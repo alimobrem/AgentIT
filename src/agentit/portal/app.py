@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import shutil
 import tempfile
+import zipfile
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.responses import StreamingResponse
 from fastapi.templating import Jinja2Templates
 
 from agentit.agents.cicd import CICDAgent
@@ -15,6 +18,8 @@ from agentit.agents.hardening import HardeningAgent
 from agentit.agents.observability import ObservabilityAgent
 from agentit.cloner import clone_repo
 from agentit.models import AssessmentReport, Severity
+from agentit.portal.cluster_apply import apply_manifests_to_cluster
+from agentit.portal.github_pr import create_onboarding_pr
 from agentit.portal.store import AssessmentStore
 from agentit.runner import run_assessment
 
@@ -177,3 +182,82 @@ async def api_manifests(assessment_id: str) -> JSONResponse:
     if files is None:
         raise HTTPException(status_code=404, detail="Onboarding not found")
     return JSONResponse(files)
+
+
+@app.get("/api/assessments/{assessment_id}/manifests/download")
+async def download_manifests(assessment_id: str):
+    """Download all onboarding manifests as a zip file."""
+    s = get_store()
+    report = s.get(assessment_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    files = s.get_onboarding(assessment_id)
+    if files is None:
+        raise HTTPException(status_code=404, detail="Onboarding not found")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in files:
+            arcname = f"{f['category']}/{f['path']}"
+            zf.writestr(arcname, f["content"])
+    buf.seek(0)
+
+    filename = f"{report.repo_name}-onboarding.zip"
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/assessments/{assessment_id}/apply", response_model=None)
+async def apply_to_cluster(request: Request, assessment_id: str):
+    """Apply onboarding manifests to the current cluster."""
+    s = get_store()
+    report = s.get(assessment_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    files = s.get_onboarding(assessment_id)
+    if files is None:
+        raise HTTPException(status_code=404, detail="Onboarding not found")
+
+    form = await request.form()
+    namespace = str(form.get("namespace", "default"))
+    dry_run = form.get("dry_run") == "true"
+
+    results = await asyncio.to_thread(
+        apply_manifests_to_cluster, files, namespace, dry_run,
+    )
+
+    applied = len(results["applied"])
+    skipped = len(results["skipped"])
+    errs = len(results["errors"])
+    return RedirectResponse(
+        url=(
+            f"/assessments/{assessment_id}/onboard-results"
+            f"?applied={applied}&skipped={skipped}&errors={errs}"
+        ),
+        status_code=303,
+    )
+
+
+@app.post("/assessments/{assessment_id}/create-pr", response_model=None)
+async def create_pr(assessment_id: str):
+    """Create a GitHub PR with the onboarding manifests."""
+    s = get_store()
+    report = s.get(assessment_id)
+    files = s.get_onboarding(assessment_id)
+    if report is None or files is None:
+        raise HTTPException(status_code=404, detail="Assessment or onboarding not found")
+    result = await asyncio.to_thread(
+        create_onboarding_pr, report.repo_url, report.repo_name, files,
+    )
+    if "error" in result:
+        return RedirectResponse(
+            url=f"/assessments/{assessment_id}/onboard-results?error={result['error']}",
+            status_code=303,
+        )
+    return RedirectResponse(
+        url=f"/assessments/{assessment_id}/onboard-results?pr_url={result['pr_url']}",
+        status_code=303,
+    )
