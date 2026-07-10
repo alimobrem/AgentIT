@@ -1,0 +1,293 @@
+from __future__ import annotations
+
+import textwrap
+from pathlib import Path
+
+import yaml
+from pydantic import BaseModel
+
+from agentit.agents.hardening import GeneratedFile, HardeningAgent, _sanitize_name
+from agentit.models import AssessmentReport
+
+
+class CICDResult(BaseModel):
+    files: list[GeneratedFile]
+    summary: str = ""
+
+    def model_post_init(self, _context: object) -> None:
+        count = len(self.files)
+        self.summary = (
+            f"Generated {count} CI/CD manifest{'s' if count != 1 else ''}."
+        )
+
+
+class CICDAgent:
+    def __init__(self, report: AssessmentReport, output_dir: Path) -> None:
+        self.report = report
+        self.output_dir = Path(output_dir)
+        self._name = _sanitize_name(report.repo_name)
+
+    def run(self) -> CICDResult:
+        """Generate CI/CD and GitOps manifests based on assessment findings."""
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        generated: list[GeneratedFile] = []
+
+        generated.extend(self._generate_tekton_pipeline())
+        generated.extend(self._generate_argocd_application())
+        generated.extend(self._generate_containerfile())
+        generated.extend(self._generate_quay_config())
+
+        return CICDResult(files=generated)
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+
+    def _findings_for(self, *categories: str) -> list[str]:
+        """Return descriptions of findings whose category contains any keyword."""
+        hits: list[str] = []
+        for score in self.report.scores:
+            for f in score.findings:
+                if any(kw in f.category.lower() for kw in categories):
+                    hits.append(f.description)
+        return hits
+
+    def _primary_language(self) -> str:
+        if not self.report.stack.languages:
+            return "unknown"
+        top = max(self.report.stack.languages, key=lambda lang: lang.percentage)
+        return top.name.lower()
+
+    def _write(self, filename: str, content: str) -> None:
+        (self.output_dir / filename).write_text(content)
+
+    # ------------------------------------------------------------------
+    # generators
+    # ------------------------------------------------------------------
+
+    def _generate_tekton_pipeline(self) -> list[GeneratedFile]:
+        hits = self._findings_for("pipeline", "ci/cd", "cicd")
+        if not hits:
+            return []
+
+        name = self._name
+        pipeline: dict = {
+            "apiVersion": "tekton.dev/v1beta1",
+            "kind": "Pipeline",
+            "metadata": {
+                "name": f"{name}-pipeline",
+                "labels": {"app.kubernetes.io/name": name},
+            },
+            "spec": {
+                "params": [
+                    {"name": "repo-url", "type": "string"},
+                    {"name": "image-ref", "type": "string"},
+                ],
+                "workspaces": [
+                    {"name": "shared-workspace"},
+                ],
+                "tasks": [
+                    {
+                        "name": "git-clone",
+                        "taskRef": {"name": "git-clone", "kind": "ClusterTask"},
+                        "params": [
+                            {"name": "url", "value": "$(params.repo-url)"},
+                        ],
+                        "workspaces": [
+                            {"name": "output", "workspace": "shared-workspace"},
+                        ],
+                    },
+                    {
+                        "name": "build",
+                        "taskRef": {"name": "maven" if self._primary_language() == "java" else "npm", "kind": "ClusterTask"},
+                        "runAfter": ["git-clone"],
+                        "workspaces": [
+                            {"name": "source", "workspace": "shared-workspace"},
+                        ],
+                    },
+                    {
+                        "name": "test",
+                        "taskRef": {"name": "maven" if self._primary_language() == "java" else "npm", "kind": "ClusterTask"},
+                        "runAfter": ["build"],
+                        "workspaces": [
+                            {"name": "source", "workspace": "shared-workspace"},
+                        ],
+                    },
+                    {
+                        "name": "image-build",
+                        "taskRef": {"name": "buildah", "kind": "ClusterTask"},
+                        "runAfter": ["test"],
+                        "params": [
+                            {"name": "IMAGE", "value": "$(params.image-ref)"},
+                        ],
+                        "workspaces": [
+                            {"name": "source", "workspace": "shared-workspace"},
+                        ],
+                    },
+                    {
+                        "name": "image-push",
+                        "taskRef": {"name": "buildah", "kind": "ClusterTask"},
+                        "runAfter": ["image-build"],
+                        "params": [
+                            {"name": "IMAGE", "value": "$(params.image-ref)"},
+                            {"name": "PUSH_EXTRA_ARGS", "value": "--digestfile /tmp/digest"},
+                        ],
+                        "workspaces": [
+                            {"name": "source", "workspace": "shared-workspace"},
+                        ],
+                    },
+                    {
+                        "name": "deploy",
+                        "taskRef": {"name": "kubernetes-actions", "kind": "ClusterTask"},
+                        "runAfter": ["image-push"],
+                        "params": [
+                            {"name": "script", "value": f"kubectl rollout restart deployment/{name}"},
+                        ],
+                    },
+                ],
+            },
+        }
+
+        pipeline_run: dict = {
+            "apiVersion": "tekton.dev/v1beta1",
+            "kind": "PipelineRun",
+            "metadata": {
+                "generateName": f"{name}-pipeline-run-",
+                "labels": {"app.kubernetes.io/name": name},
+            },
+            "spec": {
+                "pipelineRef": {"name": f"{name}-pipeline"},
+                "params": [
+                    {"name": "repo-url", "value": self.report.repo_url},
+                    {"name": "image-ref", "value": f"quay.io/org/{name}:latest"},
+                ],
+                "workspaces": [
+                    {
+                        "name": "shared-workspace",
+                        "volumeClaimTemplate": {
+                            "spec": {
+                                "accessModes": ["ReadWriteOnce"],
+                                "resources": {"requests": {"storage": "1Gi"}},
+                            },
+                        },
+                    },
+                ],
+            },
+        }
+
+        content = yaml.dump_all(
+            [pipeline, pipeline_run], default_flow_style=False, sort_keys=False
+        )
+        self._write("tekton-pipeline.yaml", content)
+
+        return [
+            GeneratedFile(
+                path="tekton-pipeline.yaml",
+                content=content,
+                description="Tekton Pipeline with git-clone, build, test, image-build, image-push, deploy tasks and PipelineRun template.",
+                finding_addressed="; ".join(hits),
+            ),
+        ]
+
+    def _generate_argocd_application(self) -> list[GeneratedFile]:
+        hits = self._findings_for("gitops", "argo", "deployment")
+        if not hits:
+            return []
+
+        name = self._name
+        doc: dict = {
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "Application",
+            "metadata": {
+                "name": name,
+                "namespace": "openshift-gitops",
+                "labels": {"app.kubernetes.io/name": name},
+            },
+            "spec": {
+                "project": "default",
+                "source": {
+                    "repoURL": self.report.repo_url,
+                    "targetRevision": "HEAD",
+                    "path": "manifests",
+                },
+                "destination": {
+                    "server": "https://kubernetes.default.svc",
+                    "namespace": name,
+                },
+                "syncPolicy": {
+                    "automated": {
+                        "selfHeal": True,
+                        "prune": True,
+                    },
+                    "syncOptions": [
+                        "CreateNamespace=true",
+                    ],
+                },
+            },
+        }
+
+        content = yaml.dump(doc, default_flow_style=False, sort_keys=False)
+        self._write("argocd-application.yaml", content)
+
+        return [
+            GeneratedFile(
+                path="argocd-application.yaml",
+                content=content,
+                description="Argo CD Application with auto-sync, self-heal, and prune enabled.",
+                finding_addressed="; ".join(hits),
+            ),
+        ]
+
+    def _generate_containerfile(self) -> list[GeneratedFile]:
+        # Skip if hardening agent already generated one
+        if (self.output_dir / "Containerfile").exists():
+            return []
+
+        hits = self._findings_for("container", "dockerfile")
+        if not hits:
+            return []
+
+        lang = self._primary_language()
+        content = HardeningAgent._containerfile_for(lang)
+        self._write("Containerfile", content)
+
+        return [
+            GeneratedFile(
+                path="Containerfile",
+                content=content,
+                description=f"Multi-stage Containerfile using UBI base for {lang}.",
+                finding_addressed="; ".join(hits),
+            ),
+        ]
+
+    def _generate_quay_config(self) -> list[GeneratedFile]:
+        name = self._name
+        doc: dict = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": f"{name}-quay-config",
+                "labels": {"app.kubernetes.io/name": name},
+            },
+            "data": {
+                "repository": f"quay.io/org/{name}",
+                "description": f"Container image for {name}",
+                "visibility": "private",
+                "image-scanning": "enabled",
+                "vulnerability-notifications": "enabled",
+                "tag-expiration": "4w",
+                "robot-account": f"{name}-ci",
+            },
+        }
+
+        content = yaml.dump(doc, default_flow_style=False, sort_keys=False)
+        self._write("quay-config.yaml", content)
+
+        return [
+            GeneratedFile(
+                path="quay-config.yaml",
+                content=content,
+                description="Quay repository configuration with image scanning and vulnerability notifications enabled.",
+                finding_addressed="Registry configuration baseline.",
+            ),
+        ]
