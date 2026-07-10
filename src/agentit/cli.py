@@ -34,8 +34,16 @@ def assess(repo_url: str, criticality: str, output_format: str, output_file: str
             repo_path = clone_repo(repo_url)
             clone_dir = repo_path
 
+        llm_client = None
+        if llm_endpoint:
+            from agentit.llm import LLMClient
+            llm_client = LLMClient(
+                endpoint=llm_endpoint,
+                model=llm_model or "default",
+            )
+
         click.echo("Running assessment...", err=True)
-        report = run_assessment(repo_path, repo_url=repo_url, criticality=criticality)
+        report = run_assessment(repo_path, repo_url=repo_url, criticality=criticality, llm_client=llm_client)
 
         if output_format == "json":
             output = render_json_report(report)
@@ -60,10 +68,46 @@ def assess(repo_url: str, criticality: str, output_format: str, output_file: str
 @click.argument("repo_url")
 @click.option("--output-dir", default="./hardening-output", type=click.Path())
 @click.option("--criticality", type=click.Choice(["low", "medium", "high", "critical"]), default="medium")
-def harden(repo_url: str, output_dir: str, criticality: str) -> None:
+@click.option("--llm-endpoint", default=None, help="LLM API endpoint URL.")
+@click.option("--llm-model", default=None, help="LLM model identifier.")
+def harden(repo_url: str, output_dir: str, criticality: str, llm_endpoint: str | None, llm_model: str | None) -> None:
     """Generate enterprise hardening manifests for a repository."""
-    click.echo("Hardening agent not yet wired up", err=True)
-    sys.exit(1)
+    from agentit.agents.hardening import HardeningAgent
+
+    clone_dir: Path | None = None
+    try:
+        if Path(repo_url).is_dir():
+            repo_path = Path(repo_url)
+        else:
+            click.echo(f"Cloning {repo_url}...", err=True)
+            repo_path = clone_repo(repo_url)
+            clone_dir = repo_path
+
+        llm_client = None
+        if llm_endpoint:
+            from agentit.llm import LLMClient
+            llm_client = LLMClient(
+                endpoint=llm_endpoint,
+                model=llm_model or "default",
+            )
+
+        click.echo("Running assessment...", err=True)
+        report = run_assessment(repo_path, repo_url=repo_url, criticality=criticality, llm_client=llm_client)
+
+        click.echo("Generating hardening manifests...", err=True)
+        agent = HardeningAgent(report=report, output_dir=Path(output_dir))
+        result = agent.run()
+
+        click.echo(result.summary, err=True)
+        for gf in result.files:
+            click.echo(f"  {gf.path}: {gf.description}", err=True)
+
+    except CloneError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    finally:
+        if clone_dir and clone_dir.exists():
+            shutil.rmtree(clone_dir, ignore_errors=True)
 
 
 @main.command()
@@ -71,5 +115,8 @@ def harden(repo_url: str, output_dir: str, criticality: str) -> None:
 @click.option("--port", default=8080, type=int)
 def portal(host: str, port: int) -> None:
     """Launch the AgentIT portal web UI."""
-    click.echo("Portal not yet wired up", err=True)
-    sys.exit(1)
+    import uvicorn
+
+    from agentit.portal.app import app
+
+    uvicorn.run(app, host=host, port=port)
