@@ -117,6 +117,64 @@ def portal(host: str, port: int) -> None:
 
 @main.command()
 @click.argument("repo_url")
+@click.option("--interval", default=3600, type=int, help="Re-assessment interval in seconds (default: 1 hour).")
+@click.option("--criticality", type=click.Choice(["low", "medium", "high", "critical"]), default="medium")
+@click.option("--llm", "use_llm", is_flag=True, default=None)
+@click.option("--llm-model", default=None)
+@click.option("--webhook", default=None, help="Webhook URL to POST results to.")
+def watch(repo_url: str, interval: int, criticality: str, use_llm: bool | None, llm_model: str | None, webhook: str | None) -> None:
+    """Continuously re-assess a repository on a schedule."""
+    import time
+    import json
+    import httpx
+
+    click.echo(f"Watching {repo_url} every {interval}s...", err=True)
+    previous_score: float | None = None
+
+    while True:
+        try:
+            with _resolve_and_assess(repo_url, criticality, use_llm, llm_model) as report:
+                current_score = report.overall_score
+                delta = ""
+                if previous_score is not None:
+                    diff = current_score - previous_score
+                    delta = f" ({'+' if diff >= 0 else ''}{diff:.0f})"
+
+                click.echo(
+                    f"[{report.assessed_at.strftime('%Y-%m-%d %H:%M')}] "
+                    f"{report.repo_name}: {current_score:.0f}/100{delta} "
+                    f"({sum(len(s.findings) for s in report.scores)} findings)",
+                    err=True,
+                )
+
+                if webhook:
+                    try:
+                        httpx.post(webhook, json={
+                            "repo_url": repo_url,
+                            "score": current_score,
+                            "delta": current_score - (previous_score or current_score),
+                            "findings_count": sum(len(s.findings) for s in report.scores),
+                        }, timeout=10)
+                    except Exception:
+                        pass
+
+                previous_score = current_score
+
+        except CloneError as exc:
+            click.echo(f"Error: {exc}", err=True)
+        except KeyboardInterrupt:
+            click.echo("Stopped.", err=True)
+            break
+
+        try:
+            time.sleep(interval)
+        except KeyboardInterrupt:
+            click.echo("Stopped.", err=True)
+            break
+
+
+@main.command()
+@click.argument("repo_url")
 @click.option("--output-dir", default="./onboarding-output", type=click.Path())
 @click.option("--criticality", type=click.Choice(["low", "medium", "high", "critical"]), default="medium")
 @click.option("--llm", "use_llm", is_flag=True, default=None, help="Enable Claude LLM (auto-detects credentials if omitted).")
