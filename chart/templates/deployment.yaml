@@ -1,5 +1,10 @@
+{{- if .Values.rollout.enabled }}
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+{{- else }}
 apiVersion: apps/v1
 kind: Deployment
+{{- end }}
 metadata:
   name: {{ .Release.Name }}
   labels:
@@ -11,6 +16,20 @@ spec:
     matchLabels:
       app.kubernetes.io/name: agentit
       app.kubernetes.io/instance: {{ .Release.Name }}
+  {{- if .Values.rollout.enabled }}
+  strategy:
+    canary:
+      steps:
+        - setWeight: 5
+        - pause: { duration: 60s }
+        - setWeight: 25
+        - pause: { duration: 60s }
+        - setWeight: 50
+        - pause: { duration: 60s }
+        - setWeight: 100
+      canaryService: {{ .Release.Name }}-canary
+      stableService: {{ .Release.Name }}
+  {{- end }}
   template:
     metadata:
       labels:
@@ -28,6 +47,7 @@ spec:
           ports:
             - containerPort: 8080
               protocol: TCP
+          {{- if or .Values.env.ANTHROPIC_VERTEX_PROJECT_ID .Values.env.CLOUD_ML_REGION }}
           env:
             {{- if .Values.env.ANTHROPIC_VERTEX_PROJECT_ID }}
             - name: ANTHROPIC_VERTEX_PROJECT_ID
@@ -37,6 +57,7 @@ spec:
             - name: CLOUD_ML_REGION
               value: {{ .Values.env.CLOUD_ML_REGION | quote }}
             {{- end }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /

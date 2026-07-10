@@ -34,6 +34,7 @@ class CICDAgent:
 
         generated.extend(self._generate_tekton_pipeline())
         generated.extend(self._generate_argocd_application())
+        generated.extend(self._generate_argo_rollout())
         generated.extend(self._generate_containerfile())
         generated.extend(self._generate_quay_config())
 
@@ -235,6 +236,123 @@ class CICDAgent:
                 content=content,
                 description="Argo CD Application with auto-sync, self-heal, and prune enabled.",
                 finding_addressed="; ".join(hits),
+            ),
+        ]
+
+    def _generate_argo_rollout(self) -> list[GeneratedFile]:
+        name = self._name
+        lang = self._primary_language()
+
+        port = 8080
+        if lang == "java":
+            port = 8080
+        elif lang in ("go", "python"):
+            port = 8080
+        elif lang in ("node", "typescript", "javascript"):
+            port = 3000
+
+        doc: dict = {
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "Rollout",
+            "metadata": {
+                "name": name,
+                "labels": {"app.kubernetes.io/name": name},
+            },
+            "spec": {
+                "replicas": 2,
+                "selector": {
+                    "matchLabels": {"app": name},
+                },
+                "strategy": {
+                    "canary": {
+                        "steps": [
+                            {"setWeight": 5},
+                            {"pause": {"duration": "60s"}},
+                            {"setWeight": 25},
+                            {"pause": {"duration": "60s"}},
+                            {"setWeight": 50},
+                            {"pause": {"duration": "60s"}},
+                            {"setWeight": 100},
+                        ],
+                        "canaryService": f"{name}-canary",
+                        "stableService": name,
+                    },
+                },
+                "template": {
+                    "metadata": {
+                        "labels": {"app": name},
+                    },
+                    "spec": {
+                        "securityContext": {
+                            "runAsNonRoot": True,
+                            "seccompProfile": {"type": "RuntimeDefault"},
+                        },
+                        "containers": [
+                            {
+                                "name": name,
+                                "image": f"quay.io/org/{name}:latest",
+                                "ports": [{"containerPort": port}],
+                                "resources": {
+                                    "requests": {"cpu": "100m", "memory": "128Mi"},
+                                    "limits": {"cpu": "500m", "memory": "512Mi"},
+                                },
+                                "securityContext": {
+                                    "allowPrivilegeEscalation": False,
+                                    "readOnlyRootFilesystem": True,
+                                    "capabilities": {"drop": ["ALL"]},
+                                },
+                                "livenessProbe": {
+                                    "httpGet": {"path": "/", "port": port},
+                                    "initialDelaySeconds": 10,
+                                },
+                                "readinessProbe": {
+                                    "httpGet": {"path": "/", "port": port},
+                                    "initialDelaySeconds": 5,
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+        }
+
+        canary_svc: dict = {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {
+                "name": f"{name}-canary",
+                "labels": {"app.kubernetes.io/name": name},
+            },
+            "spec": {
+                "type": "ClusterIP",
+                "ports": [{"port": port, "targetPort": port, "protocol": "TCP"}],
+                "selector": {"app": name},
+            },
+        }
+
+        stable_svc: dict = {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {
+                "name": name,
+                "labels": {"app.kubernetes.io/name": name},
+            },
+            "spec": {
+                "type": "ClusterIP",
+                "ports": [{"port": port, "targetPort": port, "protocol": "TCP"}],
+                "selector": {"app": name},
+            },
+        }
+
+        content = yaml.dump_all([doc, stable_svc, canary_svc], default_flow_style=False, sort_keys=False)
+        self._write("argo-rollout.yaml", content)
+
+        return [
+            GeneratedFile(
+                path="argo-rollout.yaml",
+                content=content,
+                description="Argo Rollout with canary strategy (5% → 25% → 50% → 100%) plus stable and canary Services.",
+                finding_addressed="Progressive delivery for safe production deployments.",
             ),
         ]
 
