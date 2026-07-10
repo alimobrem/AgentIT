@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentit"
+version = "0.1.0"
+description = "Enterprise Readiness Assessor for AgentIT"
+requires-python = ">=3.12"
+dependencies = [
+    "click>=8.1",
+    "gitpython>=3.1",
+    "pydantic>=2.7",
+    "rich>=13.0",
+]
+
+[project.scripts]
+agentit = "agentit.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentit"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
