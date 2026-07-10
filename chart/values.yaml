@@ -22,3 +22,9 @@ resources:
 env:
   ANTHROPIC_VERTEX_PROJECT_ID: ""
   CLOUD_ML_REGION: ""
+
+rollout:
+  enabled: true
+
+argoWorkflows:
+  enabled: false
