@@ -25,7 +25,7 @@ from agentit.agents.compliance import ComplianceAgent
 def _resolve_and_assess(
     repo_url: str,
     criticality: str,
-    use_llm: bool = False,
+    use_llm: bool | None = None,
     llm_model: str | None = None,
 ) -> Generator[AssessmentReport]:
     clone_dir: Path | None = None
@@ -38,6 +38,9 @@ def _resolve_and_assess(
             clone_dir = repo_path
 
         llm_client = None
+        if use_llm is None:
+            import os
+            use_llm = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID"))
         if use_llm:
             from agentit.llm import LLMClient
             llm_client = LLMClient(model=llm_model or "claude-sonnet-4-5-20250514")
@@ -60,7 +63,7 @@ def main() -> None:
 @click.option("--criticality", type=click.Choice(["low", "medium", "high", "critical"]), default="medium")
 @click.option("--format", "output_format", type=click.Choice(["json", "terminal"]), default="json")
 @click.option("--output", "output_file", type=click.Path(), default=None)
-@click.option("--llm", "use_llm", is_flag=True, default=False, help="Enable Claude LLM for improved analysis (requires ANTHROPIC_API_KEY or ANTHROPIC_VERTEX_PROJECT_ID).")
+@click.option("--llm", "use_llm", is_flag=True, default=None, help="Enable Claude LLM (auto-detects credentials if omitted).")
 @click.option("--llm-model", default=None, help="Claude model to use (default: claude-sonnet-4-5-20250514).")
 def assess(repo_url: str, criticality: str, output_format: str, output_file: str | None, use_llm: bool, llm_model: str | None) -> None:
     """Assess enterprise readiness of a Git repository."""
@@ -81,7 +84,7 @@ def assess(repo_url: str, criticality: str, output_format: str, output_file: str
 @click.argument("repo_url")
 @click.option("--output-dir", default="./hardening-output", type=click.Path())
 @click.option("--criticality", type=click.Choice(["low", "medium", "high", "critical"]), default="medium")
-@click.option("--llm", "use_llm", is_flag=True, default=False, help="Enable Claude LLM for improved analysis.")
+@click.option("--llm", "use_llm", is_flag=True, default=None, help="Enable Claude LLM (auto-detects credentials if omitted).")
 @click.option("--llm-model", default=None, help="Claude model to use.")
 def harden(repo_url: str, output_dir: str, criticality: str, use_llm: bool, llm_model: str | None) -> None:
     """Generate enterprise hardening manifests for a repository."""
@@ -116,7 +119,7 @@ def portal(host: str, port: int) -> None:
 @click.argument("repo_url")
 @click.option("--output-dir", default="./onboarding-output", type=click.Path())
 @click.option("--criticality", type=click.Choice(["low", "medium", "high", "critical"]), default="medium")
-@click.option("--llm", "use_llm", is_flag=True, default=False, help="Enable Claude LLM for improved analysis.")
+@click.option("--llm", "use_llm", is_flag=True, default=None, help="Enable Claude LLM (auto-detects credentials if omitted).")
 @click.option("--llm-model", default=None, help="Claude model to use.")
 def onboard(repo_url: str, output_dir: str, criticality: str, use_llm: bool, llm_model: str | None) -> None:
     """Run full enterprise onboarding: assess -> harden -> observe -> cicd -> comply."""
