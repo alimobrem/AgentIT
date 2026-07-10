@@ -189,10 +189,17 @@ def _is_false_positive(content: str, match: re.Match) -> bool:
         "example", "placeholder", "changeme", "your_", "xxx", "<",
         "REPLACE", "TODO", "${", "$(", "os.environ", "os.getenv",
         "process.env", "vault:", "secretKeyRef",
+        "from-literal", "from-file", "create secret", "kubectl create",
+        "dry-run", "os.urandom",
     ]
     if any(p in matched_line for p in placeholder_patterns):
         return True
-    if matched_line.lstrip().startswith(("#", "//", "*", "echo", "grep", "if ")):
+    stripped = matched_line.lstrip()
+    if stripped.startswith(("#", "//", "*", "echo", "grep", "if ", "elif ")):
+        return True
+    if re.search(r'[A-Z_]+="\$\{', matched_line):
+        return True
+    if re.search(r'[A-Z_]+="\$\(', matched_line):
         return True
     return False
 
