@@ -143,3 +143,196 @@ def test_assessment_not_found(client):
 def test_api_detail_not_found(client):
     resp = client.get("/api/assessments/nonexistent")
     assert resp.status_code == 404
+
+
+# ------------------------------------------------------------------
+# Onboarding tests
+# ------------------------------------------------------------------
+
+
+def _make_report_with_findings(repo_name: str = "onboard-repo") -> AssessmentReport:
+    """Report with findings that trigger all agent generators."""
+    return AssessmentReport(
+        repo_url=f"https://github.com/org/{repo_name}",
+        repo_name=repo_name,
+        assessed_at=datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc),
+        stack=StackInfo(
+            languages=[Language(name="python", version="3.12", file_count=10, percentage=100.0)],
+            frameworks=[],
+            databases=[],
+            runtimes=[],
+            package_managers=["pip"],
+        ),
+        architecture=ArchitectureInfo(
+            service_count=1,
+            architecture_style="monolith",
+            has_api=True,
+            api_style="REST",
+            external_dependencies=[],
+            auth_mechanism=None,
+        ),
+        scores=[
+            DimensionScore(
+                dimension="security",
+                score=30,
+                max_score=100,
+                findings=[
+                    Finding(
+                        category="network security",
+                        severity=Severity.high,
+                        description="No network policy",
+                        recommendation="Add NetworkPolicy",
+                    ),
+                    Finding(
+                        category="container security",
+                        severity=Severity.high,
+                        description="No Containerfile found",
+                        recommendation="Add Containerfile",
+                    ),
+                    Finding(
+                        category="resource limits",
+                        severity=Severity.medium,
+                        description="No resource limits",
+                        recommendation="Add resource limits",
+                    ),
+                ],
+            ),
+            DimensionScore(
+                dimension="observability",
+                score=20,
+                max_score=100,
+                findings=[
+                    Finding(
+                        category="metrics endpoint",
+                        severity=Severity.medium,
+                        description="No metrics endpoint",
+                        recommendation="Add /metrics",
+                    ),
+                    Finding(
+                        category="tracing",
+                        severity=Severity.medium,
+                        description="No distributed tracing",
+                        recommendation="Add OpenTelemetry",
+                    ),
+                ],
+            ),
+            DimensionScore(
+                dimension="cicd",
+                score=25,
+                max_score=100,
+                findings=[
+                    Finding(
+                        category="pipeline cicd",
+                        severity=Severity.high,
+                        description="No CI/CD pipeline",
+                        recommendation="Add Tekton pipeline",
+                    ),
+                    Finding(
+                        category="gitops deployment",
+                        severity=Severity.medium,
+                        description="No GitOps deployment",
+                        recommendation="Add ArgoCD",
+                    ),
+                ],
+            ),
+            DimensionScore(
+                dimension="compliance",
+                score=35,
+                max_score=100,
+                findings=[
+                    Finding(
+                        category="policy compliance",
+                        severity=Severity.medium,
+                        description="No admission policies",
+                        recommendation="Add Kyverno policies",
+                    ),
+                    Finding(
+                        category="sbom supply chain",
+                        severity=Severity.medium,
+                        description="No SBOM generation",
+                        recommendation="Add SBOM tooling",
+                    ),
+                    Finding(
+                        category="audit logging",
+                        severity=Severity.medium,
+                        description="No audit policy",
+                        recommendation="Add audit policy",
+                    ),
+                ],
+            ),
+        ],
+        criticality="high",
+        summary="Needs onboarding",
+        remediation_plan=[],
+    )
+
+
+def test_onboard_creates_results(client, _override_store):
+    store = _override_store
+    report = _make_report_with_findings()
+    aid = store.save(report)
+
+    resp = client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
+    assert resp.status_code == 303
+    assert f"/assessments/{aid}/onboard-results" in resp.headers["location"]
+
+
+def test_onboard_results_page(client, _override_store):
+    store = _override_store
+    report = _make_report_with_findings()
+    aid = store.save(report)
+
+    client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
+    resp = client.get(f"/assessments/{aid}/onboard-results")
+    assert resp.status_code == 200
+    assert "security" in resp.text
+    assert "observability" in resp.text
+    assert "compliance" in resp.text
+    assert "Download All" in resp.text
+
+
+def test_api_manifests(client, _override_store):
+    store = _override_store
+    report = _make_report_with_findings()
+    aid = store.save(report)
+
+    client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
+    resp = client.get(f"/api/assessments/{aid}/manifests")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, list)
+    assert len(data) > 0
+    categories = {f["category"] for f in data}
+    assert "security" in categories
+    assert "observability" in categories
+    assert "compliance" in categories
+
+
+def test_api_manifests_not_found(client):
+    resp = client.get("/api/assessments/nonexistent/manifests")
+    assert resp.status_code == 404
+
+
+def test_onboard_not_found(client):
+    resp = client.post("/assessments/nonexistent/onboard", follow_redirects=False)
+    assert resp.status_code == 404
+
+
+def test_onboard_results_no_onboarding(client, _override_store):
+    store = _override_store
+    report = _make_report()
+    aid = store.save(report)
+
+    resp = client.get(f"/assessments/{aid}/onboard-results")
+    assert resp.status_code == 404
+
+
+def test_assessment_detail_has_onboard_button(client, _override_store):
+    store = _override_store
+    report = _make_report()
+    aid = store.save(report)
+
+    resp = client.get(f"/assessments/{aid}")
+    assert resp.status_code == 200
+    assert f"/assessments/{aid}/onboard" in resp.text
+    assert "Onboard" in resp.text

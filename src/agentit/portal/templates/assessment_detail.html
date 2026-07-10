@@ -42,6 +42,14 @@
 </ul>
 {% endif %}
 
+<div style="margin: 1.5rem 0;">
+  <form method="post" action="/assessments/{{ assessment_id }}/onboard" style="display: inline;">
+    <button type="submit" class="btn" style="background: #0f3460; border: 2px solid #e94560; font-size: 1.1rem; padding: 0.8rem 2rem;">
+      Onboard
+    </button>
+  </form>
+</div>
+
 {% if report.remediation_plan %}
 <h2 style="color: #e94560; margin: 1.5rem 0 0.8rem;">Remediation Plan</h2>
 <table>

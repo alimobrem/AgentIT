@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import tempfile
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+from agentit.agents.cicd import CICDAgent
+from agentit.agents.compliance import ComplianceAgent
+from agentit.agents.hardening import HardeningAgent
+from agentit.agents.observability import ObservabilityAgent
 from agentit.cloner import clone_repo
-from agentit.models import Severity
+from agentit.models import AssessmentReport, Severity
 from agentit.portal.store import AssessmentStore
 from agentit.runner import run_assessment
 
@@ -82,6 +87,7 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "report": report,
             "scores_sorted": scores_sorted,
             "urgent_findings": urgent_findings,
+            "assessment_id": assessment_id,
         },
     )
 
@@ -97,3 +103,77 @@ async def api_detail(assessment_id: str) -> JSONResponse:
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
     return JSONResponse(report.model_dump(mode="json"))
+
+
+def _run_onboarding(report: AssessmentReport) -> list[dict]:
+    """Run all 4 agents and collect generated files with categories."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base = Path(tmpdir)
+
+        agents = [
+            ("security", HardeningAgent(report, base / "security")),
+            ("observability", ObservabilityAgent(report, base / "observability")),
+            ("cicd", CICDAgent(report, base / "cicd")),
+            ("compliance", ComplianceAgent(report, base / "compliance")),
+        ]
+
+        all_files: list[dict] = []
+        for category, agent in agents:
+            result = agent.run()
+            for gf in result.files:
+                all_files.append(
+                    {
+                        "category": category,
+                        "path": gf.path,
+                        "description": gf.description,
+                        "content": gf.content,
+                    }
+                )
+        return all_files
+
+
+@app.post("/assessments/{assessment_id}/onboard", response_model=None)
+async def onboard_submit(assessment_id: str):
+    s = get_store()
+    report = s.get(assessment_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+
+    files = await asyncio.to_thread(_run_onboarding, report)
+    s.save_onboarding(assessment_id, files)
+    return RedirectResponse(
+        url=f"/assessments/{assessment_id}/onboard-results", status_code=303,
+    )
+
+
+@app.get("/assessments/{assessment_id}/onboard-results", response_class=HTMLResponse)
+async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
+    s = get_store()
+    report = s.get(assessment_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    files = s.get_onboarding(assessment_id)
+    if files is None:
+        raise HTTPException(status_code=404, detail="Onboarding not found")
+
+    grouped: dict[str, list[dict]] = {}
+    for f in files:
+        grouped.setdefault(f["category"], []).append(f)
+
+    return templates.TemplateResponse(
+        request,
+        "onboard_results.html",
+        {"report": report, "grouped": grouped, "assessment_id": assessment_id},
+    )
+
+
+@app.get("/api/assessments/{assessment_id}/manifests")
+async def api_manifests(assessment_id: str) -> JSONResponse:
+    s = get_store()
+    report = s.get(assessment_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    files = s.get_onboarding(assessment_id)
+    if files is None:
+        raise HTTPException(status_code=404, detail="Onboarding not found")
+    return JSONResponse(files)

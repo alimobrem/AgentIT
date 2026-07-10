@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
+from datetime import datetime, timezone
 
 from agentit.models import AssessmentReport
 
@@ -21,6 +23,17 @@ class AssessmentStore:
                 criticality TEXT NOT NULL,
                 overall_score REAL NOT NULL,
                 report_json TEXT NOT NULL
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS onboarding_results (
+                id TEXT PRIMARY KEY,
+                assessment_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                files_json TEXT NOT NULL,
+                FOREIGN KEY (assessment_id) REFERENCES assessments(id)
             )
             """
         )
@@ -71,3 +84,29 @@ class AssessmentStore:
         )
         self._conn.commit()
         return cursor.rowcount > 0
+
+    def save_onboarding(self, assessment_id: str, files: list[dict]) -> str:
+        onboarding_id = uuid.uuid4().hex
+        self._conn.execute(
+            """
+            INSERT INTO onboarding_results (id, assessment_id, created_at, files_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                onboarding_id,
+                assessment_id,
+                datetime.now(timezone.utc).isoformat(),
+                json.dumps(files),
+            ),
+        )
+        self._conn.commit()
+        return onboarding_id
+
+    def get_onboarding(self, assessment_id: str) -> list[dict] | None:
+        row = self._conn.execute(
+            "SELECT files_json FROM onboarding_results WHERE assessment_id = ? ORDER BY created_at DESC LIMIT 1",
+            (assessment_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row["files_json"])

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Onboarding Results - {{ report.repo_name }} - AgentIT{% endblock %}
+{% block content %}
+<h1>Onboarding Results: {{ report.repo_name }}</h1>
+<p style="margin-bottom: 1rem;">
+  <a href="/assessments/{{ assessment_id }}">Back to Assessment</a>
+</p>
+
+<div style="margin-bottom: 1.5rem;">
+  <a href="/api/assessments/{{ assessment_id }}/manifests" class="btn">Download All</a>
+</div>
+
+{% for category, files in grouped.items() %}
+<h2 style="color: #e94560; margin: 1.5rem 0 0.8rem; text-transform: capitalize;">{{ category }}</h2>
+{% for f in files %}
+<div style="background: #16213e; border-radius: 8px; padding: 1rem 1.2rem; margin-bottom: 1rem; border: 1px solid #0f3460;">
+  <div style="font-weight: 600; margin-bottom: 0.3rem;">{{ f.path }}</div>
+  <div style="color: #888; font-size: 0.9rem; margin-bottom: 0.6rem;">{{ f.description }}</div>
+  <pre style="background: #0f3460; padding: 0.8rem; border-radius: 6px; overflow-x: auto; margin: 0;"><code style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 0.85rem; color: #e0e0e0;">{{ f.content }}</code></pre>
+</div>
+{% endfor %}
+{% endfor %}
+{% endblock %}
