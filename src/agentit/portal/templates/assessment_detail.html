@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}{{ report.repo_name }} - AgentIT{% endblock %}
+{% block content %}
+<h1>{{ report.repo_name }}</h1>
+<p style="margin-bottom: 1.5rem;">
+  <a href="{{ report.repo_url }}" target="_blank">{{ report.repo_url }}</a>
+  &nbsp;
+  <span class="badge badge-{{ report.criticality }}">{{ report.criticality }}</span>
+</p>
+
+<div style="font-size: 3rem; font-weight: 700; margin-bottom: 0.5rem;
+  {% if report.overall_score > 70 %}color: #2ecc71;
+  {% elif report.overall_score >= 40 %}color: #f0a500;
+  {% else %}color: #e94560;{% endif %}
+">{{ "%.0f"|format(report.overall_score) }}<span style="font-size: 1.2rem; color: #888;">/100</span></div>
+
+<h2 style="color: #e94560; margin: 1.5rem 0 0.8rem;">Dimension Scores</h2>
+{% for s in scores_sorted %}
+<div style="display: flex; align-items: center; gap: 0.8rem; margin-bottom: 0.5rem;">
+  <div style="width: 180px; font-size: 0.9rem;">{{ s.dimension | replace("_", " ") | title }}</div>
+  <div class="score-bar-bg" style="flex: 1;">
+    <div class="score-bar-fill
+      {% if s.score > 70 %}score-green
+      {% elif s.score >= 40 %}score-yellow
+      {% else %}score-red{% endif %}"
+      style="width: {{ s.score }}%;"></div>
+  </div>
+  <div style="width: 50px; text-align: right; font-weight: 600;">{{ s.score }}</div>
+</div>
+{% endfor %}
+
+{% if urgent_findings %}
+<h2 style="color: #e94560; margin: 1.5rem 0 0.8rem;">Critical &amp; High Findings</h2>
+<ul style="list-style: none;">
+  {% for f in urgent_findings %}
+  <li style="background: #16213e; padding: 0.7rem 1rem; border-radius: 6px; margin-bottom: 0.4rem; border-left: 3px solid {% if f.severity.name == 'critical' %}#e94560{% else %}#e07b39{% endif %};">
+    <span class="badge badge-{{ f.severity.name }}" style="margin-right: 0.5rem;">{{ f.severity.name }}</span>
+    {{ f.description }}
+    {% if f.file_path %}<span style="color: #666; margin-left: 0.5rem;">{{ f.file_path }}</span>{% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+{% if report.remediation_plan %}
+<h2 style="color: #e94560; margin: 1.5rem 0 0.8rem;">Remediation Plan</h2>
+<table>
+  <thead>
+    <tr><th>#</th><th>Dimension</th><th>Description</th><th>Effort</th><th>Agent</th></tr>
+  </thead>
+  <tbody>
+    {% for item in report.remediation_plan %}
+    <tr>
+      <td>{{ item.priority }}</td>
+      <td>{{ item.dimension | replace("_", " ") | title }}</td>
+      <td>{{ item.description }}</td>
+      <td>{{ item.estimated_effort }}</td>
+      <td>{{ item.agent_responsible }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

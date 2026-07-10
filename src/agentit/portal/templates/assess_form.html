@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}New Assessment - AgentIT{% endblock %}
+{% block content %}
+<h1>New Assessment</h1>
+<form method="post" action="/assess" style="max-width: 500px; display: flex; flex-direction: column; gap: 1rem;">
+  <label>
+    <div style="margin-bottom: 0.3rem; font-size: 0.9rem;">Repository URL</div>
+    <input type="url" name="repo_url" required placeholder="https://github.com/org/repo" style="width: 100%;">
+  </label>
+  <label>
+    <div style="margin-bottom: 0.3rem; font-size: 0.9rem;">Criticality</div>
+    <select name="criticality" style="width: 100%;">
+      <option value="low">Low</option>
+      <option value="medium" selected>Medium</option>
+      <option value="high">High</option>
+      <option value="critical">Critical</option>
+    </select>
+  </label>
+  <button type="submit" class="btn">Run Assessment</button>
+</form>
+{% endblock %}

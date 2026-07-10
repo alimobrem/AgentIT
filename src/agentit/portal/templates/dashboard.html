@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - AgentIT{% endblock %}
+{% block content %}
+<h1>Enterprise Readiness Dashboard</h1>
+{% if assessments %}
+<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1.2rem;">
+  {% for a in assessments %}
+  <a href="/assessments/{{ a.id }}" style="text-decoration: none;">
+  <div style="background: #16213e; border-radius: 8px; padding: 1.2rem; border: 1px solid #0f3460;">
+    <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 0.8rem;">
+      <div style="font-weight: 600; color: #e0e0e0; font-size: 1.05rem;">{{ a.repo_name }}</div>
+      <span class="badge badge-{{ a.criticality }}">{{ a.criticality }}</span>
+    </div>
+    <div style="font-size: 2.2rem; font-weight: 700; margin-bottom: 0.4rem;
+      {% if a.overall_score > 70 %}color: #2ecc71;
+      {% elif a.overall_score >= 40 %}color: #f0a500;
+      {% else %}color: #e94560;{% endif %}
+    ">{{ "%.0f"|format(a.overall_score) }}</div>
+    <div class="score-bar-bg">
+      <div class="score-bar-fill
+        {% if a.overall_score > 70 %}score-green
+        {% elif a.overall_score >= 40 %}score-yellow
+        {% else %}score-red{% endif %}"
+        style="width: {{ a.overall_score }}%"></div>
+    </div>
+    <div style="margin-top: 0.6rem; font-size: 0.82rem; color: #888;">{{ a.assessed_at[:19] }}</div>
+  </div>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<p>No assessments yet. <a href="/assess">Run your first assessment.</a></p>
+{% endif %}
+{% endblock %}
