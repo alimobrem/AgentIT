@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import shutil
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -7,7 +9,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from agentit.cloner import clone_repo
-from agentit.models import AssessmentReport, Severity
+from agentit.models import Severity
 from agentit.portal.store import AssessmentStore
 from agentit.runner import run_assessment
 
@@ -35,13 +37,20 @@ async def assess_form(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "assess_form.html")
 
 
+def _clone_assess_cleanup(repo_url: str, criticality: str):
+    repo_path = clone_repo(repo_url)
+    try:
+        return run_assessment(repo_path, repo_url, criticality)
+    finally:
+        shutil.rmtree(repo_path, ignore_errors=True)
+
+
 @app.post("/assess")
 async def assess_submit(
     repo_url: str = Form(...),
     criticality: str = Form("medium"),
 ) -> RedirectResponse:
-    repo_path = clone_repo(repo_url)
-    report = run_assessment(repo_path, repo_url, criticality)
+    report = await asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality)
     assessment_id = get_store().save(report)
     return RedirectResponse(url=f"/assessments/{assessment_id}", status_code=303)
 

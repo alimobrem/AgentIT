@@ -65,7 +65,7 @@ def run_assessment(
     if llm_client is not None:
         llm_summary = llm_client.summarize_architecture(
             stack.model_dump(),
-            [str(p.relative_to(repo_path)) for p in repo_path.rglob("*") if p.is_file()],
+            [str(p.relative_to(repo_path)) for p in repo_path.rglob("*") if p.is_file() and not is_ignored(p, repo_path)],
         )
         if llm_summary is not None:
             summary = llm_summary

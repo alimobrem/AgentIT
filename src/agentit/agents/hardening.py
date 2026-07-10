@@ -29,13 +29,15 @@ class HardeningResult(BaseModel):
 
 def _sanitize_name(name: str) -> str:
     """Turn a repo name into a k8s-safe DNS label."""
-    return name.lower().replace("_", "-").replace(".", "-")[:63]
+    sanitized = name.lower().replace("_", "-").replace(".", "-")[:63]
+    return sanitized.strip("-") or "app"
 
 
 class HardeningAgent:
     def __init__(self, report: AssessmentReport, output_dir: Path) -> None:
         self.report = report
         self.output_dir = Path(output_dir)
+        self._name = _sanitize_name(report.repo_name)
 
     def run(self) -> HardeningResult:
         """Generate all hardening manifests based on assessment findings."""
@@ -81,7 +83,7 @@ class HardeningAgent:
         if not hits:
             return []
 
-        name = _sanitize_name(self.report.repo_name)
+        name = self._name
         docs: list[dict] = [
             {
                 "apiVersion": "networking.k8s.io/v1",
@@ -151,7 +153,7 @@ class HardeningAgent:
         ]
 
     def _generate_rbac(self) -> list[GeneratedFile]:
-        name = _sanitize_name(self.report.repo_name)
+        name = self._name
         docs: list[dict] = [
             {
                 "apiVersion": "v1",
@@ -214,7 +216,7 @@ class HardeningAgent:
         ]
 
     def _generate_security_context(self) -> list[GeneratedFile]:
-        name = _sanitize_name(self.report.repo_name)
+        name = self._name
         doc = {
             "apiVersion": "v1",
             "kind": "Pod",
@@ -259,7 +261,7 @@ class HardeningAgent:
         if not hits:
             return []
 
-        name = _sanitize_name(self.report.repo_name)
+        name = self._name
         docs: list[dict] = [
             {
                 "apiVersion": "v1",

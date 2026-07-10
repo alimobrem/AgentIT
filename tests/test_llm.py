@@ -86,17 +86,6 @@ def test_summarize_architecture():
     assert result == summary_text
 
 
-def test_enhance_remediation():
-    remediation = "Rotate the exposed API key and store it in HashiCorp Vault."
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return _make_chat_response(remediation)
-
-    client = _make_client(_mock_transport(handler))
-    result = client.enhance_remediation({"category": "secrets", "description": "API key found in config.yaml"})
-
-    assert result == remediation
-
 
 def test_classify_secret_bad_json_returns_none():
     def handler(request: httpx.Request) -> httpx.Response:

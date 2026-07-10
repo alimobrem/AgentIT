@@ -27,10 +27,6 @@ _SUMMARIZE_SYSTEM = (
     "produce a 2-3 sentence architecture summary. Be concise."
 )
 
-_REMEDIATION_SYSTEM = (
-    "You are a DevSecOps engineer. Given a security finding, "
-    "produce a specific, actionable remediation description in 1-2 sentences."
-)
 
 
 class LLMClient:
@@ -47,6 +43,9 @@ class LLMClient:
         self.model = model
         self.api_key = api_key or os.environ.get("AGENTIT_LLM_API_KEY")
         self._client = httpx.Client(timeout=timeout)
+        self._headers: dict[str, str] = {"Content-Type": "application/json"}
+        if self.api_key:
+            self._headers["Authorization"] = f"Bearer {self.api_key}"
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -89,26 +88,17 @@ class LLMClient:
     ) -> str | None:
         """Produce a short architecture summary from stack info and file listing."""
         user_msg = (
-            f"Stack info:\n{json.dumps(stack_info, indent=2)}\n\n"
+            f"Stack info:\n{json.dumps(stack_info)}\n\n"
             f"Files ({len(file_list)} total, first 80 shown):\n"
             + "\n".join(file_list[:80])
         )
         return self._chat(_SUMMARIZE_SYSTEM, user_msg)
-
-    def enhance_remediation(self, finding: dict) -> str | None:
-        """Produce a specific remediation description for *finding*."""
-        user_msg = json.dumps(finding, indent=2)
-        return self._chat(_REMEDIATION_SYSTEM, user_msg)
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
     def _chat(self, system: str, user: str) -> str | None:
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-
         payload = {
             "model": self.model,
             "messages": [
@@ -122,7 +112,7 @@ class LLMClient:
         try:
             resp = self._client.post(
                 f"{self.endpoint}/v1/chat/completions",
-                headers=headers,
+                headers=self._headers,
                 json=payload,
             )
             resp.raise_for_status()
