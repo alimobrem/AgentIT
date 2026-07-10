@@ -45,12 +45,18 @@ def _clone_assess_cleanup(repo_url: str, criticality: str):
         shutil.rmtree(repo_path, ignore_errors=True)
 
 
-@app.post("/assess")
+@app.post("/assess", response_model=None)
 async def assess_submit(
+    request: Request,
     repo_url: str = Form(...),
     criticality: str = Form("medium"),
-) -> RedirectResponse:
-    report = await asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality)
+):
+    try:
+        report = await asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality)
+    except Exception as exc:
+        return templates.TemplateResponse(
+            request, "assess_form.html", {"error": str(exc)}, status_code=400,
+        )
     assessment_id = get_store().save(report)
     return RedirectResponse(url=f"/assessments/{assessment_id}", status_code=303)
 

@@ -42,8 +42,11 @@ def iter_text_files(
     extensions: set[str] | None = None,
 ) -> Iterator[tuple[Path, str]]:
     exts = extensions or TEXT_EXTENSIONS
+    repo_resolved = repo_path.resolve()
     for fp in repo_path.rglob("*"):
         if not fp.is_file() or is_ignored(fp, repo_path):
+            continue
+        if not fp.resolve().is_relative_to(repo_resolved):
             continue
         if fp.suffix.lower() in exts:
             try:

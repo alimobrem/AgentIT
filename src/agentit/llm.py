@@ -4,13 +4,13 @@ import json
 import logging
 import os
 
-import httpx
+import anthropic
 
 logger = logging.getLogger(__name__)
 
 _CLASSIFY_SYSTEM = (
     "You are a security analyst reviewing source code for hardcoded secrets. "
-    "Respond ONLY with valid JSON: {\"is_secret\": bool, \"confidence\": float, \"reason\": str}. "
+    'Respond ONLY with valid JSON: {"is_secret": bool, "confidence": float, "reason": str}. '
     "confidence is 0.0-1.0."
 )
 
@@ -28,28 +28,25 @@ _SUMMARIZE_SYSTEM = (
 )
 
 
+def _create_client() -> anthropic.Anthropic | anthropic.AnthropicVertex:
+    project = os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "")
+    region = os.environ.get("CLOUD_ML_REGION", "")
+    if project and region:
+        return anthropic.AnthropicVertex(region=region, project_id=project)
+    return anthropic.Anthropic()
+
 
 class LLMClient:
-    """OpenAI-compatible LLM client. Works with vLLM, RHOAI, OpenAI, etc."""
+    """Claude client via Anthropic SDK. Supports Vertex AI and direct API.
 
-    def __init__(
-        self,
-        endpoint: str,
-        model: str = "default",
-        api_key: str | None = None,
-        timeout: float = 30.0,
-    ) -> None:
-        self.endpoint = endpoint.rstrip("/")
+    Backend selection (same as pulse-agent):
+    - ANTHROPIC_VERTEX_PROJECT_ID + CLOUD_ML_REGION → Vertex AI
+    - ANTHROPIC_API_KEY → direct Anthropic API
+    """
+
+    def __init__(self, model: str = "claude-sonnet-4-5-20250514", **_kwargs) -> None:
         self.model = model
-        self.api_key = api_key or os.environ.get("AGENTIT_LLM_API_KEY")
-        self._client = httpx.Client(timeout=timeout)
-        self._headers: dict[str, str] = {"Content-Type": "application/json"}
-        if self.api_key:
-            self._headers["Authorization"] = f"Bearer {self.api_key}"
-
-    # ------------------------------------------------------------------
-    # Public helpers
-    # ------------------------------------------------------------------
+        self._client = _create_client()
 
     def classify_secret(
         self,
@@ -57,11 +54,6 @@ class LLMClient:
         matched_line: str,
         context_lines: list[str],
     ) -> dict | None:
-        """Ask the LLM whether *matched_line* is a real secret or a false positive.
-
-        Returns ``{"is_secret": bool, "confidence": float, "reason": str}``
-        or ``None`` on any failure.
-        """
         user_msg = _CLASSIFY_USER.format(
             file_path=file_path,
             matched_line=matched_line,
@@ -86,7 +78,6 @@ class LLMClient:
         stack_info: dict,
         file_list: list[str],
     ) -> str | None:
-        """Produce a short architecture summary from stack info and file listing."""
         user_msg = (
             f"Stack info:\n{json.dumps(stack_info)}\n\n"
             f"Files ({len(file_list)} total, first 80 shown):\n"
@@ -94,30 +85,16 @@ class LLMClient:
         )
         return self._chat(_SUMMARIZE_SYSTEM, user_msg)
 
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
     def _chat(self, system: str, user: str) -> str | None:
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": 0.2,
-            "max_tokens": 512,
-        }
-
         try:
-            resp = self._client.post(
-                f"{self.endpoint}/v1/chat/completions",
-                headers=self._headers,
-                json=payload,
+            resp = self._client.messages.create(
+                model=self.model,
+                max_tokens=512,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+                temperature=0.2,
             )
-            resp.raise_for_status()
-            data = resp.json()
-            return data["choices"][0]["message"]["content"].strip()
-        except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
+            return resp.content[0].text.strip()
+        except (anthropic.APIError, anthropic.APIConnectionError) as exc:
             logger.warning("LLM call failed: %s", exc)
             return None

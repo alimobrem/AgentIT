@@ -18,7 +18,7 @@ from agentit.runner import run_assessment
 def _resolve_and_assess(
     repo_url: str,
     criticality: str,
-    llm_endpoint: str | None = None,
+    use_llm: bool = False,
     llm_model: str | None = None,
 ) -> Generator[AssessmentReport]:
     clone_dir: Path | None = None
@@ -31,9 +31,9 @@ def _resolve_and_assess(
             clone_dir = repo_path
 
         llm_client = None
-        if llm_endpoint:
+        if use_llm:
             from agentit.llm import LLMClient
-            llm_client = LLMClient(endpoint=llm_endpoint, model=llm_model or "default")
+            llm_client = LLMClient(model=llm_model or "claude-sonnet-4-5-20250514")
 
         click.echo("Running assessment...", err=True)
         report = run_assessment(repo_path, repo_url=repo_url, criticality=criticality, llm_client=llm_client)
@@ -53,12 +53,12 @@ def main() -> None:
 @click.option("--criticality", type=click.Choice(["low", "medium", "high", "critical"]), default="medium")
 @click.option("--format", "output_format", type=click.Choice(["json", "terminal"]), default="json")
 @click.option("--output", "output_file", type=click.Path(), default=None)
-@click.option("--llm-endpoint", default=None, help="LLM API endpoint URL.")
-@click.option("--llm-model", default=None, help="LLM model identifier.")
-def assess(repo_url: str, criticality: str, output_format: str, output_file: str | None, llm_endpoint: str | None, llm_model: str | None) -> None:
+@click.option("--llm", "use_llm", is_flag=True, default=False, help="Enable Claude LLM for improved analysis (requires ANTHROPIC_API_KEY or ANTHROPIC_VERTEX_PROJECT_ID).")
+@click.option("--llm-model", default=None, help="Claude model to use (default: claude-sonnet-4-5-20250514).")
+def assess(repo_url: str, criticality: str, output_format: str, output_file: str | None, use_llm: bool, llm_model: str | None) -> None:
     """Assess enterprise readiness of a Git repository."""
     try:
-        with _resolve_and_assess(repo_url, criticality, llm_endpoint, llm_model) as report:
+        with _resolve_and_assess(repo_url, criticality, use_llm, llm_model) as report:
             output = render_json_report(report) if output_format == "json" else render_terminal_report(report)
             if output_file:
                 Path(output_file).write_text(output, encoding="utf-8")
@@ -74,14 +74,14 @@ def assess(repo_url: str, criticality: str, output_format: str, output_file: str
 @click.argument("repo_url")
 @click.option("--output-dir", default="./hardening-output", type=click.Path())
 @click.option("--criticality", type=click.Choice(["low", "medium", "high", "critical"]), default="medium")
-@click.option("--llm-endpoint", default=None, help="LLM API endpoint URL.")
-@click.option("--llm-model", default=None, help="LLM model identifier.")
-def harden(repo_url: str, output_dir: str, criticality: str, llm_endpoint: str | None, llm_model: str | None) -> None:
+@click.option("--llm", "use_llm", is_flag=True, default=False, help="Enable Claude LLM for improved analysis.")
+@click.option("--llm-model", default=None, help="Claude model to use.")
+def harden(repo_url: str, output_dir: str, criticality: str, use_llm: bool, llm_model: str | None) -> None:
     """Generate enterprise hardening manifests for a repository."""
     from agentit.agents.hardening import HardeningAgent
 
     try:
-        with _resolve_and_assess(repo_url, criticality, llm_endpoint, llm_model) as report:
+        with _resolve_and_assess(repo_url, criticality, use_llm, llm_model) as report:
             click.echo("Generating hardening manifests...", err=True)
             agent = HardeningAgent(report=report, output_dir=Path(output_dir))
             result = agent.run()

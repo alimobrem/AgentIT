@@ -33,13 +33,13 @@ def local_git_repo(tmp_path: Path) -> str:
 
 def test_clone_repo_creates_directory(local_git_repo: str, tmp_path: Path):
     target = tmp_path / "cloned"
-    result = clone_repo(local_git_repo, target_dir=target)
+    result = clone_repo(local_git_repo, target_dir=target, allow_local=True)
     assert result.exists()
     assert (result / "README.md").exists()
 
 
 def test_clone_repo_auto_target(local_git_repo: str):
-    result = clone_repo(local_git_repo)
+    result = clone_repo(local_git_repo, allow_local=True)
     try:
         assert result.exists()
         assert (result / "README.md").exists()

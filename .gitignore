@@ -8,3 +8,8 @@ build/
 .venv/
 *.egg
 *.db
+.env
+.env.*
+secrets/
+*.pem
+*.key

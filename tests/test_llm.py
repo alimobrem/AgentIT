@@ -1,60 +1,43 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-import httpx
 import pytest
 
 from agentit.llm import LLMClient
 
 
-def _mock_transport(handler):
-    """Build an httpx.MockTransport from a handler function."""
-    return httpx.MockTransport(handler)
+def _mock_response(text: str) -> MagicMock:
+    block = MagicMock()
+    block.text = text
+    resp = MagicMock()
+    resp.content = [block]
+    return resp
 
 
-def _make_chat_response(content: str) -> httpx.Response:
-    body = {
-        "choices": [{"message": {"content": content}}],
-    }
-    return httpx.Response(200, json=body)
-
-
-def _make_client(transport: httpx.MockTransport) -> LLMClient:
-    client = LLMClient(endpoint="http://fake-llm:8000", model="test-model")
-    client._client = httpx.Client(transport=transport)
-    return client
-
-
-# ------------------------------------------------------------------
-# classify_secret
-# ------------------------------------------------------------------
+def _make_client(mock_create: MagicMock) -> LLMClient:
+    with patch("agentit.llm._create_client") as mock_factory:
+        client_mock = MagicMock()
+        client_mock.messages.create = mock_create
+        mock_factory.return_value = client_mock
+        return LLMClient(model="test-model")
 
 
 def test_classify_secret_real_secret():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return _make_chat_response(
-            json.dumps({"is_secret": True, "confidence": 0.95, "reason": "Hardcoded AWS key"})
-        )
-
-    client = _make_client(_mock_transport(handler))
-    result = client.classify_secret("config.yaml", "aws_key = AKIAIOSFODNN7EXAMPLE", ["# config", "aws_key = AKIAIOSFODNN7EXAMPLE", "region = us-east-1"])
+    response = _mock_response(json.dumps({"is_secret": True, "confidence": 0.95, "reason": "Hardcoded AWS key"}))
+    client = _make_client(MagicMock(return_value=response))
+    result = client.classify_secret("config.yaml", "aws_key = AKIAIOSFODNN7EXAMPLE", ["# config", "aws_key = AKIAIOSFODNN7EXAMPLE"])
 
     assert result is not None
     assert result["is_secret"] is True
     assert result["confidence"] == pytest.approx(0.95)
-    assert "AWS" in result["reason"] or "key" in result["reason"].lower()
 
 
 def test_classify_secret_false_positive():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return _make_chat_response(
-            json.dumps({"is_secret": False, "confidence": 0.9, "reason": "Variable name reference, not a real value"})
-        )
-
-    client = _make_client(_mock_transport(handler))
-    result = client.classify_secret("app.py", 'password = os.getenv("DB_PASSWORD")', ['import os', 'password = os.getenv("DB_PASSWORD")', 'connect(password)'])
+    response = _mock_response(json.dumps({"is_secret": False, "confidence": 0.9, "reason": "Variable reference"}))
+    client = _make_client(MagicMock(return_value=response))
+    result = client.classify_secret("app.py", 'password = os.getenv("DB_PASSWORD")', ['import os', 'password = os.getenv("DB_PASSWORD")'])
 
     assert result is not None
     assert result["is_secret"] is False
@@ -62,36 +45,26 @@ def test_classify_secret_false_positive():
 
 
 def test_llm_unavailable_returns_none():
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection refused")
-
-    client = _make_client(_mock_transport(handler))
+    import anthropic
+    client = _make_client(MagicMock(side_effect=anthropic.APIConnectionError(request=MagicMock())))
     result = client.classify_secret("f.py", "secret=abc123xyz789!!", [])
 
     assert result is None
 
 
 def test_summarize_architecture():
-    summary_text = "A Go microservice exposing a REST API backed by PostgreSQL."
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return _make_chat_response(summary_text)
-
-    client = _make_client(_mock_transport(handler))
+    summary = "A Go microservice exposing a REST API backed by PostgreSQL."
+    client = _make_client(MagicMock(return_value=_mock_response(summary)))
     result = client.summarize_architecture(
-        {"languages": [{"name": "go"}], "frameworks": [], "databases": [{"name": "postgresql"}]},
+        {"languages": [{"name": "go"}], "databases": [{"name": "postgresql"}]},
         ["main.go", "handler.go", "db.go"],
     )
 
-    assert result == summary_text
-
+    assert result == summary
 
 
 def test_classify_secret_bad_json_returns_none():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return _make_chat_response("I'm not sure, maybe it's a secret?")
-
-    client = _make_client(_mock_transport(handler))
+    client = _make_client(MagicMock(return_value=_mock_response("I'm not sure, maybe it's a secret?")))
     result = client.classify_secret("f.py", "key=abc", [])
 
     assert result is None
