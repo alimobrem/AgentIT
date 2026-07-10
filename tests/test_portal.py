@@ -486,3 +486,120 @@ def test_resolve_gate_approve(client, _override_store):
     approved = store.list_gates(status="approved")
     assert len(approved) == 1
     assert approved[0]["resolved_by"] == "tester"
+
+
+# ------------------------------------------------------------------
+# Fleet dashboard tests
+# ------------------------------------------------------------------
+
+
+def _make_report_scored(repo_name: str, score: int, criticality: str = "medium") -> AssessmentReport:
+    return AssessmentReport(
+        repo_url=f"https://github.com/org/{repo_name}",
+        repo_name=repo_name,
+        assessed_at=datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc),
+        stack=StackInfo(
+            languages=[Language(name="python", version="3.12", file_count=10, percentage=100.0)],
+            frameworks=[], databases=[], runtimes=[], package_managers=["pip"],
+        ),
+        architecture=ArchitectureInfo(
+            service_count=1, architecture_style="monolith", has_api=True,
+            api_style="REST", external_dependencies=[], auth_mechanism=None,
+        ),
+        scores=[
+            DimensionScore(
+                dimension="security", score=score, max_score=100,
+                findings=[
+                    Finding(
+                        category="secrets", severity=Severity.critical,
+                        description="Crit finding", recommendation="Fix it",
+                    ),
+                ],
+            ),
+        ],
+        criticality=criticality,
+        summary="Test",
+        remediation_plan=[],
+    )
+
+
+def test_fleet_dashboard_shows_portfolio_summary(client, _override_store):
+    store = _override_store
+    store.save(_make_report_scored("alpha-svc", 80, "low"))
+    store.save(_make_report_scored("beta-svc", 30, "critical"))
+    store.save(_make_report_scored("gamma-svc", 55, "medium"))
+
+    resp = client.get("/fleet")
+    assert resp.status_code == 200
+    # Portfolio summary
+    assert "Total Apps" in resp.text
+    assert "Average Score" in resp.text
+    assert "Critical Findings" in resp.text
+    assert "3" in resp.text  # total apps
+    # Table rows
+    assert "alpha-svc" in resp.text
+    assert "beta-svc" in resp.text
+    assert "gamma-svc" in resp.text
+    # Assess new repo button
+    assert "Assess New Repo" in resp.text
+
+
+def test_fleet_empty(client):
+    resp = client.get("/fleet")
+    assert resp.status_code == 200
+    assert "No applications in fleet" in resp.text
+
+
+def test_api_fleet_returns_json(client, _override_store):
+    store = _override_store
+    store.save(_make_report_scored("svc-a", 75))
+    store.save(_make_report_scored("svc-b", 40))
+
+    resp = client.get("/api/fleet")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, list)
+    assert len(data) == 2
+    names = {r["repo_name"] for r in data}
+    assert names == {"svc-a", "svc-b"}
+    for r in data:
+        assert "latest_score" in r
+        assert "delta" in r
+        assert "critical_count" in r
+        assert "assessment_count" in r
+        assert "last_assessed" in r
+
+
+def test_api_fleet_trend_with_multiple_assessments(client, _override_store):
+    store = _override_store
+    r1 = _make_report_scored("trending", 40)
+    store.save(r1)
+    r2 = _make_report_scored("trending", 60)
+    r2.assessed_at = datetime(2025, 2, 1, 12, 0, 0, tzinfo=timezone.utc)
+    store.save(r2)
+
+    resp = client.get("/api/fleet")
+    data = resp.json()
+    assert len(data) == 1
+    entry = data[0]
+    assert entry["latest_score"] == 60
+    assert entry["previous_score"] == 40
+    assert entry["delta"] == 20.0
+    assert entry["assessment_count"] == 2
+
+
+def test_dashboard_shows_portfolio_summary(client, _override_store):
+    store = _override_store
+    store.save(_make_report_scored("app-one", 90))
+
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "Total Apps" in resp.text
+    assert "Average Score" in resp.text
+    assert "Critical Findings" in resp.text
+
+
+def test_base_nav_has_fleet_link(client):
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert 'href="/fleet"' in resp.text

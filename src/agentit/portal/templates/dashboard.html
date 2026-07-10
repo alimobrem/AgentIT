@@ -2,20 +2,51 @@
 {% block title %}Dashboard - AgentIT{% endblock %}
 {% block content %}
 <h1>Enterprise Readiness Dashboard</h1>
+
 {% if assessments %}
+{# ── Portfolio Summary Bar ────────────────────────────────────── #}
+<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 2rem;">
+  <div style="background: #16213e; border-radius: 8px; padding: 1rem; text-align: center; border: 1px solid #0f3460;">
+    <div style="font-size: 0.8rem; text-transform: uppercase; color: #888;">Total Apps</div>
+    <div style="font-size: 2rem; font-weight: 700; color: #e0e0e0;">{{ total_apps }}</div>
+  </div>
+  <div style="background: #16213e; border-radius: 8px; padding: 1rem; text-align: center; border: 1px solid #0f3460;">
+    <div style="font-size: 0.8rem; text-transform: uppercase; color: #888;">Average Score</div>
+    <div style="font-size: 2rem; font-weight: 700;
+      {% if avg_score > 70 %}color: #2ecc71;
+      {% elif avg_score >= 40 %}color: #f0a500;
+      {% else %}color: #e94560;{% endif %}
+    ">{{ "%.0f"|format(avg_score) }}</div>
+  </div>
+  <div style="background: #16213e; border-radius: 8px; padding: 1rem; text-align: center; border: 1px solid #0f3460;">
+    <div style="font-size: 0.8rem; text-transform: uppercase; color: #888;">Critical Findings</div>
+    <div style="font-size: 2rem; font-weight: 700; color: {% if critical_total > 0 %}#e94560{% else %}#2ecc71{% endif %};">{{ critical_total }}</div>
+  </div>
+</div>
+
+{# ── Assessment Cards ─────────────────────────────────────────── #}
 <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1.2rem;">
   {% for a in assessments %}
-  <a href="/assessments/{{ a.id }}" style="text-decoration: none;">
   <div style="background: #16213e; border-radius: 8px; padding: 1.2rem; border: 1px solid #0f3460;">
+    <a href="/assessments/{{ a.id }}" style="text-decoration: none;">
     <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 0.8rem;">
       <div style="font-weight: 600; color: #e0e0e0; font-size: 1.05rem;">{{ a.repo_name }}</div>
       <span class="badge badge-{{ a.criticality }}">{{ a.criticality }}</span>
     </div>
-    <div style="font-size: 2.2rem; font-weight: 700; margin-bottom: 0.4rem;
-      {% if a.overall_score > 70 %}color: #2ecc71;
-      {% elif a.overall_score >= 40 %}color: #f0a500;
-      {% else %}color: #e94560;{% endif %}
-    ">{{ "%.0f"|format(a.overall_score) }}</div>
+    <div style="display: flex; align-items: baseline; gap: 0.6rem; margin-bottom: 0.4rem;">
+      <span style="font-size: 2.2rem; font-weight: 700;
+        {% if a.overall_score > 70 %}color: #2ecc71;
+        {% elif a.overall_score >= 40 %}color: #f0a500;
+        {% else %}color: #e94560;{% endif %}
+      ">{{ "%.0f"|format(a.overall_score) }}</span>
+      {% if trends.get(a.repo_url) and trends[a.repo_url].delta is not none %}
+        {% set d = trends[a.repo_url].delta %}
+        <span style="font-size: 0.95rem; font-weight: 600;
+          {% if d > 0 %}color: #2ecc71;{% elif d < 0 %}color: #e94560;{% else %}color: #888;{% endif %}">
+          {% if d > 0 %}&#9650; +{{ "%.1f"|format(d) }}{% elif d < 0 %}&#9660; {{ "%.1f"|format(d) }}{% else %}&#8212; 0{% endif %}
+        </span>
+      {% endif %}
+    </div>
     <div class="score-bar-bg">
       <div class="score-bar-fill
         {% if a.overall_score > 70 %}score-green
@@ -23,9 +54,16 @@
         {% else %}score-red{% endif %}"
         style="width: {{ a.overall_score }}%"></div>
     </div>
-    <div style="margin-top: 0.6rem; font-size: 0.82rem; color: #888;">{{ a.assessed_at[:19] }}</div>
+    <div style="margin-top: 0.6rem; font-size: 0.82rem; color: #888;">Assessed: {{ a.assessed_at[:19] }}</div>
+    </a>
+    <div style="margin-top: 0.6rem;">
+      <form method="post" action="/assess" style="display: inline;">
+        <input type="hidden" name="repo_url" value="{{ a.repo_url }}">
+        <input type="hidden" name="criticality" value="{{ a.criticality }}">
+        <button type="submit" class="btn" style="padding: 0.3rem 0.8rem; font-size: 0.8rem;">Re-assess</button>
+      </form>
+    </div>
   </div>
-  </a>
   {% endfor %}
 </div>
 {% else %}
