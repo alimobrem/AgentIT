@@ -32,6 +32,9 @@ HELM_TEMPLATE_RE = re.compile(r"\{\{.*\}\}")
 class SecurityAnalyzer:
     dimension = "security"
 
+    def __init__(self, llm_client: object | None = None) -> None:
+        self._llm = llm_client
+
     def analyze(self, repo_path: Path) -> DimensionScore:
         findings: list[Finding] = []
         findings.extend(self._check_secrets(repo_path))
@@ -58,6 +61,12 @@ class SecurityAnalyzer:
             for secret_type, pattern in SECRET_PATTERNS:
                 match = pattern.search(content)
                 if match and not _is_false_positive(content, match):
+                    if self._llm is not None:
+                        matched_line = _get_match_line(content, match.start())
+                        context_lines = _get_context_lines(content, match.start(), radius=3)
+                        verdict = self._llm.classify_secret(rel_path, matched_line, context_lines)
+                        if verdict is not None and not verdict["is_secret"] and verdict["confidence"] > 0.7:
+                            continue
                     findings.append(Finding(
                         category="secrets",
                         severity=Severity.critical,
@@ -210,3 +219,19 @@ def _get_match_line(content: str, pos: int) -> str:
     if line_end == -1:
         line_end = len(content)
     return content[line_start:line_end]
+
+
+def _get_context_lines(content: str, pos: int, radius: int = 3) -> list[str]:
+    lines = content.splitlines()
+    # determine which line index pos falls on
+    current = 0
+    target_idx = 0
+    for i, line in enumerate(lines):
+        end = current + len(line) + 1  # +1 for newline
+        if pos < end:
+            target_idx = i
+            break
+        current = end
+    start = max(0, target_idx - radius)
+    end = min(len(lines), target_idx + radius + 1)
+    return lines[start:end]

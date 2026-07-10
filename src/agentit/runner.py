@@ -39,6 +39,7 @@ def run_assessment(
     repo_path: Path,
     repo_url: str,
     criticality: str = "medium",
+    llm_client: object | None = None,
 ) -> AssessmentReport:
     detector = StackDetector()
     stack = detector.detect(repo_path)
@@ -46,7 +47,7 @@ def run_assessment(
     architecture = _detect_architecture(repo_path)
 
     analyzers = [
-        SecurityAnalyzer(),
+        SecurityAnalyzer(llm_client=llm_client),
         ObservabilityAnalyzer(),
         CICDAnalyzer(),
         InfrastructureAnalyzer(),
@@ -60,6 +61,15 @@ def run_assessment(
 
     repo_name = repo_url.rstrip("/").split("/")[-1].removesuffix(".git")
 
+    summary = _generate_summary(scores, repo_name)
+    if llm_client is not None:
+        llm_summary = llm_client.summarize_architecture(
+            stack.model_dump(),
+            [str(p.relative_to(repo_path)) for p in repo_path.rglob("*") if p.is_file()],
+        )
+        if llm_summary is not None:
+            summary = llm_summary
+
     return AssessmentReport(
         repo_url=repo_url,
         repo_name=repo_name,
@@ -68,7 +78,7 @@ def run_assessment(
         architecture=architecture,
         scores=scores,
         criticality=criticality,
-        summary=_generate_summary(scores, repo_name),
+        summary=summary,
         remediation_plan=remediation_plan,
     )
 
