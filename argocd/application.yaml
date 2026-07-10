@@ -8,7 +8,7 @@ spec:
   source:
     repoURL: https://github.com/alimobrem/AgentIT.git
     targetRevision: main
-    path: agentit/chart
+    path: chart
     helm:
       parameters:
         - name: image.repository
