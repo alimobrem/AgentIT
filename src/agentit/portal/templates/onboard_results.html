@@ -8,7 +8,7 @@
 
 {% if request.query_params.get('pr_url') %}
 <div style="background: #1a4a2e; border: 1px solid #238636; padding: 1rem; border-radius: 8px; margin-bottom: 1rem;">
-  PR created: <a href="{{ request.query_params.get('pr_url') }}" target="_blank" style="color: #58a6ff;">{{ request.query_params.get('pr_url') }}</a>
+  PR created: <a href="{{ request.query_params.get('pr_url') | safe_url }}" target="_blank" style="color: #58a6ff;">{{ request.query_params.get('pr_url') }}</a>
 </div>
 {% endif %}
 {% if request.query_params.get('error') %}
