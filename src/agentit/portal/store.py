@@ -237,6 +237,46 @@ class AssessmentStore:
             "assessments_count": len(history),
         }
 
+    # ── Fleet ──────────────────────────────────────────────────────────
+
+    def get_fleet_data(self) -> list[dict]:
+        """Return one row per unique repo_url with latest assessment + trend."""
+        rows = self._conn.execute(
+            """
+            SELECT a.id, a.repo_url, a.repo_name, a.assessed_at,
+                   a.overall_score, a.criticality, a.report_json
+            FROM assessments a
+            INNER JOIN (
+                SELECT repo_url, MAX(assessed_at) AS max_at
+                FROM assessments GROUP BY repo_url
+            ) latest ON a.repo_url = latest.repo_url
+                    AND a.assessed_at = latest.max_at
+            ORDER BY a.overall_score ASC
+            """
+        ).fetchall()
+
+        fleet: list[dict] = []
+        for r in rows:
+            report = AssessmentReport.model_validate_json(r["report_json"])
+            critical_count = sum(
+                1 for s in report.scores for f in s.findings
+                if f.severity in (0, 1)  # critical / high
+            )
+            trend = self.get_trend(r["repo_url"])
+            fleet.append({
+                "id": r["id"],
+                "repo_url": r["repo_url"],
+                "repo_name": r["repo_name"],
+                "latest_score": r["overall_score"],
+                "previous_score": trend["previous_score"],
+                "delta": trend["delta"],
+                "criticality": r["criticality"],
+                "last_assessed": r["assessed_at"],
+                "assessment_count": trend["assessments_count"],
+                "critical_count": critical_count,
+            })
+        return fleet
+
     # ── Gates ────────────────────────────────────────────────────────────
 
     def create_gate(self, assessment_id: str, gate_type: str, summary: str) -> str:
