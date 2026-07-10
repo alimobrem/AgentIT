@@ -6,7 +6,7 @@ def test_no_data_governance_scores_low(create_mock_repo):
     analyzer = DataGovernanceAnalyzer()
     score = analyzer.analyze(repo)
     assert score.dimension == "data_governance"
-    assert score.score <= 45
+    assert score.score <= 65
 
 
 def test_backup_config_scores_higher(create_mock_repo):

@@ -3,9 +3,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from agentit.analyzers.base import calculate_score, iter_yaml_files
 from agentit.models import DimensionScore, Finding, Severity
-
-IGNORED_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "vendor", "dist", "build", "target"}
 
 
 class HADRAnalyzer:
@@ -17,17 +16,9 @@ class HADRAnalyzer:
         has_pdb = False
         has_hpa = False
         has_health_probes = False
-        has_anti_affinity = False
 
-        for yaml_file in list(repo_path.rglob("*.yaml")) + list(repo_path.rglob("*.yml")):
-            if any(d in yaml_file.relative_to(repo_path).parts for d in IGNORED_DIRS):
-                continue
-            try:
-                content = yaml_file.read_text(errors="ignore")
-            except OSError:
-                continue
-
-            if re.search(r"replicas:\s*[2-9]", content):
+        for _, content in iter_yaml_files(repo_path):
+            if re.search(r"replicas:\s*([2-9]|\d{2,})", content):
                 has_replicas = True
             if "PodDisruptionBudget" in content:
                 has_pdb = True
@@ -35,8 +26,6 @@ class HADRAnalyzer:
                 has_hpa = True
             if "livenessProbe" in content or "readinessProbe" in content:
                 has_health_probes = True
-            if "podAntiAffinity" in content:
-                has_anti_affinity = True
 
         if not has_replicas:
             findings.append(Finding(
@@ -67,10 +56,9 @@ class HADRAnalyzer:
                 recommendation="Add livenessProbe and readinessProbe to all containers",
             ))
 
-        score = 100
-        for f in findings:
-            if f.severity == Severity.high:
-                score -= 25
-            elif f.severity == Severity.medium:
-                score -= 12
-        return DimensionScore(dimension="ha_dr", score=max(0, score), max_score=100, findings=findings)
+        return DimensionScore(
+            dimension="ha_dr",
+            score=calculate_score(findings),
+            max_score=100,
+            findings=findings,
+        )

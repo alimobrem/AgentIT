@@ -5,8 +5,9 @@ import re
 from collections import Counter
 from pathlib import Path
 
+from agentit.analyzers.base import is_ignored
 from agentit.models import (
-    Database, DimensionScore, Finding, Framework, Language, Runtime, Severity, StackInfo,
+    Database, Framework, Language, Runtime, StackInfo,
 )
 
 LANG_EXTENSIONS: dict[str, str] = {
@@ -56,14 +57,21 @@ PACKAGE_MANAGER_FILES: dict[str, str] = {
 }
 
 
-class StackDetector:
-    dimension = "stack"
+DEP_FILES = [
+    "requirements.txt", "Pipfile", "pyproject.toml",
+    "package.json", "go.mod", "go.sum",
+    "pom.xml", "build.gradle", "Gemfile", "Cargo.toml",
+    "docker-compose.yml", "docker-compose.yaml",
+]
 
+
+class StackDetector:
     def detect(self, repo_path: Path) -> StackInfo:
+        dep_contents = self._read_dep_files(repo_path)
         languages = self._detect_languages(repo_path)
-        frameworks = self._detect_frameworks(repo_path)
-        databases = self._detect_databases(repo_path)
-        runtimes = self._detect_runtimes(repo_path, languages)
+        frameworks = self._detect_frameworks(repo_path, dep_contents)
+        databases = self._detect_databases(dep_contents)
+        runtimes = self._detect_runtimes(languages)
         package_managers = self._detect_package_managers(repo_path)
         return StackInfo(
             languages=languages,
@@ -73,20 +81,25 @@ class StackDetector:
             package_managers=package_managers,
         )
 
-    def analyze(self, repo_path: Path) -> DimensionScore:
-        self.detect(repo_path)
-        return DimensionScore(dimension="stack", score=0, max_score=0, findings=[])
+    def _read_dep_files(self, repo_path: Path) -> dict[str, str]:
+        contents: dict[str, str] = {}
+        for candidate in DEP_FILES:
+            p = repo_path / candidate
+            if p.exists():
+                try:
+                    contents[candidate] = p.read_text(errors="ignore")
+                except OSError:
+                    continue
+        return contents
 
     def _detect_languages(self, repo_path: Path) -> list[Language]:
         counts: Counter[str] = Counter()
-        versions: dict[str, str | None] = {}
 
         for file_path in repo_path.rglob("*"):
-            if file_path.is_file() and not _is_ignored(file_path, repo_path):
+            if file_path.is_file() and not is_ignored(file_path, repo_path):
                 ext = file_path.suffix.lower()
                 if ext in LANG_EXTENSIONS:
-                    lang = LANG_EXTENSIONS[ext]
-                    counts[lang] += 1
+                    counts[LANG_EXTENSIONS[ext]] += 1
 
         total = sum(counts.values())
         if total == 0:
@@ -145,21 +158,25 @@ class StackDetector:
 
         return versions
 
-    def _detect_frameworks(self, repo_path: Path) -> list[Framework]:
+    def _detect_frameworks(self, repo_path: Path, dep_contents: dict[str, str]) -> list[Framework]:
         found: list[Framework] = []
-        file_contents: dict[str, str] = {}
 
         for name, info in FRAMEWORK_PATTERNS.items():
             for dep_file in info["files"]:
-                dep_path = repo_path / dep_file
-                if dep_path.exists():
-                    if dep_file not in file_contents:
-                        file_contents[dep_file] = dep_path.read_text()
-                    content = file_contents[dep_file]
-                    if re.search(info["pattern"], content, re.IGNORECASE):
-                        version = self._extract_version(content, name, dep_file)
-                        found.append(Framework(name=name, version=version, language=info["language"]))
-                        break
+                content = dep_contents.get(dep_file)
+                if content is None:
+                    dep_path = repo_path / dep_file
+                    if dep_path.exists():
+                        try:
+                            content = dep_path.read_text(errors="ignore")
+                        except OSError:
+                            continue
+                    else:
+                        continue
+                if re.search(info["pattern"], content, re.IGNORECASE):
+                    version = self._extract_version(content, name, dep_file)
+                    found.append(Framework(name=name, version=version, language=info["language"]))
+                    break
 
         return found
 
@@ -171,7 +188,7 @@ class StackDetector:
                 for key, ver in deps.items():
                     if name.replace(".", "").replace(" ", "").lower() in key.lower().replace(".", "").replace(" ", ""):
                         return ver.lstrip("^~>=<")
-                    return None
+                return None
             except (json.JSONDecodeError, KeyError):
                 pass
         if dep_file in ("requirements.txt", "Pipfile"):
@@ -185,31 +202,21 @@ class StackDetector:
                 return match.group(1)
         return None
 
-    def _detect_databases(self, repo_path: Path) -> list[Database]:
+    def _detect_databases(self, dep_contents: dict[str, str]) -> list[Database]:
         found: list[Database] = []
-        all_content = ""
-
-        for candidate in [
-            "requirements.txt", "Pipfile", "pyproject.toml",
-            "package.json", "go.mod", "go.sum",
-            "pom.xml", "build.gradle", "Gemfile", "Cargo.toml",
-            "docker-compose.yml", "docker-compose.yaml",
-        ]:
-            p = repo_path / candidate
-            if p.exists():
-                all_content += " " + p.read_text()
+        all_lower = " ".join(dep_contents.values()).lower()
 
         seen: set[str] = set()
         for db_name, patterns in DB_PATTERNS.items():
             for pattern in patterns:
-                if pattern.lower() in all_content.lower() and db_name not in seen:
+                if pattern.lower() in all_lower and db_name not in seen:
                     seen.add(db_name)
                     found.append(Database(name=db_name))
                     break
 
         return found
 
-    def _detect_runtimes(self, repo_path: Path, languages: list[Language]) -> list[Runtime]:
+    def _detect_runtimes(self, languages: list[Language]) -> list[Runtime]:
         runtimes: list[Runtime] = []
         lang_names = {l.name for l in languages}
 
@@ -233,14 +240,3 @@ class StackDetector:
             if (repo_path / filename).exists():
                 found.add(pm)
         return sorted(found)
-
-
-def _is_ignored(file_path: Path, repo_root: Path) -> bool:
-    relative = file_path.relative_to(repo_root)
-    parts = relative.parts
-    ignored_dirs = {
-        ".git", "node_modules", "__pycache__", ".venv", "venv",
-        "vendor", "dist", "build", ".tox", ".mypy_cache", ".pytest_cache",
-        "target", ".idea", ".vscode",
-    }
-    return bool(ignored_dirs & set(parts))

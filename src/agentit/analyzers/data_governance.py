@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agentit.analyzers.base import calculate_score, iter_yaml_files
 from agentit.models import DimensionScore, Finding, Severity
-
-IGNORED_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "vendor", "dist", "build", "target"}
 
 
 class DataGovernanceAnalyzer:
@@ -14,24 +13,14 @@ class DataGovernanceAnalyzer:
         findings: list[Finding] = []
         has_backup = False
         has_migration = False
-        has_pvc = False
         has_retention = False
 
-        all_text = ""
-        for fp in list(repo_path.rglob("*.yaml")) + list(repo_path.rglob("*.yml")):
-            if any(d in fp.relative_to(repo_path).parts for d in IGNORED_DIRS):
-                continue
-            try:
-                all_text += fp.read_text(errors="ignore") + "\n"
-            except OSError:
-                continue
-
-        if "backup" in all_text.lower() or "CronJob" in all_text:
-            has_backup = True
-        if "PersistentVolumeClaim" in all_text:
-            has_pvc = True
-        if "retention" in all_text.lower():
-            has_retention = True
+        for _, content in iter_yaml_files(repo_path):
+            content_lower = content.lower()
+            if "backup" in content_lower or "kind: CronJob" in content:
+                has_backup = True
+            if "retention" in content_lower:
+                has_retention = True
 
         migration_dirs = ["migrations", "migrate", "alembic", "flyway", "liquibase", "db/migrate"]
         for d in migration_dirs:
@@ -61,10 +50,9 @@ class DataGovernanceAnalyzer:
                 recommendation="Define data retention policies for compliance (GDPR, SOC 2)",
             ))
 
-        score = 100
-        for f in findings:
-            if f.severity == Severity.high:
-                score -= 25
-            elif f.severity == Severity.medium:
-                score -= 15
-        return DimensionScore(dimension="data_governance", score=max(0, score), max_score=100, findings=findings)
+        return DimensionScore(
+            dimension="data_governance",
+            score=calculate_score(findings),
+            max_score=100,
+            findings=findings,
+        )

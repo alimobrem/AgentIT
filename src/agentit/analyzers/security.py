@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from agentit.analyzers.base import calculate_score, iter_text_files, iter_yaml_files
 from agentit.models import DimensionScore, Finding, Severity
 
 SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
@@ -15,9 +16,6 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("private_key", re.compile(r"""-----BEGIN (?:RSA |EC )?PRIVATE KEY-----""")),
 ]
 
-IGNORED_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "vendor", "dist", "build", "target"}
-TEXT_EXTENSIONS = {".py", ".go", ".java", ".js", ".ts", ".tsx", ".jsx", ".rb", ".rs", ".yaml", ".yml", ".toml", ".json", ".env", ".cfg", ".conf", ".ini", ".xml", ".properties", ".sh"}
-
 
 class SecurityAnalyzer:
     dimension = "security"
@@ -27,26 +25,19 @@ class SecurityAnalyzer:
         findings.extend(self._check_secrets(repo_path))
         findings.extend(self._check_dockerfile(repo_path))
         findings.extend(self._check_network_policies(repo_path))
-        findings.extend(self._check_rbac(repo_path))
         findings.extend(self._check_scanning(repo_path))
         findings.extend(self._check_base_image(repo_path))
 
-        score = self._calculate_score(findings, repo_path)
-        return DimensionScore(dimension="security", score=score, max_score=100, findings=findings)
+        return DimensionScore(
+            dimension="security",
+            score=calculate_score(findings),
+            max_score=100,
+            findings=findings,
+        )
 
     def _check_secrets(self, repo_path: Path) -> list[Finding]:
         findings: list[Finding] = []
-        for file_path in repo_path.rglob("*"):
-            if not file_path.is_file():
-                continue
-            if any(d in file_path.relative_to(repo_path).parts for d in IGNORED_DIRS):
-                continue
-            if file_path.suffix.lower() not in TEXT_EXTENSIONS:
-                continue
-            try:
-                content = file_path.read_text(errors="ignore")
-            except (OSError, UnicodeDecodeError):
-                continue
+        for file_path, content in iter_text_files(repo_path):
             for secret_type, pattern in SECRET_PATTERNS:
                 if pattern.search(content):
                     rel_path = str(file_path.relative_to(repo_path))
@@ -73,7 +64,10 @@ class SecurityAnalyzer:
             return findings
 
         for df in dockerfiles:
-            content = df.read_text()
+            try:
+                content = df.read_text(errors="ignore")
+            except OSError:
+                continue
             rel_path = str(df.relative_to(repo_path))
 
             if not re.search(r"^\s*USER\s+", content, re.MULTILINE):
@@ -106,19 +100,14 @@ class SecurityAnalyzer:
         return findings
 
     def _check_network_policies(self, repo_path: Path) -> list[Finding]:
-        has_k8s = any(repo_path.rglob("*.yaml")) or any(repo_path.rglob("*.yml"))
-        if not has_k8s:
-            return []
+        seen_yaml = False
+        for _, content in iter_yaml_files(repo_path):
+            seen_yaml = True
+            if "NetworkPolicy" in content:
+                return []
 
-        for yaml_file in list(repo_path.rglob("*.yaml")) + list(repo_path.rglob("*.yml")):
-            if any(d in yaml_file.relative_to(repo_path).parts for d in IGNORED_DIRS):
-                continue
-            try:
-                content = yaml_file.read_text()
-                if "NetworkPolicy" in content:
-                    return []
-            except (OSError, UnicodeDecodeError):
-                continue
+        if not seen_yaml:
+            return []
 
         return [Finding(
             category="network",
@@ -127,26 +116,14 @@ class SecurityAnalyzer:
             recommendation="Add deny-all default NetworkPolicy with explicit allow rules",
         )]
 
-    def _check_rbac(self, repo_path: Path) -> list[Finding]:
-        for yaml_file in list(repo_path.rglob("*.yaml")) + list(repo_path.rglob("*.yml")):
-            if any(d in yaml_file.relative_to(repo_path).parts for d in IGNORED_DIRS):
-                continue
-            try:
-                content = yaml_file.read_text()
-                if "rbac.authorization.k8s.io" in content:
-                    return []
-            except (OSError, UnicodeDecodeError):
-                continue
-        return []
-
     def _check_scanning(self, repo_path: Path) -> list[Finding]:
         scan_indicators = ["trivy", "grype", "snyk", "stackrox", "acs", "clair", "anchore"]
         for ci_file in list(repo_path.rglob(".github/workflows/*.yml")) + list(repo_path.rglob(".gitlab-ci.yml")) + list(repo_path.rglob("Jenkinsfile")):
             try:
-                content = ci_file.read_text().lower()
+                content = ci_file.read_text(errors="ignore").lower()
                 if any(s in content for s in scan_indicators):
                     return []
-            except (OSError, UnicodeDecodeError):
+            except OSError:
                 continue
         return [Finding(
             category="scanning",
@@ -158,27 +135,16 @@ class SecurityAnalyzer:
     def _check_base_image(self, repo_path: Path) -> list[Finding]:
         findings: list[Finding] = []
         for df in list(repo_path.glob("Dockerfile*")) + list(repo_path.glob("Containerfile*")):
-            content = df.read_text()
-            if re.search(r"FROM\s+(?!.*ubi|.*redhat)", content, re.IGNORECASE):
-                if not re.search(r"FROM\s+.*(?:ubi|redhat|registry\.access\.redhat)", content, re.IGNORECASE):
-                    findings.append(Finding(
-                        category="container",
-                        severity=Severity.low,
-                        description=f"Base image is not UBI (Red Hat Universal Base Image) in {df.name}",
-                        file_path=str(df.relative_to(repo_path)),
-                        recommendation="Use registry.access.redhat.com/ubi9/ubi-minimal for supported, secure base image",
-                    ))
+            try:
+                content = df.read_text(errors="ignore")
+            except OSError:
+                continue
+            if re.search(r"^\s*FROM\s+", content, re.MULTILINE) and not re.search(r"FROM\s+.*(?:ubi|redhat|registry\.access\.redhat)", content, re.IGNORECASE):
+                findings.append(Finding(
+                    category="container",
+                    severity=Severity.low,
+                    description=f"Base image is not UBI (Red Hat Universal Base Image) in {df.name}",
+                    file_path=str(df.relative_to(repo_path)),
+                    recommendation="Use registry.access.redhat.com/ubi9/ubi-minimal for supported, secure base image",
+                ))
         return findings
-
-    def _calculate_score(self, findings: list[Finding], repo_path: Path) -> int:
-        score = 100
-        for finding in findings:
-            if finding.severity == Severity.critical:
-                score -= 25
-            elif finding.severity == Severity.high:
-                score -= 15
-            elif finding.severity == Severity.medium:
-                score -= 8
-            elif finding.severity == Severity.low:
-                score -= 3
-        return max(0, min(100, score))

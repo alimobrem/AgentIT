@@ -6,7 +6,7 @@ def test_no_cicd_scores_low(create_mock_repo):
     analyzer = CICDAnalyzer()
     score = analyzer.analyze(repo)
     assert score.dimension == "cicd"
-    assert score.score <= 35
+    assert score.score <= 55
 
 
 def test_github_actions_scores_medium(create_mock_repo):

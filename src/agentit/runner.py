@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agentit.analyzers.base import is_ignored
 from agentit.analyzers.cicd import CICDAnalyzer
 from agentit.analyzers.compliance import ComplianceAnalyzer
 from agentit.analyzers.data_governance import DataGovernanceAnalyzer
@@ -42,7 +43,7 @@ def run_assessment(
     detector = StackDetector()
     stack = detector.detect(repo_path)
 
-    architecture = _detect_architecture(repo_path, stack)
+    architecture = _detect_architecture(repo_path)
 
     analyzers = [
         SecurityAnalyzer(),
@@ -67,66 +68,64 @@ def run_assessment(
         architecture=architecture,
         scores=scores,
         criticality=criticality,
-        summary=_generate_summary(scores, stack, repo_name),
+        summary=_generate_summary(scores, repo_name),
         remediation_plan=remediation_plan,
     )
 
 
 def generate_remediation_plan(scores: list[DimensionScore]) -> list[RemediationItem]:
-    items: list[RemediationItem] = []
-    all_findings = []
-
-    for score in scores:
-        for finding in score.findings:
-            all_findings.append((score.dimension, finding))
-
+    all_findings = [
+        (score.dimension, finding)
+        for score in scores
+        for finding in score.findings
+    ]
     all_findings.sort(key=lambda x: x[1].severity.value)
 
-    for priority, (dimension, finding) in enumerate(all_findings, start=1):
-        items.append(RemediationItem(
-            priority=priority,
+    return [
+        RemediationItem(
+            priority=i,
             dimension=dimension,
             description=finding.description,
             estimated_effort=EFFORT_MAP.get(finding.severity, "30 agent-minutes"),
             agent_responsible=AGENT_MAP.get(dimension, "Unknown Agent"),
-        ))
+        )
+        for i, (dimension, finding) in enumerate(all_findings, start=1)
+    ]
 
-    return items
 
-
-def _detect_architecture(repo_path: Path, stack: object) -> ArchitectureInfo:
-    service_count = 0
+def _detect_architecture(repo_path: Path) -> ArchitectureInfo:
+    service_count = 1
     has_api = False
     api_style = None
     auth_mechanism = None
-    external_deps: list[str] = []
 
     docker_composes = list(repo_path.glob("docker-compose*.y*ml"))
     if docker_composes:
         for dc in docker_composes:
             content = dc.read_text(errors="ignore")
             service_count = content.count("image:") + content.count("build:")
-    else:
-        service_count = 1
 
     for fp in repo_path.rglob("*"):
-        if not fp.is_file() or fp.suffix.lower() not in {".py", ".go", ".java", ".js", ".ts"}:
+        if not fp.is_file() or is_ignored(fp, repo_path):
+            continue
+        if fp.suffix.lower() not in {".py", ".go", ".java", ".js", ".ts"}:
             continue
         try:
             content = fp.read_text(errors="ignore")
         except OSError:
             continue
-        if any(kw in content.lower() for kw in ["router", "endpoint", "handler", "@app.route", "@api", "http.handle"]):
+        content_lower = content.lower()
+        if any(kw in content_lower for kw in ["router", "endpoint", "handler", "@app.route", "@api", "http.handle"]):
             has_api = True
-        if "grpc" in content.lower():
+        if "grpc" in content_lower:
             api_style = "gRPC"
-        elif "graphql" in content.lower():
+        elif "graphql" in content_lower:
             api_style = "GraphQL"
         elif has_api and api_style is None:
             api_style = "REST"
-        if any(kw in content.lower() for kw in ["oauth", "oidc", "saml", "jwt", "keycloak", "auth0"]):
+        if any(kw in content_lower for kw in ["oauth", "oidc", "saml", "jwt", "keycloak", "auth0"]):
             auth_mechanism = "SSO/OIDC"
-        elif any(kw in content.lower() for kw in ["basic auth", "basicauth", "session", "cookie"]):
+        elif any(kw in content_lower for kw in ["basic auth", "basicauth", "session", "cookie"]):
             if auth_mechanism is None:
                 auth_mechanism = "basic/session"
 
@@ -139,12 +138,12 @@ def _detect_architecture(repo_path: Path, stack: object) -> ArchitectureInfo:
         architecture_style=style,
         has_api=has_api,
         api_style=api_style,
-        external_dependencies=external_deps,
+        external_dependencies=[],
         auth_mechanism=auth_mechanism,
     )
 
 
-def _generate_summary(scores: list[DimensionScore], stack: object, repo_name: str) -> str:
+def _generate_summary(scores: list[DimensionScore], repo_name: str) -> str:
     avg = sum(s.score for s in scores) / len(scores) if scores else 0
     critical_count = sum(
         1 for s in scores for f in s.findings if f.severity == Severity.critical

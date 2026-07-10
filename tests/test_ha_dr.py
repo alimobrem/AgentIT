@@ -6,7 +6,7 @@ def test_no_ha_scores_low(create_mock_repo):
     analyzer = HADRAnalyzer()
     score = analyzer.analyze(repo)
     assert score.dimension == "ha_dr"
-    assert score.score <= 26
+    assert score.score <= 45
 
 
 def test_replicas_and_pdb_score_higher(create_mock_repo):

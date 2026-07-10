@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agentit.analyzers.base import calculate_score, iter_yaml_files
 from agentit.models import DimensionScore, Finding, Severity
-
-IGNORED_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "vendor", "dist", "build", "target"}
 
 
 class CICDAnalyzer:
@@ -13,8 +12,6 @@ class CICDAnalyzer:
     def analyze(self, repo_path: Path) -> DimensionScore:
         findings: list[Finding] = []
         has_ci = False
-        has_container = False
-        has_gitops = False
         has_tekton = False
 
         ci_paths = [
@@ -23,36 +20,25 @@ class CICDAnalyzer:
             ".tekton",
         ]
         for ci_path in ci_paths:
-            p = repo_path / ci_path
-            if p.exists():
+            if (repo_path / ci_path).exists():
                 has_ci = True
                 if ".tekton" in ci_path:
                     has_tekton = True
                 break
 
-        for name in ["Dockerfile", "Containerfile", "Dockerfile.prod"]:
-            if (repo_path / name).exists():
-                has_container = True
-                break
+        has_container = any(
+            (repo_path / name).exists()
+            for name in ["Dockerfile", "Containerfile", "Dockerfile.prod"]
+        )
 
-        all_text = ""
-        for fp in repo_path.rglob("*.yaml"):
-            if any(d in fp.relative_to(repo_path).parts for d in IGNORED_DIRS):
-                continue
-            try:
-                all_text += fp.read_text(errors="ignore") + "\n"
-            except OSError:
-                continue
-        for fp in repo_path.rglob("*.yml"):
-            if any(d in fp.relative_to(repo_path).parts for d in IGNORED_DIRS):
-                continue
-            try:
-                all_text += fp.read_text(errors="ignore") + "\n"
-            except OSError:
-                continue
-
-        if "argoproj.io" in all_text or "kind: Application" in all_text:
-            has_gitops = True
+        has_argoproj = False
+        has_app_kind = False
+        for _, content in iter_yaml_files(repo_path):
+            if "argoproj.io" in content:
+                has_argoproj = True
+            if "kind: Application" in content:
+                has_app_kind = True
+        has_gitops = has_argoproj and has_app_kind
 
         if not has_ci:
             findings.append(Finding(
@@ -83,12 +69,9 @@ class CICDAnalyzer:
                 recommendation="Consider migrating to OpenShift Pipelines (Tekton) for OpenShift-native CI",
             ))
 
-        score = 100
-        for f in findings:
-            if f.severity == Severity.high:
-                score -= 25
-            elif f.severity == Severity.medium:
-                score -= 15
-            elif f.severity == Severity.low:
-                score -= 5
-        return DimensionScore(dimension="cicd", score=max(0, score), max_score=100, findings=findings)
+        return DimensionScore(
+            dimension="cicd",
+            score=calculate_score(findings),
+            max_score=100,
+            findings=findings,
+        )

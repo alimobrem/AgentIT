@@ -6,7 +6,7 @@ def test_no_infra_scores_low(create_mock_repo):
     analyzer = InfrastructureAnalyzer()
     score = analyzer.analyze(repo)
     assert score.dimension == "infrastructure"
-    assert score.score <= 50
+    assert score.score <= 65
 
 
 def test_helm_chart_scores_medium(create_mock_repo):

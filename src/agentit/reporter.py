@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agentit.models import AssessmentReport
+from agentit.models import AssessmentReport, Severity
 
 
 def render_json_report(report: AssessmentReport) -> str:
@@ -16,45 +16,36 @@ def render_terminal_report(report: AssessmentReport) -> str:
 
     if report.stack.languages:
         lang_str = " / ".join(
-            f"{l.name.capitalize()} {l.version or ''}" for l in report.stack.languages
+            f"{lang.name.capitalize()} {lang.version or ''}" for lang in report.stack.languages
         )
         lines.append(f"  Stack: {lang_str.strip()}")
     if report.stack.frameworks:
-        fw_str = " / ".join(f.name for f in report.stack.frameworks)
+        fw_str = " / ".join(fw.name for fw in report.stack.frameworks)
         lines.append(f"  Frameworks: {fw_str}")
     if report.stack.databases:
-        db_str = " / ".join(d.name.capitalize() for d in report.stack.databases)
+        db_str = " / ".join(db.name.capitalize() for db in report.stack.databases)
         lines.append(f"  Databases: {db_str}")
     lines.append(f"  Architecture: {report.architecture.architecture_style} ({report.architecture.service_count} service(s))")
-    if report.architecture.auth_mechanism:
-        lines.append(f"  Auth: {report.architecture.auth_mechanism}")
-    else:
-        lines.append("  Auth: None detected")
+    lines.append(f"  Auth: {report.architecture.auth_mechanism or 'None detected'}")
     lines.append("")
 
     lines.append("  SCORES:")
     for score in sorted(report.scores, key=lambda s: s.score):
         bar_filled = score.score // 10
-        bar_empty = 10 - bar_filled
-        bar = "█" * bar_filled + "░" * bar_empty
+        bar = "█" * bar_filled + "░" * (10 - bar_filled)
         dim_name = score.dimension.replace("_", " ").ljust(22)
         lines.append(f"    {dim_name} {score.score:>3}/100  {bar}")
     lines.append("")
     lines.append(f"  OVERALL: {report.overall_score:.0f}/100")
     lines.append("")
 
-    critical_findings = [
-        f for s in report.scores for f in s.findings if f.severity.name == "critical"
+    urgent = [
+        f for s in report.scores for f in s.findings
+        if f.severity in (Severity.critical, Severity.high)
     ]
-    high_findings = [
-        f for s in report.scores for f in s.findings if f.severity.name == "high"
-    ]
-
-    if critical_findings or high_findings:
+    if urgent:
         lines.append("  CRITICAL & HIGH FINDINGS:")
-        for f in critical_findings:
-            lines.append(f"    [{f.severity.name.upper()}] {f.description}")
-        for f in high_findings:
+        for f in urgent:
             lines.append(f"    [{f.severity.name.upper()}] {f.description}")
         lines.append("")
 
