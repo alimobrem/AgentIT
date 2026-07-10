@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}AgentIT{% endblock %}</title>
+{% block head_extra %}{% endblock %}
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -57,6 +58,7 @@
   .badge-high { background: #e07b39; color: #fff; }
   .badge-medium { background: #f0a500; color: #1a1a2e; }
   .badge-low { background: #2ecc71; color: #1a1a2e; }
+  .badge-info { background: #3498db; color: #fff; }
   .btn {
     display: inline-block;
     background: #e94560;
@@ -90,6 +92,8 @@
   <div class="links">
     <a href="/">Dashboard</a>
     <a href="/assess">New Assessment</a>
+    <a href="/gates">Gates</a>
+    <a href="/events">Events</a>
   </div>
 </nav>
 <div class="container">

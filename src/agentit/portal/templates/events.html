@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Agent Activity Feed - AgentIT{% endblock %}
+{% block head_extra %}<meta http-equiv="refresh" content="30">{% endblock %}
+{% block content %}
+<h1>Agent Activity Feed</h1>
+{% if events %}
+<table>
+  <thead>
+    <tr>
+      <th>Timestamp</th>
+      <th>Agent</th>
+      <th>Action</th>
+      <th>Target App</th>
+      <th>Severity</th>
+      <th>Summary</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for e in events %}
+    <tr>
+      <td>{{ e.timestamp }}</td>
+      <td>{{ e.agent_id }}</td>
+      <td>{{ e.action }}</td>
+      <td>{{ e.target_app or "-" }}</td>
+      <td>
+        {% if e.severity == "critical" %}
+          <span class="badge badge-critical">critical</span>
+        {% elif e.severity == "high" %}
+          <span class="badge badge-high">high</span>
+        {% elif e.severity == "medium" %}
+          <span class="badge badge-medium">medium</span>
+        {% else %}
+          <span class="badge badge-info">info</span>
+        {% endif %}
+      </td>
+      <td>{{ e.summary }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>No events recorded yet.</p>
+{% endif %}
+{% endblock %}

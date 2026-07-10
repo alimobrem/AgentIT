@@ -27,6 +27,17 @@ TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 app = FastAPI(title="AgentIT Portal")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+
+def _safe_url(value: str) -> str:
+    from urllib.parse import urlparse
+    parsed = urlparse(value)
+    if parsed.scheme not in ("https", "http", ""):
+        return "#"
+    return value
+
+
+templates.env.filters["safe_url"] = _safe_url
 store = AssessmentStore()
 
 
@@ -36,10 +47,72 @@ def get_store() -> AssessmentStore:
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request) -> HTMLResponse:
-    assessments = get_store().list_all()
+    s = get_store()
+    assessments = s.list_all()
+    fleet = s.get_fleet_data()
+    total_apps = len(fleet)
+    avg_score = sum(r["latest_score"] for r in fleet) / total_apps if total_apps else 0
+    critical_total = sum(r["critical_count"] for r in fleet)
+    # Build trend lookup keyed by repo_url
+    trends = {r["repo_url"]: r for r in fleet}
     return templates.TemplateResponse(
-        request, "dashboard.html", {"assessments": assessments},
+        request,
+        "dashboard.html",
+        {
+            "assessments": assessments,
+            "total_apps": total_apps,
+            "avg_score": avg_score,
+            "critical_total": critical_total,
+            "trends": trends,
+        },
     )
+
+
+@app.get("/fleet", response_class=HTMLResponse)
+async def fleet_dashboard(request: Request) -> HTMLResponse:
+    fleet = get_store().get_fleet_data()
+    total_apps = len(fleet)
+    avg_score = sum(r["latest_score"] for r in fleet) / total_apps if total_apps else 0
+    critical_total = sum(r["critical_count"] for r in fleet)
+    return templates.TemplateResponse(
+        request,
+        "fleet.html",
+        {
+            "fleet": fleet,
+            "total_apps": total_apps,
+            "avg_score": avg_score,
+            "critical_total": critical_total,
+        },
+    )
+
+
+@app.get("/api/fleet")
+async def api_fleet() -> JSONResponse:
+    return JSONResponse(get_store().get_fleet_data())
+
+
+@app.get("/events", response_class=HTMLResponse)
+async def events_page(request: Request) -> HTMLResponse:
+    events = get_store().list_events(limit=100)
+    return templates.TemplateResponse(request, "events.html", {"events": events})
+
+
+@app.post("/api/webhook/assess")
+async def webhook_assess(request: Request):
+    """Trigger an assessment via webhook. Accepts JSON body: {repo_url, criticality}"""
+    body = await request.json()
+    repo_url = body.get("repo_url")
+    if not repo_url:
+        raise HTTPException(400, "repo_url required")
+    criticality = body.get("criticality", "medium")
+    report = await asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality)
+    assessment_id = get_store().save(report)
+    return JSONResponse({"assessment_id": assessment_id, "overall_score": report.overall_score})
+
+
+@app.get("/api/events")
+async def api_events(limit: int = 50, target_app: str | None = None):
+    return JSONResponse(get_store().list_events(limit=limit, target_app=target_app))
 
 
 @app.get("/assess", response_class=HTMLResponse)
@@ -146,6 +219,7 @@ async def onboard_submit(assessment_id: str):
 
     files = await asyncio.to_thread(_run_onboarding, report)
     s.save_onboarding(assessment_id, files)
+    s.create_gate(assessment_id, "deploy", f"Approve deployment of {report.repo_name} to production (score: {report.overall_score:.0f}/100)")
     return RedirectResponse(
         url=f"/assessments/{assessment_id}/onboard-results", status_code=303,
     )
@@ -239,6 +313,31 @@ async def apply_to_cluster(request: Request, assessment_id: str):
         ),
         status_code=303,
     )
+
+
+@app.get("/gates", response_class=HTMLResponse)
+async def gates_page(request: Request):
+    """Show pending approval gates."""
+    pending = get_store().list_gates(status="pending")
+    resolved = get_store().list_gates(status="approved") + get_store().list_gates(status="rejected")
+    resolved.sort(key=lambda g: g.get("resolved_at", ""), reverse=True)
+    return templates.TemplateResponse(request, "gates.html", {
+        "pending": pending, "resolved": resolved[:20]
+    })
+
+
+@app.post("/gates/{gate_id}/resolve", response_model=None)
+async def resolve_gate(request: Request, gate_id: str):
+    form = await request.form()
+    status = form.get("status")  # "approved" or "rejected"
+    resolved_by = form.get("resolved_by", "portal-user")
+    get_store().resolve_gate(gate_id, status, resolved_by)
+    return RedirectResponse(url="/gates", status_code=303)
+
+
+@app.get("/api/gates")
+async def api_gates(status: str = "pending"):
+    return JSONResponse(get_store().list_gates(status=status))
 
 
 @app.post("/assessments/{assessment_id}/create-pr", response_model=None)

@@ -4,6 +4,7 @@ import io
 import tempfile
 import zipfile
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -384,3 +385,104 @@ def test_assessment_detail_has_onboard_button(client, _override_store):
     assert resp.status_code == 200
     assert f"/assessments/{aid}/onboard" in resp.text
     assert "Onboard" in resp.text
+
+
+# ------------------------------------------------------------------
+# Events & Webhook tests
+# ------------------------------------------------------------------
+
+
+def test_events_page_renders(client, _override_store):
+    store = _override_store
+    store.log_event("test-agent", "scan", "my-app", "high", "Found vuln")
+    resp = client.get("/events")
+    assert resp.status_code == 200
+    assert "Agent Activity Feed" in resp.text
+    assert "test-agent" in resp.text
+    assert "Found vuln" in resp.text
+
+
+def test_webhook_triggers_assessment(client, _override_store):
+    report = _make_report("webhook-repo")
+    with patch("agentit.portal.app.clone_repo") as mock_clone, \
+         patch("agentit.portal.app.run_assessment", return_value=report):
+        mock_clone.return_value = Path("/tmp/fake")
+        resp = client.post(
+            "/api/webhook/assess",
+            json={"repo_url": "https://github.com/org/webhook-repo", "criticality": "high"},
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "assessment_id" in data
+    assert "overall_score" in data
+
+
+def test_webhook_missing_repo_url(client):
+    resp = client.post("/api/webhook/assess", json={"criticality": "high"})
+    assert resp.status_code == 400
+
+
+def test_api_events_returns_json(client, _override_store):
+    store = _override_store
+    store.log_event("agent-a", "deploy", "app-x", "info", "Deployed v2")
+    store.log_event("agent-b", "scan", "app-y", "medium", "Scan done")
+    resp = client.get("/api/events")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, list)
+    assert len(data) >= 2
+
+
+def test_api_events_filter_target_app(client, _override_store):
+    store = _override_store
+    store.log_event("a", "x", "app-1", "info", "e1")
+    store.log_event("b", "y", "app-2", "info", "e2")
+    resp = client.get("/api/events?target_app=app-1")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert all(e["target_app"] == "app-1" for e in data)
+
+
+# ------------------------------------------------------------------
+# Gate queue tests
+# ------------------------------------------------------------------
+
+
+def test_gates_page_empty(client):
+    resp = client.get("/gates")
+    assert resp.status_code == 200
+    assert "No pending gates" in resp.text
+
+
+def test_gates_page_with_pending(client, _override_store):
+    store = _override_store
+    report = _make_report()
+    aid = store.save(report)
+    store.create_gate(aid, "deploy", "Approve deployment of test-repo")
+
+    resp = client.get("/gates")
+    assert resp.status_code == 200
+    assert "Approve deployment of test-repo" in resp.text
+    assert "Approve" in resp.text
+    assert "Reject" in resp.text
+
+
+def test_resolve_gate_approve(client, _override_store):
+    store = _override_store
+    report = _make_report()
+    aid = store.save(report)
+    gate_id = store.create_gate(aid, "deploy", "Approve deployment of test-repo")
+
+    resp = client.post(
+        f"/gates/{gate_id}/resolve",
+        data={"status": "approved", "resolved_by": "tester"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/gates"
+
+    pending = store.list_gates(status="pending")
+    assert len(pending) == 0
+    approved = store.list_gates(status="approved")
+    assert len(approved) == 1
+    assert approved[0]["resolved_by"] == "tester"
