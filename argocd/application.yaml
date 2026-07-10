@@ -1,0 +1,29 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: agentit
+  namespace: openshift-gitops
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/alimobrem/AgentIT.git
+    targetRevision: main
+    path: agentit/chart
+    helm:
+      parameters:
+        - name: image.repository
+          value: image-registry.openshift-image-registry.svc:5000/agentit/agentit
+        - name: image.tag
+          value: latest
+        - name: image.pullPolicy
+          value: Always
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: agentit
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true
