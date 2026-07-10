@@ -16,6 +16,18 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("private_key", re.compile(r"""-----BEGIN (?:RSA |EC )?PRIVATE KEY-----""")),
 ]
 
+IGNORED_SECRET_PATHS = {
+    "test", "tests", "spec", "specs", "fixtures", "testdata",
+    "mock", "mocks", "__tests__", "evals",
+}
+
+IGNORED_SECRET_SUFFIXES = {
+    "_test.go", "_test.py", ".test.ts", ".test.js",
+    ".spec.ts", ".spec.js", ".stories.tsx",
+}
+
+HELM_TEMPLATE_RE = re.compile(r"\{\{.*\}\}")
+
 
 class SecurityAnalyzer:
     dimension = "security"
@@ -38,9 +50,14 @@ class SecurityAnalyzer:
     def _check_secrets(self, repo_path: Path) -> list[Finding]:
         findings: list[Finding] = []
         for file_path, content in iter_text_files(repo_path):
+            rel_path = str(file_path.relative_to(repo_path))
+
+            if _is_secret_scan_excluded(file_path, rel_path):
+                continue
+
             for secret_type, pattern in SECRET_PATTERNS:
-                if pattern.search(content):
-                    rel_path = str(file_path.relative_to(repo_path))
+                match = pattern.search(content)
+                if match and not _is_false_positive(content, match):
                     findings.append(Finding(
                         category="secrets",
                         severity=Severity.critical,
@@ -148,3 +165,41 @@ class SecurityAnalyzer:
                     recommendation="Use registry.access.redhat.com/ubi9/ubi-minimal for supported, secure base image",
                 ))
         return findings
+
+
+def _is_secret_scan_excluded(file_path: Path, rel_path: str) -> bool:
+    parts = set(file_path.parts)
+    if parts & IGNORED_SECRET_PATHS:
+        return True
+    name_lower = file_path.name.lower()
+    if any(name_lower.endswith(s) for s in IGNORED_SECRET_SUFFIXES):
+        return True
+    if name_lower.endswith(".md") or name_lower.endswith(".txt"):
+        return True
+    if "hook" in rel_path.lower() or "pre-commit" in rel_path.lower():
+        return True
+    return False
+
+
+def _is_false_positive(content: str, match: re.Match) -> bool:
+    matched_line = _get_match_line(content, match.start())
+    if HELM_TEMPLATE_RE.search(matched_line):
+        return True
+    placeholder_patterns = [
+        "example", "placeholder", "changeme", "your_", "xxx", "<",
+        "REPLACE", "TODO", "${", "$(", "os.environ", "os.getenv",
+        "process.env", "vault:", "secretKeyRef",
+    ]
+    if any(p in matched_line for p in placeholder_patterns):
+        return True
+    if matched_line.lstrip().startswith(("#", "//", "*", "echo", "grep", "if ")):
+        return True
+    return False
+
+
+def _get_match_line(content: str, pos: int) -> str:
+    line_start = content.rfind("\n", 0, pos) + 1
+    line_end = content.find("\n", pos)
+    if line_end == -1:
+        line_end = len(content)
+    return content[line_start:line_end]
