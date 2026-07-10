@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import tempfile
+import zipfile
 from datetime import datetime, timezone
 from unittest.mock import patch
 
@@ -288,7 +290,10 @@ def test_onboard_results_page(client, _override_store):
     assert "security" in resp.text
     assert "observability" in resp.text
     assert "compliance" in resp.text
-    assert "Download All" in resp.text
+    assert "Download ZIP" in resp.text
+    assert "Create GitHub PR" in resp.text
+    assert "Apply to Cluster" in resp.text
+    assert "Dry Run" in resp.text
 
 
 def test_api_manifests(client, _override_store):
@@ -324,6 +329,49 @@ def test_onboard_results_no_onboarding(client, _override_store):
     aid = store.save(report)
 
     resp = client.get(f"/assessments/{aid}/onboard-results")
+    assert resp.status_code == 404
+
+
+def test_download_manifests_zip(client, _override_store):
+    store = _override_store
+    report = _make_report_with_findings()
+    aid = store.save(report)
+
+    # Run onboarding to populate files
+    client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
+
+    resp = client.get(f"/api/assessments/{aid}/manifests/download")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/zip"
+    assert "onboard-repo-onboarding.zip" in resp.headers["content-disposition"]
+
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    names = zf.namelist()
+    assert len(names) > 0
+
+    # Every entry should be under a known category directory
+    categories = {n.split("/")[0] for n in names}
+    assert "security" in categories
+    assert "observability" in categories
+    assert "compliance" in categories
+
+    # Verify files are readable and non-empty
+    for name in names:
+        assert len(zf.read(name)) > 0
+    zf.close()
+
+
+def test_download_manifests_not_found(client):
+    resp = client.get("/api/assessments/nonexistent/manifests/download")
+    assert resp.status_code == 404
+
+
+def test_download_manifests_no_onboarding(client, _override_store):
+    store = _override_store
+    report = _make_report()
+    aid = store.save(report)
+
+    resp = client.get(f"/api/assessments/{aid}/manifests/download")
     assert resp.status_code == 404
 
 
