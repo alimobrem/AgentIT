@@ -6,6 +6,11 @@
 </p>
 <h1>Onboarding: {{ report.repo_name }}</h1>
 
+{% if request.query_params.get('fix_generated') %}
+<div class="alert alert-success">
+  Generated {{ request.query_params.get('fix_generated') }} fix(es) via {{ request.query_params.get('agent', 'dispatcher') }} agent. Review below and apply to cluster or create a PR.
+</div>
+{% endif %}
 {% if request.query_params.get('pr_url') %}
 <div class="alert alert-success">
   PR created: <a href="{{ request.query_params.get('pr_url') | safe_url }}" target="_blank" hx-boost="false">{{ request.query_params.get('pr_url') }}</a>

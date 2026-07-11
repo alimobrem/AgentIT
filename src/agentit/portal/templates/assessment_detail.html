@@ -5,6 +5,9 @@
   <a href="/">&larr; Dashboard</a>
 </p>
 <h1>{{ report.repo_name }}</h1>
+{% if request.query_params.get('error') %}
+<div class="alert alert-error">{{ request.query_params.get('error') }}</div>
+{% endif %}
 <p class="mb-2">
   <a href="{{ report.repo_url | safe_url }}" target="_blank" hx-boost="false">{{ report.repo_url }}</a>
   &nbsp;
@@ -58,6 +61,17 @@
         <span class="badge badge-{{ f.severity.name }} finding-badge">{{ f.severity.name }}</span>
         {{ f.description }}
         {% if f.file_path %}<span class="finding-file">{{ f.file_path }}</span>{% endif %}
+        {% if f.category in fixable_categories %}
+        <form method="post" action="/assessments/{{ assessment_id }}/fix" class="inline-form"
+              onsubmit="return confirm('Generate a fix for this finding?')">
+          <input type="hidden" name="category" value="{{ f.category }}">
+          <input type="hidden" name="description" value="{{ f.description }}">
+          <button type="submit" class="btn btn-sm btn-green">
+            <span class="btn-label">Fix</span>
+            <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+          </button>
+        </form>
+        {% endif %}
       </li>
       {% endfor %}
     </ul>

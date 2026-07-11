@@ -19,7 +19,12 @@
   <tbody>
     {% for g in pending %}
     <tr>
-      <td>{{ g.summary }}</td>
+      <td>
+        {{ g.summary }}
+        {% if 'finding-' in g.gate_type %}
+        <br><a href="/assessments/{{ g.assessment_id }}/onboard-results" class="text-sm">Preview generated files &rarr;</a>
+        {% endif %}
+      </td>
       <td><span class="badge badge-medium">{{ g.gate_type }}</span></td>
       <td><a href="/assessments/{{ g.assessment_id }}">View</a></td>
       <td class="text-sm text-muted">{{ g.created_at[:16] }}</td>

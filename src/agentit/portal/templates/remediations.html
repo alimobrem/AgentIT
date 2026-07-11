@@ -54,7 +54,7 @@
       <td class="text-sm text-muted">{{ r.created_at[:10] }}</td>
       <td>
         {% if r.status == "generated" %}
-          <span class="text-sm">Apply manifests to cluster or commit to GitOps repo</span>
+          <a href="/assessments/{{ assessment_id }}/onboard-results" class="btn btn-sm btn-outline">View &amp; Apply</a>
         {% elif r.status == "applied" %}
           <form method="post" action="/assessments/{{ assessment_id }}/remediations/{{ r.id }}/status" class="inline-form">
             <input type="hidden" name="status" value="completed">

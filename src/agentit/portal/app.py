@@ -494,6 +494,9 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     slos = s.list_slos(assessment_id)
     onboardings = s.list_onboardings(assessment_id)
 
+    from agentit.remediation.registry import lookup
+    fixable_categories = {f.category for f in urgent_findings if lookup(f.category) is not None}
+
     return templates.TemplateResponse(
         request,
         "assessment_detail.html",
@@ -505,7 +508,61 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "remediation_count": len(remediations),
             "slo_count": len(slos),
             "onboarding_count": len(onboardings),
+            "fixable_categories": fixable_categories,
         },
+    )
+
+
+@app.post("/assessments/{assessment_id}/fix")
+async def fix_finding(request: Request, assessment_id: str):
+    """Dispatch a single finding fix via the generic remediation dispatcher."""
+    form = await request.form()
+    category = str(form.get("category", ""))
+    description = str(form.get("description", ""))
+
+    if not category:
+        raise HTTPException(400, "category required")
+
+    s = get_store()
+    report = s.get(assessment_id)
+    if report is None:
+        raise HTTPException(404, "Assessment not found")
+
+    from agentit.remediation.dispatcher import RemediationDispatcher
+    dispatcher = RemediationDispatcher(s)
+    result = dispatcher.dispatch(assessment_id, category, report.repo_name)
+
+    if result.get("error") and not result["files"]:
+        return RedirectResponse(
+            url=f"/assessments/{assessment_id}?error={quote(result['error'])}",
+            status_code=303,
+        )
+
+    if result["files"]:
+        from agentit.portal.cluster_apply import apply_manifests_to_cluster
+        namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
+        apply_result = await asyncio.to_thread(
+            apply_manifests_to_cluster, result["files"], namespace, dry_run=True,
+        )
+        s.save_apply_results(assessment_id, apply_result, namespace, dry_run=True)
+
+        for f in result["files"]:
+            s.save_remediation(
+                assessment_id, result["agent"], f["description"],
+                status="generated", manifest_path=f["path"],
+            )
+        s.log_event(
+            "dispatcher", "fix-generated", report.repo_name, "info",
+            f"Generated {len(result['files'])} fix(es) for '{category}' via {result['agent']}",
+        )
+        return RedirectResponse(
+            url=f"/assessments/{assessment_id}/onboard-results?fix_generated={len(result['files'])}&agent={result['agent']}",
+            status_code=303,
+        )
+
+    return RedirectResponse(
+        url=f"/assessments/{assessment_id}?error={quote('No fix generated for this finding')}",
+        status_code=303,
     )
 
 
