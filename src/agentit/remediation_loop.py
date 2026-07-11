@@ -14,7 +14,9 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PORTAL = "http://localhost:8080"
+import os
+
+DEFAULT_PORTAL = os.environ.get("AGENTIT_PORTAL_URL", "http://localhost:8080")
 VERIFY_WINDOW_SECONDS = 300  # 5 minutes SLO watch after apply
 
 

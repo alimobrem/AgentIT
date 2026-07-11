@@ -37,6 +37,16 @@ spec:
           value: "true"
         - name: agents.driftDetector.enabled
           value: "true"
+  ignoreDifferences:
+    - group: tekton.dev
+      kind: Pipeline
+      jsonPointers:
+        - /spec/tasks
+    - group: triggers.tekton.dev
+      kind: EventListener
+      jsonPointers:
+        - /status
+        - /spec/resources
   destination:
     server: https://kubernetes.default.svc
     namespace: agentit

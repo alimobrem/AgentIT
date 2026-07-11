@@ -38,6 +38,8 @@ spec:
             {{- end }}
             - name: AGENTIT_DB_PATH
               value: /data/agentit.db
+            - name: AGENTIT_PORTAL_URL
+              value: http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc:8080
           volumeMounts:
             - name: data
               mountPath: /data
@@ -50,7 +52,6 @@ spec:
               memory: 256Mi
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
       volumes:
