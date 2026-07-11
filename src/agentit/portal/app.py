@@ -117,10 +117,14 @@ async def assess_form(request: Request) -> HTMLResponse:
 
 
 def _get_llm_client():
+    import logging
     import os
     if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID"):
-        from agentit.llm import LLMClient
-        return LLMClient()
+        try:
+            from agentit.llm import LLMClient
+            return LLMClient()
+        except Exception as exc:
+            logging.getLogger("agentit.portal").warning("LLM client init failed (continuing without): %s", exc)
     return None
 
 
@@ -138,9 +142,11 @@ async def assess_submit(
     repo_url: str = Form(...),
     criticality: str = Form("medium"),
 ):
+    import logging
     try:
         report = await asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality)
     except Exception as exc:
+        logging.getLogger("agentit.portal").exception("Assessment failed for %s", repo_url)
         return templates.TemplateResponse(
             request, "assess_form.html", {"error": str(exc)}, status_code=400,
         )

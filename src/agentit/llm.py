@@ -95,6 +95,6 @@ class LLMClient:
                 temperature=0.2,
             )
             return resp.content[0].text.strip()
-        except (anthropic.APIError, anthropic.APIConnectionError) as exc:
+        except Exception as exc:
             logger.warning("LLM call failed: %s", exc)
             return None

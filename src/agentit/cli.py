@@ -42,8 +42,11 @@ def _resolve_and_assess(
             import os
             use_llm = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID"))
         if use_llm:
-            from agentit.llm import LLMClient
-            llm_client = LLMClient(model=llm_model or "claude-sonnet-4-6")
+            try:
+                from agentit.llm import LLMClient
+                llm_client = LLMClient(model=llm_model or "claude-sonnet-4-6")
+            except Exception as exc:
+                click.echo(f"LLM init failed (continuing without): {exc}", err=True)
 
         click.echo("Running assessment...", err=True)
         report = run_assessment(repo_path, repo_url=repo_url, criticality=criticality, llm_client=llm_client)
