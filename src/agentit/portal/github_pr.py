@@ -415,12 +415,15 @@ def ensure_applicationset(infra_repo_url: str) -> bool:
                 "git": {
                     "repoURL": infra_repo_url,
                     "revision": "HEAD",
-                    "directories": [{"path": "apps/*"}],
+                    "directories": [
+                    {"path": "apps/*"},
+                    {"path": "apps/agentit", "exclude": True},
+                ],
                 },
             }],
             "template": {
                 "metadata": {
-                    "name": "{{path.basename}}",
+                    "name": "managed-{{path.basename}}",
                     "namespace": "openshift-gitops",
                 },
                 "spec": {

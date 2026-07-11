@@ -770,7 +770,8 @@ def _get_cluster_health() -> dict:
             apps = _json.loads(raw).get("items", [])
             for a in apps:
                 name = a.get("metadata", {}).get("name", "?")
-                if name not in managed_names:
+                bare_name = name.removeprefix("managed-")
+                if name not in managed_names and bare_name not in managed_names:
                     continue
                 sync = a.get("status", {}).get("sync", {}).get("status", "Unknown")
                 health = a.get("status", {}).get("health", {}).get("status", "Unknown")
