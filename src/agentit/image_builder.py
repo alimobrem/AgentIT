@@ -13,6 +13,79 @@ INTERNAL_REGISTRY = "image-registry.openshift-image-registry.svc:5000"
 BUILD_TIMEOUT = 600  # 10 minutes
 
 
+def _generate_dockerfile_script(app_name: str) -> str:
+    """Generate a shell script that creates a Dockerfile if none exists."""
+    return f"""\
+#!/bin/sh
+set -e
+cd $(workspaces.source.path)
+if [ -f Dockerfile ] || [ -f Containerfile ]; then
+  echo "Dockerfile found — using existing"
+  # Ensure the DOCKERFILE param matches what exists
+  if [ -f Containerfile ] && [ ! -f Dockerfile ]; then
+    cp Containerfile Dockerfile
+  fi
+  exit 0
+fi
+echo "No Dockerfile found — auto-generating for {app_name}"
+# Detect language
+if [ -f go.mod ]; then
+  cat > Dockerfile <<'GOEOF'
+FROM registry.access.redhat.com/ubi9/go-toolset:latest AS builder
+WORKDIR /app
+COPY . .
+RUN go build -o app .
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+COPY --from=builder /app/app /usr/local/bin/app
+USER 1001
+EXPOSE 8080
+CMD ["app"]
+GOEOF
+elif [ -f package.json ]; then
+  cat > Dockerfile <<'NODEEOF'
+FROM registry.access.redhat.com/ubi9/nodejs-20:latest
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --production
+COPY . .
+USER 1001
+EXPOSE 3000
+CMD ["node", "index.js"]
+NODEEOF
+elif [ -f requirements.txt ] || [ -f pyproject.toml ]; then
+  cat > Dockerfile <<'PYEOF'
+FROM registry.access.redhat.com/ubi9/python-312:latest
+WORKDIR /app
+COPY . .
+RUN pip install --no-cache-dir -r requirements.txt 2>/dev/null || pip install --no-cache-dir . 2>/dev/null || true
+USER 1001
+EXPOSE 8080
+CMD ["python", "app.py"]
+PYEOF
+elif [ -f pom.xml ]; then
+  cat > Dockerfile <<'JAVAEOF'
+FROM registry.access.redhat.com/ubi9/openjdk-21:latest
+WORKDIR /app
+COPY . .
+RUN mvn package -DskipTests 2>/dev/null || true
+USER 1001
+EXPOSE 8080
+CMD ["java", "-jar", "target/*.jar"]
+JAVAEOF
+else
+  cat > Dockerfile <<'DEFAULTEOF'
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+WORKDIR /app
+COPY . .
+USER 1001
+EXPOSE 8080
+DEFAULTEOF
+fi
+echo "Generated Dockerfile for {app_name}"
+cat Dockerfile
+"""
+
+
 def get_image_ref(app_name: str, namespace: str = "agentit") -> str:
     """Return the internal registry image reference for an app."""
     name = app_name.lower().replace("_", "-").replace(".", "-")
@@ -24,6 +97,7 @@ def build_app_image(
     app_name: str,
     namespace: str = "agentit",
     dockerfile: str = "Dockerfile",
+    containerfile_content: str | None = None,
 ) -> dict:
     """Trigger a Tekton PipelineRun to build and push the app image.
 
@@ -66,8 +140,21 @@ def build_app_image(
                         "workspaces": [{"name": "output", "workspace": "source"}],
                     },
                     {
-                        "name": "build-push",
+                        "name": "ensure-dockerfile",
                         "runAfter": ["git-clone"],
+                        "taskSpec": {
+                            "workspaces": [{"name": "source"}],
+                            "steps": [{
+                                "name": "check-or-create",
+                                "image": "registry.access.redhat.com/ubi9/ubi-minimal:latest",
+                                "script": _generate_dockerfile_script(app_name),
+                            }],
+                        },
+                        "workspaces": [{"name": "source", "workspace": "source"}],
+                    },
+                    {
+                        "name": "build-push",
+                        "runAfter": ["ensure-dockerfile"],
                         "taskRef": {
                             "resolver": "cluster",
                             "params": [
