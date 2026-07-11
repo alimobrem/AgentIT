@@ -71,6 +71,12 @@ spec:
             - name: AGENTIT_KAFKA_BOOTSTRAP
               value: {{ .Values.kafka.bootstrapServers | quote }}
             {{- end }}
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+                  optional: true
           volumeMounts:
             - name: data
               mountPath: /data

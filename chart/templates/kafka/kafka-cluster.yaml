@@ -12,7 +12,9 @@ spec:
     - controller
     - broker
   storage:
-    type: ephemeral
+    type: persistent-claim
+    size: 5Gi
+    deleteClaim: false
 ---
 apiVersion: kafka.strimzi.io/v1
 kind: Kafka
