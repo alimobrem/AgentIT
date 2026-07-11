@@ -358,6 +358,46 @@
   .finding-success  { border-left: 3px solid var(--color-success); }
   .schedule-edit-form { display: flex; gap: var(--space-2); align-items: center; }
   .schedule-input { width: 120px; font-size: var(--font-xs); }
+
+  /* ── Pipeline Flow ──────────────────────────────────────────────── */
+  .pipeline-flow {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    overflow-x: auto;
+    padding: var(--space-4) 0;
+  }
+  .pipeline-step {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-5);
+    min-width: 150px;
+    text-align: center;
+    transition: border-color 0.15s;
+  }
+  .pipeline-step:hover { border-color: var(--color-accent); }
+  .pipeline-step-number {
+    font-family: var(--font-display);
+    font-size: var(--font-xl);
+    font-weight: 700;
+    color: var(--color-accent);
+    margin-bottom: var(--space-1);
+  }
+  .pipeline-step-title {
+    font-weight: 600;
+    font-size: var(--font-md);
+    margin-bottom: var(--space-1);
+  }
+  .pipeline-step-desc {
+    font-size: var(--font-xs);
+    color: var(--color-muted);
+  }
+  .pipeline-arrow {
+    font-size: var(--font-xl);
+    color: var(--color-muted);
+    flex-shrink: 0;
+  }
   .finding-badge    { margin-right: var(--space-2); }
   .finding-file     { color: #666; margin-left: var(--space-2); }
 
@@ -540,6 +580,7 @@
     <a href="/events" class="{{ 'nav-active' if request.url.path == '/events' }}">Events</a>
     <a href="/events/dlq" class="{{ 'nav-active' if request.url.path == '/events/dlq' }}">DLQ</a>
     <a href="/agents" class="{{ 'nav-active' if request.url.path.startswith('/agents') }}">Agents</a>
+    <a href="/workflows" class="{{ 'nav-active' if request.url.path == '/workflows' }}">Workflows</a>
     <a href="/schedules" class="{{ 'nav-active' if request.url.path == '/schedules' }}">Schedules</a>
     <a href="/health" class="{{ 'nav-active' if request.url.path.startswith('/health') }}">Health</a>
     <a href="/settings" class="{{ 'nav-active' if request.url.path == '/settings' }}">Settings</a>

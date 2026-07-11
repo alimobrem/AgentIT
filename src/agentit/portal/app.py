@@ -1427,6 +1427,46 @@ _WATCHER_AGENTS = [
 ]
 
 
+@app.get("/workflows", response_class=HTMLResponse)
+async def workflows_page(request: Request) -> HTMLResponse:
+    import os
+    from agentit.remediation.registry import FIX_REGISTRY
+
+    agents = [
+        {"name": "Security Hardening", "generates": "NetworkPolicies, Containerfile, RBAC, SCCs, resource limits, image scan task", "category": "security"},
+        {"name": "Observability", "generates": "ServiceMonitor, Grafana dashboard (ConfigMap), alerting rules, OTel collector", "category": "observability"},
+        {"name": "CI/CD & GitOps", "generates": "Tekton Pipeline (with scan + SBOM steps), Argo CD Application, Argo Rollout, Containerfile", "category": "cicd"},
+        {"name": "Compliance", "generates": "Kyverno policies, SBOM Tekton Task, audit policy, compliance evidence, CronJob", "category": "compliance"},
+        {"name": "Infrastructure", "generates": "HPA, PDB, ResourceQuota, LimitRange, Namespace", "category": "infrastructure"},
+        {"name": "Cost Optimization", "generates": "VPA, cost labels, cost report, CronJob", "category": "cost"},
+        {"name": "Dependency", "generates": "Dependency report, Renovate/Dependabot config, CronJob", "category": "dependency"},
+        {"name": "Incident Response", "generates": "Runbook, PagerDuty config, Alertmanager config", "category": "incident"},
+        {"name": "Release Coordinator", "generates": "AnalysisTemplate, Rollout patch, rollback policy, release runbook", "category": "release"},
+        {"name": "Code Change", "generates": ".gitignore, OTel instrumentation, structured logging config", "category": "codechange"},
+        {"name": "Retirement", "generates": "Decommission plan, cleanup Tekton Task, data archive job", "category": "retirement"},
+    ]
+
+    watchers = [
+        {"name": "vuln-watcher", "description": "Monitors fleet for critical/high findings, triggers remediation loop when auto-mode is on", "interval": "6 hours"},
+        {"name": "slo-tracker", "description": "Checks SLO status across all assessments, publishes breach alerts, recommends rollbacks", "interval": "5 minutes"},
+        {"name": "drift-detector", "description": "Queries Argo CD apps for OutOfSync state, optionally auto-syncs when auto-mode is on", "interval": "10 minutes"},
+    ]
+
+    fix_categories = [
+        {"category": cat, "agent": agent, "method": method.lstrip("_").replace("_", " ")}
+        for cat, (agent, method) in sorted(FIX_REGISTRY.items())
+    ]
+
+    retention_days = int(os.environ.get("AGENTIT_RETENTION_DAYS", "30"))
+
+    return templates.TemplateResponse(request, "workflows.html", {
+        "agents": agents,
+        "watchers": watchers,
+        "fix_categories": fix_categories,
+        "retention_days": retention_days,
+    })
+
+
 @app.get("/schedules", response_class=HTMLResponse)
 async def schedules_page(request: Request) -> HTMLResponse:
     import yaml as _yaml
