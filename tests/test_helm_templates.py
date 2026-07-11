@@ -146,7 +146,7 @@ class TestTektonPipeline:
         tasks = {t["name"]: t for t in doc["spec"]["tasks"]}
         assert tasks["git-clone"].get("retries", 0) >= 1
         assert tasks["run-tests"].get("retries", 0) >= 1
-        assert tasks["restart-rollout"].get("retries", 0) >= 1
+        assert tasks["notify-argocd"].get("retries", 0) >= 1
 
     def test_pipeline_has_timeouts(self):
         doc = _load(self.TEMPLATE)

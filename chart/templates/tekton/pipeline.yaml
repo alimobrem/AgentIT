@@ -91,13 +91,13 @@ spec:
         - name: source
           workspace: source
 
-    - name: restart-rollout
+    - name: notify-argocd
       retries: 1
       timeout: "2m"
       runAfter: [build-image]
       taskSpec:
         steps:
-          - name: restart
+          - name: refresh
             image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
             computeResources:
               requests:
@@ -105,8 +105,11 @@ spec:
                 cpu: 50m
             script: |
               set -euo pipefail
-              oc delete pod -n {{ .Release.Namespace }} -l app.kubernetes.io/name=agentit --wait=false
-              echo "Pod restart triggered — new image will be pulled"
+              # Tell Argo CD to refresh — it detects the new image and rolls out via Rollout controller
+              oc -n openshift-gitops patch applications.argoproj.io agentit \
+                --type=merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}' \
+                && echo "Argo CD refresh triggered" \
+                || echo "Argo CD refresh failed (non-fatal)"
 
   finally:
     - name: report-status
