@@ -919,16 +919,17 @@ async def operator_status(request: Request):
     if not cli:
         return HTMLResponse(f"<strong>{package}</strong> — cannot check (no oc/kubectl)")
 
+    op_ns = f"openshift-{package.replace('_', '-')}"
     try:
         result = subprocess.run(
-            [cli, "get", "csv", "-n", "openshift-operators", "-o",
+            [cli, "get", "csv", "-n", op_ns, "-o",
              f"jsonpath={{.items[?(@.spec.displayName=='{package}')].status.phase}}"],
             capture_output=True, text=True, timeout=10,
         )
         phase = result.stdout.strip()
         if not phase:
             result2 = subprocess.run(
-                [cli, "get", "subscription", package, "-n", "openshift-operators",
+                [cli, "get", "subscription.operators.coreos.com", package, "-n", op_ns,
                  "-o", "jsonpath={.status.state}"],
                 capture_output=True, text=True, timeout=10,
             )

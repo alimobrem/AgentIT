@@ -169,11 +169,16 @@
     {% for kind, op in missing_operators.items() %}
     <tr>
       <td class="text-bold">{{ op.name }}</td>
-      <td class="text-sm text-muted"><code>{{ kind }}</code></td>
       <td>
-        {% if op.get('package') %}
+        <code class="text-sm text-muted">{{ kind }}</code>
+        {% if op.get('value') %}
+        <br><span class="text-sm">{{ op.value }}</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if op.get('package') and op.get('source') == 'redhat-operators' %}
         <form method="post" action="/api/install-operator" class="inline-form"
-              onsubmit="return confirm('Install operator {{ op.name }} on the cluster?')">
+              onsubmit="return confirm('Install {{ op.name }}? This will create a Subscription in a dedicated namespace.')">
           <input type="hidden" name="package" value="{{ op.package }}">
           <input type="hidden" name="channel" value="{{ op.get('channel', 'stable') }}">
           <input type="hidden" name="source" value="{{ op.source }}">

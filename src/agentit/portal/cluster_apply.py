@@ -28,63 +28,154 @@ _OPERATOR_NAMESPACES = frozenset({
 })
 
 _CRD_TO_OPERATOR: dict[str, dict] = {
+    # ── Red Hat Operators (installable via UI) ─────────────────────
     "VerticalPodAutoscaler": {
         "name": "VPA (Vertical Pod Autoscaler)",
         "package": "vertical-pod-autoscaler",
         "channel": "stable",
         "source": "redhat-operators",
-    },
-    "Policy": {
-        "name": "Kyverno",
-        "package": "kyverno",
-        "channel": "stable",
-        "source": "community-operators",
-    },
-    "PrometheusRule": {
-        "name": "Cluster Monitoring (built-in)",
-        "package": None,
-        "note": "PrometheusRule requires the OpenShift monitoring stack (enabled by default). Check: oc get crd prometheusrules.monitoring.coreos.com",
-    },
-    "ServiceMonitor": {
-        "name": "Cluster Monitoring (built-in)",
-        "package": None,
-        "note": "ServiceMonitor requires the OpenShift monitoring stack.",
+        "value": "Automatically right-sizes CPU and memory requests based on actual usage — reduces waste and prevents OOM kills.",
     },
     "Pipeline": {
-        "name": "OpenShift Pipelines (Tekton)",
+        "name": "OpenShift Pipelines",
         "package": "openshift-pipelines-operator-rh",
         "channel": "latest",
         "source": "redhat-operators",
+        "value": "Automated CI/CD with Tekton — build, test, scan, and deploy on every commit.",
     },
     "Task": {
-        "name": "OpenShift Pipelines (Tekton)",
+        "name": "OpenShift Pipelines",
         "package": "openshift-pipelines-operator-rh",
         "channel": "latest",
         "source": "redhat-operators",
+        "value": "Required for running image scans and SBOM generation in your CI pipeline.",
     },
     "PipelineRun": {
-        "name": "OpenShift Pipelines (Tekton)",
+        "name": "OpenShift Pipelines",
         "package": "openshift-pipelines-operator-rh",
         "channel": "latest",
         "source": "redhat-operators",
+        "value": "Required for running CI/CD pipelines.",
     },
     "Rollout": {
-        "name": "OpenShift GitOps (Argo Rollouts)",
+        "name": "OpenShift GitOps",
         "package": "openshift-gitops-operator",
         "channel": "latest",
         "source": "redhat-operators",
+        "value": "Canary deployments with automatic rollback — reduce blast radius of bad deploys.",
+    },
+    "Application": {
+        "name": "OpenShift GitOps",
+        "package": "openshift-gitops-operator",
+        "channel": "latest",
+        "source": "redhat-operators",
+        "value": "GitOps delivery — your Git repo is the source of truth for cluster state.",
+    },
+    "AnalysisTemplate": {
+        "name": "OpenShift GitOps",
+        "package": "openshift-gitops-operator",
+        "channel": "latest",
+        "source": "redhat-operators",
+        "value": "Automated deployment analysis — verify metrics before promoting a canary.",
     },
     "OpenTelemetryCollector": {
         "name": "Red Hat OpenTelemetry",
         "package": "opentelemetry-product",
         "channel": "stable",
         "source": "redhat-operators",
+        "value": "Unified traces, metrics, and logs collection — see exactly what your app does in production.",
     },
-    "AnalysisTemplate": {
-        "name": "OpenShift GitOps (Argo Rollouts)",
-        "package": "openshift-gitops-operator",
-        "channel": "latest",
+    "ServiceMeshControlPlane": {
+        "name": "Red Hat OpenShift Service Mesh",
+        "package": "servicemeshoperator",
+        "channel": "stable",
         "source": "redhat-operators",
+        "value": "mTLS between services, traffic management, and network-level observability.",
+    },
+    "NMState": {
+        "name": "Kubernetes NMState Operator",
+        "package": "kubernetes-nmstate-operator",
+        "channel": "stable",
+        "source": "redhat-operators",
+        "value": "Declarative network configuration for nodes.",
+    },
+    "StorageCluster": {
+        "name": "OpenShift Data Foundation",
+        "package": "odf-operator",
+        "channel": "stable-4.17",
+        "source": "redhat-operators",
+        "value": "Persistent storage, object storage, and backup infrastructure for stateful apps.",
+    },
+    "ACSSecuredCluster": {
+        "name": "Advanced Cluster Security",
+        "package": "rhacs-operator",
+        "channel": "stable",
+        "source": "redhat-operators",
+        "value": "Runtime vulnerability scanning, compliance checks, and network segmentation policies.",
+    },
+    "Central": {
+        "name": "Advanced Cluster Security",
+        "package": "rhacs-operator",
+        "channel": "stable",
+        "source": "redhat-operators",
+        "value": "Central security management — CVE database, policy engine, and compliance dashboard.",
+    },
+    "KnativeServing": {
+        "name": "Red Hat OpenShift Serverless",
+        "package": "serverless-operator",
+        "channel": "stable",
+        "source": "redhat-operators",
+        "value": "Scale-to-zero and autoscaling for event-driven workloads — pay only for what you use.",
+    },
+    "KnativeEventing": {
+        "name": "Red Hat OpenShift Serverless",
+        "package": "serverless-operator",
+        "channel": "stable",
+        "source": "redhat-operators",
+        "value": "Event-driven architecture — connect services with CloudEvents.",
+    },
+    "ClusterLogging": {
+        "name": "Red Hat OpenShift Logging",
+        "package": "cluster-logging",
+        "channel": "stable-6.2",
+        "source": "redhat-operators",
+        "value": "Centralized log collection and forwarding — aggregate logs from all pods to Loki or Elasticsearch.",
+    },
+    "Kafka": {
+        "name": "AMQ Streams",
+        "package": "amq-streams",
+        "channel": "stable",
+        "source": "redhat-operators",
+        "value": "Event streaming backbone — durable, ordered messaging for agent communication and audit trails.",
+    },
+    "Keycloak": {
+        "name": "Red Hat build of Keycloak",
+        "package": "rhbk-operator",
+        "channel": "stable-v26",
+        "source": "redhat-operators",
+        "value": "SSO, OIDC, and SAML authentication — secure your app without building auth from scratch.",
+    },
+    # ── Built-in (no install needed) ──────────────────────────────
+    "PrometheusRule": {
+        "name": "Cluster Monitoring (built-in)",
+        "package": None,
+        "note": "PrometheusRule requires the OpenShift monitoring stack (enabled by default).",
+    },
+    "ServiceMonitor": {
+        "name": "Cluster Monitoring (built-in)",
+        "package": None,
+        "note": "ServiceMonitor requires the OpenShift monitoring stack.",
+    },
+    # ── Community (manual install only) ───────────────────────────
+    "Policy": {
+        "name": "Kyverno (community)",
+        "package": None,
+        "note": "Kyverno is a community operator — install manually if needed.",
+    },
+    "ChaosEngine": {
+        "name": "LitmusChaos (community)",
+        "package": None,
+        "note": "LitmusChaos is not in the Red Hat catalog.",
     },
 }
 
@@ -274,34 +365,57 @@ def apply_manifests_to_cluster(
 
 
 def install_operator(package: str, channel: str, source: str) -> dict:
-    """Install an OLM operator via Subscription CR."""
+    """Install an OLM operator via Subscription CR.
+
+    Creates a dedicated namespace with a scoped OperatorGroup when the operator
+    doesn't support AllNamespaces mode (e.g. VPA). Falls back to openshift-operators
+    for operators that support it.
+    """
+    if source != "redhat-operators":
+        return {"status": "error", "package": package,
+                "error": f"Only Red Hat operators are supported (source={source})"}
+
     cli = _find_cli()
-    sub_yaml = yaml.dump({
-        "apiVersion": "operators.coreos.com/v1alpha1",
-        "kind": "Subscription",
-        "metadata": {
-            "name": package,
-            "namespace": "openshift-operators",
+    ns = f"openshift-{package.replace('_', '-')}"
+
+    docs = [
+        {
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {"name": ns},
         },
-        "spec": {
-            "channel": channel,
-            "name": package,
-            "source": source,
-            "sourceNamespace": "openshift-marketplace",
-            "installPlanApproval": "Automatic",
+        {
+            "apiVersion": "operators.coreos.com/v1",
+            "kind": "OperatorGroup",
+            "metadata": {"name": f"{package}-og", "namespace": ns},
+            "spec": {"targetNamespaces": [ns]},
         },
-    })
+        {
+            "apiVersion": "operators.coreos.com/v1alpha1",
+            "kind": "Subscription",
+            "metadata": {"name": package, "namespace": ns},
+            "spec": {
+                "channel": channel,
+                "name": package,
+                "source": source,
+                "sourceNamespace": "openshift-marketplace",
+                "installPlanApproval": "Automatic",
+            },
+        },
+    ]
+
+    content = yaml.dump_all(docs, default_flow_style=False)
     tmpdir = tempfile.mkdtemp(prefix="agentit-install-")
     try:
-        tmp_file = Path(tmpdir) / "subscription.yaml"
-        tmp_file.write_text(sub_yaml)
+        tmp_file = Path(tmpdir) / "operator-install.yaml"
+        tmp_file.write_text(content)
         result = subprocess.run(
             [cli, "apply", "-f", str(tmp_file)],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0:
-            logger.info("Operator %s install started: %s", package, result.stdout.strip())
-            return {"status": "installing", "package": package}
+            logger.info("Operator %s install started in %s: %s", package, ns, result.stdout.strip())
+            return {"status": "installing", "package": package, "namespace": ns}
         else:
             logger.error("Operator %s install failed: %s", package, result.stderr.strip())
             return {"status": "error", "package": package, "error": result.stderr.strip()}
