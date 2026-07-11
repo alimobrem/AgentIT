@@ -1,15 +1,20 @@
 {% extends "base.html" %}
-{% block title %}Fleet - AgentIT{% endblock %}
+{% block title %}AgentIT{% endblock %}
 {% block content %}
-<h1>Fleet Overview</h1>
+<h1>Enterprise Readiness</h1>
 
+<div class="action-bar">
+  <a href="/assess" class="btn">Assess New Repo</a>
+</div>
+
+{% if total_apps > 1 %}
 <div class="stat-grid">
   <div class="stat-card">
-    <div class="stat-label">Total Apps</div>
+    <div class="stat-label">Apps</div>
     <div class="stat-value">{{ total_apps }}</div>
   </div>
   <div class="stat-card">
-    <div class="stat-label">Average Score</div>
+    <div class="stat-label">Avg Score</div>
     <div class="stat-value
       {% if avg_score > 70 %} text-success
       {% elif avg_score >= 40 %} text-warning
@@ -17,14 +22,11 @@
     ">{{ "%.0f"|format(avg_score) }}</div>
   </div>
   <div class="stat-card">
-    <div class="stat-label">Critical Findings</div>
+    <div class="stat-label">Critical</div>
     <div class="stat-value {% if critical_total > 0 %}text-danger{% else %}text-success{% endif %}">{{ critical_total }}</div>
   </div>
 </div>
-
-<div class="mb-2">
-  <a href="/assess" class="btn">Assess New Repo</a>
-</div>
+{% endif %}
 
 {% if fleet %}
 <table>
@@ -34,10 +36,10 @@
       <th>Score</th>
       <th>Trend</th>
       <th>Criticality</th>
-      <th>Assessments</th>
-      <th>Critical Findings</th>
+      <th>Runs</th>
+      <th>Critical</th>
       <th>Last Assessed</th>
-      <th>Actions</th>
+      <th></th>
     </tr>
   </thead>
   <tbody>
@@ -53,19 +55,18 @@
         {% else %} text-danger{% endif %}
       ">{{ "%.0f"|format(r.latest_score) }}</td>
       <td>
-        {% if r.delta is not none %}
-          <span class="trend
-            {% if r.delta > 0 %} trend-up{% elif r.delta < 0 %} trend-down{% else %} trend-flat{% endif %}">
-            {% if r.delta > 0 %}&#9650; +{{ "%.1f"|format(r.delta) }}{% elif r.delta < 0 %}&#9660; {{ "%.1f"|format(r.delta) }}{% else %}&#8212;{% endif %}
+        {% if r.delta is not none and r.delta != 0 %}
+          <span class="trend {% if r.delta > 0 %}trend-up{% else %}trend-down{% endif %}">
+            {% if r.delta > 0 %}&#9650;+{{ "%.0f"|format(r.delta) }}{% else %}&#9660;{{ "%.0f"|format(r.delta) }}{% endif %}
           </span>
         {% else %}
-          <span class="text-muted">--</span>
+          <span class="text-muted">&mdash;</span>
         {% endif %}
       </td>
       <td><span class="badge badge-{{ r.criticality }}">{{ r.criticality }}</span></td>
       <td>{{ r.assessment_count }}</td>
       <td class="{% if r.critical_count > 0 %}text-danger text-bold{% endif %}">{{ r.critical_count }}</td>
-      <td class="text-sm text-muted">{{ r.last_assessed[:19] }}</td>
+      <td class="text-sm text-muted">{{ r.last_assessed[:10] }}</td>
       <td>
         <form method="post" action="/assess" class="inline-form">
           <input type="hidden" name="repo_url" value="{{ r.repo_url }}">
@@ -77,7 +78,5 @@
     {% endfor %}
   </tbody>
 </table>
-{% else %}
-<p>No applications in fleet yet. <a href="/assess">Run your first assessment.</a></p>
 {% endif %}
 {% endblock %}

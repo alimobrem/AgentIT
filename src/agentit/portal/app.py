@@ -42,33 +42,15 @@ def get_store() -> AssessmentStore:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def dashboard(request: Request) -> HTMLResponse:
+async def home(request: Request) -> HTMLResponse:
     s = get_store()
-    assessments = s.list_all()
     fleet = s.get_fleet_data()
     total_apps = len(fleet)
-    avg_score = sum(r["latest_score"] for r in fleet) / total_apps if total_apps else 0
-    critical_total = sum(r["critical_count"] for r in fleet)
-    # Build trend lookup keyed by repo_url
-    trends = {r["repo_url"]: r for r in fleet}
-    return templates.TemplateResponse(
-        request,
-        "dashboard.html",
-        {
-            "assessments": assessments,
-            "total_apps": total_apps,
-            "avg_score": avg_score,
-            "critical_total": critical_total,
-            "trends": trends,
-        },
-    )
-
-
-@app.get("/fleet", response_class=HTMLResponse)
-async def fleet_dashboard(request: Request) -> HTMLResponse:
-    fleet = get_store().get_fleet_data()
-    total_apps = len(fleet)
-    avg_score = sum(r["latest_score"] for r in fleet) / total_apps if total_apps else 0
+    if total_apps == 0:
+        return templates.TemplateResponse(request, "dashboard.html", {
+            "assessments": [], "total_apps": 0, "avg_score": 0, "critical_total": 0, "trends": {},
+        })
+    avg_score = sum(r["latest_score"] for r in fleet) / total_apps
     critical_total = sum(r["critical_count"] for r in fleet)
     return templates.TemplateResponse(
         request,
@@ -80,6 +62,11 @@ async def fleet_dashboard(request: Request) -> HTMLResponse:
             "critical_total": critical_total,
         },
     )
+
+
+@app.get("/fleet", response_class=HTMLResponse)
+async def fleet_redirect() -> RedirectResponse:
+    return RedirectResponse(url="/", status_code=301)
 
 
 @app.get("/api/fleet")
@@ -676,3 +663,65 @@ async def add_slo(request: Request, assessment_id: str):
 @app.get("/api/assessments/{assessment_id}/slos")
 async def api_slos(assessment_id: str):
     return JSONResponse(get_store().list_slos(assessment_id))
+
+
+# ── Settings + Auto-Mode ───────────────────────────────────────────────
+
+
+@app.get("/api/settings")
+async def api_settings():
+    return JSONResponse(get_store().list_settings())
+
+
+@app.get("/api/settings/{key}")
+async def api_get_setting(key: str):
+    val = get_store().get_setting(key)
+    if val is None:
+        raise HTTPException(404, f"Setting '{key}' not found")
+    return JSONResponse({"key": key, "value": val})
+
+
+@app.post("/api/settings/{key}")
+async def api_set_setting(request: Request, key: str):
+    body = await request.json()
+    value = body.get("value")
+    if value is None:
+        raise HTTPException(400, "value required")
+    get_store().set_setting(key, str(value))
+    return JSONResponse({"key": key, "value": str(value)})
+
+
+@app.post("/api/webhook/auto-apply")
+async def webhook_auto_apply(request: Request):
+    """Auto-apply manifests if auto-mode is on and LLM classifies as safe."""
+    import logging
+    log = logging.getLogger("agentit.portal")
+
+    body = await request.json()
+    assessment_id = body.get("assessment_id")
+    namespace = body.get("namespace", "default")
+    if not assessment_id:
+        raise HTTPException(400, "assessment_id required")
+
+    s = get_store()
+    report = s.get(assessment_id)
+    if report is None:
+        raise HTTPException(404, "Assessment not found")
+
+    files = s.get_onboarding(assessment_id)
+    if files is None:
+        raise HTTPException(404, "Onboarding not found — run onboarding first")
+
+    orch = s.get_orchestration(assessment_id) or {}
+    auto_approve = orch.get("auto_approve", False)
+
+    from agentit.automode import AutoMode
+    engine = AutoMode(store=s, publisher=None, llm_client=_get_llm_client())
+
+    result = await asyncio.to_thread(
+        engine.execute, assessment_id, files, namespace,
+        report.criticality, auto_approve, report.repo_name,
+    )
+
+    log.info("auto-apply result for %s: %s — %s", assessment_id, result["action"], result["reason"])
+    return JSONResponse(result)

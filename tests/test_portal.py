@@ -100,7 +100,7 @@ def client():
 def test_dashboard_empty(client):
     resp = client.get("/")
     assert resp.status_code == 200
-    assert "No assessments" in resp.text
+    assert "Assess your first app" in resp.text
 
 
 def test_assess_form(client):
@@ -291,8 +291,8 @@ def test_onboard_results_page(client, _override_store):
     assert "security" in resp.text
     assert "observability" in resp.text
     assert "compliance" in resp.text
-    assert "Download ZIP" in resp.text
-    assert "Create GitHub PR" in resp.text
+    assert "Download" in resp.text
+    assert "Create PR" in resp.text
     assert "Apply to Cluster" in resp.text
     assert "Dry Run" in resp.text
 
@@ -561,25 +561,24 @@ def test_fleet_dashboard_shows_portfolio_summary(client, _override_store):
     store.save(_make_report_scored("beta-svc", 30, "critical"))
     store.save(_make_report_scored("gamma-svc", 55, "medium"))
 
-    resp = client.get("/fleet")
+    resp = client.get("/")
     assert resp.status_code == 200
-    # Portfolio summary
-    assert "Total Apps" in resp.text
-    assert "Average Score" in resp.text
-    assert "Critical Findings" in resp.text
-    assert "3" in resp.text  # total apps
-    # Table rows
     assert "alpha-svc" in resp.text
     assert "beta-svc" in resp.text
     assert "gamma-svc" in resp.text
-    # Assess new repo button
     assert "Assess New Repo" in resp.text
 
 
 def test_fleet_empty(client):
-    resp = client.get("/fleet")
+    resp = client.get("/")
     assert resp.status_code == 200
-    assert "No applications in fleet" in resp.text
+    assert "Assess your first app" in resp.text
+
+
+def test_fleet_redirects_to_home(client):
+    resp = client.get("/fleet", follow_redirects=False)
+    assert resp.status_code == 301
+    assert resp.headers["location"] == "/"
 
 
 def test_api_fleet_returns_json(client, _override_store):
@@ -623,18 +622,19 @@ def test_api_fleet_trend_with_multiple_assessments(client, _override_store):
 def test_dashboard_shows_portfolio_summary(client, _override_store):
     store = _override_store
     store.save(_make_report_scored("app-one", 90))
+    store.save(_make_report_scored("app-two", 60))
 
     resp = client.get("/")
     assert resp.status_code == 200
-    assert "Total Apps" in resp.text
-    assert "Average Score" in resp.text
-    assert "Critical Findings" in resp.text
+    assert "Apps" in resp.text
+    assert "Avg Score" in resp.text
+    assert "Critical" in resp.text
 
 
-def test_base_nav_has_fleet_link(client):
+def test_base_nav_has_assess_link(client):
     resp = client.get("/")
     assert resp.status_code == 200
-    assert 'href="/fleet"' in resp.text
+    assert 'href="/assess"' in resp.text
 
 
 # ------------------------------------------------------------------

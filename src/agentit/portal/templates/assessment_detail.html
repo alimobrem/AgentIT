@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 {% block title %}{{ report.repo_name }} - AgentIT{% endblock %}
 {% block content %}
+<p class="mb-1">
+  <a href="/">&larr; Dashboard</a>
+</p>
 <h1>{{ report.repo_name }}</h1>
 <p class="mb-2">
   <a href="{{ report.repo_url }}" target="_blank" hx-boost="false">{{ report.repo_url }}</a>
@@ -14,7 +17,6 @@
   {% else %} text-danger{% endif %}
 ">{{ "%.0f"|format(report.overall_score) }}<span class="score-unit">/100</span></div>
 
-<h2 class="section-title">Dimension Scores</h2>
 {% for s in scores_sorted %}
 <div class="dimension-row">
   <div class="dimension-label">{{ s.dimension | replace("_", " ") | title }}</div>
@@ -31,54 +33,71 @@
 </div>
 {% endfor %}
 
-{% if urgent_findings %}
-<h2 class="section-title">Critical &amp; High Findings</h2>
-<ul class="finding-list">
-  {% for f in urgent_findings %}
-  <li class="finding-item {% if f.severity.name == 'critical' %}finding-critical{% else %}finding-high{% endif %}">
-    <span class="badge badge-{{ f.severity.name }} finding-badge">{{ f.severity.name }}</span>
-    {{ f.description }}
-    {% if f.file_path %}<span class="finding-file">{{ f.file_path }}</span>{% endif %}
-  </li>
-  {% endfor %}
-</ul>
-{% endif %}
-
-<div class="action-bar mb-2 mt-2">
+<div class="action-bar mt-2 mb-2">
   <form method="post" action="/assessments/{{ assessment_id }}/onboard" class="inline-form">
     <button type="submit" class="btn btn-action btn-lg">
-      <span class="btn-label">Onboard</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Onboarding&hellip;</span>
+      <span class="btn-label">Onboard This App</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Running agents&hellip;</span>
     </button>
   </form>
-  {% if remediation_count > 0 %}
-  <a href="/assessments/{{ assessment_id }}/remediations" class="btn btn-outline">Remediations ({{ remediation_count }})</a>
-  {% endif %}
-  {% if slo_count > 0 %}
-  <a href="/assessments/{{ assessment_id }}/slos" class="btn btn-outline">SLOs ({{ slo_count }})</a>
-  {% endif %}
-  {% if onboarding_count > 0 %}
-  <a href="/assessments/{{ assessment_id }}/onboarding-history" class="btn btn-outline">History ({{ onboarding_count }})</a>
-  {% endif %}
 </div>
 
+{% if urgent_findings %}
+<div x-data="{ open: false }">
+  <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
+    Findings ({{ urgent_findings|length }})
+  </h2>
+  <div class="collapse-body" x-show="open" x-transition>
+    <ul class="finding-list">
+      {% for f in urgent_findings %}
+      <li class="finding-item {% if f.severity.name == 'critical' %}finding-critical{% else %}finding-high{% endif %}">
+        <span class="badge badge-{{ f.severity.name }} finding-badge">{{ f.severity.name }}</span>
+        {{ f.description }}
+        {% if f.file_path %}<span class="finding-file">{{ f.file_path }}</span>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+</div>
+{% endif %}
+
 {% if report.remediation_plan %}
-<h2 class="section-title">Remediation Plan</h2>
-<table>
-  <thead>
-    <tr><th>#</th><th>Dimension</th><th>Description</th><th>Effort</th><th>Agent</th></tr>
-  </thead>
-  <tbody>
-    {% for item in report.remediation_plan %}
-    <tr>
-      <td>{{ item.priority }}</td>
-      <td>{{ item.dimension | replace("_", " ") | title }}</td>
-      <td>{{ item.description }}</td>
-      <td>{{ item.estimated_effort }}</td>
-      <td>{{ item.agent_responsible }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
+<div x-data="{ open: false }">
+  <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
+    Remediation Plan ({{ report.remediation_plan|length }})
+  </h2>
+  <div class="collapse-body" x-show="open" x-transition>
+    <table>
+      <thead>
+        <tr><th>#</th><th>Dimension</th><th>Description</th><th>Effort</th><th>Agent</th></tr>
+      </thead>
+      <tbody>
+        {% for item in report.remediation_plan %}
+        <tr>
+          <td>{{ item.priority }}</td>
+          <td>{{ item.dimension | replace("_", " ") | title }}</td>
+          <td>{{ item.description }}</td>
+          <td>{{ item.estimated_effort }}</td>
+          <td>{{ item.agent_responsible }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{% if remediation_count > 0 or slo_count > 0 or onboarding_count > 0 %}
+<div class="action-bar mt-2">
+  {% if remediation_count > 0 %}
+  <a href="/assessments/{{ assessment_id }}/remediations" class="btn btn-sm btn-outline">Remediations ({{ remediation_count }})</a>
+  {% endif %}
+  {% if slo_count > 0 %}
+  <a href="/assessments/{{ assessment_id }}/slos" class="btn btn-sm btn-outline">SLOs ({{ slo_count }})</a>
+  {% endif %}
+  {% if onboarding_count > 0 %}
+  <a href="/assessments/{{ assessment_id }}/onboarding-history" class="btn btn-sm btn-outline">History ({{ onboarding_count }})</a>
+  {% endif %}
+</div>
 {% endif %}
 {% endblock %}

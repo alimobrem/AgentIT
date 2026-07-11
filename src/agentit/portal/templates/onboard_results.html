@@ -1,10 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Onboarding Results - {{ report.repo_name }} - AgentIT{% endblock %}
 {% block content %}
-<h1>Onboarding Results: {{ report.repo_name }}</h1>
 <p class="mb-1">
-  <a href="/assessments/{{ assessment_id }}">Back to Assessment</a>
+  <a href="/assessments/{{ assessment_id }}">&larr; {{ report.repo_name }} Assessment</a>
 </p>
+<h1>Onboarding: {{ report.repo_name }}</h1>
 
 {% if request.query_params.get('pr_url') %}
 <div class="alert alert-success">
@@ -23,74 +23,94 @@
 </div>
 {% endif %}
 {% if request.query_params.get('error') %}
-<div class="alert alert-error">
-  Error: {{ request.query_params.get('error') }}
-</div>
+<div class="alert alert-error">{{ request.query_params.get('error') }}</div>
 {% endif %}
 {% if request.query_params.get('operator_installed') %}
 <div class="alert alert-success">
-  Operator <strong>{{ request.query_params.get('operator_installed') }}</strong> installation started.
-  It may take 1-2 minutes to become available. Re-run Dry Run to verify.
+  <strong>{{ request.query_params.get('operator_installed') }}</strong> installation started. Re-run Dry Run in 1-2 minutes to verify.
 </div>
 {% endif %}
+
+{# ── Primary Actions ─────────────────────────────────────────────── #}
+{% set total = namespace(count=0) %}
+{% for cat, files in grouped.items() %}{% set total.count = total.count + files|length %}{% endfor %}
+
+<div class="action-bar">
+  <form method="post" action="/assessments/{{ assessment_id }}/apply" class="inline-form">
+    <input type="hidden" name="namespace" value="{{ report.repo_name | lower | replace('_', '-') | replace('.', '-') }}">
+    <input type="hidden" name="dry_run" value="true">
+    <button type="submit" class="btn btn-action btn-lg">
+      <span class="btn-label">Dry Run</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Running&hellip;</span>
+    </button>
+  </form>
+  <form method="post" action="/assessments/{{ assessment_id }}/apply" class="inline-form">
+    <input type="hidden" name="namespace" value="{{ report.repo_name | lower | replace('_', '-') | replace('.', '-') }}">
+    <button type="submit" class="btn btn-green btn-lg">
+      <span class="btn-label">Apply to Cluster</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Applying&hellip;</span>
+    </button>
+  </form>
+  <form method="post" action="/assessments/{{ assessment_id }}/create-pr" class="inline-form">
+    <button type="submit" class="btn btn-outline">
+      <span class="btn-label">Create PR</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+    </button>
+  </form>
+  <a href="/api/assessments/{{ assessment_id }}/manifests/download" class="btn btn-outline" hx-boost="false">Download</a>
+</div>
+
+{# ── Apply Report ────────────────────────────────────────────────── #}
 {% if apply_results %}
-<h2 class="section-title">Cluster Apply Report{% if apply_results.dry_run %} (Dry Run){% endif %}</h2>
-<p class="text-muted mb-1">Namespace: <strong>{{ apply_results.namespace }}</strong> &mdash; {{ apply_results.created_at[:19] }}</p>
+<h2 class="section-title">Apply Report{% if apply_results.dry_run %} (dry run){% endif %}</h2>
+<p class="text-muted text-sm mb-1">{{ apply_results.namespace }} &middot; {{ apply_results.created_at[:19] }}</p>
 
 {% if apply_results.applied %}
-<h3 class="text-sm mb-1">Applied ({{ apply_results.applied|length }})</h3>
-<ul class="finding-list mb-1">
-  {% for f in apply_results.applied %}
-  <li class="finding-item finding-high" style="border-left-color:var(--color-success)">
-    <span class="badge badge-low">applied</span> {{ f }}
-  </li>
-  {% endfor %}
-</ul>
+<div x-data="{ open: true }">
+  <h3 class="text-sm collapse-toggle mb-1" @click="open = !open" :aria-expanded="open">Applied ({{ apply_results.applied|length }})</h3>
+  <ul class="finding-list mb-1" x-show="open" x-transition>
+    {% for f in apply_results.applied %}
+    <li class="finding-item" style="border-left:3px solid var(--color-success)"><span class="badge badge-low">OK</span> {{ f }}</li>
+    {% endfor %}
+  </ul>
+</div>
 {% endif %}
 
 {% if apply_results.skipped %}
-<h3 class="text-sm mb-1">Skipped ({{ apply_results.skipped|length }})</h3>
-<ul class="finding-list mb-1">
-  {% for f in apply_results.skipped %}
-  <li class="finding-item">
-    <span class="badge badge-info">skipped</span> {{ f }}
-  </li>
-  {% endfor %}
-</ul>
+<div x-data="{ open: false }">
+  <h3 class="text-sm collapse-toggle mb-1" @click="open = !open" :aria-expanded="open">Skipped ({{ apply_results.skipped|length }})</h3>
+  <ul class="finding-list mb-1" x-show="open" x-transition>
+    {% for f in apply_results.skipped %}
+    <li class="finding-item"><span class="badge badge-info">skip</span> {{ f }}</li>
+    {% endfor %}
+  </ul>
+</div>
 {% endif %}
 
 {% if apply_results.errors %}
-<h3 class="text-sm mb-1">Errors ({{ apply_results.errors|length }})</h3>
-<ul class="finding-list mb-1">
-  {% for f in apply_results.errors %}
-  <li class="finding-item finding-critical">
-    <span class="badge badge-critical">error</span>
-    <span class="text-sm">{{ f.split(':')[0] }}</span>
-    {% if 'Forbidden' in f %}
-    <span class="text-muted text-sm"> — Insufficient RBAC permissions. Run: <code>oc adm policy add-cluster-role-to-user edit system:serviceaccount:agentit:default</code></span>
-    {% elif 'resource mapping not found' in f %}
-    <span class="text-muted text-sm"> — Required CRD not installed on this cluster (see prerequisites below)</span>
-    {% endif %}
-  </li>
-  {% endfor %}
-</ul>
+<div x-data="{ open: true }">
+  <h3 class="text-sm collapse-toggle mb-1" @click="open = !open" :aria-expanded="open">Errors ({{ apply_results.errors|length }})</h3>
+  <ul class="finding-list mb-1" x-show="open" x-transition>
+    {% for f in apply_results.errors %}
+    <li class="finding-item finding-critical">
+      <span class="badge badge-critical">fail</span> {{ f.split(':')[0] }}
+      {% if 'Forbidden' in f %}<span class="text-muted text-sm"> &mdash; needs RBAC</span>{% endif %}
+      {% if 'resource mapping not found' in f %}<span class="text-muted text-sm"> &mdash; CRD missing</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</div>
 {% endif %}
 
 {% if missing_operators %}
-<h3 class="text-sm mb-1">Missing Prerequisites</h3>
-<div class="alert alert-warn mb-1">
-  The following operators are needed for skipped manifests. Install them to enable full onboarding.
-</div>
+<h3 class="text-sm mb-1 mt-1">Missing Prerequisites</h3>
 <table class="mb-2">
-  <thead>
-    <tr><th>Operator</th><th>Required For</th><th>Source</th><th>Action</th></tr>
-  </thead>
+  <thead><tr><th>Operator</th><th>For</th><th></th></tr></thead>
   <tbody>
     {% for kind, op in missing_operators.items() %}
     <tr>
       <td class="text-bold">{{ op.name }}</td>
-      <td><code>{{ kind }}</code></td>
-      <td class="text-sm text-muted">{{ op.get('source', '') }}</td>
+      <td class="text-sm text-muted"><code>{{ kind }}</code></td>
       <td>
         {% if op.get('package') %}
         <form method="post" action="/api/install-operator" class="inline-form">
@@ -98,15 +118,10 @@
           <input type="hidden" name="channel" value="{{ op.get('channel', 'stable') }}">
           <input type="hidden" name="source" value="{{ op.source }}">
           <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
-          <button type="submit" class="btn btn-sm btn-green">
-            <span class="btn-label">Install</span>
-            <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
-          </button>
+          <button type="submit" class="btn btn-sm btn-green">Install</button>
         </form>
         {% elif op.get('note') %}
-        <span class="text-sm text-muted">{{ op.note }}</span>
-        {% else %}
-        <span class="text-muted">Manual install required</span>
+        <span class="text-xs text-muted">{{ op.note }}</span>
         {% endif %}
       </td>
     </tr>
@@ -114,105 +129,50 @@
   </tbody>
 </table>
 {% endif %}
-
-{% elif request.query_params.get('applied') is not none %}
-{% set count = request.query_params.get('applied')|int %}
-{% if count > 0 %}
-<div class="alert alert-success">
-  Applied {{ count }} manifest{{ 's' if count != 1 else '' }} to cluster
-  {% if request.query_params.get('dry_run') == 'true' %} (dry run){% endif %}
-</div>
-{% else %}
-<div class="alert alert-warn">
-  Applied 0 manifests.
-  {% if request.query_params.get('errors') %}({{ request.query_params.get('errors') }} errors){% endif %}
-</div>
-{% endif %}
 {% endif %}
 
-<div class="action-bar">
-  <a href="/api/assessments/{{ assessment_id }}/manifests/download" class="btn" hx-boost="false">Download ZIP</a>
-  <form method="post" action="/assessments/{{ assessment_id }}/create-pr" class="inline-form">
-    <button type="submit" class="btn btn-green">
-      <span class="btn-label">Create GitHub PR</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Creating&hellip;</span>
-    </button>
-  </form>
-  <form method="post" action="/assessments/{{ assessment_id }}/create-agent-prs" class="inline-form">
-    <button type="submit" class="btn btn-outline">
-      <span class="btn-label">Per-Agent PRs</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Creating&hellip;</span>
-    </button>
-  </form>
-  <form method="post" action="/assessments/{{ assessment_id }}/apply" class="inline-form">
-    <input type="hidden" name="namespace" value="{{ report.repo_name | lower | replace('_', '-') | replace('.', '-') }}">
-    <button type="submit" class="btn">
-      <span class="btn-label">Apply to Cluster</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Applying&hellip;</span>
-    </button>
-  </form>
-  <form method="post" action="/assessments/{{ assessment_id }}/apply" class="inline-form">
-    <input type="hidden" name="namespace" value="{{ report.repo_name | lower | replace('_', '-') | replace('.', '-') }}">
-    <input type="hidden" name="dry_run" value="true">
-    <button type="submit" class="btn btn-outline">
-      <span class="btn-label">Dry Run</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Running&hellip;</span>
-    </button>
-  </form>
-</div>
-
+{# ── Orchestration (collapsed by default) ────────────────────────── #}
 {% if orchestration and orchestration.agents %}
-<h2 class="section-title">Orchestration Summary</h2>
-<div class="alert {% if orchestration.recommendation and 'BLOCKED' in orchestration.recommendation %}alert-error{% elif orchestration.recommendation and 'AUTO-APPROVED' in orchestration.recommendation %}alert-success{% else %}alert-warn{% endif %} mb-2">
-  {{ orchestration.recommendation or "No recommendation available" }}
+<div x-data="{ open: false }">
+  <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
+    Orchestration ({{ orchestration.agents|length }} agents)
+  </h2>
+  <div class="collapse-body" x-show="open" x-transition>
+    <div class="alert {% if orchestration.recommendation and 'BLOCKED' in orchestration.recommendation %}alert-error{% elif orchestration.recommendation and 'AUTO-APPROVED' in orchestration.recommendation %}alert-success{% else %}alert-warn{% endif %} mb-1">
+      {{ orchestration.recommendation or "Pending" }}
+    </div>
+    <table class="mb-1">
+      <thead><tr><th>Agent</th><th>Status</th><th>Files</th></tr></thead>
+      <tbody>
+        {% for a in orchestration.agents %}
+        <tr class="{% if a.success %}row-border-green{% else %}row-border-red{% endif %}">
+          <td>{{ a.name }}</td>
+          <td>{% if a.success %}<span class="badge badge-low">OK</span>{% else %}<span class="badge badge-critical">FAIL</span>{% endif %}</td>
+          <td>{{ a.files_count }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </div>
-<table class="mb-2">
-  <thead>
-    <tr><th>Agent</th><th>Category</th><th>Status</th><th>Files</th><th>Error</th></tr>
-  </thead>
-  <tbody>
-    {% for a in orchestration.agents %}
-    <tr class="{% if a.success %}row-border-green{% else %}row-border-red{% endif %}">
-      <td class="text-bold">{{ a.name }}</td>
-      <td>{{ a.category }}</td>
-      <td>
-        {% if a.success %}
-          <span class="badge badge-low">PASS</span>
-        {% else %}
-          <span class="badge badge-critical">FAIL</span>
-        {% endif %}
-      </td>
-      <td>{{ a.files_count }}</td>
-      <td class="text-sm text-danger">{{ a.error or "—" }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% if orchestration.conflicts %}
-<h3 class="text-sm text-muted mb-1">Conflicts</h3>
-<ul class="finding-list mb-2">
-  {% for c in orchestration.conflicts %}
-  <li class="finding-item {% if c.type == 'blocker' %}finding-critical{% endif %}">
-    <span class="badge badge-{{ 'critical' if c.type == 'blocker' else 'medium' }}">{{ c.type }}</span>
-    {{ c.resolution }} (winner: {{ c.winner }})
-  </li>
-  {% endfor %}
-</ul>
-{% endif %}
 {% endif %}
 
-{% set total = namespace(count=0) %}
-{% for cat, files in grouped.items() %}{% set total.count = total.count + files|length %}{% endfor %}
-<p class="text-muted mb-1">{{ total.count }} manifests across {{ grouped|length }} categories</p>
+{# ── Generated Manifests (code collapsed by default) ─────────────── #}
+<p class="text-muted mb-1 mt-2">{{ total.count }} manifests across {{ grouped|length }} categories</p>
 
 {% for category, files in grouped.items() %}
-<h2 class="section-title">{{ category }}</h2>
-{% for f in files %}
-<div class="manifest-card">
-  <div class="manifest-title">{{ f.path }}</div>
-  <div class="manifest-desc">{{ f.description }}</div>
-  <pre class="code-block"><code>{{ f.content }}</code></pre>
+<div x-data="{ open: false }">
+  <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
+    {{ category }} ({{ files|length }})
+  </h2>
+  <div class="collapse-body" x-show="open" x-transition>
+    {% for f in files %}
+    <div class="manifest-card">
+      <div class="manifest-title">{{ f.path }}</div>
+      <pre class="code-block"><code>{{ f.content }}</code></pre>
+    </div>
+    {% endfor %}
+  </div>
 </div>
-{% endfor %}
 {% endfor %}
 {% endblock %}

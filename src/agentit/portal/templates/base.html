@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}AgentIT{% endblock %}</title>
 {% block head_extra %}{% endblock %}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/htmx.org@2.0.4" integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+" crossorigin="anonymous"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js" integrity="sha384-X9kJyAubVxnP0hcA+AMMs21U445qsnqhnUF8EBlEpP3a42Kh/JwWjlv2ZcvGfphb" crossorigin="anonymous"></script>
 <style>
@@ -43,13 +46,14 @@
     --font-2xl: 2rem;
     --font-3xl: 2.2rem;
     --font-hero: 3rem;
-    --font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    --font-mono: 'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
+    --font-display: 'IBM Plex Mono', monospace;
   }
 
   /* ── Reset ─────────────────────────────────────────────────────── */
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: var(--color-bg);
     color: var(--color-text);
     line-height: 1.6;
@@ -92,7 +96,8 @@
 
   /* ── Layout ────────────────────────────────────────────────────── */
   .container { max-width: 1100px; margin: 0 auto; padding: var(--space-8); }
-  h1 { color: var(--color-accent); margin-bottom: var(--space-7); }
+  h1 { color: var(--color-accent); margin-bottom: var(--space-7); font-family: var(--font-display); font-weight: 700; }
+  h2 { font-family: var(--font-display); }
 
   /* ── Stat Grid (portfolio summary) ─────────────────────────────── */
   .stat-grid {
@@ -182,11 +187,13 @@
 
   /* ── Score Display ─────────────────────────────────────────────── */
   .score-hero {
+    font-family: var(--font-display);
     font-size: var(--font-hero);
     font-weight: 700;
     margin-bottom: var(--space-2);
   }
   .score-3xl {
+    font-family: var(--font-display);
     font-size: var(--font-3xl);
     font-weight: 700;
   }
@@ -425,6 +432,40 @@
   .htmx-request .btn-label { display: none; }
   .btn-loading { opacity: 0.7; pointer-events: none; }
 
+  /* ── Collapsible Sections ────────────────────────────────────────── */
+  .collapse-toggle {
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    user-select: none;
+  }
+  .collapse-toggle::before {
+    content: '▸';
+    font-size: var(--font-sm);
+    transition: transform 0.15s;
+    display: inline-block;
+    width: 1em;
+  }
+  .collapse-toggle[aria-expanded="true"]::before { transform: rotate(90deg); }
+  .collapse-body { overflow: hidden; }
+
+  /* ── Nav Secondary ─────────────────────────────────────────────── */
+  nav .links-secondary { display: flex; gap: var(--space-5); margin-left: auto; }
+  nav .links-secondary a { color: var(--color-muted); font-size: var(--font-sm); }
+  nav .links-secondary a:hover { color: var(--color-text); text-decoration: none; }
+
+  /* ── Hero CTA ──────────────────────────────────────────────────── */
+  .hero-cta {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    padding: var(--space-8) 0;
+  }
+  .hero-cta h2 { color: var(--color-text); margin-bottom: var(--space-4); font-family: var(--font-display); }
+  .hero-cta p { color: var(--color-muted); margin-bottom: var(--space-7); max-width: 500px; }
+
   /* ── Page Transition ───────────────────────────────────────────── */
   .htmx-settling { opacity: 0.8; }
   .htmx-swapping { opacity: 0; transition: opacity 0.1s ease-out; }
@@ -447,9 +488,10 @@
 <nav>
   <span class="logo">AgentIT</span>
   <div class="links">
-    <a href="/">Dashboard</a>
-    <a href="/fleet">Fleet</a>
-    <a href="/assess">New Assessment</a>
+    <a href="/">Fleet</a>
+    <a href="/assess">Assess</a>
+  </div>
+  <div class="links-secondary">
     <a href="/gates">Gates</a>
     <a href="/events">Events</a>
     <a href="/agents">Agents</a>

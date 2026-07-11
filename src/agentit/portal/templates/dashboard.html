@@ -1,16 +1,21 @@
 {% extends "base.html" %}
 {% block title %}Dashboard - AgentIT{% endblock %}
 {% block content %}
-<h1>Enterprise Readiness Dashboard</h1>
+<h1>Enterprise Readiness</h1>
 
 {% if assessments %}
+<div class="action-bar">
+  <a href="/assess" class="btn">Assess New Repo</a>
+</div>
+
+{% if total_apps > 1 %}
 <div class="stat-grid">
   <div class="stat-card">
-    <div class="stat-label">Total Apps</div>
+    <div class="stat-label">Apps</div>
     <div class="stat-value">{{ total_apps }}</div>
   </div>
   <div class="stat-card">
-    <div class="stat-label">Average Score</div>
+    <div class="stat-label">Avg Score</div>
     <div class="stat-value
       {% if avg_score > 70 %} text-success
       {% elif avg_score >= 40 %} text-warning
@@ -18,10 +23,11 @@
     ">{{ "%.0f"|format(avg_score) }}</div>
   </div>
   <div class="stat-card">
-    <div class="stat-label">Critical Findings</div>
+    <div class="stat-label">Critical</div>
     <div class="stat-value {% if critical_total > 0 %}text-danger{% else %}text-success{% endif %}">{{ critical_total }}</div>
   </div>
 </div>
+{% endif %}
 
 <div class="card-grid">
   {% for a in assessments %}
@@ -39,10 +45,11 @@
       ">{{ "%.0f"|format(a.overall_score) }}</span>
       {% if trends.get(a.repo_url) and trends[a.repo_url].delta is not none %}
         {% set d = trends[a.repo_url].delta %}
-        <span class="trend
-          {% if d > 0 %} trend-up{% elif d < 0 %} trend-down{% else %} trend-flat{% endif %}">
-          {% if d > 0 %}&#9650; +{{ "%.1f"|format(d) }}{% elif d < 0 %}&#9660; {{ "%.1f"|format(d) }}{% else %}&#8212; 0{% endif %}
+        {% if d != 0 %}
+        <span class="trend {% if d > 0 %} trend-up{% else %} trend-down{% endif %}">
+          {% if d > 0 %}&#9650;+{{ "%.0f"|format(d) }}{% else %}&#9660;{{ "%.0f"|format(d) }}{% endif %}
         </span>
+        {% endif %}
       {% endif %}
     </div>
     <div class="score-bar-bg">
@@ -52,19 +59,16 @@
         {% else %} score-red{% endif %}"
         style="width:{{ a.overall_score }}%"></div>
     </div>
-    <div class="card-meta">Assessed: {{ a.assessed_at[:19] }}</div>
+    <div class="card-meta">{{ a.assessed_at[:10] }}</div>
     </a>
-    <div class="card-footer">
-      <form method="post" action="/assess" class="inline-form">
-        <input type="hidden" name="repo_url" value="{{ a.repo_url }}">
-        <input type="hidden" name="criticality" value="{{ a.criticality }}">
-        <button type="submit" class="btn btn-sm">Re-assess</button>
-      </form>
-    </div>
   </div>
   {% endfor %}
 </div>
 {% else %}
-<p>No assessments yet. <a href="/assess">Run your first assessment.</a></p>
+<div class="hero-cta">
+  <h2>Assess your first app</h2>
+  <p>Paste a GitHub repo URL and AgentIT will score it across 7 enterprise readiness dimensions — security, observability, CI/CD, compliance, infrastructure, data governance, and HA/DR.</p>
+  <a href="/assess" class="btn btn-lg">Run Assessment</a>
+</div>
 {% endif %}
 {% endblock %}
