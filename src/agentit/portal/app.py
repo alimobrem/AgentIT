@@ -1236,11 +1236,13 @@ async def update_remediation_status(request: Request, assessment_id: str, rem_id
     status = str(form.get("status", ""))
     if status not in ("generated", "applied", "blocked", "completed"):
         raise HTTPException(400, "Invalid status")
+    redirect = str(form.get("redirect", ""))
     s = get_store()
     s.update_remediation_status(rem_id, status)
-    return RedirectResponse(
-        url=f"/assessments/{assessment_id}/remediations", status_code=303,
-    )
+    dest = f"/assessments/{assessment_id}/remediations"
+    if redirect.startswith("/agents/"):
+        dest = redirect
+    return RedirectResponse(url=dest, status_code=303)
 
 
 @app.get("/api/assessments/{assessment_id}/remediations")

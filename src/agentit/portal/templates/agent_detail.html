@@ -50,6 +50,7 @@
       <th>Status</th>
       <th>Created</th>
       <th>Completed</th>
+      <th>Action</th>
     </tr>
   </thead>
   <tbody>
@@ -59,12 +60,28 @@
       <td>
         {% if r.status == "completed" %}
           <span class="badge badge-low">completed</span>
+        {% elif r.status == "applied" %}
+          <span class="badge badge-info">applied</span>
         {% else %}
           <span class="badge badge-medium">pending</span>
         {% endif %}
       </td>
       <td class="text-sm">{{ r.created_at[:19] }}</td>
       <td class="text-sm">{{ r.completed_at[:19] if r.completed_at else "—" }}</td>
+      <td>
+        {% if r.status not in ("completed", "applied") %}
+        <form method="post" action="/assessments/{{ r.assessment_id }}/remediations/{{ r.id }}/status" class="inline-form">
+          <input type="hidden" name="status" value="completed">
+          <input type="hidden" name="redirect" value="/agents/{{ agent.agent_name }}">
+          <button type="submit" class="btn btn-green btn-sm">
+            <span class="btn-label">Mark Done</span>
+            <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+          </button>
+        </form>
+        {% else %}
+        <span class="text-sm text-muted">—</span>
+        {% endif %}
+      </td>
     </tr>
     {% endfor %}
   </tbody>
