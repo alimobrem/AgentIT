@@ -194,7 +194,7 @@ class TestKafkaTriggerFlow:
         sensor_doc = _load(CHART_DIR / "argo-events" / "sensor-onboard.yaml")
         dep = sensor_doc["spec"]["dependencies"][0]
         assert dep["eventSourceName"] == es_doc["metadata"]["name"]
-        assert dep["eventName"] == "agentit-events"
+        assert dep["eventName"] == "agentit-assessments"
 
     def test_sensor_filters_on_assessment_complete(self):
         doc = _load(CHART_DIR / "argo-events" / "sensor-onboard.yaml")

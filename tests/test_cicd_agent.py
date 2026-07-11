@@ -48,7 +48,7 @@ class TestTektonPipeline:
         pipeline = docs[0]
         assert pipeline["kind"] == "Pipeline"
         task_names = [t["name"] for t in pipeline["spec"]["tasks"]]
-        assert task_names == ["git-clone", "build", "test", "image-build", "image-push", "deploy"]
+        assert task_names == ["git-clone", "build", "test", "image-build", "image-push", "image-scan", "sbom-generate", "deploy"]
 
         pipeline_run = docs[1]
         assert pipeline_run["kind"] == "PipelineRun"

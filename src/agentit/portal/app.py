@@ -112,11 +112,12 @@ def _publish_event(
     details: dict | None = None,
     correlation_id: str | None = None,
     agent_id: str = "assessor",
+    extra_topic: str | None = None,
 ) -> None:
     try:
-        from agentit.events import get_publisher
-        get_publisher().publish(
-            "agentit-events",
+        from agentit.events import get_publisher, TOPIC_EVENTS
+        pub = get_publisher()
+        kwargs = dict(
             agent_id=agent_id,
             action=action,
             target_app=target_app,
@@ -124,6 +125,9 @@ def _publish_event(
             details=details,
             correlation_id=correlation_id,
         )
+        pub.publish(TOPIC_EVENTS, **kwargs)
+        if extra_topic:
+            pub.publish(extra_topic, **kwargs)
     except Exception:
         log.warning("Failed to publish event %s", action, exc_info=True)
 
@@ -219,6 +223,17 @@ async def events_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "events.html", {"events": events})
 
 
+@app.get("/events/dlq", response_class=HTMLResponse)
+async def dlq_page(request: Request) -> HTMLResponse:
+    """Show dead-lettered messages from the events store."""
+    s = get_store()
+    rows = s._conn.execute(
+        "SELECT * FROM events WHERE action = 'dead-letter' ORDER BY timestamp DESC LIMIT 200",
+    ).fetchall()
+    dlq_messages = [dict(r) for r in rows]
+    return templates.TemplateResponse(request, "dlq.html", {"dlq_messages": dlq_messages})
+
+
 @app.post("/api/webhook/assess")
 async def webhook_assess(request: Request):
     """Trigger an assessment via webhook. Accepts JSON body: {repo_url, criticality}"""
@@ -229,10 +244,12 @@ async def webhook_assess(request: Request):
     criticality = body.get("criticality", "medium")
     report = await _with_timeout(asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality))
     assessment_id = get_store().save(report)
+    from agentit.events import TOPIC_ASSESSMENTS
     _publish_event("assessment-complete", report.repo_name,
                    f"Assessment complete: {report.overall_score:.0f}/100",
                    {"assessment_id": assessment_id, "score": report.overall_score},
-                   correlation_id=assessment_id)
+                   correlation_id=assessment_id,
+                   extra_topic=TOPIC_ASSESSMENTS)
     return JSONResponse({"assessment_id": assessment_id, "overall_score": report.overall_score})
 
 
@@ -281,10 +298,12 @@ async def webhook_github_push(request: Request):
         assessment_id = s.save(report)
         s.log_event("github-webhook", "reassessment-complete", managed["repo_name"],
                     "info", f"Re-assessment complete: {report.overall_score:.0f}/100 (was {managed.get('latest_score', '?')})")
+        from agentit.events import TOPIC_ASSESSMENTS as _TOPIC_ASSESSMENTS
         _publish_event("assessment-complete", managed["repo_name"],
                        f"Re-assessment: {report.overall_score:.0f}/100",
                        {"assessment_id": assessment_id, "score": report.overall_score},
-                       correlation_id=assessment_id)
+                       correlation_id=assessment_id,
+                       extra_topic=_TOPIC_ASSESSMENTS)
         return JSONResponse({
             "status": "assessed",
             "repo": managed["repo_name"],
@@ -447,10 +466,12 @@ async def self_assess_route(request: Request):
     assessment_id = get_store().save(report)
     get_store().log_event("self-assess", "assessment-complete", "agentit", "info",
                           f"Self-assessment complete: {report.overall_score:.0f}/100")
+    from agentit.events import TOPIC_ASSESSMENTS as _TOPIC_ASSESS
     _publish_event("assessment-complete", "agentit",
                    f"Self-assessment: {report.overall_score:.0f}/100",
                    {"assessment_id": assessment_id, "score": report.overall_score},
-                   correlation_id=assessment_id)
+                   correlation_id=assessment_id,
+                   extra_topic=_TOPIC_ASSESS)
     return RedirectResponse(url=f"/assessments/{assessment_id}", status_code=303)
 
 
@@ -614,7 +635,16 @@ async def onboard_submit(request: Request, assessment_id: str):
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
 
-    files, orch_summary = await _with_timeout(asyncio.to_thread(_run_onboarding, report, assessment_id))
+    try:
+        files, orch_summary = await _with_timeout(asyncio.to_thread(_run_onboarding, report, assessment_id))
+    except HTTPException:
+        raise
+    except Exception:
+        log.exception("Onboarding failed for %s", assessment_id)
+        return RedirectResponse(
+            url=f"/assessments/{assessment_id}?error={quote('Onboarding failed — check server logs')}",
+            status_code=303,
+        )
     s.save_onboarding(assessment_id, files, orchestration=orch_summary)
 
     _publish_event("onboarding-complete", report.repo_name,
@@ -758,9 +788,16 @@ async def apply_to_cluster(request: Request, assessment_id: str):
     namespace = str(form.get("namespace", "default"))
     dry_run = form.get("dry_run") == "true"
 
-    results = await asyncio.to_thread(
-        apply_manifests_to_cluster, files, namespace, dry_run,
-    )
+    try:
+        results = await asyncio.to_thread(
+            apply_manifests_to_cluster, files, namespace, dry_run,
+        )
+    except Exception:
+        log.exception("Cluster apply failed for assessment %s", assessment_id)
+        return RedirectResponse(
+            url=f"/assessments/{assessment_id}/onboard-results?error={quote('Cluster apply failed — check server logs')}",
+            status_code=303,
+        )
 
     s.save_apply_results(assessment_id, results, namespace, dry_run)
 
@@ -826,6 +863,8 @@ async def gates_page(request: Request):
 async def resolve_gate(request: Request, gate_id: str):
     form = await request.form()
     status = form.get("status")
+    if status not in ("approved", "rejected", "dismissed"):
+        raise HTTPException(400, "Invalid status: must be approved, rejected, or dismissed")
     resolved_by = form.get("resolved_by", "portal-user")
     s = get_store()
 
@@ -834,17 +873,23 @@ async def resolve_gate(request: Request, gate_id: str):
     if gate is None:
         raise HTTPException(404, "Gate not found")
 
-    s.resolve_gate(gate_id, status, resolved_by)
-
     if status == "approved" and gate.get("assessment_id"):
         assessment_id = gate["assessment_id"]
         files = s.get_onboarding(assessment_id)
         report = s.get(assessment_id)
         if files and report:
             namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
-            results = await asyncio.to_thread(
-                apply_manifests_to_cluster, files, namespace, False,
-            )
+            try:
+                results = await asyncio.to_thread(
+                    apply_manifests_to_cluster, files, namespace, False,
+                )
+            except Exception:
+                log.exception("Manifest apply failed for gate %s (assessment %s)", gate_id, assessment_id)
+                return RedirectResponse(
+                    url=f"/assessments/{assessment_id}/onboard-results?error={quote('Manifest apply failed — gate remains pending')}",
+                    status_code=303,
+                )
+            s.resolve_gate(gate_id, status, resolved_by)
             s.save_apply_results(assessment_id, results, namespace, False)
             applied = len(results["applied"])
             return RedirectResponse(
@@ -852,6 +897,7 @@ async def resolve_gate(request: Request, gate_id: str):
                 status_code=303,
             )
 
+    s.resolve_gate(gate_id, status, resolved_by)
     return RedirectResponse(url="/gates", status_code=303)
 
 
@@ -1294,6 +1340,26 @@ async def schedules_page(request: Request) -> HTMLResponse:
                 "enabled": enabled,
             })
 
+    # Merge manually created schedules from the store
+    manual_schedules = s.list_schedules()
+    for ms in manual_schedules:
+        schedules.append({
+            "id": ms["id"],
+            "app_name": ms["app_name"],
+            "job_name": ms["job_name"],
+            "schedule": ms["schedule"],
+            "human_schedule": _CRON_HUMAN.get(ms["schedule"], ms["schedule"]),
+            "agent": ms["agent"],
+            "concurrency": "Allow",
+            "enabled": bool(ms["enabled"]),
+            "source": "manual",
+        })
+
+    # Tag onboarding-generated schedules with source
+    for sched in schedules:
+        if "source" not in sched:
+            sched["source"] = "onboarding"
+
     agents = s.list_agents()
     deploy_status = await asyncio.to_thread(_get_watcher_deploy_status)
     watchers = []
@@ -1322,6 +1388,8 @@ async def update_schedule(request: Request):
     job_key = str(form.get("job_key", ""))
     schedule = str(form.get("schedule", "")).strip()
     if app_name and job_key and schedule:
+        if len(schedule.split()) != 5:
+            raise HTTPException(400, "Invalid cron expression: must have exactly 5 fields")
         get_store().set_setting(f"schedule:{app_name}:{job_key}", schedule)
         get_store().log_event(
             "portal", "schedule-updated", app_name, "info",
@@ -1344,6 +1412,43 @@ async def toggle_schedule(request: Request):
             f"Schedule {job_key} {action} for {app_name}",
         )
     return RedirectResponse(url="/schedules", status_code=303)
+
+
+@app.post("/schedules/create", response_model=None)
+async def create_schedule(request: Request):
+    form = await request.form()
+    app_name = str(form.get("app_name", "")).strip()
+    job_name = str(form.get("job_name", "")).strip()
+    agent = str(form.get("agent", "")).strip()
+    schedule = str(form.get("schedule", "")).strip()
+    command = str(form.get("command", "")).strip()
+
+    if not all([app_name, job_name, agent, schedule, command]):
+        raise HTTPException(400, "All fields are required: app_name, job_name, agent, schedule, command")
+    if len(schedule.split()) != 5:
+        raise HTTPException(400, "Invalid cron expression: must have exactly 5 fields")
+
+    s = get_store()
+    s.create_schedule(app_name, job_name, agent, schedule, command)
+    s.log_event(
+        "portal", "schedule-created", app_name, "info",
+        f"Manual schedule created: {job_name} ({schedule})",
+    )
+    return RedirectResponse(url="/schedules?created=true", status_code=303)
+
+
+@app.post("/schedules/delete", response_model=None)
+async def delete_schedule_route(request: Request):
+    form = await request.form()
+    schedule_id = str(form.get("schedule_id", "")).strip()
+    if not schedule_id:
+        raise HTTPException(400, "schedule_id required")
+
+    s = get_store()
+    if not s.delete_schedule(schedule_id):
+        raise HTTPException(404, "Schedule not found")
+    s.log_event("portal", "schedule-deleted", None, "info", f"Deleted manual schedule {schedule_id}")
+    return RedirectResponse(url="/schedules?deleted=true", status_code=303)
 
 
 # ── Agents ─────────────────────────────────────────────────────────────
@@ -1502,7 +1607,11 @@ async def add_slo(request: Request, assessment_id: str):
     target_str = str(form.get("target_value", "")).strip()
     if not metric_name or not target_str:
         raise HTTPException(status_code=400, detail="metric_name and target_value required")
-    s.save_slo(assessment_id, metric_name, float(target_str))
+    try:
+        target_value = float(target_str)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="target_value must be a number")
+    s.save_slo(assessment_id, metric_name, target_value)
     return RedirectResponse(
         url=f"/assessments/{assessment_id}/slos", status_code=303,
     )

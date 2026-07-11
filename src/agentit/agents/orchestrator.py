@@ -16,6 +16,8 @@ PRIORITY_MATRIX = {
     ("compliance", "cicd"): "compliance",
     ("compliance", "observability"): "compliance",
     ("cicd", "release"): "release",
+    ("infrastructure", "security"): "security",
+    ("infrastructure", "compliance"): "compliance",
 }
 
 
@@ -96,12 +98,14 @@ class FleetOrchestrator:
         from agentit.agents.observability import ObservabilityAgent
         from agentit.agents.cicd import CICDAgent
         from agentit.agents.compliance import ComplianceAgent
+        from agentit.agents.infrastructure import InfrastructureAgent
 
         agent_map: dict[str, tuple[str, type]] = {
             "security": ("security", HardeningAgent),
             "observability": ("observability", ObservabilityAgent),
             "cicd": ("cicd", CICDAgent),
             "compliance": ("compliance", ComplianceAgent),
+            "infrastructure": ("infrastructure", InfrastructureAgent),
         }
 
         # Import optional agents — log failures instead of silently swallowing
@@ -225,7 +229,7 @@ class FleetOrchestrator:
 
     def _select_agents(self) -> list[str]:
         """Select which agents to run based on assessment findings."""
-        agents = ["security", "observability", "cicd", "compliance", "release"]
+        agents = ["security", "observability", "cicd", "compliance", "infrastructure", "release"]
 
         # Always run these core 5, then add based on findings/criticality
         if self.report.criticality in ("high", "critical"):

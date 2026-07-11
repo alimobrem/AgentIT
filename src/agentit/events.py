@@ -8,6 +8,14 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
+# ── Topic constants ───────────────────────────────────────────────────
+TOPIC_EVENTS = "agentit-events"
+TOPIC_ASSESSMENTS = "agentit-assessments"
+TOPIC_GATES = "agentit-gates"
+TOPIC_DECISIONS = "agentit-decisions"
+TOPIC_ALERTS = "agentit-alerts"
+TOPIC_DLQ = "agentit-dlq"
+
 
 class EventPublisher:
     def __init__(self, bootstrap_servers: str | None = None) -> None:

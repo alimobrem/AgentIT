@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Dead Letter Queue - AgentIT{% endblock %}
+{% block content %}
+<h1>Dead Letter Queue</h1>
+
+{% if dlq_messages %}
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-label">DLQ Messages</div>
+    <div class="stat-value">{{ dlq_messages | length }}</div>
+  </div>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Timestamp</th>
+      <th>Original Topic</th>
+      <th>Error</th>
+      <th>Message Preview</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for msg in dlq_messages %}
+    <tr>
+      <td class="text-sm">{{ msg.timestamp[:19] }}</td>
+      <td>{{ msg.target_app or '—' }}</td>
+      <td class="text-danger text-sm">{{ msg.summary[:200] }}</td>
+      <td class="text-muted text-sm">{{ msg.details_json[:200] }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="text-muted mt-2">No dead-lettered messages.</p>
+{% endif %}
+{% endblock %}

@@ -8,7 +8,7 @@ import time
 import click
 
 from agentit.consumer import EventConsumer
-from agentit.events import EventPublisher
+from agentit.events import EventPublisher, TOPIC_ALERTS
 from agentit.portal.store import AssessmentStore
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ class SloTracker:
 
             for slo in app_breaches:
                 self._publisher.publish(
-                    "agentit-alerts",
+                    TOPIC_ALERTS,
                     agent_id="slo-tracker",
                     action="slo-breach",
                     target_app=a["repo_name"],
@@ -76,7 +76,7 @@ class SloTracker:
         breach_names = ", ".join(s["metric_name"] for s in breaches)
 
         self._publisher.publish(
-            "agentit-alerts",
+            TOPIC_ALERTS,
             agent_id="slo-tracker",
             action="rollback-recommended",
             target_app=repo_name,

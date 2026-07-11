@@ -165,14 +165,30 @@ class ObservabilityAgent:
             "uid": f"{name}-dashboard",
         }
 
-        content = json.dumps(dashboard, indent=2)
-        self._write("grafana-dashboard.json", content)
+        dashboard_json = json.dumps(dashboard, indent=2)
+
+        configmap: dict = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": f"{name}-grafana-dashboard",
+                "labels": {
+                    "app.kubernetes.io/name": name,
+                    "grafana_dashboard": "1",
+                },
+            },
+            "data": {
+                f"{name}-dashboard.json": dashboard_json,
+            },
+        }
+        content = yaml.dump(configmap, default_flow_style=False, sort_keys=False)
+        self._write("grafana-dashboard-cm.yaml", content)
 
         return [
             GeneratedFile(
-                path="grafana-dashboard.json",
+                path="grafana-dashboard-cm.yaml",
                 content=content,
-                description=f"Grafana RED metrics dashboard for {name}.",
+                description=f"ConfigMap with Grafana RED metrics dashboard for {name} (auto-imported by Grafana sidecar via grafana_dashboard=1 label).",
                 finding_addressed="Observability baseline: RED metrics dashboard.",
             ),
         ]

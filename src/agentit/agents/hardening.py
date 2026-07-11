@@ -37,6 +37,7 @@ class HardeningAgent:
         generated.extend(self._generate_rbac())
         generated.extend(self._generate_security_context())
         generated.extend(self._generate_resource_limits())
+        generated.extend(self._generate_image_scan_task())
 
         return HardeningResult(files=generated)
 
@@ -363,3 +364,55 @@ class HardeningAgent:
             USER 1001
             ENTRYPOINT ["/bin/sh"]
         """)
+
+    def _generate_image_scan_task(self) -> list[GeneratedFile]:
+        hits = self._findings_for("scanning", "vulnerability", "cve")
+        if not hits:
+            return []
+
+        name = self._name
+        task: dict = {
+            "apiVersion": "tekton.dev/v1",
+            "kind": "Task",
+            "metadata": {
+                "name": f"{name}-image-scan",
+                "labels": {"app.kubernetes.io/name": name},
+            },
+            "spec": {
+                "params": [
+                    {"name": "IMAGE", "type": "string", "description": "Image reference to scan"},
+                    {"name": "SEVERITY_CUTOFF", "type": "string", "default": "high"},
+                ],
+                "results": [
+                    {"name": "VULN_COUNT", "description": "Number of vulnerabilities found"},
+                ],
+                "steps": [
+                    {
+                        "name": "scan",
+                        "image": "aquasec/trivy:latest",
+                        "script": (
+                            "#!/usr/bin/env sh\n"
+                            "set -e\n"
+                            'trivy image --exit-code 1 --severity "$(params.SEVERITY_CUTOFF)" '
+                            '"$(params.IMAGE)" --format json --output /tmp/scan-results.json || EXIT=$?\n'
+                            "VULNS=$(cat /tmp/scan-results.json | grep -c '\"VulnerabilityID\"' || echo 0)\n"
+                            'printf "%s" "$VULNS" > "$(results.VULN_COUNT.path)"\n'
+                            'echo "Found $VULNS vulnerabilities at $(params.SEVERITY_CUTOFF) or above"\n'
+                            "exit ${EXIT:-0}\n"
+                        ),
+                    },
+                ],
+            },
+        }
+
+        content = yaml.dump(task, default_flow_style=False, sort_keys=False)
+        self._write("image-scan-task.yaml", content)
+
+        return [
+            GeneratedFile(
+                path="image-scan-task.yaml",
+                content=content,
+                description=f"Tekton Task to scan {name} container image for vulnerabilities using Trivy.",
+                finding_addressed="; ".join(hits),
+            ),
+        ]

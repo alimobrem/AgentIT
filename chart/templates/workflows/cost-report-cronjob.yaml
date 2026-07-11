@@ -1,0 +1,46 @@
+{{- if .Values.cronJobs.costReport.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: agentit-cost-report
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  schedule: "{{ .Values.cronJobs.costReport.schedule }}"
+  concurrencyPolicy: Replace
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: {{ .Chart.Name }}
+            app.kubernetes.io/component: cost-report
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: pipeline
+          containers:
+            - name: cost-report
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: [python, -m, agentit, watch, --cost-report]
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              env:
+                {{- range $key, $value := .Values.env }}
+                {{- if $value }}
+                - name: {{ $key }}
+                  value: {{ $value | quote }}
+                {{- end }}
+                {{- end }}
+{{- end }}

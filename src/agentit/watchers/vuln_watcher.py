@@ -8,7 +8,7 @@ import time
 import click
 
 from agentit.consumer import EventConsumer
-from agentit.events import EventPublisher
+from agentit.events import EventPublisher, TOPIC_ALERTS, TOPIC_EVENTS
 from agentit.portal.store import AssessmentStore
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ class VulnWatcher:
             logger.info("Assessment completed for %s, checking for CVEs", target)
             click.echo(f"[vuln-watch] Assessment completed for {target}, checking for CVEs...", err=True)
             self._publisher.publish(
-                "agentit-events",
+                TOPIC_EVENTS,
                 agent_id="vuln-watcher",
                 action="cve-check-triggered",
                 target_app=target,
@@ -59,7 +59,7 @@ class VulnWatcher:
         for app_data in fleet:
             if app_data.get("critical_count", 0) > 0:
                 self._publisher.publish(
-                    "agentit-alerts",
+                    TOPIC_ALERTS,
                     agent_id="vuln-watcher",
                     action="critical-findings-detected",
                     target_app=app_data["repo_name"],

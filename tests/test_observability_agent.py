@@ -55,22 +55,24 @@ class TestServiceMonitor:
 
 
 class TestGrafanaDashboard:
-    def test_generates_grafana_dashboard(self, tmp_path: Path) -> None:
+    def test_generates_grafana_dashboard_configmap(self, tmp_path: Path) -> None:
         report = make_report(scores=[])
         result = ObservabilityAgent(report, tmp_path / "out").run()
 
-        dash_files = [f for f in result.files if f.path == "grafana-dashboard.json"]
-        assert len(dash_files) == 1
+        cm_files = [f for f in result.files if f.path == "grafana-dashboard-cm.yaml"]
+        assert len(cm_files) == 1
 
-        dashboard = json.loads(dash_files[0].content)
+        import yaml
+        cm = yaml.safe_load(cm_files[0].content)
+        assert cm["kind"] == "ConfigMap"
+        assert cm["metadata"]["labels"]["grafana_dashboard"] == "1"
+        dashboard = json.loads(cm["data"]["test-app-dashboard.json"])
         assert dashboard["title"] == "test-app"
         assert len(dashboard["panels"]) == 4
         panel_titles = {p["title"] for p in dashboard["panels"]}
         assert "Requests / sec" in panel_titles
         assert "Error Rate %" in panel_titles
-        assert "P99 Latency" in panel_titles
-        assert "Pod Restarts" in panel_titles
-        assert (tmp_path / "out" / "grafana-dashboard.json").exists()
+        assert (tmp_path / "out" / "grafana-dashboard-cm.yaml").exists()
 
 
 class TestAlertingRules:

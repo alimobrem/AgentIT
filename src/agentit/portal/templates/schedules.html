@@ -3,6 +3,13 @@
 {% block content %}
 <h1>Scheduled Operations</h1>
 
+{% if request.query_params.get('created') %}
+<div class="alert alert-success">Schedule created successfully.</div>
+{% endif %}
+{% if request.query_params.get('deleted') %}
+<div class="alert alert-success">Schedule deleted.</div>
+{% endif %}
+
 <div class="stat-grid">
   <div class="stat-card">
     <div class="stat-label">Scheduled Jobs</div>
@@ -15,6 +22,38 @@
   <div class="stat-card">
     <div class="stat-label">Monitored Apps</div>
     <div class="stat-value">{{ apps | length }}</div>
+  </div>
+</div>
+
+<div x-data="{ showForm: false }">
+  <button class="btn btn-green mb-1" @click="showForm = !showForm" x-text="showForm ? 'Cancel' : 'Create Schedule'"></button>
+  <div x-show="showForm" x-cloak>
+    <form method="post" action="/schedules/create" class="form-narrow mb-2">
+      <div class="form-group">
+        <label class="form-label" for="sched-app">App Name</label>
+        <input type="text" id="sched-app" name="app_name" required placeholder="my-app">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="sched-job">Job Name</label>
+        <input type="text" id="sched-job" name="job_name" required placeholder="Nightly compliance scan">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="sched-agent">Agent</label>
+        <input type="text" id="sched-agent" name="agent" required placeholder="compliance">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="sched-cron">Schedule (cron)</label>
+        <input type="text" id="sched-cron" name="schedule" required placeholder="0 3 * * *">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="sched-cmd">Command</label>
+        <input type="text" id="sched-cmd" name="command" required placeholder="python -m agentit watch --rescan --dimension compliance">
+      </div>
+      <button type="submit" class="btn">
+        <span class="btn-label">Create</span>
+        <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+      </button>
+    </form>
   </div>
 </div>
 
@@ -47,7 +86,7 @@
 <h2 class="section-title">Scheduled CronWorkflows</h2>
 <table>
   <thead>
-    <tr><th>App</th><th>Job</th><th>Schedule</th><th>Agent</th><th>Policy</th><th>Action</th></tr>
+    <tr><th>App</th><th>Job</th><th>Schedule</th><th>Agent</th><th>Source</th><th>Policy</th><th>Action</th></tr>
   </thead>
   <tbody>
     {% for s in schedules %}
@@ -55,6 +94,7 @@
       <td class="text-bold">{{ s.app_name }}</td>
       <td>{{ s.job_name }}</td>
       <td>
+        {% if s.source == 'onboarding' %}
         <form method="post" action="/schedules/update" class="inline-form schedule-edit-form">
           <input type="hidden" name="app_name" value="{{ s.app_name }}">
           <input type="hidden" name="job_key" value="{{ s.agent }}">
@@ -64,25 +104,42 @@
             <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
           </button>
         </form>
+        {% else %}
+        <span>{{ s.schedule }}</span>
+        {% endif %}
         <span class="text-muted text-xs">{{ s.human_schedule }}</span>
       </td>
       <td>{{ s.agent }}</td>
+      <td>
+        {% if s.source == 'manual' %}
+          <span class="badge badge-info">manual</span>
+        {% else %}
+          <span class="badge badge-low">onboarding</span>
+        {% endif %}
+      </td>
       <td><span class="badge badge-info" title="{% if s.concurrency == 'Forbid' %}Skip if previous run still active{% elif s.concurrency == 'Replace' %}Cancel previous run and start new{% else %}Allow concurrent runs{% endif %}">{{ s.concurrency }}</span></td>
       <td>
-        {% if s.enabled %}
-        <form method="post" action="/schedules/toggle" class="inline-form">
-          <input type="hidden" name="app_name" value="{{ s.app_name }}">
-          <input type="hidden" name="job_key" value="{{ s.agent }}">
-          <input type="hidden" name="enabled" value="false">
-          <button type="submit" class="btn btn-sm btn-outline">Disable</button>
-        </form>
+        {% if s.source == 'onboarding' %}
+          {% if s.enabled %}
+          <form method="post" action="/schedules/toggle" class="inline-form">
+            <input type="hidden" name="app_name" value="{{ s.app_name }}">
+            <input type="hidden" name="job_key" value="{{ s.agent }}">
+            <input type="hidden" name="enabled" value="false">
+            <button type="submit" class="btn btn-sm btn-outline">Disable</button>
+          </form>
+          {% else %}
+          <form method="post" action="/schedules/toggle" class="inline-form">
+            <input type="hidden" name="app_name" value="{{ s.app_name }}">
+            <input type="hidden" name="job_key" value="{{ s.agent }}">
+            <input type="hidden" name="enabled" value="true">
+            <button type="submit" class="btn btn-sm btn-green">Enable</button>
+          </form>
+          {% endif %}
         {% else %}
-        <form method="post" action="/schedules/toggle" class="inline-form">
-          <input type="hidden" name="app_name" value="{{ s.app_name }}">
-          <input type="hidden" name="job_key" value="{{ s.agent }}">
-          <input type="hidden" name="enabled" value="true">
-          <button type="submit" class="btn btn-sm btn-green">Enable</button>
-        </form>
+          <form method="post" action="/schedules/delete" class="inline-form">
+            <input type="hidden" name="schedule_id" value="{{ s.id }}">
+            <button type="submit" class="btn btn-sm btn-danger-outline" onclick="return confirm('Delete this schedule?')">Delete</button>
+          </form>
         {% endif %}
       </td>
     </tr>
@@ -90,6 +147,6 @@
   </tbody>
 </table>
 {% else %}
-<p class="text-muted mt-2">No scheduled operations yet. Onboard an app to generate CronWorkflows.</p>
+<p class="text-muted mt-2">No scheduled operations yet. Onboard an app to generate CronWorkflows, or create one manually.</p>
 {% endif %}
 {% endblock %}

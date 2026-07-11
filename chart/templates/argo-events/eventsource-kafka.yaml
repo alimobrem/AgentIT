@@ -18,4 +18,20 @@ spec:
         rebalanceStrategy: range
       jsonBody: true
       version: "4.1.0"
+    agentit-assessments:
+      url: agentit-kafka-kafka-bootstrap:9092
+      topic: agentit-assessments
+      consumerGroup:
+        groupName: agentit-argo-assessments
+        rebalanceStrategy: range
+      jsonBody: true
+      version: "4.1.0"
+    agentit-alerts:
+      url: agentit-kafka-kafka-bootstrap:9092
+      topic: agentit-alerts
+      consumerGroup:
+        groupName: agentit-argo-alerts
+        rebalanceStrategy: range
+      jsonBody: true
+      version: "4.1.0"
 {{- end }}

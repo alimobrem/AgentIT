@@ -33,7 +33,7 @@ class ComplianceAgent:
         generated: list[GeneratedFile] = []
 
         generated.extend(self._generate_kyverno_policies())
-        generated.extend(self._generate_sbom_script())
+        generated.extend(self._generate_sbom_task())
         generated.extend(self._generate_compliance_evidence())
         generated.extend(self._generate_audit_policy())
         generated.extend(self._generate_compliance_cronworkflow())
@@ -186,45 +186,50 @@ class ComplianceAgent:
             ),
         ]
 
-    def _generate_sbom_script(self) -> list[GeneratedFile]:
+    def _generate_sbom_task(self) -> list[GeneratedFile]:
         hits = self._findings_for("sbom", "supply chain", "bom")
         if not hits:
             return []
 
-        content = textwrap.dedent("""\
-            #!/usr/bin/env bash
-            set -euo pipefail
+        name = self._name
+        task: dict = {
+            "apiVersion": "tekton.dev/v1",
+            "kind": "Task",
+            "metadata": {
+                "name": f"{name}-sbom-generate",
+                "labels": {"app.kubernetes.io/name": name},
+            },
+            "spec": {
+                "params": [
+                    {"name": "IMAGE", "type": "string", "description": "Image reference to scan"},
+                ],
+                "workspaces": [
+                    {"name": "source"},
+                    {"name": "sbom-output"},
+                ],
+                "steps": [
+                    {
+                        "name": "generate-sbom",
+                        "image": "anchore/syft:latest",
+                        "script": (
+                            "#!/usr/bin/env sh\n"
+                            "set -e\n"
+                            'syft "$(params.IMAGE)" -o cyclonedx-json=/workspace/sbom-output/sbom.cdx.json\n'
+                            'echo "SBOM generated for $(params.IMAGE)"\n'
+                        ),
+                    },
+                ],
+            },
+        }
 
-            # Generate SBOM in CycloneDX format using syft
-            # Usage: ./generate-sbom.sh <image-or-path> [output-dir]
-
-            TARGET="${1:-.}"
-            OUTPUT_DIR="${2:-./sbom-output}"
-
-            mkdir -p "${OUTPUT_DIR}"
-
-            TIMESTAMP=$(date -u +%Y%m%d%H%M%S)
-            OUTPUT_FILE="${OUTPUT_DIR}/sbom-${TIMESTAMP}.cdx.json"
-
-            echo "Generating SBOM for: ${TARGET}"
-            echo "Output: ${OUTPUT_FILE}"
-
-            if ! command -v syft &>/dev/null; then
-                echo "ERROR: syft is not installed. Install from https://github.com/anchore/syft" >&2
-                exit 1
-            fi
-
-            syft "${TARGET}" -o cyclonedx-json="${OUTPUT_FILE}"
-
-            echo "SBOM generated: ${OUTPUT_FILE}"
-        """)
-        self._write("generate-sbom.sh", content)
+        content = yaml.dump(task, default_flow_style=False, sort_keys=False)
+        self._write("sbom-generate-task.yaml", content)
 
         return [
             GeneratedFile(
-                path="generate-sbom.sh",
+                path="sbom-generate-task.yaml",
                 content=content,
-                description="Shell script to generate CycloneDX SBOM using syft.",
+                description=f"Tekton Task to generate CycloneDX SBOM for {name} using syft.",
                 finding_addressed="; ".join(hits),
             ),
         ]

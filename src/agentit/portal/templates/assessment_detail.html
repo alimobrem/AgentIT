@@ -47,7 +47,7 @@
 </div>
 
 {% if urgent_findings %}
-<div x-data="{ open: false }">
+<div x-data="{ open: true }">
   <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
     Findings ({{ urgent_findings|length }})
   </h2>
@@ -66,7 +66,7 @@
 {% endif %}
 
 {% if report.remediation_plan %}
-<div x-data="{ open: false }">
+<div x-data="{ open: true }">
   <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
     Remediation Plan ({{ report.remediation_plan|length }})
   </h2>
@@ -91,17 +91,9 @@
 </div>
 {% endif %}
 
-{% if remediation_count > 0 or slo_count > 0 or onboarding_count > 0 %}
 <div class="action-bar mt-2">
-  {% if remediation_count > 0 %}
   <a href="/assessments/{{ assessment_id }}/remediations" class="btn btn-sm btn-outline">Remediations ({{ remediation_count }})</a>
-  {% endif %}
-  {% if slo_count > 0 %}
   <a href="/assessments/{{ assessment_id }}/slos" class="btn btn-sm btn-outline">SLOs ({{ slo_count }})</a>
-  {% endif %}
-  {% if onboarding_count > 0 %}
   <a href="/assessments/{{ assessment_id }}/onboarding-history" class="btn btn-sm btn-outline">History ({{ onboarding_count }})</a>
-  {% endif %}
 </div>
-{% endif %}
 {% endblock %}

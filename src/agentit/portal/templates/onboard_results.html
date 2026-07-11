@@ -74,7 +74,8 @@
       <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Running&hellip;</span>
     </button>
   </form>
-  <form method="post" action="/assessments/{{ assessment_id }}/apply" class="inline-form">
+  <form method="post" action="/assessments/{{ assessment_id }}/apply" class="inline-form"
+        onsubmit="return confirm('This will apply manifests to the live cluster. Continue?')">
     <input type="hidden" name="namespace" value="{{ report.repo_name | lower | replace('_', '-') | replace('.', '-') }}">
     <button type="submit" class="btn btn-green btn-lg">
       <span class="btn-label">Apply to Cluster</span>
@@ -143,7 +144,8 @@
       <td class="text-sm text-muted"><code>{{ kind }}</code></td>
       <td>
         {% if op.get('package') %}
-        <form method="post" action="/api/install-operator" class="inline-form">
+        <form method="post" action="/api/install-operator" class="inline-form"
+              onsubmit="return confirm('Install operator {{ op.name }} on the cluster?')">
           <input type="hidden" name="package" value="{{ op.package }}">
           <input type="hidden" name="channel" value="{{ op.get('channel', 'stable') }}">
           <input type="hidden" name="source" value="{{ op.source }}">

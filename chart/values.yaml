@@ -33,6 +33,15 @@ cronJobs:
   cveScan:
     enabled: false
     schedule: "0 6 * * 1"
+  complianceRescan:
+    enabled: false
+    schedule: "0 3 1 * *"
+  dependencyUpdate:
+    enabled: false
+    schedule: "0 4 * * 1"
+  costReport:
+    enabled: false
+    schedule: "0 6 * * 1"
 
 kafka:
   enabled: false

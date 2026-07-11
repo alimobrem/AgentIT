@@ -63,11 +63,11 @@ class EventConsumer:
 
     def _dead_letter(self, topic: str, message: dict, error: Exception) -> None:
         """Publish a failed message to the dead-letter topic."""
-        from agentit.events import get_publisher
+        from agentit.events import get_publisher, TOPIC_DLQ
 
         publisher = get_publisher()
         publisher.publish(
-            "agentit-dlq",
+            TOPIC_DLQ,
             agent_id="event-consumer",
             action="dead-letter",
             target_app=message.get("targetApp"),

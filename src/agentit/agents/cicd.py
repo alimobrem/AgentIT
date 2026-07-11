@@ -143,9 +143,29 @@ class CICDAgent:
                         ],
                     },
                     {
+                        "name": "image-scan",
+                        "taskRef": {"name": f"{name}-image-scan", "kind": "Task"},
+                        "runAfter": ["image-push"],
+                        "params": [
+                            {"name": "IMAGE", "value": "$(params.image-ref)"},
+                        ],
+                    },
+                    {
+                        "name": "sbom-generate",
+                        "taskRef": {"name": f"{name}-sbom-generate", "kind": "Task"},
+                        "runAfter": ["image-push"],
+                        "params": [
+                            {"name": "IMAGE", "value": "$(params.image-ref)"},
+                        ],
+                        "workspaces": [
+                            {"name": "source", "workspace": "shared-workspace"},
+                            {"name": "sbom-output", "workspace": "shared-workspace"},
+                        ],
+                    },
+                    {
                         "name": "deploy",
                         "taskRef": {"name": "kubernetes-actions", "kind": "ClusterTask"},
-                        "runAfter": ["image-push"],
+                        "runAfter": ["image-scan", "sbom-generate"],
                         "params": [
                             {"name": "script", "value": f"kubectl rollout restart deployment/{name}"},
                         ],

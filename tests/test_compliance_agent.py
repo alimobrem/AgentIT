@@ -62,24 +62,24 @@ class TestKyvernoPolicies:
         assert not any(f.path == "kyverno-policies.yaml" for f in result.files)
 
 
-class TestSbomScript:
-    def test_generates_sbom_script(self, tmp_path: Path) -> None:
+class TestSbomTask:
+    def test_generates_sbom_task(self, tmp_path: Path) -> None:
         report = make_report(
             scores=[_score_with_finding("compliance", "sbom", "No SBOM found")],
         )
         result = ComplianceAgent(report, tmp_path / "out").run()
 
-        sbom = [f for f in result.files if f.path == "generate-sbom.sh"]
+        sbom = [f for f in result.files if f.path == "sbom-generate-task.yaml"]
         assert len(sbom) == 1
-        assert "#!/usr/bin/env bash" in sbom[0].content
+        assert "kind: Task" in sbom[0].content
         assert "syft" in sbom[0].content
         assert "cyclonedx-json" in sbom[0].content
-        assert (tmp_path / "out" / "generate-sbom.sh").exists()
+        assert (tmp_path / "out" / "sbom-generate-task.yaml").exists()
 
     def test_skips_sbom_without_findings(self, tmp_path: Path) -> None:
         report = make_report(scores=[])
         result = ComplianceAgent(report, tmp_path / "out").run()
-        assert not any(f.path == "generate-sbom.sh" for f in result.files)
+        assert not any(f.path == "sbom-generate-task.yaml" for f in result.files)
 
 
 class TestComplianceEvidence:

@@ -974,12 +974,14 @@ def test_assessment_detail_shows_remediation_button(client, _override_store):
     assert "Remediations (1)" in resp.text
 
 
-def test_assessment_detail_hides_buttons_when_empty(client, _override_store):
+def test_assessment_detail_shows_links_with_zero_counts(client, _override_store):
     store = _override_store
     aid = store.save(_make_report())
     resp = client.get(f"/assessments/{aid}")
     assert resp.status_code == 200
-    assert "Remediations" not in resp.text or "Remediations (0)" not in resp.text
+    assert "Remediations (0)" in resp.text
+    assert "SLOs (0)" in resp.text
+    assert "History (0)" in resp.text
 
 
 # ── SLO add form ───────────────────────────────────────────────────────

@@ -46,32 +46,26 @@ class TestDecommissionPlan:
         assert "No databases detected" in content
 
 
-class TestCleanupScript:
-    def test_generates_cleanup_script(self, tmp_path: Path) -> None:
+class TestCleanupTask:
+    def test_generates_cleanup_task(self, tmp_path: Path) -> None:
         report = make_report()
         result = RetirementAgent(report, tmp_path / "out").run()
 
-        script = [f for f in result.files if f.path == "cleanup-script.sh"]
-        assert len(script) == 1
+        task = [f for f in result.files if f.path == "cleanup-task.yaml"]
+        assert len(task) == 1
 
-        content = script[0].content
-        assert "#!/usr/bin/env bash" in content
-        assert "set -euo pipefail" in content
-        assert "delete deployment" in content
-        assert "delete service" in content
-        assert "delete route" in content
-        assert "delete configmap" in content
-        assert "delete secret" in content
-        assert "delete pvc" in content
-        assert "--force" in content
-        assert "delete namespace" in content
-        assert (tmp_path / "out" / "cleanup-script.sh").exists()
+        content = task[0].content
+        assert "kind: Task" in content
+        assert "delete-workloads" in content
+        assert "delete-pvcs" in content
+        assert "ose-cli" in content
+        assert (tmp_path / "out" / "cleanup-task.yaml").exists()
 
-    def test_cleanup_script_executable(self, tmp_path: Path) -> None:
+    def test_cleanup_task_has_pvc_param(self, tmp_path: Path) -> None:
         report = make_report()
-        RetirementAgent(report, tmp_path / "out").run()
-        script_path = tmp_path / "out" / "cleanup-script.sh"
-        assert script_path.stat().st_mode & 0o755
+        result = RetirementAgent(report, tmp_path / "out").run()
+        task = [f for f in result.files if f.path == "cleanup-task.yaml"]
+        assert "DELETE_PVCS" in task[0].content
 
 
 class TestDataArchive:
@@ -110,7 +104,7 @@ class TestRetirementResult:
     def test_summary_count(self, tmp_path: Path) -> None:
         report = make_report()
         result = RetirementAgent(report, tmp_path / "out").run()
-        # Without postgres: decommission-plan.md + cleanup-script.sh = 2
+        # Without postgres: decommission-plan.md + cleanup-task.yaml = 2
         assert result.summary == "Generated 2 retirement artifacts."
 
     def test_summary_with_archive(self, tmp_path: Path) -> None:

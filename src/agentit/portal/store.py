@@ -17,6 +17,7 @@ class AssessmentStore:
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.row_factory = sqlite3.Row
         self._conn.execute(
             """
@@ -165,6 +166,21 @@ class AssessmentStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scheduled_operations (
+                id TEXT PRIMARY KEY,
+                app_name TEXT NOT NULL,
+                job_name TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                schedule TEXT NOT NULL,
+                command TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         self._conn.commit()
 
     # ── Settings ───────────────────────────────────────────────────────
@@ -276,6 +292,7 @@ class AssessmentStore:
         return [dict(r) for r in rows]
 
     def delete(self, assessment_id: str) -> bool:
+        self._conn.execute("DELETE FROM remediation_jobs WHERE assessment_id = ?", (assessment_id,))
         self._conn.execute("DELETE FROM onboarding_results WHERE assessment_id = ?", (assessment_id,))
         self._conn.execute("DELETE FROM remediations WHERE assessment_id = ?", (assessment_id,))
         self._conn.execute("DELETE FROM slos WHERE assessment_id = ?", (assessment_id,))
@@ -630,12 +647,12 @@ class AssessmentStore:
 
     def update_remediation_status(self, remediation_id: str, status: str) -> bool:
         cursor = self._conn.execute(
-            "UPDATE remediations SET status = ? WHERE id = ?",
+            "UPDATE remediations SET status = ? WHERE id = ? AND status != 'completed'",
             (status, remediation_id),
         )
         if status == "completed":
             self._conn.execute(
-                "UPDATE remediations SET completed_at = ? WHERE id = ?",
+                "UPDATE remediations SET completed_at = ? WHERE id = ? AND status = 'completed'",
                 (datetime.now(timezone.utc).isoformat(), remediation_id),
             )
         self._conn.commit()
@@ -807,3 +824,56 @@ class AssessmentStore:
             d["steps_completed"] = json.loads(d["steps_completed"])
             result.append(d)
         return result
+
+    # ── Scheduled Operations ─────────────────────────────────────────
+
+    def create_schedule(
+        self,
+        app_name: str,
+        job_name: str,
+        agent: str,
+        schedule: str,
+        command: str,
+    ) -> str:
+        schedule_id = uuid.uuid4().hex
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO scheduled_operations
+                (id, app_name, job_name, agent, schedule, command, enabled, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+            """,
+            (schedule_id, app_name, job_name, agent, schedule, command, now, now),
+        )
+        self._conn.commit()
+        return schedule_id
+
+    def list_schedules(self) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM scheduled_operations ORDER BY created_at DESC",
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_schedule_cron(self, schedule_id: str, schedule: str) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE scheduled_operations SET schedule = ?, updated_at = ? WHERE id = ?",
+            (schedule, datetime.now(timezone.utc).isoformat(), schedule_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def delete_schedule(self, schedule_id: str) -> bool:
+        cursor = self._conn.execute(
+            "DELETE FROM scheduled_operations WHERE id = ?",
+            (schedule_id,),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def toggle_schedule(self, schedule_id: str, enabled: bool) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE scheduled_operations SET enabled = ?, updated_at = ? WHERE id = ?",
+            (int(enabled), datetime.now(timezone.utc).isoformat(), schedule_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0

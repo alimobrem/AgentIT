@@ -13,7 +13,7 @@ spec:
   dependencies:
     - name: assessment-complete
       eventSourceName: agentit-kafka
-      eventName: agentit-events
+      eventName: agentit-assessments
       filters:
         data:
           - path: body.action

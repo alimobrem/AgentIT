@@ -52,7 +52,8 @@
     </button>
   </form>
   {% else %}
-  <form method="post" action="/settings/auto-mode" class="inline-form">
+  <form method="post" action="/settings/auto-mode" class="inline-form"
+        onsubmit="return confirm('Enable auto-mode? Agents will automatically apply safe changes to your clusters.')">
     <input type="hidden" name="value" value="true">
     <button type="submit" class="btn btn-green">
       <span class="btn-label">Enable Auto-Mode</span>

@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Dashboard - AgentIT{% endblock %}
 {% block content %}
+{% if request.query_params.get('error') %}
+<div class="alert alert-error">{{ request.query_params.get('error') }}</div>
+{% endif %}
 <h1>Enterprise Readiness</h1>
 
 {% if assessments %}
@@ -68,7 +71,8 @@
 <div class="hero-cta">
   <h2>Assess your first app</h2>
   <p>Paste a GitHub repo URL and AgentIT will score it across 7 enterprise readiness dimensions — security, observability, CI/CD, compliance, infrastructure, data governance, and HA/DR.</p>
-  <form method="post" action="/assess" class="form-narrow">
+  <form method="post" action="/assess" class="form-narrow"
+        onsubmit="var b=this.querySelector('button');b.disabled=true;b.classList.add('submitting')">
     <div class="form-group">
       <input type="url" name="repo_url" required placeholder="https://github.com/org/repo">
     </div>
@@ -85,12 +89,15 @@
         <span class="btn-label">Run Assessment</span>
         <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
       </button>
-      <form method="post" action="/self-assess" class="inline-form">
-        <button type="submit" class="btn btn-lg btn-outline">
-          <span class="btn-label">Assess AgentIT</span>
-          <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
-        </button>
-      </form>
+    </div>
+  </form>
+  <form method="post" action="/self-assess" class="inline-form"
+        onsubmit="var b=this.querySelector('button');b.disabled=true;b.classList.add('submitting')">
+    <div class="action-bar">
+      <button type="submit" class="btn btn-lg btn-outline">
+        <span class="btn-label">Assess AgentIT</span>
+        <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
+      </button>
     </div>
   </form>
 </div>
