@@ -26,6 +26,9 @@ env:
 rollout:
   enabled: true
 
+gcp:
+  credentialsSecret: ""
+
 argoWorkflows:
   enabled: false
 

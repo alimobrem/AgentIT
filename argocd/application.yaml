@@ -27,6 +27,8 @@ spec:
           value: itpc-gcp-product-all-claude
         - name: env.CLOUD_ML_REGION
           value: global
+        - name: gcp.credentialsSecret
+          value: gcp-credentials
   destination:
     server: https://kubernetes.default.svc
     namespace: agentit

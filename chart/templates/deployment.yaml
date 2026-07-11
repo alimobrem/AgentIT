@@ -44,6 +44,11 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: {{ .Release.Name }}-data
+        {{- if .Values.gcp.credentialsSecret }}
+        - name: gcp-credentials
+          secret:
+            secretName: {{ .Values.gcp.credentialsSecret }}
+        {{- end }}
       containers:
         - name: agentit
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -58,6 +63,10 @@ spec:
               value: {{ .Values.env.ANTHROPIC_VERTEX_PROJECT_ID | default "" | quote }}
             - name: CLOUD_ML_REGION
               value: {{ .Values.env.CLOUD_ML_REGION | default "" | quote }}
+            {{- if .Values.gcp.credentialsSecret }}
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /var/secrets/gcp/credentials.json
+            {{- end }}
             {{- if .Values.kafka.enabled }}
             - name: AGENTIT_KAFKA_BOOTSTRAP
               value: {{ .Values.kafka.bootstrapServers | quote }}
@@ -65,6 +74,11 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            {{- if .Values.gcp.credentialsSecret }}
+            - name: gcp-credentials
+              mountPath: /var/secrets/gcp
+              readOnly: true
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /
