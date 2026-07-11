@@ -19,6 +19,7 @@ from agentit.portal.store import AssessmentStore
 
 def pytest_addoption(parser):
     parser.addoption("--run-real-repos", action="store_true", default=False, help="Run tests against real repos")
+    parser.addoption("--live-cluster", action="store_true", default=False, help="Run e2e tests against a live OpenShift cluster")
 
 
 def pytest_collection_modifyitems(config, items):
@@ -26,6 +27,11 @@ def pytest_collection_modifyitems(config, items):
         skip = pytest.mark.skip(reason="needs --run-real-repos flag")
         for item in items:
             if "real_repo" in item.keywords:
+                item.add_marker(skip)
+    if not config.getoption("--live-cluster"):
+        skip = pytest.mark.skip(reason="needs --live-cluster flag and active oc login")
+        for item in items:
+            if "live_cluster" in item.keywords:
                 item.add_marker(skip)
 
 
