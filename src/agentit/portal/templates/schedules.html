@@ -55,10 +55,10 @@
       <td class="text-bold">{{ s.app_name }}</td>
       <td>{{ s.job_name }}</td>
       <td>
-        <form method="post" action="/schedules/update" class="inline-form" style="display:flex;gap:var(--space-2);align-items:center">
+        <form method="post" action="/schedules/update" class="inline-form schedule-edit-form">
           <input type="hidden" name="app_name" value="{{ s.app_name }}">
           <input type="hidden" name="job_key" value="{{ s.agent }}">
-          <input type="text" name="schedule" value="{{ s.schedule }}" style="width:120px;font-size:var(--font-xs)">
+          <input type="text" name="schedule" value="{{ s.schedule }}" class="schedule-input">
           <button type="submit" class="btn btn-sm btn-outline">
             <span class="btn-label">Save</span>
             <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>

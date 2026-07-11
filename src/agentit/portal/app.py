@@ -54,7 +54,7 @@ def get_store() -> AssessmentStore:
     return store
 
 
-def _enrich_fleet_with_cluster_status(fleet: list[dict]) -> list[dict]:
+def _enrich_fleet_with_cluster_status(fleet: list[dict], _store: object | None = None) -> list[dict]:
     """Check cluster for each app's deployment status."""
     import json as _json
 
@@ -75,18 +75,16 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict]) -> list[dict]:
                     "namespace": namespace,
                 }
         except Exception:
-            pass
+            log.debug("Failed to fetch Argo CD apps for fleet enrichment", exc_info=True)
 
     for app in fleet:
         app_name = app["repo_name"].lower().replace("_", "-").replace(".", "-")
         argo = argo_status.get(app_name)
         apply_results = None
         try:
-            from agentit.portal.store import AssessmentStore
-            _s = AssessmentStore()
-            apply_results = _s.get_apply_results(app["id"])
+            apply_results = _store.get_apply_results(app["id"]) if _store else None
         except Exception:
-            pass
+            log.debug("Failed to get apply results for %s", app["id"], exc_info=True)
 
         if argo:
             app["deploy_status"] = "synced" if argo["sync"] == "Synced" else "out-of-sync"
@@ -111,7 +109,7 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict]) -> list[dict]:
 async def home(request: Request) -> HTMLResponse:
     s = get_store()
     fleet = s.get_fleet_data()
-    fleet = await asyncio.to_thread(_enrich_fleet_with_cluster_status, fleet)
+    fleet = await asyncio.to_thread(_enrich_fleet_with_cluster_status, fleet, s)
     total_apps = len(fleet)
     if total_apps == 0:
         return templates.TemplateResponse(request, "dashboard.html", {
@@ -791,7 +789,7 @@ def _get_watcher_deploy_status() -> dict[str, str]:
             ready = dep.get("status", {}).get("readyReplicas", 0)
             result[name] = "running" if ready and ready > 0 else "not running"
     except Exception:
-        pass
+        log.debug("Failed to parse deployment status JSON", exc_info=True)
     return result
 
 
@@ -800,7 +798,7 @@ def _run_cmd(cmd: list[str], timeout: int = 10) -> str | None:
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return r.stdout if r.returncode == 0 else None
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return None
 
 
@@ -817,12 +815,11 @@ def _get_cluster_health() -> dict:
     # Argo CD apps — only show AgentIT-managed apps
     managed_names = {"agentit"}
     try:
-        from agentit.portal.store import AssessmentStore
-        _s = AssessmentStore()
+        _s = get_store()
         for app_data in _s.get_fleet_data():
             managed_names.add(app_data["repo_name"].lower().replace("_", "-").replace(".", "-"))
     except Exception:
-        pass
+        log.debug("Failed to load fleet for health check", exc_info=True)
 
     raw = _run_cmd(["oc", "get", "applications.argoproj.io", "-n", "openshift-gitops", "-o", "json"])
     if raw:
@@ -838,7 +835,7 @@ def _get_cluster_health() -> dict:
                 result["argo_apps"].append({"name": name, "sync": sync, "health": health})
             result["argo_synced"] = all(a["sync"] == "Synced" for a in result["argo_apps"]) if result["argo_apps"] else True
         except Exception:
-            pass
+            log.warning("Failed to parse Argo CD apps JSON", exc_info=True)
 
     # Pods — only show Running/Pending/Failed, skip Completed pipeline pods
     raw = _run_cmd(["oc", "get", "pods", "-n", "agentit", "-o", "json"])
@@ -861,7 +858,7 @@ def _get_cluster_health() -> dict:
                 })
             result["pods_running"] = sum(1 for p in result["pods"] if p["status"] == "Running")
         except Exception:
-            pass
+            log.warning("Failed to parse pods JSON", exc_info=True)
 
     # Pipeline runs
     raw = _run_cmd(["oc", "get", "pipelineruns", "-n", "agentit", "-o", "json"], 5)
@@ -883,7 +880,7 @@ def _get_cluster_health() -> dict:
             if result["pipelines"]:
                 result["pipeline_status"] = result["pipelines"][-1]["status"]
         except Exception:
-            pass
+            log.warning("Failed to parse pipeline runs JSON", exc_info=True)
 
     # Kafka
     raw = _run_cmd(["oc", "get", "kafka", "-n", "agentit", "-o",
@@ -896,7 +893,7 @@ def _get_cluster_health() -> dict:
         pub = get_publisher()
         result["publisher_ok"] = pub._producer is not None
     except Exception:
-        pass
+        log.debug("Failed to check event publisher", exc_info=True)
 
     return result
 
@@ -949,7 +946,7 @@ async def pod_detail_page(request: Request, pod_name: str) -> HTMLResponse:
                     "message": e.get("message", "")[:200],
                 })
         except Exception:
-            pass
+            log.debug("Failed to parse pod events", exc_info=True)
 
     return templates.TemplateResponse(request, "pod_detail.html", {
         "pod_name": pod_name,
@@ -1067,7 +1064,7 @@ async def schedules_page(request: Request) -> HTMLResponse:
                 doc = _yaml.safe_load(f["content"])
                 cron = doc.get("spec", {}).get("schedule", "unknown")
                 concurrency = doc.get("spec", {}).get("concurrencyPolicy", "Allow")
-            except Exception:
+            except (ValueError, AttributeError):
                 cron = "unknown"
                 concurrency = "unknown"
             override_key = f"schedule:{app_data['repo_name']}:{agent}"

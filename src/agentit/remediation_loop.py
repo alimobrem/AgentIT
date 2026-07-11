@@ -46,7 +46,7 @@ class RemediationLoop:
             try:
                 self._store.log_event("remediation-loop", action, target, severity, summary)
             except Exception:
-                pass
+                logger.warning("Failed to log event to store", exc_info=True)
         if self._publisher is not None:
             try:
                 self._publisher.publish(
@@ -58,7 +58,7 @@ class RemediationLoop:
                     summary=summary,
                 )
             except Exception:
-                pass
+                logger.warning("Failed to publish event to Kafka", exc_info=True)
 
     def trigger(
         self,

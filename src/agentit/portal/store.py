@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from agentit.models import AssessmentReport, Severity
 
@@ -46,13 +46,13 @@ class AssessmentStore:
             self._conn.execute(
                 "ALTER TABLE onboarding_results ADD COLUMN orchestration_json TEXT DEFAULT '{}'"
             )
-        except Exception:
+        except sqlite3.OperationalError:
             pass
         try:
             self._conn.execute(
                 "ALTER TABLE onboarding_results ADD COLUMN pr_url TEXT DEFAULT ''"
             )
-        except Exception:
+        except sqlite3.OperationalError:
             pass
         self._conn.execute(
             """
@@ -518,7 +518,7 @@ class AssessmentStore:
 
     def expire_stale_gates(self, hours: int = 24) -> int:
         """Auto-reject pending gates older than the given hours."""
-        cutoff = (datetime.now(timezone.utc) - __import__("datetime").timedelta(hours=hours)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         cursor = self._conn.execute(
             """
             UPDATE gates SET status = 'expired', resolved_at = ?, resolved_by = 'auto-expire'
@@ -544,7 +544,7 @@ class AssessmentStore:
 
     def get_stale_gates(self, hours: int = 24) -> list[dict]:
         """Find pending gates older than the given hours."""
-        cutoff = (datetime.now(timezone.utc) - __import__("datetime").timedelta(hours=hours)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         rows = self._conn.execute(
             "SELECT * FROM gates WHERE status = 'pending' AND created_at < ? ORDER BY created_at ASC",
             (cutoff,),

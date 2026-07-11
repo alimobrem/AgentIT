@@ -227,7 +227,7 @@ def wait_for_build(run_name: str, namespace: str = "agentit", timeout: int = BUI
             if status in ("Failed", "PipelineRunTimeout"):
                 return {"status": "Failed", "reason": status}
         except Exception:
-            pass
+            logger.debug("Failed to check pipeline run status", exc_info=True)
         time.sleep(15)
 
     return {"status": "Timeout"}

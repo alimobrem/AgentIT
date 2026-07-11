@@ -6,7 +6,7 @@
 </p>
 <h1>{{ report.repo_name }}</h1>
 <p class="mb-2">
-  <a href="{{ report.repo_url }}" target="_blank" hx-boost="false">{{ report.repo_url }}</a>
+  <a href="{{ report.repo_url | safe_url }}" target="_blank" hx-boost="false">{{ report.repo_url }}</a>
   &nbsp;
   <span class="badge badge-{{ report.criticality }}">{{ report.criticality }}</span>
 </p>

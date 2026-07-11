@@ -82,7 +82,7 @@ def get_pr_status(pr_url: str) -> dict:
 
         return {"state": "unknown", "merged_at": "", "html_url": pr_url}
     except Exception:
-        logger.debug("Failed to check PR status for %s", pr_url, exc_info=True)
+        logger.warning("Failed to check PR status for %s", pr_url, exc_info=True)
         return {"state": "unknown", "merged_at": "", "html_url": pr_url}
 
 
