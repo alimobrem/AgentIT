@@ -120,10 +120,18 @@ async def assess_form(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "assess_form.html")
 
 
+def _get_llm_client():
+    import os
+    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID"):
+        from agentit.llm import LLMClient
+        return LLMClient()
+    return None
+
+
 def _clone_assess_cleanup(repo_url: str, criticality: str):
     repo_path = clone_repo(repo_url)
     try:
-        return run_assessment(repo_path, repo_url, criticality)
+        return run_assessment(repo_path, repo_url, criticality, llm_client=_get_llm_client())
     finally:
         shutil.rmtree(repo_path, ignore_errors=True)
 

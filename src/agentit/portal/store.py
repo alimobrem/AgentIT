@@ -9,7 +9,10 @@ from agentit.models import AssessmentReport
 
 
 class AssessmentStore:
-    def __init__(self, db_path: str = "agentit.db") -> None:
+    def __init__(self, db_path: str | None = None) -> None:
+        import os
+        if db_path is None:
+            db_path = os.environ.get("AGENTIT_DB_PATH", "agentit.db")
         self._db_path = db_path
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row

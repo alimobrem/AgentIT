@@ -40,6 +40,10 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-data
       containers:
         - name: agentit
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -47,8 +51,9 @@ spec:
           ports:
             - containerPort: 8080
               protocol: TCP
-          {{- if or .Values.env.ANTHROPIC_VERTEX_PROJECT_ID .Values.env.CLOUD_ML_REGION }}
           env:
+            - name: AGENTIT_DB_PATH
+              value: /data/agentit.db
             {{- if .Values.env.ANTHROPIC_VERTEX_PROJECT_ID }}
             - name: ANTHROPIC_VERTEX_PROJECT_ID
               value: {{ .Values.env.ANTHROPIC_VERTEX_PROJECT_ID | quote }}
@@ -57,7 +62,9 @@ spec:
             - name: CLOUD_ML_REGION
               value: {{ .Values.env.CLOUD_ML_REGION | quote }}
             {{- end }}
-          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
           livenessProbe:
             httpGet:
               path: /

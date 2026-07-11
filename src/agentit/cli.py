@@ -43,7 +43,7 @@ def _resolve_and_assess(
             use_llm = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID"))
         if use_llm:
             from agentit.llm import LLMClient
-            llm_client = LLMClient(model=llm_model or "claude-sonnet-4-5-20250514")
+            llm_client = LLMClient(model=llm_model or "claude-sonnet-4-6")
 
         click.echo("Running assessment...", err=True)
         report = run_assessment(repo_path, repo_url=repo_url, criticality=criticality, llm_client=llm_client)
@@ -64,7 +64,7 @@ def main() -> None:
 @click.option("--format", "output_format", type=click.Choice(["json", "terminal"]), default="json")
 @click.option("--output", "output_file", type=click.Path(), default=None)
 @click.option("--llm", "use_llm", is_flag=True, default=None, help="Enable Claude LLM (auto-detects credentials if omitted).")
-@click.option("--llm-model", default=None, help="Claude model to use (default: claude-sonnet-4-5-20250514).")
+@click.option("--llm-model", default=None, help="Claude model to use (default: claude-sonnet-4-6).")
 def assess(repo_url: str, criticality: str, output_format: str, output_file: str | None, use_llm: bool, llm_model: str | None) -> None:
     """Assess enterprise readiness of a Git repository."""
     try:

@@ -44,7 +44,7 @@ class LLMClient:
     - ANTHROPIC_API_KEY → direct Anthropic API
     """
 
-    def __init__(self, model: str = "claude-sonnet-4-5-20250514", **_kwargs) -> None:
+    def __init__(self, model: str = "claude-sonnet-4-6", **_kwargs) -> None:
         self.model = model
         self._client = _create_client()
 
