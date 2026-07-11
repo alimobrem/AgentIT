@@ -62,6 +62,10 @@ spec:
             - name: CLOUD_ML_REGION
               value: {{ .Values.env.CLOUD_ML_REGION | quote }}
             {{- end }}
+            {{- if .Values.kafka.enabled }}
+            - name: AGENTIT_KAFKA_BOOTSTRAP
+              value: {{ .Values.kafka.bootstrapServers | quote }}
+            {{- end }}
           volumeMounts:
             - name: data
               mountPath: /data

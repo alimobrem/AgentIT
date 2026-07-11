@@ -28,3 +28,10 @@ rollout:
 
 argoWorkflows:
   enabled: false
+
+kafka:
+  enabled: false
+  bootstrapServers: agentit-kafka-kafka-bootstrap.agentit.svc:9092
+
+argoEvents:
+  enabled: false

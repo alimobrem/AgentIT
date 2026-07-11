@@ -1,0 +1,18 @@
+{{- if .Values.argoEvents.enabled }}
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: agentit-kafka
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  kafka:
+    agentit-events:
+      url: agentit-kafka-kafka-bootstrap:9092
+      topic: agentit-events
+      consumerGroup: agentit-argo-events
+      jsonBody: true
+{{- end }}

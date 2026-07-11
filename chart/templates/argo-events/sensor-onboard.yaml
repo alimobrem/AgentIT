@@ -1,0 +1,43 @@
+{{- if .Values.argoEvents.enabled }}
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: agentit-onboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  eventBusName: default
+  dependencies:
+    - name: assessment-complete
+      eventSourceName: agentit-kafka
+      eventName: agentit-events
+      filters:
+        data:
+          - path: type
+            type: string
+            value:
+              - assessment-complete
+          - path: score
+            type: number
+            comparator: "<"
+            value:
+              - "70"
+  triggers:
+    - template:
+        name: trigger-onboarding
+        argoWorkflow:
+          operation: submit
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: agentit-onboarding-
+                namespace: {{ .Release.Namespace }}
+              spec:
+                workflowTemplateRef:
+                  name: agentit-onboarding
+{{- end }}
