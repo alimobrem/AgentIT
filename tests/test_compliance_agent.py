@@ -51,7 +51,7 @@ class TestKyvernoPolicies:
         assert "disallow-latest-tag" in names
 
         for doc in docs:
-            assert doc["kind"] == "ClusterPolicy"
+            assert doc["kind"] == "Policy"
             assert doc["apiVersion"] == "kyverno.io/v1"
 
         assert (tmp_path / "out" / "kyverno-policies.yaml").exists()

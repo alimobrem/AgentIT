@@ -34,7 +34,7 @@ _CRD_TO_OPERATOR: dict[str, dict] = {
         "channel": "stable",
         "source": "redhat-operators",
     },
-    "ClusterPolicy": {
+    "Policy": {
         "name": "Kyverno",
         "package": "kyverno",
         "channel": "stable",
@@ -90,7 +90,7 @@ _CRD_TO_OPERATOR: dict[str, dict] = {
 
 _CLUSTER_SCOPED_KINDS = frozenset({
     "ClusterRole", "ClusterRoleBinding", "ClusterPolicy",
-    "ClusterCleanupPolicy", "Namespace", "CustomResourceDefinition",
+    "ClusterCleanupPolicy", "CustomResourceDefinition",
     "StorageClass", "PriorityClass", "ClusterIssuer",
 })
 

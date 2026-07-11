@@ -68,7 +68,7 @@ class ComplianceAgent:
         docs: list[dict] = [
             {
                 "apiVersion": "kyverno.io/v1",
-                "kind": "ClusterPolicy",
+                "kind": "Policy",
                 "metadata": {"name": "require-labels"},
                 "spec": {
                     "validationFailureAction": "Enforce",
@@ -93,7 +93,7 @@ class ComplianceAgent:
             },
             {
                 "apiVersion": "kyverno.io/v1",
-                "kind": "ClusterPolicy",
+                "kind": "Policy",
                 "metadata": {"name": "require-resource-limits"},
                 "spec": {
                     "validationFailureAction": "Enforce",
@@ -124,7 +124,7 @@ class ComplianceAgent:
             },
             {
                 "apiVersion": "kyverno.io/v1",
-                "kind": "ClusterPolicy",
+                "kind": "Policy",
                 "metadata": {"name": "restrict-image-registries"},
                 "spec": {
                     "validationFailureAction": "Enforce",
@@ -150,7 +150,7 @@ class ComplianceAgent:
             },
             {
                 "apiVersion": "kyverno.io/v1",
-                "kind": "ClusterPolicy",
+                "kind": "Policy",
                 "metadata": {"name": "disallow-latest-tag"},
                 "spec": {
                     "validationFailureAction": "Enforce",
