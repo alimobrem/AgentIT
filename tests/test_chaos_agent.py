@@ -117,7 +117,7 @@ class TestCpuStress:
 
 
 class TestSchedule:
-    def test_generates_schedule_for_non_critical(self, tmp_path: Path) -> None:
+    def test_generates_cronworkflow_for_non_critical(self, tmp_path: Path) -> None:
         report = _make_report(criticality="medium")
         result = ChaosAgent(report, tmp_path / "out").run()
 
@@ -125,8 +125,10 @@ class TestSchedule:
         assert len(sched) == 1
 
         doc = yaml.safe_load(sched[0].content)
-        assert doc["kind"] == "CronJob"
+        assert doc["kind"] == "CronWorkflow"
+        assert doc["apiVersion"] == "argoproj.io/v1alpha1"
         assert doc["spec"]["schedule"] == "0 2 * * 3"
+        assert doc["spec"]["concurrencyPolicy"] == "Forbid"
 
     def test_skips_schedule_for_critical_apps(self, tmp_path: Path) -> None:
         report = _make_report(criticality="critical")

@@ -160,5 +160,19 @@ class TestSummary:
     def test_result_summary(self, tmp_path: Path) -> None:
         report = _make_report()
         result = CostOptimizationAgent(report, tmp_path / "out").run()
-        assert result.summary == "Generated 3 cost optimization artifacts."
-        assert len(result.files) == 3
+        assert result.summary == "Generated 4 cost optimization artifacts."
+        assert len(result.files) == 4
+
+
+class TestCostCronWorkflow:
+    def test_generates_cost_cronworkflow(self, tmp_path: Path) -> None:
+        report = _make_report()
+        result = CostOptimizationAgent(report, tmp_path / "out").run()
+        cw = [f for f in result.files if f.path == "cost-cronworkflow.yaml"]
+        assert len(cw) == 1
+
+        doc = yaml.safe_load(cw[0].content)
+        assert doc["kind"] == "CronWorkflow"
+        assert doc["apiVersion"] == "argoproj.io/v1alpha1"
+        assert doc["spec"]["schedule"] == "0 4 * * 1"
+        assert doc["spec"]["concurrencyPolicy"] == "Replace"

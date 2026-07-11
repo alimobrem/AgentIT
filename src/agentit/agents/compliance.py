@@ -36,6 +36,7 @@ class ComplianceAgent:
         generated.extend(self._generate_sbom_script())
         generated.extend(self._generate_compliance_evidence())
         generated.extend(self._generate_audit_policy())
+        generated.extend(self._generate_compliance_cronworkflow())
 
         return ComplianceResult(files=generated)
 
@@ -330,5 +331,52 @@ class ComplianceAgent:
                 content=content,
                 description="Kubernetes audit policy logging write operations on critical resources.",
                 finding_addressed="; ".join(hits),
+            ),
+        ]
+
+    def _generate_compliance_cronworkflow(self) -> list[GeneratedFile]:
+        name = self._name
+        doc: dict = {
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "CronWorkflow",
+            "metadata": {
+                "name": f"{name}-compliance-reassess",
+                "labels": {"app.kubernetes.io/name": name},
+            },
+            "spec": {
+                "schedule": "0 3 1 * *",
+                "timezone": "UTC",
+                "concurrencyPolicy": "Forbid",
+                "successfulJobsHistoryLimit": 3,
+                "failedJobsHistoryLimit": 3,
+                "workflowSpec": {
+                    "entrypoint": "compliance-check",
+                    "templates": [
+                        {
+                            "name": "compliance-check",
+                            "container": {
+                                "image": "REPLACE_WITH_AGENTIT_IMAGE",
+                                "command": ["agentit"],
+                                "args": ["assess", "--rescan"],
+                                "resources": {
+                                    "requests": {"cpu": "100m", "memory": "256Mi"},
+                                    "limits": {"cpu": "500m", "memory": "512Mi"},
+                                },
+                            },
+                        },
+                    ],
+                },
+            },
+        }
+
+        content = yaml.dump(doc, default_flow_style=False, sort_keys=False)
+        self._write("compliance-cronworkflow.yaml", content)
+
+        return [
+            GeneratedFile(
+                path="compliance-cronworkflow.yaml",
+                content=content,
+                description="CronWorkflow: monthly compliance re-assessment (1st of month, 3am UTC).",
+                finding_addressed="Continuous compliance posture — periodic re-evaluation.",
             ),
         ]

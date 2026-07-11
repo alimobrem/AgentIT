@@ -82,6 +82,7 @@ class CostOptimizationAgent:
         generated.append(self._generate_cost_report())
         generated.append(self._generate_vpa())
         generated.append(self._generate_cost_labels())
+        generated.append(self._generate_cost_cronworkflow())
 
         return CostResult(files=generated)
 
@@ -230,4 +231,49 @@ class CostOptimizationAgent:
             content=content,
             description="Recommended cost-attribution labels as a ConfigMap.",
             finding_addressed="Cost attribution via standardized labels.",
+        )
+
+    def _generate_cost_cronworkflow(self) -> GeneratedFile:
+        name = self._name
+        doc: dict = {
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "CronWorkflow",
+            "metadata": {
+                "name": f"{name}-cost-report",
+                "labels": {"app.kubernetes.io/name": name},
+            },
+            "spec": {
+                "schedule": "0 4 * * 1",
+                "timezone": "UTC",
+                "concurrencyPolicy": "Replace",
+                "successfulJobsHistoryLimit": 3,
+                "failedJobsHistoryLimit": 3,
+                "workflowSpec": {
+                    "entrypoint": "cost-scan",
+                    "templates": [
+                        {
+                            "name": "cost-scan",
+                            "container": {
+                                "image": "REPLACE_WITH_AGENTIT_IMAGE",
+                                "command": ["agentit"],
+                                "args": ["assess", "--rescan"],
+                                "resources": {
+                                    "requests": {"cpu": "100m", "memory": "256Mi"},
+                                    "limits": {"cpu": "500m", "memory": "512Mi"},
+                                },
+                            },
+                        },
+                    ],
+                },
+            },
+        }
+
+        content = yaml.dump(doc, default_flow_style=False, sort_keys=False)
+        self._write("cost-cronworkflow.yaml", content)
+
+        return GeneratedFile(
+            path="cost-cronworkflow.yaml",
+            content=content,
+            description="CronWorkflow: weekly cost report (Monday 4am UTC).",
+            finding_addressed="Scheduled cost optimization and right-sizing analysis.",
         )

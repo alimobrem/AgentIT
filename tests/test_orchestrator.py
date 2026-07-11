@@ -76,14 +76,22 @@ def _make_report(
 
 class TestPlanSelectsAgents:
     def test_plan_selects_core_agents(self, tmp_path: Path) -> None:
-        """Medium criticality -> 4 core agents + chaos."""
+        """Medium criticality -> 5 core agents + chaos."""
         report = _make_report(criticality="medium")
         orch = FleetOrchestrator(report, tmp_path / "out")
         plan = orch.plan()
 
-        for agent in ("security", "observability", "cicd", "compliance"):
+        for agent in ("security", "observability", "cicd", "compliance", "release"):
             assert agent in plan.agents_to_run
         assert "chaos" in plan.agents_to_run
+
+    def test_release_agent_always_selected(self, tmp_path: Path) -> None:
+        """Release coordinator is selected for all criticality levels."""
+        for crit in ("low", "medium", "high", "critical"):
+            report = _make_report(criticality=crit)
+            orch = FleetOrchestrator(report, tmp_path / f"out-{crit}")
+            plan = orch.plan()
+            assert "release" in plan.agents_to_run, f"release not selected for {crit}"
 
     def test_plan_adds_extra_agents_for_high_criticality(self, tmp_path: Path) -> None:
         """High criticality -> adds dependency, incident, cost."""

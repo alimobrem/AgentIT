@@ -15,6 +15,7 @@ PRIORITY_MATRIX = {
     ("security", "compliance"): "security",
     ("compliance", "cicd"): "compliance",
     ("compliance", "observability"): "compliance",
+    ("cicd", "release"): "release",
 }
 
 
@@ -129,6 +130,11 @@ class FleetOrchestrator:
             agent_map["retirement"] = ("retirement", RetirementAgent)
         except ImportError:
             logger.warning("Failed to import RetirementAgent — agent will be skipped")
+        try:
+            from agentit.agents.release import ReleaseCoordinatorAgent
+            agent_map["release"] = ("release", ReleaseCoordinatorAgent)
+        except ImportError:
+            logger.warning("Failed to import ReleaseCoordinatorAgent — agent will be skipped")
 
         # Register all available agents in the store
         if self._store is not None:
@@ -212,9 +218,9 @@ class FleetOrchestrator:
 
     def _select_agents(self) -> list[str]:
         """Select which agents to run based on assessment findings."""
-        agents = ["security", "observability", "cicd", "compliance"]
+        agents = ["security", "observability", "cicd", "compliance", "release"]
 
-        # Always run these core 4, then add based on findings/criticality
+        # Always run these core 5, then add based on findings/criticality
         if self.report.criticality in ("high", "critical"):
             agents.extend(["dependency", "incident", "cost"])
 

@@ -226,37 +226,40 @@ class ChaosAgent:
             return None
 
         name = self._name
-        doc = {
-            "apiVersion": "batch/v1",
-            "kind": "CronJob",
+        doc: dict = {
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "CronWorkflow",
             "metadata": {
                 "name": f"{name}-chaos-schedule",
-                "namespace": "default",
                 "labels": {"app.kubernetes.io/name": name},
             },
             "spec": {
                 "schedule": "0 2 * * 3",
-                "jobTemplate": {
-                    "spec": {
-                        "template": {
-                            "spec": {
-                                "serviceAccountName": f"{name}-chaos-sa",
-                                "restartPolicy": "Never",
-                                "containers": [
-                                    {
-                                        "name": "chaos-runner",
-                                        "image": "litmuschaos/litmus-checker:latest",
-                                        "args": [
-                                            "--chaosengine",
-                                            f"{name}-pod-kill",
-                                            "--namespace",
-                                            "default",
-                                        ],
-                                    },
+                "timezone": "UTC",
+                "concurrencyPolicy": "Forbid",
+                "successfulJobsHistoryLimit": 3,
+                "failedJobsHistoryLimit": 3,
+                "workflowSpec": {
+                    "entrypoint": "chaos-run",
+                    "serviceAccountName": f"{name}-chaos-sa",
+                    "templates": [
+                        {
+                            "name": "chaos-run",
+                            "container": {
+                                "image": "litmuschaos/litmus-checker:latest",
+                                "args": [
+                                    "--chaosengine",
+                                    f"{name}-pod-kill",
+                                    "--namespace",
+                                    "default",
                                 ],
+                                "resources": {
+                                    "requests": {"cpu": "100m", "memory": "128Mi"},
+                                    "limits": {"cpu": "250m", "memory": "256Mi"},
+                                },
                             },
                         },
-                    },
+                    ],
                 },
             },
         }
@@ -267,5 +270,5 @@ class ChaosAgent:
         return GeneratedFile(
             path="chaos-schedule.yaml",
             content=content,
-            description="CronJob: run chaos experiments weekly (Wednesday 2am).",
+            description="CronWorkflow: run chaos experiments weekly (Wednesday 2am UTC).",
         )

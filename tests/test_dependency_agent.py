@@ -173,3 +173,18 @@ class TestNoEcosystems:
         # But no renovate or dependabot configs
         assert not any(f.path == "renovate.json" for f in result.files)
         assert not any(f.path == ".github/dependabot.yml" for f in result.files)
+
+
+class TestDependencyCronWorkflow:
+    def test_generates_dependency_cronworkflow(self, tmp_path: Path) -> None:
+        from agentit.agents.dependency import DependencyAgent
+        report = _make_report()
+        result = DependencyAgent(report, tmp_path / "out").run()
+        cw = [f for f in result.files if f.path == "dependency-cronworkflow.yaml"]
+        assert len(cw) == 1
+
+        doc = yaml.safe_load(cw[0].content)
+        assert doc["kind"] == "CronWorkflow"
+        assert doc["apiVersion"] == "argoproj.io/v1alpha1"
+        assert doc["spec"]["schedule"] == "0 5 * * 1"
+        assert doc["spec"]["concurrencyPolicy"] == "Replace"
