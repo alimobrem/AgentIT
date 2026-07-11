@@ -1,0 +1,89 @@
+{{- if .Values.tektonCI.enabled }}
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: agentit-ci
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+spec:
+  params:
+    - name: repo-url
+      type: string
+      default: https://github.com/alimobrem/AgentIT.git
+    - name: revision
+      type: string
+      default: main
+    - name: image-ref
+      type: string
+      default: image-registry.openshift-image-registry.svc:5000/{{ .Release.Namespace }}/agentit:latest
+  workspaces:
+    - name: source
+  tasks:
+    - name: git-clone
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: git-clone
+          - name: namespace
+            value: openshift-pipelines
+      params:
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.revision)
+      workspaces:
+        - name: output
+          workspace: source
+
+    - name: run-tests
+      runAfter: [git-clone]
+      taskSpec:
+        workspaces:
+          - name: source
+        steps:
+          - name: test
+            image: registry.access.redhat.com/ubi9/python-312:latest
+            workingDir: $(workspaces.source.path)/agentit
+            script: |
+              pip install -e ".[dev]" 2>/dev/null || pip install -e .
+              python -m pytest tests/ -q --ignore=tests/test_real_repos.py
+      workspaces:
+        - name: source
+          workspace: source
+
+    - name: build-image
+      runAfter: [run-tests]
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: buildah
+          - name: namespace
+            value: openshift-pipelines
+      params:
+        - name: IMAGE
+          value: $(params.image-ref)
+        - name: DOCKERFILE
+          value: agentit/Containerfile
+        - name: CONTEXT
+          value: agentit
+      workspaces:
+        - name: source
+          workspace: source
+
+    - name: restart-rollout
+      runAfter: [build-image]
+      taskSpec:
+        steps:
+          - name: restart
+            image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+            script: |
+              oc delete pod -n {{ .Release.Namespace }} -l app.kubernetes.io/name=agentit --wait=false
+              echo "Pod restart triggered — new image will be pulled"
+{{- end }}

@@ -15,3 +15,10 @@
 - LLM client init must always fail gracefully — if credentials are missing, continue without LLM.
 - All agents follow the pattern in `agents/hardening.py` — take `(report, output_dir)`, return a result with `files: list[GeneratedFile]`.
 - Shared utilities (IGNORED_DIRS, iter_text_files, calculate_score) live in `analyzers/base.py` — don't duplicate.
+
+## Frontend / Templates
+
+- **Never use inline styles** — all styling goes in `base.html` `<style>` block as CSS classes.
+- Use `.btn`, `.btn-sm`, `.btn-green`, `.btn-outline`, `.action-bar` for buttons and action groups.
+- Errors must always be visible to the user — every form/endpoint must surface error messages.
+- All form submissions must show a loading spinner — handled globally in `base.html` JS.

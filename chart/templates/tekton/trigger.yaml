@@ -1,0 +1,60 @@
+{{- if .Values.tektonCI.enabled }}
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: agentit-ci-trigger
+  namespace: {{ .Release.Namespace }}
+spec:
+  params:
+    - name: revision
+      default: main
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: PipelineRun
+      metadata:
+        generateName: agentit-ci-
+        namespace: {{ .Release.Namespace }}
+      spec:
+        pipelineRef:
+          name: agentit-ci
+        params:
+          - name: revision
+            value: $(tt.params.revision)
+        workspaces:
+          - name: source
+            volumeClaimTemplate:
+              spec:
+                accessModes: [ReadWriteOnce]
+                resources:
+                  requests:
+                    storage: 2Gi
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: agentit-ci-listener
+  namespace: {{ .Release.Namespace }}
+spec:
+  serviceAccountName: pipeline
+  triggers:
+    - name: github-push
+      bindings:
+        - name: revision
+          value: $(body.after)
+      template:
+        ref: agentit-ci-trigger
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: agentit-ci-webhook
+  namespace: {{ .Release.Namespace }}
+spec:
+  to:
+    kind: Service
+    name: el-agentit-ci-listener
+  port:
+    targetPort: http-listener
+  tls:
+    termination: edge
+{{- end }}

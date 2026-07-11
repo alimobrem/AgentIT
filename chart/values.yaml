@@ -38,3 +38,6 @@ kafka:
 
 argoEvents:
   enabled: false
+
+tektonCI:
+  enabled: false
