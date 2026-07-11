@@ -57,6 +57,12 @@ class AssessmentStore:
             )
         except sqlite3.OperationalError:
             pass
+        try:
+            self._conn.execute(
+                "ALTER TABLE apply_results ADD COLUMN repo_files_json TEXT DEFAULT '[]'"
+            )
+        except sqlite3.OperationalError:
+            pass
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS events (
@@ -213,13 +219,14 @@ class AssessmentStore:
         now = datetime.now(timezone.utc).isoformat()
         self._conn.execute(
             """INSERT INTO apply_results
-               (assessment_id, namespace, dry_run, applied_json, skipped_json, errors_json, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (assessment_id, namespace, dry_run, applied_json, skipped_json, errors_json, repo_files_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 assessment_id, namespace, int(dry_run),
                 json.dumps(results["applied"]),
                 json.dumps(results["skipped"]),
                 json.dumps(results["errors"]),
+                json.dumps(results.get("repo_files", [])),
                 now,
             ),
         )
@@ -237,12 +244,14 @@ class AssessmentStore:
         ).fetchone()
         if row is None:
             return None
+        repo_files_raw = row["repo_files_json"] if "repo_files_json" in row.keys() else "[]"
         return {
             "namespace": row["namespace"],
             "dry_run": bool(row["dry_run"]),
             "applied": json.loads(row["applied_json"]),
             "skipped": json.loads(row["skipped_json"]),
             "errors": json.loads(row["errors_json"]),
+            "repo_files": json.loads(repo_files_raw),
             "created_at": row["created_at"],
         }
 

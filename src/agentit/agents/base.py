@@ -26,7 +26,6 @@ KNOWN_API_GROUPS = {
     "triggers.tekton.dev/v1beta1",
     "triggers.tekton.dev/v1alpha1",
     "kyverno.io/v1",
-    "litmuschaos.io/v1alpha1",
     "opentelemetry.io/v1alpha1",
     "integreatly.org/v1alpha1",
     "argoproj.io/v1",
@@ -85,6 +84,51 @@ def validate_manifest(content: str) -> list[str]:
             errors.append(f"Document {i}: metadata missing 'name' or 'generateName'")
 
     return errors
+
+
+def make_cronjob(
+    name: str,
+    schedule: str,
+    command: list[str],
+    *,
+    concurrency: str = "Forbid",
+    image: str = "REPLACE_WITH_AGENTIT_IMAGE",
+) -> dict:
+    """Build a K8s CronJob dict (no CRD dependency)."""
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "CronJob",
+        "metadata": {
+            "name": name,
+            "labels": {"app.kubernetes.io/name": name.rsplit("-", 1)[0]},
+        },
+        "spec": {
+            "schedule": schedule,
+            "concurrencyPolicy": concurrency,
+            "successfulJobsHistoryLimit": 3,
+            "failedJobsHistoryLimit": 3,
+            "jobTemplate": {
+                "spec": {
+                    "backoffLimit": 2,
+                    "activeDeadlineSeconds": 3600,
+                    "template": {
+                        "spec": {
+                            "restartPolicy": "OnFailure",
+                            "containers": [{
+                                "name": "job",
+                                "image": image,
+                                "command": command,
+                                "resources": {
+                                    "requests": {"cpu": "100m", "memory": "256Mi"},
+                                    "limits": {"cpu": "500m", "memory": "512Mi"},
+                                },
+                            }],
+                        },
+                    },
+                },
+            },
+        },
+    }
 
 
 def validate_generated_files(files: list[GeneratedFile]) -> list[str]:

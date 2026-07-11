@@ -12,6 +12,16 @@ logger = logging.getLogger(__name__)
 
 _SKIP_EXTENSIONS = frozenset({".sh", ".md", ".json", ".txt", ".toml", ".cfg", ".ini"})
 
+_NON_MANIFEST_PURPOSE: dict[str, str] = {
+    ".md": "Documentation — review in your repo after merging the PR",
+    ".json": "Configuration — commit to your repo (e.g. Renovate config, Grafana dashboard)",
+    ".sh": "Script — should be a Tekton Task instead; report this as a bug",
+    ".toml": "Configuration — commit to your repo",
+    ".cfg": "Configuration — commit to your repo",
+    ".ini": "Configuration — commit to your repo",
+    ".txt": "Configuration — commit to your repo",
+}
+
 _OPERATOR_NAMESPACES = frozenset({
     "openshift-gitops", "openshift-operators", "openshift-pipelines",
     "openshift-monitoring", "openshift-logging",
@@ -46,7 +56,31 @@ _CRD_TO_OPERATOR: dict[str, dict] = {
         "channel": "latest",
         "source": "redhat-operators",
     },
+    "Task": {
+        "name": "OpenShift Pipelines (Tekton)",
+        "package": "openshift-pipelines-operator-rh",
+        "channel": "latest",
+        "source": "redhat-operators",
+    },
+    "PipelineRun": {
+        "name": "OpenShift Pipelines (Tekton)",
+        "package": "openshift-pipelines-operator-rh",
+        "channel": "latest",
+        "source": "redhat-operators",
+    },
     "Rollout": {
+        "name": "OpenShift GitOps (Argo Rollouts)",
+        "package": "openshift-gitops-operator",
+        "channel": "latest",
+        "source": "redhat-operators",
+    },
+    "OpenTelemetryCollector": {
+        "name": "Red Hat OpenTelemetry",
+        "package": "opentelemetry-product",
+        "channel": "stable",
+        "source": "redhat-operators",
+    },
+    "AnalysisTemplate": {
         "name": "OpenShift GitOps (Argo Rollouts)",
         "package": "openshift-gitops-operator",
         "channel": "latest",
@@ -166,6 +200,7 @@ def apply_manifests_to_cluster(
     skipped: list[str] = []
     errors: list[str] = []
     missing_operators: dict[str, dict] = {}
+    repo_files: list[dict] = []
 
     _ensure_namespace(cli, namespace, dry_run)
     available = _get_available_resources(cli)
@@ -177,7 +212,12 @@ def apply_manifests_to_cluster(
             suffix = Path(fpath).suffix.lower()
 
             if suffix in _SKIP_EXTENSIONS or suffix not in (".yaml", ".yml"):
-                skipped.append(f"{fpath} (non-YAML)")
+                purpose = _NON_MANIFEST_PURPOSE.get(suffix, "Not a Kubernetes manifest")
+                repo_files.append({
+                    "path": fpath,
+                    "purpose": purpose,
+                    "description": entry.get("description", ""),
+                })
                 continue
 
             docs = _parse_manifest(entry["content"])
@@ -229,6 +269,7 @@ def apply_manifests_to_cluster(
         "skipped": skipped,
         "errors": errors,
         "missing_operators": missing_operators,
+        "repo_files": repo_files,
     }
 
 

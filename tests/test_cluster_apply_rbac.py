@@ -33,7 +33,7 @@ def test_skips_non_yaml_files():
          patch("agentit.portal.cluster_apply.subprocess.run") as mock_run:
         result = apply_manifests_to_cluster(files, dry_run=True)
 
-    assert len(result["skipped"]) == 4
+    assert len(result["repo_files"]) == 4
     assert len(result["applied"]) == 0
     mock_run.assert_not_called()
 

@@ -84,7 +84,7 @@ class DependencyAgent:
         generated.extend(self._generate_dependency_report())
         generated.extend(self._generate_renovate_config())
         generated.extend(self._generate_dependabot_config())
-        generated.extend(self._generate_dependency_cronworkflow())
+        generated.extend(self._generate_dependency_cronjob())
 
         return DependencyResult(files=generated)
 
@@ -319,49 +319,25 @@ class DependencyAgent:
             ),
         ]
 
-    def _generate_dependency_cronworkflow(self) -> list[GeneratedFile]:
+    def _generate_dependency_cronjob(self) -> list[GeneratedFile]:
+        from agentit.agents.base import make_cronjob
+
         name = self._name
-        doc: dict = {
-            "apiVersion": "argoproj.io/v1alpha1",
-            "kind": "CronWorkflow",
-            "metadata": {
-                "name": f"{name}-dependency-scan",
-                "labels": {"app.kubernetes.io/name": name},
-            },
-            "spec": {
-                "schedule": "0 5 * * 1",
-                "timezone": "UTC",
-                "concurrencyPolicy": "Replace",
-                "successfulJobsHistoryLimit": 3,
-                "failedJobsHistoryLimit": 3,
-                "workflowSpec": {
-                    "entrypoint": "dep-scan",
-                    "templates": [
-                        {
-                            "name": "dep-scan",
-                            "container": {
-                                "image": "REPLACE_WITH_AGENTIT_IMAGE",
-                                "command": ["agentit"],
-                                "args": ["assess", "--rescan"],
-                                "resources": {
-                                    "requests": {"cpu": "100m", "memory": "256Mi"},
-                                    "limits": {"cpu": "500m", "memory": "512Mi"},
-                                },
-                            },
-                        },
-                    ],
-                },
-            },
-        }
+        doc = make_cronjob(
+            f"{name}-dependency-scan",
+            "0 5 * * 1",
+            ["agentit", "assess", "--rescan"],
+            concurrency="Replace",
+        )
 
         content = yaml.dump(doc, default_flow_style=False, sort_keys=False)
-        self._write("dependency-cronworkflow.yaml", content)
+        self._write("dependency-cronjob.yaml", content)
 
         return [
             GeneratedFile(
-                path="dependency-cronworkflow.yaml",
+                path="dependency-cronjob.yaml",
                 content=content,
-                description="CronWorkflow: weekly in-cluster dependency scan (Monday 5am UTC).",
+                description="CronJob: weekly in-cluster dependency scan (Monday 5am UTC).",
                 finding_addressed="Scheduled dependency scanning independent of GitHub-native tools.",
             ),
         ]

@@ -107,6 +107,21 @@
 </div>
 {% endif %}
 
+{% if apply_results.repo_files %}
+<div x-data="{ open: false }">
+  <h3 class="text-sm collapse-toggle mb-1" @click="open = !open" :aria-expanded="open">Repo Files ({{ apply_results.repo_files|length }}) — include in PR</h3>
+  <ul class="finding-list mb-1" x-show="open" x-transition>
+    {% for f in apply_results.repo_files %}
+    <li class="finding-item">
+      <span class="badge badge-info">repo</span>
+      <strong>{{ f.path }}</strong>
+      <span class="text-muted text-sm"> &mdash; {{ f.purpose }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
 {% if apply_results.skipped %}
 <div x-data="{ open: false }">
   <h3 class="text-sm collapse-toggle mb-1" @click="open = !open" :aria-expanded="open">Skipped ({{ apply_results.skipped|length }})</h3>

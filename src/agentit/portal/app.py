@@ -1284,9 +1284,9 @@ _CRON_HUMAN = {
 }
 
 _SCHEDULE_FILES = {
-    "compliance-cronworkflow.yaml": ("compliance", "Compliance re-assessment"),
-    "cost-cronworkflow.yaml": ("cost", "Cost optimization report"),
-    "dependency-cronworkflow.yaml": ("dependency", "Dependency scan"),
+    "compliance-cronjob.yaml": ("compliance", "Compliance re-assessment"),
+    "cost-cronjob.yaml": ("cost", "Cost optimization report"),
+    "dependency-cronjob.yaml": ("dependency", "Dependency scan"),
     "chaos-schedule.yaml": ("chaos", "Chaos experiments"),
 }
 

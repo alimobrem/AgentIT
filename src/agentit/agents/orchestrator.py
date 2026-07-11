@@ -125,11 +125,6 @@ class FleetOrchestrator:
         except ImportError:
             logger.warning("Failed to import CostOptimizationAgent — agent will be skipped")
         try:
-            from agentit.agents.chaos import ChaosAgent
-            agent_map["chaos"] = ("chaos", ChaosAgent)
-        except ImportError:
-            logger.warning("Failed to import ChaosAgent — agent will be skipped")
-        try:
             from agentit.agents.retirement import RetirementAgent
             agent_map["retirement"] = ("retirement", RetirementAgent)
         except ImportError:
@@ -234,9 +229,6 @@ class FleetOrchestrator:
         # Always run these core 5, then add based on findings/criticality
         if self.report.criticality in ("high", "critical"):
             agents.extend(["dependency", "incident", "cost"])
-
-        if self.report.criticality != "critical":
-            agents.append("chaos")
 
         if self.report.overall_score < 30:
             agents.append("retirement")  # Consider if app is worth hardening

@@ -143,15 +143,15 @@ class TestComplianceResult:
         assert str(len(result.files)) in result.summary
 
 
-class TestComplianceCronWorkflow:
-    def test_generates_compliance_cronworkflow(self, tmp_path: Path) -> None:
+class TestComplianceCronJob:
+    def test_generates_compliance_cronjob(self, tmp_path: Path) -> None:
         report = make_report()
         result = ComplianceAgent(report, tmp_path / "out").run()
-        cw = [f for f in result.files if f.path == "compliance-cronworkflow.yaml"]
+        cw = [f for f in result.files if f.path == "compliance-cronjob.yaml"]
         assert len(cw) == 1
 
         doc = yaml.safe_load(cw[0].content)
-        assert doc["kind"] == "CronWorkflow"
-        assert doc["apiVersion"] == "argoproj.io/v1alpha1"
+        assert doc["kind"] == "CronJob"
+        assert doc["apiVersion"] == "batch/v1"
         assert doc["spec"]["schedule"] == "0 3 1 * *"
         assert doc["spec"]["concurrencyPolicy"] == "Forbid"

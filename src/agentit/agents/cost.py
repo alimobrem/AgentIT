@@ -82,7 +82,7 @@ class CostOptimizationAgent:
         generated.append(self._generate_cost_report())
         generated.append(self._generate_vpa())
         generated.append(self._generate_cost_labels())
-        generated.append(self._generate_cost_cronworkflow())
+        generated.append(self._generate_cost_cronjob())
 
         return CostResult(files=generated)
 
@@ -233,47 +233,23 @@ class CostOptimizationAgent:
             finding_addressed="Cost attribution via standardized labels.",
         )
 
-    def _generate_cost_cronworkflow(self) -> GeneratedFile:
+    def _generate_cost_cronjob(self) -> GeneratedFile:
+        from agentit.agents.base import make_cronjob
+
         name = self._name
-        doc: dict = {
-            "apiVersion": "argoproj.io/v1alpha1",
-            "kind": "CronWorkflow",
-            "metadata": {
-                "name": f"{name}-cost-report",
-                "labels": {"app.kubernetes.io/name": name},
-            },
-            "spec": {
-                "schedule": "0 4 * * 1",
-                "timezone": "UTC",
-                "concurrencyPolicy": "Replace",
-                "successfulJobsHistoryLimit": 3,
-                "failedJobsHistoryLimit": 3,
-                "workflowSpec": {
-                    "entrypoint": "cost-scan",
-                    "templates": [
-                        {
-                            "name": "cost-scan",
-                            "container": {
-                                "image": "REPLACE_WITH_AGENTIT_IMAGE",
-                                "command": ["agentit"],
-                                "args": ["assess", "--rescan"],
-                                "resources": {
-                                    "requests": {"cpu": "100m", "memory": "256Mi"},
-                                    "limits": {"cpu": "500m", "memory": "512Mi"},
-                                },
-                            },
-                        },
-                    ],
-                },
-            },
-        }
+        doc = make_cronjob(
+            f"{name}-cost-report",
+            "0 4 * * 1",
+            ["agentit", "assess", "--rescan"],
+            concurrency="Replace",
+        )
 
         content = yaml.dump(doc, default_flow_style=False, sort_keys=False)
-        self._write("cost-cronworkflow.yaml", content)
+        self._write("cost-cronjob.yaml", content)
 
         return GeneratedFile(
-            path="cost-cronworkflow.yaml",
+            path="cost-cronjob.yaml",
             content=content,
-            description="CronWorkflow: weekly cost report (Monday 4am UTC).",
+            description="CronJob: weekly cost report (Monday 4am UTC).",
             finding_addressed="Scheduled cost optimization and right-sizing analysis.",
         )

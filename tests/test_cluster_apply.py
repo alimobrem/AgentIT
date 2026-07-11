@@ -39,7 +39,7 @@ def test_skips_non_yaml():
         result = apply_manifests_to_cluster(files)
 
     assert result["applied"] == []
-    assert len(result["skipped"]) == 3
+    assert len(result["repo_files"]) == 3
     assert result["errors"] == []
     mock_run.assert_not_called()
 
@@ -153,7 +153,7 @@ def test_mixed_files():
         result = apply_manifests_to_cluster(files)
 
     assert sorted(result["applied"]) == ["deploy.yaml", "monitor.yml"]
-    assert len(result["skipped"]) == 1
+    assert len(result["repo_files"]) == 1
 
 
 def test_find_cli_falls_back_to_kubectl():

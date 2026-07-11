@@ -225,44 +225,19 @@ class ChaosAgent:
         if self.report.criticality == "critical":
             return None
 
+        from agentit.agents.base import make_cronjob
+
         name = self._name
-        doc: dict = {
-            "apiVersion": "argoproj.io/v1alpha1",
-            "kind": "CronWorkflow",
-            "metadata": {
-                "name": f"{name}-chaos-schedule",
-                "labels": {"app.kubernetes.io/name": name},
-            },
-            "spec": {
-                "schedule": "0 2 * * 3",
-                "timezone": "UTC",
-                "concurrencyPolicy": "Forbid",
-                "successfulJobsHistoryLimit": 3,
-                "failedJobsHistoryLimit": 3,
-                "workflowSpec": {
-                    "entrypoint": "chaos-run",
-                    "serviceAccountName": f"{name}-chaos-sa",
-                    "templates": [
-                        {
-                            "name": "chaos-run",
-                            "container": {
-                                "image": "litmuschaos/litmus-checker:latest",
-                                "args": [
-                                    "--chaosengine",
-                                    f"{name}-pod-kill",
-                                    "--namespace",
-                                    "default",
-                                ],
-                                "resources": {
-                                    "requests": {"cpu": "100m", "memory": "128Mi"},
-                                    "limits": {"cpu": "250m", "memory": "256Mi"},
-                                },
-                            },
-                        },
-                    ],
-                },
-            },
-        }
+        doc = make_cronjob(
+            f"{name}-chaos-schedule",
+            "0 2 * * 3",
+            [
+                "litmus-checker",
+                "--chaosengine", f"{name}-pod-kill",
+                "--namespace", "default",
+            ],
+            image="litmuschaos/litmus-checker:latest",
+        )
 
         content = yaml.dump(doc, default_flow_style=False, sort_keys=False)
         self._write("chaos-schedule.yaml", content)
@@ -270,5 +245,5 @@ class ChaosAgent:
         return GeneratedFile(
             path="chaos-schedule.yaml",
             content=content,
-            description="CronWorkflow: run chaos experiments weekly (Wednesday 2am UTC).",
+            description="CronJob: run chaos experiments weekly (Wednesday 2am UTC).",
         )

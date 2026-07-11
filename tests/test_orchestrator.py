@@ -22,14 +22,13 @@ from conftest import make_report
 
 class TestPlanSelectsAgents:
     def test_plan_selects_core_agents(self, tmp_path: Path) -> None:
-        """Medium criticality -> 5 core agents + chaos."""
+        """Medium criticality -> 5 core agents."""
         report = make_report(criticality="medium")
         orch = FleetOrchestrator(report, tmp_path / "out")
         plan = orch.plan()
 
         for agent in ("security", "observability", "cicd", "compliance", "release"):
             assert agent in plan.agents_to_run
-        assert "chaos" in plan.agents_to_run
 
     def test_release_agent_always_selected(self, tmp_path: Path) -> None:
         """Release coordinator is selected for all criticality levels."""
@@ -47,14 +46,6 @@ class TestPlanSelectsAgents:
 
         for agent in ("dependency", "incident", "cost"):
             assert agent in plan.agents_to_run
-
-    def test_plan_skips_chaos_for_critical(self, tmp_path: Path) -> None:
-        """Critical criticality -> no chaos."""
-        report = make_report(criticality="critical")
-        orch = FleetOrchestrator(report, tmp_path / "out")
-        plan = orch.plan()
-
-        assert "chaos" not in plan.agents_to_run
 
     def test_plan_adds_retirement_for_low_score(self, tmp_path: Path) -> None:
         """Score < 30 -> retirement agent included."""
