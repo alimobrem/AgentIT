@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}System Health - AgentIT{% endblock %}
+{% block head_extra %}<meta http-equiv="refresh" content="30">{% endblock %}
+{% block content %}
+<h1>System Health</h1>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-label">Platform</div>
+    <div class="stat-value {% if argo_synced %}text-success{% else %}text-danger{% endif %}">
+      {{ "Healthy" if argo_synced else "Degraded" }}
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Pods Running</div>
+    <div class="stat-value">{{ pods_running }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Last Pipeline</div>
+    <div class="stat-value text-sm {% if pipeline_status == 'Succeeded' %}text-success{% elif pipeline_status == 'Running' %}text-warning{% else %}text-danger{% endif %}">
+      {{ pipeline_status }}
+    </div>
+  </div>
+</div>
+
+<h2 class="section-title">Argo CD</h2>
+<table>
+  <thead><tr><th>App</th><th>Sync</th><th>Health</th></tr></thead>
+  <tbody>
+    {% for app in argo_apps %}
+    <tr class="{% if app.sync == 'Synced' %}row-border-green{% else %}row-border-red{% endif %}">
+      <td class="text-bold">{{ app.name }}</td>
+      <td><span class="badge {% if app.sync == 'Synced' %}badge-low{% else %}badge-critical{% endif %}">{{ app.sync }}</span></td>
+      <td><span class="badge {% if app.health == 'Healthy' %}badge-low{% elif app.health == 'Progressing' %}badge-medium{% else %}badge-critical{% endif %}">{{ app.health }}</span></td>
+    </tr>
+    {% endfor %}
+    {% if not argo_apps %}
+    <tr><td colspan="3" class="text-muted">No Argo CD access</td></tr>
+    {% endif %}
+  </tbody>
+</table>
+
+<h2 class="section-title">Pods</h2>
+<table>
+  <thead><tr><th>Name</th><th>Status</th><th>Restarts</th><th>Age</th></tr></thead>
+  <tbody>
+    {% for pod in pods %}
+    <tr class="{% if pod.status == 'Running' %}row-border-green{% elif pod.status == 'Completed' %}{% else %}row-border-red{% endif %}">
+      <td class="text-bold">{{ pod.name }}</td>
+      <td><span class="badge {% if pod.status == 'Running' %}badge-low{% elif pod.status == 'Completed' %}badge-info{% else %}badge-critical{% endif %}">{{ pod.status }}</span></td>
+      <td>{{ pod.restarts }}</td>
+      <td class="text-sm">{{ pod.age }}</td>
+    </tr>
+    {% endfor %}
+    {% if not pods %}
+    <tr><td colspan="4" class="text-muted">No cluster access</td></tr>
+    {% endif %}
+  </tbody>
+</table>
+
+{% if pipelines %}
+<h2 class="section-title">Recent Pipelines</h2>
+<table>
+  <thead><tr><th>Name</th><th>Status</th><th>Duration</th></tr></thead>
+  <tbody>
+    {% for p in pipelines %}
+    <tr class="{% if p.status == 'Succeeded' %}row-border-green{% elif p.status == 'Running' %}row-border-yellow{% else %}row-border-red{% endif %}">
+      <td class="text-bold">{{ p.name }}</td>
+      <td><span class="badge {% if p.status == 'Succeeded' %}badge-low{% elif p.status == 'Running' %}badge-medium{% else %}badge-critical{% endif %}">{{ p.status }}</span></td>
+      <td class="text-sm">{{ p.duration }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2 class="section-title">Kafka</h2>
+<table>
+  <thead><tr><th>Component</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr class="{% if kafka_ready %}row-border-green{% else %}row-border-red{% endif %}">
+      <td class="text-bold">Kafka Broker</td>
+      <td><span class="badge {% if kafka_ready %}badge-low{% else %}badge-critical{% endif %}">{{ "Ready" if kafka_ready else "Not Found" }}</span></td>
+    </tr>
+    <tr><td class="text-bold">Event Publisher</td>
+      <td><span class="badge {% if publisher_ok %}badge-low{% else %}badge-medium{% endif %}">{{ "Connected" if publisher_ok else "Disconnected" }}</span></td>
+    </tr>
+  </tbody>
+</table>
+{% endblock %}

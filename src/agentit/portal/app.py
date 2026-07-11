@@ -601,6 +601,118 @@ async def create_agent_prs_route(assessment_id: str):
     )
 
 
+# ── System Health ──────────────────────────────────────────────────────
+
+
+def _run_cmd(cmd: list[str], timeout: int = 10) -> str | None:
+    import subprocess
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return r.stdout if r.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def _get_cluster_health() -> dict:
+    import json as _json
+
+    result: dict = {
+        "argo_apps": [], "argo_synced": False,
+        "pods": [], "pods_running": 0,
+        "pipelines": [], "pipeline_status": "Unknown",
+        "kafka_ready": False, "publisher_ok": False,
+    }
+
+    # Argo CD apps
+    raw = _run_cmd(["oc", "get", "applications.argoproj.io", "-n", "openshift-gitops", "-o", "json"])
+    if raw:
+        try:
+            apps = _json.loads(raw).get("items", [])
+            for a in apps:
+                name = a.get("metadata", {}).get("name", "?")
+                sync = a.get("status", {}).get("sync", {}).get("status", "Unknown")
+                health = a.get("status", {}).get("health", {}).get("status", "Unknown")
+                result["argo_apps"].append({"name": name, "sync": sync, "health": health})
+            result["argo_synced"] = all(a["sync"] == "Synced" for a in result["argo_apps"])
+        except Exception:
+            pass
+
+    # Pods
+    raw = _run_cmd(["oc", "get", "pods", "-n", "agentit", "-o", "json"])
+    if raw:
+        try:
+            pods = _json.loads(raw).get("items", [])
+            for p in pods:
+                name = p.get("metadata", {}).get("name", "?")
+                phase = p.get("status", {}).get("phase", "Unknown")
+                restarts = sum(
+                    cs.get("restartCount", 0)
+                    for cs in p.get("status", {}).get("containerStatuses", [])
+                )
+                created = p.get("metadata", {}).get("creationTimestamp", "")
+                result["pods"].append({
+                    "name": name, "status": phase,
+                    "restarts": restarts, "age": created[:16],
+                })
+            result["pods_running"] = sum(1 for p in result["pods"] if p["status"] == "Running")
+        except Exception:
+            pass
+
+    # Pipeline runs
+    raw = _run_cmd(["oc", "get", "pipelineruns", "-n", "agentit", "-o", "json",
+                    "--sort-by=.metadata.creationTimestamp"])
+    if raw:
+        try:
+            runs = _json.loads(raw).get("items", [])[-5:]
+            for r in runs:
+                name = r.get("metadata", {}).get("name", "?")
+                conditions = r.get("status", {}).get("conditions", [{}])
+                status = conditions[0].get("reason", "Unknown") if conditions else "Unknown"
+                start = r.get("status", {}).get("startTime", "")
+                completion = r.get("status", {}).get("completionTime", "")
+                duration = ""
+                if start and completion:
+                    duration = f"{start[:16]} → {completion[:16]}"
+                elif start:
+                    duration = f"Started {start[:16]}"
+                result["pipelines"].append({"name": name, "status": status, "duration": duration})
+            if result["pipelines"]:
+                result["pipeline_status"] = result["pipelines"][-1]["status"]
+        except Exception:
+            pass
+
+    # Kafka
+    raw = _run_cmd(["oc", "get", "kafka", "-n", "agentit", "-o", "jsonpath={.items[0].status.conditions[0].type}"])
+    result["kafka_ready"] = raw and "Ready" in raw
+
+    # Event publisher
+    try:
+        from agentit.events import get_publisher
+        pub = get_publisher()
+        result["publisher_ok"] = pub._producer is not None
+    except Exception:
+        pass
+
+    return result
+
+
+@app.get("/health", response_class=HTMLResponse)
+async def health_page(request: Request) -> HTMLResponse:
+    data = await asyncio.to_thread(_get_cluster_health)
+    return templates.TemplateResponse(request, "health.html", data)
+
+
+@app.get("/api/health")
+async def api_health():
+    data = await asyncio.to_thread(_get_cluster_health)
+    return JSONResponse({
+        "argo_synced": data["argo_synced"],
+        "pods_running": data["pods_running"],
+        "pipeline_status": data["pipeline_status"],
+        "kafka_ready": data["kafka_ready"],
+    })
+
+
 # ── Schedules ──────────────────────────────────────────────────────────
 
 
