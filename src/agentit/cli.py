@@ -305,6 +305,9 @@ def vuln_watch(interval: int) -> None:
             fleet = store.get_fleet_data()
             click.echo(f"[vuln-watch] Monitoring {len(fleet)} apps", err=True)
 
+            from agentit.automode import AutoMode
+
+            auto = AutoMode(store=store, publisher=publisher, llm_client=None)
             for app_data in fleet:
                 if app_data.get("critical_count", 0) > 0:
                     publisher.publish(
@@ -315,6 +318,17 @@ def vuln_watch(interval: int) -> None:
                         severity="warning",
                         summary=f"{app_data['critical_count']} critical/high findings in {app_data['repo_name']}",
                     )
+                    if auto.enabled:
+                        click.echo(f"[vuln-watch] Auto-mode: triggering re-assessment for {app_data['repo_name']}...", err=True)
+                        try:
+                            import httpx
+                            httpx.post(
+                                "http://localhost:8080/api/webhook/assess",
+                                json={"repo_url": app_data["repo_url"], "criticality": app_data.get("criticality", "medium")},
+                                timeout=120,
+                            )
+                        except Exception as exc:
+                            click.echo(f"[vuln-watch] Auto re-assess failed: {exc}", err=True)
         except KeyboardInterrupt:
             click.echo("Vulnerability watcher stopped.", err=True)
             break

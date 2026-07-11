@@ -134,7 +134,40 @@ class AssessmentStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         self._conn.commit()
+
+    # ── Settings ───────────────────────────────────────────────────────
+
+    def get_setting(self, key: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,),
+        ).fetchone()
+        return row["value"] if row else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            """,
+            (key, value, datetime.now(timezone.utc).isoformat()),
+        )
+        self._conn.commit()
+
+    def list_settings(self) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM settings ORDER BY key",
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def save_apply_results(
         self, assessment_id: str, results: dict, namespace: str, dry_run: bool,
