@@ -140,11 +140,25 @@ class FleetOrchestrator:
         except ImportError:
             logger.warning("Failed to import CodeChangeAgent — agent will be skipped")
 
-        # Register all available agents in the store
+        _AGENT_CAPABILITIES: dict[str, str] = {
+            "security": "NetworkPolicy, Containerfile, RBAC, SCCs, resource limits, image scan task",
+            "observability": "ServiceMonitor, Grafana dashboard, alerting rules, OTel collector",
+            "cicd": "Tekton Pipeline (scan + SBOM), Argo CD Application, Argo Rollout, Containerfile",
+            "compliance": "Kyverno policies, SBOM task, audit policy, compliance evidence",
+            "infrastructure": "HPA, PDB, ResourceQuota, LimitRange, Namespace",
+            "cost": "VPA, cost labels, cost report",
+            "dependency": "Dependency report, Renovate/Dependabot config",
+            "incident": "Runbook, PagerDuty config, Alertmanager config",
+            "release": "AnalysisTemplate, Rollout patch, rollback policy",
+            "codechange": ".gitignore, OTel instrumentation, structured logging",
+            "retirement": "Decommission plan, cleanup task, data archive job",
+        }
+
         if self._store is not None:
             for name, (cat, _cls) in agent_map.items():
                 try:
-                    self._store.register_agent(name, cat)
+                    caps = _AGENT_CAPABILITIES.get(name, "")
+                    self._store.register_agent(name, cat, capabilities=caps)
                 except Exception as exc:
                     logger.warning("Failed to register agent '%s': %s", name, exc)
 

@@ -1623,10 +1623,31 @@ async def delete_schedule_route(request: Request):
 
 # ── Agents ─────────────────────────────────────────────────────────────
 
+_AGENT_CAPS: dict[str, str] = {
+    "security": "NetworkPolicy, Containerfile, RBAC, SCCs, resource limits, image scan task",
+    "observability": "ServiceMonitor, Grafana dashboard, alerting rules, OTel collector",
+    "cicd": "Tekton Pipeline (scan + SBOM), Argo CD Application, Argo Rollout",
+    "compliance": "Kyverno policies, SBOM task, audit policy, compliance evidence",
+    "infrastructure": "HPA, PDB, ResourceQuota, LimitRange, Namespace",
+    "cost": "VPA, cost labels, cost report",
+    "dependency": "Dependency report, Renovate/Dependabot config",
+    "incident": "Runbook, PagerDuty config, Alertmanager config",
+    "release": "AnalysisTemplate, Rollout patch, rollback policy",
+    "codechange": ".gitignore, OTel instrumentation, structured logging",
+    "retirement": "Decommission plan, cleanup task, data archive job",
+    "vuln-watcher": "Monitors fleet for CVEs, triggers remediation when auto-mode on",
+    "slo-tracker": "Checks SLO status, publishes breach alerts, recommends rollbacks",
+    "drift-detector": "Queries Argo CD for OutOfSync apps, optionally auto-syncs",
+}
+
 
 @app.get("/agents", response_class=HTMLResponse)
 async def agents_page(request: Request) -> HTMLResponse:
     agents = get_store().list_agents()
+
+    for a in agents:
+        if not a.get("capabilities") or a["capabilities"] in ("[]", ""):
+            a["capabilities"] = _AGENT_CAPS.get(a["agent_name"], "")
 
     # Merge long-lived watcher agents that aren't in the registry
     registered_names = {a["agent_name"] for a in agents}
@@ -1636,7 +1657,7 @@ async def agents_page(request: Request) -> HTMLResponse:
                 "agent_name": w["name"],
                 "category": w["mode"],
                 "status": "deployed",
-                "capabilities": f"interval: {w['interval']}",
+                "capabilities": _AGENT_CAPS.get(w["name"], f"interval: {w['interval']}"),
                 "registered_at": "—",
                 "last_heartbeat": "—",
             })

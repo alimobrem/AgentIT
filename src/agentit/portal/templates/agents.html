@@ -42,7 +42,7 @@
           <span class="badge badge-medium">{{ a.status }}</span>
         {% endif %}
       </td>
-      <td class="text-sm text-muted">{{ a.capabilities if a.capabilities and a.capabilities != "[]" else "—" }}</td>
+      <td class="text-sm text-muted">{{ a.capabilities if a.capabilities and a.capabilities not in ("[]", "", "—") else "—" }}</td>
       <td class="text-sm">{{ a.registered_at[:19] }}</td>
       <td class="text-sm">{{ a.last_heartbeat[:19] if a.last_heartbeat else "—" }}</td>
     </tr>
