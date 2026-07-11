@@ -30,3 +30,57 @@ subjects:
   - kind: ServiceAccount
     name: default
     namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-agent-apply
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/instance: {{ .Release.Name }}
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["prometheusrules", "servicemonitors", "podmonitors"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: ["kyverno.io"]
+    resources: ["policies"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: ["tekton.dev"]
+    resources: ["tasks", "pipelines", "pipelineruns"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "rollouts", "analysistemplates"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-agent-apply
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/instance: {{ .Release.Name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-agent-apply
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: {{ .Release.Namespace }}
+  - kind: ServiceAccount
+    name: pipeline
+    namespace: {{ .Release.Namespace }}

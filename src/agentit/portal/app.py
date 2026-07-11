@@ -39,18 +39,31 @@ app = FastAPI(title="AgentIT Portal")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
-async def _background_gate_expiry() -> None:
+async def _background_maintenance() -> None:
+    """Hourly: expire stale gates. Daily: purge old data."""
+    tick = 0
     while True:
         await asyncio.sleep(3600)
+        tick += 1
         try:
-            get_store().expire_stale_gates(hours=24)
+            s = get_store()
+            expired = s.expire_stale_gates(hours=24)
+            if expired:
+                log.info("Background: expired %d stale gates", expired)
+            if tick % 24 == 0:
+                import os
+                retention = int(os.environ.get("AGENTIT_RETENTION_DAYS", "30"))
+                counts = s.purge_old_data(retention_days=retention)
+                total = sum(counts.values())
+                if total:
+                    log.info("Background: purged %d old rows (retention=%dd)", total, retention)
         except Exception:
-            log.debug("Background gate expiry failed", exc_info=True)
+            log.debug("Background maintenance failed", exc_info=True)
 
 
 @app.on_event("startup")
 async def _start_background_tasks() -> None:
-    asyncio.create_task(_background_gate_expiry())
+    asyncio.create_task(_background_maintenance())
 
 
 def _safe_url(value: str) -> str:
@@ -1688,11 +1701,26 @@ async def settings_page(request: Request) -> HTMLResponse:
     auto_mode = s.get_setting("auto_mode") in ("true", "1", "on")
     llm_available = _get_llm_client() is not None
     recent_actions = s.list_events_by_agent("auto-mode", limit=20)
+    import os
+    retention_days = int(os.environ.get("AGENTIT_RETENTION_DAYS", "30"))
+    purge_result = request.query_params.get("purged")
     return templates.TemplateResponse(request, "settings.html", {
         "auto_mode": auto_mode,
         "llm_available": llm_available,
         "recent_actions": recent_actions,
+        "retention_days": retention_days,
+        "purge_result": purge_result,
     })
+
+
+@app.post("/settings/purge", response_model=None)
+async def purge_old_data(request: Request):
+    import os
+    retention = int(os.environ.get("AGENTIT_RETENTION_DAYS", "30"))
+    s = get_store()
+    counts = s.purge_old_data(retention_days=retention)
+    total = sum(counts.values())
+    return RedirectResponse(url=f"/settings?purged={total}", status_code=303)
 
 
 @app.post("/settings/auto-mode", response_model=None)

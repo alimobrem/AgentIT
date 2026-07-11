@@ -893,3 +893,49 @@ class AssessmentStore:
         )
         self._conn.commit()
         return cursor.rowcount > 0
+
+    def purge_old_data(self, retention_days: int = 30) -> dict[str, int]:
+        """Delete data older than retention_days. Returns count of deleted rows per table."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+        counts: dict[str, int] = {}
+
+        for table, col in [
+            ("events", "timestamp"),
+            ("remediation_jobs", "created_at"),
+            ("apply_results", "created_at"),
+        ]:
+            cursor = self._conn.execute(
+                f"DELETE FROM {table} WHERE {col} < ?", (cutoff,),
+            )
+            counts[table] = cursor.rowcount
+
+        cursor = self._conn.execute(
+            "DELETE FROM onboarding_results WHERE created_at < ? AND id NOT IN "
+            "(SELECT id FROM onboarding_results GROUP BY assessment_id "
+            "HAVING created_at = MAX(created_at))",
+            (cutoff,),
+        )
+        counts["onboarding_results"] = cursor.rowcount
+
+        cursor = self._conn.execute(
+            "DELETE FROM remediations WHERE status = 'completed' AND completed_at < ?",
+            (cutoff,),
+        )
+        counts["remediations"] = cursor.rowcount
+
+        cursor = self._conn.execute(
+            "DELETE FROM gates WHERE status IN ('approved', 'rejected', 'expired', 'cancelled') "
+            "AND resolved_at < ?",
+            (cutoff,),
+        )
+        counts["gates"] = cursor.rowcount
+
+        self._conn.commit()
+        total = sum(counts.values())
+        if total > 0:
+            self.log_event(
+                "store", "data-purged", None, "info",
+                f"Purged {total} stale rows (retention={retention_days}d): "
+                + ", ".join(f"{t}={c}" for t, c in counts.items() if c > 0),
+            )
+        return counts

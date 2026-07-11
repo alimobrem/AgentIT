@@ -260,7 +260,7 @@ class TestRBAC:
     def test_parseable(self):
         rendered = _render(self.TEMPLATE)
         docs = list(yaml.safe_load_all(rendered))
-        assert len(docs) == 2
+        assert len(docs) == 4
 
     def test_has_namespace_rolebinding(self):
         rendered = _render(self.TEMPLATE)

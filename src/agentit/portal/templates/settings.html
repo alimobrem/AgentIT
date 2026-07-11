@@ -103,6 +103,24 @@
   </tbody>
 </table>
 
+<h2 class="section-title">Data Retention</h2>
+<p class="text-muted mb-1">
+  Old events, completed remediation jobs, resolved gates, and stale onboarding runs are automatically
+  purged after {{ retention_days }} days. Set <code>AGENTIT_RETENTION_DAYS</code> to change (default: 30).
+</p>
+<div class="action-bar mb-2">
+  <form method="post" action="/settings/purge" class="inline-form"
+        onsubmit="return confirm('Purge data older than {{ retention_days }} days?')">
+    <button type="submit" class="btn btn-outline">
+      <span class="btn-label">Purge Now</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+    </button>
+  </form>
+</div>
+{% if purge_result %}
+<div class="alert alert-success">Purged {{ purge_result }} stale rows.</div>
+{% endif %}
+
 {% if recent_actions %}
 <h2 class="section-title">Recent Auto-Mode Actions</h2>
 <table>

@@ -145,8 +145,8 @@
     {% for f in apply_results.errors %}
     <li class="finding-item finding-critical">
       <span class="badge badge-critical">fail</span> {{ f.split(':')[0] }}
-      {% if 'Forbidden' in f %}<span class="text-muted text-sm"> &mdash; needs RBAC</span>{% endif %}
-      {% if 'resource mapping not found' in f %}<span class="text-muted text-sm"> &mdash; CRD missing</span>{% endif %}
+      {% if 'Forbidden' in f %}<span class="text-muted text-sm"> &mdash; run: <code>oc adm policy add-role-to-user admin system:serviceaccount:agentit:pipeline -n {{ apply_results.namespace }}</code></span>{% endif %}
+      {% if 'resource mapping not found' in f %}<span class="text-muted text-sm"> &mdash; CRD missing (install operator below)</span>{% endif %}
     </li>
     {% endfor %}
   </ul>
