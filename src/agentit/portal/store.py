@@ -519,24 +519,43 @@ class AssessmentStore:
     # ── Remediations ───────────────────────────────────────────────────
 
     def save_remediation(
-        self, assessment_id: str, agent_name: str, description: str
+        self,
+        assessment_id: str,
+        agent_name: str,
+        description: str,
+        status: str = "generated",
+        manifest_path: str | None = None,
     ) -> str:
         rem_id = uuid.uuid4().hex
         self._conn.execute(
             """
             INSERT INTO remediations (id, assessment_id, agent_name, description, status, created_at)
-            VALUES (?, ?, ?, ?, 'pending', ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 rem_id,
                 assessment_id,
                 agent_name,
                 description,
+                status,
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
         self._conn.commit()
         return rem_id
+
+    def update_remediation_status(self, remediation_id: str, status: str) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE remediations SET status = ? WHERE id = ?",
+            (status, remediation_id),
+        )
+        if status == "completed":
+            self._conn.execute(
+                "UPDATE remediations SET completed_at = ? WHERE id = ?",
+                (datetime.now(timezone.utc).isoformat(), remediation_id),
+            )
+        self._conn.commit()
+        return cursor.rowcount > 0
 
     def list_remediations(self, assessment_id: str) -> list[dict]:
         rows = self._conn.execute(
@@ -549,7 +568,7 @@ class AssessmentStore:
         cursor = self._conn.execute(
             """
             UPDATE remediations SET status = 'completed', completed_at = ?
-            WHERE id = ? AND status = 'pending'
+            WHERE id = ? AND status != 'completed'
             """,
             (datetime.now(timezone.utc).isoformat(), remediation_id),
         )

@@ -187,7 +187,7 @@ class TestRemediationsTable:
         rems = store.list_remediations(aid)
         assert len(rems) == 1
         assert rems[0]["agent_name"] == "security"
-        assert rems[0]["status"] == "pending"
+        assert rems[0]["status"] == "generated"
         assert rems[0]["id"] == rid
 
     def test_complete(self):

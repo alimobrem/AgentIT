@@ -753,8 +753,8 @@ async def remediations_page(request: Request, assessment_id: str) -> HTMLRespons
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
     remediations = s.list_remediations(assessment_id)
-    pending = sum(1 for r in remediations if r["status"] == "pending")
-    completed = sum(1 for r in remediations if r["status"] == "completed")
+    pending = sum(1 for r in remediations if r["status"] not in ("completed", "applied"))
+    completed = sum(1 for r in remediations if r["status"] in ("completed", "applied"))
     return templates.TemplateResponse(request, "remediations.html", {
         "report": report,
         "remediations": remediations,
@@ -772,6 +772,19 @@ async def complete_remediation(assessment_id: str, rem_id: str):
     if not any(r["id"] == rem_id for r in remediations):
         raise HTTPException(status_code=404, detail="Remediation not found for this assessment")
     s.complete_remediation(rem_id)
+    return RedirectResponse(
+        url=f"/assessments/{assessment_id}/remediations", status_code=303,
+    )
+
+
+@app.post("/assessments/{assessment_id}/remediations/{rem_id}/status", response_model=None)
+async def update_remediation_status(request: Request, assessment_id: str, rem_id: str):
+    form = await request.form()
+    status = str(form.get("status", ""))
+    if status not in ("generated", "applied", "blocked", "completed"):
+        raise HTTPException(400, "Invalid status")
+    s = get_store()
+    s.update_remediation_status(rem_id, status)
     return RedirectResponse(
         url=f"/assessments/{assessment_id}/remediations", status_code=303,
     )
