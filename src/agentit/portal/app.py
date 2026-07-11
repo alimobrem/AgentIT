@@ -498,17 +498,31 @@ async def api_gates(status: str = "pending"):
 @app.post("/assessments/{assessment_id}/create-pr", response_model=None)
 async def create_pr(assessment_id: str):
     """Create a GitHub PR with the onboarding manifests."""
+    from urllib.parse import quote
+
     s = get_store()
     report = s.get(assessment_id)
     files = s.get_onboarding(assessment_id)
     if report is None or files is None:
         raise HTTPException(status_code=404, detail="Assessment or onboarding not found")
-    result = await asyncio.to_thread(
-        create_onboarding_pr, report.repo_url, report.repo_name, files,
-    )
-    if "error" in result:
+
+    import logging
+    log = logging.getLogger("agentit.portal")
+    try:
+        result = await asyncio.to_thread(
+            create_onboarding_pr, report.repo_url, report.repo_name, files,
+        )
+    except Exception as exc:
+        log.exception("PR creation failed for %s", report.repo_name)
         return RedirectResponse(
-            url=f"/assessments/{assessment_id}/onboard-results?error={result['error']}",
+            url=f"/assessments/{assessment_id}/onboard-results?error={quote(str(exc)[:200])}",
+            status_code=303,
+        )
+
+    if "error" in result:
+        log.warning("PR creation error for %s: %s", report.repo_name, result["error"])
+        return RedirectResponse(
+            url=f"/assessments/{assessment_id}/onboard-results?error={quote(result['error'][:200])}",
             status_code=303,
         )
     return RedirectResponse(
