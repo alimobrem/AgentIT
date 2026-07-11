@@ -10,8 +10,9 @@ from agentit.portal.cluster_apply import apply_manifests_to_cluster
 
 @pytest.fixture(autouse=True)
 def _mock_cli():
-    """Make _find_cli always return 'oc'."""
-    with patch("agentit.portal.cluster_apply.shutil.which", return_value="/usr/bin/oc"):
+    """Make _find_cli always return 'oc' and skip namespace creation."""
+    with patch("agentit.portal.cluster_apply.shutil.which", return_value="/usr/bin/oc"), \
+         patch("agentit.portal.cluster_apply._ensure_namespace"):
         yield
 
 
@@ -126,6 +127,7 @@ def test_find_cli_falls_back_to_kubectl():
     )
     with (
         patch("agentit.portal.cluster_apply.shutil.which", side_effect=which_side_effect),
+        patch("agentit.portal.cluster_apply._ensure_namespace"),
         patch("agentit.portal.cluster_apply.subprocess.run", return_value=completed) as mock_run,
     ):
         result = apply_manifests_to_cluster(files)

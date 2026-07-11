@@ -320,11 +320,14 @@ async def apply_to_cluster(request: Request, assessment_id: str):
     applied = len(results["applied"])
     skipped = len(results["skipped"])
     errs = len(results["errors"])
+    error_detail = "; ".join(results["errors"][:5]) if results["errors"] else ""
+    from urllib.parse import quote
     return RedirectResponse(
         url=(
             f"/assessments/{assessment_id}/onboard-results"
             f"?applied={applied}&skipped={skipped}&errors={errs}"
             f"&dry_run={'true' if dry_run else 'false'}"
+            f"&error_detail={quote(error_detail)}"
         ),
         status_code=303,
     )

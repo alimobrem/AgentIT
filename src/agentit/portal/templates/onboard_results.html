@@ -25,8 +25,9 @@
 </div>
 {% else %}
 <div class="alert alert-warn">
-  No YAML manifests were applicable. Non-YAML files (Containerfile, .sh, .md, .json) are skipped.
-  {% if request.query_params.get('errors') %}Errors: {{ request.query_params.get('errors') }}{% endif %}
+  Applied 0 manifests. Non-YAML files (Containerfile, .sh, .md, .json) are skipped.
+  {% if request.query_params.get('errors') %}({{ request.query_params.get('errors') }} errors){% endif %}
+  {% if request.query_params.get('error_detail') %}<pre class="code-block mt-1"><code>{{ request.query_params.get('error_detail') }}</code></pre>{% endif %}
 </div>
 {% endif %}
 {% endif %}

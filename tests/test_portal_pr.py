@@ -21,29 +21,34 @@ SAMPLE_FILES = [
 ]
 
 
-@patch("agentit.portal.github_pr.shutil.rmtree")
-@patch("agentit.portal.github_pr.subprocess.run")
-@patch("agentit.portal.github_pr.tempfile.mkdtemp")
-def test_create_onboarding_pr_structure(mock_mkdtemp, mock_run, mock_rmtree, tmp_path):
-    """Verify the function issues git clone, checkout, add, commit, push, and gh pr create in order."""
-    work_dir = str(tmp_path / "agentit-pr-xyz")
-    mock_mkdtemp.return_value = work_dir
+@patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"})
+@patch("agentit.portal.github_pr.requests")
+def test_create_onboarding_pr_structure(mock_requests):
+    """Verify the function calls GitHub API to create tree, commit, ref, and PR."""
+    def mock_get(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        if url.endswith("/repos/org/my-app"):
+            resp.json.return_value = {"default_branch": "main"}
+        elif "git/ref/heads/main" in url:
+            resp.json.return_value = {"object": {"sha": "abc123"}}
+        return resp
 
-    # Make the repo dir exist so Path writes succeed
-    repo_dir = tmp_path / "agentit-pr-xyz" / "my-app"
-    repo_dir.mkdir(parents=True)
+    def mock_post(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 201
+        if "git/trees" in url:
+            resp.json.return_value = {"sha": "tree456"}
+        elif "git/commits" in url:
+            resp.json.return_value = {"sha": "commit789"}
+        elif "git/refs" in url:
+            resp.json.return_value = {"ref": "refs/heads/agentit/onboarding"}
+        elif "/pulls" in url:
+            resp.json.return_value = {"html_url": "https://github.com/org/my-app/pull/42"}
+        return resp
 
-    # gh pr create returns the PR URL on stdout
-    def side_effect(*args, **kwargs):
-        cmd = args[0]
-        result = MagicMock()
-        result.stdout = ""
-        result.stderr = ""
-        if cmd[0] == "gh":
-            result.stdout = "https://github.com/org/my-app/pull/42\n"
-        return result
-
-    mock_run.side_effect = side_effect
+    mock_requests.get.side_effect = mock_get
+    mock_requests.post.side_effect = mock_post
 
     result = create_onboarding_pr(
         repo_url="https://github.com/org/my-app.git",
@@ -56,52 +61,29 @@ def test_create_onboarding_pr_structure(mock_mkdtemp, mock_run, mock_rmtree, tmp
     assert result["branch"] == "agentit/onboarding"
     assert result["files_added"] == 2
 
-    # Verify the sequence of subprocess calls
-    calls = mock_run.call_args_list
-    assert len(calls) == 6
+    assert mock_requests.get.call_count == 2
+    assert mock_requests.post.call_count >= 3
 
-    # 1. git clone
-    assert calls[0].args[0][:2] == ["git", "clone"]
-
-    # 2. git checkout -b
-    assert calls[1].args[0] == ["git", "checkout", "-b", "agentit/onboarding"]
-
-    # 3. git add
-    assert calls[2].args[0] == ["git", "add", ".agentit"]
-
-    # 4. git commit
-    assert calls[3].args[0][0:2] == ["git", "commit"]
-
-    # 5. git push
-    assert calls[4].args[0] == ["git", "push", "-u", "origin", "agentit/onboarding"]
-
-    # 6. gh pr create
-    assert calls[5].args[0][0:3] == ["gh", "pr", "create"]
-
-    # Verify files were written to disk
-    sec = repo_dir / ".agentit" / "security" / "networkpolicy.yaml"
-    obs = repo_dir / ".agentit" / "observability" / "servicemonitor.yaml"
-    assert sec.exists()
-    assert obs.exists()
-
-    # Verify cleanup
-    mock_rmtree.assert_called_once_with(work_dir, ignore_errors=True)
+    tree_call = [c for c in mock_requests.post.call_args_list if "git/trees" in str(c)]
+    assert len(tree_call) == 1
+    tree_items = tree_call[0].kwargs["json"]["tree"]
+    paths = {t["path"] for t in tree_items}
+    assert ".agentit/security/networkpolicy.yaml" in paths
+    assert ".agentit/observability/servicemonitor.yaml" in paths
 
 
-@patch("agentit.portal.github_pr.shutil.rmtree")
-@patch("agentit.portal.github_pr.subprocess.run")
-@patch("agentit.portal.github_pr.tempfile.mkdtemp")
-def test_create_onboarding_pr_error(mock_mkdtemp, mock_run, mock_rmtree, tmp_path):
-    """Verify subprocess failures return an error dict instead of raising."""
-    import subprocess
+@patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"})
+@patch("agentit.portal.github_pr.requests")
+def test_create_onboarding_pr_error(mock_requests):
+    """Verify API failures return an error dict."""
+    import requests
 
-    work_dir = str(tmp_path / "agentit-pr-fail")
-    mock_mkdtemp.return_value = work_dir
-    (tmp_path / "agentit-pr-fail").mkdir(parents=True)
-
-    mock_run.side_effect = subprocess.CalledProcessError(
-        128, ["git", "clone"], stderr="fatal: repo not found",
-    )
+    resp = MagicMock()
+    resp.status_code = 404
+    resp.raise_for_status.side_effect = requests.HTTPError(response=resp)
+    resp.text = "Not Found"
+    mock_requests.get.return_value = resp
+    mock_requests.HTTPError = requests.HTTPError
 
     result = create_onboarding_pr(
         repo_url="https://github.com/org/nope.git",
@@ -110,5 +92,15 @@ def test_create_onboarding_pr_error(mock_mkdtemp, mock_run, mock_rmtree, tmp_pat
     )
 
     assert "error" in result
-    assert "git" in result["error"]
-    mock_rmtree.assert_called_once()
+
+
+def test_create_onboarding_pr_no_token():
+    """Verify missing GITHUB_TOKEN returns error."""
+    with patch.dict("os.environ", {}, clear=True):
+        result = create_onboarding_pr(
+            repo_url="https://github.com/org/test.git",
+            repo_name="test",
+            files=SAMPLE_FILES,
+        )
+    assert "error" in result
+    assert "GITHUB_TOKEN" in result["error"]

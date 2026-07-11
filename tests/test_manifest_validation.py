@@ -156,3 +156,8 @@ class TestAgentYamlValidity:
         report = _make_report(score=10)
         errors = _validate_agent_yaml(RetirementAgent, report, tmp_path)
         assert errors == [], f"Retirement agent produced invalid YAML: {errors}"
+
+    def test_release_agent(self, tmp_path: Path) -> None:
+        from agentit.agents.release import ReleaseCoordinatorAgent
+        errors = _validate_agent_yaml(ReleaseCoordinatorAgent, _make_report(), tmp_path)
+        assert errors == [], f"Release agent produced invalid YAML: {errors}"

@@ -11,6 +11,20 @@ logger = logging.getLogger(__name__)
 _SKIP_EXTENSIONS = frozenset({".sh", ".md", ".json", ".txt", ".toml", ".cfg", ".ini"})
 
 
+def _ensure_namespace(cli: str, namespace: str, dry_run: bool) -> None:
+    """Create namespace if it doesn't exist."""
+    check = subprocess.run(
+        [cli, "get", "namespace", namespace],
+        capture_output=True, text=True, timeout=10,
+    )
+    if check.returncode != 0 and not dry_run:
+        subprocess.run(
+            [cli, "create", "namespace", namespace],
+            capture_output=True, text=True, timeout=10,
+        )
+        logger.info("Created namespace %s", namespace)
+
+
 def _find_cli() -> str:
     """Return 'oc' if available, else 'kubectl', else raise."""
     for cmd in ("oc", "kubectl"):
@@ -44,6 +58,8 @@ def apply_manifests_to_cluster(
     applied: list[str] = []
     skipped: list[str] = []
     errors: list[str] = []
+
+    _ensure_namespace(cli, namespace, dry_run)
 
     tmpdir = tempfile.mkdtemp(prefix="agentit-apply-")
     try:
