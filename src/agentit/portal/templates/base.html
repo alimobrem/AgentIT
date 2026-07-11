@@ -100,5 +100,29 @@
 <div class="container">
 {% block content %}{% endblock %}
 </div>
+<script>
+document.addEventListener('submit', function(e) {
+  var form = e.target;
+  var btn = form.querySelector('button[type="submit"]');
+  if (!btn) return;
+  var orig = btn.innerHTML;
+  btn.innerHTML = '<span style="display:inline-flex;align-items:center;gap:0.5rem"><span class="spinner"></span>Working...</span>';
+  btn.disabled = true;
+  btn.style.opacity = '0.7';
+  // Re-enable after 120s in case of timeout
+  setTimeout(function() { btn.innerHTML = orig; btn.disabled = false; btn.style.opacity = '1'; }, 120000);
+});
+</script>
+<style>
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner {
+  display: inline-block;
+  width: 14px; height: 14px;
+  border: 2px solid rgba(255,255,255,0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+</style>
 </body>
 </html>
