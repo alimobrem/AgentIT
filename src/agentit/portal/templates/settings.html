@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}Settings - AgentIT{% endblock %}
+{% block content %}
+<h1>Settings</h1>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-label">Auto-Mode</div>
+    <div class="stat-value">
+      {% if auto_mode %}
+        <span class="text-success">ON</span>
+      {% else %}
+        <span class="text-muted">OFF</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">LLM Safety Gate</div>
+    <div class="stat-value">
+      {% if llm_available %}
+        <span class="text-success">Active</span>
+      {% else %}
+        <span class="text-warning">Unavailable</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Mode</div>
+    <div class="stat-value text-sm">
+      {% if auto_mode %}
+        Agents detect, classify, and auto-apply safe changes. Destructive actions gate for human review.
+      {% else %}
+        Human-in-the-loop. All actions require manual approval.
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<h2 class="section-title">Auto-Mode</h2>
+<p class="text-muted mb-2">
+  When enabled, agents automatically assess, onboard, and apply manifests for monitored apps.
+  The LLM reviews every action — destructive operations are always gated for human approval.
+</p>
+
+<div class="action-bar mb-2">
+  {% if auto_mode %}
+  <form method="post" action="/settings/auto-mode" class="inline-form">
+    <input type="hidden" name="value" value="false">
+    <button type="submit" class="btn btn-outline">
+      <span class="btn-label">Disable Auto-Mode</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+    </button>
+  </form>
+  {% else %}
+  <form method="post" action="/settings/auto-mode" class="inline-form">
+    <input type="hidden" name="value" value="true">
+    <button type="submit" class="btn btn-green">
+      <span class="btn-label">Enable Auto-Mode</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+    </button>
+  </form>
+  {% endif %}
+</div>
+
+{% if auto_mode %}
+<div class="alert alert-warn mb-2">
+  Auto-mode is active. Safe changes (adding NetworkPolicies, ConfigMaps, ServiceMonitors) will be
+  applied automatically. Destructive changes (deleting resources, modifying RBAC, scaling to zero)
+  will be flagged by the LLM and queued in Gates for your review.
+  {% if not llm_available %}
+  <strong>Warning:</strong> LLM is unavailable — all actions will be gated (fail-closed).
+  {% endif %}
+</div>
+{% endif %}
+
+<h2 class="section-title">Decision Matrix</h2>
+<table>
+  <thead>
+    <tr><th>Auto-Mode</th><th>Orchestrator</th><th>LLM Says</th><th>Result</th></tr>
+  </thead>
+  <tbody>
+    <tr class="row-border-yellow">
+      <td>OFF</td><td>Any</td><td>Any</td>
+      <td><span class="badge badge-medium">Gate</span> (current default)</td>
+    </tr>
+    <tr class="row-border-green">
+      <td>ON</td><td>Auto-approve</td><td>Safe</td>
+      <td><span class="badge badge-low">Auto-apply</span></td>
+    </tr>
+    <tr class="row-border-red">
+      <td>ON</td><td>Auto-approve</td><td>Destructive</td>
+      <td><span class="badge badge-critical">Gate + Alert</span></td>
+    </tr>
+    <tr class="row-border-yellow">
+      <td>ON</td><td>Needs approval</td><td>Any</td>
+      <td><span class="badge badge-medium">Gate</span></td>
+    </tr>
+    <tr class="row-border-red">
+      <td>ON</td><td>Any</td><td>Unavailable</td>
+      <td><span class="badge badge-critical">Gate</span> (fail-closed)</td>
+    </tr>
+  </tbody>
+</table>
+
+{% if recent_actions %}
+<h2 class="section-title">Recent Auto-Mode Actions</h2>
+<table>
+  <thead>
+    <tr><th>Time</th><th>Action</th><th>Target</th><th>Summary</th></tr>
+  </thead>
+  <tbody>
+    {% for e in recent_actions %}
+    <tr>
+      <td class="text-sm">{{ e.timestamp[:19] }}</td>
+      <td class="text-bold">{{ e.action }}</td>
+      <td>{{ e.target_app or "—" }}</td>
+      <td class="text-sm">{{ e.summary }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

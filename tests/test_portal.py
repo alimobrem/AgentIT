@@ -1043,3 +1043,43 @@ def test_assessment_detail_shows_history_button(client, _override_store):
     assert resp.status_code == 200
     assert f"/assessments/{aid}/onboarding-history" in resp.text
     assert "History (1)" in resp.text
+
+
+# ── Settings page ──────────────────────────────────────────────────────
+
+
+def test_settings_page_default(client, _override_store):
+    resp = client.get("/settings")
+    assert resp.status_code == 200
+    assert "Settings" in resp.text
+    assert "Auto-Mode" in resp.text
+    assert "OFF" in resp.text
+
+
+def test_toggle_auto_mode_on(client, _override_store):
+    store = _override_store
+    resp = client.post("/settings/auto-mode", data={"value": "true"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert store.get_setting("auto_mode") == "true"
+
+
+def test_toggle_auto_mode_off(client, _override_store):
+    store = _override_store
+    store.set_setting("auto_mode", "true")
+    resp = client.post("/settings/auto-mode", data={"value": "false"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert store.get_setting("auto_mode") == "false"
+
+
+def test_settings_page_shows_on_when_enabled(client, _override_store):
+    store = _override_store
+    store.set_setting("auto_mode", "true")
+    resp = client.get("/settings")
+    assert resp.status_code == 200
+    assert "ON" in resp.text
+    assert "Disable Auto-Mode" in resp.text
+
+
+def test_settings_nav_link(client):
+    resp = client.get("/")
+    assert 'href="/settings"' in resp.text
