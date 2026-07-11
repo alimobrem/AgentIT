@@ -88,7 +88,10 @@
           <form method="post" action="/assess" class="inline-form">
             <input type="hidden" name="repo_url" value="{{ r.repo_url }}">
             <input type="hidden" name="criticality" value="{{ r.criticality }}">
-            <button type="submit" class="btn btn-sm">Re-assess</button>
+            <button type="submit" class="btn btn-sm">
+              <span class="btn-label">Re-assess</span>
+              <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
+            </button>
           </form>
           <form method="post" action="/assessments/{{ r.id }}/delete" class="inline-form"
                 data-repo-name="{{ r.repo_name }}">
