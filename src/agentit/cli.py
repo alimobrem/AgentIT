@@ -235,6 +235,8 @@ def onboard(repo_url: str, output_dir: str, criticality: str, use_llm: bool, llm
 
     out = Path(output_dir)
 
+    from agentit.agents.orchestrator import FleetOrchestrator
+
     try:
         with _resolve_and_assess(repo_url, criticality, use_llm, llm_model) as report:
             # Write assessment report
@@ -242,28 +244,23 @@ def onboard(repo_url: str, output_dir: str, criticality: str, use_llm: bool, llm
             assessment_path = out / "assessment.json"
             assessment_path.write_text(render_json_report(report), encoding="utf-8")
 
-            # Run agents into subdirectories
-            agents: list[tuple[str, type]] = [
-                ("security", HardeningAgent),
-                ("observability", ObservabilityAgent),
-                ("cicd", CICDAgent),
-                ("compliance", ComplianceAgent),
-            ]
-
-            all_files: dict[str, list[str]] = {}
-            for subdir, agent_cls in agents:
-                sub_path = out / subdir
-                click.echo(f"Running {agent_cls.__name__}...", err=True)
-                result = agent_cls(report=report, output_dir=sub_path).run()
-                all_files[subdir] = [gf.path for gf in result.files]
+            # Run full orchestration
+            click.echo("Running Fleet Orchestrator...", err=True)
+            orch = FleetOrchestrator(report=report, output_dir=out)
+            result = orch.run()
 
             # Summary
             click.echo(f"\nAssessment score: {report.overall_score:.1f}", err=True)
             click.echo(f"Assessment report: {assessment_path}", err=True)
-            for category, files in all_files.items():
-                click.echo(f"\n[{category}]", err=True)
-                for f in files:
-                    click.echo(f"  {out / category / f}", err=True)
+            for ar in result.agent_results:
+                status = "PASS" if ar.success else "FAIL"
+                click.echo(f"\n[{status}] {ar.agent_name}", err=True)
+                for f in ar.files_generated:
+                    click.echo(f"  {out / ar.category / f}", err=True)
+                if ar.error:
+                    click.echo(f"  error: {ar.error}", err=True)
+
+            click.echo(f"\n{result.recommendation}", err=True)
     except CloneError as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)

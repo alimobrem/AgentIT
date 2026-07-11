@@ -54,8 +54,16 @@ spec:
                 - name: command
                   value: comply
 
+          - name: release
+            dependencies: [assess]
+            template: run-agentit
+            arguments:
+              parameters:
+                - name: command
+                  value: release
+
           - name: approve
-            dependencies: [harden, observe, cicd, comply]
+            dependencies: [harden, observe, cicd, comply, release]
             template: approval-gate
 
     - name: run-agentit
