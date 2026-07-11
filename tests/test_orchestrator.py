@@ -65,6 +65,29 @@ class TestPlanSelectsAgents:
 
         assert "retirement" in plan.agents_to_run
 
+    def test_plan_adds_codechange_for_high_criticality(self, tmp_path: Path) -> None:
+        """High criticality -> codechange agent included."""
+        report = make_report(criticality="high")
+        orch = FleetOrchestrator(report, tmp_path / "out")
+        plan = orch.plan()
+        assert "codechange" in plan.agents_to_run
+
+    def test_plan_adds_codechange_for_low_score(self, tmp_path: Path) -> None:
+        """Score < 50 -> codechange agent included."""
+        report = make_report()
+        report.overall_score = 40.0
+        orch = FleetOrchestrator(report, tmp_path / "out")
+        plan = orch.plan()
+        assert "codechange" in plan.agents_to_run
+
+    def test_plan_skips_codechange_for_high_score_low_crit(self, tmp_path: Path) -> None:
+        """Low criticality, score >= 50 -> no codechange."""
+        report = make_report(criticality="low")
+        report.overall_score = 80.0
+        orch = FleetOrchestrator(report, tmp_path / "out")
+        plan = orch.plan()
+        assert "codechange" not in plan.agents_to_run
+
 
 class TestAutoApprove:
     def test_auto_approve_for_low_crit_high_score(self, tmp_path: Path) -> None:

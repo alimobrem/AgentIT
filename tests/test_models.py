@@ -104,3 +104,18 @@ def test_assessment_report_json_roundtrip():
     restored = AssessmentReport.model_validate_json(json_str)
     assert restored.repo_url == report.repo_url
     assert restored.assessed_at == report.assessed_at
+
+
+def test_infra_repo_url_defaults_to_none():
+    from conftest import make_report
+    report = make_report()
+    assert report.infra_repo_url is None
+
+
+def test_infra_repo_url_roundtrip():
+    from conftest import make_report
+    report = make_report()
+    report.infra_repo_url = "https://github.com/org/gitops-infra"
+    json_str = report.model_dump_json()
+    restored = AssessmentReport.model_validate_json(json_str)
+    assert restored.infra_repo_url == "https://github.com/org/gitops-infra"

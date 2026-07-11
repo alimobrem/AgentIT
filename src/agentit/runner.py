@@ -40,6 +40,7 @@ def run_assessment(
     repo_url: str,
     criticality: str = "medium",
     llm_client: object | None = None,
+    infra_repo_url: str | None = None,
 ) -> AssessmentReport:
     detector = StackDetector()
     stack = detector.detect(repo_path)
@@ -80,6 +81,7 @@ def run_assessment(
         criticality=criticality,
         summary=summary,
         remediation_plan=remediation_plan,
+        infra_repo_url=infra_repo_url or None,
     )
 
 

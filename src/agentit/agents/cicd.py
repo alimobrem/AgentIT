@@ -197,6 +197,10 @@ class CICDAgent:
             return []
 
         name = self._name
+
+        if self.report.infra_repo_url:
+            return self._generate_applicationset(name, hits)
+
         doc: dict = {
             "apiVersion": "argoproj.io/v1alpha1",
             "kind": "Application",
@@ -236,6 +240,68 @@ class CICDAgent:
                 path="argocd-application.yaml",
                 content=content,
                 description="Argo CD Application with auto-sync, self-heal, and prune enabled.",
+                finding_addressed="; ".join(hits),
+            ),
+        ]
+
+    def _generate_applicationset(self, name: str, hits: list[str]) -> list[GeneratedFile]:
+        doc: dict = {
+            "apiVersion": "argoproj.io/v1alpha1",
+            "kind": "ApplicationSet",
+            "metadata": {
+                "name": "agentit-managed-apps",
+                "namespace": "openshift-gitops",
+            },
+            "spec": {
+                "generators": [
+                    {
+                        "git": {
+                            "repoURL": self.report.infra_repo_url,
+                            "revision": "HEAD",
+                            "directories": [
+                                {"path": "apps/*"},
+                            ],
+                        },
+                    },
+                ],
+                "template": {
+                    "metadata": {
+                        "name": "{{path.basename}}",
+                        "namespace": "openshift-gitops",
+                    },
+                    "spec": {
+                        "project": "default",
+                        "source": {
+                            "repoURL": self.report.infra_repo_url,
+                            "targetRevision": "HEAD",
+                            "path": "{{path}}",
+                        },
+                        "destination": {
+                            "server": "https://kubernetes.default.svc",
+                            "namespace": "{{path.basename}}",
+                        },
+                        "syncPolicy": {
+                            "automated": {
+                                "selfHeal": True,
+                                "prune": True,
+                            },
+                            "syncOptions": [
+                                "CreateNamespace=true",
+                            ],
+                        },
+                    },
+                },
+            },
+        }
+
+        content = yaml.dump(doc, default_flow_style=False, sort_keys=False)
+        self._write("argocd-applicationset.yaml", content)
+
+        return [
+            GeneratedFile(
+                path="argocd-applicationset.yaml",
+                content=content,
+                description=f"Argo CD ApplicationSet — auto-discovers apps in {self.report.infra_repo_url} under apps/*/.",
                 finding_addressed="; ".join(hits),
             ),
         ]

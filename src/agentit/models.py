@@ -94,6 +94,7 @@ class AssessmentReport(BaseModel):
     criticality: str
     summary: str
     remediation_plan: list[RemediationItem]
+    infra_repo_url: str | None = None
 
     def model_post_init(self, _context: object) -> None:
         if self.scores:

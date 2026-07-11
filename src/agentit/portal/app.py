@@ -156,10 +156,13 @@ def _get_llm_client():
     return None
 
 
-def _clone_assess_cleanup(repo_url: str, criticality: str):
+def _clone_assess_cleanup(repo_url: str, criticality: str, infra_repo_url: str | None = None):
     repo_path = clone_repo(repo_url)
     try:
-        return run_assessment(repo_path, repo_url, criticality, llm_client=_get_llm_client())
+        return run_assessment(
+            repo_path, repo_url, criticality,
+            llm_client=_get_llm_client(), infra_repo_url=infra_repo_url,
+        )
     finally:
         shutil.rmtree(repo_path, ignore_errors=True)
 
@@ -169,9 +172,11 @@ async def assess_submit(
     request: Request,
     repo_url: str = Form(...),
     criticality: str = Form("medium"),
+    infra_repo_url: str = Form(""),
 ):
+    infra = infra_repo_url.strip() or None
     try:
-        report = await asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality)
+        report = await asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality, infra)
     except Exception as exc:
         log.exception("Assessment failed for %s", repo_url)
         return templates.TemplateResponse(
@@ -497,7 +502,9 @@ async def api_gates(status: str = "pending"):
 
 @app.post("/assessments/{assessment_id}/create-pr", response_model=None)
 async def create_pr(assessment_id: str):
-    """Create a GitHub PR with the onboarding manifests."""
+    """Commit manifests to GitOps infra repo (or app repo as fallback)."""
+    from agentit.portal.github_pr import commit_to_infra_repo
+
     s = get_store()
     report = s.get(assessment_id)
     files = s.get_onboarding(assessment_id)
@@ -505,9 +512,14 @@ async def create_pr(assessment_id: str):
         raise HTTPException(status_code=404, detail="Assessment or onboarding not found")
 
     try:
-        result = await asyncio.to_thread(
-            create_onboarding_pr, report.repo_url, report.repo_name, files,
-        )
+        if report.infra_repo_url:
+            result = await asyncio.to_thread(
+                commit_to_infra_repo, report.infra_repo_url, report.repo_name, files,
+            )
+        else:
+            result = await asyncio.to_thread(
+                create_onboarding_pr, report.repo_url, report.repo_name, files,
+            )
     except Exception as exc:
         log.exception("PR creation failed for %s", report.repo_name)
         return RedirectResponse(

@@ -110,3 +110,33 @@ class TestContainerfileSkip:
         )
         result = CICDAgent(report, out).run()
         assert not any(f.path == "Containerfile" for f in result.files)
+
+
+class TestApplicationSet:
+    def test_generates_applicationset_with_infra_repo(self, tmp_path: Path) -> None:
+        report = make_report(
+            scores=[_score_with_finding("cicd", "gitops", "No GitOps deployment")],
+        )
+        report.infra_repo_url = "https://github.com/org/gitops-infra"
+        result = CICDAgent(report, tmp_path / "out").run()
+
+        appset = [f for f in result.files if f.path == "argocd-applicationset.yaml"]
+        assert len(appset) == 1
+
+        doc = yaml.safe_load(appset[0].content)
+        assert doc["kind"] == "ApplicationSet"
+        assert doc["spec"]["generators"][0]["git"]["repoURL"] == "https://github.com/org/gitops-infra"
+        assert doc["spec"]["generators"][0]["git"]["directories"][0]["path"] == "apps/*"
+        assert "{{path.basename}}" in doc["spec"]["template"]["metadata"]["name"]
+
+    def test_generates_application_without_infra_repo(self, tmp_path: Path) -> None:
+        report = make_report(
+            scores=[_score_with_finding("cicd", "gitops", "No GitOps deployment")],
+        )
+        result = CICDAgent(report, tmp_path / "out").run()
+
+        app = [f for f in result.files if f.path == "argocd-application.yaml"]
+        assert len(app) == 1
+
+        doc = yaml.safe_load(app[0].content)
+        assert doc["kind"] == "Application"
