@@ -470,6 +470,13 @@ class AssessmentStore:
     # ── Gates ────────────────────────────────────────────────────────────
 
     def create_gate(self, assessment_id: str, gate_type: str, summary: str) -> str:
+        existing = self._conn.execute(
+            "SELECT id FROM gates WHERE assessment_id = ? AND gate_type = ? AND status = 'pending'",
+            (assessment_id, gate_type),
+        ).fetchone()
+        if existing:
+            return existing["id"]
+
         gate_id = uuid.uuid4().hex
         self._conn.execute(
             """
@@ -486,6 +493,19 @@ class AssessmentStore:
         )
         self._conn.commit()
         return gate_id
+
+    def expire_stale_gates(self, hours: int = 24) -> int:
+        """Auto-reject pending gates older than the given hours."""
+        cutoff = (datetime.now(timezone.utc) - __import__("datetime").timedelta(hours=hours)).isoformat()
+        cursor = self._conn.execute(
+            """
+            UPDATE gates SET status = 'expired', resolved_at = ?, resolved_by = 'auto-expire'
+            WHERE status = 'pending' AND created_at < ?
+            """,
+            (datetime.now(timezone.utc).isoformat(), cutoff),
+        )
+        self._conn.commit()
+        return cursor.rowcount
 
     def list_gates(self, status: str = "pending") -> list[dict]:
         rows = self._conn.execute(

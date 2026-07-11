@@ -464,18 +464,24 @@ async def install_operator_endpoint(request: Request):
 
 @app.get("/gates", response_class=HTMLResponse)
 async def gates_page(request: Request):
-    """Show pending approval gates."""
+    """Show pending approval gates. Auto-expires gates older than 24h."""
     s = get_store()
+    expired_count = s.expire_stale_gates(hours=24)
+    if expired_count:
+        s.log_event("portal", "gates-expired", None, "info",
+                    f"Auto-expired {expired_count} stale gate(s)")
+
     all_gates = s.list_all_gates()
     pending = [g for g in all_gates if g["status"] == "pending"]
-    stale = s.get_stale_gates(hours=24)
+    stale = s.get_stale_gates(hours=4)
     stale_ids = {g["id"] for g in stale}
     for g in pending:
         g["stale"] = g["id"] in stale_ids
-    resolved = [g for g in all_gates if g["status"] in ("approved", "rejected")]
-    resolved.sort(key=lambda g: g.get("resolved_at", ""), reverse=True)
+    resolved = [g for g in all_gates if g["status"] in ("approved", "rejected", "expired")]
+    resolved.sort(key=lambda g: g.get("resolved_at") or g.get("created_at", ""), reverse=True)
     return templates.TemplateResponse(request, "gates.html", {
-        "pending": pending, "resolved": resolved[:20], "stale_count": len(stale),
+        "pending": pending, "resolved": resolved[:20],
+        "stale_count": len(stale), "expired_count": expired_count,
     })
 
 
