@@ -16,11 +16,11 @@ spec:
       eventName: agentit-events
       filters:
         data:
-          - path: type
+          - path: body.action
             type: string
             value:
               - assessment-complete
-          - path: score
+          - path: body.result.details.score
             type: number
             comparator: "<"
             value:
@@ -28,16 +28,15 @@ spec:
   triggers:
     - template:
         name: trigger-onboarding
-        argoWorkflow:
-          operation: submit
-          source:
-            resource:
-              apiVersion: argoproj.io/v1alpha1
-              kind: Workflow
-              metadata:
-                generateName: agentit-onboarding-
-                namespace: {{ .Release.Namespace }}
-              spec:
-                workflowTemplateRef:
-                  name: agentit-onboarding
+        http:
+          url: http://agentit.{{ .Release.Namespace }}.svc:8080/api/webhook/onboard
+          method: POST
+          headers:
+            Content-Type: application/json
+          payload:
+            - src:
+                dependencyName: assessment-complete
+                dataKey: body
+              dest: body
+          timeout: 120
 {{- end }}

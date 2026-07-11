@@ -422,6 +422,37 @@ def test_webhook_missing_repo_url(client):
     assert resp.status_code == 400
 
 
+def test_webhook_onboard_triggers_onboarding(client, _override_store):
+    store = _override_store
+    report = _make_report_with_findings()
+    aid = store.save(report)
+
+    fake_files = [{"category": "security", "filename": "netpol.yaml", "content": "kind: NetworkPolicy"}]
+    with patch("agentit.portal.app._run_onboarding", return_value=fake_files):
+        resp = client.post(
+            "/api/webhook/onboard",
+            json={"correlationId": aid},
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["assessment_id"] == aid
+    assert data["files_generated"] == 1
+    assert "security" in data["categories"]
+
+
+def test_webhook_onboard_missing_assessment_id(client):
+    resp = client.post("/api/webhook/onboard", json={"eventId": "evt-123"})
+    assert resp.status_code == 400
+
+
+def test_webhook_onboard_assessment_not_found(client):
+    resp = client.post(
+        "/api/webhook/onboard",
+        json={"correlationId": "nonexistent-id"},
+    )
+    assert resp.status_code == 404
+
+
 def test_api_events_returns_json(client, _override_store):
     store = _override_store
     store.log_event("agent-a", "deploy", "app-x", "info", "Deployed v2")

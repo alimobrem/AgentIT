@@ -106,6 +106,47 @@ async def webhook_assess(request: Request):
     return JSONResponse({"assessment_id": assessment_id, "overall_score": report.overall_score})
 
 
+@app.post("/api/webhook/onboard")
+async def webhook_onboard(request: Request):
+    """Trigger onboarding via webhook (called by Argo Events Sensor for low-score assessments)."""
+    import logging
+    log = logging.getLogger("agentit.portal")
+    body = await request.json()
+    log.info("webhook_onboard received event: %s", body.get("eventId", "unknown"))
+
+    # Extract assessment_id: correlationId first, then result.details.assessment_id
+    assessment_id = body.get("correlationId")
+    if not assessment_id:
+        result = body.get("result") or {}
+        details = result.get("details") or {}
+        assessment_id = details.get("assessment_id")
+    if not assessment_id:
+        raise HTTPException(400, "assessment_id not found in event body")
+
+    s = get_store()
+    report = s.get(assessment_id)
+    if report is None:
+        raise HTTPException(404, f"Assessment {assessment_id} not found")
+
+    try:
+        files = await asyncio.to_thread(_run_onboarding, report, assessment_id)
+    except Exception as exc:
+        log.exception("Onboarding failed for assessment %s", assessment_id)
+        return JSONResponse(
+            {"error": str(exc), "assessment_id": assessment_id},
+            status_code=500,
+        )
+
+    s.save_onboarding(assessment_id, files)
+    log.info("webhook_onboard completed for %s: %d files generated", assessment_id, len(files))
+    return JSONResponse({
+        "assessment_id": assessment_id,
+        "repo_url": report.repo_url,
+        "files_generated": len(files),
+        "categories": list({f["category"] for f in files}),
+    })
+
+
 @app.get("/api/events")
 async def api_events(limit: int = 50, target_app: str | None = None):
     return JSONResponse(get_store().list_events(limit=limit, target_app=target_app))

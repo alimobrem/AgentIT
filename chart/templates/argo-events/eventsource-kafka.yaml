@@ -13,6 +13,9 @@ spec:
     agentit-events:
       url: agentit-kafka-kafka-bootstrap:9092
       topic: agentit-events
-      consumerGroup: agentit-argo-events
+      consumerGroup:
+        groupName: agentit-argo-events
+        rebalanceStrategy: range
       jsonBody: true
+      version: "4.1.0"
 {{- end }}

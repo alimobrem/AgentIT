@@ -29,8 +29,10 @@ rollout:
 gcp:
   credentialsSecret: ""
 
-argoWorkflows:
-  enabled: false
+cronJobs:
+  cveScan:
+    enabled: false
+    schedule: "0 6 * * 1"
 
 kafka:
   enabled: false

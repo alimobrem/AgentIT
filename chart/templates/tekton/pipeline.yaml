@@ -92,6 +92,7 @@ spec:
           workspace: source
 
     - name: restart-rollout
+      retries: 1
       timeout: "2m"
       runAfter: [build-image]
       taskSpec:
