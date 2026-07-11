@@ -30,10 +30,8 @@ def _make_report(
     frameworks = [Framework(name=framework, language=lang)] if framework else []
     if findings is None:
         findings = [
-            Finding(category="container security", severity=Severity.high,
-                    description="No Containerfile", recommendation="Add Dockerfile"),
-            Finding(category="health endpoint", severity=Severity.medium,
-                    description="No health check", recommendation="Add /healthz"),
+            Finding(category="gitignore", severity=Severity.low,
+                    description="Missing .gitignore", recommendation="Add .gitignore"),
             Finding(category="opentelemetry", severity=Severity.medium,
                     description="No tracing", recommendation="Add OTel"),
         ]
@@ -57,57 +55,6 @@ def _make_report(
 
 
 class TestDeterministicChanges:
-    def test_generates_dockerfile_fix(self, tmp_path: Path) -> None:
-        report = _make_report(findings=[
-            Finding(category="dockerfile", severity=Severity.high,
-                    description="Running as root", recommendation="Add USER"),
-        ])
-        agent = CodeChangeAgent(report, tmp_path / "out")
-        result = agent.run()
-        assert len(result.changes) == 1
-        assert result.changes[0].file_path == "Dockerfile"
-        assert "USER 1001" in result.changes[0].content
-        assert "HEALTHCHECK" in result.changes[0].content
-
-    def test_dockerfile_uses_ubi_base(self, tmp_path: Path) -> None:
-        for lang in ("python", "go", "node", "java"):
-            report = _make_report(lang=lang, findings=[
-                Finding(category="container", severity=Severity.high,
-                        description="No Dockerfile", recommendation="Add it"),
-            ])
-            agent = CodeChangeAgent(report, tmp_path / f"out-{lang}")
-            result = agent.run()
-            assert "ubi9" in result.changes[0].content, f"No UBI base for {lang}"
-
-    def test_generates_health_endpoint_python(self, tmp_path: Path) -> None:
-        report = _make_report(lang="python", framework="Flask", findings=[
-            Finding(category="health", severity=Severity.medium,
-                    description="No health check", recommendation="Add /healthz"),
-        ])
-        agent = CodeChangeAgent(report, tmp_path / "out")
-        result = agent.run()
-        assert len(result.changes) == 1
-        assert "healthz" in result.changes[0].content
-
-    def test_generates_health_endpoint_node(self, tmp_path: Path) -> None:
-        report = _make_report(lang="javascript", framework="Express", findings=[
-            Finding(category="healthcheck", severity=Severity.medium,
-                    description="No health check", recommendation="Add /healthz"),
-        ])
-        agent = CodeChangeAgent(report, tmp_path / "out")
-        result = agent.run()
-        assert len(result.changes) == 1
-        assert "healthz" in result.changes[0].content
-
-    def test_generates_health_endpoint_go(self, tmp_path: Path) -> None:
-        report = _make_report(lang="go", framework="Gin", findings=[
-            Finding(category="health", severity=Severity.medium,
-                    description="No health check", recommendation="Add /healthz"),
-        ])
-        agent = CodeChangeAgent(report, tmp_path / "out")
-        result = agent.run()
-        assert "healthz" in result.changes[0].content
-
     def test_generates_gitignore(self, tmp_path: Path) -> None:
         report = _make_report(findings=[
             Finding(category="gitignore", severity=Severity.low,
@@ -140,25 +87,24 @@ class TestDeterministicChanges:
 class TestLLMChanges:
     def test_llm_generates_change(self, tmp_path: Path) -> None:
         llm = MagicMock()
-        llm._chat.return_value = '{"file_path": "Dockerfile", "action": "modify", "content": "FROM ubi9", "explanation": "Fix base image"}'
+        llm._chat.return_value = '{"file_path": ".gitignore", "action": "create", "content": ".env\\n__pycache__", "explanation": "Add gitignore"}'
 
         report = _make_report(findings=[
-            Finding(category="container", severity=Severity.high,
-                    description="Bad base image", recommendation="Use UBI"),
+            Finding(category="gitignore", severity=Severity.low,
+                    description="Missing .gitignore", recommendation="Add it"),
         ])
         agent = CodeChangeAgent(report, tmp_path / "out", llm_client=llm)
         result = agent.run()
         assert len(result.changes) == 1
-        assert result.changes[0].file_path == "Dockerfile"
-        assert result.changes[0].content == "FROM ubi9"
+        assert result.changes[0].file_path == ".gitignore"
 
     def test_llm_bad_json_skips(self, tmp_path: Path) -> None:
         llm = MagicMock()
         llm._chat.return_value = "not valid json"
 
         report = _make_report(findings=[
-            Finding(category="container", severity=Severity.high,
-                    description="Issue", recommendation="Fix"),
+            Finding(category="secrets", severity=Severity.high,
+                    description="Hardcoded secret", recommendation="Fix"),
         ])
         agent = CodeChangeAgent(report, tmp_path / "out", llm_client=llm)
         result = agent.run()
@@ -169,8 +115,8 @@ class TestLLMChanges:
         llm._chat.return_value = None
 
         report = _make_report(findings=[
-            Finding(category="container", severity=Severity.high,
-                    description="Issue", recommendation="Fix"),
+            Finding(category="secrets", severity=Severity.high,
+                    description="Hardcoded secret", recommendation="Fix"),
         ])
         agent = CodeChangeAgent(report, tmp_path / "out", llm_client=llm)
         result = agent.run()
@@ -196,10 +142,10 @@ class TestNoActionableFindings:
 
 class TestMultipleChanges:
     def test_generates_multiple_changes(self, tmp_path: Path) -> None:
-        report = _make_report(framework="Flask")  # framework needed for health endpoint
+        report = _make_report()
         agent = CodeChangeAgent(report, tmp_path / "out")
         result = agent.run()
-        assert len(result.changes) == 3
+        assert len(result.changes) == 2
         summary_files = [f for f in result.files if f.path == "code-changes-summary.md"]
         assert len(summary_files) == 1
         assert "Code Changes" in summary_files[0].content
@@ -207,11 +153,11 @@ class TestMultipleChanges:
 
 class TestResultModel:
     def test_summary_count(self, tmp_path: Path) -> None:
-        report = _make_report(framework="Flask")
+        report = _make_report()
         agent = CodeChangeAgent(report, tmp_path / "out")
         result = agent.run()
         assert isinstance(result, CodeChangeResult)
-        assert "3 code changes" in result.summary
+        assert "2 code changes" in result.summary
 
     def test_output_dir_created(self, tmp_path: Path) -> None:
         out = tmp_path / "out"

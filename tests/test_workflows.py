@@ -175,19 +175,19 @@ class TestGateLifecycleFlow:
 class TestCodeChangeAgentFlow:
     """Code change agent: generates patches for actionable findings."""
 
-    def test_generates_dockerfile_for_container_finding(self, tmp_path):
+    def test_generates_gitignore_for_finding(self, tmp_path):
         from agentit.agents.codechange import CodeChangeAgent
         report = make_report(
             scores=[DimensionScore(
                 dimension="security", score=30, max_score=100,
-                findings=[Finding(category="container", severity=Severity.high,
-                                  description="No Dockerfile", recommendation="Add it")],
+                findings=[Finding(category="gitignore", severity=Severity.low,
+                                  description="Missing .gitignore", recommendation="Add it")],
             )],
         )
         agent = CodeChangeAgent(report, tmp_path / "out")
         result = agent.run()
         assert len(result.changes) == 1
-        assert "USER 1001" in result.changes[0].content
+        assert ".env" in result.changes[0].content
 
     def test_skips_non_actionable_findings(self, tmp_path):
         from agentit.agents.codechange import CodeChangeAgent

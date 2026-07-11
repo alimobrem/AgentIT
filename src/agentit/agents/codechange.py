@@ -55,7 +55,6 @@ Generate the minimal fix.
 
 # Findings the code agent can handle (category keywords)
 _SUPPORTED_CATEGORIES = {
-    "container", "dockerfile", "health", "healthcheck",
     "secrets", "gitignore", "instrumentation", "otel",
     "opentelemetry", "tracing", "logging", "structured",
 }
