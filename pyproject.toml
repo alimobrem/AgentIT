@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "agentit"
 version = "0.1.0"
 description = "Enterprise Readiness Assessor for AgentIT"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "click>=8.1",
