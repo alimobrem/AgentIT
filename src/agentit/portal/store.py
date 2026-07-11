@@ -119,7 +119,56 @@ class AssessmentStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS apply_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                assessment_id TEXT NOT NULL,
+                namespace TEXT NOT NULL,
+                dry_run INTEGER NOT NULL DEFAULT 0,
+                applied_json TEXT NOT NULL DEFAULT '[]',
+                skipped_json TEXT NOT NULL DEFAULT '[]',
+                errors_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (assessment_id) REFERENCES assessments(id)
+            )
+            """
+        )
         self._conn.commit()
+
+    def save_apply_results(
+        self, assessment_id: str, results: dict, namespace: str, dry_run: bool,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            """INSERT INTO apply_results
+               (assessment_id, namespace, dry_run, applied_json, skipped_json, errors_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                assessment_id, namespace, int(dry_run),
+                json.dumps(results["applied"]),
+                json.dumps(results["skipped"]),
+                json.dumps(results["errors"]),
+                now,
+            ),
+        )
+        self._conn.commit()
+
+    def get_apply_results(self, assessment_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM apply_results WHERE assessment_id = ? ORDER BY created_at DESC LIMIT 1",
+            (assessment_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "namespace": row["namespace"],
+            "dry_run": bool(row["dry_run"]),
+            "applied": json.loads(row["applied_json"]),
+            "skipped": json.loads(row["skipped_json"]),
+            "errors": json.loads(row["errors_json"]),
+            "created_at": row["created_at"],
+        }
 
     def save(self, report: AssessmentReport) -> str:
         assessment_id = uuid.uuid4().hex

@@ -16,7 +16,44 @@
   Error: {{ request.query_params.get('error') }}
 </div>
 {% endif %}
-{% if request.query_params.get('applied') is not none %}
+{% if apply_results %}
+<h2 class="section-title">Cluster Apply Report{% if apply_results.dry_run %} (Dry Run){% endif %}</h2>
+<p class="text-muted mb-1">Namespace: <strong>{{ apply_results.namespace }}</strong> &mdash; {{ apply_results.created_at[:19] }}</p>
+
+{% if apply_results.applied %}
+<h3 class="text-sm mb-1">Applied ({{ apply_results.applied|length }})</h3>
+<ul class="finding-list mb-1">
+  {% for f in apply_results.applied %}
+  <li class="finding-item finding-high" style="border-left-color:var(--color-success)">
+    <span class="badge badge-low">applied</span> {{ f }}
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+{% if apply_results.skipped %}
+<h3 class="text-sm mb-1">Skipped ({{ apply_results.skipped|length }})</h3>
+<ul class="finding-list mb-1">
+  {% for f in apply_results.skipped %}
+  <li class="finding-item">
+    <span class="badge badge-info">skipped</span> {{ f }}
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+{% if apply_results.errors %}
+<h3 class="text-sm mb-1">Errors ({{ apply_results.errors|length }})</h3>
+<ul class="finding-list mb-1">
+  {% for f in apply_results.errors %}
+  <li class="finding-item finding-critical">
+    <span class="badge badge-critical">error</span> {{ f }}
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+{% elif request.query_params.get('applied') is not none %}
 {% set count = request.query_params.get('applied')|int %}
 {% if count > 0 %}
 <div class="alert alert-success">
@@ -25,9 +62,8 @@
 </div>
 {% else %}
 <div class="alert alert-warn">
-  Applied 0 manifests. Non-YAML files (Containerfile, .sh, .md, .json) are skipped.
+  Applied 0 manifests.
   {% if request.query_params.get('errors') %}({{ request.query_params.get('errors') }} errors){% endif %}
-  {% if request.query_params.get('error_detail') %}<pre class="code-block mt-1"><code>{{ request.query_params.get('error_detail') }}</code></pre>{% endif %}
 </div>
 {% endif %}
 {% endif %}

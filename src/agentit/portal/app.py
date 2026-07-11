@@ -336,6 +336,7 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
         grouped.setdefault(f["category"], []).append(f)
 
     orchestration = s.get_orchestration(assessment_id) or {}
+    apply_results = s.get_apply_results(assessment_id)
 
     return templates.TemplateResponse(
         request,
@@ -345,6 +346,7 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
             "grouped": grouped,
             "assessment_id": assessment_id,
             "orchestration": orchestration,
+            "apply_results": apply_results,
         },
     )
 
@@ -406,17 +408,16 @@ async def apply_to_cluster(request: Request, assessment_id: str):
         apply_manifests_to_cluster, files, namespace, dry_run,
     )
 
+    s.save_apply_results(assessment_id, results, namespace, dry_run)
+
     applied = len(results["applied"])
     skipped = len(results["skipped"])
     errs = len(results["errors"])
-    error_detail = "; ".join(results["errors"][:5]) if results["errors"] else ""
-    from urllib.parse import quote
     return RedirectResponse(
         url=(
             f"/assessments/{assessment_id}/onboard-results"
             f"?applied={applied}&skipped={skipped}&errors={errs}"
             f"&dry_run={'true' if dry_run else 'false'}"
-            f"&error_detail={quote(error_detail)}"
         ),
         status_code=303,
     )
