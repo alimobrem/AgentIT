@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -14,70 +13,17 @@ from agentit.agents.orchestrator import (
     PRIORITY_MATRIX,
 )
 from agentit.models import (
-    ArchitectureInfo,
-    AssessmentReport,
     DimensionScore,
     Finding,
-    Language,
     Severity,
-    StackInfo,
 )
-
-
-def _make_report(
-    *,
-    criticality: str = "medium",
-    overall_score: float | None = None,
-    scores: list[DimensionScore] | None = None,
-) -> AssessmentReport:
-    scores = scores or [
-        DimensionScore(
-            dimension="security",
-            score=50,
-            max_score=100,
-            findings=[
-                Finding(
-                    category="network",
-                    severity=Severity.high,
-                    description="No NetworkPolicy",
-                    recommendation="Add NetworkPolicy",
-                ),
-            ],
-        ),
-    ]
-    report = AssessmentReport(
-        repo_url="https://github.com/org/test-app",
-        repo_name="test-app",
-        assessed_at=datetime.now(timezone.utc),
-        stack=StackInfo(
-            languages=[Language(name="python", file_count=10, percentage=100.0)],
-            frameworks=[],
-            databases=[],
-            runtimes=[],
-            package_managers=[],
-        ),
-        architecture=ArchitectureInfo(
-            service_count=1,
-            architecture_style="monolith",
-            has_api=True,
-            api_style="REST",
-            external_dependencies=[],
-        ),
-        scores=scores,
-        criticality=criticality,
-        summary="test summary",
-        remediation_plan=[],
-    )
-    # Override overall_score after model_post_init if requested
-    if overall_score is not None:
-        report.overall_score = overall_score
-    return report
+from conftest import make_report
 
 
 class TestPlanSelectsAgents:
     def test_plan_selects_core_agents(self, tmp_path: Path) -> None:
         """Medium criticality -> 5 core agents + chaos."""
-        report = _make_report(criticality="medium")
+        report = make_report(criticality="medium")
         orch = FleetOrchestrator(report, tmp_path / "out")
         plan = orch.plan()
 
@@ -88,14 +34,14 @@ class TestPlanSelectsAgents:
     def test_release_agent_always_selected(self, tmp_path: Path) -> None:
         """Release coordinator is selected for all criticality levels."""
         for crit in ("low", "medium", "high", "critical"):
-            report = _make_report(criticality=crit)
+            report = make_report(criticality=crit)
             orch = FleetOrchestrator(report, tmp_path / f"out-{crit}")
             plan = orch.plan()
             assert "release" in plan.agents_to_run, f"release not selected for {crit}"
 
     def test_plan_adds_extra_agents_for_high_criticality(self, tmp_path: Path) -> None:
         """High criticality -> adds dependency, incident, cost."""
-        report = _make_report(criticality="high")
+        report = make_report(criticality="high")
         orch = FleetOrchestrator(report, tmp_path / "out")
         plan = orch.plan()
 
@@ -104,7 +50,7 @@ class TestPlanSelectsAgents:
 
     def test_plan_skips_chaos_for_critical(self, tmp_path: Path) -> None:
         """Critical criticality -> no chaos."""
-        report = _make_report(criticality="critical")
+        report = make_report(criticality="critical")
         orch = FleetOrchestrator(report, tmp_path / "out")
         plan = orch.plan()
 
@@ -112,7 +58,8 @@ class TestPlanSelectsAgents:
 
     def test_plan_adds_retirement_for_low_score(self, tmp_path: Path) -> None:
         """Score < 30 -> retirement agent included."""
-        report = _make_report(overall_score=20.0)
+        report = make_report()
+        report.overall_score = 20.0
         orch = FleetOrchestrator(report, tmp_path / "out")
         plan = orch.plan()
 
@@ -137,7 +84,8 @@ class TestAutoApprove:
                 ],
             ),
         ]
-        report = _make_report(criticality="low", scores=scores, overall_score=80.0)
+        report = make_report(criticality="low", scores=scores)
+        report.overall_score = 80.0
         orch = FleetOrchestrator(report, tmp_path / "out")
         plan = orch.plan()
 
@@ -160,7 +108,8 @@ class TestAutoApprove:
                 ],
             ),
         ]
-        report = _make_report(criticality="low", scores=scores, overall_score=80.0)
+        report = make_report(criticality="low", scores=scores)
+        report.overall_score = 80.0
         orch = FleetOrchestrator(report, tmp_path / "out")
         plan = orch.plan()
 
@@ -170,7 +119,7 @@ class TestAutoApprove:
 class TestRun:
     def test_run_executes_agents(self, tmp_path: Path) -> None:
         """Run with a real report -> results have success=True for available agents."""
-        report = _make_report(criticality="medium")
+        report = make_report(criticality="medium")
         orch = FleetOrchestrator(report, tmp_path / "out")
         result = orch.run()
 
@@ -183,7 +132,7 @@ class TestRun:
 
     def test_run_writes_summary(self, tmp_path: Path) -> None:
         """Verify orchestration-summary.md exists after run."""
-        report = _make_report(criticality="medium")
+        report = make_report(criticality="medium")
         orch = FleetOrchestrator(report, tmp_path / "out")
         orch.run()
 
@@ -197,7 +146,7 @@ class TestRun:
 class TestConflicts:
     def test_conflict_detection_security_blocker(self, tmp_path: Path) -> None:
         """Mock security agent failure -> blocker conflict."""
-        report = _make_report(criticality="medium")
+        report = make_report(criticality="medium")
         orch = FleetOrchestrator(report, tmp_path / "out")
 
         results = [
@@ -223,7 +172,7 @@ class TestConflicts:
 
     def test_priority_matrix_resolves_security_over_cicd(self, tmp_path: Path) -> None:
         """When both security and cicd succeed, priority matrix picks security."""
-        report = _make_report(criticality="medium")
+        report = make_report(criticality="medium")
         orch = FleetOrchestrator(report, tmp_path / "out")
 
         results = [
@@ -241,7 +190,7 @@ class TestConflicts:
 
     def test_priority_matrix_not_applied_when_agent_failed(self, tmp_path: Path) -> None:
         """Priority conflicts only fire for agents that both succeeded."""
-        report = _make_report(criticality="medium")
+        report = make_report(criticality="medium")
         orch = FleetOrchestrator(report, tmp_path / "out")
 
         results = [
@@ -258,7 +207,7 @@ class TestConflicts:
 class TestRecommendation:
     def test_recommendation_blocked(self, tmp_path: Path) -> None:
         """Conflict present -> BLOCKED recommendation."""
-        report = _make_report(criticality="medium")
+        report = make_report(criticality="medium")
         orch = FleetOrchestrator(report, tmp_path / "out")
 
         plan = OrchestrationPlan(
@@ -285,7 +234,8 @@ class TestRecommendation:
 
     def test_recommendation_auto_approved(self, tmp_path: Path) -> None:
         """auto_approve=True, all succeed -> AUTO-APPROVED recommendation."""
-        report = _make_report(criticality="low", overall_score=80.0)
+        report = make_report(criticality="low")
+        report.overall_score = 80.0
         orch = FleetOrchestrator(report, tmp_path / "out")
 
         plan = OrchestrationPlan(
@@ -321,7 +271,7 @@ class TestCostAgentRegistration:
     """Regression: CostAgent import was broken (wrong class name). Must never regress."""
 
     def test_cost_agent_runs_for_high_criticality(self, tmp_path: Path) -> None:
-        report = _make_report(criticality="high")
+        report = make_report(criticality="high")
         orch = FleetOrchestrator(report, tmp_path / "out")
         result = orch.run()
 
@@ -346,7 +296,7 @@ class TestNoSilentSwallowing:
     """Regression: orchestrator must never silently skip agents."""
 
     def test_planned_agents_all_appear_in_results(self, tmp_path: Path) -> None:
-        report = _make_report(criticality="high")
+        report = make_report(criticality="high")
         orch = FleetOrchestrator(report, tmp_path / "out")
         result = orch.run()
 
@@ -356,7 +306,7 @@ class TestNoSilentSwallowing:
 
     def test_missing_agent_logged_as_failure(self, tmp_path: Path, caplog) -> None:
         """If an agent is planned but not in agent_map, it shows as failure + log."""
-        report = _make_report(criticality="medium")
+        report = make_report(criticality="medium")
         orch = FleetOrchestrator(report, tmp_path / "out")
 
         # Inject a fake agent name into the plan
@@ -379,7 +329,7 @@ class TestNoSilentSwallowing:
 
 class TestPostHardeningValidation:
     def test_catches_missing_file(self, tmp_path: Path) -> None:
-        report = _make_report(criticality="medium")
+        report = make_report(criticality="medium")
         orch = FleetOrchestrator(report, tmp_path / "out")
         (tmp_path / "out" / "security").mkdir(parents=True)
 
@@ -392,7 +342,7 @@ class TestPostHardeningValidation:
         assert "missing from disk" in issues[0]
 
     def test_catches_invalid_yaml_on_disk(self, tmp_path: Path) -> None:
-        report = _make_report(criticality="medium")
+        report = make_report(criticality="medium")
         orch = FleetOrchestrator(report, tmp_path / "out")
         sec_dir = tmp_path / "out" / "security"
         sec_dir.mkdir(parents=True)
@@ -407,7 +357,7 @@ class TestPostHardeningValidation:
 
     def test_validation_adds_conflict(self, tmp_path: Path) -> None:
         """Full run with all valid agents should not produce validation conflicts."""
-        report = _make_report(criticality="medium")
+        report = make_report(criticality="medium")
         orch = FleetOrchestrator(report, tmp_path / "out")
         result = orch.run()
 

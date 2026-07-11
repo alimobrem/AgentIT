@@ -1,27 +1,14 @@
 import json
-from datetime import datetime, timezone
 
-from agentit.models import (
-    AssessmentReport, ArchitectureInfo, DimensionScore, Finding, Severity,
-    StackInfo, Language, RemediationItem,
-)
+from agentit.models import DimensionScore, Finding, Severity
 from agentit.reporter import render_json_report, render_terminal_report
+from conftest import make_report
 
 
-def _make_report() -> AssessmentReport:
-    return AssessmentReport(
-        repo_url="https://github.com/test/app",
+def test_render_json_report_is_valid_json():
+    report = make_report(
         repo_name="app",
-        assessed_at=datetime(2026, 7, 10, tzinfo=timezone.utc),
-        stack=StackInfo(
-            languages=[Language(name="go", version="1.22", file_count=10, percentage=100.0)],
-            frameworks=[], databases=[], runtimes=[], package_managers=["go mod"],
-        ),
-        architecture=ArchitectureInfo(
-            service_count=1, architecture_style="monolith",
-            has_api=True, api_style="REST",
-            external_dependencies=[], auth_mechanism=None,
-        ),
+        repo_url="https://github.com/test/app",
         scores=[
             DimensionScore(dimension="security", score=18, max_score=100, findings=[
                 Finding(category="secrets", severity=Severity.critical,
@@ -31,16 +18,7 @@ def _make_report() -> AssessmentReport:
         ],
         criticality="high",
         summary="",
-        remediation_plan=[
-            RemediationItem(priority=1, dimension="security",
-                            description="Migrate secrets", estimated_effort="1 agent-hour",
-                            agent_responsible="Security Hardening Agent"),
-        ],
     )
-
-
-def test_render_json_report_is_valid_json():
-    report = _make_report()
     json_str = render_json_report(report)
     parsed = json.loads(json_str)
     assert parsed["repo_url"] == "https://github.com/test/app"
@@ -48,7 +26,19 @@ def test_render_json_report_is_valid_json():
 
 
 def test_render_terminal_report_contains_key_info():
-    report = _make_report()
+    report = make_report(
+        repo_name="app",
+        repo_url="https://github.com/test/app",
+        scores=[
+            DimensionScore(dimension="security", score=18, max_score=100, findings=[
+                Finding(category="secrets", severity=Severity.critical,
+                        description="Hardcoded password", recommendation="Use Vault"),
+            ]),
+            DimensionScore(dimension="observability", score=5, max_score=100, findings=[]),
+        ],
+        criticality="high",
+        summary="",
+    )
     output = render_terminal_report(report)
     assert "app" in output.lower()
     assert "security" in output.lower()

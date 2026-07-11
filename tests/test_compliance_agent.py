@@ -1,51 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 import pytest
 
+from conftest import make_report
+
 from agentit.agents.compliance import ComplianceAgent, ComplianceResult
 from agentit.models import (
-    AssessmentReport,
-    ArchitectureInfo,
     DimensionScore,
     Finding,
-    Language,
     Severity,
-    StackInfo,
 )
-
-
-def _make_report(
-    *,
-    repo_name: str = "test-app",
-    scores: list[DimensionScore] | None = None,
-) -> AssessmentReport:
-    return AssessmentReport(
-        repo_url="https://github.com/org/test-app",
-        repo_name=repo_name,
-        assessed_at=datetime.now(timezone.utc),
-        stack=StackInfo(
-            languages=[Language(name="python", file_count=10, percentage=100.0)],
-            frameworks=[],
-            databases=[],
-            runtimes=[],
-            package_managers=[],
-        ),
-        architecture=ArchitectureInfo(
-            service_count=1,
-            architecture_style="monolith",
-            has_api=True,
-            api_style="REST",
-            external_dependencies=[],
-        ),
-        scores=scores or [],
-        criticality="medium",
-        summary="test summary",
-        remediation_plan=[],
-    )
 
 
 def _score_with_finding(dimension: str, category: str, desc: str) -> DimensionScore:
@@ -66,7 +33,7 @@ def _score_with_finding(dimension: str, category: str, desc: str) -> DimensionSc
 
 class TestKyvernoPolicies:
     def test_generates_kyverno_policies(self, tmp_path: Path) -> None:
-        report = _make_report(
+        report = make_report(
             scores=[_score_with_finding("compliance", "policy", "No admission policies")],
         )
         result = ComplianceAgent(report, tmp_path / "out").run()
@@ -90,14 +57,14 @@ class TestKyvernoPolicies:
         assert (tmp_path / "out" / "kyverno-policies.yaml").exists()
 
     def test_skips_kyverno_without_findings(self, tmp_path: Path) -> None:
-        report = _make_report(scores=[])
+        report = make_report(scores=[])
         result = ComplianceAgent(report, tmp_path / "out").run()
         assert not any(f.path == "kyverno-policies.yaml" for f in result.files)
 
 
 class TestSbomScript:
     def test_generates_sbom_script(self, tmp_path: Path) -> None:
-        report = _make_report(
+        report = make_report(
             scores=[_score_with_finding("compliance", "sbom", "No SBOM found")],
         )
         result = ComplianceAgent(report, tmp_path / "out").run()
@@ -110,14 +77,14 @@ class TestSbomScript:
         assert (tmp_path / "out" / "generate-sbom.sh").exists()
 
     def test_skips_sbom_without_findings(self, tmp_path: Path) -> None:
-        report = _make_report(scores=[])
+        report = make_report(scores=[])
         result = ComplianceAgent(report, tmp_path / "out").run()
         assert not any(f.path == "generate-sbom.sh" for f in result.files)
 
 
 class TestComplianceEvidence:
     def test_generates_compliance_evidence(self, tmp_path: Path) -> None:
-        report = _make_report(
+        report = make_report(
             scores=[_score_with_finding("security", "network", "Open ports")],
         )
         result = ComplianceAgent(report, tmp_path / "out").run()
@@ -132,14 +99,14 @@ class TestComplianceEvidence:
         assert (tmp_path / "out" / "compliance-evidence.md").exists()
 
     def test_evidence_always_generated(self, tmp_path: Path) -> None:
-        report = _make_report(scores=[])
+        report = make_report(scores=[])
         result = ComplianceAgent(report, tmp_path / "out").run()
         assert any(f.path == "compliance-evidence.md" for f in result.files)
 
 
 class TestAuditPolicy:
     def test_generates_audit_policy(self, tmp_path: Path) -> None:
-        report = _make_report(
+        report = make_report(
             scores=[_score_with_finding("compliance", "audit", "No audit logging configured")],
         )
         result = ComplianceAgent(report, tmp_path / "out").run()
@@ -157,14 +124,14 @@ class TestAuditPolicy:
         assert (tmp_path / "out" / "audit-policy.yaml").exists()
 
     def test_skips_audit_without_findings(self, tmp_path: Path) -> None:
-        report = _make_report(scores=[])
+        report = make_report(scores=[])
         result = ComplianceAgent(report, tmp_path / "out").run()
         assert not any(f.path == "audit-policy.yaml" for f in result.files)
 
 
 class TestComplianceResult:
     def test_summary_message(self, tmp_path: Path) -> None:
-        report = _make_report(
+        report = make_report(
             scores=[
                 _score_with_finding("compliance", "policy", "No policies"),
                 _score_with_finding("compliance", "sbom", "No SBOM"),
@@ -178,7 +145,7 @@ class TestComplianceResult:
 
 class TestComplianceCronWorkflow:
     def test_generates_compliance_cronworkflow(self, tmp_path: Path) -> None:
-        report = _make_report()
+        report = make_report()
         result = ComplianceAgent(report, tmp_path / "out").run()
         cw = [f for f in result.files if f.path == "compliance-cronworkflow.yaml"]
         assert len(cw) == 1

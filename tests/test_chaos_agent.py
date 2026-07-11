@@ -1,53 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 import pytest
 
+from conftest import make_report
+
 from agentit.agents.chaos import ChaosAgent, ChaosResult
-from agentit.models import (
-    AssessmentReport,
-    ArchitectureInfo,
-    Language,
-    StackInfo,
-)
-
-
-def _make_report(
-    *,
-    repo_name: str = "test-app",
-    criticality: str = "medium",
-) -> AssessmentReport:
-    return AssessmentReport(
-        repo_url="https://github.com/org/test-app",
-        repo_name=repo_name,
-        assessed_at=datetime.now(timezone.utc),
-        stack=StackInfo(
-            languages=[Language(name="python", file_count=10, percentage=100.0)],
-            frameworks=[],
-            databases=[],
-            runtimes=[],
-            package_managers=[],
-        ),
-        architecture=ArchitectureInfo(
-            service_count=1,
-            architecture_style="monolith",
-            has_api=True,
-            api_style="REST",
-            external_dependencies=[],
-        ),
-        scores=[],
-        criticality=criticality,
-        summary="test summary",
-        remediation_plan=[],
-    )
 
 
 class TestPodKill:
     def test_generates_pod_kill_experiment(self, tmp_path: Path) -> None:
-        report = _make_report()
+        report = make_report()
         result = ChaosAgent(report, tmp_path / "out").run()
 
         pk = [f for f in result.files if f.path == "chaos-pod-kill.yaml"]
@@ -72,7 +37,7 @@ class TestPodKill:
 
 class TestNetworkLatency:
     def test_generates_network_latency(self, tmp_path: Path) -> None:
-        report = _make_report()
+        report = make_report()
         result = ChaosAgent(report, tmp_path / "out").run()
 
         nl = [f for f in result.files if f.path == "chaos-network-latency.yaml"]
@@ -97,7 +62,7 @@ class TestNetworkLatency:
 
 class TestCpuStress:
     def test_generates_cpu_stress(self, tmp_path: Path) -> None:
-        report = _make_report()
+        report = make_report()
         result = ChaosAgent(report, tmp_path / "out").run()
 
         cs = [f for f in result.files if f.path == "chaos-cpu-stress.yaml"]
@@ -118,7 +83,7 @@ class TestCpuStress:
 
 class TestSchedule:
     def test_generates_cronworkflow_for_non_critical(self, tmp_path: Path) -> None:
-        report = _make_report(criticality="medium")
+        report = make_report(criticality="medium")
         result = ChaosAgent(report, tmp_path / "out").run()
 
         sched = [f for f in result.files if f.path == "chaos-schedule.yaml"]
@@ -131,7 +96,7 @@ class TestSchedule:
         assert doc["spec"]["concurrencyPolicy"] == "Forbid"
 
     def test_skips_schedule_for_critical_apps(self, tmp_path: Path) -> None:
-        report = _make_report(criticality="critical")
+        report = make_report(criticality="critical")
         result = ChaosAgent(report, tmp_path / "out").run()
 
         assert not any(f.path == "chaos-schedule.yaml" for f in result.files)

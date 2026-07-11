@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import shutil
 import tempfile
 import zipfile
 from pathlib import Path
+from urllib.parse import quote, urlparse
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -19,6 +21,8 @@ from agentit.portal.github_pr import create_onboarding_pr
 from agentit.portal.store import AssessmentStore
 from agentit.runner import run_assessment
 
+log = logging.getLogger(__name__)
+
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 app = FastAPI(title="AgentIT Portal")
@@ -26,7 +30,6 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
 def _safe_url(value: str) -> str:
-    from urllib.parse import urlparse
     parsed = urlparse(value)
     if parsed.scheme not in ("https", "http", ""):
         return "#"
@@ -96,8 +99,6 @@ async def webhook_assess(request: Request):
 @app.post("/api/webhook/onboard")
 async def webhook_onboard(request: Request):
     """Trigger onboarding via webhook (called by Argo Events Sensor for low-score assessments)."""
-    import logging
-    log = logging.getLogger("agentit.portal")
     body = await request.json()
     log.info("webhook_onboard received event: %s", body.get("eventId", "unknown"))
 
@@ -145,14 +146,13 @@ async def assess_form(request: Request) -> HTMLResponse:
 
 
 def _get_llm_client():
-    import logging
     import os
     if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID"):
         try:
             from agentit.llm import LLMClient
             return LLMClient()
         except Exception as exc:
-            logging.getLogger("agentit.portal").warning("LLM client init failed (continuing without): %s", exc)
+            log.warning("LLM client init failed (continuing without): %s", exc)
     return None
 
 
@@ -170,11 +170,10 @@ async def assess_submit(
     repo_url: str = Form(...),
     criticality: str = Form("medium"),
 ):
-    import logging
     try:
         report = await asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality)
     except Exception as exc:
-        logging.getLogger("agentit.portal").exception("Assessment failed for %s", repo_url)
+        log.exception("Assessment failed for %s", repo_url)
         return templates.TemplateResponse(
             request, "assess_form.html", {"error": str(exc)}, status_code=400,
         )
@@ -449,8 +448,9 @@ async def install_operator_endpoint(request: Request):
 @app.get("/gates", response_class=HTMLResponse)
 async def gates_page(request: Request):
     """Show pending approval gates."""
-    pending = get_store().list_gates(status="pending")
-    resolved = get_store().list_gates(status="approved") + get_store().list_gates(status="rejected")
+    all_gates = get_store().list_all_gates()
+    pending = [g for g in all_gates if g["status"] == "pending"]
+    resolved = [g for g in all_gates if g["status"] in ("approved", "rejected")]
     resolved.sort(key=lambda g: g.get("resolved_at", ""), reverse=True)
     return templates.TemplateResponse(request, "gates.html", {
         "pending": pending, "resolved": resolved[:20]
@@ -498,16 +498,12 @@ async def api_gates(status: str = "pending"):
 @app.post("/assessments/{assessment_id}/create-pr", response_model=None)
 async def create_pr(assessment_id: str):
     """Create a GitHub PR with the onboarding manifests."""
-    from urllib.parse import quote
-
     s = get_store()
     report = s.get(assessment_id)
     files = s.get_onboarding(assessment_id)
     if report is None or files is None:
         raise HTTPException(status_code=404, detail="Assessment or onboarding not found")
 
-    import logging
-    log = logging.getLogger("agentit.portal")
     try:
         result = await asyncio.to_thread(
             create_onboarding_pr, report.repo_url, report.repo_name, files,
@@ -563,10 +559,9 @@ async def create_agent_prs_route(assessment_id: str):
         s.log_event("orchestrator", "agent-prs-created", report.repo_name,
                     "info", f"Created {len(successful)} per-agent PRs: {pr_list}")
 
-    from urllib.parse import quote
     if errors and not successful:
         return RedirectResponse(
-            url=f"/assessments/{assessment_id}/onboard-results?error={quote(errors[0].get('error', 'Unknown'))}",
+            url=f"/assessments/{assessment_id}/onboard-results?error={quote(errors[0].get('error', 'Unknown')[:200])}",
             status_code=303,
         )
 
@@ -757,9 +752,6 @@ async def api_set_setting(request: Request, key: str):
 @app.post("/api/webhook/auto-apply")
 async def webhook_auto_apply(request: Request):
     """Auto-apply manifests if auto-mode is on and LLM classifies as safe."""
-    import logging
-    log = logging.getLogger("agentit.portal")
-
     body = await request.json()
     assessment_id = body.get("assessment_id")
     namespace = body.get("namespace", "default")

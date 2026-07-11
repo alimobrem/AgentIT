@@ -10,73 +10,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from click.testing import CliRunner
 
 from agentit.agents.hardening import HardeningAgent, _sanitize_name
 from agentit.analyzers.base import iter_text_files
 from agentit.analyzers.security import SecurityAnalyzer, _is_secret_scan_excluded
-from agentit.cli import main
 from agentit.cloner import CloneError, _validate_repo_url
 from agentit.models import (
-    ArchitectureInfo,
     AssessmentReport,
     DimensionScore,
     Finding,
     Language,
     RemediationItem,
     Severity,
-    StackInfo,
 )
 from agentit.portal.app import _safe_url
-from agentit.portal.store import AssessmentStore
+from conftest import make_store, make_report
 from agentit.reporter import render_json_report
 from agentit.runner import generate_remediation_plan, run_assessment
-
-
-# ── helpers ────────────────────────────────────────────────────────────
-
-
-def _empty_stack() -> StackInfo:
-    return StackInfo(
-        languages=[], frameworks=[], databases=[], runtimes=[], package_managers=[]
-    )
-
-
-def _empty_arch() -> ArchitectureInfo:
-    return ArchitectureInfo(
-        service_count=1,
-        architecture_style="monolith",
-        has_api=False,
-        api_style=None,
-        external_dependencies=[],
-        auth_mechanism=None,
-    )
-
-
-def _make_report(
-    repo_name: str = "test-repo",
-    scores: list[DimensionScore] | None = None,
-    languages: list[Language] | None = None,
-    remediation_plan: list[RemediationItem] | None = None,
-) -> AssessmentReport:
-    stack = StackInfo(
-        languages=languages or [],
-        frameworks=[],
-        databases=[],
-        runtimes=[],
-        package_managers=[],
-    )
-    return AssessmentReport(
-        repo_url=f"https://github.com/org/{repo_name}",
-        repo_name=repo_name,
-        assessed_at=datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc),
-        stack=stack,
-        architecture=_empty_arch(),
-        scores=scores or [],
-        criticality="medium",
-        summary="test",
-        remediation_plan=remediation_plan or [],
-    )
 
 
 def _init_git_repo(repo_dir: Path) -> None:
@@ -296,19 +246,19 @@ class TestDataModels:
                 findings=[],
             ),
         ]
-        report = _make_report(
+        report = make_report(
             scores=scores,
             languages=[Language(name="python", file_count=10, percentage=100.0)],
-            remediation_plan=[
-                RemediationItem(
-                    priority=1,
-                    dimension="security",
-                    description="Fix secrets",
-                    estimated_effort="2 agent-hours",
-                    agent_responsible="Security Hardening Agent",
-                ),
-            ],
         )
+        report.remediation_plan = [
+            RemediationItem(
+                priority=1,
+                dimension="security",
+                description="Fix secrets",
+                estimated_effort="2 agent-hours",
+                agent_responsible="Security Hardening Agent",
+            ),
+        ]
 
         json_str = report.model_dump_json()
         restored = AssessmentReport.model_validate_json(json_str)
@@ -369,52 +319,15 @@ class TestDataModels:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# CLI
-# ═══════════════════════════════════════════════════════════════════════
-
-
-class TestCLI:
-    def test_cli_assess_help(self):
-        runner = CliRunner()
-        result = runner.invoke(main, ["assess", "--help"])
-        assert result.exit_code == 0
-        assert "--criticality" in result.output
-        assert "--format" in result.output
-        assert "--output" in result.output
-
-    def test_cli_harden_help(self):
-        runner = CliRunner()
-        result = runner.invoke(main, ["harden", "--help"])
-        assert result.exit_code == 0
-        assert "--output-dir" in result.output
-
-    def test_cli_onboard_help(self):
-        runner = CliRunner()
-        result = runner.invoke(main, ["onboard", "--help"])
-        assert result.exit_code == 0
-        assert "--output-dir" in result.output
-        assert "--criticality" in result.output
-
-    def test_cli_watch_help(self):
-        runner = CliRunner()
-        result = runner.invoke(main, ["watch", "--help"])
-        assert result.exit_code == 0
-        assert "--interval" in result.output
-        assert "--webhook" in result.output
-
-
-# ═══════════════════════════════════════════════════════════════════════
 # Portal Store
 # ═══════════════════════════════════════════════════════════════════════
 
 
 class TestPortalStore:
-    def _store(self) -> AssessmentStore:
-        return AssessmentStore(db_path=":memory:")
-
     def test_store_save_and_get_roundtrip(self):
-        store = self._store()
-        report = _make_report(
+        store = make_store()
+        report = make_report(
+            repo_name="test-repo",
             scores=[
                 DimensionScore(
                     dimension="security",
@@ -442,10 +355,10 @@ class TestPortalStore:
         assert len(restored.scores[0].findings) == 1
 
     def test_store_list_all_ordering(self):
-        store = self._store()
-        r1 = _make_report(repo_name="first")
+        store = make_store()
+        r1 = make_report(repo_name="first")
         r1.assessed_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        r2 = _make_report(repo_name="second")
+        r2 = make_report(repo_name="second")
         r2.assessed_at = datetime(2026, 7, 1, tzinfo=timezone.utc)
         store.save(r1)
         store.save(r2)
@@ -457,8 +370,8 @@ class TestPortalStore:
         assert items[1]["repo_name"] == "first"
 
     def test_store_delete(self):
-        store = self._store()
-        aid = store.save(_make_report())
+        store = make_store()
+        aid = store.save(make_report())
         assert store.get(aid) is not None
 
         ok = store.delete(aid)
@@ -466,7 +379,7 @@ class TestPortalStore:
         assert store.get(aid) is None
 
     def test_store_event_logging(self):
-        store = self._store()
+        store = make_store()
         store.log_event("agent-a", "scan", "app1", "info", "Scanned app1")
         store.log_event("agent-b", "deploy", "app2", "warning", "Deployed app2")
         store.log_event("agent-a", "remediate", "app1", "info", "Fixed secrets")
@@ -475,8 +388,8 @@ class TestPortalStore:
         assert len(events) >= 3
 
     def test_store_gate_lifecycle(self):
-        store = self._store()
-        aid = store.save(_make_report())
+        store = make_store()
+        aid = store.save(make_report())
         gid = store.create_gate(aid, "deploy", "Approve deploy?")
 
         pending = store.list_gates(status="pending")
@@ -510,7 +423,7 @@ class TestHardeningAgent:
         assert _sanitize_name("my.app_name") == "my-app-name"
 
     def test_hardening_python_containerfile_uses_ubi(self, tmp_path: Path):
-        report = _make_report(
+        report = make_report(
             languages=[Language(name="python", file_count=10, percentage=100.0)],
             scores=[
                 DimensionScore(

@@ -1,55 +1,19 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 import pytest
 
+from conftest import make_report
+
 from agentit.agents.retirement import RetirementAgent, RetirementResult
-from agentit.models import (
-    AssessmentReport,
-    ArchitectureInfo,
-    Database,
-    DimensionScore,
-    Language,
-    StackInfo,
-)
-
-
-def _make_report(
-    *,
-    repo_name: str = "test-app",
-    databases: list[Database] | None = None,
-) -> AssessmentReport:
-    return AssessmentReport(
-        repo_url="https://github.com/org/test-app",
-        repo_name=repo_name,
-        assessed_at=datetime.now(timezone.utc),
-        stack=StackInfo(
-            languages=[Language(name="python", file_count=10, percentage=100.0)],
-            frameworks=[],
-            databases=databases or [],
-            runtimes=[],
-            package_managers=[],
-        ),
-        architecture=ArchitectureInfo(
-            service_count=1,
-            architecture_style="monolith",
-            has_api=True,
-            api_style="REST",
-            external_dependencies=[],
-        ),
-        scores=[],
-        criticality="medium",
-        summary="test summary",
-        remediation_plan=[],
-    )
+from agentit.models import Database
 
 
 class TestDecommissionPlan:
     def test_generates_decommission_plan(self, tmp_path: Path) -> None:
-        report = _make_report()
+        report = make_report()
         result = RetirementAgent(report, tmp_path / "out").run()
 
         plan = [f for f in result.files if f.path == "decommission-plan.md"]
@@ -64,9 +28,8 @@ class TestDecommissionPlan:
         assert (tmp_path / "out" / "decommission-plan.md").exists()
 
     def test_plan_includes_detected_databases(self, tmp_path: Path) -> None:
-        report = _make_report(
-            databases=[Database(name="PostgreSQL", version="15")],
-        )
+        report = make_report()
+        report.stack.databases = [Database(name="PostgreSQL", version="15")]
         result = RetirementAgent(report, tmp_path / "out").run()
 
         plan = [f for f in result.files if f.path == "decommission-plan.md"]
@@ -75,7 +38,7 @@ class TestDecommissionPlan:
         assert "Back up **PostgreSQL** data" in content
 
     def test_plan_no_databases(self, tmp_path: Path) -> None:
-        report = _make_report(databases=[])
+        report = make_report(scores=[])
         result = RetirementAgent(report, tmp_path / "out").run()
 
         plan = [f for f in result.files if f.path == "decommission-plan.md"]
@@ -85,7 +48,7 @@ class TestDecommissionPlan:
 
 class TestCleanupScript:
     def test_generates_cleanup_script(self, tmp_path: Path) -> None:
-        report = _make_report()
+        report = make_report()
         result = RetirementAgent(report, tmp_path / "out").run()
 
         script = [f for f in result.files if f.path == "cleanup-script.sh"]
@@ -105,7 +68,7 @@ class TestCleanupScript:
         assert (tmp_path / "out" / "cleanup-script.sh").exists()
 
     def test_cleanup_script_executable(self, tmp_path: Path) -> None:
-        report = _make_report()
+        report = make_report()
         RetirementAgent(report, tmp_path / "out").run()
         script_path = tmp_path / "out" / "cleanup-script.sh"
         assert script_path.stat().st_mode & 0o755
@@ -113,9 +76,8 @@ class TestCleanupScript:
 
 class TestDataArchive:
     def test_generates_data_archive_for_postgres(self, tmp_path: Path) -> None:
-        report = _make_report(
-            databases=[Database(name="PostgreSQL", version="15")],
-        )
+        report = make_report()
+        report.stack.databases = [Database(name="PostgreSQL", version="15")]
         result = RetirementAgent(report, tmp_path / "out").run()
 
         archive = [f for f in result.files if f.path == "data-archive-job.yaml"]
@@ -129,16 +91,15 @@ class TestDataArchive:
         assert (tmp_path / "out" / "data-archive-job.yaml").exists()
 
     def test_skips_data_archive_without_database(self, tmp_path: Path) -> None:
-        report = _make_report(databases=[])
+        report = make_report()
         result = RetirementAgent(report, tmp_path / "out").run()
 
         archive = [f for f in result.files if f.path == "data-archive-job.yaml"]
         assert len(archive) == 0
 
     def test_skips_data_archive_for_non_postgres(self, tmp_path: Path) -> None:
-        report = _make_report(
-            databases=[Database(name="Redis", version="7")],
-        )
+        report = make_report()
+        report.stack.databases = [Database(name="Redis", version="7")]
         result = RetirementAgent(report, tmp_path / "out").run()
 
         archive = [f for f in result.files if f.path == "data-archive-job.yaml"]
@@ -147,22 +108,21 @@ class TestDataArchive:
 
 class TestRetirementResult:
     def test_summary_count(self, tmp_path: Path) -> None:
-        report = _make_report()
+        report = make_report()
         result = RetirementAgent(report, tmp_path / "out").run()
         # Without postgres: decommission-plan.md + cleanup-script.sh = 2
         assert result.summary == "Generated 2 retirement artifacts."
 
     def test_summary_with_archive(self, tmp_path: Path) -> None:
-        report = _make_report(
-            databases=[Database(name="PostgreSQL")],
-        )
+        report = make_report()
+        report.stack.databases = [Database(name="PostgreSQL")]
         result = RetirementAgent(report, tmp_path / "out").run()
         assert result.summary == "Generated 3 retirement artifacts."
 
     def test_output_dir_created(self, tmp_path: Path) -> None:
         out = tmp_path / "nested" / "deep" / "dir"
         assert not out.exists()
-        report = _make_report()
+        report = make_report()
         RetirementAgent(report, out).run()
         assert out.exists()
         assert out.is_dir()

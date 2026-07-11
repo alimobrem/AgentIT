@@ -1,57 +1,20 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 import pytest
 
+from conftest import make_report
+
 from agentit.agents.dependency import DependencyAgent, DependencyResult
 from agentit.models import (
-    AssessmentReport,
-    ArchitectureInfo,
     DimensionScore,
     Finding,
     Language,
     Severity,
-    StackInfo,
 )
-
-
-def _make_report(
-    *,
-    repo_name: str = "test-app",
-    languages: list[Language] | None = None,
-    package_managers: list[str] | None = None,
-    external_dependencies: list[str] | None = None,
-    scores: list[DimensionScore] | None = None,
-) -> AssessmentReport:
-    if languages is None:
-        languages = [Language(name="python", file_count=10, percentage=100.0)]
-    return AssessmentReport(
-        repo_url="https://github.com/org/test-app",
-        repo_name=repo_name,
-        assessed_at=datetime.now(timezone.utc),
-        stack=StackInfo(
-            languages=languages,
-            frameworks=[],
-            databases=[],
-            runtimes=[],
-            package_managers=package_managers or [],
-        ),
-        architecture=ArchitectureInfo(
-            service_count=1,
-            architecture_style="monolith",
-            has_api=True,
-            api_style="REST",
-            external_dependencies=external_dependencies or [],
-        ),
-        scores=scores or [],
-        criticality="medium",
-        summary="test summary",
-        remediation_plan=[],
-    )
 
 
 def _score_with_finding(dimension: str, category: str, desc: str) -> DimensionScore:
@@ -72,15 +35,15 @@ def _score_with_finding(dimension: str, category: str, desc: str) -> DimensionSc
 
 class TestDependencyReport:
     def test_generates_dependency_report(self, tmp_path: Path) -> None:
-        report = _make_report(
+        report = make_report(
             languages=[Language(name="python", file_count=10, percentage=100.0)],
-            package_managers=["pip"],
-            external_dependencies=["requests", "log4j-core"],
             scores=[
                 _score_with_finding("security", "vulnerability", "CVE-2023-32681 in requests"),
                 _score_with_finding("security", "dependency", "Outdated packages detected"),
             ],
         )
+        report.stack.package_managers = ["pip"]
+        report.architecture.external_dependencies = ["requests", "log4j-core"]
         result = DependencyAgent(report, tmp_path / "out").run()
 
         md_files = [f for f in result.files if f.path == "dependency-report.md"]
@@ -97,10 +60,10 @@ class TestDependencyReport:
 
 class TestRenovateConfig:
     def test_generates_renovate_config_python(self, tmp_path: Path) -> None:
-        report = _make_report(
+        report = make_report(
             languages=[Language(name="python", file_count=10, percentage=100.0)],
-            package_managers=["pip"],
         )
+        report.stack.package_managers = ["pip"]
         result = DependencyAgent(report, tmp_path / "out").run()
 
         renovate_files = [f for f in result.files if f.path == "renovate.json"]
@@ -128,10 +91,10 @@ class TestRenovateConfig:
 
 class TestDependabotConfig:
     def test_generates_dependabot_config_node(self, tmp_path: Path) -> None:
-        report = _make_report(
+        report = make_report(
             languages=[Language(name="javascript", file_count=20, percentage=100.0)],
-            package_managers=["npm"],
         )
+        report.stack.package_managers = ["npm"]
         result = DependencyAgent(report, tmp_path / "out").run()
 
         db_files = [f for f in result.files if f.path == ".github/dependabot.yml"]
@@ -145,10 +108,10 @@ class TestDependabotConfig:
         assert (tmp_path / "out" / ".github" / "dependabot.yml").exists()
 
     def test_generates_dependabot_config_go(self, tmp_path: Path) -> None:
-        report = _make_report(
+        report = make_report(
             languages=[Language(name="Go", file_count=15, percentage=100.0)],
-            package_managers=["gomod"],
         )
+        report.stack.package_managers = ["gomod"]
         result = DependencyAgent(report, tmp_path / "out").run()
 
         db_files = [f for f in result.files if f.path == ".github/dependabot.yml"]
@@ -162,9 +125,8 @@ class TestDependabotConfig:
 
 class TestNoEcosystems:
     def test_no_configs_without_ecosystems(self, tmp_path: Path) -> None:
-        report = _make_report(
+        report = make_report(
             languages=[Language(name="unknown-lang", file_count=1, percentage=100.0)],
-            package_managers=[],
         )
         result = DependencyAgent(report, tmp_path / "out").run()
 
@@ -178,7 +140,7 @@ class TestNoEcosystems:
 class TestDependencyCronWorkflow:
     def test_generates_dependency_cronworkflow(self, tmp_path: Path) -> None:
         from agentit.agents.dependency import DependencyAgent
-        report = _make_report()
+        report = make_report()
         result = DependencyAgent(report, tmp_path / "out").run()
         cw = [f for f in result.files if f.path == "dependency-cronworkflow.yaml"]
         assert len(cw) == 1

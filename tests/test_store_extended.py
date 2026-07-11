@@ -8,75 +8,17 @@ from agentit.models import (
     DimensionScore,
     Finding,
     Language,
-    RemediationItem,
     Severity,
     StackInfo,
 )
-from agentit.portal.store import AssessmentStore
-
-
-def _make_store() -> AssessmentStore:
-    return AssessmentStore(db_path=":memory:")
-
-
-def _make_report(
-    repo_name: str = "test-repo",
-    score: int = 50,
-    assessed_at: datetime | None = None,
-) -> AssessmentReport:
-    return AssessmentReport(
-        repo_url=f"https://github.com/org/{repo_name}",
-        repo_name=repo_name,
-        assessed_at=assessed_at or datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc),
-        stack=StackInfo(
-            languages=[Language(name="python", version="3.12", file_count=10, percentage=100.0)],
-            frameworks=[],
-            databases=[],
-            runtimes=[],
-            package_managers=["pip"],
-        ),
-        architecture=ArchitectureInfo(
-            service_count=1,
-            architecture_style="monolith",
-            has_api=True,
-            api_style="REST",
-            external_dependencies=[],
-            auth_mechanism=None,
-        ),
-        scores=[
-            DimensionScore(
-                dimension="security",
-                score=score,
-                max_score=100,
-                findings=[
-                    Finding(
-                        category="test",
-                        severity=Severity.info,
-                        description="placeholder",
-                        recommendation="n/a",
-                    )
-                ],
-            ),
-        ],
-        criticality="low",
-        summary="test",
-        remediation_plan=[
-            RemediationItem(
-                priority=1,
-                dimension="security",
-                description="fix it",
-                estimated_effort="1h",
-                agent_responsible="human",
-            )
-        ],
-    )
+from conftest import make_store, make_report
 
 
 # ── Events ──────────────────────────────────────────────────────────────
 
 
 def test_log_and_list_events():
-    store = _make_store()
+    store = make_store()
     eid = store.log_event("bot", "deploy", "my-app", "info", "deployed v1")
     assert eid
 
@@ -101,9 +43,19 @@ def test_log_and_list_events():
 
 
 def test_list_history_returns_multiple_assessments():
-    store = _make_store()
-    r1 = _make_report(score=40, assessed_at=datetime(2025, 1, 1, tzinfo=timezone.utc))
-    r2 = _make_report(score=60, assessed_at=datetime(2025, 2, 1, tzinfo=timezone.utc))
+    store = make_store()
+    r1 = make_report(repo_name="test-repo", scores=[DimensionScore(
+        dimension="security", score=40, max_score=100,
+        findings=[Finding(category="test", severity=Severity.low,
+                          description="minor", recommendation="fix")],
+    )])
+    r1.assessed_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    r2 = make_report(repo_name="test-repo", scores=[DimensionScore(
+        dimension="security", score=60, max_score=100,
+        findings=[Finding(category="test", severity=Severity.low,
+                          description="minor", recommendation="fix")],
+    )])
+    r2.assessed_at = datetime(2025, 2, 1, tzinfo=timezone.utc)
     store.save(r1)
     store.save(r2)
 
@@ -115,9 +67,19 @@ def test_list_history_returns_multiple_assessments():
 
 
 def test_get_trend_shows_delta():
-    store = _make_store()
-    r1 = _make_report(score=40, assessed_at=datetime(2025, 1, 1, tzinfo=timezone.utc))
-    r2 = _make_report(score=70, assessed_at=datetime(2025, 2, 1, tzinfo=timezone.utc))
+    store = make_store()
+    r1 = make_report(repo_name="test-repo", scores=[DimensionScore(
+        dimension="security", score=40, max_score=100,
+        findings=[Finding(category="test", severity=Severity.low,
+                          description="minor", recommendation="fix")],
+    )])
+    r1.assessed_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    r2 = make_report(repo_name="test-repo", scores=[DimensionScore(
+        dimension="security", score=70, max_score=100,
+        findings=[Finding(category="test", severity=Severity.low,
+                          description="minor", recommendation="fix")],
+    )])
+    r2.assessed_at = datetime(2025, 2, 1, tzinfo=timezone.utc)
     store.save(r1)
     store.save(r2)
 
@@ -137,8 +99,8 @@ def test_get_trend_shows_delta():
 
 
 def test_create_and_resolve_gate():
-    store = _make_store()
-    aid = store.save(_make_report())
+    store = make_store()
+    aid = store.save(make_report())
     gid = store.create_gate(aid, "security", "Critical vuln found")
     assert gid
 
@@ -161,8 +123,8 @@ def test_create_and_resolve_gate():
 
 
 def test_list_gates_filters_by_status():
-    store = _make_store()
-    aid = store.save(_make_report())
+    store = make_store()
+    aid = store.save(make_report())
     g1 = store.create_gate(aid, "compliance", "Missing SBOM")
     g2 = store.create_gate(aid, "security", "No network policy")
 
@@ -178,7 +140,7 @@ def test_list_gates_filters_by_status():
 
 def test_fleet_data_counts_critical_findings_correctly():
     """Regression: severity comparison must use Severity enum, not raw ints."""
-    store = _make_store()
+    store = make_store()
     report = AssessmentReport(
         repo_url="https://github.com/org/sev-test",
         repo_name="sev-test",
@@ -219,8 +181,8 @@ def test_fleet_data_counts_critical_findings_correctly():
 
 class TestRemediationsTable:
     def test_save_and_list(self):
-        store = _make_store()
-        aid = store.save(_make_report())
+        store = make_store()
+        aid = store.save(make_report())
         rid = store.save_remediation(aid, "security", "Fix RBAC")
         rems = store.list_remediations(aid)
         assert len(rems) == 1
@@ -229,8 +191,8 @@ class TestRemediationsTable:
         assert rems[0]["id"] == rid
 
     def test_complete(self):
-        store = _make_store()
-        aid = store.save(_make_report())
+        store = make_store()
+        aid = store.save(make_report())
         rid = store.save_remediation(aid, "security", "Fix RBAC")
         assert store.complete_remediation(rid) is True
         rems = store.list_remediations(aid)
@@ -238,8 +200,8 @@ class TestRemediationsTable:
         assert rems[0]["completed_at"] is not None
 
     def test_complete_idempotent(self):
-        store = _make_store()
-        aid = store.save(_make_report())
+        store = make_store()
+        aid = store.save(make_report())
         rid = store.save_remediation(aid, "cicd", "Add pipeline")
         store.complete_remediation(rid)
         assert store.complete_remediation(rid) is False
@@ -250,7 +212,7 @@ class TestRemediationsTable:
 
 class TestAgentRegistryTable:
     def test_register_and_list(self):
-        store = _make_store()
+        store = make_store()
         aid = store.register_agent("security", "hardening", "network,rbac")
         agents = store.list_agents()
         assert len(agents) == 1
@@ -259,13 +221,13 @@ class TestAgentRegistryTable:
         assert agents[0]["status"] == "active"
 
     def test_heartbeat(self):
-        store = _make_store()
+        store = make_store()
         store.register_agent("observability", "monitoring")
         assert store.agent_heartbeat("observability") is True
         assert store.agent_heartbeat("nonexistent") is False
 
     def test_register_replaces_existing(self):
-        store = _make_store()
+        store = make_store()
         store.register_agent("security", "hardening", "v1")
         store.register_agent("security", "hardening", "v2")
         agents = store.list_agents()
@@ -278,8 +240,8 @@ class TestAgentRegistryTable:
 
 class TestSlosTable:
     def test_save_and_list(self):
-        store = _make_store()
-        aid = store.save(_make_report())
+        store = make_store()
+        aid = store.save(make_report())
         sid = store.save_slo(aid, "availability", 99.9)
         slos = store.list_slos(aid)
         assert len(slos) == 1
@@ -289,8 +251,8 @@ class TestSlosTable:
         assert slos[0]["id"] == sid
 
     def test_update_slo(self):
-        store = _make_store()
-        aid = store.save(_make_report())
+        store = make_store()
+        aid = store.save(make_report())
         sid = store.save_slo(aid, "error_rate", 0.1)
         assert store.update_slo(sid, 0.05, "met") is True
         slos = store.list_slos(aid)
@@ -299,8 +261,8 @@ class TestSlosTable:
         assert slos[0]["updated_at"] is not None
 
     def test_multiple_slos_per_assessment(self):
-        store = _make_store()
-        aid = store.save(_make_report())
+        store = make_store()
+        aid = store.save(make_report())
         store.save_slo(aid, "availability", 99.9)
         store.save_slo(aid, "latency_p99", 200.0)
         store.save_slo(aid, "error_rate", 0.1)
@@ -318,8 +280,8 @@ class TestOrchestratorStoreWiring:
         import tempfile
         from pathlib import Path
 
-        store = _make_store()
-        report = _make_report()
+        store = make_store()
+        report = make_report()
         aid = store.save(report)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -340,8 +302,8 @@ class TestOrchestratorStoreWiring:
         import tempfile
         from pathlib import Path
 
-        store = _make_store()
-        report = _make_report()
+        store = make_store()
+        report = make_report()
         aid = store.save(report)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -362,8 +324,8 @@ class TestOrchestratorStoreWiring:
         import tempfile
         from pathlib import Path
 
-        store = _make_store()
-        report = _make_report()
+        store = make_store()
+        report = make_report()
         store.save(report)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -383,8 +345,8 @@ class TestOrchestratorStoreWiring:
         import tempfile
         from pathlib import Path
 
-        store = _make_store()
-        report = _make_report()
+        store = make_store()
+        report = make_report()
         aid = store.save(report)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -407,8 +369,8 @@ class TestOrchestratorStoreWiring:
 
 class TestOnboardingHistory:
     def test_list_onboardings(self):
-        store = _make_store()
-        aid = store.save(_make_report())
+        store = make_store()
+        aid = store.save(make_report())
         store.save_onboarding(aid, [
             {"category": "security", "path": "rbac.yaml", "content": "x", "description": "d"},
         ], orchestration={"recommendation": "READY", "auto_approve": False})
@@ -423,6 +385,6 @@ class TestOnboardingHistory:
         assert history[1]["file_count"] == 1
 
     def test_list_onboardings_empty(self):
-        store = _make_store()
-        aid = store.save(_make_report())
+        store = make_store()
+        aid = store.save(make_report())
         assert store.list_onboardings(aid) == []

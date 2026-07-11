@@ -1,63 +1,19 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 import pytest
 
+from conftest import make_report
+
 from agentit.agents.incident import IncidentAgent, IncidentResult
-from agentit.models import (
-    AssessmentReport,
-    ArchitectureInfo,
-    Database,
-    DimensionScore,
-    Finding,
-    Framework,
-    Language,
-    Runtime,
-    Severity,
-    StackInfo,
-)
-
-
-def _make_report(
-    *,
-    repo_name: str = "test-app",
-    languages: list[Language] | None = None,
-    databases: list[Database] | None = None,
-    criticality: str = "medium",
-) -> AssessmentReport:
-    if languages is None:
-        languages = [Language(name="python", file_count=10, percentage=100.0)]
-    return AssessmentReport(
-        repo_url="https://github.com/org/test-app",
-        repo_name=repo_name,
-        assessed_at=datetime.now(timezone.utc),
-        stack=StackInfo(
-            languages=languages,
-            frameworks=[],
-            databases=databases or [],
-            runtimes=[],
-            package_managers=[],
-        ),
-        architecture=ArchitectureInfo(
-            service_count=1,
-            architecture_style="monolith",
-            has_api=True,
-            api_style="REST",
-            external_dependencies=[],
-        ),
-        scores=[],
-        criticality=criticality,
-        summary="test summary",
-        remediation_plan=[],
-    )
+from agentit.models import Database, Language
 
 
 class TestRunbook:
     def test_generates_runbook_with_stack_info(self, tmp_path: Path) -> None:
-        report = _make_report(
+        report = make_report(
             languages=[Language(name="python", file_count=10, percentage=100.0)],
         )
         result = IncidentAgent(report, tmp_path / "out").run()
@@ -77,9 +33,8 @@ class TestRunbook:
     def test_runbook_includes_database_steps_when_db_detected(
         self, tmp_path: Path
     ) -> None:
-        report = _make_report(
-            databases=[Database(name="PostgreSQL", version="15")],
-        )
+        report = make_report()
+        report.stack.databases = [Database(name="PostgreSQL", version="15")]
         result = IncidentAgent(report, tmp_path / "out").run()
 
         runbooks = [f for f in result.files if f.path == "runbook.md"]
@@ -94,7 +49,7 @@ class TestRunbook:
 
 class TestPagerDutyConfig:
     def test_generates_pagerduty_config(self, tmp_path: Path) -> None:
-        report = _make_report(criticality="critical")
+        report = make_report(criticality="critical")
         result = IncidentAgent(report, tmp_path / "out").run()
 
         pd_files = [f for f in result.files if f.path == "pagerduty-service.yaml"]
@@ -109,7 +64,7 @@ class TestPagerDutyConfig:
         assert (tmp_path / "out" / "pagerduty-service.yaml").exists()
 
     def test_pagerduty_low_urgency_for_medium(self, tmp_path: Path) -> None:
-        report = _make_report(criticality="medium")
+        report = make_report(criticality="medium")
         result = IncidentAgent(report, tmp_path / "out").run()
 
         pd_files = [f for f in result.files if f.path == "pagerduty-service.yaml"]
@@ -120,7 +75,7 @@ class TestPagerDutyConfig:
 
 class TestAlertManagerConfig:
     def test_generates_alertmanager_config(self, tmp_path: Path) -> None:
-        report = _make_report()
+        report = make_report()
         result = IncidentAgent(report, tmp_path / "out").run()
 
         am_files = [f for f in result.files if f.path == "alertmanager-config.yaml"]
@@ -156,6 +111,6 @@ class TestAlertManagerConfig:
 
 class TestIncidentResult:
     def test_summary_count(self, tmp_path: Path) -> None:
-        report = _make_report()
+        report = make_report()
         result = IncidentAgent(report, tmp_path / "out").run()
         assert result.summary == "Generated 3 incident response artifacts."

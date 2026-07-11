@@ -494,6 +494,12 @@ class AssessmentStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_all_gates(self) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM gates ORDER BY created_at DESC",
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def resolve_gate(self, gate_id: str, status: str, resolved_by: str) -> bool:
         cursor = self._conn.execute(
             """

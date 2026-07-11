@@ -1,52 +1,19 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 import pytest
 
+from conftest import make_report
+
 from agentit.agents.observability import ObservabilityAgent, ObservabilityResult
 from agentit.models import (
-    AssessmentReport,
-    ArchitectureInfo,
     DimensionScore,
     Finding,
-    Language,
     Severity,
-    StackInfo,
 )
-
-
-def _make_report(
-    *,
-    repo_name: str = "test-app",
-    scores: list[DimensionScore] | None = None,
-) -> AssessmentReport:
-    return AssessmentReport(
-        repo_url="https://github.com/org/test-app",
-        repo_name=repo_name,
-        assessed_at=datetime.now(timezone.utc),
-        stack=StackInfo(
-            languages=[Language(name="python", file_count=10, percentage=100.0)],
-            frameworks=[],
-            databases=[],
-            runtimes=[],
-            package_managers=[],
-        ),
-        architecture=ArchitectureInfo(
-            service_count=1,
-            architecture_style="monolith",
-            has_api=True,
-            api_style="REST",
-            external_dependencies=[],
-        ),
-        scores=scores or [],
-        criticality="medium",
-        summary="test summary",
-        remediation_plan=[],
-    )
 
 
 def _score_with_finding(dimension: str, category: str, desc: str) -> DimensionScore:
@@ -67,7 +34,7 @@ def _score_with_finding(dimension: str, category: str, desc: str) -> DimensionSc
 
 class TestServiceMonitor:
     def test_generates_service_monitor(self, tmp_path: Path) -> None:
-        report = _make_report(
+        report = make_report(
             scores=[_score_with_finding("observability", "metrics", "No metrics endpoint")],
         )
         result = ObservabilityAgent(report, tmp_path / "out").run()
@@ -82,14 +49,14 @@ class TestServiceMonitor:
         assert (tmp_path / "out" / "servicemonitor.yaml").exists()
 
     def test_skips_service_monitor_without_findings(self, tmp_path: Path) -> None:
-        report = _make_report(scores=[])
+        report = make_report(scores=[])
         result = ObservabilityAgent(report, tmp_path / "out").run()
         assert not any(f.path == "servicemonitor.yaml" for f in result.files)
 
 
 class TestGrafanaDashboard:
     def test_generates_grafana_dashboard(self, tmp_path: Path) -> None:
-        report = _make_report(scores=[])
+        report = make_report(scores=[])
         result = ObservabilityAgent(report, tmp_path / "out").run()
 
         dash_files = [f for f in result.files if f.path == "grafana-dashboard.json"]
@@ -108,7 +75,7 @@ class TestGrafanaDashboard:
 
 class TestAlertingRules:
     def test_generates_alerting_rules(self, tmp_path: Path) -> None:
-        report = _make_report(scores=[])
+        report = make_report(scores=[])
         result = ObservabilityAgent(report, tmp_path / "out").run()
 
         ar_files = [f for f in result.files if f.path == "alerting-rules.yaml"]
@@ -124,7 +91,7 @@ class TestAlertingRules:
 
 class TestOtelCollector:
     def test_generates_otel_collector(self, tmp_path: Path) -> None:
-        report = _make_report(
+        report = make_report(
             scores=[_score_with_finding("observability", "tracing", "No tracing configured")],
         )
         result = ObservabilityAgent(report, tmp_path / "out").run()
@@ -141,6 +108,6 @@ class TestOtelCollector:
         assert (tmp_path / "out" / "otel-collector.yaml").exists()
 
     def test_skips_otel_without_findings(self, tmp_path: Path) -> None:
-        report = _make_report(scores=[])
+        report = make_report(scores=[])
         result = ObservabilityAgent(report, tmp_path / "out").run()
         assert not any(f.path == "otel-collector.yaml" for f in result.files)
