@@ -25,6 +25,11 @@
 {% if request.query_params.get('error') %}
 <div class="alert alert-error">{{ request.query_params.get('error') }}</div>
 {% endif %}
+{% if request.query_params.get('warning') %}
+{% for w in request.query_params.get('warning').split('|') %}
+<div class="alert alert-warn">{{ w }}</div>
+{% endfor %}
+{% endif %}
 {% if request.query_params.get('gate_approved') %}
 <div class="alert alert-success">
   Gate approved — manifests applied to cluster.

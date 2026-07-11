@@ -599,7 +599,7 @@ def ensure_webhook(repo_url: str, webhook_url: str) -> dict:
                 "config": {
                     "url": webhook_url,
                     "content_type": "json",
-                    "insecure_ssl": "1",
+                    "insecure_ssl": "0",
                 },
             },
         )

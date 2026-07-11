@@ -14,16 +14,20 @@ class EventPublisher:
         self._bootstrap = bootstrap_servers or os.environ.get("AGENTIT_KAFKA_BOOTSTRAP")
         self._producer = None
         if self._bootstrap:
-            try:
-                from kafka import KafkaProducer
+            self._connect()
 
-                self._producer = KafkaProducer(
-                    bootstrap_servers=self._bootstrap,
-                    value_serializer=lambda v: json.dumps(v).encode(),
-                    acks="all",
-                )
-            except Exception as exc:
-                logger.warning("Kafka unavailable: %s", exc)
+    def _connect(self) -> None:
+        try:
+            from kafka import KafkaProducer
+
+            self._producer = KafkaProducer(
+                bootstrap_servers=self._bootstrap,
+                value_serializer=lambda v: json.dumps(v).encode(),
+                acks="all",
+            )
+        except Exception as exc:
+            logger.warning("Kafka unavailable: %s", exc)
+            self._producer = None
 
     @property
     def kafka_enabled(self) -> bool:
@@ -59,7 +63,10 @@ class EventPublisher:
                 self._producer.send(topic, event)
                 self._producer.flush(timeout=5)
             except Exception as exc:
-                logger.warning("Kafka publish failed: %s", exc)
+                logger.error("Kafka publish failed for %s/%s: %s — attempting reconnect",
+                             topic, action, exc)
+                self._producer = None
+                self._connect()
         return event
 
     def close(self) -> None:

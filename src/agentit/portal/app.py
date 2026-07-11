@@ -39,6 +39,20 @@ app = FastAPI(title="AgentIT Portal")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
+async def _background_gate_expiry() -> None:
+    while True:
+        await asyncio.sleep(3600)
+        try:
+            get_store().expire_stale_gates(hours=24)
+        except Exception:
+            log.debug("Background gate expiry failed", exc_info=True)
+
+
+@app.on_event("startup")
+async def _start_background_tasks() -> None:
+    asyncio.create_task(_background_gate_expiry())
+
+
 def _safe_url(value: str) -> str:
     parsed = urlparse(value)
     if parsed.scheme not in ("https", "http", ""):
@@ -282,7 +296,7 @@ async def webhook_github_push(request: Request):
         log.exception("Re-assessment failed for %s", managed["repo_name"])
         s.log_event("github-webhook", "reassessment-failed", managed["repo_name"],
                     "warning", f"Re-assessment failed: {str(exc)[:200]}")
-        return JSONResponse({"status": "error", "reason": str(exc)[:200]}, status_code=500)
+        return JSONResponse({"status": "error", "reason": str(exc)[:200]})
 
 
 @app.post("/api/webhook/onboard")
@@ -383,10 +397,21 @@ async def assess_submit(
 
     try:
         report = await _with_timeout(asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality, infra))
+    except asyncio.TimeoutError:
+        return templates.TemplateResponse(
+            request, "assess_form.html",
+            {"error": "Assessment timed out. The repository may be too large or the server is under load."},
+            status_code=504,
+        )
     except Exception as exc:
         log.exception("Assessment failed for %s", repo_url)
+        msg = str(exc)
+        if "clone" in msg.lower() or "git" in msg.lower():
+            msg = f"Could not clone repository. Check the URL and permissions. ({msg[:100]})"
+        elif "GITHUB_TOKEN" in msg:
+            msg = "GitHub integration is not configured. Contact your administrator."
         return templates.TemplateResponse(
-            request, "assess_form.html", {"error": str(exc)}, status_code=400,
+            request, "assess_form.html", {"error": msg}, status_code=400,
         )
     assessment_id = get_store().save(report)
     return RedirectResponse(url=f"/assessments/{assessment_id}", status_code=303)
@@ -600,26 +625,31 @@ async def onboard_submit(request: Request, assessment_id: str):
     # Trigger image build for the app
     from agentit.image_builder import build_app_image
     build_result = await asyncio.to_thread(build_app_image, report.repo_url, report.repo_name)
+    warnings = []
     if "error" in build_result:
         log.warning("Image build trigger failed for %s: %s", report.repo_name, build_result["error"])
+        s.log_event("image-builder", "build-failed", report.repo_name, "warning",
+                    f"Image build failed: {build_result['error'][:200]}")
+        warnings.append(f"Image build failed: {build_result['error'][:100]}")
     else:
         log.info("Image build triggered: %s → %s", report.repo_name, build_result.get("image_ref"))
         s.log_event("image-builder", "build-triggered", report.repo_name, "info",
                     f"Building image: {build_result.get('image_ref')}")
 
-    # Auto-register GitHub webhook for push-based re-assessment
     from agentit.portal.github_pr import ensure_webhook
     webhook_url = str(request.base_url).rstrip("/") + "/api/webhook/github-push"
     hook_result = await asyncio.to_thread(ensure_webhook, report.repo_url, webhook_url)
     if "error" in hook_result:
         log.warning("Webhook registration failed for %s: %s", report.repo_name, hook_result["error"])
+        warnings.append(f"Auto-reassessment webhook not registered: {hook_result['error'][:100]}")
     elif hook_result.get("created"):
         s.log_event("portal", "webhook-registered", report.repo_name,
                     "info", "GitHub push webhook registered for auto-reassessment")
 
-    return RedirectResponse(
-        url=f"/assessments/{assessment_id}/onboard-results", status_code=303,
-    )
+    redirect_url = f"/assessments/{assessment_id}/onboard-results"
+    if warnings:
+        redirect_url += f"?warning={quote('|'.join(warnings))}"
+    return RedirectResponse(url=redirect_url, status_code=303)
 
 
 @app.get("/assessments/{assessment_id}/onboard-results", response_class=HTMLResponse)
@@ -843,14 +873,14 @@ async def create_pr(assessment_id: str):
 
     try:
         if report.infra_repo_url:
-            result = await asyncio.to_thread(
+            result = await _with_timeout(asyncio.to_thread(
                 commit_to_infra_repo, report.infra_repo_url, report.repo_name, files,
-            )
+            ))
             await asyncio.to_thread(ensure_applicationset, report.infra_repo_url)
         else:
-            result = await asyncio.to_thread(
+            result = await _with_timeout(asyncio.to_thread(
                 create_onboarding_pr, report.repo_url, report.repo_name, files,
-            )
+            ))
     except Exception as exc:
         log.exception("PR creation failed for %s", report.repo_name)
         return RedirectResponse(
