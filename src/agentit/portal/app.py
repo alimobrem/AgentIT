@@ -192,12 +192,22 @@ async def webhook_onboard(request: Request):
         )
 
     s.save_onboarding(assessment_id, files, orchestration=orch_summary)
-    log.info("webhook_onboard completed for %s: %d files generated", assessment_id, len(files))
+
+    # Trigger image build
+    from agentit.image_builder import build_app_image
+    build_result = await asyncio.to_thread(build_app_image, report.repo_url, report.repo_name)
+    build_status = build_result.get("image_ref", build_result.get("error", "unknown"))
+    if "error" not in build_result:
+        s.log_event("image-builder", "build-triggered", report.repo_name, "info",
+                    f"Building image: {build_result['image_ref']}")
+
+    log.info("webhook_onboard completed for %s: %d files, build=%s", assessment_id, len(files), build_status)
     return JSONResponse({
         "assessment_id": assessment_id,
         "repo_url": report.repo_url,
         "files_generated": len(files),
         "categories": list({f["category"] for f in files}),
+        "image_build": build_status,
     })
 
 
