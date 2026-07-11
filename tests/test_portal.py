@@ -603,3 +603,188 @@ def test_base_nav_has_fleet_link(client):
     resp = client.get("/")
     assert resp.status_code == 200
     assert 'href="/fleet"' in resp.text
+
+
+# ------------------------------------------------------------------
+# UI design system tests
+# ------------------------------------------------------------------
+
+
+def test_base_has_htmx_script(client):
+    resp = client.get("/")
+    assert "htmx.org@2.0.4" in resp.text
+    assert 'integrity="sha384-' in resp.text
+
+
+def test_base_has_alpinejs_script(client):
+    resp = client.get("/")
+    assert "alpinejs@3" in resp.text
+    assert 'crossorigin="anonymous"' in resp.text
+
+
+def test_base_has_hx_boost(client):
+    resp = client.get("/")
+    assert 'hx-boost="true"' in resp.text
+
+
+def test_base_has_css_variables(client):
+    resp = client.get("/")
+    assert "--color-bg:" in resp.text
+    assert "--color-accent:" in resp.text
+    assert "--color-surface:" in resp.text
+    assert "--radius-md:" in resp.text
+    assert "--space-" in resp.text
+
+
+def test_no_inline_styles_dashboard(client, _override_store):
+    store = _override_store
+    store.save(_make_report_scored("styled-app", 70))
+    resp = client.get("/")
+    html = resp.text
+    lines = html.split("\n")
+    for i, line in enumerate(lines, 1):
+        if "style=" in line.lower() and 'style="width:' not in line:
+            assert False, f"Inline style found on line {i}: {line.strip()}"
+
+
+def test_no_inline_styles_fleet(client, _override_store):
+    store = _override_store
+    store.save(_make_report_scored("fleet-app", 50))
+    resp = client.get("/fleet")
+    html = resp.text
+    lines = html.split("\n")
+    for i, line in enumerate(lines, 1):
+        if "style=" in line.lower() and 'style="width:' not in line:
+            assert False, f"Inline style found on line {i}: {line.strip()}"
+
+
+def test_no_inline_styles_assess_form(client):
+    resp = client.get("/assess")
+    html = resp.text
+    for line in html.split("\n"):
+        if "style=" in line.lower() and 'style="width:' not in line:
+            assert False, f"Inline style found: {line.strip()}"
+
+
+def test_no_inline_styles_assessment_detail(client, _override_store):
+    store = _override_store
+    report = _make_report()
+    aid = store.save(report)
+    resp = client.get(f"/assessments/{aid}")
+    html = resp.text
+    for line in html.split("\n"):
+        if "style=" in line.lower() and 'style="width:' not in line:
+            assert False, f"Inline style found: {line.strip()}"
+
+
+def test_no_inline_styles_events(client):
+    resp = client.get("/events")
+    html = resp.text
+    for line in html.split("\n"):
+        if "style=" in line.lower() and 'style="width:' not in line:
+            assert False, f"Inline style found: {line.strip()}"
+
+
+def test_no_inline_styles_gates(client, _override_store):
+    store = _override_store
+    report = _make_report()
+    aid = store.save(report)
+    store.create_gate(aid, "deploy", "Test gate")
+    resp = client.get("/gates")
+    html = resp.text
+    for line in html.split("\n"):
+        if "style=" in line.lower() and 'style="width:' not in line:
+            assert False, f"Inline style found: {line.strip()}"
+
+
+def test_no_inline_styles_onboard_results(client, _override_store):
+    store = _override_store
+    report = _make_report_with_findings()
+    aid = store.save(report)
+    client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
+    resp = client.get(f"/assessments/{aid}/onboard-results")
+    html = resp.text
+    for line in html.split("\n"):
+        if "style=" in line.lower() and 'style="width:' not in line:
+            assert False, f"Inline style found: {line.strip()}"
+
+
+def test_dashboard_uses_design_system_classes(client, _override_store):
+    store = _override_store
+    store.save(_make_report_scored("css-app", 60))
+    resp = client.get("/")
+    assert "stat-grid" in resp.text
+    assert "stat-card" in resp.text
+    assert "stat-label" in resp.text
+    assert "stat-value" in resp.text
+    assert "card-grid" in resp.text
+    assert "card-header" in resp.text
+    assert "card-title" in resp.text
+    assert "card-score" in resp.text
+    assert "card-meta" in resp.text
+    assert "card-footer" in resp.text
+
+
+def test_fleet_uses_design_system_classes(client, _override_store):
+    store = _override_store
+    store.save(_make_report_scored("fleet-css", 80))
+    resp = client.get("/fleet")
+    assert "stat-grid" in resp.text
+    assert "row-border-" in resp.text
+    assert "text-bold" in resp.text
+    assert "btn btn-sm" in resp.text
+
+
+def test_assessment_detail_uses_design_system_classes(client, _override_store):
+    store = _override_store
+    report = _make_report()
+    aid = store.save(report)
+    resp = client.get(f"/assessments/{aid}")
+    assert "score-hero" in resp.text
+    assert "score-unit" in resp.text
+    assert "section-title" in resp.text
+    assert "dimension-row" in resp.text
+    assert "dimension-label" in resp.text
+    assert "dimension-bar" in resp.text
+    assert "dimension-value" in resp.text
+    assert "finding-list" in resp.text
+    assert "btn-action" in resp.text
+
+
+def test_assess_form_uses_design_system_classes(client):
+    resp = client.get("/assess")
+    assert "form-narrow" in resp.text
+    assert "form-group" in resp.text
+    assert "form-label" in resp.text
+    assert "htmx-indicator" in resp.text
+
+
+def test_gates_uses_design_system_classes(client, _override_store):
+    store = _override_store
+    report = _make_report()
+    aid = store.save(report)
+    store.create_gate(aid, "deploy", "Gate test")
+    resp = client.get("/gates")
+    assert "gate-actions" in resp.text
+    assert "btn-approve" in resp.text
+    assert "btn-reject" in resp.text
+    assert "section-title" in resp.text
+
+
+def test_onboard_results_uses_design_system_classes(client, _override_store):
+    store = _override_store
+    report = _make_report_with_findings()
+    aid = store.save(report)
+    client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
+    resp = client.get(f"/assessments/{aid}/onboard-results")
+    assert "manifest-card" in resp.text
+    assert "manifest-title" in resp.text
+    assert "manifest-desc" in resp.text
+    assert "code-block" in resp.text
+    assert "action-bar" in resp.text
+    assert 'hx-boost="false"' in resp.text
+
+
+def test_responsive_css_exists(client):
+    resp = client.get("/")
+    assert "@media (max-width: 768px)" in resp.text

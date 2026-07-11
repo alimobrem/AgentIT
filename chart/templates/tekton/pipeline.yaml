@@ -47,7 +47,7 @@ spec:
         steps:
           - name: test
             image: registry.access.redhat.com/ubi9/python-312:latest
-            workingDir: $(workspaces.source.path)/agentit
+            workingDir: $(workspaces.source.path)
             script: |
               pip install -e ".[dev]" 2>/dev/null || pip install -e .
               python -m pytest tests/ -q --ignore=tests/test_real_repos.py
@@ -70,9 +70,9 @@ spec:
         - name: IMAGE
           value: $(params.image-ref)
         - name: DOCKERFILE
-          value: agentit/Containerfile
+          value: ./Containerfile
         - name: CONTEXT
-          value: agentit
+          value: .
       workspaces:
         - name: source
           workspace: source
