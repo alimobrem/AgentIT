@@ -93,6 +93,11 @@
     text-decoration: none;
     border-bottom-color: var(--color-accent);
   }
+  nav .links a.nav-active,
+  nav .links-secondary a.nav-active {
+    color: var(--color-accent);
+    border-bottom-color: var(--color-accent);
+  }
 
   /* ── Layout ────────────────────────────────────────────────────── */
   .container { max-width: 1100px; margin: 0 auto; padding: var(--space-8); }
@@ -526,15 +531,15 @@
 <nav>
   <span class="logo">AgentIT</span>
   <div class="links">
-    <a href="/">Fleet</a>
+    <a href="/" class="{{ 'nav-active' if request.url.path == '/' or request.url.path.startswith('/assessments') or request.url.path == '/fleet' }}">Fleet</a>
   </div>
   <div class="links-secondary">
-    <a href="/gates">Gates</a>
-    <a href="/events">Events</a>
-    <a href="/agents">Agents</a>
-    <a href="/schedules">Schedules</a>
-    <a href="/health">Health</a>
-    <a href="/settings">Settings</a>
+    <a href="/gates" class="{{ 'nav-active' if request.url.path.startswith('/gates') }}">Gates</a>
+    <a href="/events" class="{{ 'nav-active' if request.url.path == '/events' }}">Events</a>
+    <a href="/agents" class="{{ 'nav-active' if request.url.path.startswith('/agents') }}">Agents</a>
+    <a href="/schedules" class="{{ 'nav-active' if request.url.path == '/schedules' }}">Schedules</a>
+    <a href="/health" class="{{ 'nav-active' if request.url.path.startswith('/health') }}">Health</a>
+    <a href="/settings" class="{{ 'nav-active' if request.url.path == '/settings' }}">Settings</a>
   </div>
 </nav>
 <div class="container">

@@ -19,7 +19,7 @@
 
 {% for s in scores_sorted %}
 <div class="dimension-row">
-  <div class="dimension-label">{{ s.dimension | replace("_", " ") | title }}</div>
+  <div class="dimension-label">{{ s.dimension | dimension_label }}</div>
   <div class="dimension-bar">
     <div class="score-bar-bg">
       <div class="score-bar-fill
@@ -79,7 +79,7 @@
         {% for item in report.remediation_plan %}
         <tr>
           <td>{{ item.priority }}</td>
-          <td>{{ item.dimension | replace("_", " ") | title }}</td>
+          <td>{{ item.dimension | dimension_label }}</td>
           <td>{{ item.description }}</td>
           <td>{{ item.estimated_effort }}</td>
           <td>{{ item.agent_responsible }}</td>

@@ -46,7 +46,44 @@ def _safe_url(value: str) -> str:
     return value
 
 
+_DIMENSION_LABELS: dict[str, str] = {
+    "ha_dr": "HA/DR",
+    "cicd": "CI/CD",
+    "data_governance": "Data Governance",
+}
+
+
+def _format_dimension(value: str) -> str:
+    """Format dimension names for display. Uses explicit mapping for acronyms,
+    falls back to replacing underscores and title-casing."""
+    if value in _DIMENSION_LABELS:
+        return _DIMENSION_LABELS[value]
+    return value.replace("_", " ").title()
+
+
 templates.env.filters["safe_url"] = _safe_url
+templates.env.filters["dimension_label"] = _format_dimension
+
+
+@app.exception_handler(404)
+async def not_found_handler(request: Request, exc: HTTPException) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request, "error.html",
+        {"status_code": 404, "detail": "Page not found"},
+        status_code=404,
+    )
+
+
+@app.exception_handler(500)
+async def server_error_handler(request: Request, exc: Exception) -> HTMLResponse:
+    log.exception("Internal server error on %s", request.url.path)
+    return templates.TemplateResponse(
+        request, "error.html",
+        {"status_code": 500, "detail": "Internal server error"},
+        status_code=500,
+    )
+
+
 store = AssessmentStore()
 
 
@@ -807,7 +844,7 @@ def _get_cluster_health() -> dict:
 
     result: dict = {
         "argo_apps": [], "argo_synced": False,
-        "pods": [], "pods_running": 0,
+        "pods": [], "pods_running": 0, "pods_failed": 0,
         "pipelines": [], "pipeline_status": "Unknown",
         "kafka_ready": False, "publisher_ok": False,
     }
@@ -857,6 +894,7 @@ def _get_cluster_health() -> dict:
                     "restarts": restarts, "age": created[:16],
                 })
             result["pods_running"] = sum(1 for p in result["pods"] if p["status"] == "Running")
+            result["pods_failed"] = sum(1 for p in result["pods"] if p["status"] in ("Failed", "Error", "CrashLoopBackOff"))
         except Exception:
             log.warning("Failed to parse pods JSON", exc_info=True)
 
@@ -1143,6 +1181,20 @@ async def toggle_schedule(request: Request):
 @app.get("/agents", response_class=HTMLResponse)
 async def agents_page(request: Request) -> HTMLResponse:
     agents = get_store().list_agents()
+
+    # Merge long-lived watcher agents that aren't in the registry
+    registered_names = {a["agent_name"] for a in agents}
+    for w in _WATCHER_AGENTS:
+        if w["name"] not in registered_names:
+            agents.append({
+                "agent_name": w["name"],
+                "category": w["mode"],
+                "status": "deployed",
+                "capabilities": f"interval: {w['interval']}",
+                "registered_at": "—",
+                "last_heartbeat": "—",
+            })
+
     active = sum(1 for a in agents if a["status"] == "active")
     last_hb = max((a["last_heartbeat"] or "" for a in agents), default="—")
     return templates.TemplateResponse(request, "agents.html", {

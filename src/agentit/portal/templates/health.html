@@ -13,7 +13,7 @@
   </div>
   <div class="stat-card">
     <div class="stat-label">Pods Running</div>
-    <div class="stat-value">{{ pods_running }}</div>
+    <div class="stat-value">{{ pods_running }}{% if pods_failed %} <span class="text-danger text-sm">/ {{ pods_failed }} failed</span>{% endif %}</div>
   </div>
   <div class="stat-card">
     <div class="stat-label">Last Pipeline</div>
