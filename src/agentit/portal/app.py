@@ -899,10 +899,12 @@ def _get_cluster_health() -> dict:
             log.warning("Failed to parse pods JSON", exc_info=True)
 
     # Pipeline runs
-    raw = _run_cmd(["oc", "get", "pipelineruns", "-n", "agentit", "-o", "json"], 5)
+    raw = _run_cmd(["oc", "get", "pipelineruns", "-n", "agentit",
+                    "-l", "tekton.dev/pipeline=agentit-ci", "-o", "json"], 5)
     if raw:
         try:
-            runs = _json.loads(raw).get("items", [])[-5:]
+            all_runs = _json.loads(raw).get("items", [])
+            runs = all_runs[-5:]
             for r in runs:
                 name = r.get("metadata", {}).get("name", "?")
                 conditions = r.get("status", {}).get("conditions", [{}])
@@ -917,8 +919,31 @@ def _get_cluster_health() -> dict:
                 result["pipelines"].append({"name": name, "status": status, "duration": duration})
             if result["pipelines"]:
                 result["pipeline_status"] = result["pipelines"][-1]["status"]
+            for r in reversed(all_runs):
+                conds = r.get("status", {}).get("conditions", [{}])
+                if conds and conds[0].get("reason") == "Succeeded":
+                    ct = r.get("status", {}).get("completionTime", "")
+                    result["last_successful_ci"] = ct[:19] if ct else "?"
+                    break
         except Exception:
             log.warning("Failed to parse pipeline runs JSON", exc_info=True)
+
+    # Rollout status
+    raw = _run_cmd(["oc", "get", "rollouts.argoproj.io", "agentit", "-n", "agentit", "-o", "json"])
+    if raw:
+        try:
+            ro = _json.loads(raw)
+            result["rollout_phase"] = ro.get("status", {}).get("phase", "Unknown")
+            result["rollout_step"] = ro.get("status", {}).get("currentStepIndex", 0)
+            result["rollout_total_steps"] = len(ro.get("spec", {}).get("strategy", {}).get("canary", {}).get("steps", []))
+            result["rollout_revision"] = ro.get("status", {}).get("observedGeneration", "?")
+        except Exception:
+            log.debug("Failed to parse rollout JSON", exc_info=True)
+
+    # Current commit (from the running pod's image labels or git)
+    raw = _run_cmd(["oc", "get", "applications.argoproj.io", "agentit", "-n", "openshift-gitops",
+                    "-o", "jsonpath={.status.sync.revision}"])
+    result["current_commit"] = (raw or "").strip()[:12]
 
     # Kafka
     raw = _run_cmd(["oc", "get", "kafka", "-n", "agentit", "-o",

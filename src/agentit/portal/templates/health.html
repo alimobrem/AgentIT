@@ -12,6 +12,13 @@
     </div>
   </div>
   <div class="stat-card">
+    <div class="stat-label">Rollout</div>
+    <div class="stat-value text-sm {% if rollout_phase == 'Healthy' %}text-success{% elif rollout_phase == 'Paused' %}text-warning{% else %}text-danger{% endif %}">
+      {{ rollout_phase | default("Unknown") }}
+      {% if rollout_phase == 'Paused' and rollout_total_steps %}<span class="text-muted"> ({{ rollout_step }}/{{ rollout_total_steps }})</span>{% endif %}
+    </div>
+  </div>
+  <div class="stat-card">
     <div class="stat-label">Pods Running</div>
     <div class="stat-value">{{ pods_running }}{% if pods_failed %} <span class="text-danger text-sm">/ {{ pods_failed }} failed</span>{% endif %}</div>
   </div>
@@ -21,6 +28,18 @@
       {{ pipeline_status }}
     </div>
   </div>
+  {% if current_commit %}
+  <div class="stat-card">
+    <div class="stat-label">Deployed Commit</div>
+    <div class="stat-value text-sm"><code>{{ current_commit }}</code></div>
+  </div>
+  {% endif %}
+  {% if last_successful_ci %}
+  <div class="stat-card">
+    <div class="stat-label">Last Good CI</div>
+    <div class="stat-value text-sm text-success">{{ last_successful_ci }}</div>
+  </div>
+  {% endif %}
 </div>
 
 <h2 class="section-title">Argo CD</h2>
