@@ -93,7 +93,7 @@ graph TB
     ArgoCD --> Rollout
     Tekton -->|build & push image| Target
     Kafka <--> ArgoEvents
-    ArgoEvents -->|score < 70 → onboard| Portal
+    ArgoEvents -->|"score under 70 → onboard"| Portal
     Portal -->|publish events| Kafka
     Watchers <--> Kafka
     Watchers -->|CVE / SLO / drift alerts| Portal
@@ -118,21 +118,21 @@ flowchart TD
     H --> I{"_select_agents()\nbased on criticality\n+ overall_score"}
     I --> J["Always: security, observability,\ncicd, compliance, release"]
     I --> K["high/critical → +dependency,\n+incident, +cost"]
-    I --> L["score < 30 → +retirement"]
+    I --> L["score under 30 → +retirement"]
     I --> M["not critical → +chaos"]
-    I --> N["high/critical OR score < 50\n→ +codechange"]
+    I --> N["high/critical OR score under 50\n→ +codechange"]
 
     J & K & L & M & N --> O["Run each agent:\n(report, output_dir) → GeneratedFile[]"]
     O --> P["validate_manifest()\non every .yaml/.yml output"]
     P --> Q["_detect_conflicts()\npriority matrix, e.g.\nsecurity beats cicd/observability/compliance"]
-    Q --> R{"_can_auto_approve()?\ncriticality not high/critical\nAND no critical findings\nAND score >= 70"}
+    Q --> R{"_can_auto_approve()?\ncriticality not high/critical\nAND no critical findings\nAND score 70 or higher"}
     R -->|yes, no warnings| S["AUTO-APPROVED"]
     R -->|no| T["Gates created:\nsecurity-review (if critical findings)\ndeploy-approval (if high/critical)\nfinal-approval (always)"]
     S --> U["orchestration-summary.md\n+ recommendation"]
     T --> U
 
     U --> V{"Human / operator decides"}
-    V -->|create PR| W["github_pr.py\nper-agent branches + PRs\n.agentit/<category>/*.yaml"]
+    V -->|create PR| W["github_pr.py\nper-agent branches + PRs\n.agentit/CATEGORY/*.yaml"]
     V -->|apply directly| X["cluster_apply.py\ndry-run → classify → oc apply"]
 ```
 
@@ -156,7 +156,7 @@ sequenceDiagram
     Portal->>Portal: re-assess managed repo
     Portal->>Kafka: publish "assessment-complete" (score)
     Kafka->>Sensor: event delivered
-    Sensor->>Portal: POST /api/webhook/onboard\n(if score < 70)
+    Sensor->>Portal: POST /api/webhook/onboard\n(if score under 70)
     Portal->>Orch: FleetOrchestrator.run()
     Orch-->>Portal: manifests + auto_approve flag
     Portal->>Auto: execute(files, criticality, auto_approve)
@@ -202,7 +202,7 @@ graph LR
         PVC["PVC: agentit-data\n(SQLite db)"]
         KafkaCluster["Kafka cluster (Strimzi)\ntopics: agentit-events, agentit-alerts"]
         EventSource["EventSource\n(Kafka → Argo Events)"]
-        SensorOnboard["Sensor: agentit-onboard\n(score < 70 → /api/webhook/onboard)"]
+        SensorOnboard["Sensor: agentit-onboard\n(score under 70 → /api/webhook/onboard)"]
         SensorAutoApply["Sensor: auto-apply triggers"]
         Pipeline["Tekton Pipeline\ngit-clone→build→test→\nimage-build→image-push→deploy"]
         CronCVE["CronWorkflow: CVE scan"]
