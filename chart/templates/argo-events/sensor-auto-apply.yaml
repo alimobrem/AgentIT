@@ -1,0 +1,37 @@
+{{- if .Values.argoEvents.enabled }}
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: agentit-auto-apply
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  eventBusName: default
+  dependencies:
+    - name: onboarding-complete
+      eventSourceName: agentit-kafka
+      eventName: agentit-events
+      filters:
+        data:
+          - path: body.action
+            type: string
+            value:
+              - onboarding-complete
+  triggers:
+    - template:
+        name: trigger-auto-apply
+        http:
+          url: http://agentit.{{ .Release.Namespace }}.svc:8080/api/webhook/auto-apply
+          method: POST
+          headers:
+            Content-Type: application/json
+          payload:
+            - src:
+                dependencyName: onboarding-complete
+                dataKey: body
+              dest: body
+          timeout: 300
+{{- end }}

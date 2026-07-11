@@ -568,3 +568,50 @@ def ensure_infra_repo(owner: str, repo_name: str = "agentit-gitops") -> dict:
     except Exception as exc:
         logger.exception("Failed to create infra repo")
         return {"error": str(exc)}
+
+
+def ensure_webhook(repo_url: str, webhook_url: str) -> dict:
+    """Ensure a GitHub push webhook exists on the repo pointing to our endpoint.
+
+    Idempotent — if a webhook with the same URL already exists, returns it.
+    Returns {"id": webhook_id, "created": bool} or {"error": str}.
+    """
+    try:
+        token = _get_token()
+        hdrs = _headers(token)
+        owner, repo = _parse_owner_repo(repo_url)
+        base_url = f"{_API}/repos/{owner}/{repo}"
+
+        resp = requests.get(f"{base_url}/hooks", headers=hdrs, timeout=10)
+        resp.raise_for_status()
+        for hook in resp.json():
+            if hook.get("config", {}).get("url", "") == webhook_url:
+                logger.info("Webhook already exists on %s/%s (id=%s)", owner, repo, hook["id"])
+                return {"id": hook["id"], "created": False}
+
+        resp = requests.post(
+            f"{base_url}/hooks",
+            headers=hdrs, timeout=10,
+            json={
+                "name": "web",
+                "active": True,
+                "events": ["push"],
+                "config": {
+                    "url": webhook_url,
+                    "content_type": "json",
+                    "insecure_ssl": "1",
+                },
+            },
+        )
+        resp.raise_for_status()
+        hook_id = resp.json()["id"]
+        logger.info("Created push webhook on %s/%s (id=%s) → %s", owner, repo, hook_id, webhook_url)
+        return {"id": hook_id, "created": True}
+
+    except requests.HTTPError as exc:
+        msg = exc.response.text if exc.response else str(exc)
+        logger.warning("Failed to create webhook on %s: %s", repo_url, msg[:200])
+        return {"error": f"GitHub API error: {msg[:200]}"}
+    except Exception as exc:
+        logger.warning("Failed to ensure webhook on %s: %s", repo_url, exc)
+        return {"error": str(exc)}

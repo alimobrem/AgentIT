@@ -192,7 +192,86 @@ async def webhook_assess(request: Request):
     criticality = body.get("criticality", "medium")
     report = await _with_timeout(asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality))
     assessment_id = get_store().save(report)
+    from agentit.events import get_publisher
+    get_publisher().publish(
+        "agentit-events",
+        agent_id="assessor",
+        action="assessment-complete",
+        target_app=report.repo_name,
+        summary=f"Assessment complete: {report.overall_score:.0f}/100",
+        details={"assessment_id": assessment_id, "score": report.overall_score},
+        correlation_id=assessment_id,
+    )
     return JSONResponse({"assessment_id": assessment_id, "overall_score": report.overall_score})
+
+
+@app.post("/api/webhook/github-push")
+async def webhook_github_push(request: Request):
+    """Handle GitHub push webhooks — triggers re-assessment for managed repos."""
+    event_type = request.headers.get("X-GitHub-Event", "")
+    if event_type == "ping":
+        return JSONResponse({"status": "pong"})
+    if event_type != "push":
+        return JSONResponse({"status": "ignored", "reason": f"event type '{event_type}' not handled"})
+
+    body = await request.json()
+    ref = body.get("ref", "")
+    repo_url = body.get("repository", {}).get("html_url", "")
+    default_branch = body.get("repository", {}).get("default_branch", "main")
+
+    if ref != f"refs/heads/{default_branch}":
+        return JSONResponse({"status": "ignored", "reason": f"push to {ref}, not {default_branch}"})
+
+    if not repo_url:
+        raise HTTPException(400, "No repository URL in push payload")
+
+    s = get_store()
+    fleet = s.get_fleet_data()
+    managed = next(
+        (app for app in fleet if app["repo_url"].rstrip("/").lower() == repo_url.rstrip("/").lower()),
+        None,
+    )
+    if managed is None:
+        return JSONResponse({"status": "ignored", "reason": f"{repo_url} not in fleet"})
+
+    commit_sha = body.get("after", "")[:12]
+    pusher = body.get("pusher", {}).get("name", "unknown")
+    log.info("GitHub push on managed repo %s by %s (commit %s) — triggering re-assessment",
+             managed["repo_name"], pusher, commit_sha)
+
+    s.log_event("github-webhook", "push-received", managed["repo_name"],
+                "info", f"Push by {pusher} (commit {commit_sha}) — re-assessing")
+
+    criticality = managed.get("criticality", "medium")
+    try:
+        report = await _with_timeout(
+            asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality)
+        )
+        assessment_id = s.save(report)
+        s.log_event("github-webhook", "reassessment-complete", managed["repo_name"],
+                    "info", f"Re-assessment complete: {report.overall_score:.0f}/100 (was {managed.get('latest_score', '?')})")
+        from agentit.events import get_publisher
+        get_publisher().publish(
+            "agentit-events",
+            agent_id="assessor",
+            action="assessment-complete",
+            target_app=managed["repo_name"],
+            summary=f"Re-assessment: {report.overall_score:.0f}/100",
+            details={"assessment_id": assessment_id, "score": report.overall_score},
+            correlation_id=assessment_id,
+        )
+        return JSONResponse({
+            "status": "assessed",
+            "repo": managed["repo_name"],
+            "assessment_id": assessment_id,
+            "score": report.overall_score,
+            "previous_score": managed.get("latest_score"),
+        })
+    except Exception as exc:
+        log.exception("Re-assessment failed for %s", managed["repo_name"])
+        s.log_event("github-webhook", "reassessment-failed", managed["repo_name"],
+                    "warning", f"Re-assessment failed: {str(exc)[:200]}")
+        return JSONResponse({"status": "error", "reason": str(exc)[:200]}, status_code=500)
 
 
 @app.post("/api/webhook/onboard")
@@ -332,6 +411,16 @@ async def self_assess_route(request: Request):
     assessment_id = get_store().save(report)
     get_store().log_event("self-assess", "assessment-complete", "agentit", "info",
                           f"Self-assessment complete: {report.overall_score:.0f}/100")
+    from agentit.events import get_publisher
+    get_publisher().publish(
+        "agentit-events",
+        agent_id="assessor",
+        action="assessment-complete",
+        target_app="agentit",
+        summary=f"Self-assessment: {report.overall_score:.0f}/100",
+        details={"assessment_id": assessment_id, "score": report.overall_score},
+        correlation_id=assessment_id,
+    )
     return RedirectResponse(url=f"/assessments/{assessment_id}", status_code=303)
 
 
@@ -489,7 +578,7 @@ async def onboarding_history(request: Request, assessment_id: str) -> HTMLRespon
 
 
 @app.post("/assessments/{assessment_id}/onboard", response_model=None)
-async def onboard_submit(assessment_id: str):
+async def onboard_submit(request: Request, assessment_id: str):
     s = get_store()
     report = s.get(assessment_id)
     if report is None:
@@ -497,6 +586,18 @@ async def onboard_submit(assessment_id: str):
 
     files, orch_summary = await asyncio.to_thread(_run_onboarding, report, assessment_id)
     s.save_onboarding(assessment_id, files, orchestration=orch_summary)
+
+    # Publish onboarding-complete to Kafka so sensors can react
+    from agentit.events import get_publisher
+    get_publisher().publish(
+        "agentit-events",
+        agent_id="onboarding",
+        action="onboarding-complete",
+        target_app=report.repo_name,
+        summary=f"Generated {len(files)} manifests",
+        details={"assessment_id": assessment_id, "file_count": len(files)},
+        correlation_id=assessment_id,
+    )
 
     # Trigger image build for the app
     from agentit.image_builder import build_app_image
@@ -507,6 +608,16 @@ async def onboard_submit(assessment_id: str):
         log.info("Image build triggered: %s → %s", report.repo_name, build_result.get("image_ref"))
         s.log_event("image-builder", "build-triggered", report.repo_name, "info",
                     f"Building image: {build_result.get('image_ref')}")
+
+    # Auto-register GitHub webhook for push-based re-assessment
+    from agentit.portal.github_pr import ensure_webhook
+    webhook_url = str(request.base_url).rstrip("/") + "/api/webhook/github-push"
+    hook_result = await asyncio.to_thread(ensure_webhook, report.repo_url, webhook_url)
+    if "error" in hook_result:
+        log.warning("Webhook registration failed for %s: %s", report.repo_name, hook_result["error"])
+    elif hook_result.get("created"):
+        s.log_event("portal", "webhook-registered", report.repo_name,
+                    "info", "GitHub push webhook registered for auto-reassessment")
 
     return RedirectResponse(
         url=f"/assessments/{assessment_id}/onboard-results", status_code=303,
