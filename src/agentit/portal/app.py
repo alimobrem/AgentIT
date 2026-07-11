@@ -906,6 +906,55 @@ async def install_operator_endpoint(request: Request):
     return JSONResponse(result)
 
 
+@app.get("/api/operator-status")
+async def operator_status(request: Request):
+    """Check if an OLM operator is installed and ready. Used by htmx polling."""
+    package = request.query_params.get("package", "")
+    if not package:
+        return HTMLResponse("<span>Missing package name</span>")
+
+    import shutil
+    import subprocess
+    cli = shutil.which("oc") or shutil.which("kubectl")
+    if not cli:
+        return HTMLResponse(f"<strong>{package}</strong> — cannot check (no oc/kubectl)")
+
+    try:
+        result = subprocess.run(
+            [cli, "get", "csv", "-n", "openshift-operators", "-o",
+             f"jsonpath={{.items[?(@.spec.displayName=='{package}')].status.phase}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        phase = result.stdout.strip()
+        if not phase:
+            result2 = subprocess.run(
+                [cli, "get", "subscription", package, "-n", "openshift-operators",
+                 "-o", "jsonpath={.status.state}"],
+                capture_output=True, text=True, timeout=10,
+            )
+            state = result2.stdout.strip()
+            if state:
+                return HTMLResponse(
+                    f"<strong>{package}</strong> — subscription {state}. Waiting for operator pod..."
+                    '<span class="spinner"></span>'
+                )
+            return HTMLResponse(
+                f"<strong>{package}</strong> — installing..."
+                '<span class="spinner"></span>'
+            )
+        if phase == "Succeeded":
+            return HTMLResponse(
+                f'<strong>{package}</strong> — <span class="badge badge-low">Installed</span>. '
+                "Re-run Dry Run to apply the previously skipped manifests."
+            )
+        return HTMLResponse(
+            f"<strong>{package}</strong> — phase: {phase}"
+            '<span class="spinner"></span>'
+        )
+    except Exception:
+        return HTMLResponse(f"<strong>{package}</strong> — checking..." '<span class="spinner"></span>')
+
+
 @app.get("/gates", response_class=HTMLResponse)
 async def gates_page(request: Request):
     """Show pending approval gates. Auto-expires gates older than 24h."""

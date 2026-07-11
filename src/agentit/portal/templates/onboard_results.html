@@ -41,8 +41,16 @@
 </div>
 {% endif %}
 {% if request.query_params.get('operator_installed') %}
-<div class="alert alert-success">
-  <strong>{{ request.query_params.get('operator_installed') }}</strong> installation started. Re-run Dry Run in 1-2 minutes to verify.
+{% set install_status = request.query_params.get('install_status', 'installing') %}
+<div class="alert {% if install_status == 'error' %}alert-error{% else %}alert-success{% endif %}"
+     {% if install_status == 'installing' %}hx-get="/api/operator-status?package={{ request.query_params.get('operator_installed') }}" hx-trigger="every 10s" hx-swap="innerHTML"{% endif %}>
+  {% if install_status == 'error' %}
+    <strong>{{ request.query_params.get('operator_installed') }}</strong> installation failed. Check operator catalog and cluster permissions.
+  {% else %}
+    <strong>{{ request.query_params.get('operator_installed') }}</strong> installation started.
+    <span class="text-sm">Checking status automatically — re-run Dry Run once ready.</span>
+    <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+  {% endif %}
 </div>
 {% endif %}
 
