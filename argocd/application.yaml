@@ -45,6 +45,7 @@ spec:
         - /spec/clusterIPs
         - /spec/ipFamilies
         - /spec/ipFamilyPolicy
+        - /spec/selector
     - group: tekton.dev
       kind: Pipeline
       managedFieldsManagers:
