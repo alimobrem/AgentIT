@@ -1707,6 +1707,77 @@ async def webhook_auto_apply(request: Request):
     return JSONResponse(result)
 
 
+@app.post("/api/webhook/finding")
+async def webhook_finding(request: Request):
+    """Generic finding remediation — routes to the right agent generator via the dispatcher.
+
+    Accepts: {"app_name": "...", "category": "container", "description": "...", "severity": "high", "source": "trivy"}
+    """
+    body = await request.json()
+    app_name = body.get("app_name", "unknown")
+    category = body.get("category", "")
+    description = body.get("description", "")
+    severity = body.get("severity", "info")
+    source = body.get("source", "webhook")
+
+    if not category:
+        raise HTTPException(400, "category required")
+
+    s = get_store()
+    s.log_event(source, "finding-received", app_name, severity, f"{category}: {description}")
+    _publish_event(source, "finding-received", app_name, severity, f"{category}: {description}")
+
+    fleet = s.get_fleet_data()
+    app = next((a for a in fleet if a["repo_name"] == app_name), None)
+    if not app:
+        return JSONResponse({"status": "accepted", "action": "alert-only", "reason": f"app '{app_name}' not in fleet"})
+
+    from agentit.remediation.dispatcher import RemediationDispatcher
+    dispatcher = RemediationDispatcher(s)
+    result = dispatcher.dispatch(app["id"], category, app_name)
+
+    if result.get("error") and not result["files"]:
+        s.log_event("dispatcher", "no-fix-available", app_name, "warning", result["error"])
+        return JSONResponse({"status": "accepted", "action": "alert-only", "reason": result["error"]})
+
+    from agentit.automode import AutoMode
+    from agentit.events import get_publisher as _gp
+    auto = AutoMode(store=s, publisher=_gp())
+
+    if auto.enabled and result["files"]:
+        from agentit.portal.cluster_apply import apply_manifests_to_cluster
+        namespace = app.get("deploy_namespace", app_name)
+        apply_result = await asyncio.to_thread(
+            apply_manifests_to_cluster, result["files"], namespace, dry_run=False,
+        )
+        s.log_event("dispatcher", "auto-applied", app_name, "info",
+                    f"Applied {len(apply_result['applied'])} fixes for {category}")
+        return JSONResponse({
+            "status": "accepted",
+            "action": "auto-applied",
+            "files_generated": len(result["files"]),
+            "applied": len(apply_result["applied"]),
+            "agent": result["agent"],
+        })
+
+    if result["files"]:
+        gate_id = s.create_gate(
+            app["id"], f"finding-{category}",
+            f"Dispatcher generated {len(result['files'])} fix(es) for '{category}' — review and approve",
+        )
+        s.log_event("dispatcher", "gated", app_name, "info",
+                    f"Fix for {category} gated for review (gate {gate_id})")
+        return JSONResponse({
+            "status": "accepted",
+            "action": "gated",
+            "gate_id": gate_id,
+            "files_generated": len(result["files"]),
+            "agent": result["agent"],
+        })
+
+    return JSONResponse({"status": "accepted", "action": "alert-only"})
+
+
 @app.post("/api/webhook/remediate")
 async def webhook_remediate(request: Request):
     """Trigger the full remediation loop asynchronously.

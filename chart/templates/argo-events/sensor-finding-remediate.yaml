@@ -1,0 +1,57 @@
+{{- if .Values.argoEvents.enabled }}
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: agentit-finding-remediate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  dependencies:
+    - name: finding-alert
+      eventSourceName: agentit-kafka
+      eventName: agentit-alerts
+      filters:
+        data:
+          - path: body.action
+            type: string
+            value:
+              - "image-cve-found"
+              - "drift-detected"
+              - "slo-breach"
+              - "compliance-violation"
+              - "finding-received"
+  triggers:
+    - template:
+        name: remediate-finding
+        http:
+          url: http://agentit:8080/api/webhook/finding
+          method: POST
+          payload:
+            - src:
+                dependencyName: finding-alert
+                dataKey: body.targetApp
+              dest: app_name
+            - src:
+                dependencyName: finding-alert
+                dataKey: body.action
+              dest: category
+            - src:
+                dependencyName: finding-alert
+                dataKey: body.result.summary
+              dest: description
+            - src:
+                dependencyName: finding-alert
+                dataKey: body.severity
+              dest: severity
+            - src:
+                dependencyName: finding-alert
+                dataKey: body.agentId
+              dest: source
+      retryStrategy:
+        steps: 3
+        duration: "30s"
+        factor: 2.0
+{{- end }}

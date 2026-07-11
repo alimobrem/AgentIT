@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import textwrap
 from pathlib import Path
 
@@ -8,6 +9,47 @@ from pydantic import BaseModel
 
 from agentit.agents.base import GeneratedFile, _sanitize_name
 from agentit.models import AssessmentReport, Severity
+
+_UBI_MAP: dict[str, str] = {
+    "python": "registry.access.redhat.com/ubi9/python-312:latest",
+    "go": "registry.access.redhat.com/ubi9/ubi-minimal:latest",
+    "java": "registry.access.redhat.com/ubi9/openjdk-21:latest",
+    "node": "registry.access.redhat.com/ubi9/nodejs-20:latest",
+    "javascript": "registry.access.redhat.com/ubi9/nodejs-20:latest",
+    "typescript": "registry.access.redhat.com/ubi9/nodejs-20:latest",
+}
+
+
+def patch_base_image(dockerfile_content: str, language: str) -> str | None:
+    """Replace a non-UBI base image with the UBI equivalent.
+
+    For multi-stage builds, only patches the last FROM (runtime stage).
+    Returns the patched content, or None if already UBI.
+    """
+    lines = dockerfile_content.splitlines(keepends=True)
+    from_indices = [
+        i for i, line in enumerate(lines)
+        if re.match(r"^\s*FROM\s+", line, re.IGNORECASE)
+    ]
+    if not from_indices:
+        return None
+
+    last_from_idx = from_indices[-1]
+    from_line = lines[last_from_idx]
+
+    if any(kw in from_line.lower() for kw in ("ubi", "redhat", "registry.access.redhat")):
+        return None
+
+    match = re.match(r"^(\s*FROM\s+)(\S+)(.*)", from_line, re.IGNORECASE)
+    if not match:
+        return None
+
+    ubi_image = _UBI_MAP.get(language.lower(), "registry.access.redhat.com/ubi9/ubi-minimal:latest")
+    lines[last_from_idx] = f"{match.group(1)}{ubi_image}{match.group(3)}"
+    if not lines[last_from_idx].endswith("\n"):
+        lines[last_from_idx] += "\n"
+
+    return "".join(lines)
 
 
 class HardeningResult(BaseModel):
@@ -399,6 +441,21 @@ class HardeningAgent:
                             'printf "%s" "$VULNS" > "$(results.VULN_COUNT.path)"\n'
                             'echo "Found $VULNS vulnerabilities at $(params.SEVERITY_CUTOFF) or above"\n'
                             "exit ${EXIT:-0}\n"
+                        ),
+                    },
+                    {
+                        "name": "notify-cve",
+                        "image": "registry.access.redhat.com/ubi9/ubi-minimal:latest",
+                        "script": (
+                            "#!/usr/bin/env sh\n"
+                            'VULNS=$(cat "$(results.VULN_COUNT.path)")\n'
+                            'if [ "$VULNS" -gt 0 ] 2>/dev/null; then\n'
+                            "  curl -sf -X POST http://agentit:8080/api/webhook/finding \\\n"
+                            "    -H 'Content-Type: application/json' \\\n"
+                            f'    -d \'{{"app_name":"{name}","category":"base_image",'
+                            f'"description":"\'$VULNS\' CVEs found by Trivy",'
+                            f'"severity":"critical","source":"trivy"}}\'\n'
+                            "fi\n"
                         ),
                     },
                 ],

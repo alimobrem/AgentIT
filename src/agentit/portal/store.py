@@ -353,6 +353,13 @@ class AssessmentStore:
             return None
         return json.loads(row["files_json"])
 
+    def get_latest_onboarding(self, assessment_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM onboarding_results WHERE assessment_id = ? ORDER BY created_at DESC LIMIT 1",
+            (assessment_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
     def get_orchestration(self, assessment_id: str) -> dict | None:
         row = self._conn.execute(
             "SELECT orchestration_json FROM onboarding_results WHERE assessment_id = ? ORDER BY created_at DESC LIMIT 1",
