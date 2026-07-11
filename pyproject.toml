@@ -40,6 +40,4 @@ markers = [
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:starlette",
-    "ignore:.*StarletteDeprecationWarning.*:DeprecationWarning",
-    "ignore::starlette.exceptions.StarletteDeprecationWarning",
 ]
