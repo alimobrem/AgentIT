@@ -500,6 +500,15 @@ class AssessmentStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_stale_gates(self, hours: int = 24) -> list[dict]:
+        """Find pending gates older than the given hours."""
+        cutoff = (datetime.now(timezone.utc) - __import__("datetime").timedelta(hours=hours)).isoformat()
+        rows = self._conn.execute(
+            "SELECT * FROM gates WHERE status = 'pending' AND created_at < ? ORDER BY created_at ASC",
+            (cutoff,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def resolve_gate(self, gate_id: str, status: str, resolved_by: str) -> bool:
         cursor = self._conn.execute(
             """

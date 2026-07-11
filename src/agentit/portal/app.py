@@ -23,6 +23,16 @@ from agentit.runner import run_assessment
 
 log = logging.getLogger(__name__)
 
+OPERATION_TIMEOUT = 300  # 5 minutes max for any blocking operation
+
+
+async def _with_timeout(coro, timeout: int = OPERATION_TIMEOUT):
+    """Wrap an async operation with a timeout to prevent stuck requests."""
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout)
+    except asyncio.TimeoutError:
+        raise HTTPException(504, f"Operation timed out after {timeout}s")
+
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 app = FastAPI(title="AgentIT Portal")
@@ -91,7 +101,7 @@ async def webhook_assess(request: Request):
     if not repo_url:
         raise HTTPException(400, "repo_url required")
     criticality = body.get("criticality", "medium")
-    report = await asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality)
+    report = await _with_timeout(asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality))
     assessment_id = get_store().save(report)
     return JSONResponse({"assessment_id": assessment_id, "overall_score": report.overall_score})
 
@@ -117,7 +127,9 @@ async def webhook_onboard(request: Request):
         raise HTTPException(404, f"Assessment {assessment_id} not found")
 
     try:
-        files, orch_summary = await asyncio.to_thread(_run_onboarding, report, assessment_id)
+        files, orch_summary = await _with_timeout(asyncio.to_thread(_run_onboarding, report, assessment_id))
+    except HTTPException:
+        raise
     except Exception as exc:
         log.exception("Onboarding failed for assessment %s", assessment_id)
         return JSONResponse(
@@ -453,12 +465,17 @@ async def install_operator_endpoint(request: Request):
 @app.get("/gates", response_class=HTMLResponse)
 async def gates_page(request: Request):
     """Show pending approval gates."""
-    all_gates = get_store().list_all_gates()
+    s = get_store()
+    all_gates = s.list_all_gates()
     pending = [g for g in all_gates if g["status"] == "pending"]
+    stale = s.get_stale_gates(hours=24)
+    stale_ids = {g["id"] for g in stale}
+    for g in pending:
+        g["stale"] = g["id"] in stale_ids
     resolved = [g for g in all_gates if g["status"] in ("approved", "rejected")]
     resolved.sort(key=lambda g: g.get("resolved_at", ""), reverse=True)
     return templates.TemplateResponse(request, "gates.html", {
-        "pending": pending, "resolved": resolved[:20]
+        "pending": pending, "resolved": resolved[:20], "stale_count": len(stale),
     })
 
 
