@@ -28,6 +28,10 @@ class CICDAgent:
         self.output_dir = Path(output_dir)
         self._name = _sanitize_name(report.repo_name)
 
+    def _image_ref(self) -> str:
+        from agentit.image_builder import get_image_ref
+        return get_image_ref(self.report.repo_name)
+
     def run(self) -> CICDResult:
         """Generate CI/CD and GitOps manifests based on assessment findings."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -161,7 +165,7 @@ class CICDAgent:
                 "pipelineRef": {"name": f"{name}-pipeline"},
                 "params": [
                     {"name": "repo-url", "value": self.report.repo_url},
-                    {"name": "image-ref", "value": f"quay.io/org/{name}:latest"},
+                    {"name": "image-ref", "value": self._image_ref()},
                 ],
                 "workspaces": [
                     {
@@ -357,7 +361,7 @@ class CICDAgent:
                         "containers": [
                             {
                                 "name": name,
-                                "image": f"quay.io/org/{name}:latest",
+                                "image": self._image_ref(),
                                 "ports": [{"containerPort": port}],
                                 "resources": {
                                     "requests": {"cpu": "100m", "memory": "128Mi"},

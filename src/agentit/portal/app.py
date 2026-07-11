@@ -442,6 +442,17 @@ async def onboard_submit(assessment_id: str):
 
     files, orch_summary = await asyncio.to_thread(_run_onboarding, report, assessment_id)
     s.save_onboarding(assessment_id, files, orchestration=orch_summary)
+
+    # Trigger image build for the app
+    from agentit.image_builder import build_app_image
+    build_result = await asyncio.to_thread(build_app_image, report.repo_url, report.repo_name)
+    if "error" in build_result:
+        log.warning("Image build trigger failed for %s: %s", report.repo_name, build_result["error"])
+    else:
+        log.info("Image build triggered: %s → %s", report.repo_name, build_result.get("image_ref"))
+        s.log_event("image-builder", "build-triggered", report.repo_name, "info",
+                    f"Building image: {build_result.get('image_ref')}")
+
     return RedirectResponse(
         url=f"/assessments/{assessment_id}/onboard-results", status_code=303,
     )

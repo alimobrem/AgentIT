@@ -55,6 +55,10 @@ class ReleaseCoordinatorAgent:
             return _NODE_PORT
         return _DEFAULT_PORT
 
+    def _image_ref(self) -> str:
+        from agentit.image_builder import get_image_ref
+        return get_image_ref(self.report.repo_name)
+
     def _write(self, filename: str, content: str) -> None:
         (self.output_dir / filename).write_text(content)
 
@@ -179,7 +183,7 @@ class ReleaseCoordinatorAgent:
                         "containers": [
                             {
                                 "name": name,
-                                "image": f"REPLACE_WITH_IMAGE:{name}",
+                                "image": self._image_ref(),
                                 "ports": [{"containerPort": port}],
                                 "livenessProbe": {
                                     "httpGet": {"path": "/", "port": port},
