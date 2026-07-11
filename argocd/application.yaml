@@ -17,6 +17,16 @@ spec:
           value: latest
         - name: image.pullPolicy
           value: Always
+        - name: rollout.enabled
+          value: "true"
+        - name: kafka.enabled
+          value: "true"
+        - name: argoEvents.enabled
+          value: "true"
+        - name: env.ANTHROPIC_VERTEX_PROJECT_ID
+          value: itpc-gcp-product-all-claude
+        - name: env.CLOUD_ML_REGION
+          value: global
   destination:
     server: https://kubernetes.default.svc
     namespace: agentit
@@ -27,3 +37,4 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ApplyOutOfSyncOnly=true
+      - ServerSideApply=true

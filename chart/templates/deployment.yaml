@@ -54,14 +54,10 @@ spec:
           env:
             - name: AGENTIT_DB_PATH
               value: /data/agentit.db
-            {{- if .Values.env.ANTHROPIC_VERTEX_PROJECT_ID }}
             - name: ANTHROPIC_VERTEX_PROJECT_ID
-              value: {{ .Values.env.ANTHROPIC_VERTEX_PROJECT_ID | quote }}
-            {{- end }}
-            {{- if .Values.env.CLOUD_ML_REGION }}
+              value: {{ .Values.env.ANTHROPIC_VERTEX_PROJECT_ID | default "" | quote }}
             - name: CLOUD_ML_REGION
-              value: {{ .Values.env.CLOUD_ML_REGION | quote }}
-            {{- end }}
+              value: {{ .Values.env.CLOUD_ML_REGION | default "" | quote }}
             {{- if .Values.kafka.enabled }}
             - name: AGENTIT_KAFKA_BOOTSTRAP
               value: {{ .Values.kafka.bootstrapServers | quote }}
