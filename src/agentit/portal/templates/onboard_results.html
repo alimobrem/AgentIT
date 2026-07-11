@@ -2,13 +2,13 @@
 {% block title %}Onboarding Results - {{ report.repo_name }} - AgentIT{% endblock %}
 {% block content %}
 <h1>Onboarding Results: {{ report.repo_name }}</h1>
-<p style="margin-bottom: 1rem;">
+<p class="mb-1">
   <a href="/assessments/{{ assessment_id }}">Back to Assessment</a>
 </p>
 
 {% if request.query_params.get('pr_url') %}
 <div class="alert alert-success">
-  PR created: <a href="{{ request.query_params.get('pr_url') | safe_url }}" target="_blank">{{ request.query_params.get('pr_url') }}</a>
+  PR created: <a href="{{ request.query_params.get('pr_url') | safe_url }}" target="_blank" hx-boost="false">{{ request.query_params.get('pr_url') }}</a>
 </div>
 {% endif %}
 {% if request.query_params.get('error') %}
@@ -32,32 +32,41 @@
 {% endif %}
 
 <div class="action-bar">
-  <a href="/api/assessments/{{ assessment_id }}/manifests/download" class="btn">Download ZIP</a>
-  <form method="post" action="/assessments/{{ assessment_id }}/create-pr" style="display:inline;">
-    <button type="submit" class="btn btn-green">Create GitHub PR</button>
+  <a href="/api/assessments/{{ assessment_id }}/manifests/download" class="btn" hx-boost="false">Download ZIP</a>
+  <form method="post" action="/assessments/{{ assessment_id }}/create-pr" class="inline-form">
+    <button type="submit" class="btn btn-green">
+      <span class="btn-label">Create GitHub PR</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Creating&hellip;</span>
+    </button>
   </form>
   <form method="post" action="/assessments/{{ assessment_id }}/apply" class="inline-form">
     <input type="hidden" name="namespace" value="{{ report.repo_name | lower | replace('_', '-') | replace('.', '-') }}">
-    <button type="submit" class="btn">Apply to Cluster</button>
+    <button type="submit" class="btn">
+      <span class="btn-label">Apply to Cluster</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Applying&hellip;</span>
+    </button>
   </form>
   <form method="post" action="/assessments/{{ assessment_id }}/apply" class="inline-form">
     <input type="hidden" name="namespace" value="{{ report.repo_name | lower | replace('_', '-') | replace('.', '-') }}">
     <input type="hidden" name="dry_run" value="true">
-    <button type="submit" class="btn btn-outline">Dry Run</button>
+    <button type="submit" class="btn btn-outline">
+      <span class="btn-label">Dry Run</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Running&hellip;</span>
+    </button>
   </form>
 </div>
 
 {% set total = namespace(count=0) %}
 {% for cat, files in grouped.items() %}{% set total.count = total.count + files|length %}{% endfor %}
-<p style="color: #888; margin-bottom: 1rem;">{{ total.count }} manifests across {{ grouped|length }} categories</p>
+<p class="text-muted mb-1">{{ total.count }} manifests across {{ grouped|length }} categories</p>
 
 {% for category, files in grouped.items() %}
-<h2 style="color: #e94560; margin: 1.5rem 0 0.8rem; text-transform: capitalize;">{{ category }}</h2>
+<h2 class="section-title">{{ category }}</h2>
 {% for f in files %}
-<div style="background: #16213e; border-radius: 8px; padding: 1rem 1.2rem; margin-bottom: 1rem; border: 1px solid #0f3460;">
-  <div style="font-weight: 600; margin-bottom: 0.3rem;">{{ f.path }}</div>
-  <div style="color: #888; font-size: 0.9rem; margin-bottom: 0.6rem;">{{ f.description }}</div>
-  <pre style="background: #0f3460; padding: 0.8rem; border-radius: 6px; overflow-x: auto; margin: 0;"><code style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 0.85rem; color: #e0e0e0;">{{ f.content }}</code></pre>
+<div class="manifest-card">
+  <div class="manifest-title">{{ f.path }}</div>
+  <div class="manifest-desc">{{ f.description }}</div>
+  <pre class="code-block"><code>{{ f.content }}</code></pre>
 </div>
 {% endfor %}
 {% endfor %}

@@ -3,27 +3,26 @@
 {% block content %}
 <h1>Fleet Overview</h1>
 
-{# ── Portfolio Summary Bar ────────────────────────────────────── #}
-<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 2rem;">
-  <div style="background: #16213e; border-radius: 8px; padding: 1rem; text-align: center; border: 1px solid #0f3460;">
-    <div style="font-size: 0.8rem; text-transform: uppercase; color: #888;">Total Apps</div>
-    <div style="font-size: 2rem; font-weight: 700; color: #e0e0e0;">{{ total_apps }}</div>
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-label">Total Apps</div>
+    <div class="stat-value">{{ total_apps }}</div>
   </div>
-  <div style="background: #16213e; border-radius: 8px; padding: 1rem; text-align: center; border: 1px solid #0f3460;">
-    <div style="font-size: 0.8rem; text-transform: uppercase; color: #888;">Average Score</div>
-    <div style="font-size: 2rem; font-weight: 700;
-      {% if avg_score > 70 %}color: #2ecc71;
-      {% elif avg_score >= 40 %}color: #f0a500;
-      {% else %}color: #e94560;{% endif %}
+  <div class="stat-card">
+    <div class="stat-label">Average Score</div>
+    <div class="stat-value
+      {% if avg_score > 70 %} text-success
+      {% elif avg_score >= 40 %} text-warning
+      {% else %} text-danger{% endif %}
     ">{{ "%.0f"|format(avg_score) }}</div>
   </div>
-  <div style="background: #16213e; border-radius: 8px; padding: 1rem; text-align: center; border: 1px solid #0f3460;">
-    <div style="font-size: 0.8rem; text-transform: uppercase; color: #888;">Critical Findings</div>
-    <div style="font-size: 2rem; font-weight: 700; color: {% if critical_total > 0 %}#e94560{% else %}#2ecc71{% endif %};">{{ critical_total }}</div>
+  <div class="stat-card">
+    <div class="stat-label">Critical Findings</div>
+    <div class="stat-value {% if critical_total > 0 %}text-danger{% else %}text-success{% endif %}">{{ critical_total }}</div>
   </div>
 </div>
 
-<div style="margin-bottom: 1.2rem;">
+<div class="mb-2">
   <a href="/assess" class="btn">Assess New Repo</a>
 </div>
 
@@ -43,35 +42,35 @@
   </thead>
   <tbody>
     {% for r in fleet %}
-    <tr style="border-left: 3px solid
-      {% if r.latest_score > 70 %}#2ecc71
-      {% elif r.latest_score >= 40 %}#f0a500
-      {% else %}#e94560{% endif %};">
+    <tr class="
+      {% if r.latest_score > 70 %}row-border-green
+      {% elif r.latest_score >= 40 %}row-border-yellow
+      {% else %}row-border-red{% endif %}">
       <td><a href="/assessments/{{ r.id }}">{{ r.repo_name }}</a></td>
-      <td style="font-weight: 700;
-        {% if r.latest_score > 70 %}color: #2ecc71;
-        {% elif r.latest_score >= 40 %}color: #f0a500;
-        {% else %}color: #e94560;{% endif %}
+      <td class="text-bold
+        {% if r.latest_score > 70 %} text-success
+        {% elif r.latest_score >= 40 %} text-warning
+        {% else %} text-danger{% endif %}
       ">{{ "%.0f"|format(r.latest_score) }}</td>
       <td>
         {% if r.delta is not none %}
-          <span style="font-weight: 600;
-            {% if r.delta > 0 %}color: #2ecc71;{% elif r.delta < 0 %}color: #e94560;{% else %}color: #888;{% endif %}">
+          <span class="trend
+            {% if r.delta > 0 %} trend-up{% elif r.delta < 0 %} trend-down{% else %} trend-flat{% endif %}">
             {% if r.delta > 0 %}&#9650; +{{ "%.1f"|format(r.delta) }}{% elif r.delta < 0 %}&#9660; {{ "%.1f"|format(r.delta) }}{% else %}&#8212;{% endif %}
           </span>
         {% else %}
-          <span style="color: #888;">--</span>
+          <span class="text-muted">--</span>
         {% endif %}
       </td>
       <td><span class="badge badge-{{ r.criticality }}">{{ r.criticality }}</span></td>
       <td>{{ r.assessment_count }}</td>
-      <td style="{% if r.critical_count > 0 %}color: #e94560; font-weight: 600;{% endif %}">{{ r.critical_count }}</td>
-      <td style="font-size: 0.85rem; color: #888;">{{ r.last_assessed[:19] }}</td>
+      <td class="{% if r.critical_count > 0 %}text-danger text-bold{% endif %}">{{ r.critical_count }}</td>
+      <td class="text-sm text-muted">{{ r.last_assessed[:19] }}</td>
       <td>
-        <form method="post" action="/assess" style="display: inline;">
+        <form method="post" action="/assess" class="inline-form">
           <input type="hidden" name="repo_url" value="{{ r.repo_url }}">
           <input type="hidden" name="criticality" value="{{ r.criticality }}">
-          <button type="submit" class="btn" style="padding: 0.3rem 0.8rem; font-size: 0.8rem;">Re-assess</button>
+          <button type="submit" class="btn btn-sm">Re-assess</button>
         </form>
       </td>
     </tr>

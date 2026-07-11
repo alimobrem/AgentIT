@@ -3,7 +3,7 @@
 {% block content %}
 <h1>Approval Gates</h1>
 
-<h2 style="margin-bottom: 1rem;">Pending</h2>
+<h2 class="section-title mt-1">Pending</h2>
 {% if pending %}
 <table>
   <thead>
@@ -21,26 +21,28 @@
       <td>{{ g.summary }}</td>
       <td><span class="badge badge-medium">{{ g.gate_type }}</span></td>
       <td><a href="/assessments/{{ g.assessment_id }}">View</a></td>
-      <td>{{ g.created_at[:16] }}</td>
-      <td style="display: flex; gap: 0.5rem;">
-        <form method="post" action="/gates/{{ g.id }}/resolve">
-          <input type="hidden" name="status" value="approved">
-          <button type="submit" class="btn" style="background: #2ecc71; padding: 0.4rem 1rem; font-size: 0.85rem;">Approve</button>
-        </form>
-        <form method="post" action="/gates/{{ g.id }}/resolve">
-          <input type="hidden" name="status" value="rejected">
-          <button type="submit" class="btn" style="background: #e94560; padding: 0.4rem 1rem; font-size: 0.85rem;">Reject</button>
-        </form>
+      <td class="text-sm text-muted">{{ g.created_at[:16] }}</td>
+      <td>
+        <div class="gate-actions">
+          <form method="post" action="/gates/{{ g.id }}/resolve" class="inline-form">
+            <input type="hidden" name="status" value="approved">
+            <button type="submit" class="btn btn-sm btn-approve">Approve</button>
+          </form>
+          <form method="post" action="/gates/{{ g.id }}/resolve" class="inline-form">
+            <input type="hidden" name="status" value="rejected">
+            <button type="submit" class="btn btn-sm btn-reject">Reject</button>
+          </form>
+        </div>
       </td>
     </tr>
     {% endfor %}
   </tbody>
 </table>
 {% else %}
-<p style="color: #888;">No pending gates</p>
+<p class="text-muted">No pending gates</p>
 {% endif %}
 
-<h2 style="margin-top: 2rem; margin-bottom: 1rem;">Recently Resolved</h2>
+<h2 class="section-title mt-2">Recently Resolved</h2>
 {% if resolved %}
 <table>
   <thead>
@@ -63,12 +65,12 @@
         {% endif %}
       </td>
       <td>{{ g.resolved_by or "" }}</td>
-      <td>{{ (g.resolved_at or "")[:16] }}</td>
+      <td class="text-sm text-muted">{{ (g.resolved_at or "")[:16] }}</td>
     </tr>
     {% endfor %}
   </tbody>
 </table>
 {% else %}
-<p style="color: #888;">No resolved gates yet</p>
+<p class="text-muted">No resolved gates yet</p>
 {% endif %}
 {% endblock %}

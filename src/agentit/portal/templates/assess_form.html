@@ -3,24 +3,27 @@
 {% block content %}
 <h1>New Assessment</h1>
 {% if error %}
-<div style="background: #4a1a1a; border: 1px solid #e94560; padding: 1rem; border-radius: 8px; margin-bottom: 1rem; max-width: 500px;">
+<div class="alert alert-error form-narrow">
   {{ error }}
 </div>
 {% endif %}
-<form method="post" action="/assess" style="max-width: 500px; display: flex; flex-direction: column; gap: 1rem;">
-  <label>
-    <div style="margin-bottom: 0.3rem; font-size: 0.9rem;">Repository URL</div>
-    <input type="url" name="repo_url" required placeholder="https://github.com/org/repo" style="width: 100%;">
-  </label>
-  <label>
-    <div style="margin-bottom: 0.3rem; font-size: 0.9rem;">Criticality</div>
-    <select name="criticality" style="width: 100%;">
+<form method="post" action="/assess" class="form-narrow">
+  <div class="form-group">
+    <label class="form-label" for="repo_url">Repository URL</label>
+    <input type="url" id="repo_url" name="repo_url" required placeholder="https://github.com/org/repo">
+  </div>
+  <div class="form-group">
+    <label class="form-label" for="criticality">Criticality</label>
+    <select id="criticality" name="criticality">
       <option value="low">Low</option>
       <option value="medium" selected>Medium</option>
       <option value="high">High</option>
       <option value="critical">Critical</option>
     </select>
-  </label>
-  <button type="submit" class="btn">Run Assessment</button>
+  </div>
+  <button type="submit" class="btn">
+    <span class="btn-label">Run Assessment</span>
+    <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
+  </button>
 </form>
 {% endblock %}

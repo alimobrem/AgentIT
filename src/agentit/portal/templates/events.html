@@ -18,7 +18,7 @@
   <tbody>
     {% for e in events %}
     <tr>
-      <td>{{ e.timestamp }}</td>
+      <td class="text-sm text-muted">{{ e.timestamp }}</td>
       <td>{{ e.agent_id }}</td>
       <td>{{ e.action }}</td>
       <td>{{ e.target_app or "-" }}</td>
