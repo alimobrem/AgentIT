@@ -778,6 +778,23 @@ async def create_agent_prs_route(assessment_id: str):
 # ── System Health ──────────────────────────────────────────────────────
 
 
+def _get_watcher_deploy_status() -> dict[str, str]:
+    import json as _json
+    raw = _run_cmd(["oc", "get", "deployments", "-n", "agentit",
+                    "-l", "app.kubernetes.io/instance=agentit", "-o", "json"])
+    result: dict[str, str] = {}
+    if not raw:
+        return result
+    try:
+        for dep in _json.loads(raw).get("items", []):
+            name = dep.get("metadata", {}).get("name", "")
+            ready = dep.get("status", {}).get("readyReplicas", 0)
+            result[name] = "running" if ready and ready > 0 else "not running"
+    except Exception:
+        pass
+    return result
+
+
 def _run_cmd(cmd: list[str], timeout: int = 10) -> str | None:
     import subprocess
     try:
@@ -1072,14 +1089,18 @@ async def schedules_page(request: Request) -> HTMLResponse:
             })
 
     agents = s.list_agents()
-    watcher_names = {w["name"] for w in _WATCHER_AGENTS}
+    deploy_status = await asyncio.to_thread(_get_watcher_deploy_status)
     watchers = []
     for w in _WATCHER_AGENTS:
         agent_record = next((a for a in agents if a["agent_name"] == w["name"]), None)
-        watchers.append({
-            **w,
-            "status": agent_record["status"] if agent_record else "not deployed",
-        })
+        deploy_name = f"agentit-{w['name']}"
+        if agent_record:
+            status = agent_record["status"]
+        elif deploy_status.get(deploy_name) == "running":
+            status = "active"
+        else:
+            status = "not deployed"
+        watchers.append({**w, "status": status})
 
     return templates.TemplateResponse(request, "schedules.html", {
         "schedules": schedules,
