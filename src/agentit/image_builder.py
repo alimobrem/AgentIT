@@ -46,7 +46,7 @@ elif [ -f package.json ]; then
 FROM registry.access.redhat.com/ubi9/nodejs-20:latest
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --production
+RUN npm install --production --ignore-scripts
 COPY . .
 USER 1001
 EXPOSE 3000
