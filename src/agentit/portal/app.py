@@ -738,13 +738,26 @@ async def agent_detail(request: Request, agent_name: str) -> HTMLResponse:
     s = get_store()
     agents = s.list_agents()
     agent = next((a for a in agents if a["agent_name"] == agent_name), None)
+
+    # Long-lived agents may not be in the registry — create a synthetic entry
     if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
+        watcher = next((w for w in _WATCHER_AGENTS if w["name"] == agent_name), None)
+        if watcher is not None:
+            agent = {
+                "agent_name": agent_name,
+                "category": watcher["mode"],
+                "status": "deployed",
+                "capabilities": f"interval: {watcher['interval']}",
+                "registered_at": "—",
+                "last_heartbeat": "—",
+            }
+        else:
+            raise HTTPException(status_code=404, detail="Agent not found")
 
     events = s.list_events_by_agent(agent_name, limit=50)
     remediations = s.list_remediations_by_agent(agent_name)
-    pending = sum(1 for r in remediations if r["status"] == "pending")
-    completed = sum(1 for r in remediations if r["status"] == "completed")
+    pending = sum(1 for r in remediations if r["status"] not in ("completed", "applied"))
+    completed = sum(1 for r in remediations if r["status"] in ("completed", "applied"))
 
     return templates.TemplateResponse(request, "agent_detail.html", {
         "agent": agent,

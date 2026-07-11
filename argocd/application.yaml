@@ -38,6 +38,13 @@ spec:
         - name: agents.driftDetector.enabled
           value: "true"
   ignoreDifferences:
+    - group: ""
+      kind: Service
+      jsonPointers:
+        - /spec/clusterIP
+        - /spec/clusterIPs
+        - /spec/ipFamilies
+        - /spec/ipFamilyPolicy
     - group: tekton.dev
       kind: Pipeline
       jsonPointers:

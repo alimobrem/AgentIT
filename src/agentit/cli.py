@@ -469,15 +469,14 @@ def drift_detect(interval: int) -> None:
                         if _auto.enabled:
                             click.echo(f"[drift-detect] Auto-syncing {name}...", err=True)
                             sync_result = subprocess.run(
-                                ["oc", "app", "sync", name, "--async"],
+                                ["oc", "-n", "openshift-gitops", "patch", "applications.argoproj.io", name,
+                                 "--type=merge", "-p", '{"operation":{"sync":{"revision":"HEAD"}}}'],
                                 capture_output=True, text=True, timeout=30,
                             )
-                            if sync_result.returncode != 0:
-                                click.echo(f"[drift-detect] Sync failed, trying argocd CLI...", err=True)
-                                subprocess.run(
-                                    ["argocd", "app", "sync", name, "--async"],
-                                    capture_output=True, text=True, timeout=30,
-                                )
+                            if sync_result.returncode == 0:
+                                click.echo(f"[drift-detect] Sync triggered for {name}", err=True)
+                            else:
+                                click.echo(f"[drift-detect] Sync failed: {sync_result.stderr[:100]}", err=True)
 
                 click.echo(f"[drift-detect] Checked {len(items)} Argo CD apps", err=True)
             else:
