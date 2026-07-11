@@ -32,6 +32,7 @@
       <th>Status</th>
       <th>Progress</th>
       <th>Created</th>
+      <th></th>
     </tr>
   </thead>
   <tbody>
@@ -57,6 +58,12 @@
         </div>
       </td>
       <td class="text-sm">{{ sl.created_at[:19] }}</td>
+      <td>
+        <form method="post" action="/assessments/{{ assessment_id }}/slos/{{ sl.id }}/delete" class="inline-form"
+              onsubmit="return confirm('Delete this SLO?')">
+          <button type="submit" class="btn btn-sm btn-danger-outline">×</button>
+        </form>
+      </td>
     </tr>
     {% endfor %}
   </tbody>

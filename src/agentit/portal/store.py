@@ -254,10 +254,12 @@ class AssessmentStore:
         return [dict(r) for r in rows]
 
     def delete(self, assessment_id: str) -> bool:
-        cursor = self._conn.execute(
-            "DELETE FROM assessments WHERE id = ?",
-            (assessment_id,),
-        )
+        self._conn.execute("DELETE FROM onboarding_results WHERE assessment_id = ?", (assessment_id,))
+        self._conn.execute("DELETE FROM remediations WHERE assessment_id = ?", (assessment_id,))
+        self._conn.execute("DELETE FROM slos WHERE assessment_id = ?", (assessment_id,))
+        self._conn.execute("DELETE FROM gates WHERE assessment_id = ?", (assessment_id,))
+        self._conn.execute("DELETE FROM apply_results WHERE assessment_id = ?", (assessment_id,))
+        cursor = self._conn.execute("DELETE FROM assessments WHERE id = ?", (assessment_id,))
         self._conn.commit()
         return cursor.rowcount > 0
 

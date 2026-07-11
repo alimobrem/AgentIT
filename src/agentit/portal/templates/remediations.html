@@ -76,6 +76,10 @@
             </button>
           </form>
         {% endif %}
+        <form method="post" action="/assessments/{{ assessment_id }}/remediations/{{ r.id }}/delete" class="inline-form"
+              onsubmit="return confirm('Delete this remediation?')">
+          <button type="submit" class="btn btn-sm btn-danger-outline">×</button>
+        </form>
       </td>
     </tr>
     {% endfor %}

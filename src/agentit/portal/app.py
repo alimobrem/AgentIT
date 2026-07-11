@@ -245,6 +245,38 @@ async def api_detail(assessment_id: str) -> JSONResponse:
     return JSONResponse(report.model_dump(mode="json"))
 
 
+@app.post("/assessments/{assessment_id}/delete", response_model=None)
+async def delete_assessment(assessment_id: str):
+    s = get_store()
+    if not s.delete(assessment_id):
+        raise HTTPException(404, "Assessment not found")
+    s.log_event("portal", "assessment-deleted", None, "info", f"Deleted assessment {assessment_id}")
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.post("/assessments/{assessment_id}/slos/{slo_id}/delete", response_model=None)
+async def delete_slo(assessment_id: str, slo_id: str):
+    s = get_store()
+    s._conn.execute("DELETE FROM slos WHERE id = ? AND assessment_id = ?", (slo_id, assessment_id))
+    s._conn.commit()
+    return RedirectResponse(url=f"/assessments/{assessment_id}/slos", status_code=303)
+
+
+@app.post("/assessments/{assessment_id}/remediations/{rem_id}/delete", response_model=None)
+async def delete_remediation(assessment_id: str, rem_id: str):
+    s = get_store()
+    s._conn.execute("DELETE FROM remediations WHERE id = ? AND assessment_id = ?", (rem_id, assessment_id))
+    s._conn.commit()
+    return RedirectResponse(url=f"/assessments/{assessment_id}/remediations", status_code=303)
+
+
+@app.post("/gates/{gate_id}/cancel", response_model=None)
+async def cancel_gate(gate_id: str):
+    s = get_store()
+    s.resolve_gate(gate_id, "cancelled", "portal-user")
+    return RedirectResponse(url="/gates", status_code=303)
+
+
 def _run_onboarding(
     report: AssessmentReport, assessment_id: str | None = None,
 ) -> tuple[list[dict], dict]:

@@ -67,7 +67,7 @@
         <span class="text-muted text-xs">{{ s.human_schedule }}</span>
       </td>
       <td>{{ s.agent }}</td>
-      <td><span class="badge badge-info">{{ s.concurrency }}</span></td>
+      <td><span class="badge badge-info" title="{% if s.concurrency == 'Forbid' %}Skip if previous run still active{% elif s.concurrency == 'Replace' %}Cancel previous run and start new{% else %}Allow concurrent runs{% endif %}">{{ s.concurrency }}</span></td>
       <td>
         {% if s.enabled %}
         <form method="post" action="/schedules/toggle" class="inline-form">
