@@ -327,16 +327,19 @@ class FleetOrchestrator:
         total_files = sum(len(r.files_generated) for r in results)
 
         blockers = [c for c in conflicts if c["type"] == "blocker"]
+        warnings = [c for c in conflicts if c["type"] != "blocker"]
         if blockers:
             return f"BLOCKED: {len(blockers)} blocker(s) require resolution before proceeding."
 
         if fail_count > 0:
             return f"PARTIAL: {success_count}/{success_count + fail_count} agents succeeded, {total_files} files generated. Review failures before deploying."
 
-        if plan.auto_approve:
+        warn_suffix = f" ({len(warnings)} non-blocker conflict(s) — review before proceeding)" if warnings else ""
+
+        if plan.auto_approve and not warnings:
             return f"AUTO-APPROVED: All {success_count} agents succeeded, {total_files} files generated. Safe for automated deployment."
 
-        return f"READY FOR REVIEW: All {success_count} agents succeeded, {total_files} files generated. Awaiting human approval."
+        return f"READY FOR REVIEW: All {success_count} agents succeeded, {total_files} files generated. Awaiting human approval.{warn_suffix}"
 
     _SLO_DEFAULTS = {
         "critical": [
