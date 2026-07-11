@@ -105,7 +105,13 @@ spec:
                 cpu: 50m
             script: |
               set -euo pipefail
-              # Tell Argo CD to refresh — it detects the new image and rolls out via Rollout controller
+              TIMESTAMP=$(date +%s)
+              # Patch the Rollout to force a new ReplicaSet with fresh image pull
+              oc -n {{ .Release.Namespace }} patch rollout agentit --type=merge \
+                -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"agentit.io/restart\":\"${TIMESTAMP}\"}}}}}" \
+                && echo "Rollout restart triggered (${TIMESTAMP})" \
+                || echo "Rollout restart failed (non-fatal)"
+              # Also refresh Argo CD
               oc -n openshift-gitops patch applications.argoproj.io agentit \
                 --type=merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}' \
                 && echo "Argo CD refresh triggered" \
