@@ -212,6 +212,7 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
 
     remediations = s.list_remediations(assessment_id)
     slos = s.list_slos(assessment_id)
+    onboardings = s.list_onboardings(assessment_id)
 
     return templates.TemplateResponse(
         request,
@@ -223,6 +224,7 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "assessment_id": assessment_id,
             "remediation_count": len(remediations),
             "slo_count": len(slos),
+            "onboarding_count": len(onboardings),
         },
     )
 
@@ -288,6 +290,20 @@ def _run_onboarding(
             "gates": result.gates_created,
         }
         return all_files, orch_summary
+
+
+@app.get("/assessments/{assessment_id}/onboarding-history", response_class=HTMLResponse)
+async def onboarding_history(request: Request, assessment_id: str) -> HTMLResponse:
+    s = get_store()
+    report = s.get(assessment_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    onboardings = s.list_onboardings(assessment_id)
+    return templates.TemplateResponse(request, "onboarding_history.html", {
+        "report": report,
+        "onboardings": onboardings,
+        "assessment_id": assessment_id,
+    })
 
 
 @app.post("/assessments/{assessment_id}/onboard", response_model=None)
@@ -533,6 +549,22 @@ async def slos_page(request: Request, assessment_id: str) -> HTMLResponse:
         "met": met,
         "breached": breached,
     })
+
+
+@app.post("/assessments/{assessment_id}/slos/add", response_model=None)
+async def add_slo(request: Request, assessment_id: str):
+    s = get_store()
+    if s.get(assessment_id) is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    form = await request.form()
+    metric_name = str(form.get("metric_name", "")).strip()
+    target_str = str(form.get("target_value", "")).strip()
+    if not metric_name or not target_str:
+        raise HTTPException(status_code=400, detail="metric_name and target_value required")
+    s.save_slo(assessment_id, metric_name, float(target_str))
+    return RedirectResponse(
+        url=f"/assessments/{assessment_id}/slos", status_code=303,
+    )
 
 
 @app.get("/api/assessments/{assessment_id}/slos")

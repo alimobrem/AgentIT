@@ -954,3 +954,64 @@ def test_assessment_detail_hides_buttons_when_empty(client, _override_store):
     resp = client.get(f"/assessments/{aid}")
     assert resp.status_code == 200
     assert "Remediations" not in resp.text or "Remediations (0)" not in resp.text
+
+
+# ── SLO add form ───────────────────────────────────────────────────────
+
+
+def test_add_slo_via_form(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    resp = client.post(
+        f"/assessments/{aid}/slos/add",
+        data={"metric_name": "availability", "target_value": "99.9"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    slos = store.list_slos(aid)
+    assert len(slos) == 1
+    assert slos[0]["metric_name"] == "availability"
+    assert slos[0]["target_value"] == 99.9
+
+
+def test_slos_page_shows_add_form(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    resp = client.get(f"/assessments/{aid}/slos")
+    assert resp.status_code == 200
+    assert "Add SLO" in resp.text
+    assert "metric_name" in resp.text
+    assert "target_value" in resp.text
+
+
+# ── Onboarding history ─────────────────────────────────────────────────
+
+
+def test_onboarding_history_empty(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    resp = client.get(f"/assessments/{aid}/onboarding-history")
+    assert resp.status_code == 200
+    assert "No onboarding runs" in resp.text
+
+
+def test_onboarding_history_with_data(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    store.save_onboarding(aid, [
+        {"category": "security", "path": "rbac.yaml", "content": "kind: Role", "description": "rbac"},
+    ], orchestration={"recommendation": "READY FOR REVIEW", "auto_approve": False})
+    resp = client.get(f"/assessments/{aid}/onboarding-history")
+    assert resp.status_code == 200
+    assert "READY FOR REVIEW" in resp.text
+    assert "1" in resp.text  # file count
+
+
+def test_assessment_detail_shows_history_button(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    store.save_onboarding(aid, [{"category": "c", "path": "f.yaml", "content": "x", "description": "d"}])
+    resp = client.get(f"/assessments/{aid}")
+    assert resp.status_code == 200
+    assert f"/assessments/{aid}/onboarding-history" in resp.text
+    assert "History (1)" in resp.text

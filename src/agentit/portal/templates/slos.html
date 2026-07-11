@@ -62,6 +62,22 @@
   </tbody>
 </table>
 {% else %}
-<p class="text-muted mt-2">No SLOs defined yet. SLOs will be populated as monitoring data is collected.</p>
+<p class="text-muted mt-2">No SLOs defined yet. Run onboarding or add one manually below.</p>
 {% endif %}
+
+<h2 class="section-title">Add SLO</h2>
+<form method="post" action="/assessments/{{ assessment_id }}/slos/add" class="form-narrow">
+  <div class="form-group">
+    <label class="form-label" for="metric_name">Metric Name</label>
+    <input type="text" id="metric_name" name="metric_name" placeholder="e.g. availability, error_rate, latency_p99_ms" required>
+  </div>
+  <div class="form-group">
+    <label class="form-label" for="target_value">Target Value</label>
+    <input type="number" id="target_value" name="target_value" step="0.01" placeholder="e.g. 99.9" required>
+  </div>
+  <button type="submit" class="btn btn-green">
+    <span class="btn-label">Add SLO</span>
+    <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Adding&hellip;</span>
+  </button>
+</form>
 {% endblock %}

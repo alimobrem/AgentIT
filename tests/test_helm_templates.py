@@ -232,3 +232,46 @@ class TestTektonCleanup:
         doc = _load(self.TEMPLATE)
         sa = doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]["serviceAccountName"]
         assert sa == "pipeline"
+
+
+# ---------------------------------------------------------------------------
+# RBAC
+# ---------------------------------------------------------------------------
+
+class TestRBAC:
+    TEMPLATE = CHART_DIR / "rbac.yaml"
+
+    def test_parseable(self):
+        rendered = _render(self.TEMPLATE)
+        docs = list(yaml.safe_load_all(rendered))
+        assert len(docs) == 2
+
+    def test_has_namespace_rolebinding(self):
+        rendered = _render(self.TEMPLATE)
+        docs = list(yaml.safe_load_all(rendered))
+        rb = docs[0]
+        assert rb["kind"] == "RoleBinding"
+        assert rb["metadata"]["namespace"] == "test-ns"
+        assert rb["roleRef"]["name"] == "edit"
+        assert rb["subjects"][0]["name"] == "default"
+
+    def test_has_cluster_rolebinding(self):
+        rendered = _render(self.TEMPLATE)
+        docs = list(yaml.safe_load_all(rendered))
+        crb = docs[1]
+        assert crb["kind"] == "ClusterRoleBinding"
+        assert crb["roleRef"]["name"] == "edit"
+        assert crb["subjects"][0]["name"] == "default"
+        assert crb["subjects"][0]["namespace"] == "test-ns"
+
+    def test_cluster_rolebinding_enables_cross_namespace(self):
+        """ClusterRoleBinding (not RoleBinding) is required for cross-namespace apply."""
+        rendered = _render(self.TEMPLATE)
+        docs = list(yaml.safe_load_all(rendered))
+        crb = docs[1]
+        assert crb["kind"] == "ClusterRoleBinding", (
+            "Cross-namespace apply requires ClusterRoleBinding, not RoleBinding"
+        )
+        assert "namespace" not in crb["metadata"], (
+            "ClusterRoleBinding must not have metadata.namespace"
+        )

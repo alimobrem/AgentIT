@@ -376,3 +376,53 @@ class TestOrchestratorStoreWiring:
         # No assessment_id means no remediations saved — but we can't
         # query without an assessment_id. Just verify no crash.
         assert True
+
+    def test_slos_created_on_onboard(self):
+        """Orchestrator creates default SLOs after release agent runs."""
+        from agentit.agents.orchestrator import FleetOrchestrator
+        import tempfile
+        from pathlib import Path
+
+        store = _make_store()
+        report = _make_report()
+        aid = store.save(report)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orch = FleetOrchestrator(
+                report=report, output_dir=Path(tmpdir),
+                store=store, assessment_id=aid,
+            )
+            orch.run()
+
+        slos = store.list_slos(aid)
+        assert len(slos) == 3
+        metric_names = {s["metric_name"] for s in slos}
+        assert "availability" in metric_names
+        assert "error_rate" in metric_names
+        assert "latency_p99_ms" in metric_names
+
+
+# ── Onboarding history ────────────────────────────────────────────────
+
+
+class TestOnboardingHistory:
+    def test_list_onboardings(self):
+        store = _make_store()
+        aid = store.save(_make_report())
+        store.save_onboarding(aid, [
+            {"category": "security", "path": "rbac.yaml", "content": "x", "description": "d"},
+        ], orchestration={"recommendation": "READY", "auto_approve": False})
+        store.save_onboarding(aid, [
+            {"category": "security", "path": "rbac.yaml", "content": "x", "description": "d"},
+            {"category": "cicd", "path": "pipeline.yaml", "content": "y", "description": "p"},
+        ], orchestration={"recommendation": "AUTO-APPROVED", "auto_approve": True})
+
+        history = store.list_onboardings(aid)
+        assert len(history) == 2
+        assert history[0]["file_count"] == 2  # most recent first
+        assert history[1]["file_count"] == 1
+
+    def test_list_onboardings_empty(self):
+        store = _make_store()
+        aid = store.save(_make_report())
+        assert store.list_onboardings(aid) == []

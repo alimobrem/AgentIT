@@ -172,6 +172,8 @@ class FleetOrchestrator:
                 ))
                 self._log_event(agent_name, "completed", f"Generated {len(result.files)} files")
                 self._record_remediations(agent_name, result.files)
+                if agent_name == "release":
+                    self._create_default_slos()
             except Exception as exc:
                 logger.warning("Agent %s failed: %s", agent_name, exc)
                 results.append(AgentResult(
@@ -334,6 +336,42 @@ class FleetOrchestrator:
             return f"AUTO-APPROVED: All {success_count} agents succeeded, {total_files} files generated. Safe for automated deployment."
 
         return f"READY FOR REVIEW: All {success_count} agents succeeded, {total_files} files generated. Awaiting human approval."
+
+    _SLO_DEFAULTS = {
+        "critical": [
+            ("availability", 99.99),
+            ("error_rate", 0.01),
+            ("latency_p99_ms", 100.0),
+        ],
+        "high": [
+            ("availability", 99.9),
+            ("error_rate", 0.05),
+            ("latency_p99_ms", 200.0),
+        ],
+        "medium": [
+            ("availability", 99.5),
+            ("error_rate", 0.1),
+            ("latency_p99_ms", 500.0),
+        ],
+        "low": [
+            ("availability", 99.0),
+            ("error_rate", 0.5),
+            ("latency_p99_ms", 1000.0),
+        ],
+    }
+
+    def _create_default_slos(self) -> None:
+        """Create default SLOs based on app criticality after release agent runs."""
+        if self._store is None or self._assessment_id is None:
+            return
+        slo_set = self._SLO_DEFAULTS.get(self.report.criticality, self._SLO_DEFAULTS["medium"])
+        for metric, target in slo_set:
+            try:
+                self._store.save_slo(self._assessment_id, metric, target)
+            except Exception as exc:
+                logger.warning("Failed to create SLO %s: %s", metric, exc)
+        self._log_event("release", "slos-created",
+                        f"Created {len(slo_set)} default SLOs for {self.report.criticality} criticality")
 
     def _record_remediations(self, agent_name: str, files: list) -> None:
         """Record each generated file as a remediation in the store."""

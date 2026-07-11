@@ -57,6 +57,9 @@
   {% if slo_count > 0 %}
   <a href="/assessments/{{ assessment_id }}/slos" class="btn btn-outline">SLOs ({{ slo_count }})</a>
   {% endif %}
+  {% if onboarding_count > 0 %}
+  <a href="/assessments/{{ assessment_id }}/onboarding-history" class="btn btn-outline">History ({{ onboarding_count }})</a>
+  {% endif %}
 </div>
 
 {% if report.remediation_plan %}

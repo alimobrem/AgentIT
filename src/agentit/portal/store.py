@@ -225,6 +225,30 @@ class AssessmentStore:
             return None
         return json.loads(row["orchestration_json"])
 
+    def list_onboardings(self, assessment_id: str) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT id, assessment_id, created_at, files_json, orchestration_json
+            FROM onboarding_results WHERE assessment_id = ?
+            ORDER BY created_at DESC
+            """,
+            (assessment_id,),
+        ).fetchall()
+        result = []
+        for r in rows:
+            files = json.loads(r["files_json"])
+            orch = json.loads(r["orchestration_json"]) if r["orchestration_json"] else {}
+            categories = list({f["category"] for f in files})
+            result.append({
+                "id": r["id"],
+                "created_at": r["created_at"],
+                "file_count": len(files),
+                "categories": categories,
+                "recommendation": orch.get("recommendation", ""),
+                "auto_approve": orch.get("auto_approve", False),
+            })
+        return result
+
     # ── Events ──────────────────────────────────────────────────────────
 
     def log_event(

@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Onboarding History - {{ report.repo_name }} - AgentIT{% endblock %}
+{% block content %}
+<h1>Onboarding History: {{ report.repo_name }}</h1>
+
+<div class="action-bar mb-2">
+  <a href="/assessments/{{ assessment_id }}" class="btn btn-outline btn-sm">&larr; Back to Assessment</a>
+</div>
+
+{% if onboardings %}
+<table>
+  <thead>
+    <tr>
+      <th>Date</th>
+      <th>Files</th>
+      <th>Categories</th>
+      <th>Recommendation</th>
+      <th>Action</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for ob in onboardings %}
+    <tr class="{% if 'AUTO-APPROVED' in ob.recommendation %}row-border-green{% elif 'BLOCKED' in ob.recommendation %}row-border-red{% else %}row-border-yellow{% endif %}">
+      <td class="text-sm">{{ ob.created_at[:19] }}</td>
+      <td class="text-bold">{{ ob.file_count }}</td>
+      <td class="text-sm">{{ ob.categories | join(", ") }}</td>
+      <td class="text-sm">
+        {% if ob.recommendation %}
+          {{ ob.recommendation[:80] }}{% if ob.recommendation|length > 80 %}&hellip;{% endif %}
+        {% else %}
+          <span class="text-muted">—</span>
+        {% endif %}
+      </td>
+      <td>
+        <a href="/assessments/{{ assessment_id }}/onboard-results" class="btn btn-outline btn-sm">View</a>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="text-muted mt-2">No onboarding runs yet. Use the "Onboard" button on the assessment page to start.</p>
+{% endif %}
+{% endblock %}
