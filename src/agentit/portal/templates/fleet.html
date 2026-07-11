@@ -84,11 +84,17 @@
       <td><span class="badge badge-{{ r.criticality }}">{{ r.criticality }}</span></td>
       <td class="{% if r.critical_count > 0 %}text-danger text-bold{% endif %}">{{ r.critical_count }}</td>
       <td>
-        <form method="post" action="/assess" class="inline-form">
-          <input type="hidden" name="repo_url" value="{{ r.repo_url }}">
-          <input type="hidden" name="criticality" value="{{ r.criticality }}">
-          <button type="submit" class="btn btn-sm">Re-assess</button>
-        </form>
+        <div class="gate-actions">
+          <form method="post" action="/assess" class="inline-form">
+            <input type="hidden" name="repo_url" value="{{ r.repo_url }}">
+            <input type="hidden" name="criticality" value="{{ r.criticality }}">
+            <button type="submit" class="btn btn-sm">Re-assess</button>
+          </form>
+          <form method="post" action="/assessments/{{ r.id }}/delete" class="inline-form"
+                onsubmit="return confirm('Delete {{ r.repo_name }} and all related data?')">
+            <button type="submit" class="btn btn-sm btn-danger-outline">×</button>
+          </form>
+        </div>
       </td>
     </tr>
     {% endfor %}

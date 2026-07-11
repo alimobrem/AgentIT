@@ -1211,3 +1211,63 @@ def test_stale_gate_expiry(client, _override_store):
     expired = store.expire_stale_gates(hours=1)
     assert expired == 1
     assert len(store.list_gates("pending")) == 0
+
+
+# ── Delete ─────────────────────────────────────────────────────────────
+
+
+def test_delete_assessment_route(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    resp = client.post(f"/assessments/{aid}/delete", follow_redirects=False)
+    assert resp.status_code == 303
+    assert store.get(aid) is None
+
+
+def test_delete_cascades(client, _override_store):
+    """Delete removes all related data — remediations, SLOs, gates, onboarding."""
+    store = _override_store
+    aid = store.save(_make_report())
+    store.save_remediation(aid, "security", "Fix RBAC")
+    store.save_slo(aid, "availability", 99.9)
+    store.create_gate(aid, "deploy", "Approve deploy")
+    store.save_onboarding(aid, [{"category": "sec", "path": "x.yaml", "content": "y", "description": "d"}])
+
+    resp = client.post(f"/assessments/{aid}/delete", follow_redirects=False)
+    assert resp.status_code == 303
+    assert store.get(aid) is None
+    assert store.list_remediations(aid) == []
+    assert store.list_slos(aid) == []
+    assert store.get_onboarding(aid) is None
+
+
+def test_delete_nonexistent_returns_404(client, _override_store):
+    resp = client.post("/assessments/fake-id/delete", follow_redirects=False)
+    assert resp.status_code == 404
+
+
+def test_delete_slo_route(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    sid = store.save_slo(aid, "latency", 200.0)
+    resp = client.post(f"/assessments/{aid}/slos/{sid}/delete", follow_redirects=False)
+    assert resp.status_code == 303
+    assert len(store.list_slos(aid)) == 0
+
+
+def test_delete_remediation_route(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    rid = store.save_remediation(aid, "cicd", "Add pipeline")
+    resp = client.post(f"/assessments/{aid}/remediations/{rid}/delete", follow_redirects=False)
+    assert resp.status_code == 303
+    assert len(store.list_remediations(aid)) == 0
+
+
+def test_cancel_gate_route(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    gid = store.create_gate(aid, "deploy", "Approve")
+    resp = client.post(f"/gates/{gid}/cancel", follow_redirects=False)
+    assert resp.status_code == 303
+    assert len(store.list_gates("pending")) == 0
