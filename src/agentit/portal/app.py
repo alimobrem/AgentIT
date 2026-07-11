@@ -302,7 +302,6 @@ async def onboard_submit(assessment_id: str):
 
     files, orch_summary = await asyncio.to_thread(_run_onboarding, report, assessment_id)
     s.save_onboarding(assessment_id, files, orchestration=orch_summary)
-    s.create_gate(assessment_id, "deploy", f"Approve deployment of {report.repo_name} to production (score: {report.overall_score:.0f}/100)")
     return RedirectResponse(
         url=f"/assessments/{assessment_id}/onboard-results", status_code=303,
     )
@@ -461,9 +460,33 @@ async def gates_page(request: Request):
 @app.post("/gates/{gate_id}/resolve", response_model=None)
 async def resolve_gate(request: Request, gate_id: str):
     form = await request.form()
-    status = form.get("status")  # "approved" or "rejected"
+    status = form.get("status")
     resolved_by = form.get("resolved_by", "portal-user")
-    get_store().resolve_gate(gate_id, status, resolved_by)
+    s = get_store()
+
+    gates = s.list_gates(status="pending")
+    gate = next((g for g in gates if g["id"] == gate_id), None)
+    if gate is None:
+        raise HTTPException(404, "Gate not found")
+
+    s.resolve_gate(gate_id, status, resolved_by)
+
+    if status == "approved" and gate.get("assessment_id"):
+        assessment_id = gate["assessment_id"]
+        files = s.get_onboarding(assessment_id)
+        report = s.get(assessment_id)
+        if files and report:
+            namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
+            results = await asyncio.to_thread(
+                apply_manifests_to_cluster, files, namespace, False,
+            )
+            s.save_apply_results(assessment_id, results, namespace, False)
+            applied = len(results["applied"])
+            return RedirectResponse(
+                url=f"/assessments/{assessment_id}/onboard-results?applied={applied}&gate_approved=true",
+                status_code=303,
+            )
+
     return RedirectResponse(url="/gates", status_code=303)
 
 
