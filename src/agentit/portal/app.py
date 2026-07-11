@@ -382,7 +382,7 @@ async def assess_submit(
         infra = await asyncio.to_thread(_auto_create_infra_repo, repo_url)
 
     try:
-        report = await asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality, infra)
+        report = await _with_timeout(asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality, infra))
     except Exception as exc:
         log.exception("Assessment failed for %s", repo_url)
         return templates.TemplateResponse(
@@ -589,7 +589,7 @@ async def onboard_submit(request: Request, assessment_id: str):
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
 
-    files, orch_summary = await asyncio.to_thread(_run_onboarding, report, assessment_id)
+    files, orch_summary = await _with_timeout(asyncio.to_thread(_run_onboarding, report, assessment_id))
     s.save_onboarding(assessment_id, files, orchestration=orch_summary)
 
     _publish_event("onboarding-complete", report.repo_name,

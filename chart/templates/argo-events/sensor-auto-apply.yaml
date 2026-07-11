@@ -21,7 +21,12 @@ spec:
             value:
               - onboarding-complete
   triggers:
-    - template:
+    - retryStrategy:
+        steps: 3
+        duration: "30s"
+        factor:
+          value: 2.0
+      template:
         name: trigger-auto-apply
         http:
           url: http://agentit.{{ .Release.Namespace }}.svc:8080/api/webhook/auto-apply
@@ -31,7 +36,11 @@ spec:
           payload:
             - src:
                 dependencyName: onboarding-complete
-                dataKey: body
-              dest: body
+                dataKey: body.correlationId
+              dest: assessment_id
+            - src:
+                dependencyName: onboarding-complete
+                dataKey: body.targetApp
+              dest: namespace
           timeout: 300
 {{- end }}

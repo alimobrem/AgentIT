@@ -26,7 +26,12 @@ spec:
             value:
               - "70"
   triggers:
-    - template:
+    - retryStrategy:
+        steps: 3
+        duration: "30s"
+        factor:
+          value: 2.0
+      template:
         name: trigger-onboarding
         http:
           url: http://agentit.{{ .Release.Namespace }}.svc:8080/api/webhook/onboard

@@ -126,11 +126,11 @@ class AutoMode:
             f"Applied {len(result['applied'])} manifests to {namespace}",
         )
 
-        # Mark remediations as complete
-        remediations = self._store.list_remediations(assessment_id)
-        for rem in remediations:
-            if rem["status"] != "completed":
-                self._store.complete_remediation(rem["id"])
+        if not result.get("errors"):
+            remediations = self._store.list_remediations(assessment_id)
+            for rem in remediations:
+                if rem["status"] != "completed":
+                    self._store.complete_remediation(rem["id"])
 
         return {
             "action": "applied",
