@@ -43,3 +43,14 @@ argoEvents:
 
 tektonCI:
   enabled: false
+
+agents:
+  vulnWatcher:
+    enabled: false
+    interval: 21600   # 6 hours
+  sloTracker:
+    enabled: false
+    interval: 300     # 5 minutes
+  driftDetector:
+    enabled: false
+    interval: 600     # 10 minutes

@@ -17,6 +17,43 @@ _OPERATOR_NAMESPACES = frozenset({
     "openshift-monitoring", "openshift-logging",
 })
 
+_CRD_TO_OPERATOR: dict[str, dict] = {
+    "VerticalPodAutoscaler": {
+        "name": "VPA (Vertical Pod Autoscaler)",
+        "package": "vertical-pod-autoscaler",
+        "channel": "stable",
+        "source": "redhat-operators",
+    },
+    "ClusterPolicy": {
+        "name": "Kyverno",
+        "package": "kyverno",
+        "channel": "stable",
+        "source": "community-operators",
+    },
+    "PrometheusRule": {
+        "name": "Cluster Monitoring (built-in)",
+        "package": None,
+        "note": "PrometheusRule requires the OpenShift monitoring stack (enabled by default). Check: oc get crd prometheusrules.monitoring.coreos.com",
+    },
+    "ServiceMonitor": {
+        "name": "Cluster Monitoring (built-in)",
+        "package": None,
+        "note": "ServiceMonitor requires the OpenShift monitoring stack.",
+    },
+    "Pipeline": {
+        "name": "OpenShift Pipelines (Tekton)",
+        "package": "openshift-pipelines-operator-rh",
+        "channel": "latest",
+        "source": "redhat-operators",
+    },
+    "Rollout": {
+        "name": "OpenShift GitOps (Argo Rollouts)",
+        "package": "openshift-gitops-operator",
+        "channel": "latest",
+        "source": "redhat-operators",
+    },
+}
+
 _CLUSTER_SCOPED_KINDS = frozenset({
     "ClusterRole", "ClusterRoleBinding", "ClusterPolicy",
     "ClusterCleanupPolicy", "Namespace", "CustomResourceDefinition",
@@ -128,6 +165,7 @@ def apply_manifests_to_cluster(
     applied: list[str] = []
     skipped: list[str] = []
     errors: list[str] = []
+    missing_operators: dict[str, dict] = {}
 
     _ensure_namespace(cli, namespace, dry_run)
     available = _get_available_resources(cli)
@@ -158,6 +196,11 @@ def apply_manifests_to_cluster(
                     apply_docs.append(fixed)
                 else:
                     skip_reasons.append(reason)
+                    if action == "skip_crd_missing":
+                        kind = doc.get("kind", "")
+                        if kind in _CRD_TO_OPERATOR:
+                            op = _CRD_TO_OPERATOR[kind]
+                            missing_operators[kind] = op
 
             if all_skip:
                 skipped.append(f"{fpath} ({'; '.join(skip_reasons)})")
@@ -181,4 +224,45 @@ def apply_manifests_to_cluster(
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-    return {"applied": applied, "skipped": skipped, "errors": errors}
+    return {
+        "applied": applied,
+        "skipped": skipped,
+        "errors": errors,
+        "missing_operators": missing_operators,
+    }
+
+
+def install_operator(package: str, channel: str, source: str) -> dict:
+    """Install an OLM operator via Subscription CR."""
+    cli = _find_cli()
+    sub_yaml = yaml.dump({
+        "apiVersion": "operators.coreos.com/v1alpha1",
+        "kind": "Subscription",
+        "metadata": {
+            "name": package,
+            "namespace": "openshift-operators",
+        },
+        "spec": {
+            "channel": channel,
+            "name": package,
+            "source": source,
+            "sourceNamespace": "openshift-marketplace",
+            "installPlanApproval": "Automatic",
+        },
+    })
+    tmpdir = tempfile.mkdtemp(prefix="agentit-install-")
+    try:
+        tmp_file = Path(tmpdir) / "subscription.yaml"
+        tmp_file.write_text(sub_yaml)
+        result = subprocess.run(
+            [cli, "apply", "-f", str(tmp_file)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            logger.info("Operator %s install started: %s", package, result.stdout.strip())
+            return {"status": "installing", "package": package}
+        else:
+            logger.error("Operator %s install failed: %s", package, result.stderr.strip())
+            return {"status": "error", "package": package, "error": result.stderr.strip()}
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)

@@ -1,0 +1,60 @@
+{{- if .Values.agents.sloTracker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-slo-tracker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-slo-tracker
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-slo-tracker
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-slo-tracker
+        app.kubernetes.io/component: agent
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: slo-tracker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [python, -m, agentit, slo-track]
+          args:
+            - --interval
+            - "{{ .Values.agents.sloTracker.interval }}"
+          env:
+            {{- if .Values.kafka.enabled }}
+            - name: AGENTIT_KAFKA_BOOTSTRAP
+              value: {{ .Values.kafka.bootstrapServers }}
+            {{- end }}
+            - name: AGENTIT_DB_PATH
+              value: /data/agentit.db
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-data
+{{- end }}

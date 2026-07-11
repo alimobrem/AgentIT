@@ -11,6 +11,17 @@
   PR created: <a href="{{ request.query_params.get('pr_url') | safe_url }}" target="_blank" hx-boost="false">{{ request.query_params.get('pr_url') }}</a>
 </div>
 {% endif %}
+{% if request.query_params.get('agent_prs') %}
+<div class="alert alert-success">
+  Per-agent PRs created:
+  <ul class="mb-0">
+    {% for pair in request.query_params.get('agent_prs').split('|') %}
+    {% set parts = pair.split('=', 1) %}
+    <li><strong>{{ parts[0] }}</strong>: <a href="{{ parts[1] | safe_url }}" target="_blank" hx-boost="false">{{ parts[1] }}</a></li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
 {% if request.query_params.get('error') %}
 <div class="alert alert-error">
   Error: {{ request.query_params.get('error') }}
@@ -73,6 +84,12 @@
   <form method="post" action="/assessments/{{ assessment_id }}/create-pr" class="inline-form">
     <button type="submit" class="btn btn-green">
       <span class="btn-label">Create GitHub PR</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Creating&hellip;</span>
+    </button>
+  </form>
+  <form method="post" action="/assessments/{{ assessment_id }}/create-agent-prs" class="inline-form">
+    <button type="submit" class="btn btn-outline">
+      <span class="btn-label">Per-Agent PRs</span>
       <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Creating&hellip;</span>
     </button>
   </form>

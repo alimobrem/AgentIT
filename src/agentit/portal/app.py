@@ -14,7 +14,7 @@ from fastapi.templating import Jinja2Templates
 
 from agentit.cloner import clone_repo
 from agentit.models import AssessmentReport, Severity
-from agentit.portal.cluster_apply import apply_manifests_to_cluster
+from agentit.portal.cluster_apply import apply_manifests_to_cluster, install_operator
 from agentit.portal.github_pr import create_onboarding_pr
 from agentit.portal.store import AssessmentStore
 from agentit.runner import run_assessment
@@ -337,6 +337,7 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
 
     orchestration = s.get_orchestration(assessment_id) or {}
     apply_results = s.get_apply_results(assessment_id)
+    missing_operators = s.get_missing_operators(assessment_id)
 
     return templates.TemplateResponse(
         request,
@@ -347,6 +348,7 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
             "assessment_id": assessment_id,
             "orchestration": orchestration,
             "apply_results": apply_results,
+            "missing_operators": missing_operators,
         },
     )
 
@@ -409,6 +411,8 @@ async def apply_to_cluster(request: Request, assessment_id: str):
     )
 
     s.save_apply_results(assessment_id, results, namespace, dry_run)
+    if results.get("missing_operators"):
+        s.save_missing_operators(assessment_id, results["missing_operators"])
 
     applied = len(results["applied"])
     skipped = len(results["skipped"])
@@ -421,6 +425,28 @@ async def apply_to_cluster(request: Request, assessment_id: str):
         ),
         status_code=303,
     )
+
+
+@app.post("/api/install-operator", response_model=None)
+async def install_operator_endpoint(request: Request):
+    """Install an OLM operator. Called from the missing prerequisites UI."""
+    form = await request.form()
+    package = str(form.get("package", ""))
+    channel = str(form.get("channel", "stable"))
+    source = str(form.get("source", "redhat-operators"))
+    assessment_id = str(form.get("assessment_id", ""))
+
+    if not package:
+        raise HTTPException(400, "package required")
+
+    result = await asyncio.to_thread(install_operator, package, channel, source)
+
+    if assessment_id:
+        return RedirectResponse(
+            url=f"/assessments/{assessment_id}/onboard-results?operator_installed={package}&install_status={result['status']}",
+            status_code=303,
+        )
+    return JSONResponse(result)
 
 
 @app.get("/gates", response_class=HTMLResponse)
@@ -466,6 +492,52 @@ async def create_pr(assessment_id: str):
         )
     return RedirectResponse(
         url=f"/assessments/{assessment_id}/onboard-results?pr_url={result['pr_url']}",
+        status_code=303,
+    )
+
+
+@app.post("/assessments/{assessment_id}/create-agent-prs", response_model=None)
+async def create_agent_prs_route(assessment_id: str):
+    """Create per-agent branches and PRs."""
+    from agentit.portal.github_pr import create_agent_prs
+
+    s = get_store()
+    report = s.get(assessment_id)
+    files = s.get_onboarding(assessment_id)
+    if report is None or files is None:
+        raise HTTPException(status_code=404, detail="Assessment or onboarding not found")
+
+    grouped: dict[str, list[dict]] = {}
+    for f in files:
+        grouped.setdefault(f["category"], []).append(f)
+
+    agent_results = [
+        {"agent_name": cat, "category": cat, "files": cat_files}
+        for cat, cat_files in grouped.items()
+    ]
+
+    results = await asyncio.to_thread(
+        create_agent_prs, report.repo_url, report.repo_name, agent_results,
+    )
+
+    successful = [r for r in results if "pr_url" in r]
+    errors = [r for r in results if "error" in r]
+
+    if successful:
+        pr_list = ", ".join(f"{r['agent_name']}" for r in successful)
+        s.log_event("orchestrator", "agent-prs-created", report.repo_name,
+                    "info", f"Created {len(successful)} per-agent PRs: {pr_list}")
+
+    from urllib.parse import quote
+    if errors and not successful:
+        return RedirectResponse(
+            url=f"/assessments/{assessment_id}/onboard-results?error={quote(errors[0].get('error', 'Unknown'))}",
+            status_code=303,
+        )
+
+    pr_urls = "|".join(f"{r['agent_name']}={r['pr_url']}" for r in successful)
+    return RedirectResponse(
+        url=f"/assessments/{assessment_id}/onboard-results?agent_prs={quote(pr_urls)}",
         status_code=303,
     )
 

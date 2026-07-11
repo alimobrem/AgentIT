@@ -152,6 +152,11 @@ class AssessmentStore:
                 now,
             ),
         )
+        if results.get("missing_operators"):
+            self._conn.execute(
+                "DELETE FROM apply_results WHERE assessment_id = ? AND created_at < ?",
+                (assessment_id, now),
+            )
         self._conn.commit()
 
     def get_apply_results(self, assessment_id: str) -> dict | None:
