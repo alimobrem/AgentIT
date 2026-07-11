@@ -20,6 +20,12 @@ dependencies = [
     "kafka-python>=2.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+]
+
 [project.scripts]
 agentit = "agentit.cli:main"
 
