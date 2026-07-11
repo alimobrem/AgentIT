@@ -80,8 +80,8 @@ graph TB
     Portal --> Runner
     Runner -->|AssessmentReport| Orchestrator
     Orchestrator --> Agents
-    Agents -->|GeneratedFile[]| Store
-    Agents -.->|classify secrets /\nsummarize / classify actions| LLM
+    Agents -->|"generated files"| Store
+    Agents -.->|"classify secrets, summarize, classify actions"| LLM
     Orchestrator -->|plan + gates| Store
     Portal --> Store
     Portal -->|create PR| GH
@@ -108,7 +108,7 @@ flowchart TD
     A["Repo URL"] --> B["cloner.py: shallow clone\n(or use local path)"]
     B --> C["StackDetector\nlanguages, frameworks, DBs, runtimes"]
     B --> D["7 Analyzers run\n(read-only, no writes)"]
-    D --> E["DimensionScore + Finding[]\nper dimension, 0-100"]
+    D --> E["DimensionScore + Findings\nper dimension, 0-100"]
     C --> F["AssessmentReport\noverall_score, criticality, summary,\nremediation_plan"]
     E --> F
     F -->|optional| G["LLM: summarize_architecture()\n2-3 sentence summary"]
@@ -122,7 +122,7 @@ flowchart TD
     I --> M["not critical → +chaos"]
     I --> N["high/critical OR score under 50\n→ +codechange"]
 
-    J & K & L & M & N --> O["Run each agent:\n(report, output_dir) → GeneratedFile[]"]
+    J & K & L & M & N --> O["Run each agent:\n(report, output_dir) → GeneratedFile list"]
     O --> P["validate_manifest()\non every .yaml/.yml output"]
     P --> Q["_detect_conflicts()\npriority matrix, e.g.\nsecurity beats cicd/observability/compliance"]
     Q --> R{"_can_auto_approve()?\ncriticality not high/critical\nAND no critical findings\nAND score 70 or higher"}
