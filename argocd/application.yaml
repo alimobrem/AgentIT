@@ -29,6 +29,8 @@ spec:
           value: global
         - name: gcp.credentialsSecret
           value: gcp-credentials
+        - name: tektonCI.enabled
+          value: "true"
   destination:
     server: https://kubernetes.default.svc
     namespace: agentit
