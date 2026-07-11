@@ -643,7 +643,7 @@ def _get_cluster_health() -> dict:
         except Exception:
             pass
 
-    # Pods
+    # Pods — only show Running/Pending/Failed, skip Completed pipeline pods
     raw = _run_cmd(["oc", "get", "pods", "-n", "agentit", "-o", "json"])
     if raw:
         try:
@@ -651,6 +651,8 @@ def _get_cluster_health() -> dict:
             for p in pods:
                 name = p.get("metadata", {}).get("name", "?")
                 phase = p.get("status", {}).get("phase", "Unknown")
+                if phase in ("Succeeded", "Completed"):
+                    continue
                 restarts = sum(
                     cs.get("restartCount", 0)
                     for cs in p.get("status", {}).get("containerStatuses", [])
@@ -688,8 +690,9 @@ def _get_cluster_health() -> dict:
             pass
 
     # Kafka
-    raw = _run_cmd(["oc", "get", "kafka", "-n", "agentit", "-o", "jsonpath={.items[0].status.conditions[0].type}"])
-    result["kafka_ready"] = raw and "Ready" in raw
+    raw = _run_cmd(["oc", "get", "kafka", "-n", "agentit", "-o",
+                    "jsonpath={.items[0].status.conditions[?(@.type=='Ready')].status}"])
+    result["kafka_ready"] = raw is not None and "True" in raw
 
     # Event publisher
     try:
