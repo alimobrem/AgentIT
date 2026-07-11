@@ -450,3 +450,76 @@ def drift_detect(interval: int) -> None:
         except KeyboardInterrupt:
             click.echo("Drift detector stopped.", err=True)
             break
+
+
+@main.command("self-assess")
+@click.option("--repo-url", default="https://github.com/alimobrem/AgentIT", help="AgentIT repo URL.")
+@click.option("--criticality", type=click.Choice(["low", "medium", "high", "critical"]), default="high")
+@click.option("--auto-apply", is_flag=True, default=False, help="Run auto-mode pipeline after onboarding.")
+@click.option("--llm", "use_llm", is_flag=True, default=None)
+@click.option("--llm-model", default=None)
+def self_assess(repo_url: str, criticality: str, auto_apply: bool, use_llm: bool, llm_model: str | None) -> None:
+    """Assess AgentIT itself — dogfooding the platform on its own repo."""
+    from agentit.agents.orchestrator import FleetOrchestrator
+    from agentit.portal.store import AssessmentStore
+
+    store = AssessmentStore()
+
+    try:
+        with _resolve_and_assess(repo_url, criticality, use_llm, llm_model) as report:
+            assessment_id = store.save(report)
+            click.echo(f"Self-assessment score: {report.overall_score:.0f}/100", err=True)
+            click.echo(f"Assessment ID: {assessment_id}", err=True)
+
+            out = Path("./self-assess-output")
+            out.mkdir(parents=True, exist_ok=True)
+
+            click.echo("Running Fleet Orchestrator on AgentIT...", err=True)
+            orch = FleetOrchestrator(
+                report=report, output_dir=out,
+                store=store, assessment_id=assessment_id,
+            )
+            result = orch.run()
+
+            for ar in result.agent_results:
+                status = "PASS" if ar.success else "FAIL"
+                click.echo(f"  [{status}] {ar.agent_name}: {len(ar.files_generated)} files", err=True)
+
+            click.echo(f"\n{result.recommendation}", err=True)
+
+            if auto_apply and result.plan.auto_approve:
+                from agentit.automode import AutoMode
+                llm_client = None
+                if use_llm:
+                    try:
+                        from agentit.llm import LLMClient
+                        llm_client = LLMClient(model=llm_model or "claude-sonnet-4-6")
+                    except Exception:
+                        pass
+
+                files = []
+                for ar in result.agent_results:
+                    if not ar.success:
+                        continue
+                    for fpath in ar.files_generated:
+                        full = out / ar.category / fpath
+                        if full.is_file():
+                            files.append({
+                                "category": ar.category,
+                                "path": fpath,
+                                "content": full.read_text(),
+                                "description": fpath,
+                            })
+
+                engine = AutoMode(store=store, llm_client=llm_client)
+                apply_result = engine.execute(
+                    assessment_id, files, "agentit",
+                    criticality, result.plan.auto_approve, "agentit",
+                )
+                click.echo(f"\nAuto-apply: {apply_result['action']} — {apply_result['reason']}", err=True)
+            elif auto_apply:
+                click.echo("\nAuto-apply skipped: orchestrator did not auto-approve.", err=True)
+
+    except CloneError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
