@@ -47,13 +47,14 @@ spec:
         - /spec/ipFamilyPolicy
     - group: tekton.dev
       kind: Pipeline
-      jsonPointers:
-        - /spec/tasks
+      managedFieldsManagers:
+        - argocd-server
+        - argocd-controller
     - group: triggers.tekton.dev
       kind: EventListener
-      jsonPointers:
-        - /status
-        - /spec/resources
+      jqPathExpressions:
+        - .spec
+        - .status
   destination:
     server: https://kubernetes.default.svc
     namespace: agentit
