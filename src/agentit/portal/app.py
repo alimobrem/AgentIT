@@ -938,3 +938,35 @@ async def webhook_auto_apply(request: Request):
 
     log.info("auto-apply result for %s: %s — %s", assessment_id, result["action"], result["reason"])
     return JSONResponse(result)
+
+
+@app.post("/api/webhook/remediate")
+async def webhook_remediate(request: Request):
+    """Trigger the full remediation loop: assess → onboard → apply → verify.
+
+    Called by watcher agents or external triggers when an issue is detected.
+    """
+    body = await request.json()
+    repo_url = body.get("repo_url")
+    if not repo_url:
+        raise HTTPException(400, "repo_url required")
+
+    app_name = body.get("app_name", repo_url.rstrip("/").split("/")[-1].removesuffix(".git"))
+    criticality = body.get("criticality", "medium")
+    reason = body.get("reason", "webhook trigger")
+
+    from agentit.remediation_loop import RemediationLoop
+    from agentit.events import get_publisher
+
+    loop = RemediationLoop(store=get_store(), publisher=get_publisher())
+    try:
+        result = await asyncio.to_thread(
+            loop.trigger, repo_url, app_name, criticality, reason,
+        )
+    except Exception as exc:
+        log.exception("Remediation loop failed for %s", app_name)
+        return JSONResponse({"outcome": "failed", "error": str(exc)}, status_code=500)
+    finally:
+        loop.close()
+
+    return JSONResponse(result)

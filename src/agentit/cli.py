@@ -306,8 +306,11 @@ def vuln_watch(interval: int) -> None:
             click.echo(f"[vuln-watch] Monitoring {len(fleet)} apps", err=True)
 
             from agentit.automode import AutoMode
+            from agentit.remediation_loop import RemediationLoop
 
             auto = AutoMode(store=store, publisher=publisher, llm_client=None)
+            loop = RemediationLoop(store=store, publisher=publisher)
+
             for app_data in fleet:
                 if app_data.get("critical_count", 0) > 0:
                     publisher.publish(
@@ -319,16 +322,17 @@ def vuln_watch(interval: int) -> None:
                         summary=f"{app_data['critical_count']} critical/high findings in {app_data['repo_name']}",
                     )
                     if auto.enabled:
-                        click.echo(f"[vuln-watch] Auto-mode: triggering re-assessment for {app_data['repo_name']}...", err=True)
+                        click.echo(f"[vuln-watch] Auto-mode: running remediation loop for {app_data['repo_name']}...", err=True)
                         try:
-                            import httpx
-                            httpx.post(
-                                "http://localhost:8080/api/webhook/assess",
-                                json={"repo_url": app_data["repo_url"], "criticality": app_data.get("criticality", "medium")},
-                                timeout=120,
+                            result = loop.trigger(
+                                repo_url=app_data["repo_url"],
+                                app_name=app_data["repo_name"],
+                                criticality=app_data.get("criticality", "medium"),
+                                reason=f"critical findings detected ({app_data['critical_count']})",
                             )
+                            click.echo(f"[vuln-watch] Loop result: {result['outcome']} at step {result.get('step', '?')}", err=True)
                         except Exception as exc:
-                            click.echo(f"[vuln-watch] Auto re-assess failed: {exc}", err=True)
+                            click.echo(f"[vuln-watch] Remediation loop failed: {exc}", err=True)
         except KeyboardInterrupt:
             click.echo("Vulnerability watcher stopped.", err=True)
             break
@@ -364,20 +368,42 @@ def slo_track(interval: int) -> None:
             consumer.poll_once()
 
             assessments = store.list_all()
+            breached_apps = 0
             for a in assessments:
                 slos = store.list_slos(a["id"])
-                for slo in slos:
-                    if slo["status"] == "breached":
+                app_breaches = [s for s in slos if s["status"] == "breached"]
+                for slo in app_breaches:
+                    publisher.publish(
+                        "agentit-alerts",
+                        agent_id="slo-tracker",
+                        action="slo-breach",
+                        target_app=a["repo_name"],
+                        severity="critical",
+                        summary=f"SLO breached: {slo['metric_name']} (target={slo['target_value']}, current={slo['current_value']})",
+                    )
+
+                if app_breaches:
+                    breached_apps += 1
+                    # Check if there was a recent apply — if so, recommend rollback
+                    apply_result = store.get_apply_results(a["id"])
+                    if apply_result and apply_result.get("applied"):
                         publisher.publish(
                             "agentit-alerts",
                             agent_id="slo-tracker",
-                            action="slo-breach",
+                            action="rollback-recommended",
                             target_app=a["repo_name"],
                             severity="critical",
-                            summary=f"SLO breached: {slo['metric_name']} (target={slo['target_value']}, current={slo['current_value']})",
+                            summary=f"SLO breach after recent apply — consider rollback: kubectl argo rollouts undo {a['repo_name']}",
                         )
+                        store.create_gate(
+                            a["id"], "rollback-review",
+                            f"SLO breach detected for {a['repo_name']} after recent apply. "
+                            f"Breached: {', '.join(s['metric_name'] for s in app_breaches)}. "
+                            f"Review and decide: rollback or investigate.",
+                        )
+                        click.echo(f"[slo-track] ROLLBACK RECOMMENDED: {a['repo_name']}", err=True)
 
-            click.echo(f"[slo-track] Checked SLOs for {len(assessments)} assessments", err=True)
+            click.echo(f"[slo-track] Checked {len(assessments)} apps, {breached_apps} with breaches", err=True)
         except KeyboardInterrupt:
             click.echo("SLO tracker stopped.", err=True)
             break
@@ -434,6 +460,24 @@ def drift_detect(interval: int) -> None:
                             summary=f"Argo CD app '{name}' is OutOfSync (health: {health})",
                         )
                         click.echo(f"[drift-detect] DRIFT: {name} is OutOfSync", err=True)
+
+                        # Auto-sync if auto-mode is on
+                        from agentit.automode import AutoMode
+                        from agentit.portal.store import AssessmentStore
+                        _store = AssessmentStore()
+                        _auto = AutoMode(store=_store, publisher=publisher)
+                        if _auto.enabled:
+                            click.echo(f"[drift-detect] Auto-syncing {name}...", err=True)
+                            sync_result = subprocess.run(
+                                ["oc", "app", "sync", name, "--async"],
+                                capture_output=True, text=True, timeout=30,
+                            )
+                            if sync_result.returncode != 0:
+                                click.echo(f"[drift-detect] Sync failed, trying argocd CLI...", err=True)
+                                subprocess.run(
+                                    ["argocd", "app", "sync", name, "--async"],
+                                    capture_output=True, text=True, timeout=30,
+                                )
 
                 click.echo(f"[drift-detect] Checked {len(items)} Argo CD apps", err=True)
             else:
