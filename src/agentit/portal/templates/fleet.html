@@ -5,6 +5,12 @@
 
 <div class="action-bar">
   <a href="/assess" class="btn">Assess New Repo</a>
+  <form method="post" action="/self-assess" class="inline-form">
+    <button type="submit" class="btn btn-outline btn-sm">
+      <span class="btn-label">Self-Assess</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
+    </button>
+  </form>
 </div>
 
 {% if total_apps > 1 %}

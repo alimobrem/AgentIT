@@ -187,6 +187,11 @@ async def assess_submit(
     infra_repo_url: str = Form(""),
 ):
     infra = infra_repo_url.strip() or None
+
+    # Auto-create infra repo if not provided
+    if not infra:
+        infra = await asyncio.to_thread(_auto_create_infra_repo, repo_url)
+
     try:
         report = await asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality, infra)
     except Exception as exc:
@@ -195,6 +200,39 @@ async def assess_submit(
             request, "assess_form.html", {"error": str(exc)}, status_code=400,
         )
     assessment_id = get_store().save(report)
+    return RedirectResponse(url=f"/assessments/{assessment_id}", status_code=303)
+
+
+def _auto_create_infra_repo(repo_url: str) -> str | None:
+    """Auto-create a GitOps infra repo based on the app repo owner."""
+    try:
+        from agentit.portal.github_pr import _parse_owner_repo, ensure_infra_repo
+        owner, _ = _parse_owner_repo(repo_url)
+        result = ensure_infra_repo(owner)
+        if "repo_url" in result:
+            log.info("Infra repo: %s (created=%s)", result["repo_url"], result.get("created", False))
+            return result["repo_url"]
+        log.warning("Failed to create infra repo: %s", result.get("error"))
+    except Exception as exc:
+        log.warning("Auto-create infra repo failed: %s", exc)
+    return None
+
+
+@app.post("/self-assess", response_model=None)
+async def self_assess_route(request: Request):
+    """One-click self-assessment — AgentIT assesses its own repo."""
+    repo_url = "https://github.com/alimobrem/AgentIT"
+    infra = await asyncio.to_thread(_auto_create_infra_repo, repo_url)
+    try:
+        report = await _with_timeout(
+            asyncio.to_thread(_clone_assess_cleanup, repo_url, "high", infra)
+        )
+    except Exception as exc:
+        log.exception("Self-assessment failed")
+        return RedirectResponse(url=f"/?error={quote(str(exc)[:200])}", status_code=303)
+    assessment_id = get_store().save(report)
+    get_store().log_event("self-assess", "assessment-complete", "agentit", "info",
+                          f"Self-assessment complete: {report.overall_score:.0f}/100")
     return RedirectResponse(url=f"/assessments/{assessment_id}", status_code=303)
 
 

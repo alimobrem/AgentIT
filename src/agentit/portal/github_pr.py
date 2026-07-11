@@ -395,3 +395,59 @@ def commit_to_infra_repo(
     except Exception as exc:
         logger.exception("Failed to commit to infra repo")
         return {"error": str(exc)}
+
+
+def ensure_infra_repo(owner: str, repo_name: str = "agentit-gitops") -> dict:
+    """Create a GitOps infra repo if it doesn't exist. Returns {"repo_url"} or {"error"}.
+
+    Checks if the repo exists first. If not, creates it with a README
+    and apps/ directory structure.
+    """
+    try:
+        token = _get_token()
+        hdrs = _headers(token)
+        repo_url = f"https://github.com/{owner}/{repo_name}"
+
+        resp = requests.get(f"{_API}/repos/{owner}/{repo_name}", headers=hdrs, timeout=10)
+        if resp.status_code == 200:
+            return {"repo_url": repo_url, "created": False}
+
+        resp = requests.post(
+            f"{_API}/user/repos",
+            headers=hdrs, timeout=10,
+            json={
+                "name": repo_name,
+                "description": "AgentIT GitOps infrastructure — managed by AgentIT agents",
+                "private": False,
+                "auto_init": True,
+            },
+        )
+        if resp.status_code == 422:
+            resp = requests.post(
+                f"{_API}/orgs/{owner}/repos",
+                headers=hdrs, timeout=10,
+                json={
+                    "name": repo_name,
+                    "description": "AgentIT GitOps infrastructure — managed by AgentIT agents",
+                    "private": False,
+                    "auto_init": True,
+                },
+            )
+        resp.raise_for_status()
+        created_url = resp.json().get("html_url", repo_url)
+
+        requests.put(
+            f"{_API}/repos/{owner}/{repo_name}/contents/apps/.gitkeep",
+            headers=hdrs, timeout=10,
+            json={
+                "message": "chore: initialize apps directory for managed applications",
+                "content": base64.b64encode(b"").decode(),
+            },
+        )
+
+        logger.info("Created infra repo: %s", created_url)
+        return {"repo_url": created_url, "created": True}
+
+    except Exception as exc:
+        logger.exception("Failed to create infra repo")
+        return {"error": str(exc)}
