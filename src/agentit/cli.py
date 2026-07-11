@@ -175,6 +175,53 @@ def watch(repo_url: str, interval: int, criticality: str, use_llm: bool | None, 
 
 @main.command()
 @click.argument("repo_url")
+@click.option("--output-dir", default="./orchestration-output", type=click.Path())
+@click.option("--criticality", type=click.Choice(["low", "medium", "high", "critical"]), default="medium")
+@click.option("--llm", "use_llm", is_flag=True, default=None, help="Enable Claude LLM (auto-detects credentials if omitted).")
+@click.option("--llm-model", default=None, help="Claude model to use.")
+def orchestrate(repo_url: str, output_dir: str, criticality: str, use_llm: bool, llm_model: str | None) -> None:
+    """Run full orchestrated onboarding with Fleet Orchestrator."""
+    from agentit.agents.orchestrator import FleetOrchestrator
+
+    try:
+        with _resolve_and_assess(repo_url, criticality, use_llm, llm_model) as report:
+            click.echo("Running Fleet Orchestrator...", err=True)
+            orch = FleetOrchestrator(report=report, output_dir=Path(output_dir))
+            result = orch.run()
+
+            # Print plan
+            plan = result.plan
+            click.echo(f"\n=== Orchestration Plan ===", err=True)
+            click.echo(f"Agents: {', '.join(plan.agents_to_run)}", err=True)
+            click.echo(f"Auto-approve: {plan.auto_approve}", err=True)
+
+            # Print results
+            click.echo(f"\n=== Agent Results ===", err=True)
+            for ar in result.agent_results:
+                status = "PASS" if ar.success else "FAIL"
+                click.echo(f"  [{status}] {ar.agent_name}: {len(ar.files_generated)} files", err=True)
+                if ar.error:
+                    click.echo(f"         error: {ar.error}", err=True)
+
+            # Print conflicts
+            if result.conflicts:
+                click.echo(f"\n=== Conflicts ===", err=True)
+                for c in result.conflicts:
+                    click.echo(f"  {c['type']}: {c['resolution']}", err=True)
+
+            # Print recommendation and gates
+            click.echo(f"\n=== Recommendation ===", err=True)
+            click.echo(f"  {result.recommendation}", err=True)
+            click.echo(f"\n=== Gates ===", err=True)
+            for g in result.gates_created:
+                click.echo(f"  [ ] {g}", err=True)
+    except CloneError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+
+@main.command()
+@click.argument("repo_url")
 @click.option("--output-dir", default="./onboarding-output", type=click.Path())
 @click.option("--criticality", type=click.Choice(["low", "medium", "high", "critical"]), default="medium")
 @click.option("--llm", "use_llm", is_flag=True, default=None, help="Enable Claude LLM (auto-detects credentials if omitted).")

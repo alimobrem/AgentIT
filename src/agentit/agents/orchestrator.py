@@ -57,9 +57,10 @@ class FleetOrchestrator:
     - Track overall onboarding status
     """
 
-    def __init__(self, report: AssessmentReport, output_dir: Path):
+    def __init__(self, report: AssessmentReport, output_dir: Path, store: object | None = None):
         self.report = report
         self.output_dir = Path(output_dir)
+        self._store = store
         self._events: list[dict] = []
 
     def plan(self) -> OrchestrationPlan:
@@ -264,6 +265,14 @@ class FleetOrchestrator:
             "action": action,
             "summary": summary,
         })
+        if self._store is not None:
+            self._store.log_event(
+                agent_name,
+                action,
+                self.report.repo_name,
+                "info",
+                summary,
+            )
 
     def _write_summary(
         self,

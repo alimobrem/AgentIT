@@ -12,10 +12,6 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.responses import StreamingResponse
 from fastapi.templating import Jinja2Templates
 
-from agentit.agents.cicd import CICDAgent
-from agentit.agents.compliance import ComplianceAgent
-from agentit.agents.hardening import HardeningAgent
-from agentit.agents.observability import ObservabilityAgent
 from agentit.cloner import clone_repo
 from agentit.models import AssessmentReport, Severity
 from agentit.portal.cluster_apply import apply_manifests_to_cluster
@@ -192,29 +188,30 @@ async def api_detail(assessment_id: str) -> JSONResponse:
 
 
 def _run_onboarding(report: AssessmentReport) -> list[dict]:
-    """Run all 4 agents and collect generated files with categories."""
+    """Run orchestrated onboarding via FleetOrchestrator and collect generated files."""
+    from agentit.agents.orchestrator import FleetOrchestrator
+
     with tempfile.TemporaryDirectory() as tmpdir:
         base = Path(tmpdir)
-
-        agents = [
-            ("security", HardeningAgent(report, base / "security")),
-            ("observability", ObservabilityAgent(report, base / "observability")),
-            ("cicd", CICDAgent(report, base / "cicd")),
-            ("compliance", ComplianceAgent(report, base / "compliance")),
-        ]
+        orch = FleetOrchestrator(report=report, output_dir=base, store=get_store())
+        result = orch.run()
 
         all_files: list[dict] = []
-        for category, agent in agents:
-            result = agent.run()
-            for gf in result.files:
-                all_files.append(
-                    {
-                        "category": category,
-                        "path": gf.path,
-                        "description": gf.description,
-                        "content": gf.content,
-                    }
-                )
+        for ar in result.agent_results:
+            if not ar.success:
+                continue
+            category_dir = base / ar.category
+            for rel_path in ar.files_generated:
+                file_path = category_dir / rel_path
+                if file_path.is_file():
+                    all_files.append(
+                        {
+                            "category": ar.category,
+                            "path": rel_path,
+                            "description": rel_path,
+                            "content": file_path.read_text(encoding="utf-8"),
+                        }
+                    )
         return all_files
 
 
