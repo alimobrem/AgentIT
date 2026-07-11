@@ -7,20 +7,28 @@
 </p>
 
 {% if request.query_params.get('pr_url') %}
-<div style="background: #1a4a2e; border: 1px solid #238636; padding: 1rem; border-radius: 8px; margin-bottom: 1rem;">
-  PR created: <a href="{{ request.query_params.get('pr_url') | safe_url }}" target="_blank" style="color: #58a6ff;">{{ request.query_params.get('pr_url') }}</a>
+<div class="alert alert-success">
+  PR created: <a href="{{ request.query_params.get('pr_url') | safe_url }}" target="_blank">{{ request.query_params.get('pr_url') }}</a>
 </div>
 {% endif %}
 {% if request.query_params.get('error') %}
-<div style="background: #4a1a1a; border: 1px solid #e94560; padding: 1rem; border-radius: 8px; margin-bottom: 1rem;">
+<div class="alert alert-error">
   Error: {{ request.query_params.get('error') }}
 </div>
 {% endif %}
-{% if request.query_params.get('applied') %}
-<div style="background: #1a4a2e; border: 1px solid #238636; padding: 1rem; border-radius: 8px; margin-bottom: 1rem;">
-  Applied {{ request.query_params.get('applied') }} manifests to cluster
+{% if request.query_params.get('applied') is not none %}
+{% set count = request.query_params.get('applied')|int %}
+{% if count > 0 %}
+<div class="alert alert-success">
+  Applied {{ count }} manifest{{ 's' if count != 1 else '' }} to cluster
   {% if request.query_params.get('dry_run') == 'true' %} (dry run){% endif %}
 </div>
+{% else %}
+<div class="alert alert-warn">
+  No YAML manifests were applicable. Non-YAML files (Containerfile, .sh, .md, .json) are skipped.
+  {% if request.query_params.get('errors') %}Errors: {{ request.query_params.get('errors') }}{% endif %}
+</div>
+{% endif %}
 {% endif %}
 
 <div class="action-bar">

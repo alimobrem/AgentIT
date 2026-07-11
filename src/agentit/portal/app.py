@@ -321,6 +321,7 @@ async def apply_to_cluster(request: Request, assessment_id: str):
         url=(
             f"/assessments/{assessment_id}/onboard-results"
             f"?applied={applied}&skipped={skipped}&errors={errs}"
+            f"&dry_run={'true' if dry_run else 'false'}"
         ),
         status_code=303,
     )
