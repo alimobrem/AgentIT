@@ -337,7 +337,20 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
 
     orchestration = s.get_orchestration(assessment_id) or {}
     apply_results = s.get_apply_results(assessment_id)
-    missing_operators = s.get_missing_operators(assessment_id)
+
+    missing_operators = {}
+    if apply_results:
+        from agentit.portal.cluster_apply import _CRD_TO_OPERATOR
+        for skip_reason in apply_results.get("skipped", []):
+            if "CRD not installed" in skip_reason:
+                for kind, op in _CRD_TO_OPERATOR.items():
+                    if kind in skip_reason:
+                        missing_operators[kind] = op
+        for err in apply_results.get("errors", []):
+            if "resource mapping not found" in err.lower():
+                for kind, op in _CRD_TO_OPERATOR.items():
+                    if kind.lower() in err.lower():
+                        missing_operators[kind] = op
 
     return templates.TemplateResponse(
         request,
@@ -411,8 +424,6 @@ async def apply_to_cluster(request: Request, assessment_id: str):
     )
 
     s.save_apply_results(assessment_id, results, namespace, dry_run)
-    if results.get("missing_operators"):
-        s.save_missing_operators(assessment_id, results["missing_operators"])
 
     applied = len(results["applied"])
     skipped = len(results["skipped"])

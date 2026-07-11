@@ -27,6 +27,12 @@
   Error: {{ request.query_params.get('error') }}
 </div>
 {% endif %}
+{% if request.query_params.get('operator_installed') %}
+<div class="alert alert-success">
+  Operator <strong>{{ request.query_params.get('operator_installed') }}</strong> installation started.
+  It may take 1-2 minutes to become available. Re-run Dry Run to verify.
+</div>
+{% endif %}
 {% if apply_results %}
 <h2 class="section-title">Cluster Apply Report{% if apply_results.dry_run %} (Dry Run){% endif %}</h2>
 <p class="text-muted mb-1">Namespace: <strong>{{ apply_results.namespace }}</strong> &mdash; {{ apply_results.created_at[:19] }}</p>
@@ -58,10 +64,55 @@
 <ul class="finding-list mb-1">
   {% for f in apply_results.errors %}
   <li class="finding-item finding-critical">
-    <span class="badge badge-critical">error</span> {{ f }}
+    <span class="badge badge-critical">error</span>
+    <span class="text-sm">{{ f.split(':')[0] }}</span>
+    {% if 'Forbidden' in f %}
+    <span class="text-muted text-sm"> — Insufficient RBAC permissions. Run: <code>oc adm policy add-cluster-role-to-user edit system:serviceaccount:agentit:default</code></span>
+    {% elif 'resource mapping not found' in f %}
+    <span class="text-muted text-sm"> — Required CRD not installed on this cluster (see prerequisites below)</span>
+    {% endif %}
   </li>
   {% endfor %}
 </ul>
+{% endif %}
+
+{% if missing_operators %}
+<h3 class="text-sm mb-1">Missing Prerequisites</h3>
+<div class="alert alert-warn mb-1">
+  The following operators are needed for skipped manifests. Install them to enable full onboarding.
+</div>
+<table class="mb-2">
+  <thead>
+    <tr><th>Operator</th><th>Required For</th><th>Source</th><th>Action</th></tr>
+  </thead>
+  <tbody>
+    {% for kind, op in missing_operators.items() %}
+    <tr>
+      <td class="text-bold">{{ op.name }}</td>
+      <td><code>{{ kind }}</code></td>
+      <td class="text-sm text-muted">{{ op.get('source', '') }}</td>
+      <td>
+        {% if op.get('package') %}
+        <form method="post" action="/api/install-operator" class="inline-form">
+          <input type="hidden" name="package" value="{{ op.package }}">
+          <input type="hidden" name="channel" value="{{ op.get('channel', 'stable') }}">
+          <input type="hidden" name="source" value="{{ op.source }}">
+          <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
+          <button type="submit" class="btn btn-sm btn-green">
+            <span class="btn-label">Install</span>
+            <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+          </button>
+        </form>
+        {% elif op.get('note') %}
+        <span class="text-sm text-muted">{{ op.note }}</span>
+        {% else %}
+        <span class="text-muted">Manual install required</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
 {% endif %}
 
 {% elif request.query_params.get('applied') is not none %}
