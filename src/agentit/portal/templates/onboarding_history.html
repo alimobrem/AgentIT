@@ -14,6 +14,7 @@
       <th>Date</th>
       <th>Files</th>
       <th>Categories</th>
+      <th>PR</th>
       <th>Recommendation</th>
       <th>Action</th>
     </tr>
@@ -24,6 +25,24 @@
       <td class="text-sm">{{ ob.created_at[:19] }}</td>
       <td class="text-bold">{{ ob.file_count }}</td>
       <td class="text-sm">{{ ob.categories | join(", ") }}</td>
+      <td class="text-sm">
+        {% if ob.pr_status %}
+          {% if ob.pr_status.state == 'merged' %}
+            <span class="badge badge-low">Merged</span>
+          {% elif ob.pr_status.state == 'open' %}
+            <span class="badge badge-medium">Open</span>
+          {% elif ob.pr_status.state == 'closed' %}
+            <span class="badge badge-critical">Closed</span>
+          {% else %}
+            <span class="badge badge-info">Created</span>
+          {% endif %}
+          <a href="{{ ob.pr_status.html_url | safe_url }}" target="_blank" hx-boost="false" class="text-sm">View</a>
+        {% elif ob.pr_url %}
+          <a href="{{ ob.pr_url | safe_url }}" target="_blank" hx-boost="false" class="text-sm">Link</a>
+        {% else %}
+          <span class="text-muted">—</span>
+        {% endif %}
+      </td>
       <td class="text-sm">
         {% if ob.recommendation %}
           {{ ob.recommendation[:80] }}{% if ob.recommendation|length > 80 %}&hellip;{% endif %}

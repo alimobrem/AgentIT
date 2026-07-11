@@ -33,6 +33,59 @@ def _parse_owner_repo(repo_url: str) -> tuple[str, str]:
     return parts[-2], parts[-1]
 
 
+def get_pr_status(pr_url: str) -> dict:
+    """Check the merge status of a GitHub PR.
+
+    Accepts full PR URLs (https://github.com/owner/repo/pull/N)
+    or compare URLs (https://github.com/owner/repo/compare/branch).
+    Returns {"state": "open"|"merged"|"closed"|"unknown", "merged_at": ..., "html_url": ...}.
+    """
+    try:
+        token = _get_token()
+        hdrs = _headers(token)
+        parts = pr_url.rstrip("/").split("/")
+
+        if "/pull/" in pr_url and parts[-2] == "pull":
+            owner, repo, pr_number = parts[-4], parts[-3], parts[-1]
+            resp = requests.get(
+                f"{_API}/repos/{owner}/{repo}/pulls/{pr_number}",
+                headers=hdrs, timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            state = "merged" if data.get("merged") else data.get("state", "unknown")
+            return {
+                "state": state,
+                "merged_at": data.get("merged_at", ""),
+                "html_url": data.get("html_url", pr_url),
+            }
+
+        if "/compare/" in pr_url:
+            owner, repo = parts[-3], parts[-2]
+            branch = parts[-1]
+            resp = requests.get(
+                f"{_API}/repos/{owner}/{repo}/pulls",
+                headers=hdrs, timeout=10,
+                params={"head": f"{owner}:{branch}", "state": "all", "per_page": 1},
+            )
+            resp.raise_for_status()
+            prs = resp.json()
+            if prs:
+                pr = prs[0]
+                state = "merged" if pr.get("merged_at") else pr.get("state", "unknown")
+                return {
+                    "state": state,
+                    "merged_at": pr.get("merged_at", ""),
+                    "html_url": pr.get("html_url", pr_url),
+                }
+            return {"state": "unknown", "merged_at": "", "html_url": pr_url}
+
+        return {"state": "unknown", "merged_at": "", "html_url": pr_url}
+    except Exception:
+        logger.debug("Failed to check PR status for %s", pr_url, exc_info=True)
+        return {"state": "unknown", "merged_at": "", "html_url": pr_url}
+
+
 def create_onboarding_pr(
     repo_url: str,
     repo_name: str,

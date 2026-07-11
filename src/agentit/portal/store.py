@@ -47,7 +47,13 @@ class AssessmentStore:
                 "ALTER TABLE onboarding_results ADD COLUMN orchestration_json TEXT DEFAULT '{}'"
             )
         except Exception:
-            pass  # Column already exists
+            pass
+        try:
+            self._conn.execute(
+                "ALTER TABLE onboarding_results ADD COLUMN pr_url TEXT DEFAULT ''"
+            )
+        except Exception:
+            pass
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS events (
@@ -314,10 +320,23 @@ class AssessmentStore:
             return None
         return json.loads(row["orchestration_json"])
 
+    def update_pr_url(self, assessment_id: str, pr_url: str) -> None:
+        self._conn.execute(
+            """
+            UPDATE onboarding_results SET pr_url = ?
+            WHERE id = (
+                SELECT id FROM onboarding_results
+                WHERE assessment_id = ? ORDER BY created_at DESC LIMIT 1
+            )
+            """,
+            (pr_url, assessment_id),
+        )
+        self._conn.commit()
+
     def list_onboardings(self, assessment_id: str) -> list[dict]:
         rows = self._conn.execute(
             """
-            SELECT id, assessment_id, created_at, files_json, orchestration_json
+            SELECT id, assessment_id, created_at, files_json, orchestration_json, pr_url
             FROM onboarding_results WHERE assessment_id = ?
             ORDER BY created_at DESC
             """,
@@ -335,6 +354,7 @@ class AssessmentStore:
                 "categories": categories,
                 "recommendation": orch.get("recommendation", ""),
                 "auto_approve": orch.get("auto_approve", False),
+                "pr_url": r["pr_url"] or "",
             })
         return result
 

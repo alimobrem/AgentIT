@@ -436,6 +436,16 @@ async def onboarding_history(request: Request, assessment_id: str) -> HTMLRespon
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
     onboardings = s.list_onboardings(assessment_id)
+    pr_urls = [ob["pr_url"] for ob in onboardings if ob.get("pr_url")]
+    if pr_urls:
+        from agentit.portal.github_pr import get_pr_status
+        statuses = await asyncio.gather(
+            *(asyncio.to_thread(get_pr_status, url) for url in pr_urls)
+        )
+        status_map = dict(zip(pr_urls, statuses))
+        for ob in onboardings:
+            if ob.get("pr_url"):
+                ob["pr_status"] = status_map.get(ob["pr_url"], {})
     return templates.TemplateResponse(request, "onboarding_history.html", {
         "report": report,
         "onboardings": onboardings,
@@ -499,6 +509,13 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
                     if kind.lower() in err.lower():
                         missing_operators[kind] = op
 
+    pr_status = None
+    onboardings = s.list_onboardings(assessment_id)
+    pr_url = onboardings[0]["pr_url"] if onboardings and onboardings[0]["pr_url"] else ""
+    if pr_url:
+        from agentit.portal.github_pr import get_pr_status
+        pr_status = await asyncio.to_thread(get_pr_status, pr_url)
+
     return templates.TemplateResponse(
         request,
         "onboard_results.html",
@@ -509,6 +526,7 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
             "orchestration": orchestration,
             "apply_results": apply_results,
             "missing_operators": missing_operators,
+            "pr_status": pr_status,
         },
     )
 
@@ -702,6 +720,9 @@ async def create_pr(assessment_id: str):
             url=f"/assessments/{assessment_id}/onboard-results?error={quote(result['error'][:200])}",
             status_code=303,
         )
+    s.update_pr_url(assessment_id, result["pr_url"])
+    s.log_event("portal", "pr-created", report.repo_name,
+                "info", f"PR created: {result['pr_url']}")
     return RedirectResponse(
         url=f"/assessments/{assessment_id}/onboard-results?pr_url={result['pr_url']}",
         status_code=303,
@@ -737,6 +758,7 @@ async def create_agent_prs_route(assessment_id: str):
 
     if successful:
         pr_list = ", ".join(f"{r['agent_name']}" for r in successful)
+        s.update_pr_url(assessment_id, successful[0]["pr_url"])
         s.log_event("orchestrator", "agent-prs-created", report.repo_name,
                     "info", f"Created {len(successful)} per-agent PRs: {pr_list}")
 

@@ -36,6 +36,26 @@
 </div>
 {% endif %}
 
+{# ── Persistent PR Status ────────────────────────────────────────── #}
+{% if pr_status %}
+<div class="alert {% if pr_status.state == 'merged' %}alert-success{% elif pr_status.state == 'open' %}alert-warn{% else %}alert-info{% endif %}">
+  {% if pr_status.state == 'merged' %}
+    <span class="badge badge-low">MERGED</span>
+    PR merged{% if pr_status.merged_at %} on {{ pr_status.merged_at[:10] }}{% endif %} —
+  {% elif pr_status.state == 'open' %}
+    <span class="badge badge-medium">OPEN</span>
+    PR awaiting review —
+  {% elif pr_status.state == 'closed' %}
+    <span class="badge badge-critical">CLOSED</span>
+    PR closed without merging —
+  {% else %}
+    <span class="badge badge-info">PR</span>
+    PR created —
+  {% endif %}
+  <a href="{{ pr_status.html_url | safe_url }}" target="_blank" hx-boost="false">{{ pr_status.html_url }}</a>
+</div>
+{% endif %}
+
 {# ── Primary Actions ─────────────────────────────────────────────── #}
 {% set total = namespace(count=0) %}
 {% for cat, files in grouped.items() %}{% set total.count = total.count + files|length %}{% endfor %}
