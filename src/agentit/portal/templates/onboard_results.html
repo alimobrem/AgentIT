@@ -25,6 +25,11 @@
 {% if request.query_params.get('error') %}
 <div class="alert alert-error">{{ request.query_params.get('error') }}</div>
 {% endif %}
+{% if request.query_params.get('gate_approved') %}
+<div class="alert alert-success">
+  Gate approved — manifests applied to cluster.
+</div>
+{% endif %}
 {% if request.query_params.get('operator_installed') %}
 <div class="alert alert-success">
   <strong>{{ request.query_params.get('operator_installed') }}</strong> installation started. Re-run Dry Run in 1-2 minutes to verify.

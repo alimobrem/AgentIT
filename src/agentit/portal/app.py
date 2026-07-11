@@ -691,6 +691,32 @@ async def api_slos(assessment_id: str):
 # ── Settings + Auto-Mode ───────────────────────────────────────────────
 
 
+@app.get("/settings", response_class=HTMLResponse)
+async def settings_page(request: Request) -> HTMLResponse:
+    s = get_store()
+    auto_mode = s.get_setting("auto_mode") in ("true", "1", "on")
+    llm_available = _get_llm_client() is not None
+    recent_actions = s.list_events_by_agent("auto-mode", limit=20)
+    return templates.TemplateResponse(request, "settings.html", {
+        "auto_mode": auto_mode,
+        "llm_available": llm_available,
+        "recent_actions": recent_actions,
+    })
+
+
+@app.post("/settings/auto-mode", response_model=None)
+async def toggle_auto_mode(request: Request):
+    form = await request.form()
+    value = str(form.get("value", "false")).lower()
+    s = get_store()
+    s.set_setting("auto_mode", value)
+    s.log_event(
+        "portal", "auto-mode-toggled", None,
+        "info", f"Auto-mode {'enabled' if value == 'true' else 'disabled'}",
+    )
+    return RedirectResponse(url="/settings", status_code=303)
+
+
 @app.get("/api/settings")
 async def api_settings():
     return JSONResponse(get_store().list_settings())

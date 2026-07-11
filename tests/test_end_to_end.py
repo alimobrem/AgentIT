@@ -174,8 +174,8 @@ def test_onboard_generates_files_for_all_dimensions(client, _override_store):
 # ------------------------------------------------------------------
 
 
-def test_onboard_creates_gate(client, _override_store):
-    """POST onboard creates a pending gate for this assessment."""
+def test_onboard_does_not_auto_create_gate(client, _override_store):
+    """POST onboard should NOT auto-create a gate — gates are only for risky actions."""
     store = _override_store
     report = _make_report_with_findings("gate-repo")
     aid = store.save(report)
@@ -183,9 +183,8 @@ def test_onboard_creates_gate(client, _override_store):
     client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
 
     pending = store.list_gates(status="pending")
-    assert len(pending) >= 1
     gate_aids = [g["assessment_id"] for g in pending]
-    assert aid in gate_aids
+    assert aid not in gate_aids
 
 
 # ------------------------------------------------------------------
