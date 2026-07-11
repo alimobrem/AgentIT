@@ -158,8 +158,8 @@ def watch(repo_url: str, interval: int, criticality: str, use_llm: bool | None, 
                             "delta": current_score - (previous_score or current_score),
                             "findings_count": sum(len(s.findings) for s in report.scores),
                         }, timeout=10)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        click.echo(f"Webhook POST failed: {exc}", err=True)
 
                 previous_score = current_score
 
@@ -266,233 +266,94 @@ def onboard(repo_url: str, output_dir: str, criticality: str, use_llm: bool, llm
         sys.exit(1)
 
 
-@main.command("vuln-watch")
-@click.option("--interval", default=21600, type=int, help="Scan interval in seconds (default: 6 hours).")
-def vuln_watch(interval: int) -> None:
-    """Long-lived vulnerability watcher — monitors for CVE events and rescans."""
-    import time
+@main.command()
+@click.option("--topics", default="agentit-events", help="Comma-separated Kafka topics.")
+@click.option("--group-id", default="agentit-consumers", help="Kafka consumer group ID.")
+def consume(topics: str, group_id: str) -> None:
+    """Start a blocking Kafka consumer that dispatches events to watchers."""
     from agentit.consumer import EventConsumer
     from agentit.events import get_publisher
     from agentit.portal.store import AssessmentStore
 
-    click.echo(f"Starting vulnerability watcher (interval={interval}s)...", err=True)
-    consumer = EventConsumer(
-        topics=["agentit-events"],
-        group_id="agentit-vuln-watcher",
-    )
+    topic_list = [t.strip() for t in topics.split(",") if t.strip()]
+    consumer = EventConsumer(topics=topic_list, group_id=group_id)
+
+    if not consumer.connected:
+        click.echo("Kafka unavailable — cannot start consumer.", err=True)
+        sys.exit(1)
+
     publisher = get_publisher()
     store = AssessmentStore()
 
-    def handle_event(event: dict) -> None:
+    def handler(event: dict) -> None:
         action = event.get("action", "")
-        target = event.get("targetApp", "")
+        target = event.get("targetApp", "unknown")
+        click.echo(f"[consume] {action} -> {target}", err=True)
+
         if action == "assessment-complete":
-            click.echo(f"[vuln-watch] Assessment completed for {target}, checking for CVEs...", err=True)
             publisher.publish(
                 "agentit-events",
-                agent_id="vuln-watcher",
+                agent_id="consumer-dispatch",
                 action="cve-check-triggered",
                 target_app=target,
                 summary=f"CVE check triggered by assessment of {target}",
             )
+        elif action == "drift-detected":
+            click.echo(f"[consume] Drift detected for {target}", err=True)
+        elif action == "slo-breach":
+            click.echo(f"[consume] SLO breach for {target}", err=True)
 
-    while True:
-        try:
-            events = consumer.poll_once()
-            for event in events:
-                handle_event(event)
+    click.echo(f"Consuming topics={topic_list} group={group_id}...", err=True)
+    consumer.consume(handler)
 
-            fleet = store.get_fleet_data()
-            click.echo(f"[vuln-watch] Monitoring {len(fleet)} apps", err=True)
 
-            from agentit.automode import AutoMode
-            from agentit.remediation_loop import RemediationLoop
+@main.command("vuln-watch")
+@click.option("--interval", default=21600, type=int, help="Scan interval in seconds (default: 6 hours).")
+def vuln_watch(interval: int) -> None:
+    """Long-lived vulnerability watcher — monitors for CVE events and rescans."""
+    from agentit.consumer import EventConsumer
+    from agentit.events import get_publisher
+    from agentit.portal.store import AssessmentStore
+    from agentit.watchers.vuln_watcher import VulnWatcher
 
-            auto = AutoMode(store=store, publisher=publisher, llm_client=None)
-            loop = RemediationLoop(store=store, publisher=publisher)
-
-            for app_data in fleet:
-                if app_data.get("critical_count", 0) > 0:
-                    publisher.publish(
-                        "agentit-alerts",
-                        agent_id="vuln-watcher",
-                        action="critical-findings-detected",
-                        target_app=app_data["repo_name"],
-                        severity="warning",
-                        summary=f"{app_data['critical_count']} critical/high findings in {app_data['repo_name']}",
-                    )
-                    if auto.enabled:
-                        click.echo(f"[vuln-watch] Auto-mode: running remediation loop for {app_data['repo_name']}...", err=True)
-                        try:
-                            result = loop.trigger(
-                                repo_url=app_data["repo_url"],
-                                app_name=app_data["repo_name"],
-                                criticality=app_data.get("criticality", "medium"),
-                                reason=f"critical findings detected ({app_data['critical_count']})",
-                            )
-                            click.echo(f"[vuln-watch] Loop result: {result['outcome']} at step {result.get('step', '?')}", err=True)
-                        except Exception as exc:
-                            click.echo(f"[vuln-watch] Remediation loop failed: {exc}", err=True)
-        except KeyboardInterrupt:
-            click.echo("Vulnerability watcher stopped.", err=True)
-            break
-        except Exception as exc:
-            click.echo(f"[vuln-watch] Error: {exc}", err=True)
-
-        try:
-            time.sleep(interval)
-        except KeyboardInterrupt:
-            click.echo("Vulnerability watcher stopped.", err=True)
-            break
+    consumer = EventConsumer(topics=["agentit-events"], group_id="agentit-vuln-watcher")
+    watcher = VulnWatcher(
+        publisher=get_publisher(),
+        store=AssessmentStore(),
+        consumer=consumer,
+        interval=interval,
+    )
+    watcher.run()
 
 
 @main.command("slo-track")
 @click.option("--interval", default=300, type=int, help="Update interval in seconds (default: 5 minutes).")
 def slo_track(interval: int) -> None:
     """Long-lived SLO tracker — updates SLO current values and alerts on breaches."""
-    import time
     from agentit.consumer import EventConsumer
     from agentit.events import get_publisher
     from agentit.portal.store import AssessmentStore
+    from agentit.watchers.slo_tracker import SloTracker
 
-    click.echo(f"Starting SLO tracker (interval={interval}s)...", err=True)
-    consumer = EventConsumer(
-        topics=["agentit-events"],
-        group_id="agentit-slo-tracker",
+    consumer = EventConsumer(topics=["agentit-events"], group_id="agentit-slo-tracker")
+    tracker = SloTracker(
+        publisher=get_publisher(),
+        store=AssessmentStore(),
+        consumer=consumer,
+        interval=interval,
     )
-    publisher = get_publisher()
-    store = AssessmentStore()
-
-    while True:
-        try:
-            consumer.poll_once()
-
-            assessments = store.list_all()
-            breached_apps = 0
-            for a in assessments:
-                slos = store.list_slos(a["id"])
-                app_breaches = [s for s in slos if s["status"] == "breached"]
-                for slo in app_breaches:
-                    publisher.publish(
-                        "agentit-alerts",
-                        agent_id="slo-tracker",
-                        action="slo-breach",
-                        target_app=a["repo_name"],
-                        severity="critical",
-                        summary=f"SLO breached: {slo['metric_name']} (target={slo['target_value']}, current={slo['current_value']})",
-                    )
-
-                if app_breaches:
-                    breached_apps += 1
-                    # Check if there was a recent apply — if so, recommend rollback
-                    apply_result = store.get_apply_results(a["id"])
-                    if apply_result and apply_result.get("applied"):
-                        publisher.publish(
-                            "agentit-alerts",
-                            agent_id="slo-tracker",
-                            action="rollback-recommended",
-                            target_app=a["repo_name"],
-                            severity="critical",
-                            summary=f"SLO breach after recent apply — consider rollback: kubectl argo rollouts undo {a['repo_name']}",
-                        )
-                        store.create_gate(
-                            a["id"], "rollback-review",
-                            f"SLO breach detected for {a['repo_name']} after recent apply. "
-                            f"Breached: {', '.join(s['metric_name'] for s in app_breaches)}. "
-                            f"Review and decide: rollback or investigate.",
-                        )
-                        click.echo(f"[slo-track] ROLLBACK RECOMMENDED: {a['repo_name']}", err=True)
-
-            click.echo(f"[slo-track] Checked {len(assessments)} apps, {breached_apps} with breaches", err=True)
-        except KeyboardInterrupt:
-            click.echo("SLO tracker stopped.", err=True)
-            break
-        except Exception as exc:
-            click.echo(f"[slo-track] Error: {exc}", err=True)
-
-        try:
-            time.sleep(interval)
-        except KeyboardInterrupt:
-            click.echo("SLO tracker stopped.", err=True)
-            break
+    tracker.run()
 
 
 @main.command("drift-detect")
 @click.option("--interval", default=600, type=int, help="Poll interval in seconds (default: 10 minutes).")
 def drift_detect(interval: int) -> None:
     """Long-lived drift detector — checks Argo CD apps for out-of-sync state."""
-    import subprocess
-    import time
     from agentit.events import get_publisher
+    from agentit.watchers.drift_detector import DriftDetector
 
-    click.echo(f"Starting drift detector (interval={interval}s)...", err=True)
-    publisher = get_publisher()
-
-    while True:
-        try:
-            result = subprocess.run(
-                ["oc", "get", "applications.argoproj.io", "-A", "-o", "json"],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode != 0:
-                result = subprocess.run(
-                    ["kubectl", "get", "applications.argoproj.io", "-A", "-o", "json"],
-                    capture_output=True, text=True, timeout=30,
-                )
-
-            if result.returncode == 0:
-                import json
-                apps = json.loads(result.stdout)
-                items = apps.get("items", [])
-                for app in items:
-                    name = app.get("metadata", {}).get("name", "unknown")
-                    status = app.get("status", {})
-                    sync_status = status.get("sync", {}).get("status", "Unknown")
-                    health = status.get("health", {}).get("status", "Unknown")
-
-                    if sync_status == "OutOfSync":
-                        publisher.publish(
-                            "agentit-events",
-                            agent_id="drift-detector",
-                            action="drift-detected",
-                            target_app=name,
-                            severity="warning",
-                            summary=f"Argo CD app '{name}' is OutOfSync (health: {health})",
-                        )
-                        click.echo(f"[drift-detect] DRIFT: {name} is OutOfSync", err=True)
-
-                        # Auto-sync if auto-mode is on
-                        from agentit.automode import AutoMode
-                        from agentit.portal.store import AssessmentStore
-                        _store = AssessmentStore()
-                        _auto = AutoMode(store=_store, publisher=publisher)
-                        if _auto.enabled:
-                            click.echo(f"[drift-detect] Auto-syncing {name}...", err=True)
-                            sync_result = subprocess.run(
-                                ["oc", "-n", "openshift-gitops", "patch", "applications.argoproj.io", name,
-                                 "--type=merge", "-p", '{"operation":{"sync":{"revision":"HEAD"}}}'],
-                                capture_output=True, text=True, timeout=30,
-                            )
-                            if sync_result.returncode == 0:
-                                click.echo(f"[drift-detect] Sync triggered for {name}", err=True)
-                            else:
-                                click.echo(f"[drift-detect] Sync failed: {sync_result.stderr[:100]}", err=True)
-
-                click.echo(f"[drift-detect] Checked {len(items)} Argo CD apps", err=True)
-            else:
-                click.echo("[drift-detect] No Argo CD access — skipping", err=True)
-
-        except KeyboardInterrupt:
-            click.echo("Drift detector stopped.", err=True)
-            break
-        except Exception as exc:
-            click.echo(f"[drift-detect] Error: {exc}", err=True)
-
-        try:
-            time.sleep(interval)
-        except KeyboardInterrupt:
-            click.echo("Drift detector stopped.", err=True)
-            break
+    detector = DriftDetector(publisher=get_publisher(), interval=interval)
+    detector.run()
 
 
 @main.command("self-assess")
@@ -538,7 +399,7 @@ def self_assess(repo_url: str, criticality: str, auto_apply: bool, use_llm: bool
                         from agentit.llm import LLMClient
                         llm_client = LLMClient(model=llm_model or "claude-sonnet-4-6")
                     except Exception:
-                        pass
+                        click.echo("LLM unavailable — continuing without safety classification.", err=True)
 
                 files = []
                 for ar in result.agent_results:

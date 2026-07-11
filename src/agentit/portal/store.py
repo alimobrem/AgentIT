@@ -151,6 +151,20 @@ class AssessmentStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS remediation_jobs (
+                id TEXT PRIMARY KEY,
+                assessment_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                current_step TEXT DEFAULT '',
+                steps_completed TEXT DEFAULT '[]',
+                error TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         self._conn.commit()
 
     # ── Settings ───────────────────────────────────────────────────────
@@ -719,3 +733,77 @@ class AssessmentStore:
         )
         self._conn.commit()
         return cursor.rowcount > 0
+
+    # ── Remediation Jobs ──────────────────────────────────────────────────
+
+    def create_remediation_job(self, assessment_id: str) -> str:
+        job_id = uuid.uuid4().hex
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO remediation_jobs
+                (id, assessment_id, status, current_step, steps_completed, error, created_at, updated_at)
+            VALUES (?, ?, 'pending', '', '[]', '', ?, ?)
+            """,
+            (job_id, assessment_id, now, now),
+        )
+        self._conn.commit()
+        return job_id
+
+    def update_remediation_job(
+        self, job_id: str, status: str, current_step: str = "", error: str = "",
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        # Append current_step to steps_completed when transitioning
+        if current_step:
+            row = self._conn.execute(
+                "SELECT steps_completed FROM remediation_jobs WHERE id = ?", (job_id,),
+            ).fetchone()
+            steps = json.loads(row["steps_completed"]) if row else []
+            if current_step not in steps:
+                steps.append(current_step)
+            self._conn.execute(
+                """
+                UPDATE remediation_jobs
+                SET status = ?, current_step = ?, steps_completed = ?, error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (status, current_step, json.dumps(steps), error, now, job_id),
+            )
+        else:
+            self._conn.execute(
+                """
+                UPDATE remediation_jobs
+                SET status = ?, error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (status, error, now, job_id),
+            )
+        self._conn.commit()
+
+    def get_remediation_job(self, job_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM remediation_jobs WHERE id = ?", (job_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        d["steps_completed"] = json.loads(d["steps_completed"])
+        return d
+
+    def list_remediation_jobs(self, assessment_id: str | None = None) -> list[dict]:
+        if assessment_id is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM remediation_jobs WHERE assessment_id = ? ORDER BY created_at DESC",
+                (assessment_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM remediation_jobs ORDER BY created_at DESC",
+            ).fetchall()
+        result = []
+        for row in rows:
+            d = dict(row)
+            d["steps_completed"] = json.loads(d["steps_completed"])
+            result.append(d)
+        return result

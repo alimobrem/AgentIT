@@ -38,12 +38,13 @@ class TestRemediationLoop:
         assert result["healthy"] is True
         loop.close()
 
-    def test_verify_slos_breached(self):
+    @patch("agentit.slo_collector.collect_slo")
+    def test_verify_slos_breached(self, mock_collect):
+        mock_collect.return_value = 5.0  # 5% error rate, well above 0.01 target
         store = make_store()
         report = make_report()
         aid = store.save(report)
-        sid = store.save_slo(aid, "error_rate", 0.01)
-        store.update_slo(sid, 0.5, "breached")
+        store.save_slo(aid, "error_rate", 0.01)
 
         loop = RemediationLoop(store=store, timeout=2)
         result = loop._verify_slos(aid, "app")

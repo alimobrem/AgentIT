@@ -1592,9 +1592,9 @@ async def webhook_auto_apply(request: Request):
 
 @app.post("/api/webhook/remediate")
 async def webhook_remediate(request: Request):
-    """Trigger the full remediation loop: assess → onboard → apply → verify.
+    """Trigger the full remediation loop asynchronously.
 
-    Called by watcher agents or external triggers when an issue is detected.
+    Returns HTTP 202 with a job_id for polling status.
     """
     body = await request.json()
     repo_url = body.get("repo_url")
@@ -1608,15 +1608,27 @@ async def webhook_remediate(request: Request):
     from agentit.remediation_loop import RemediationLoop
     from agentit.events import get_publisher
 
-    loop = RemediationLoop(store=get_store(), publisher=get_publisher())
+    s = get_store()
+    loop = RemediationLoop(store=s, publisher=get_publisher())
     try:
-        result = await asyncio.to_thread(
-            loop.trigger, repo_url, app_name, criticality, reason,
-        )
+        job_id = loop.start(repo_url, app_name, criticality, reason, store=s)
     except Exception as exc:
-        log.exception("Remediation loop failed for %s", app_name)
+        log.exception("Failed to start remediation loop for %s", app_name)
         return JSONResponse({"outcome": "failed", "error": str(exc)}, status_code=500)
-    finally:
-        loop.close()
 
-    return JSONResponse(result)
+    return JSONResponse({"status": "accepted", "job_id": job_id}, status_code=202)
+
+
+@app.get("/api/remediation-jobs/{job_id}")
+async def get_remediation_job(job_id: str):
+    """Return the status of a single remediation job."""
+    job = get_store().get_remediation_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Remediation job not found")
+    return JSONResponse(job)
+
+
+@app.get("/api/remediation-jobs")
+async def list_remediation_jobs(assessment_id: str | None = None):
+    """List remediation jobs, optionally filtered by assessment_id."""
+    return JSONResponse(get_store().list_remediation_jobs(assessment_id))
