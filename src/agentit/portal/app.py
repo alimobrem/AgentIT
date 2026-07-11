@@ -584,6 +584,122 @@ async def create_agent_prs_route(assessment_id: str):
     )
 
 
+# ── Schedules ──────────────────────────────────────────────────────────
+
+
+_CRON_HUMAN = {
+    "0 3 1 * *": "Monthly (1st, 3am UTC)",
+    "0 4 * * 1": "Weekly (Mon 4am UTC)",
+    "0 5 * * 1": "Weekly (Mon 5am UTC)",
+    "0 2 * * 3": "Weekly (Wed 2am UTC)",
+    "0 6 * * 1": "Weekly (Mon 6am UTC)",
+}
+
+_SCHEDULE_FILES = {
+    "compliance-cronworkflow.yaml": ("compliance", "Compliance re-assessment"),
+    "cost-cronworkflow.yaml": ("cost", "Cost optimization report"),
+    "dependency-cronworkflow.yaml": ("dependency", "Dependency scan"),
+    "chaos-schedule.yaml": ("chaos", "Chaos experiments"),
+}
+
+_WATCHER_AGENTS = [
+    {"name": "vuln-watcher", "mode": "Kafka consumer + polling", "interval": "6 hours"},
+    {"name": "slo-tracker", "mode": "Polling", "interval": "5 minutes"},
+    {"name": "drift-detector", "mode": "Argo CD polling", "interval": "10 minutes"},
+]
+
+
+@app.get("/schedules", response_class=HTMLResponse)
+async def schedules_page(request: Request) -> HTMLResponse:
+    import yaml as _yaml
+
+    s = get_store()
+    fleet = s.get_fleet_data()
+    schedules: list[dict] = []
+
+    for app_data in fleet:
+        aid = app_data["id"]
+        files = s.get_onboarding(aid)
+        if not files:
+            continue
+        for f in files:
+            sched_info = _SCHEDULE_FILES.get(f["path"])
+            if sched_info is None:
+                continue
+            agent, desc = sched_info
+            try:
+                doc = _yaml.safe_load(f["content"])
+                cron = doc.get("spec", {}).get("schedule", "unknown")
+                concurrency = doc.get("spec", {}).get("concurrencyPolicy", "Allow")
+            except Exception:
+                cron = "unknown"
+                concurrency = "unknown"
+            override_key = f"schedule:{app_data['repo_name']}:{agent}"
+            override = s.get_setting(override_key)
+            if override:
+                cron = override
+            enabled_key = f"schedule:{app_data['repo_name']}:{agent}:enabled"
+            enabled_val = s.get_setting(enabled_key)
+            enabled = enabled_val != "false"
+
+            schedules.append({
+                "app_name": app_data["repo_name"],
+                "job_name": desc,
+                "schedule": cron,
+                "human_schedule": _CRON_HUMAN.get(cron, cron),
+                "agent": agent,
+                "concurrency": concurrency,
+                "enabled": enabled,
+            })
+
+    agents = s.list_agents()
+    watcher_names = {w["name"] for w in _WATCHER_AGENTS}
+    watchers = []
+    for w in _WATCHER_AGENTS:
+        agent_record = next((a for a in agents if a["agent_name"] == w["name"]), None)
+        watchers.append({
+            **w,
+            "status": agent_record["status"] if agent_record else "not deployed",
+        })
+
+    return templates.TemplateResponse(request, "schedules.html", {
+        "schedules": schedules,
+        "watchers": watchers,
+        "apps": fleet,
+    })
+
+
+@app.post("/schedules/update", response_model=None)
+async def update_schedule(request: Request):
+    form = await request.form()
+    app_name = str(form.get("app_name", ""))
+    job_key = str(form.get("job_key", ""))
+    schedule = str(form.get("schedule", "")).strip()
+    if app_name and job_key and schedule:
+        get_store().set_setting(f"schedule:{app_name}:{job_key}", schedule)
+        get_store().log_event(
+            "portal", "schedule-updated", app_name, "info",
+            f"Schedule for {job_key} updated to: {schedule}",
+        )
+    return RedirectResponse(url="/schedules", status_code=303)
+
+
+@app.post("/schedules/toggle", response_model=None)
+async def toggle_schedule(request: Request):
+    form = await request.form()
+    app_name = str(form.get("app_name", ""))
+    job_key = str(form.get("job_key", ""))
+    enabled = str(form.get("enabled", "true"))
+    if app_name and job_key:
+        get_store().set_setting(f"schedule:{app_name}:{job_key}:enabled", enabled)
+        action = "enabled" if enabled == "true" else "disabled"
+        get_store().log_event(
+            "portal", f"schedule-{action}", app_name, "info",
+            f"Schedule {job_key} {action} for {app_name}",
+        )
+    return RedirectResponse(url="/schedules", status_code=303)
+
+
 # ── Agents ─────────────────────────────────────────────────────────────
 
 

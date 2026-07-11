@@ -1078,3 +1078,71 @@ def test_settings_page_shows_on_when_enabled(client, _override_store):
 def test_settings_nav_link(client):
     resp = client.get("/")
     assert 'href="/settings"' in resp.text
+
+
+# ── Schedules page ─────────────────────────────────────────────────────
+
+
+def test_schedules_page_empty(client, _override_store):
+    resp = client.get("/schedules")
+    assert resp.status_code == 200
+    assert "Scheduled Operations" in resp.text
+
+
+def test_schedules_page_shows_watchers(client, _override_store):
+    resp = client.get("/schedules")
+    assert resp.status_code == 200
+    assert "vuln-watcher" in resp.text
+    assert "slo-tracker" in resp.text
+    assert "drift-detector" in resp.text
+
+
+def test_schedules_nav_link(client):
+    resp = client.get("/")
+    assert 'href="/schedules"' in resp.text
+
+
+def test_update_schedule(client, _override_store):
+    store = _override_store
+    resp = client.post("/schedules/update", data={
+        "app_name": "test-app",
+        "job_key": "compliance",
+        "schedule": "0 6 1 * *",
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+    assert store.get_setting("schedule:test-app:compliance") == "0 6 1 * *"
+
+
+def test_toggle_schedule(client, _override_store):
+    store = _override_store
+    resp = client.post("/schedules/toggle", data={
+        "app_name": "test-app",
+        "job_key": "chaos",
+        "enabled": "false",
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+    assert store.get_setting("schedule:test-app:chaos:enabled") == "false"
+
+
+# ── All pages accessible ──────────────────────────────────────────────
+
+
+def test_all_pages_return_200(client, _override_store):
+    """Smoke test: every page returns 200."""
+    store = _override_store
+    aid = store.save(_make_report())
+    store.register_agent("security", "hardening")
+
+    pages = [
+        "/",
+        "/assess",
+        "/events",
+        "/gates",
+        "/agents",
+        "/schedules",
+        "/settings",
+        f"/assessments/{aid}",
+    ]
+    for page in pages:
+        resp = client.get(page)
+        assert resp.status_code == 200, f"{page} returned {resp.status_code}"
