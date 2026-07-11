@@ -661,17 +661,28 @@ def _get_cluster_health() -> dict:
         "kafka_ready": False, "publisher_ok": False,
     }
 
-    # Argo CD apps
+    # Argo CD apps — only show AgentIT-managed apps
+    managed_names = {"agentit"}
+    try:
+        from agentit.portal.store import AssessmentStore
+        _s = AssessmentStore()
+        for app_data in _s.get_fleet_data():
+            managed_names.add(app_data["repo_name"].lower().replace("_", "-").replace(".", "-"))
+    except Exception:
+        pass
+
     raw = _run_cmd(["oc", "get", "applications.argoproj.io", "-n", "openshift-gitops", "-o", "json"])
     if raw:
         try:
             apps = _json.loads(raw).get("items", [])
             for a in apps:
                 name = a.get("metadata", {}).get("name", "?")
+                if name not in managed_names:
+                    continue
                 sync = a.get("status", {}).get("sync", {}).get("status", "Unknown")
                 health = a.get("status", {}).get("health", {}).get("status", "Unknown")
                 result["argo_apps"].append({"name": name, "sync": sync, "health": health})
-            result["argo_synced"] = all(a["sync"] == "Synced" for a in result["argo_apps"])
+            result["argo_synced"] = all(a["sync"] == "Synced" for a in result["argo_apps"]) if result["argo_apps"] else True
         except Exception:
             pass
 
