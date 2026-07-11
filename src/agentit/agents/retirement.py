@@ -1,0 +1,327 @@
+from __future__ import annotations
+
+import textwrap
+from pathlib import Path
+
+import yaml
+from pydantic import BaseModel
+
+from agentit.models import AssessmentReport
+
+
+class GeneratedFile(BaseModel):
+    path: str
+    content: str
+    description: str
+
+
+class RetirementResult(BaseModel):
+    files: list[GeneratedFile]
+    summary: str = ""
+
+    def model_post_init(self, _context: object) -> None:
+        count = len(self.files)
+        self.summary = (
+            f"Generated {count} retirement artifact{'s' if count != 1 else ''}."
+        )
+
+
+def _sanitize_name(name: str) -> str:
+    """Turn a repo name into a k8s-safe DNS label."""
+    sanitized = name.lower().replace("_", "-").replace(".", "-")[:63]
+    return sanitized.strip("-") or "app"
+
+
+class RetirementAgent:
+    def __init__(self, report: AssessmentReport, output_dir: Path) -> None:
+        self.report = report
+        self.output_dir = Path(output_dir)
+        self._name = _sanitize_name(report.repo_name)
+        self._namespace = "default"
+
+    def run(self) -> RetirementResult:
+        """Generate all retirement/decommission artifacts."""
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        generated: list[GeneratedFile] = []
+
+        generated.append(self._generate_decommission_plan())
+        generated.append(self._generate_cleanup_script())
+        archive = self._generate_data_archive_job()
+        if archive is not None:
+            generated.append(archive)
+
+        return RetirementResult(files=generated)
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+
+    def _write(self, filename: str, content: str) -> None:
+        (self.output_dir / filename).write_text(content)
+
+    def _detected_databases(self) -> list[str]:
+        return [db.name for db in self.report.stack.databases]
+
+    def _has_postgres(self) -> bool:
+        return any(
+            "postgres" in db.lower() for db in self._detected_databases()
+        )
+
+    # ------------------------------------------------------------------
+    # generators
+    # ------------------------------------------------------------------
+
+    def _generate_decommission_plan(self) -> GeneratedFile:
+        name = self._name
+        ns = self._namespace
+        databases = self._detected_databases()
+
+        if databases:
+            db_list = "\n".join(f"   - Back up **{db}** data" for db in databases)
+            data_section = textwrap.dedent(f"""\
+                ## 1. Data Archival
+
+                Detected databases: {', '.join(databases)}
+
+                {db_list}
+                - Verify backup integrity
+                - Store backups in long-term storage (S3 / PVC)
+                - Document backup location and retention policy
+            """)
+        else:
+            data_section = textwrap.dedent("""\
+                ## 1. Data Archival
+
+                No databases detected. Verify no persistent data needs archival.
+            """)
+
+        content = textwrap.dedent(f"""\
+            # Decommission Plan: {name}
+
+            **Namespace:** {ns}
+            **Date:** YYYY-MM-DD
+            **Owner:** TBD
+
+            {data_section}
+            ## 2. DNS / Route Cleanup
+
+            - [ ] Remove DNS entries pointing to this service
+            - [ ] Delete OpenShift Routes / Ingress resources
+            - [ ] Update external load balancer configuration
+            - [ ] Remove service from service mesh (if applicable)
+
+            ## 3. Dependency Notification Checklist
+
+            - [ ] Notify upstream consumers of retirement timeline
+            - [ ] Notify downstream dependencies
+            - [ ] Update service registry / catalog
+            - [ ] Notify on-call / SRE team
+            - [ ] Send announcement to relevant Slack channels
+
+            ## 4. Resource Reclamation
+
+            - [ ] Delete Deployments / StatefulSets
+            - [ ] Delete Services, ConfigMaps, Secrets
+            - [ ] Delete PersistentVolumeClaims (after data archival)
+            - [ ] Delete ServiceAccounts and RBAC bindings
+            - [ ] Delete NetworkPolicies
+            - [ ] Remove CI/CD pipelines
+            - [ ] Archive source repository
+
+            ## 5. Timeline (30-Day Sunset)
+
+            | Day | Action |
+            |-----|--------|
+            | 0   | Announce retirement intent |
+            | 7   | Disable new traffic / mark deprecated |
+            | 14  | Complete data archival |
+            | 21  | Remove from monitoring / alerting |
+            | 30  | Execute cleanup script, delete namespace |
+        """)
+
+        self._write("decommission-plan.md", content)
+        return GeneratedFile(
+            path="decommission-plan.md",
+            content=content,
+            description="Step-by-step decommission plan with 30-day sunset timeline.",
+        )
+
+    def _generate_cleanup_script(self) -> GeneratedFile:
+        name = self._name
+        ns = self._namespace
+
+        content = textwrap.dedent(f"""\
+            #!/usr/bin/env bash
+            set -euo pipefail
+
+            # Cleanup script for {name}
+            # Generated by AgentIT Retirement Agent
+
+            NAMESPACE="${{{ns.upper().replace('-', '_')}_NAMESPACE:-{ns}}}"
+            APP_NAME="{name}"
+            CMD="${{OC_CMD:-oc}}"
+            FORCE="${{1:-}}"
+
+            echo "=== Retirement cleanup for $APP_NAME in $NAMESPACE ==="
+
+            # Delete Deployment / DeploymentConfig / Rollout
+            $CMD delete deployment -l app="$APP_NAME" -n "$NAMESPACE" --ignore-not-found
+            $CMD delete deploymentconfig -l app="$APP_NAME" -n "$NAMESPACE" --ignore-not-found 2>/dev/null || true
+            $CMD delete rollout -l app="$APP_NAME" -n "$NAMESPACE" --ignore-not-found 2>/dev/null || true
+            echo "[OK] Deployments deleted"
+
+            # Delete Services
+            $CMD delete service -l app="$APP_NAME" -n "$NAMESPACE" --ignore-not-found
+            echo "[OK] Services deleted"
+
+            # Delete Routes
+            $CMD delete route -l app="$APP_NAME" -n "$NAMESPACE" --ignore-not-found 2>/dev/null || true
+            echo "[OK] Routes deleted"
+
+            # Delete ConfigMaps
+            $CMD delete configmap -l app="$APP_NAME" -n "$NAMESPACE" --ignore-not-found
+            echo "[OK] ConfigMaps deleted"
+
+            # Delete Secrets
+            $CMD delete secret -l app="$APP_NAME" -n "$NAMESPACE" --ignore-not-found
+            echo "[OK] Secrets deleted"
+
+            # Delete PVCs (with confirmation)
+            PVCS=$($CMD get pvc -l app="$APP_NAME" -n "$NAMESPACE" -o name 2>/dev/null || true)
+            if [ -n "$PVCS" ]; then
+                echo ""
+                echo "WARNING: The following PVCs will be deleted:"
+                echo "$PVCS"
+                read -rp "Delete PVCs? [y/N] " confirm
+                if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                    $CMD delete pvc -l app="$APP_NAME" -n "$NAMESPACE" --ignore-not-found
+                    echo "[OK] PVCs deleted"
+                else
+                    echo "[SKIP] PVCs retained"
+                fi
+            fi
+
+            # Delete namespace (only with --force)
+            if [ "$FORCE" = "--force" ]; then
+                echo ""
+                echo "WARNING: Deleting namespace $NAMESPACE"
+                $CMD delete namespace "$NAMESPACE" --ignore-not-found
+                echo "[OK] Namespace deleted"
+            fi
+
+            echo ""
+            echo "=== Cleanup complete ==="
+        """)
+
+        self._write("cleanup-script.sh", content)
+        (self.output_dir / "cleanup-script.sh").chmod(0o755)
+
+        return GeneratedFile(
+            path="cleanup-script.sh",
+            content=content,
+            description="Shell script for resource cleanup using oc/kubectl.",
+        )
+
+    def _generate_data_archive_job(self) -> GeneratedFile | None:
+        if not self._has_postgres():
+            return None
+
+        name = self._name
+        ns = self._namespace
+
+        doc = {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": f"{name}-data-archive",
+                "namespace": ns,
+                "labels": {"app.kubernetes.io/name": name},
+            },
+            "spec": {
+                "backoffLimit": 2,
+                "template": {
+                    "spec": {
+                        "restartPolicy": "Never",
+                        "containers": [
+                            {
+                                "name": "pg-dump",
+                                "image": "registry.access.redhat.com/rhel9/postgresql-15:latest",
+                                "command": [
+                                    "/bin/bash",
+                                    "-c",
+                                    (
+                                        "pg_dump"
+                                        " -h $PGHOST"
+                                        " -U $PGUSER"
+                                        " -d $PGDATABASE"
+                                        " -Fc"
+                                        " -f /archive/dump.pg"
+                                    ),
+                                ],
+                                "env": [
+                                    {
+                                        "name": "PGHOST",
+                                        "valueFrom": {
+                                            "secretKeyRef": {
+                                                "name": f"{name}-db",
+                                                "key": "host",
+                                            },
+                                        },
+                                    },
+                                    {
+                                        "name": "PGUSER",
+                                        "valueFrom": {
+                                            "secretKeyRef": {
+                                                "name": f"{name}-db",
+                                                "key": "username",
+                                            },
+                                        },
+                                    },
+                                    {
+                                        "name": "PGPASSWORD",
+                                        "valueFrom": {
+                                            "secretKeyRef": {
+                                                "name": f"{name}-db",
+                                                "key": "password",
+                                            },
+                                        },
+                                    },
+                                    {
+                                        "name": "PGDATABASE",
+                                        "valueFrom": {
+                                            "secretKeyRef": {
+                                                "name": f"{name}-db",
+                                                "key": "database",
+                                            },
+                                        },
+                                    },
+                                ],
+                                "volumeMounts": [
+                                    {
+                                        "name": "archive-volume",
+                                        "mountPath": "/archive",
+                                    },
+                                ],
+                            },
+                        ],
+                        "volumes": [
+                            {
+                                "name": "archive-volume",
+                                "persistentVolumeClaim": {
+                                    "claimName": f"{name}-archive",
+                                },
+                            },
+                        ],
+                    },
+                },
+            },
+        }
+
+        content = yaml.dump(doc, default_flow_style=False, sort_keys=False)
+        self._write("data-archive-job.yaml", content)
+
+        return GeneratedFile(
+            path="data-archive-job.yaml",
+            content=content,
+            description="Kubernetes Job for PostgreSQL data backup before deletion.",
+        )
