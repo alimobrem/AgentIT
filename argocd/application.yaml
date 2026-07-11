@@ -31,6 +31,12 @@ spec:
           value: gcp-credentials
         - name: tektonCI.enabled
           value: "true"
+        - name: agents.vulnWatcher.enabled
+          value: "true"
+        - name: agents.sloTracker.enabled
+          value: "true"
+        - name: agents.driftDetector.enabled
+          value: "true"
   destination:
     server: https://kubernetes.default.svc
     namespace: agentit
