@@ -106,4 +106,49 @@
     </tr>
   </tbody>
 </table>
+
+{% if kafka_stats and kafka_stats.available %}
+<h3 class="text-sm mt-1 mb-1">Topics</h3>
+<table>
+  <thead><tr><th>Topic</th><th>Partitions</th><th>Messages</th><th></th></tr></thead>
+  <tbody>
+    {% for topic, info in kafka_stats.topics.items() %}
+    <tr class="{% if topic == 'agentit-dlq' and info.end_offset > 0 %}row-border-red{% else %}row-border-green{% endif %}">
+      <td class="text-bold">{{ topic }}</td>
+      <td>{{ info.partitions }}</td>
+      <td>{{ info.end_offset }}</td>
+      <td>{% if topic == 'agentit-dlq' and info.end_offset > 0 %}<span class="badge badge-critical">{{ info.end_offset }} dead-lettered</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+    {% if not kafka_stats.topics %}
+    <tr><td colspan="4" class="text-muted">No topics found</td></tr>
+    {% endif %}
+  </tbody>
+</table>
+
+{% if kafka_stats.consumer_groups %}
+<h3 class="text-sm mt-1 mb-1">Consumer Groups</h3>
+<table>
+  <thead><tr><th>Group</th><th>Committed</th><th>End Offset</th><th>Lag</th></tr></thead>
+  <tbody>
+    {% for g in kafka_stats.consumer_groups %}
+    <tr class="{% if g.lag is defined and g.lag > 100 %}row-border-red{% elif g.lag is defined and g.lag > 10 %}row-border-yellow{% else %}row-border-green{% endif %}">
+      <td class="text-bold">{{ g.group }}</td>
+      <td>{{ g.committed_offset | default("?") }}</td>
+      <td>{{ g.end_offset | default("?") }}</td>
+      <td>
+        {% if g.lag is defined and g.lag >= 0 %}
+          <span class="badge {% if g.lag > 100 %}badge-critical{% elif g.lag > 10 %}badge-medium{% else %}badge-low{% endif %}">{{ g.lag }}</span>
+        {% else %}
+          <span class="badge badge-info">unknown</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% elif kafka_ready %}
+<p class="text-muted text-sm mt-1">Kafka broker is ready but topic stats unavailable (kafka-python may not be installed).</p>
+{% endif %}
 {% endblock %}

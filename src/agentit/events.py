@@ -74,6 +74,69 @@ class EventPublisher:
             self._producer.close()
 
 
+def get_kafka_stats(bootstrap: str | None = None) -> dict:
+    """Return topic partition counts, end offsets, and consumer group lag."""
+    bs = bootstrap or os.environ.get("AGENTIT_KAFKA_BOOTSTRAP")
+    if not bs:
+        return {"available": False, "topics": {}, "consumer_groups": []}
+
+    try:
+        from kafka import KafkaConsumer as _KC
+        from kafka.admin import KafkaAdminClient
+
+        admin = KafkaAdminClient(bootstrap_servers=bs, client_id="agentit-stats")
+        topics_meta = admin.list_topics()
+        topic_details: dict[str, dict] = {}
+
+        consumer = _KC(bootstrap_servers=bs, consumer_timeout_ms=1000)
+        for topic in topics_meta:
+            if topic.startswith("__"):
+                continue
+            partitions = consumer.partitions_for_topic(topic)
+            if not partitions:
+                topic_details[topic] = {"partitions": 0, "end_offset": 0}
+                continue
+            from kafka import TopicPartition as _TP
+            tps = [_TP(topic, p) for p in partitions]
+            end_offsets = consumer.end_offsets(tps)
+            total_end = sum(end_offsets.values())
+            topic_details[topic] = {
+                "partitions": len(partitions),
+                "end_offset": total_end,
+            }
+        consumer.close()
+
+        groups: list[dict] = []
+        try:
+            group_list = admin.list_consumer_groups()
+            for g_name, _ in group_list:
+                if not g_name.startswith("agentit"):
+                    continue
+                try:
+                    offsets = admin.list_consumer_group_offsets(g_name)
+                    committed = sum(o.offset for o in offsets.values() if o.offset >= 0)
+                    end_total = 0
+                    for tp in offsets:
+                        if tp.topic in topic_details:
+                            end_total += topic_details[tp.topic]["end_offset"]
+                    groups.append({
+                        "group": g_name,
+                        "committed_offset": committed,
+                        "end_offset": end_total,
+                        "lag": max(0, end_total - committed),
+                    })
+                except Exception:
+                    groups.append({"group": g_name, "lag": -1})
+        except Exception:
+            logger.debug("Failed to list consumer groups", exc_info=True)
+
+        admin.close()
+        return {"available": True, "topics": topic_details, "consumer_groups": groups}
+    except Exception as exc:
+        logger.debug("Failed to collect Kafka stats: %s", exc)
+        return {"available": False, "topics": {}, "consumer_groups": []}
+
+
 _publisher: EventPublisher | None = None
 
 

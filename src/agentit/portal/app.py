@@ -1096,6 +1096,14 @@ def _get_cluster_health() -> dict:
     except Exception:
         log.debug("Failed to check event publisher", exc_info=True)
 
+    try:
+        from agentit.events import get_kafka_stats
+        kafka_stats = get_kafka_stats()
+        result["kafka_stats"] = kafka_stats
+    except Exception:
+        log.debug("Failed to collect Kafka stats", exc_info=True)
+        result["kafka_stats"] = {"available": False, "topics": {}, "consumer_groups": []}
+
     return result
 
 
