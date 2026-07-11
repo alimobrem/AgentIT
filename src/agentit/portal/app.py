@@ -54,10 +54,64 @@ def get_store() -> AssessmentStore:
     return store
 
 
+def _enrich_fleet_with_cluster_status(fleet: list[dict]) -> list[dict]:
+    """Check cluster for each app's deployment status."""
+    import json as _json
+
+    # Get all Argo CD apps in one call
+    argo_status: dict[str, dict] = {}
+    raw = _run_cmd(["oc", "get", "applications.argoproj.io", "-n", "openshift-gitops", "-o", "json"])
+    if raw:
+        try:
+            for a in _json.loads(raw).get("items", []):
+                name = a.get("metadata", {}).get("name", "")
+                dest = a.get("spec", {}).get("destination", {})
+                cluster = dest.get("server", "unknown")
+                namespace = dest.get("namespace", "default")
+                argo_status[name] = {
+                    "sync": a.get("status", {}).get("sync", {}).get("status", "Unknown"),
+                    "health": a.get("status", {}).get("health", {}).get("status", "Unknown"),
+                    "cluster": cluster,
+                    "namespace": namespace,
+                }
+        except Exception:
+            pass
+
+    for app in fleet:
+        app_name = app["repo_name"].lower().replace("_", "-").replace(".", "-")
+        argo = argo_status.get(app_name)
+        apply_results = None
+        try:
+            from agentit.portal.store import AssessmentStore
+            _s = AssessmentStore()
+            apply_results = _s.get_apply_results(app["id"])
+        except Exception:
+            pass
+
+        if argo:
+            app["deploy_status"] = "synced" if argo["sync"] == "Synced" else "out-of-sync"
+            app["deploy_health"] = argo["health"].lower()
+            app["deploy_cluster"] = argo["cluster"]
+            app["deploy_namespace"] = argo["namespace"]
+        elif apply_results and apply_results.get("applied"):
+            app["deploy_status"] = "applied"
+            app["deploy_health"] = "unknown"
+            app["deploy_cluster"] = "local"
+            app["deploy_namespace"] = apply_results.get("namespace", "default")
+        else:
+            app["deploy_status"] = "not deployed"
+            app["deploy_health"] = "—"
+            app["deploy_cluster"] = "—"
+            app["deploy_namespace"] = "—"
+
+    return fleet
+
+
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request) -> HTMLResponse:
     s = get_store()
     fleet = s.get_fleet_data()
+    fleet = await asyncio.to_thread(_enrich_fleet_with_cluster_status, fleet)
     total_apps = len(fleet)
     if total_apps == 0:
         return templates.TemplateResponse(request, "dashboard.html", {

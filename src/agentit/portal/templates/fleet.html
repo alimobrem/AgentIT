@@ -41,10 +41,10 @@
       <th>Repository</th>
       <th>Score</th>
       <th>Trend</th>
+      <th>Deployed</th>
+      <th>Cluster</th>
       <th>Criticality</th>
-      <th>Runs</th>
       <th>Critical</th>
-      <th>Last Assessed</th>
       <th></th>
     </tr>
   </thead>
@@ -69,10 +69,20 @@
           <span class="text-muted">&mdash;</span>
         {% endif %}
       </td>
+      <td>
+        {% if r.deploy_status == "synced" %}
+          <span class="badge badge-low">synced</span>
+        {% elif r.deploy_status == "applied" %}
+          <span class="badge badge-info">applied</span>
+        {% elif r.deploy_status == "out-of-sync" %}
+          <span class="badge badge-high">out-of-sync</span>
+        {% else %}
+          <span class="badge badge-medium">not deployed</span>
+        {% endif %}
+      </td>
+      <td class="text-sm text-muted">{{ r.deploy_namespace | default("—") }}</td>
       <td><span class="badge badge-{{ r.criticality }}">{{ r.criticality }}</span></td>
-      <td>{{ r.assessment_count }}</td>
       <td class="{% if r.critical_count > 0 %}text-danger text-bold{% endif %}">{{ r.critical_count }}</td>
-      <td class="text-sm text-muted">{{ r.last_assessed[:10] }}</td>
       <td>
         <form method="post" action="/assess" class="inline-form">
           <input type="hidden" name="repo_url" value="{{ r.repo_url }}">
