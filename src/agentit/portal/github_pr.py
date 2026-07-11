@@ -61,7 +61,7 @@ def get_pr_status(pr_url: str) -> dict:
             }
 
         if "/compare/" in pr_url:
-            owner, repo = parts[-3], parts[-2]
+            owner, repo = parts[-4], parts[-3]
             branch = parts[-1]
             resp = requests.get(
                 f"{_API}/repos/{owner}/{repo}/pulls",

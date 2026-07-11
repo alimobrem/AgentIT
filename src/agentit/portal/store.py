@@ -579,7 +579,7 @@ class AssessmentStore:
     ) -> str:
         existing = self._conn.execute(
             """
-            SELECT id FROM remediations
+            SELECT id, status FROM remediations
             WHERE assessment_id = ? AND agent_name = ? AND description = ?
               AND status NOT IN ('completed', 'applied')
             LIMIT 1
@@ -587,6 +587,12 @@ class AssessmentStore:
             (assessment_id, agent_name, description),
         ).fetchone()
         if existing:
+            if status != "generated" and status != existing["status"]:
+                self._conn.execute(
+                    "UPDATE remediations SET status = ? WHERE id = ?",
+                    (status, existing["id"]),
+                )
+                self._conn.commit()
             return existing["id"]
         rem_id = uuid.uuid4().hex
         self._conn.execute(

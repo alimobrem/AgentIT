@@ -91,7 +91,30 @@ def get_store() -> AssessmentStore:
     return store
 
 
-def _enrich_fleet_with_cluster_status(fleet: list[dict], _store: object | None = None) -> list[dict]:
+def _publish_event(
+    action: str,
+    target_app: str | None,
+    summary: str,
+    details: dict | None = None,
+    correlation_id: str | None = None,
+    agent_id: str = "assessor",
+) -> None:
+    try:
+        from agentit.events import get_publisher
+        get_publisher().publish(
+            "agentit-events",
+            agent_id=agent_id,
+            action=action,
+            target_app=target_app,
+            summary=summary,
+            details=details,
+            correlation_id=correlation_id,
+        )
+    except Exception:
+        log.warning("Failed to publish event %s", action, exc_info=True)
+
+
+def _enrich_fleet_with_cluster_status(fleet: list[dict], _store: AssessmentStore | None = None) -> list[dict]:
     """Check cluster for each app's deployment status."""
     import json as _json
 
@@ -192,16 +215,10 @@ async def webhook_assess(request: Request):
     criticality = body.get("criticality", "medium")
     report = await _with_timeout(asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality))
     assessment_id = get_store().save(report)
-    from agentit.events import get_publisher
-    get_publisher().publish(
-        "agentit-events",
-        agent_id="assessor",
-        action="assessment-complete",
-        target_app=report.repo_name,
-        summary=f"Assessment complete: {report.overall_score:.0f}/100",
-        details={"assessment_id": assessment_id, "score": report.overall_score},
-        correlation_id=assessment_id,
-    )
+    _publish_event("assessment-complete", report.repo_name,
+                   f"Assessment complete: {report.overall_score:.0f}/100",
+                   {"assessment_id": assessment_id, "score": report.overall_score},
+                   correlation_id=assessment_id)
     return JSONResponse({"assessment_id": assessment_id, "overall_score": report.overall_score})
 
 
@@ -250,16 +267,10 @@ async def webhook_github_push(request: Request):
         assessment_id = s.save(report)
         s.log_event("github-webhook", "reassessment-complete", managed["repo_name"],
                     "info", f"Re-assessment complete: {report.overall_score:.0f}/100 (was {managed.get('latest_score', '?')})")
-        from agentit.events import get_publisher
-        get_publisher().publish(
-            "agentit-events",
-            agent_id="assessor",
-            action="assessment-complete",
-            target_app=managed["repo_name"],
-            summary=f"Re-assessment: {report.overall_score:.0f}/100",
-            details={"assessment_id": assessment_id, "score": report.overall_score},
-            correlation_id=assessment_id,
-        )
+        _publish_event("assessment-complete", managed["repo_name"],
+                       f"Re-assessment: {report.overall_score:.0f}/100",
+                       {"assessment_id": assessment_id, "score": report.overall_score},
+                       correlation_id=assessment_id)
         return JSONResponse({
             "status": "assessed",
             "repo": managed["repo_name"],
@@ -411,16 +422,10 @@ async def self_assess_route(request: Request):
     assessment_id = get_store().save(report)
     get_store().log_event("self-assess", "assessment-complete", "agentit", "info",
                           f"Self-assessment complete: {report.overall_score:.0f}/100")
-    from agentit.events import get_publisher
-    get_publisher().publish(
-        "agentit-events",
-        agent_id="assessor",
-        action="assessment-complete",
-        target_app="agentit",
-        summary=f"Self-assessment: {report.overall_score:.0f}/100",
-        details={"assessment_id": assessment_id, "score": report.overall_score},
-        correlation_id=assessment_id,
-    )
+    _publish_event("assessment-complete", "agentit",
+                   f"Self-assessment: {report.overall_score:.0f}/100",
+                   {"assessment_id": assessment_id, "score": report.overall_score},
+                   correlation_id=assessment_id)
     return RedirectResponse(url=f"/assessments/{assessment_id}", status_code=303)
 
 
@@ -587,17 +592,10 @@ async def onboard_submit(request: Request, assessment_id: str):
     files, orch_summary = await asyncio.to_thread(_run_onboarding, report, assessment_id)
     s.save_onboarding(assessment_id, files, orchestration=orch_summary)
 
-    # Publish onboarding-complete to Kafka so sensors can react
-    from agentit.events import get_publisher
-    get_publisher().publish(
-        "agentit-events",
-        agent_id="onboarding",
-        action="onboarding-complete",
-        target_app=report.repo_name,
-        summary=f"Generated {len(files)} manifests",
-        details={"assessment_id": assessment_id, "file_count": len(files)},
-        correlation_id=assessment_id,
-    )
+    _publish_event("onboarding-complete", report.repo_name,
+                   f"Generated {len(files)} manifests",
+                   {"assessment_id": assessment_id, "file_count": len(files)},
+                   correlation_id=assessment_id, agent_id="onboarding")
 
     # Trigger image build for the app
     from agentit.image_builder import build_app_image
@@ -904,7 +902,8 @@ async def create_agent_prs_route(assessment_id: str):
 
     if successful:
         pr_list = ", ".join(f"{r['agent_name']}" for r in successful)
-        s.update_pr_url(assessment_id, successful[0]["pr_url"])
+        all_pr_urls = " | ".join(r["pr_url"] for r in successful)
+        s.update_pr_url(assessment_id, all_pr_urls)
         s.log_event("orchestrator", "agent-prs-created", report.repo_name,
                     "info", f"Created {len(successful)} per-agent PRs: {pr_list}")
 
@@ -952,6 +951,7 @@ def _run_cmd(cmd: list[str], timeout: int = 10) -> str | None:
 
 def _get_cluster_health() -> dict:
     import json as _json
+    from concurrent.futures import ThreadPoolExecutor
 
     result: dict = {
         "argo_apps": [], "argo_synced": False,
@@ -960,7 +960,6 @@ def _get_cluster_health() -> dict:
         "kafka_ready": False, "publisher_ok": False,
     }
 
-    # Argo CD apps — only show AgentIT-managed apps
     managed_names = {"agentit"}
     try:
         _s = get_store()
@@ -969,10 +968,24 @@ def _get_cluster_health() -> dict:
     except Exception:
         log.debug("Failed to load fleet for health check", exc_info=True)
 
-    raw = _run_cmd(["oc", "get", "applications.argoproj.io", "-n", "openshift-gitops", "-o", "json"])
-    if raw:
+    cmds = {
+        "argo": ["oc", "get", "applications.argoproj.io", "-n", "openshift-gitops", "-o", "json"],
+        "pods": ["oc", "get", "pods", "-n", "agentit", "-o", "json"],
+        "pipelines": ["oc", "get", "pipelineruns", "-n", "agentit",
+                       "-l", "tekton.dev/pipeline=agentit-ci", "-o", "json"],
+        "rollout": ["oc", "get", "rollouts.argoproj.io", "agentit", "-n", "agentit", "-o", "json"],
+        "commit": ["oc", "get", "applications.argoproj.io", "agentit", "-n", "openshift-gitops",
+                    "-o", "jsonpath={.status.sync.revision}"],
+        "kafka": ["oc", "get", "kafka", "-n", "agentit", "-o",
+                  "jsonpath={.items[0].status.conditions[?(@.type=='Ready')].status}"],
+    }
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {key: pool.submit(_run_cmd, cmd, 5 if key == "pipelines" else 10) for key, cmd in cmds.items()}
+        raw = {key: f.result() for key, f in futures.items()}
+
+    if raw["argo"]:
         try:
-            apps = _json.loads(raw).get("items", [])
+            apps = _json.loads(raw["argo"]).get("items", [])
             for a in apps:
                 name = a.get("metadata", {}).get("name", "?")
                 bare_name = name.removeprefix("managed-")
@@ -985,11 +998,9 @@ def _get_cluster_health() -> dict:
         except Exception:
             log.warning("Failed to parse Argo CD apps JSON", exc_info=True)
 
-    # Pods — only show Running/Pending/Failed, skip Completed pipeline pods
-    raw = _run_cmd(["oc", "get", "pods", "-n", "agentit", "-o", "json"])
-    if raw:
+    if raw["pods"]:
         try:
-            pods = _json.loads(raw).get("items", [])
+            pods = _json.loads(raw["pods"]).get("items", [])
             for p in pods:
                 name = p.get("metadata", {}).get("name", "?")
                 phase = p.get("status", {}).get("phase", "Unknown")
@@ -1009,12 +1020,9 @@ def _get_cluster_health() -> dict:
         except Exception:
             log.warning("Failed to parse pods JSON", exc_info=True)
 
-    # Pipeline runs
-    raw = _run_cmd(["oc", "get", "pipelineruns", "-n", "agentit",
-                    "-l", "tekton.dev/pipeline=agentit-ci", "-o", "json"], 5)
-    if raw:
+    if raw["pipelines"]:
         try:
-            all_runs = _json.loads(raw).get("items", [])
+            all_runs = _json.loads(raw["pipelines"]).get("items", [])
             runs = all_runs[-5:]
             for r in runs:
                 name = r.get("metadata", {}).get("name", "?")
@@ -1039,29 +1047,18 @@ def _get_cluster_health() -> dict:
         except Exception:
             log.warning("Failed to parse pipeline runs JSON", exc_info=True)
 
-    # Rollout status
-    raw = _run_cmd(["oc", "get", "rollouts.argoproj.io", "agentit", "-n", "agentit", "-o", "json"])
-    if raw:
+    if raw["rollout"]:
         try:
-            ro = _json.loads(raw)
+            ro = _json.loads(raw["rollout"])
             result["rollout_phase"] = ro.get("status", {}).get("phase", "Unknown")
             result["rollout_step"] = ro.get("status", {}).get("currentStepIndex", 0)
             result["rollout_total_steps"] = len(ro.get("spec", {}).get("strategy", {}).get("canary", {}).get("steps", []))
-            result["rollout_revision"] = ro.get("status", {}).get("observedGeneration", "?")
         except Exception:
             log.debug("Failed to parse rollout JSON", exc_info=True)
 
-    # Current commit (from the running pod's image labels or git)
-    raw = _run_cmd(["oc", "get", "applications.argoproj.io", "agentit", "-n", "openshift-gitops",
-                    "-o", "jsonpath={.status.sync.revision}"])
-    result["current_commit"] = (raw or "").strip()[:12]
+    result["current_commit"] = (raw["commit"] or "").strip()[:12]
+    result["kafka_ready"] = raw["kafka"] is not None and "True" in raw["kafka"]
 
-    # Kafka
-    raw = _run_cmd(["oc", "get", "kafka", "-n", "agentit", "-o",
-                    "jsonpath={.items[0].status.conditions[?(@.type=='Ready')].status}"])
-    result["kafka_ready"] = raw is not None and "True" in raw
-
-    # Event publisher
     try:
         from agentit.events import get_publisher
         pub = get_publisher()
@@ -1238,7 +1235,7 @@ async def schedules_page(request: Request) -> HTMLResponse:
                 doc = _yaml.safe_load(f["content"])
                 cron = doc.get("spec", {}).get("schedule", "unknown")
                 concurrency = doc.get("spec", {}).get("concurrencyPolicy", "Allow")
-            except (ValueError, AttributeError):
+            except (ValueError, AttributeError, _yaml.YAMLError):
                 cron = "unknown"
                 concurrency = "unknown"
             override_key = f"schedule:{app_data['repo_name']}:{agent}"
