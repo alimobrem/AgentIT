@@ -326,8 +326,9 @@ class FleetOrchestrator:
         fail_count = sum(1 for r in results if not r.success)
         total_files = sum(len(r.files_generated) for r in results)
 
-        if conflicts:
-            return f"BLOCKED: {len(conflicts)} conflict(s) require resolution before proceeding."
+        blockers = [c for c in conflicts if c["type"] == "blocker"]
+        if blockers:
+            return f"BLOCKED: {len(blockers)} blocker(s) require resolution before proceeding."
 
         if fail_count > 0:
             return f"PARTIAL: {success_count}/{success_count + fail_count} agents succeeded, {total_files} files generated. Review failures before deploying."
