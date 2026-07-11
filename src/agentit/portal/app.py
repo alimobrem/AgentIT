@@ -825,8 +825,7 @@ def _get_cluster_health() -> dict:
             pass
 
     # Pipeline runs
-    raw = _run_cmd(["oc", "get", "pipelineruns", "-n", "agentit", "-o", "json",
-                    "--sort-by=.metadata.creationTimestamp"])
+    raw = _run_cmd(["oc", "get", "pipelineruns", "-n", "agentit", "-o", "json"], 5)
     if raw:
         try:
             runs = _json.loads(raw).get("items", [])[-5:]
