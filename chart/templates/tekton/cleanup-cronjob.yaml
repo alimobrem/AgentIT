@@ -8,7 +8,7 @@ metadata:
     app.kubernetes.io/name: {{ .Chart.Name }}
     app.kubernetes.io/component: tekton-cleanup
 spec:
-  schedule: "23 4 * * *"
+  schedule: "17 */2 * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 1
@@ -27,20 +27,29 @@ spec:
               args:
                 - |
                   set -eu
-                  echo "Cleaning up PipelineRuns older than 7 days..."
-                  CUTOFF=$(date -u -d '7 days ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-7d '+%Y-%m-%dT%H:%M:%SZ')
-                  DELETED=0
+                  echo "Cleaning completed/failed pods..."
+                  POD_DELETED=0
+                  for phase in Succeeded Failed; do
+                    for pod in $(oc get pods -n {{ .Release.Namespace }} --field-selector=status.phase=$phase -o name 2>/dev/null); do
+                      oc delete "$pod" -n {{ .Release.Namespace }} --wait=false 2>/dev/null && POD_DELETED=$((POD_DELETED+1))
+                    done
+                  done
+                  echo "Deleted $POD_DELETED completed/failed pods"
+
+                  echo "Cleaning PipelineRuns older than 24 hours..."
+                  CUTOFF=$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-24H '+%Y-%m-%dT%H:%M:%SZ')
+                  PR_DELETED=0
                   for pr in $(oc get pipelinerun -n {{ .Release.Namespace }} -o jsonpath='{range .items[?(@.status.completionTime)]}{.metadata.name}{" "}{.status.completionTime}{"\n"}{end}'); do
                     NAME=$(echo "$pr" | awk '{print $1}')
                     COMPLETED=$(echo "$pr" | awk '{print $2}')
                     if [ -z "$NAME" ] || [ -z "$COMPLETED" ]; then continue; fi
                     if [ "$COMPLETED" \< "$CUTOFF" ]; then
-                      oc delete pipelinerun "$NAME" -n {{ .Release.Namespace }} --wait=false 2>/dev/null && DELETED=$((DELETED+1))
+                      oc delete pipelinerun "$NAME" -n {{ .Release.Namespace }} --wait=false 2>/dev/null && PR_DELETED=$((PR_DELETED+1))
                     fi
                   done
-                  echo "Deleted $DELETED old PipelineRuns"
+                  echo "Deleted $PR_DELETED old PipelineRuns"
 
-                  echo "Cleaning up orphaned PVCs..."
+                  echo "Cleaning orphaned PVCs..."
                   PVC_DELETED=0
                   for pvc in $(oc get pvc -n {{ .Release.Namespace }} -l tekton.dev/pipeline -o jsonpath='{.items[*].metadata.name}'); do
                     PR=$(oc get pvc "$pvc" -n {{ .Release.Namespace }} -o jsonpath='{.metadata.labels.tekton\.dev/pipelineRun}' 2>/dev/null || echo "")

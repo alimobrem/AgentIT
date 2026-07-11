@@ -16,7 +16,7 @@ spec:
       default: main
     - name: image-ref
       type: string
-      default: image-registry.openshift-image-registry.svc:5000/{{ .Release.Namespace }}/agentit:latest
+      default: image-registry.openshift-image-registry.svc:5000/{{ .Release.Namespace }}/agentit
   workspaces:
     - name: source
   tasks:
@@ -54,8 +54,8 @@ spec:
             workingDir: $(workspaces.source.path)
             computeResources:
               requests:
-                memory: 512Mi
-                cpu: 500m
+                memory: 256Mi
+                cpu: 200m
               limits:
                 memory: 1Gi
             script: |
@@ -82,11 +82,13 @@ spec:
             value: openshift-pipelines
       params:
         - name: IMAGE
-          value: $(params.image-ref)
+          value: $(params.image-ref):$(params.revision)
         - name: DOCKERFILE
           value: ./Containerfile
         - name: CONTEXT
           value: .
+        - name: BUILD_EXTRA_ARGS
+          value: "--tag $(params.image-ref):latest"
       workspaces:
         - name: source
           workspace: source
