@@ -1146,3 +1146,68 @@ def test_all_pages_return_200(client, _override_store):
     for page in pages:
         resp = client.get(page)
         assert resp.status_code == 200, f"{page} returned {resp.status_code}"
+
+
+# ── Health page ────────────────────────────────────────────────────────
+
+
+def test_health_page(client):
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    assert "System Health" in resp.text
+
+
+def test_health_api(client):
+    resp = client.get("/api/health")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "pods_running" in data
+    assert "pipeline_status" in data
+
+
+def test_health_nav_link(client):
+    resp = client.get("/")
+    assert 'href="/health"' in resp.text
+
+
+def test_pod_detail_404(client):
+    resp = client.get("/health/pods/nonexistent-pod-xyz")
+    assert resp.status_code == 404
+
+
+def test_pipeline_detail_404(client):
+    resp = client.get("/health/pipelines/nonexistent-run-xyz")
+    assert resp.status_code == 404
+
+
+# ── Gate deduplication and expiry ──────────────────────────────────────
+
+
+def test_gate_deduplication(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    g1 = store.create_gate(aid, "deploy", "First gate")
+    g2 = store.create_gate(aid, "deploy", "Duplicate gate")
+    assert g1 == g2  # same gate returned
+
+
+def test_gate_different_types_not_deduped(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    g1 = store.create_gate(aid, "deploy", "Deploy gate")
+    g2 = store.create_gate(aid, "security-review", "Security gate")
+    assert g1 != g2
+
+
+def test_stale_gate_expiry(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    store.create_gate(aid, "deploy", "Old gate")
+    # Manually backdate the gate
+    store._conn.execute(
+        "UPDATE gates SET created_at = '2020-01-01T00:00:00' WHERE status = 'pending'"
+    )
+    store._conn.commit()
+    expired = store.expire_stale_gates(hours=1)
+    assert expired == 1
+    assert len(store.list_gates("pending")) == 0

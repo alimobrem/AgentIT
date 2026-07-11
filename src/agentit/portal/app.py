@@ -711,6 +711,108 @@ async def health_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "health.html", data)
 
 
+@app.get("/health/pods/{pod_name}", response_class=HTMLResponse)
+async def pod_detail_page(request: Request, pod_name: str) -> HTMLResponse:
+    import json as _json
+
+    raw = await asyncio.to_thread(_run_cmd, ["oc", "get", "pod", pod_name, "-n", "agentit", "-o", "json"])
+    if not raw:
+        raise HTTPException(404, f"Pod {pod_name} not found")
+
+    pod = _json.loads(raw)
+    status = pod.get("status", {}).get("phase", "Unknown")
+    created = pod.get("metadata", {}).get("creationTimestamp", "")[:19]
+    containers = []
+    total_restarts = 0
+    for cs in pod.get("status", {}).get("containerStatuses", []):
+        restarts = cs.get("restartCount", 0)
+        total_restarts += restarts
+        containers.append({
+            "name": cs.get("name", "?"),
+            "image": cs.get("image", "?"),
+            "ready": cs.get("ready", False),
+            "restarts": restarts,
+        })
+
+    logs = await asyncio.to_thread(
+        _run_cmd, ["oc", "logs", pod_name, "-n", "agentit", "--tail=100"], 15,
+    ) or "No logs available"
+
+    events_raw = await asyncio.to_thread(
+        _run_cmd, ["oc", "get", "events", "-n", "agentit", "--field-selector",
+                   f"involvedObject.name={pod_name}", "-o", "json"],
+    )
+    events = []
+    if events_raw:
+        try:
+            for e in _json.loads(events_raw).get("items", []):
+                events.append({
+                    "time": e.get("lastTimestamp", "")[:19],
+                    "type": e.get("type", "Normal"),
+                    "reason": e.get("reason", "?"),
+                    "message": e.get("message", "")[:200],
+                })
+        except Exception:
+            pass
+
+    return templates.TemplateResponse(request, "pod_detail.html", {
+        "pod_name": pod_name,
+        "status": status,
+        "restarts": total_restarts,
+        "created": created,
+        "containers": containers,
+        "logs": logs,
+        "events": events,
+    })
+
+
+@app.get("/health/pipelines/{pipeline_name}", response_class=HTMLResponse)
+async def pipeline_detail_page(request: Request, pipeline_name: str) -> HTMLResponse:
+    import json as _json
+
+    raw = await asyncio.to_thread(
+        _run_cmd, ["oc", "get", "pipelinerun", pipeline_name, "-n", "agentit", "-o", "json"],
+    )
+    if not raw:
+        raise HTTPException(404, f"PipelineRun {pipeline_name} not found")
+
+    pr = _json.loads(raw)
+    conditions = pr.get("status", {}).get("conditions", [{}])
+    status = conditions[0].get("reason", "Unknown") if conditions else "Unknown"
+    start_time = pr.get("status", {}).get("startTime", "")[:19]
+    completion_time = (pr.get("status", {}).get("completionTime") or "")[:19]
+
+    tasks = []
+    for child in pr.get("status", {}).get("childReferences", []):
+        task_name = child.get("pipelineTaskName", child.get("name", "?"))
+        conds = child.get("conditions", [])
+        task_status = "Unknown"
+        if conds:
+            task_status = conds[0].get("reason", "Unknown")
+        elif child.get("status"):
+            task_status = child["status"]
+        pod = child.get("name", "")
+        tasks.append({"name": task_name, "status": task_status, "pod": pod})
+
+    # Get logs from the last task pod
+    logs = ""
+    if tasks:
+        last_pod = tasks[-1].get("pod", "")
+        if last_pod:
+            logs = await asyncio.to_thread(
+                _run_cmd, ["oc", "logs", last_pod, "-n", "agentit", "--tail=50", "--all-containers"], 15,
+            ) or ""
+
+    return templates.TemplateResponse(request, "pipeline_detail.html", {
+        "pipeline_name": pipeline_name,
+        "status": status,
+        "start_time": start_time,
+        "completion_time": completion_time,
+        "tasks": tasks,
+        "logs": logs,
+    })
+
+
 @app.get("/api/health")
 async def api_health():
     data = await asyncio.to_thread(_get_cluster_health)

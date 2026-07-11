@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Pipeline: {{ pipeline_name }} - AgentIT{% endblock %}
+{% block content %}
+<p class="mb-1"><a href="/health">&larr; System Health</a></p>
+<h1>{{ pipeline_name }}</h1>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-label">Status</div>
+    <div class="stat-value {% if status == 'Succeeded' %}text-success{% elif status == 'Running' %}text-warning{% else %}text-danger{% endif %}">{{ status }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Started</div>
+    <div class="stat-value text-sm">{{ start_time }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Completed</div>
+    <div class="stat-value text-sm">{{ completion_time or "—" }}</div>
+  </div>
+</div>
+
+{% if tasks %}
+<h2 class="section-title">Tasks</h2>
+<table>
+  <thead><tr><th>Task</th><th>Status</th><th>Pod</th></tr></thead>
+  <tbody>
+    {% for t in tasks %}
+    <tr class="{% if t.status == 'Succeeded' %}row-border-green{% elif t.status == 'Running' %}row-border-yellow{% else %}row-border-red{% endif %}">
+      <td class="text-bold">{{ t.name }}</td>
+      <td><span class="badge {% if t.status == 'Succeeded' %}badge-low{% elif t.status == 'Running' %}badge-medium{% else %}badge-critical{% endif %}">{{ t.status }}</span></td>
+      <td class="text-sm">
+        {% if t.pod %}<a href="/health/pods/{{ t.pod }}">{{ t.pod }}</a>{% else %}—{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if logs %}
+<h2 class="section-title">Build Logs</h2>
+<pre class="code-block"><code>{{ logs }}</code></pre>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Pod: {{ pod_name }} - AgentIT{% endblock %}
+{% block head_extra %}<meta http-equiv="refresh" content="15">{% endblock %}
+{% block content %}
+<p class="mb-1"><a href="/health">&larr; System Health</a></p>
+<h1>{{ pod_name }}</h1>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-label">Status</div>
+    <div class="stat-value {% if status == 'Running' %}text-success{% else %}text-danger{% endif %}">{{ status }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Restarts</div>
+    <div class="stat-value">{{ restarts }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Created</div>
+    <div class="stat-value text-sm">{{ created }}</div>
+  </div>
+</div>
+
+{% if containers %}
+<h2 class="section-title">Containers</h2>
+<table>
+  <thead><tr><th>Name</th><th>Image</th><th>Ready</th><th>Restarts</th></tr></thead>
+  <tbody>
+    {% for c in containers %}
+    <tr class="{% if c.ready %}row-border-green{% else %}row-border-red{% endif %}">
+      <td class="text-bold">{{ c.name }}</td>
+      <td class="text-sm text-muted">{{ c.image[:60] }}{% if c.image|length > 60 %}&hellip;{% endif %}</td>
+      <td><span class="badge {% if c.ready %}badge-low{% else %}badge-critical{% endif %}">{{ "yes" if c.ready else "no" }}</span></td>
+      <td>{{ c.restarts }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2 class="section-title">Logs (last 100 lines)</h2>
+<pre class="code-block"><code>{{ logs }}</code></pre>
+
+{% if events %}
+<h2 class="section-title">Events</h2>
+<table>
+  <thead><tr><th>Time</th><th>Type</th><th>Reason</th><th>Message</th></tr></thead>
+  <tbody>
+    {% for e in events %}
+    <tr class="{% if e.type == 'Warning' %}row-border-red{% endif %}">
+      <td class="text-sm">{{ e.time }}</td>
+      <td><span class="badge {% if e.type == 'Warning' %}badge-high{% else %}badge-info{% endif %}">{{ e.type }}</span></td>
+      <td class="text-bold">{{ e.reason }}</td>
+      <td class="text-sm">{{ e.message }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

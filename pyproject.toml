@@ -35,3 +35,11 @@ packages = ["src/agentit"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "real_repo: tests that clone real repositories (use --run-real-repos to enable)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:starlette",
+    "ignore:.*StarletteDeprecationWarning.*:DeprecationWarning",
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
+]

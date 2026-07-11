@@ -29,7 +29,7 @@
   <tbody>
     {% for app in argo_apps %}
     <tr class="{% if app.sync == 'Synced' %}row-border-green{% else %}row-border-red{% endif %}">
-      <td class="text-bold">{{ app.name }}</td>
+      <td class="text-bold"><a href="/health/pods/{{ app.name }}">{{ app.name }}</a></td>
       <td><span class="badge {% if app.sync == 'Synced' %}badge-low{% else %}badge-critical{% endif %}">{{ app.sync }}</span></td>
       <td><span class="badge {% if app.health == 'Healthy' %}badge-low{% elif app.health == 'Progressing' %}badge-medium{% else %}badge-critical{% endif %}">{{ app.health }}</span></td>
     </tr>
@@ -46,7 +46,7 @@
   <tbody>
     {% for pod in pods %}
     <tr class="{% if pod.status == 'Running' %}row-border-green{% elif pod.status == 'Completed' %}{% else %}row-border-red{% endif %}">
-      <td class="text-bold">{{ pod.name }}</td>
+      <td class="text-bold"><a href="/health/pods/{{ pod.name }}">{{ pod.name }}</a></td>
       <td><span class="badge {% if pod.status == 'Running' %}badge-low{% elif pod.status == 'Completed' %}badge-info{% else %}badge-critical{% endif %}">{{ pod.status }}</span></td>
       <td>{{ pod.restarts }}</td>
       <td class="text-sm">{{ pod.age }}</td>
@@ -65,7 +65,7 @@
   <tbody>
     {% for p in pipelines %}
     <tr class="{% if p.status == 'Succeeded' %}row-border-green{% elif p.status == 'Running' %}row-border-yellow{% else %}row-border-red{% endif %}">
-      <td class="text-bold">{{ p.name }}</td>
+      <td class="text-bold"><a href="/health/pipelines/{{ p.name }}">{{ p.name }}</a></td>
       <td><span class="badge {% if p.status == 'Succeeded' %}badge-low{% elif p.status == 'Running' %}badge-medium{% else %}badge-critical{% endif %}">{{ p.status }}</span></td>
       <td class="text-sm">{{ p.duration }}</td>
     </tr>
