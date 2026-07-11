@@ -290,6 +290,7 @@ def commit_to_infra_repo(
 
     Returns {"commit_url", "pr_url", "files_committed"} or {"error"}.
     """
+    app_name = app_name.lower().replace("_", "-").replace(".", "-")
     branch_name = branch_name or f"agentit/{app_name}"
 
     try:
@@ -395,6 +396,66 @@ def commit_to_infra_repo(
     except Exception as exc:
         logger.exception("Failed to commit to infra repo")
         return {"error": str(exc)}
+
+
+def ensure_applicationset(infra_repo_url: str) -> bool:
+    """Ensure an Argo CD ApplicationSet exists for the infra repo."""
+    import subprocess
+    import yaml
+
+    appset = {
+        "apiVersion": "argoproj.io/v1alpha1",
+        "kind": "ApplicationSet",
+        "metadata": {
+            "name": "agentit-managed-apps",
+            "namespace": "openshift-gitops",
+        },
+        "spec": {
+            "generators": [{
+                "git": {
+                    "repoURL": infra_repo_url,
+                    "revision": "HEAD",
+                    "directories": [{"path": "apps/*"}],
+                },
+            }],
+            "template": {
+                "metadata": {
+                    "name": "{{path.basename}}",
+                    "namespace": "openshift-gitops",
+                },
+                "spec": {
+                    "project": "default",
+                    "source": {
+                        "repoURL": infra_repo_url,
+                        "targetRevision": "HEAD",
+                        "path": "{{path}}",
+                    },
+                    "destination": {
+                        "server": "https://kubernetes.default.svc",
+                        "namespace": "{{path.basename}}",
+                    },
+                    "syncPolicy": {
+                        "automated": {"selfHeal": True, "prune": True},
+                        "syncOptions": ["CreateNamespace=true"],
+                    },
+                },
+            },
+        },
+    }
+
+    try:
+        result = subprocess.run(
+            ["oc", "apply", "-f", "-"],
+            input=yaml.dump(appset),
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            logger.info("ApplicationSet ensured for %s", infra_repo_url)
+            return True
+        logger.warning("ApplicationSet apply failed: %s", result.stderr[:200])
+    except Exception as exc:
+        logger.warning("ApplicationSet apply error: %s", exc)
+    return False
 
 
 def ensure_infra_repo(owner: str, repo_name: str = "agentit-gitops") -> dict:

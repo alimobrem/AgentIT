@@ -650,7 +650,7 @@ async def api_gates(status: str = "pending"):
 @app.post("/assessments/{assessment_id}/create-pr", response_model=None)
 async def create_pr(assessment_id: str):
     """Commit manifests to GitOps infra repo (or app repo as fallback)."""
-    from agentit.portal.github_pr import commit_to_infra_repo
+    from agentit.portal.github_pr import commit_to_infra_repo, ensure_applicationset
 
     s = get_store()
     report = s.get(assessment_id)
@@ -663,6 +663,7 @@ async def create_pr(assessment_id: str):
             result = await asyncio.to_thread(
                 commit_to_infra_repo, report.infra_repo_url, report.repo_name, files,
             )
+            await asyncio.to_thread(ensure_applicationset, report.infra_repo_url)
         else:
             result = await asyncio.to_thread(
                 create_onboarding_pr, report.repo_url, report.repo_name, files,
