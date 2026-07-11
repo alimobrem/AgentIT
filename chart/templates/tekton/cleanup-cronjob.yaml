@@ -8,7 +8,7 @@ metadata:
     app.kubernetes.io/name: {{ .Chart.Name }}
     app.kubernetes.io/component: tekton-cleanup
 spec:
-  schedule: "17 */2 * * *"
+  schedule: "*/30 * * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 1

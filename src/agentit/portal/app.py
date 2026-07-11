@@ -364,13 +364,19 @@ async def webhook_onboard(request: Request):
 
     s.save_onboarding(assessment_id, files, orchestration=orch_summary)
 
-    # Trigger image build
-    from agentit.image_builder import build_app_image
-    build_result = await asyncio.to_thread(build_app_image, report.repo_url, report.repo_name)
-    build_status = build_result.get("image_ref", build_result.get("error", "unknown"))
-    if "error" not in build_result:
-        s.log_event("image-builder", "build-triggered", report.repo_name, "info",
-                    f"Building image: {build_result['image_ref']}")
+    # Trigger image build only if a Containerfile was generated or exists in the repo
+    has_containerfile = any(
+        f["path"].lower() in ("containerfile", "dockerfile") for f in files
+    )
+    build_result: dict = {}
+    build_status = "skipped"
+    if has_containerfile:
+        from agentit.image_builder import build_app_image
+        build_result = await asyncio.to_thread(build_app_image, report.repo_url, report.repo_name)
+        build_status = build_result.get("image_ref", build_result.get("error", "unknown"))
+        if "error" not in build_result:
+            s.log_event("image-builder", "build-triggered", report.repo_name, "info",
+                        f"Building image: {build_result['image_ref']}")
 
     log.info("webhook_onboard completed for %s: %d files, build=%s", assessment_id, len(files), build_status)
     return JSONResponse({
@@ -722,15 +728,19 @@ async def onboard_submit(request: Request, assessment_id: str):
                    {"assessment_id": assessment_id, "file_count": len(files)},
                    correlation_id=assessment_id, agent_id="onboarding")
 
-    # Trigger image build for the app
-    from agentit.image_builder import build_app_image
-    build_result = await asyncio.to_thread(build_app_image, report.repo_url, report.repo_name)
+    # Trigger image build only if a Containerfile was generated
     warnings = []
-    if "error" in build_result:
-        log.warning("Image build trigger failed for %s: %s", report.repo_name, build_result["error"])
-        s.log_event("image-builder", "build-failed", report.repo_name, "warning",
-                    f"Image build failed: {build_result['error'][:200]}")
-        warnings.append(f"Image build failed: {build_result['error'][:100]}")
+    has_containerfile = any(
+        f["path"].lower() in ("containerfile", "dockerfile") for f in files
+    )
+    if has_containerfile:
+        from agentit.image_builder import build_app_image
+        build_result = await asyncio.to_thread(build_app_image, report.repo_url, report.repo_name)
+        if "error" in build_result:
+            log.warning("Image build trigger failed for %s: %s", report.repo_name, build_result["error"])
+            s.log_event("image-builder", "build-failed", report.repo_name, "warning",
+                        f"Image build failed: {build_result['error'][:200]}")
+            warnings.append(f"Image build failed: {build_result['error'][:100]}")
     else:
         log.info("Image build triggered: %s → %s", report.repo_name, build_result.get("image_ref"))
         s.log_event("image-builder", "build-triggered", report.repo_name, "info",
