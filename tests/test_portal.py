@@ -626,10 +626,10 @@ def test_dashboard_shows_portfolio_summary(client, _override_store):
     assert "Critical" in resp.text
 
 
-def test_base_nav_has_assess_link(client):
+def test_fleet_has_assess_modal(client):
     resp = client.get("/")
     assert resp.status_code == 200
-    assert 'href="/assess"' in resp.text
+    assert 'id="assess-modal"' in resp.text or 'action="/assess"' in resp.text
 
 
 # ------------------------------------------------------------------

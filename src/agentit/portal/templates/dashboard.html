@@ -68,15 +68,31 @@
 <div class="hero-cta">
   <h2>Assess your first app</h2>
   <p>Paste a GitHub repo URL and AgentIT will score it across 7 enterprise readiness dimensions — security, observability, CI/CD, compliance, infrastructure, data governance, and HA/DR.</p>
-  <div class="action-bar">
-    <a href="/assess" class="btn btn-lg">Run Assessment</a>
-    <form method="post" action="/self-assess" class="inline-form">
-      <button type="submit" class="btn btn-lg btn-outline">
-        <span class="btn-label">Assess AgentIT Itself</span>
+  <form method="post" action="/assess" class="form-narrow">
+    <div class="form-group">
+      <input type="url" name="repo_url" required placeholder="https://github.com/org/repo">
+    </div>
+    <div class="form-group">
+      <select name="criticality">
+        <option value="low">Low</option>
+        <option value="medium" selected>Medium</option>
+        <option value="high">High</option>
+        <option value="critical">Critical</option>
+      </select>
+    </div>
+    <div class="action-bar">
+      <button type="submit" class="btn btn-lg">
+        <span class="btn-label">Run Assessment</span>
         <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
       </button>
-    </form>
-  </div>
+      <form method="post" action="/self-assess" class="inline-form">
+        <button type="submit" class="btn btn-lg btn-outline">
+          <span class="btn-label">Assess AgentIT</span>
+          <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
+        </button>
+      </form>
+    </div>
+  </form>
 </div>
 {% endif %}
 {% endblock %}

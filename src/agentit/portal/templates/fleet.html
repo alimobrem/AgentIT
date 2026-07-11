@@ -4,7 +4,7 @@
 <h1>Enterprise Readiness</h1>
 
 <div class="action-bar">
-  <a href="/assess" class="btn">Assess New Repo</a>
+  <button class="btn" onclick="document.getElementById('assess-modal').classList.add('open')">Assess New Repo</button>
   <form method="post" action="/self-assess" class="inline-form">
     <button type="submit" class="btn btn-outline btn-sm">
       <span class="btn-label">Self-Assess</span>
@@ -42,7 +42,7 @@
       <th>Score</th>
       <th>Trend</th>
       <th>Deployed</th>
-      <th>Cluster</th>
+      <th>Namespace</th>
       <th>Criticality</th>
       <th>Critical</th>
       <th></th>
@@ -91,7 +91,7 @@
             <button type="submit" class="btn btn-sm">Re-assess</button>
           </form>
           <form method="post" action="/assessments/{{ r.id }}/delete" class="inline-form"
-                onsubmit="return confirm('Delete {{ r.repo_name }} and all related data?')">
+                data-repo-name="{{ r.repo_name }}">
             <button type="submit" class="btn btn-sm btn-danger-outline">×</button>
           </form>
         </div>
@@ -101,4 +101,44 @@
   </tbody>
 </table>
 {% endif %}
+
+<!-- Assess Modal -->
+<div id="assess-modal" class="modal-overlay" onclick="if(event.target===this)this.classList.remove('open')">
+  <div class="modal">
+    <button class="modal-close" onclick="this.closest('.modal-overlay').classList.remove('open')">&times;</button>
+    <h2>New Assessment</h2>
+    <form method="post" action="/assess" class="form-narrow">
+      <div class="form-group">
+        <label class="form-label" for="repo_url">Repository URL</label>
+        <input type="url" id="repo_url" name="repo_url" required placeholder="https://github.com/org/repo">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="criticality">Criticality</label>
+        <select id="criticality" name="criticality">
+          <option value="low">Low</option>
+          <option value="medium" selected>Medium</option>
+          <option value="high">High</option>
+          <option value="critical">Critical</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="infra_repo_url">GitOps Infra Repo <span class="text-muted text-xs">(optional)</span></label>
+        <input type="url" id="infra_repo_url" name="infra_repo_url" placeholder="https://github.com/org/gitops-infra">
+        <span class="text-muted text-xs">Leave blank to auto-create one.</span>
+      </div>
+      <button type="submit" class="btn">
+        <span class="btn-label">Run Assessment</span>
+        <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
+      </button>
+    </form>
+  </div>
+</div>
+
+<script>
+document.querySelectorAll('form[data-repo-name]').forEach(function(f) {
+  f.addEventListener('submit', function(e) {
+    if (!confirm('Delete ' + f.dataset.repoName + ' and all related data?')) e.preventDefault();
+  });
+});
+</script>
 {% endblock %}

@@ -452,6 +452,39 @@
   .collapse-toggle[aria-expanded="true"]::before { transform: rotate(90deg); }
   .collapse-body { overflow: hidden; }
 
+  /* ── Modal ─────────────────────────────────────────────────────── */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 200;
+    justify-content: center;
+    align-items: center;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-8);
+    width: 100%;
+    max-width: 500px;
+    position: relative;
+  }
+  .modal h2 { margin-bottom: var(--space-6); }
+  .modal-close {
+    position: absolute;
+    top: var(--space-4);
+    right: var(--space-4);
+    background: none;
+    border: none;
+    color: var(--color-muted);
+    font-size: var(--font-xl);
+    cursor: pointer;
+  }
+  .modal-close:hover { color: var(--color-text); }
+
   /* ── Nav Secondary ─────────────────────────────────────────────── */
   nav .links-secondary { display: flex; gap: var(--space-5); margin-left: auto; }
   nav .links-secondary a { color: var(--color-muted); font-size: var(--font-sm); }
@@ -491,7 +524,6 @@
   <span class="logo">AgentIT</span>
   <div class="links">
     <a href="/">Fleet</a>
-    <a href="/assess">Assess</a>
   </div>
   <div class="links-secondary">
     <a href="/gates">Gates</a>
