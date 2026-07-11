@@ -135,6 +135,11 @@ class FleetOrchestrator:
             agent_map["release"] = ("release", ReleaseCoordinatorAgent)
         except ImportError:
             logger.warning("Failed to import ReleaseCoordinatorAgent — agent will be skipped")
+        try:
+            from agentit.agents.codechange import CodeChangeAgent
+            agent_map["codechange"] = ("codechange", CodeChangeAgent)
+        except ImportError:
+            logger.warning("Failed to import CodeChangeAgent — agent will be skipped")
 
         # Register all available agents in the store
         if self._store is not None:
@@ -231,6 +236,10 @@ class FleetOrchestrator:
 
         if self.report.overall_score < 30:
             agents.append("retirement")  # Consider if app is worth hardening
+
+        # Code change agent runs for high/critical or when score is low
+        if self.report.criticality in ("high", "critical") or self.report.overall_score < 50:
+            agents.append("codechange")
 
         return agents
 
