@@ -821,10 +821,13 @@ def test_responsive_css_exists(client):
 
 
 def test_agents_page_empty(client, _override_store):
+    """With no registered agents, watcher agents are still shown."""
     resp = client.get("/agents")
     assert resp.status_code == 200
     assert "Agent Registry" in resp.text
-    assert "No agents registered" in resp.text
+    assert "vuln-watcher" in resp.text
+    assert "slo-tracker" in resp.text
+    assert "drift-detector" in resp.text
 
 
 def test_agents_page_with_data(client, _override_store):
