@@ -577,6 +577,17 @@ class AssessmentStore:
         status: str = "generated",
         manifest_path: str | None = None,
     ) -> str:
+        existing = self._conn.execute(
+            """
+            SELECT id FROM remediations
+            WHERE assessment_id = ? AND agent_name = ? AND description = ?
+              AND status NOT IN ('completed', 'applied')
+            LIMIT 1
+            """,
+            (assessment_id, agent_name, description),
+        ).fetchone()
+        if existing:
+            return existing["id"]
         rem_id = uuid.uuid4().hex
         self._conn.execute(
             """
