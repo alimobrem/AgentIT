@@ -6,14 +6,8 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel
 
-from agentit.agents.hardening import GeneratedFile
+from agentit.agents.base import GeneratedFile, _sanitize_name
 from agentit.models import AssessmentReport
-
-
-def _sanitize_name(name: str) -> str:
-    """Turn a repo name into a k8s-safe DNS label."""
-    sanitized = name.lower().replace("_", "-").replace(".", "-")[:63]
-    return sanitized.strip("-") or "app"
 
 
 class ObservabilityResult(BaseModel):

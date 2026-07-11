@@ -13,8 +13,10 @@
 - Never `except Exception: pass` — always `logger.exception("context")` or `logger.warning(...)`.
 - LLM calls must always fail gracefully — catch all exceptions in `_chat()`, return `None`.
 - LLM client init must always fail gracefully — if credentials are missing, continue without LLM.
-- All agents follow the pattern in `agents/hardening.py` — take `(report, output_dir)`, return a result with `files: list[GeneratedFile]`.
-- Shared utilities (IGNORED_DIRS, iter_text_files, calculate_score) live in `analyzers/base.py` — don't duplicate.
+- All agents follow the pattern in `agents/base.py` — take `(report, output_dir)`, return a result with `files: list[GeneratedFile]`.
+- `GeneratedFile` and `_sanitize_name` live in `agents/base.py` — import from there, never redefine locally.
+- `validate_manifest()` and `validate_generated_files()` live in `agents/base.py` — use to validate generated YAML.
+- Shared analyzer utilities (IGNORED_DIRS, iter_text_files, calculate_score) live in `analyzers/base.py` — don't duplicate.
 
 ## Frontend / Templates
 

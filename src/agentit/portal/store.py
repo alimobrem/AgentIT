@@ -5,7 +5,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 
-from agentit.models import AssessmentReport
+from agentit.models import AssessmentReport, Severity
 
 
 class AssessmentStore:
@@ -65,6 +65,48 @@ class AssessmentStore:
                 created_at TEXT NOT NULL,
                 resolved_at TEXT,
                 resolved_by TEXT,
+                FOREIGN KEY (assessment_id) REFERENCES assessments(id)
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS remediations (
+                id TEXT PRIMARY KEY,
+                assessment_id TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                FOREIGN KEY (assessment_id) REFERENCES assessments(id)
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_registry (
+                id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL UNIQUE,
+                category TEXT NOT NULL,
+                status TEXT DEFAULT 'active',
+                capabilities TEXT DEFAULT '[]',
+                last_heartbeat TEXT,
+                registered_at TEXT NOT NULL
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS slos (
+                id TEXT PRIMARY KEY,
+                assessment_id TEXT NOT NULL,
+                metric_name TEXT NOT NULL,
+                target_value REAL NOT NULL,
+                current_value REAL,
+                status TEXT DEFAULT 'unknown',
+                created_at TEXT NOT NULL,
+                updated_at TEXT,
                 FOREIGN KEY (assessment_id) REFERENCES assessments(id)
             )
             """
@@ -263,7 +305,7 @@ class AssessmentStore:
             report = AssessmentReport.model_validate_json(r["report_json"])
             critical_count = sum(
                 1 for s in report.scores for f in s.findings
-                if f.severity in (0, 1)  # critical / high
+                if f.severity in (Severity.critical, Severity.high)
             )
             trend = self.get_trend(r["repo_url"])
             fleet.append({
@@ -319,6 +361,121 @@ class AssessmentStore:
                 resolved_by,
                 gate_id,
             ),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    # ── Remediations ───────────────────────────────────────────────────
+
+    def save_remediation(
+        self, assessment_id: str, agent_name: str, description: str
+    ) -> str:
+        rem_id = uuid.uuid4().hex
+        self._conn.execute(
+            """
+            INSERT INTO remediations (id, assessment_id, agent_name, description, status, created_at)
+            VALUES (?, ?, ?, ?, 'pending', ?)
+            """,
+            (
+                rem_id,
+                assessment_id,
+                agent_name,
+                description,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self._conn.commit()
+        return rem_id
+
+    def list_remediations(self, assessment_id: str) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM remediations WHERE assessment_id = ? ORDER BY created_at DESC",
+            (assessment_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def complete_remediation(self, remediation_id: str) -> bool:
+        cursor = self._conn.execute(
+            """
+            UPDATE remediations SET status = 'completed', completed_at = ?
+            WHERE id = ? AND status = 'pending'
+            """,
+            (datetime.now(timezone.utc).isoformat(), remediation_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    # ── Agent Registry ─────────────────────────────────────────────────
+
+    def register_agent(
+        self, agent_name: str, category: str, capabilities: str = "[]"
+    ) -> str:
+        agent_id = uuid.uuid4().hex
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO agent_registry
+                (id, agent_name, category, status, capabilities, last_heartbeat, registered_at)
+            VALUES (?, ?, ?, 'active', ?, ?, ?)
+            """,
+            (agent_id, agent_name, category, capabilities, now, now),
+        )
+        self._conn.commit()
+        return agent_id
+
+    def list_agents(self, status: str = "active") -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM agent_registry WHERE status = ? ORDER BY agent_name",
+            (status,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def agent_heartbeat(self, agent_name: str) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE agent_registry SET last_heartbeat = ? WHERE agent_name = ?",
+            (datetime.now(timezone.utc).isoformat(), agent_name),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    # ── SLOs ───────────────────────────────────────────────────────────
+
+    def save_slo(
+        self, assessment_id: str, metric_name: str, target_value: float
+    ) -> str:
+        slo_id = uuid.uuid4().hex
+        self._conn.execute(
+            """
+            INSERT INTO slos (id, assessment_id, metric_name, target_value, status, created_at)
+            VALUES (?, ?, ?, ?, 'unknown', ?)
+            """,
+            (
+                slo_id,
+                assessment_id,
+                metric_name,
+                target_value,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self._conn.commit()
+        return slo_id
+
+    def list_slos(self, assessment_id: str) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM slos WHERE assessment_id = ? ORDER BY metric_name",
+            (assessment_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_slo(
+        self, slo_id: str, current_value: float, status: str
+    ) -> bool:
+        cursor = self._conn.execute(
+            """
+            UPDATE slos SET current_value = ?, status = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (current_value, status, datetime.now(timezone.utc).isoformat(), slo_id),
         )
         self._conn.commit()
         return cursor.rowcount > 0

@@ -7,14 +7,8 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel
 
+from agentit.agents.base import GeneratedFile, _sanitize_name
 from agentit.models import AssessmentReport, Severity
-
-
-class GeneratedFile(BaseModel):
-    path: str
-    content: str
-    description: str
-    finding_addressed: str
 
 
 class DependencyResult(BaseModel):
@@ -26,12 +20,6 @@ class DependencyResult(BaseModel):
         self.summary = (
             f"Generated {count} dependency artifact{'s' if count != 1 else ''}."
         )
-
-
-def _sanitize_name(name: str) -> str:
-    """Turn a repo name into a safe label."""
-    sanitized = name.lower().replace("_", "-").replace(".", "-")[:63]
-    return sanitized.strip("-") or "app"
 
 
 # Known risky packages with version thresholds

@@ -193,13 +193,16 @@ async def api_detail(assessment_id: str) -> JSONResponse:
     return JSONResponse(report.model_dump(mode="json"))
 
 
-def _run_onboarding(report: AssessmentReport) -> list[dict]:
+def _run_onboarding(report: AssessmentReport, assessment_id: str | None = None) -> list[dict]:
     """Run orchestrated onboarding via FleetOrchestrator and collect generated files."""
     from agentit.agents.orchestrator import FleetOrchestrator
 
     with tempfile.TemporaryDirectory() as tmpdir:
         base = Path(tmpdir)
-        orch = FleetOrchestrator(report=report, output_dir=base, store=get_store())
+        orch = FleetOrchestrator(
+            report=report, output_dir=base,
+            store=get_store(), assessment_id=assessment_id,
+        )
         result = orch.run()
 
         all_files: list[dict] = []
@@ -228,7 +231,7 @@ async def onboard_submit(assessment_id: str):
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
 
-    files = await asyncio.to_thread(_run_onboarding, report)
+    files = await asyncio.to_thread(_run_onboarding, report, assessment_id)
     s.save_onboarding(assessment_id, files)
     s.create_gate(assessment_id, "deploy", f"Approve deployment of {report.repo_name} to production (score: {report.overall_score:.0f}/100)")
     return RedirectResponse(

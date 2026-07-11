@@ -6,7 +6,8 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel
 
-from agentit.agents.hardening import GeneratedFile, HardeningAgent, _sanitize_name
+from agentit.agents.base import GeneratedFile, _sanitize_name
+from agentit.agents.hardening import HardeningAgent
 from agentit.models import AssessmentReport
 
 

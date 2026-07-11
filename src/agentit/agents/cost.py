@@ -6,14 +6,8 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel
 
+from agentit.agents.base import GeneratedFile, _sanitize_name
 from agentit.models import AssessmentReport
-
-
-class GeneratedFile(BaseModel):
-    path: str
-    content: str
-    description: str
-    finding_addressed: str
 
 
 class CostResult(BaseModel):
@@ -25,12 +19,6 @@ class CostResult(BaseModel):
         self.summary = (
             f"Generated {count} cost optimization artifact{'s' if count != 1 else ''}."
         )
-
-
-def _sanitize_name(name: str) -> str:
-    """Turn a repo name into a k8s-safe DNS label."""
-    sanitized = name.lower().replace("_", "-").replace(".", "-")[:63]
-    return sanitized.strip("-") or "app"
 
 
 # -- cost estimation tables ------------------------------------------------

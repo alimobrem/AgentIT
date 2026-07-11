@@ -57,10 +57,17 @@ class FleetOrchestrator:
     - Track overall onboarding status
     """
 
-    def __init__(self, report: AssessmentReport, output_dir: Path, store: object | None = None):
+    def __init__(
+        self,
+        report: AssessmentReport,
+        output_dir: Path,
+        store: object | None = None,
+        assessment_id: str | None = None,
+    ):
         self.report = report
         self.output_dir = Path(output_dir)
         self._store = store
+        self._assessment_id = assessment_id
         self._events: list[dict] = []
 
     def plan(self) -> OrchestrationPlan:
@@ -96,37 +103,53 @@ class FleetOrchestrator:
             "compliance": ("compliance", ComplianceAgent),
         }
 
-        # Try importing optional agents
+        # Import optional agents — log failures instead of silently swallowing
         try:
             from agentit.agents.dependency import DependencyAgent
             agent_map["dependency"] = ("dependency", DependencyAgent)
         except ImportError:
-            pass
+            logger.warning("Failed to import DependencyAgent — agent will be skipped")
         try:
             from agentit.agents.incident import IncidentAgent
             agent_map["incident"] = ("incident", IncidentAgent)
         except ImportError:
-            pass
+            logger.warning("Failed to import IncidentAgent — agent will be skipped")
         try:
-            from agentit.agents.cost import CostAgent
-            agent_map["cost"] = ("cost", CostAgent)
+            from agentit.agents.cost import CostOptimizationAgent
+            agent_map["cost"] = ("cost", CostOptimizationAgent)
         except ImportError:
-            pass
+            logger.warning("Failed to import CostOptimizationAgent — agent will be skipped")
         try:
             from agentit.agents.chaos import ChaosAgent
             agent_map["chaos"] = ("chaos", ChaosAgent)
         except ImportError:
-            pass
+            logger.warning("Failed to import ChaosAgent — agent will be skipped")
         try:
             from agentit.agents.retirement import RetirementAgent
             agent_map["retirement"] = ("retirement", RetirementAgent)
         except ImportError:
-            pass
+            logger.warning("Failed to import RetirementAgent — agent will be skipped")
+
+        # Register all available agents in the store
+        if self._store is not None:
+            for name, (cat, _cls) in agent_map.items():
+                try:
+                    self._store.register_agent(name, cat)
+                except Exception as exc:
+                    logger.warning("Failed to register agent '%s': %s", name, exc)
 
         results: list[AgentResult] = []
 
         for agent_name in plan.agents_to_run:
             if agent_name not in agent_map:
+                logger.warning("Agent '%s' was planned but not available (import failed?)", agent_name)
+                results.append(AgentResult(
+                    agent_name=agent_name,
+                    category=agent_name,
+                    files_generated=[],
+                    success=False,
+                    error=f"Agent '{agent_name}' not available (import failed)",
+                ))
                 continue
             category, agent_cls = agent_map[agent_name]
             sub_dir = self.output_dir / category
@@ -142,6 +165,7 @@ class FleetOrchestrator:
                     findings_count=len(result.files),
                 ))
                 self._log_event(agent_name, "completed", f"Generated {len(result.files)} files")
+                self._record_remediations(agent_name, result.files)
             except Exception as exc:
                 logger.warning("Agent %s failed: %s", agent_name, exc)
                 results.append(AgentResult(
@@ -153,8 +177,24 @@ class FleetOrchestrator:
                 ))
                 self._log_event(agent_name, "failed", str(exc))
 
+        # Validate generated output
+        validation_issues = self._post_hardening_validation(results)
+        if validation_issues:
+            for issue in validation_issues:
+                logger.warning("Post-hardening validation: %s", issue)
+            self._log_event("orchestrator", "validation-issues",
+                            f"{len(validation_issues)} manifest validation issue(s) found")
+
         # Resolve conflicts
         conflicts = self._detect_conflicts(results)
+
+        if validation_issues:
+            conflicts.append({
+                "type": "validation",
+                "agents": list({i.split(":")[0].split("/")[0] for i in validation_issues}),
+                "resolution": f"{len(validation_issues)} manifest(s) failed validation — review before deploying",
+                "winner": "validation",
+            })
 
         # Determine recommendation
         recommendation = self._generate_recommendation(plan, results, conflicts)
@@ -222,10 +262,11 @@ class FleetOrchestrator:
         return False
 
     def _detect_conflicts(self, results: list[AgentResult]) -> list[dict]:
-        """Detect conflicts between agent outputs."""
+        """Detect conflicts between agent outputs using the priority matrix."""
         conflicts: list[dict] = []
 
         failed = {r.agent_name: r for r in results if not r.success}
+        succeeded = {r.agent_name for r in results if r.success}
 
         # Security blocker: if security agent failed, block everything
         if "security" in failed:
@@ -236,7 +277,36 @@ class FleetOrchestrator:
                 "winner": "security",
             })
 
+        # Apply priority matrix for overlapping successful agents
+        for (a, b), winner in PRIORITY_MATRIX.items():
+            if a in succeeded and b in succeeded:
+                loser = b if winner == a else a
+                conflicts.append({
+                    "type": "priority",
+                    "agents": [a, b],
+                    "resolution": f"{winner} output takes precedence over {loser} for overlapping concerns",
+                    "winner": winner,
+                })
+
         return conflicts
+
+    def _post_hardening_validation(self, results: list[AgentResult]) -> list[str]:
+        """Validate generated files exist on disk and YAML parses as valid K8s manifests."""
+        from agentit.agents.base import validate_manifest
+
+        issues: list[str] = []
+        for r in results:
+            if not r.success:
+                continue
+            for fpath in r.files_generated:
+                full = self.output_dir / r.category / fpath
+                if not full.exists():
+                    issues.append(f"{r.agent_name}: expected file {fpath} missing from disk")
+                elif fpath.endswith((".yaml", ".yml")):
+                    errors = validate_manifest(full.read_text())
+                    if errors:
+                        issues.append(f"{r.agent_name}/{fpath}: {'; '.join(errors)}")
+        return issues
 
     def _generate_recommendation(
         self,
@@ -258,6 +328,21 @@ class FleetOrchestrator:
             return f"AUTO-APPROVED: All {success_count} agents succeeded, {total_files} files generated. Safe for automated deployment."
 
         return f"READY FOR REVIEW: All {success_count} agents succeeded, {total_files} files generated. Awaiting human approval."
+
+    def _record_remediations(self, agent_name: str, files: list) -> None:
+        """Record each generated file as a remediation in the store."""
+        if self._store is None or self._assessment_id is None:
+            return
+        for f in files:
+            try:
+                self._store.save_remediation(
+                    self._assessment_id,
+                    agent_name,
+                    f.description,
+                )
+            except Exception as exc:
+                logger.warning("Failed to record remediation for %s/%s: %s",
+                               agent_name, f.path, exc)
 
     def _log_event(self, agent_name: str, action: str, summary: str) -> None:
         self._events.append({
