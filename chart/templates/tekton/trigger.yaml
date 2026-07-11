@@ -38,6 +38,12 @@ spec:
   serviceAccountName: pipeline
   triggers:
     - name: github-push
+      interceptors:
+        - ref:
+            name: "cel"
+          params:
+            - name: "filter"
+              value: "header.match('X-GitHub-Event', 'push') && body.ref == 'refs/heads/main'"
       bindings:
         - name: revision
           value: $(body.after)
