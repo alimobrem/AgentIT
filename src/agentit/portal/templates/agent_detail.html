@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}{{ agent.agent_name }} - Agent Detail - AgentIT{% endblock %}
+{% block content %}
+<h1>{{ agent.agent_name }}</h1>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-label">Category</div>
+    <div class="stat-value text-sm">{{ agent.category }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Status</div>
+    <div class="stat-value">
+      {% if agent.status == "active" %}
+        <span class="text-success">Active</span>
+      {% else %}
+        <span class="text-warning">{{ agent.status }}</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Remediations</div>
+    <div class="stat-value">
+      <span class="text-success">{{ completed }}</span>
+      <span class="text-muted text-sm"> done</span>
+      {% if pending > 0 %}
+        / <span class="text-warning">{{ pending }}</span>
+        <span class="text-muted text-sm"> pending</span>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="action-bar mb-2">
+  <a href="/agents" class="btn btn-outline btn-sm">&larr; All Agents</a>
+</div>
+
+<p class="text-muted text-sm mb-1">
+  Registered: {{ agent.registered_at[:19] }}
+  {% if agent.last_heartbeat %} &mdash; Last heartbeat: {{ agent.last_heartbeat[:19] }}{% endif %}
+  {% if agent.capabilities and agent.capabilities != '[]' %} &mdash; Capabilities: {{ agent.capabilities }}{% endif %}
+</p>
+
+{% if remediations %}
+<h2 class="section-title">Remediations</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Description</th>
+      <th>Status</th>
+      <th>Created</th>
+      <th>Completed</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in remediations %}
+    <tr class="{% if r.status == 'completed' %}row-border-green{% else %}row-border-yellow{% endif %}">
+      <td>{{ r.description }}</td>
+      <td>
+        {% if r.status == "completed" %}
+          <span class="badge badge-low">completed</span>
+        {% else %}
+          <span class="badge badge-medium">pending</span>
+        {% endif %}
+      </td>
+      <td class="text-sm">{{ r.created_at[:19] }}</td>
+      <td class="text-sm">{{ r.completed_at[:19] if r.completed_at else "—" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if events %}
+<h2 class="section-title">Recent Activity</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>Action</th>
+      <th>Target</th>
+      <th>Severity</th>
+      <th>Summary</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for e in events %}
+    <tr>
+      <td class="text-sm">{{ e.timestamp[:19] }}</td>
+      <td class="text-bold">{{ e.action }}</td>
+      <td>{{ e.target_app or "—" }}</td>
+      <td>
+        {% if e.severity == "critical" %}
+          <span class="badge badge-critical">critical</span>
+        {% elif e.severity == "warning" %}
+          <span class="badge badge-high">warning</span>
+        {% else %}
+          <span class="badge badge-info">{{ e.severity }}</span>
+        {% endif %}
+      </td>
+      <td class="text-sm">{{ e.summary }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<h2 class="section-title">Recent Activity</h2>
+<p class="text-muted">No events recorded for this agent yet.</p>
+{% endif %}
+{% endblock %}

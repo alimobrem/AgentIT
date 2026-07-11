@@ -349,6 +349,20 @@ class AssessmentStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_events_by_agent(self, agent_id: str, limit: int = 50) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM events WHERE agent_id = ? ORDER BY timestamp DESC LIMIT ?",
+            (agent_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_remediations_by_agent(self, agent_name: str) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM remediations WHERE agent_name = ? ORDER BY created_at DESC",
+            (agent_name,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # ── Assessment history / trends ─────────────────────────────────────
 
     def list_history(self, repo_url: str) -> list[dict]:

@@ -33,7 +33,7 @@
   <tbody>
     {% for a in agents %}
     <tr>
-      <td class="text-bold">{{ a.agent_name }}</td>
+      <td class="text-bold"><a href="/agents/{{ a.agent_name }}">{{ a.agent_name }}</a></td>
       <td>{{ a.category }}</td>
       <td>
         {% if a.status == "active" %}

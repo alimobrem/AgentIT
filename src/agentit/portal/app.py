@@ -569,6 +569,28 @@ async def agents_page(request: Request) -> HTMLResponse:
     })
 
 
+@app.get("/agents/{agent_name}", response_class=HTMLResponse)
+async def agent_detail(request: Request, agent_name: str) -> HTMLResponse:
+    s = get_store()
+    agents = s.list_agents()
+    agent = next((a for a in agents if a["agent_name"] == agent_name), None)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    events = s.list_events_by_agent(agent_name, limit=50)
+    remediations = s.list_remediations_by_agent(agent_name)
+    pending = sum(1 for r in remediations if r["status"] == "pending")
+    completed = sum(1 for r in remediations if r["status"] == "completed")
+
+    return templates.TemplateResponse(request, "agent_detail.html", {
+        "agent": agent,
+        "events": events,
+        "remediations": remediations,
+        "pending": pending,
+        "completed": completed,
+    })
+
+
 @app.get("/api/agents")
 async def api_agents(status: str = "active"):
     return JSONResponse(get_store().list_agents(status=status))

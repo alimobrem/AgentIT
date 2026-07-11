@@ -852,6 +852,34 @@ def test_api_agents(client, _override_store):
     assert any(a["agent_name"] == "cicd" for a in data)
 
 
+def test_agent_detail_page(client, _override_store):
+    store = _override_store
+    store.register_agent("security", "hardening", "network,rbac")
+    store.log_event("security", "completed", "test-app", "info", "Generated 5 files")
+    report = _make_report()
+    aid = store.save(report)
+    store.save_remediation(aid, "security", "Add NetworkPolicy")
+    resp = client.get("/agents/security")
+    assert resp.status_code == 200
+    assert "security" in resp.text
+    assert "hardening" in resp.text
+    assert "Generated 5 files" in resp.text
+    assert "Add NetworkPolicy" in resp.text
+
+
+def test_agent_detail_not_found(client, _override_store):
+    resp = client.get("/agents/nonexistent")
+    assert resp.status_code == 404
+
+
+def test_agents_page_links_to_detail(client, _override_store):
+    store = _override_store
+    store.register_agent("observability", "monitoring")
+    resp = client.get("/agents")
+    assert resp.status_code == 200
+    assert 'href="/agents/observability"' in resp.text
+
+
 # ── Remediations page ─────────────────────────────────────────────────
 
 
