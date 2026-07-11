@@ -114,23 +114,58 @@ spec:
       params:
         - name: aggregateStatus
           value: $(tasks.status)
+        - name: revision
+          value: $(params.revision)
+        - name: repo-url
+          value: $(params.repo-url)
       taskSpec:
         params:
           - name: aggregateStatus
             type: string
+          - name: revision
+            type: string
+          - name: repo-url
+            type: string
         steps:
-          - name: report
-            image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+          - name: github-status
+            image: registry.access.redhat.com/ubi9/ubi-minimal:latest
             computeResources:
               requests:
                 memory: 64Mi
                 cpu: 50m
+            env:
+              - name: GITHUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: github-token
+                    key: token
+                    optional: true
             script: |
               STATUS="$(params.aggregateStatus)"
+              REVISION="$(params.revision)"
+              REPO_URL="$(params.repo-url)"
+
               if [ "$STATUS" = "Succeeded" ]; then
-                echo "Pipeline completed successfully"
+                GH_STATE="success"
+                DESC="CI passed (tests + build)"
               else
-                echo "Pipeline finished with status: $STATUS"
-                echo "Check: oc get pipelinerun -n {{ .Release.Namespace }}"
+                GH_STATE="failure"
+                DESC="CI failed: $STATUS"
               fi
+
+              echo "Pipeline $GH_STATE for $REVISION"
+
+              if [ -z "${GITHUB_TOKEN:-}" ]; then
+                echo "GITHUB_TOKEN not set — skipping commit status"
+                exit 0
+              fi
+
+              OWNER_REPO=$(echo "$REPO_URL" | sed 's|https://github.com/||;s|\.git$||')
+              curl -sfL -X POST \
+                -H "Authorization: Bearer $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${OWNER_REPO}/statuses/${REVISION}" \
+                -d "{\"state\":\"${GH_STATE}\",\"description\":\"${DESC}\",\"context\":\"agentit-ci/tekton\"}" \
+                && echo "Commit status posted" \
+                || echo "Failed to post commit status (non-fatal)"
 {{- end }}

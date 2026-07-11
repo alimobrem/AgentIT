@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Remediations - {{ report.repo_name }} - AgentIT{% endblock %}
+{% block content %}
+<h1>Remediations: {{ report.repo_name }}</h1>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-label">Total</div>
+    <div class="stat-value">{{ total }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Pending</div>
+    <div class="stat-value text-warning">{{ pending }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Completed</div>
+    <div class="stat-value text-success">{{ completed }}</div>
+  </div>
+</div>
+
+<div class="action-bar mb-2">
+  <a href="/assessments/{{ assessment_id }}" class="btn btn-outline btn-sm">&larr; Back to Assessment</a>
+</div>
+
+{% if remediations %}
+<table>
+  <thead>
+    <tr>
+      <th>Agent</th>
+      <th>Description</th>
+      <th>Status</th>
+      <th>Created</th>
+      <th>Completed</th>
+      <th>Action</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in remediations %}
+    <tr class="{% if r.status == 'completed' %}row-border-green{% else %}row-border-yellow{% endif %}">
+      <td class="text-bold">{{ r.agent_name }}</td>
+      <td>{{ r.description }}</td>
+      <td>
+        {% if r.status == "completed" %}
+          <span class="badge badge-low">completed</span>
+        {% else %}
+          <span class="badge badge-medium">pending</span>
+        {% endif %}
+      </td>
+      <td class="text-sm">{{ r.created_at[:19] }}</td>
+      <td class="text-sm">{{ r.completed_at[:19] if r.completed_at else "—" }}</td>
+      <td>
+        {% if r.status == "pending" %}
+        <form method="post" action="/assessments/{{ assessment_id }}/remediations/{{ r.id }}/complete" class="inline-form">
+          <button type="submit" class="btn btn-green btn-sm">
+            <span class="btn-label">Complete</span>
+            <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+          </button>
+        </form>
+        {% else %}
+        —
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="text-muted mt-2">No remediations recorded. Run onboarding to generate remediation items.</p>
+{% endif %}
+{% endblock %}

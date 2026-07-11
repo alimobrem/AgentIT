@@ -36,10 +36,18 @@ class AssessmentStore:
                 assessment_id TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 files_json TEXT NOT NULL,
+                orchestration_json TEXT DEFAULT '{}',
                 FOREIGN KEY (assessment_id) REFERENCES assessments(id)
             )
             """
         )
+        # Migration: add orchestration_json to existing DBs
+        try:
+            self._conn.execute(
+                "ALTER TABLE onboarding_results ADD COLUMN orchestration_json TEXT DEFAULT '{}'"
+            )
+        except Exception:
+            pass  # Column already exists
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS events (
@@ -166,18 +174,21 @@ class AssessmentStore:
         self._conn.commit()
         return cursor.rowcount > 0
 
-    def save_onboarding(self, assessment_id: str, files: list[dict]) -> str:
+    def save_onboarding(
+        self, assessment_id: str, files: list[dict], orchestration: dict | None = None,
+    ) -> str:
         onboarding_id = uuid.uuid4().hex
         self._conn.execute(
             """
-            INSERT INTO onboarding_results (id, assessment_id, created_at, files_json)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO onboarding_results (id, assessment_id, created_at, files_json, orchestration_json)
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
                 onboarding_id,
                 assessment_id,
                 datetime.now(timezone.utc).isoformat(),
                 json.dumps(files),
+                json.dumps(orchestration or {}),
             ),
         )
         self._conn.commit()
@@ -204,6 +215,15 @@ class AssessmentStore:
         if row is None:
             return None
         return json.loads(row["files_json"])
+
+    def get_orchestration(self, assessment_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT orchestration_json FROM onboarding_results WHERE assessment_id = ? ORDER BY created_at DESC LIMIT 1",
+            (assessment_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row["orchestration_json"])
 
     # ── Events ──────────────────────────────────────────────────────────
 

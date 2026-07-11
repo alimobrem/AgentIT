@@ -74,3 +74,69 @@ def test_kafka_failure_graceful():
 
     event = pub.publish("t", "a", "x")
     assert "eventId" in event  # event still returned
+
+
+def test_event_id_is_unique():
+    """Two publishes produce distinct eventId values."""
+    pub = EventPublisher(bootstrap_servers=None)
+    e1 = pub.publish("t", "a", "x")
+    e2 = pub.publish("t", "a", "x")
+    assert e1["eventId"] != e2["eventId"]
+
+
+def test_timestamp_is_iso_format():
+    """Timestamp parses as valid ISO-8601."""
+    from datetime import datetime
+
+    pub = EventPublisher(bootstrap_servers=None)
+    event = pub.publish("t", "a", "x")
+    # Will raise ValueError if not valid ISO format
+    datetime.fromisoformat(event["timestamp"])
+
+
+def test_severity_defaults_to_info():
+    """Severity defaults to 'info' when not specified."""
+    pub = EventPublisher(bootstrap_servers=None)
+    event = pub.publish("t", "a", "x")
+    assert event["severity"] == "info"
+
+
+def test_details_default_to_empty_dict():
+    """Details default to empty dict when not specified."""
+    pub = EventPublisher(bootstrap_servers=None)
+    event = pub.publish("t", "a", "x")
+    assert event["result"]["details"] == {}
+
+
+def test_dual_write_kafka_and_return():
+    """Event is both sent to Kafka and returned to the caller."""
+    pub = EventPublisher(bootstrap_servers=None)
+    mock_producer = MagicMock()
+    pub._producer = mock_producer
+
+    event = pub.publish("topic", "agent-1", "deploy", summary="done")
+
+    mock_producer.send.assert_called_once()
+    assert event["agentId"] == "agent-1"
+    assert event["action"] == "deploy"
+
+
+def test_kafka_flush_timeout():
+    """flush raises TimeoutError → event still returned gracefully."""
+    pub = EventPublisher(bootstrap_servers=None)
+    mock_producer = MagicMock()
+    mock_producer.flush.side_effect = TimeoutError("flush timed out")
+    pub._producer = mock_producer
+
+    event = pub.publish("t", "a", "x")
+    assert "eventId" in event
+
+
+def test_close_calls_producer_close():
+    """close() delegates to the underlying producer."""
+    pub = EventPublisher(bootstrap_servers=None)
+    mock_producer = MagicMock()
+    pub._producer = mock_producer
+
+    pub.close()
+    mock_producer.close.assert_called_once()

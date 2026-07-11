@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Agent Registry - AgentIT{% endblock %}
+{% block content %}
+<h1>Agent Registry</h1>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-label">Total Agents</div>
+    <div class="stat-value">{{ total }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Active</div>
+    <div class="stat-value text-success">{{ active }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Last Heartbeat</div>
+    <div class="stat-value text-sm">{{ last_heartbeat }}</div>
+  </div>
+</div>
+
+{% if agents %}
+<table>
+  <thead>
+    <tr>
+      <th>Agent</th>
+      <th>Category</th>
+      <th>Status</th>
+      <th>Capabilities</th>
+      <th>Registered</th>
+      <th>Last Heartbeat</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for a in agents %}
+    <tr>
+      <td class="text-bold">{{ a.agent_name }}</td>
+      <td>{{ a.category }}</td>
+      <td>
+        {% if a.status == "active" %}
+          <span class="badge badge-info">active</span>
+        {% else %}
+          <span class="badge badge-medium">{{ a.status }}</span>
+        {% endif %}
+      </td>
+      <td class="text-sm text-muted">{{ a.capabilities }}</td>
+      <td class="text-sm">{{ a.registered_at[:19] }}</td>
+      <td class="text-sm">{{ a.last_heartbeat[:19] if a.last_heartbeat else "—" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="text-muted mt-2">No agents registered yet. Run an onboarding to populate the registry.</p>
+{% endif %}
+{% endblock %}

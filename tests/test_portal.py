@@ -427,8 +427,9 @@ def test_webhook_onboard_triggers_onboarding(client, _override_store):
     report = _make_report_with_findings()
     aid = store.save(report)
 
-    fake_files = [{"category": "security", "filename": "netpol.yaml", "content": "kind: NetworkPolicy"}]
-    with patch("agentit.portal.app._run_onboarding", return_value=fake_files):
+    fake_files = [{"category": "security", "path": "netpol.yaml", "content": "kind: NetworkPolicy", "description": "netpol"}]
+    fake_summary = {"agents": [], "conflicts": [], "recommendation": "READY", "auto_approve": False, "gates": []}
+    with patch("agentit.portal.app._run_onboarding", return_value=(fake_files, fake_summary)):
         resp = client.post(
             "/api/webhook/onboard",
             json={"correlationId": aid},
@@ -819,3 +820,137 @@ def test_onboard_results_uses_design_system_classes(client, _override_store):
 def test_responsive_css_exists(client):
     resp = client.get("/")
     assert "@media (max-width: 768px)" in resp.text
+
+
+# ── Agents page ────────────────────────────────────────────────────────
+
+
+def test_agents_page_empty(client, _override_store):
+    resp = client.get("/agents")
+    assert resp.status_code == 200
+    assert "Agent Registry" in resp.text
+    assert "No agents registered" in resp.text
+
+
+def test_agents_page_with_data(client, _override_store):
+    store = _override_store
+    store.register_agent("security", "hardening", "network,rbac")
+    store.register_agent("observability", "monitoring")
+    resp = client.get("/agents")
+    assert resp.status_code == 200
+    assert "security" in resp.text
+    assert "observability" in resp.text
+    assert "hardening" in resp.text
+
+
+def test_api_agents(client, _override_store):
+    store = _override_store
+    store.register_agent("cicd", "deployment")
+    resp = client.get("/api/agents")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert any(a["agent_name"] == "cicd" for a in data)
+
+
+# ── Remediations page ─────────────────────────────────────────────────
+
+
+def test_remediations_page(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    store.save_remediation(aid, "security", "Fix RBAC")
+    store.save_remediation(aid, "observability", "Add metrics")
+    resp = client.get(f"/assessments/{aid}/remediations")
+    assert resp.status_code == 200
+    assert "Remediations" in resp.text
+    assert "Fix RBAC" in resp.text
+    assert "Add metrics" in resp.text
+
+
+def test_remediations_page_empty(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    resp = client.get(f"/assessments/{aid}/remediations")
+    assert resp.status_code == 200
+    assert "No remediations" in resp.text
+
+
+def test_complete_remediation(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    rid = store.save_remediation(aid, "security", "Fix RBAC")
+    resp = client.post(f"/assessments/{aid}/remediations/{rid}/complete", follow_redirects=False)
+    assert resp.status_code == 303
+    rems = store.list_remediations(aid)
+    assert rems[0]["status"] == "completed"
+
+
+def test_api_remediations(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    store.save_remediation(aid, "compliance", "Add SBOM")
+    resp = client.get(f"/api/assessments/{aid}/remediations")
+    assert resp.status_code == 200
+    assert len(resp.json()) == 1
+
+
+# ── SLOs page ──────────────────────────────────────────────────────────
+
+
+def test_slos_page(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    store.save_slo(aid, "availability", 99.9)
+    store.save_slo(aid, "error_rate", 0.1)
+    resp = client.get(f"/assessments/{aid}/slos")
+    assert resp.status_code == 200
+    assert "SLOs" in resp.text
+    assert "availability" in resp.text
+    assert "error_rate" in resp.text
+
+
+def test_slos_page_empty(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    resp = client.get(f"/assessments/{aid}/slos")
+    assert resp.status_code == 200
+    assert "No SLOs defined" in resp.text
+
+
+def test_api_slos(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    store.save_slo(aid, "latency_p99", 200.0)
+    resp = client.get(f"/api/assessments/{aid}/slos")
+    assert resp.status_code == 200
+    assert len(resp.json()) == 1
+
+
+# ── Nav bar ────────────────────────────────────────────────────────────
+
+
+def test_nav_includes_agents_link(client):
+    resp = client.get("/")
+    assert 'href="/agents"' in resp.text
+    assert "Agents" in resp.text
+
+
+# ── Assessment detail shows remediation/SLO buttons ────────────────────
+
+
+def test_assessment_detail_shows_remediation_button(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    store.save_remediation(aid, "security", "Fix it")
+    resp = client.get(f"/assessments/{aid}")
+    assert resp.status_code == 200
+    assert f"/assessments/{aid}/remediations" in resp.text
+    assert "Remediations (1)" in resp.text
+
+
+def test_assessment_detail_hides_buttons_when_empty(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    resp = client.get(f"/assessments/{aid}")
+    assert resp.status_code == 200
+    assert "Remediations" not in resp.text or "Remediations (0)" not in resp.text

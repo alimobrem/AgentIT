@@ -44,13 +44,19 @@
 </ul>
 {% endif %}
 
-<div class="mb-2 mt-2">
+<div class="action-bar mb-2 mt-2">
   <form method="post" action="/assessments/{{ assessment_id }}/onboard" class="inline-form">
     <button type="submit" class="btn btn-action btn-lg">
       <span class="btn-label">Onboard</span>
       <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Onboarding&hellip;</span>
     </button>
   </form>
+  {% if remediation_count > 0 %}
+  <a href="/assessments/{{ assessment_id }}/remediations" class="btn btn-outline">Remediations ({{ remediation_count }})</a>
+  {% endif %}
+  {% if slo_count > 0 %}
+  <a href="/assessments/{{ assessment_id }}/slos" class="btn btn-outline">SLOs ({{ slo_count }})</a>
+  {% endif %}
 </div>
 
 {% if report.remediation_plan %}

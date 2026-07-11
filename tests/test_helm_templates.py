@@ -1,0 +1,234 @@
+"""Regression tests for Helm chart templates (argo-events, tekton).
+
+Validates rendered YAML structure against bugs that were previously fixed.
+Uses simple string replacement for Helm variables — no helm binary needed.
+"""
+
+import re
+from pathlib import Path
+
+import yaml
+
+CHART_DIR = Path(__file__).resolve().parent.parent / "chart" / "templates"
+
+# Minimal Helm variable replacements for rendering
+HELM_VARS = {
+    "{{ .Release.Namespace }}": "test-ns",
+    "{{ .Release.Name }}": "agentit",
+    "{{ .Release.Service }}": "Helm",
+    "{{ .Chart.Name }}": "agentit",
+}
+
+
+def _render(template_path: Path) -> str:
+    """Read a template file and do basic Helm variable substitution."""
+    raw = template_path.read_text()
+    # Strip {{- if ... }} and {{- end }} conditionals
+    raw = re.sub(r"\{\{-?\s*if\s+.*?\}\}\n?", "", raw)
+    raw = re.sub(r"\{\{-?\s*end\s*\}\}\n?", "", raw)
+    for var, val in HELM_VARS.items():
+        raw = raw.replace(var, val)
+    return raw
+
+
+def _load(template_path: Path) -> dict:
+    """Render and parse a single-document YAML template."""
+    rendered = _render(template_path)
+    doc = yaml.safe_load(rendered)
+    assert doc is not None, f"Template rendered to empty YAML: {template_path.name}"
+    return doc
+
+
+# ---------------------------------------------------------------------------
+# EventSource: eventsource-kafka.yaml
+# ---------------------------------------------------------------------------
+
+class TestEventSourceKafka:
+    TEMPLATE = CHART_DIR / "argo-events" / "eventsource-kafka.yaml"
+
+    def test_parseable(self):
+        doc = _load(self.TEMPLATE)
+        assert doc["kind"] == "EventSource"
+
+    def test_consumer_group_is_dict(self):
+        """Bug: consumerGroup was previously a bare string, must be a dict."""
+        doc = _load(self.TEMPLATE)
+        kafka_spec = doc["spec"]["kafka"]["agentit-events"]
+        cg = kafka_spec["consumerGroup"]
+        assert isinstance(cg, dict), (
+            f"consumerGroup must be a dict, got {type(cg).__name__}: {cg}"
+        )
+        assert "groupName" in cg
+
+    def test_namespace_label(self):
+        doc = _load(self.TEMPLATE)
+        assert doc["metadata"]["namespace"] == "test-ns"
+
+
+# ---------------------------------------------------------------------------
+# Sensor: sensor-onboard.yaml
+# ---------------------------------------------------------------------------
+
+class TestSensorOnboard:
+    TEMPLATE = CHART_DIR / "argo-events" / "sensor-onboard.yaml"
+
+    def test_parseable(self):
+        doc = _load(self.TEMPLATE)
+        assert doc["kind"] == "Sensor"
+
+    def test_trigger_uses_http_not_argo_workflow(self):
+        """Bug: trigger previously used argoWorkflow instead of http."""
+        doc = _load(self.TEMPLATE)
+        triggers = doc["spec"]["triggers"]
+        for trigger in triggers:
+            tmpl = trigger["template"]
+            assert "argoWorkflow" not in tmpl, (
+                "Sensor trigger must use 'http', not 'argoWorkflow'"
+            )
+            assert "http" in tmpl, "Sensor trigger missing 'http' config"
+
+    def test_trigger_http_url(self):
+        doc = _load(self.TEMPLATE)
+        http = doc["spec"]["triggers"][0]["template"]["http"]
+        assert "test-ns" in http["url"]
+        assert http["method"] == "POST"
+
+
+# ---------------------------------------------------------------------------
+# Pipeline: tekton/pipeline.yaml
+# ---------------------------------------------------------------------------
+
+class TestTektonPipeline:
+    TEMPLATE = CHART_DIR / "tekton" / "pipeline.yaml"
+
+    def test_parseable(self):
+        doc = _load(self.TEMPLATE)
+        assert doc["kind"] == "Pipeline"
+
+    def test_git_clone_params_uppercase(self):
+        """Bug: git-clone params were lowercase 'url'/'revision', must be URL/REVISION."""
+        doc = _load(self.TEMPLATE)
+        tasks = doc["spec"]["tasks"]
+        git_clone = next(t for t in tasks if t["name"] == "git-clone")
+        param_names = {p["name"] for p in git_clone["params"]}
+        assert "URL" in param_names, (
+            f"git-clone must use uppercase 'URL', found: {param_names}"
+        )
+        assert "REVISION" in param_names, (
+            f"git-clone must use uppercase 'REVISION', found: {param_names}"
+        )
+        # Must NOT have lowercase variants
+        assert "url" not in param_names, "git-clone has lowercase 'url' — must be 'URL'"
+        assert "revision" not in param_names, (
+            "git-clone has lowercase 'revision' — must be 'REVISION'"
+        )
+
+    def test_run_tests_working_dir_no_agentit_suffix(self):
+        """Bug: workingDir had '/agentit' suffix that breaks cloned repo layout."""
+        doc = _load(self.TEMPLATE)
+        tasks = doc["spec"]["tasks"]
+        run_tests = next(t for t in tasks if t["name"] == "run-tests")
+        steps = run_tests["taskSpec"]["steps"]
+        for step in steps:
+            wd = step.get("workingDir", "")
+            assert not wd.endswith("/agentit"), (
+                f"workingDir must not end with '/agentit', got: {wd}"
+            )
+
+    def test_pipeline_has_workspaces(self):
+        doc = _load(self.TEMPLATE)
+        ws = doc["spec"]["workspaces"]
+        ws_names = {w["name"] for w in ws}
+        assert "source" in ws_names
+
+    def test_pipeline_has_retries(self):
+        doc = _load(self.TEMPLATE)
+        tasks = {t["name"]: t for t in doc["spec"]["tasks"]}
+        assert tasks["git-clone"].get("retries", 0) >= 1
+        assert tasks["run-tests"].get("retries", 0) >= 1
+        assert tasks["restart-rollout"].get("retries", 0) >= 1
+
+    def test_pipeline_has_timeouts(self):
+        doc = _load(self.TEMPLATE)
+        for task in doc["spec"]["tasks"]:
+            assert "timeout" in task, f"Task {task['name']} missing timeout"
+
+    def test_pipeline_has_finally_block(self):
+        doc = _load(self.TEMPLATE)
+        assert "finally" in doc["spec"], "Pipeline missing 'finally' block"
+        finally_tasks = doc["spec"]["finally"]
+        assert len(finally_tasks) >= 1
+        assert finally_tasks[0]["name"] == "report-status"
+
+
+# ---------------------------------------------------------------------------
+# Kafka → Sensor → HTTP trigger flow validation
+# ---------------------------------------------------------------------------
+
+class TestKafkaTriggerFlow:
+    """Validate the end-to-end Kafka→EventSource→Sensor→HTTP chain is wired correctly."""
+
+    def test_eventsource_topic_matches_publisher(self):
+        doc = _load(CHART_DIR / "argo-events" / "eventsource-kafka.yaml")
+        topic = doc["spec"]["kafka"]["agentit-events"]["topic"]
+        assert topic == "agentit-events"
+
+    def test_sensor_references_eventsource(self):
+        es_doc = _load(CHART_DIR / "argo-events" / "eventsource-kafka.yaml")
+        sensor_doc = _load(CHART_DIR / "argo-events" / "sensor-onboard.yaml")
+        dep = sensor_doc["spec"]["dependencies"][0]
+        assert dep["eventSourceName"] == es_doc["metadata"]["name"]
+        assert dep["eventName"] == "agentit-events"
+
+    def test_sensor_filters_on_assessment_complete(self):
+        doc = _load(CHART_DIR / "argo-events" / "sensor-onboard.yaml")
+        filters = doc["spec"]["dependencies"][0]["filters"]["data"]
+        action_filter = next(f for f in filters if "action" in f["path"])
+        assert "assessment-complete" in action_filter["value"]
+
+    def test_sensor_filters_on_low_score(self):
+        doc = _load(CHART_DIR / "argo-events" / "sensor-onboard.yaml")
+        filters = doc["spec"]["dependencies"][0]["filters"]["data"]
+        score_filter = next(f for f in filters if "score" in f["path"])
+        assert score_filter["comparator"] == "<"
+        assert "70" in score_filter["value"]
+
+    def test_sensor_http_targets_portal_onboard_webhook(self):
+        doc = _load(CHART_DIR / "argo-events" / "sensor-onboard.yaml")
+        http = doc["spec"]["triggers"][0]["template"]["http"]
+        assert "/api/webhook/onboard" in http["url"]
+        assert http["method"] == "POST"
+
+    def test_sensor_passes_event_body_to_webhook(self):
+        doc = _load(CHART_DIR / "argo-events" / "sensor-onboard.yaml")
+        http = doc["spec"]["triggers"][0]["template"]["http"]
+        payload = http["payload"]
+        assert len(payload) >= 1
+        assert payload[0]["src"]["dataKey"] == "body"
+
+    def test_eventbus_has_replicas(self):
+        doc = _load(CHART_DIR / "argo-events" / "eventbus.yaml")
+        assert doc["kind"] == "EventBus"
+        assert doc["spec"]["nats"]["native"]["replicas"] >= 3
+
+
+# ---------------------------------------------------------------------------
+# Tekton cleanup CronJob
+# ---------------------------------------------------------------------------
+
+class TestTektonCleanup:
+    TEMPLATE = CHART_DIR / "tekton" / "cleanup-cronjob.yaml"
+
+    def test_parseable(self):
+        doc = _load(self.TEMPLATE)
+        assert doc["kind"] == "CronJob"
+
+    def test_schedule_is_daily(self):
+        doc = _load(self.TEMPLATE)
+        parts = doc["spec"]["schedule"].split()
+        assert len(parts) == 5
+
+    def test_uses_pipeline_service_account(self):
+        doc = _load(self.TEMPLATE)
+        sa = doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]["serviceAccountName"]
+        assert sa == "pipeline"

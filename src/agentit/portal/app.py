@@ -129,7 +129,7 @@ async def webhook_onboard(request: Request):
         raise HTTPException(404, f"Assessment {assessment_id} not found")
 
     try:
-        files = await asyncio.to_thread(_run_onboarding, report, assessment_id)
+        files, orch_summary = await asyncio.to_thread(_run_onboarding, report, assessment_id)
     except Exception as exc:
         log.exception("Onboarding failed for assessment %s", assessment_id)
         return JSONResponse(
@@ -137,7 +137,7 @@ async def webhook_onboard(request: Request):
             status_code=500,
         )
 
-    s.save_onboarding(assessment_id, files)
+    s.save_onboarding(assessment_id, files, orchestration=orch_summary)
     log.info("webhook_onboard completed for %s: %d files generated", assessment_id, len(files))
     return JSONResponse({
         "assessment_id": assessment_id,
@@ -197,7 +197,8 @@ async def assess_submit(
 
 @app.get("/assessments/{assessment_id}", response_class=HTMLResponse)
 async def assessment_detail(request: Request, assessment_id: str) -> HTMLResponse:
-    report = get_store().get(assessment_id)
+    s = get_store()
+    report = s.get(assessment_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
 
@@ -209,6 +210,9 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
         if f.severity in (Severity.critical, Severity.high)
     ]
 
+    remediations = s.list_remediations(assessment_id)
+    slos = s.list_slos(assessment_id)
+
     return templates.TemplateResponse(
         request,
         "assessment_detail.html",
@@ -217,6 +221,8 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "scores_sorted": scores_sorted,
             "urgent_findings": urgent_findings,
             "assessment_id": assessment_id,
+            "remediation_count": len(remediations),
+            "slo_count": len(slos),
         },
     )
 
@@ -234,8 +240,10 @@ async def api_detail(assessment_id: str) -> JSONResponse:
     return JSONResponse(report.model_dump(mode="json"))
 
 
-def _run_onboarding(report: AssessmentReport, assessment_id: str | None = None) -> list[dict]:
-    """Run orchestrated onboarding via FleetOrchestrator and collect generated files."""
+def _run_onboarding(
+    report: AssessmentReport, assessment_id: str | None = None,
+) -> tuple[list[dict], dict]:
+    """Run orchestrated onboarding. Returns (files, orchestration_summary)."""
     from agentit.agents.orchestrator import FleetOrchestrator
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -262,7 +270,24 @@ def _run_onboarding(report: AssessmentReport, assessment_id: str | None = None) 
                             "content": file_path.read_text(encoding="utf-8"),
                         }
                     )
-        return all_files
+
+        orch_summary = {
+            "agents": [
+                {
+                    "name": ar.agent_name,
+                    "category": ar.category,
+                    "success": ar.success,
+                    "files_count": len(ar.files_generated),
+                    "error": ar.error,
+                }
+                for ar in result.agent_results
+            ],
+            "conflicts": result.conflicts,
+            "recommendation": result.recommendation,
+            "auto_approve": result.plan.auto_approve,
+            "gates": result.gates_created,
+        }
+        return all_files, orch_summary
 
 
 @app.post("/assessments/{assessment_id}/onboard", response_model=None)
@@ -272,8 +297,8 @@ async def onboard_submit(assessment_id: str):
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
 
-    files = await asyncio.to_thread(_run_onboarding, report, assessment_id)
-    s.save_onboarding(assessment_id, files)
+    files, orch_summary = await asyncio.to_thread(_run_onboarding, report, assessment_id)
+    s.save_onboarding(assessment_id, files, orchestration=orch_summary)
     s.create_gate(assessment_id, "deploy", f"Approve deployment of {report.repo_name} to production (score: {report.overall_score:.0f}/100)")
     return RedirectResponse(
         url=f"/assessments/{assessment_id}/onboard-results", status_code=303,
@@ -294,10 +319,17 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
     for f in files:
         grouped.setdefault(f["category"], []).append(f)
 
+    orchestration = s.get_orchestration(assessment_id) or {}
+
     return templates.TemplateResponse(
         request,
         "onboard_results.html",
-        {"report": report, "grouped": grouped, "assessment_id": assessment_id},
+        {
+            "report": report,
+            "grouped": grouped,
+            "assessment_id": assessment_id,
+            "orchestration": orchestration,
+        },
     )
 
 
@@ -419,3 +451,90 @@ async def create_pr(assessment_id: str):
         url=f"/assessments/{assessment_id}/onboard-results?pr_url={result['pr_url']}",
         status_code=303,
     )
+
+
+# ── Agents ─────────────────────────────────────────────────────────────
+
+
+@app.get("/agents", response_class=HTMLResponse)
+async def agents_page(request: Request) -> HTMLResponse:
+    agents = get_store().list_agents()
+    active = sum(1 for a in agents if a["status"] == "active")
+    last_hb = max((a["last_heartbeat"] or "" for a in agents), default="—")
+    return templates.TemplateResponse(request, "agents.html", {
+        "agents": agents,
+        "total": len(agents),
+        "active": active,
+        "last_heartbeat": last_hb[:19] if last_hb != "—" else "—",
+    })
+
+
+@app.get("/api/agents")
+async def api_agents(status: str = "active"):
+    return JSONResponse(get_store().list_agents(status=status))
+
+
+# ── Remediations ───────────────────────────────────────────────────────
+
+
+@app.get("/assessments/{assessment_id}/remediations", response_class=HTMLResponse)
+async def remediations_page(request: Request, assessment_id: str) -> HTMLResponse:
+    s = get_store()
+    report = s.get(assessment_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    remediations = s.list_remediations(assessment_id)
+    pending = sum(1 for r in remediations if r["status"] == "pending")
+    completed = sum(1 for r in remediations if r["status"] == "completed")
+    return templates.TemplateResponse(request, "remediations.html", {
+        "report": report,
+        "remediations": remediations,
+        "assessment_id": assessment_id,
+        "total": len(remediations),
+        "pending": pending,
+        "completed": completed,
+    })
+
+
+@app.post("/assessments/{assessment_id}/remediations/{rem_id}/complete", response_model=None)
+async def complete_remediation(assessment_id: str, rem_id: str):
+    s = get_store()
+    remediations = s.list_remediations(assessment_id)
+    if not any(r["id"] == rem_id for r in remediations):
+        raise HTTPException(status_code=404, detail="Remediation not found for this assessment")
+    s.complete_remediation(rem_id)
+    return RedirectResponse(
+        url=f"/assessments/{assessment_id}/remediations", status_code=303,
+    )
+
+
+@app.get("/api/assessments/{assessment_id}/remediations")
+async def api_remediations(assessment_id: str):
+    return JSONResponse(get_store().list_remediations(assessment_id))
+
+
+# ── SLOs ───────────────────────────────────────────────────────────────
+
+
+@app.get("/assessments/{assessment_id}/slos", response_class=HTMLResponse)
+async def slos_page(request: Request, assessment_id: str) -> HTMLResponse:
+    s = get_store()
+    report = s.get(assessment_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    slos = s.list_slos(assessment_id)
+    met = sum(1 for sl in slos if sl["status"] == "met")
+    breached = sum(1 for sl in slos if sl["status"] == "breached")
+    return templates.TemplateResponse(request, "slos.html", {
+        "report": report,
+        "slos": slos,
+        "assessment_id": assessment_id,
+        "total": len(slos),
+        "met": met,
+        "breached": breached,
+    })
+
+
+@app.get("/api/assessments/{assessment_id}/slos")
+async def api_slos(assessment_id: str):
+    return JSONResponse(get_store().list_slos(assessment_id))

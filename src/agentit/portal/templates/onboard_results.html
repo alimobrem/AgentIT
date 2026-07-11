@@ -57,6 +57,46 @@
   </form>
 </div>
 
+{% if orchestration and orchestration.agents %}
+<h2 class="section-title">Orchestration Summary</h2>
+<div class="alert {% if orchestration.recommendation and 'BLOCKED' in orchestration.recommendation %}alert-error{% elif orchestration.recommendation and 'AUTO-APPROVED' in orchestration.recommendation %}alert-success{% else %}alert-warn{% endif %} mb-2">
+  {{ orchestration.recommendation or "No recommendation available" }}
+</div>
+<table class="mb-2">
+  <thead>
+    <tr><th>Agent</th><th>Category</th><th>Status</th><th>Files</th><th>Error</th></tr>
+  </thead>
+  <tbody>
+    {% for a in orchestration.agents %}
+    <tr class="{% if a.success %}row-border-green{% else %}row-border-red{% endif %}">
+      <td class="text-bold">{{ a.name }}</td>
+      <td>{{ a.category }}</td>
+      <td>
+        {% if a.success %}
+          <span class="badge badge-low">PASS</span>
+        {% else %}
+          <span class="badge badge-critical">FAIL</span>
+        {% endif %}
+      </td>
+      <td>{{ a.files_count }}</td>
+      <td class="text-sm text-danger">{{ a.error or "—" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% if orchestration.conflicts %}
+<h3 class="text-sm text-muted mb-1">Conflicts</h3>
+<ul class="finding-list mb-2">
+  {% for c in orchestration.conflicts %}
+  <li class="finding-item {% if c.type == 'blocker' %}finding-critical{% endif %}">
+    <span class="badge badge-{{ 'critical' if c.type == 'blocker' else 'medium' }}">{{ c.type }}</span>
+    {{ c.resolution }} (winner: {{ c.winner }})
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endif %}
+
 {% set total = namespace(count=0) %}
 {% for cat, files in grouped.items() %}{% set total.count = total.count + files|length %}{% endfor %}
 <p class="text-muted mb-1">{{ total.count }} manifests across {{ grouped|length }} categories</p>
