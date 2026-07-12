@@ -523,14 +523,49 @@ def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bool) ->
                 return
 
             click.echo(f"\nStep 2: Generating fixes for {len(fixable)} finding(s)...", err=True)
+
+            # Try skill engine first (LLM-powered, tailored), fall back to dispatcher (templates)
+            from agentit.skill_engine import SkillEngine
+            from agentit.platform_context import offline_context
+            try:
+                from agentit.platform_context import discover_platform
+                platform = discover_platform()
+            except Exception:
+                platform = offline_context()
+
+            skills_dir = Path(__file__).parent.parent.parent / "skills"
+            if not skills_dir.exists():
+                skills_dir = Path("skills")
+            engine = SkillEngine(skills_dir, platform=platform)
+
+            llm_for_gen = None
+            try:
+                from agentit.llm import LLMClient
+                llm_for_gen = LLMClient()
+                click.echo("  LLM available — generating tailored fixes.", err=True)
+            except Exception:
+                click.echo("  LLM unavailable — using template fallback.", err=True)
+
             dispatcher = RemediationDispatcher(store)
             generated = []
 
             for finding in fixable:
+                # Try skill engine first
+                skill_files = engine.generate_for_finding(
+                    finding.category, finding.description, report, llm_client=llm_for_gen,
+                )
+                if skill_files:
+                    for fix_file in skill_files:
+                        source = "skill+LLM" if llm_for_gen else "skill+template"
+                        click.echo(f"  Generated: {fix_file.path} ({source})", err=True)
+                        generated.append((finding, fix_file))
+                    continue
+
+                # Fall back to dispatcher (Python agent templates)
                 result = dispatcher.dispatch(assessment_id, finding.category, report.repo_name)
                 if result.get("files"):
                     for fix_file in result["files"]:
-                        click.echo(f"  Generated: {fix_file.path} ({result['agent']})", err=True)
+                        click.echo(f"  Generated: {fix_file.path} (agent/{result['agent']})", err=True)
                         generated.append((finding, fix_file))
                 elif result.get("error"):
                     click.echo(f"  Skip {finding.category}: {result['error']}", err=True)
