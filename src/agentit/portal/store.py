@@ -508,27 +508,32 @@ class AssessmentStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def retry_dlq_message(self, event_id: str) -> bool:
-        cursor = self._conn.execute(
-            "UPDATE events SET action = 'dlq-retry' WHERE id = ? AND action = 'dead-letter'",
-            (event_id,),
-        )
-        self._conn.commit()
-        if cursor.rowcount > 0:
-            self.log_event(
-                'portal', 'dlq-retry', None, 'info',
-                f'Retried dead-letter event {event_id}',
-            )
-            return True
-        return False
+    def list_dlq_messages(self, limit: int = 200) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM events WHERE action = 'dead-letter' ORDER BY timestamp DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
-    def dismiss_dlq_message(self, event_id: str) -> bool:
+    def _update_dlq(self, event_id: str, new_action: str) -> bool:
         cursor = self._conn.execute(
-            "UPDATE events SET action = 'dlq-dismissed' WHERE id = ? AND action = 'dead-letter'",
-            (event_id,),
+            "UPDATE events SET action = ? WHERE id = ? AND action = 'dead-letter'",
+            (new_action, event_id),
         )
         self._conn.commit()
         return cursor.rowcount > 0
+
+    def retry_dlq_message(self, event_id: str) -> bool:
+        if not self._update_dlq(event_id, 'dlq-retry'):
+            return False
+        self.log_event(
+            'portal', 'dlq-retry', None, 'info',
+            f'Retried dead-letter event {event_id}',
+        )
+        return True
+
+    def dismiss_dlq_message(self, event_id: str) -> bool:
+        return self._update_dlq(event_id, 'dlq-dismissed')
 
     def dismiss_all_dlq(self) -> int:
         cursor = self._conn.execute(
@@ -536,6 +541,13 @@ class AssessmentStore:
         )
         self._conn.commit()
         return cursor.rowcount
+
+    def has_schedules_for_app(self, app_name: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM scheduled_operations WHERE app_name = ? LIMIT 1",
+            (app_name,),
+        ).fetchone()
+        return row is not None
 
     def list_remediations_by_agent(self, agent_name: str) -> list[dict]:
         rows = self._conn.execute(

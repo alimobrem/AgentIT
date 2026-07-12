@@ -880,7 +880,7 @@ function completeLoading() {
 document.body.addEventListener('htmx:afterSettle', completeLoading);
 // Re-initialize Alpine on htmx-swapped content so x-data, @click, $dispatch work
 document.body.addEventListener('htmx:afterSettle', function(e) {
-  if (e.detail && e.detail.target && window.Alpine) {
+  if (e.detail && e.detail.target && window.Alpine && e.detail.target.querySelector('[x-data]')) {
     Alpine.initTree(e.detail.target);
   }
 });

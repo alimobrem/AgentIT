@@ -318,32 +318,27 @@ async def events_page(request: Request, page: int = 1, per_page: int = 25,
 @app.get("/events/dlq", response_class=HTMLResponse)
 async def dlq_page(request: Request) -> HTMLResponse:
     """Show dead-lettered messages from the events store."""
-    s = get_store()
-    rows = s._conn.execute(
-        "SELECT * FROM events WHERE action = 'dead-letter' ORDER BY timestamp DESC LIMIT 200",
-    ).fetchall()
-    dlq_messages = [dict(r) for r in rows]
+    dlq_messages = get_store().list_dlq_messages()
     return templates.TemplateResponse(request, "dlq.html", {"dlq_messages": dlq_messages})
 
 
 @app.post("/events/dlq/{event_id}/retry")
 async def dlq_retry(event_id: str):
-    s = get_store()
-    s.retry_dlq_message(event_id)
+    if not get_store().retry_dlq_message(event_id):
+        return RedirectResponse(url="/events/dlq?error=Message+not+found+or+already+processed", status_code=303)
     return RedirectResponse(url="/events/dlq?success=Message+queued+for+retry", status_code=303)
 
 
 @app.post("/events/dlq/{event_id}/dismiss")
 async def dlq_dismiss(event_id: str):
-    s = get_store()
-    s.dismiss_dlq_message(event_id)
+    if not get_store().dismiss_dlq_message(event_id):
+        return RedirectResponse(url="/events/dlq?error=Message+not+found+or+already+processed", status_code=303)
     return RedirectResponse(url="/events/dlq?success=Message+dismissed", status_code=303)
 
 
 @app.post("/events/dlq/dismiss-all")
 async def dlq_dismiss_all():
-    s = get_store()
-    count = s.dismiss_all_dlq()
+    count = get_store().dismiss_all_dlq()
     return RedirectResponse(url=f"/events/dlq?success=Dismissed+{count}+messages", status_code=303)
 
 
@@ -505,7 +500,8 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     score_history = s.get_score_history(report.repo_url) if hasattr(s, 'get_score_history') else []
     apply_results = s.get_apply_results(assessment_id)
 
-    schedules_exist = bool(s.list_schedules()) if hasattr(s, 'list_schedules') else False
+    app_name = report.repo_name
+    schedules_exist = s.has_schedules_for_app(app_name) if hasattr(s, 'has_schedules_for_app') else False
     if apply_results and apply_results.get("applied") and (slos or schedules_exist):
         lifecycle_stage = "monitored"
     elif apply_results and apply_results.get("applied"):
@@ -1236,7 +1232,7 @@ async def api_agents(status: str = "active"):
 
 
 @app.get("/workflows")
-async def workflows_page(request: Request):
+async def workflows_redirect():
     return RedirectResponse(url="/capabilities", status_code=301)
 
 
