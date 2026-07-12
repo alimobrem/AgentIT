@@ -227,10 +227,31 @@ async def api_fleet() -> JSONResponse:
     return JSONResponse(get_store().get_fleet_data())
 
 
+@app.get("/insights", response_class=HTMLResponse)
+async def insights_page(request: Request) -> HTMLResponse:
+    s = get_store()
+    fleet_insights = s.get_fleet_insights()
+    agent_stats = s.get_agent_stats()
+    feedback = s.get_feedback_for_app("") if hasattr(s, 'get_feedback_for_app') else []
+    return templates.TemplateResponse(request, "insights.html", {
+        "insights": fleet_insights,
+        "agent_stats": agent_stats,
+        "recent_feedback": feedback[:10],
+    })
+
+
 @app.get("/events", response_class=HTMLResponse)
-async def events_page(request: Request) -> HTMLResponse:
-    events = get_store().list_events(limit=100)
-    return templates.TemplateResponse(request, "events.html", {"events": events})
+async def events_page(request: Request, page: int = 1, per_page: int = 25) -> HTMLResponse:
+    s = get_store()
+    all_events = s.list_events(limit=1000)
+    total = len(all_events)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * per_page
+    events = all_events[start:start + per_page]
+    return templates.TemplateResponse(request, "events.html", {
+        "events": events, "page": page, "total_pages": total_pages, "per_page": per_page,
+    })
 
 
 @app.get("/events/dlq", response_class=HTMLResponse)
@@ -365,6 +386,10 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     from agentit.remediation.registry import lookup
     fixable_categories = {f.category for f in urgent_findings if lookup(f.category) is not None}
 
+    timeline = s.get_assessment_timeline(assessment_id) if hasattr(s, 'get_assessment_timeline') else []
+    trend = s.get_trend(report.repo_url) if hasattr(s, 'get_trend') else {}
+    score_history = s.get_score_history(report.repo_url) if hasattr(s, 'get_score_history') else []
+
     return templates.TemplateResponse(
         request,
         "assessment_detail.html",
@@ -377,6 +402,9 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "slo_count": len(slos),
             "onboarding_count": len(onboardings),
             "fixable_categories": fixable_categories,
+            "timeline": timeline,
+            "trend": trend,
+            "score_history": score_history,
         },
     )
 
@@ -971,7 +999,8 @@ _WATCHER_AGENTS = [
 
 @app.get("/agents", response_class=HTMLResponse)
 async def agents_page(request: Request) -> HTMLResponse:
-    agents = get_store().list_agents()
+    s = get_store()
+    agents = s.list_agents()
 
     for a in agents:
         if not a.get("capabilities") or a["capabilities"] in ("[]", ""):
@@ -990,6 +1019,8 @@ async def agents_page(request: Request) -> HTMLResponse:
                 "last_heartbeat": "—",
             })
 
+    agent_stats = {a["agent"]: a for a in s.get_agent_stats()} if hasattr(s, 'get_agent_stats') else {}
+
     active = sum(1 for a in agents if a["status"] == "active")
     last_hb = max((a["last_heartbeat"] or "" for a in agents), default="—")
     return templates.TemplateResponse(request, "agents.html", {
@@ -997,6 +1028,7 @@ async def agents_page(request: Request) -> HTMLResponse:
         "total": len(agents),
         "active": active,
         "last_heartbeat": last_hb[:19] if last_hb != "—" else "—",
+        "agent_stats": agent_stats,
     })
 
 

@@ -1,10 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Agent Activity Feed - AgentIT{% endblock %}
-{% block head_extra %}<meta http-equiv="refresh" content="30">{% endblock %}
 {% block content %}
 <h1>Agent Activity Feed</h1>
+<div hx-get="/events?page={{ page }}" hx-trigger="every 30s" hx-select=".events-table" hx-target=".events-table" hx-swap="outerHTML">
 {% if events %}
-<table>
+<table class="events-table">
   <thead>
     <tr>
       <th>Timestamp</th>
@@ -18,7 +18,7 @@
   <tbody>
     {% for e in events %}
     <tr>
-      <td class="text-sm text-muted">{{ e.timestamp }}</td>
+      <td class="text-sm text-muted"><span data-timestamp="{{ e.timestamp }}">{{ e.timestamp[:16] }}</span></td>
       <td>{{ e.agent_id }}</td>
       <td>{{ e.action }}</td>
       <td>{{ e.target_app or "-" }}</td>
@@ -38,7 +38,20 @@
     {% endfor %}
   </tbody>
 </table>
+<div class="pagination">
+  {% if page > 1 %}
+  <a href="/events?page={{ page - 1 }}" class="btn btn-sm btn-outline">&larr; Previous</a>
+  {% endif %}
+  <span class="text-muted text-sm">Page {{ page }} of {{ total_pages }}</span>
+  {% if page < total_pages %}
+  <a href="/events?page={{ page + 1 }}" class="btn btn-sm btn-outline">Next &rarr;</a>
+  {% endif %}
+</div>
 {% else %}
-<p>No events recorded yet.</p>
+<div class="empty-state">
+  <h3>No events recorded yet</h3>
+  <p class="text-muted">Agent activity will appear here as assessments, remediations, and other actions occur.</p>
+</div>
 {% endif %}
+</div>
 {% endblock %}

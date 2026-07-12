@@ -995,6 +995,127 @@ class AssessmentStore:
         ).fetchone()
         return row["human_value"] if row else None
 
+    # ── Trust / Transparency ────────────────────────────────────────────
+
+    def get_agent_stats(self, agent_name: str = "") -> list[dict]:
+        """Get performance stats per agent: total runs, success rate, avg events."""
+        query = """
+            SELECT agent_id,
+                   COUNT(*) as total_events,
+                   SUM(CASE WHEN action LIKE '%completed%' THEN 1 ELSE 0 END) as successes,
+                   SUM(CASE WHEN action LIKE '%failed%' OR action LIKE '%error%' THEN 1 ELSE 0 END) as failures,
+                   MIN(timestamp) as first_seen,
+                   MAX(timestamp) as last_seen
+            FROM events
+        """
+        params: list[str] = []
+        if agent_name:
+            query += " WHERE agent_id = ?"
+            params.append(agent_name)
+        query += " GROUP BY agent_id ORDER BY total_events DESC"
+        rows = self._conn.execute(query, params).fetchall()
+        stats = []
+        for r in rows:
+            total = r["successes"] + r["failures"]
+            success_rate = (r["successes"] / total * 100) if total > 0 else 0
+            stats.append({
+                "agent": r["agent_id"],
+                "total_events": r["total_events"],
+                "successes": r["successes"],
+                "failures": r["failures"],
+                "success_rate": round(success_rate, 1),
+                "first_seen": r["first_seen"],
+                "last_seen": r["last_seen"],
+            })
+        return stats
+
+    def get_assessment_timeline(self, assessment_id: str) -> list[dict]:
+        """Get chronological timeline of all events for an assessment."""
+        events = self._conn.execute(
+            """SELECT timestamp, agent_id, action, target_app, severity, summary
+               FROM events
+               WHERE details_json LIKE ? OR summary LIKE ?
+               ORDER BY timestamp ASC""",
+            (f'%{assessment_id}%', f'%{assessment_id[:12]}%'),
+        ).fetchall()
+
+        # Also get gates for this assessment
+        gates = self._conn.execute(
+            "SELECT created_at as timestamp, 'gate' as agent_id, gate_type as action, status as severity, summary FROM gates WHERE assessment_id = ? ORDER BY created_at ASC",
+            (assessment_id,),
+        ).fetchall()
+
+        # Also get remediations
+        remeds = self._conn.execute(
+            "SELECT created_at as timestamp, agent_name as agent_id, 'remediation' as action, status as severity, description as summary FROM remediations WHERE assessment_id = ? ORDER BY created_at ASC",
+            (assessment_id,),
+        ).fetchall()
+
+        # Merge and sort
+        timeline = [dict(r) for r in events] + [dict(r) for r in gates] + [dict(r) for r in remeds]
+        timeline.sort(key=lambda x: x.get("timestamp", ""))
+        return timeline
+
+    def get_fleet_insights(self) -> dict:
+        """Get fleet-wide statistics for the insights dashboard."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) as total_assessments FROM assessments"
+        ).fetchone()
+        total_assessments = row["total_assessments"] if row else 0
+
+        row = self._conn.execute(
+            "SELECT COUNT(DISTINCT repo_url) as unique_apps FROM assessments"
+        ).fetchone()
+        unique_apps = row["unique_apps"] if row else 0
+
+        row = self._conn.execute(
+            "SELECT COUNT(*) as total_onboardings FROM onboarding_results"
+        ).fetchone()
+        total_onboardings = row["total_onboardings"] if row else 0
+
+        row = self._conn.execute(
+            "SELECT COUNT(*) as total_remediations FROM remediations"
+        ).fetchone()
+        total_remediations = row["total_remediations"] if row else 0
+
+        row = self._conn.execute(
+            "SELECT COUNT(*) as pending FROM gates WHERE status = 'pending'"
+        ).fetchone()
+        pending_gates = row["pending"] if row else 0
+
+        row = self._conn.execute(
+            "SELECT COUNT(*) as total_events FROM events"
+        ).fetchone()
+        total_events = row["total_events"] if row else 0
+
+        # Feedback stats
+        row = self._conn.execute(
+            "SELECT COUNT(*) as total, SUM(CASE WHEN action='rejected' THEN 1 ELSE 0 END) as rejections FROM agent_feedback"
+        ).fetchone()
+        total_feedback = row["total"] if row else 0
+        total_rejections = row["rejections"] or 0 if row else 0
+
+        return {
+            "total_assessments": total_assessments,
+            "unique_apps": unique_apps,
+            "total_onboardings": total_onboardings,
+            "total_remediations": total_remediations,
+            "pending_gates": pending_gates,
+            "total_events": total_events,
+            "total_feedback": total_feedback,
+            "total_rejections": total_rejections,
+        }
+
+    def get_score_history(self, repo_url: str, limit: int = 20) -> list[dict]:
+        """Get score history for trend visualization."""
+        rows = self._conn.execute(
+            """SELECT id, assessed_at, overall_score, criticality
+               FROM assessments WHERE repo_url = ?
+               ORDER BY assessed_at DESC LIMIT ?""",
+            (repo_url, limit),
+        ).fetchall()
+        return [dict(r) for r in reversed(rows)]
+
     def export_all(self) -> dict:
         """Export all tables as JSON for disaster recovery."""
         tables = ["assessments", "onboarding_results", "events", "gates",

@@ -2,91 +2,76 @@
 {% block title %}Approval Gates - AgentIT{% endblock %}
 {% block content %}
 <h1>Approval Gates</h1>
-<p class="text-muted mb-2">Gates are created when the system detects a risky action that needs human review. Approving a gate applies the manifests to the cluster.</p>
+<p class="text-muted">Gates are created when the system detects a risky action. Review carefully before approving — this applies manifests to your cluster.</p>
 
-{% if pending %}
-<h2 class="section-title mt-1">Pending Review ({{ pending|length }})</h2>
-<table>
-  <thead>
-    <tr>
-      <th>Summary</th>
-      <th>Type</th>
-      <th>Assessment</th>
-      <th>Created</th>
-      <th>Actions</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for g in pending %}
-    <tr>
-      <td>
-        {{ g.summary }}
-        {% if 'finding-' in g.gate_type %}
-        <br><a href="/assessments/{{ g.assessment_id }}/onboard-results" class="text-sm">Preview generated files &rarr;</a>
-        {% endif %}
-      </td>
-      <td><span class="badge badge-medium">{{ g.gate_type }}</span></td>
-      <td><a href="/assessments/{{ g.assessment_id }}">View</a></td>
-      <td class="text-sm text-muted">{{ g.created_at[:16] }}</td>
-      <td>
-        <div class="gate-actions">
-          <form method="post" action="/gates/{{ g.id }}/resolve" class="inline-form">
-            <input type="hidden" name="status" value="approved">
-            <button type="submit" class="btn btn-sm btn-approve">
-              <span class="btn-label">Approve &amp; Apply</span>
-              <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
-            </button>
-          </form>
-          <form method="post" action="/gates/{{ g.id }}/resolve" class="inline-form">
-            <input type="hidden" name="status" value="rejected">
-            <button type="submit" class="btn btn-sm btn-reject">Reject</button>
-          </form>
-          <form method="post" action="/gates/{{ g.id }}/cancel" class="inline-form">
-            <button type="submit" class="btn btn-sm btn-outline">Dismiss</button>
-          </form>
-        </div>
-      </td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
+<h2>Pending Review ({{ pending | length }})</h2>
+
+{% if not pending %}
+<div class="empty-state">
+  <p>No pending gates. All clear.</p>
+</div>
 {% else %}
-<p class="text-muted">No pending gates — all clear.</p>
+{% for gate in pending %}
+<div class="card mb-1">
+  <div class="card-header">
+    <div>
+      <span class="badge badge-{{ gate.severity | default('info') }}">{{ gate.gate_type | upper }}</span>
+      <span class="text-muted text-sm" data-timestamp="{{ gate.created_at }}">{{ gate.created_at[:16] }}</span>
+    </div>
+    {% if gate.assessment_id %}
+    <a href="/assessments/{{ gate.assessment_id }}/onboard-results" class="btn btn-sm btn-outline">Preview Files</a>
+    {% endif %}
+  </div>
+
+  <p class="my-4">{{ gate.summary }}</p>
+
+  <div class="action-bar">
+    <form method="POST" action="/gates/{{ gate.id }}/resolve" x-ref="approveForm{{ loop.index }}">
+      <input type="hidden" name="status" value="approved">
+      <button type="button" class="btn btn-green"
+        @click="$dispatch('show-confirm', {
+          title: 'Approve & Apply to Cluster',
+          message: 'This will apply the generated manifests to your cluster. This action modifies production resources.',
+          form: $refs['approveForm{{ loop.index }}'],
+          opts: { confirmText: 'Apply to Cluster', danger: false }
+        })">
+        Approve & Apply
+      </button>
+    </form>
+
+    <form method="POST" action="/gates/{{ gate.id }}/resolve" x-data="{ showReason: false }">
+      <input type="hidden" name="status" value="rejected">
+      <button type="button" class="btn btn-danger-outline" @click="showReason = true" x-show="!showReason">Reject</button>
+      <div x-show="showReason" class="gate-reject-row">
+        <input type="text" name="reason" placeholder="Why? (helps agents learn)" class="gate-reject-input">
+        <button type="submit" class="btn btn-danger-outline">Confirm Reject</button>
+        <button type="button" class="btn btn-outline btn-sm" @click="showReason = false">Cancel</button>
+      </div>
+    </form>
+
+    <form method="POST" action="/gates/{{ gate.id }}/cancel">
+      <button type="submit" class="btn btn-outline btn-sm">Dismiss</button>
+    </form>
+  </div>
+</div>
+{% endfor %}
 {% endif %}
 
 {% if resolved %}
-<div x-data="{ open: false }">
-  <h2 class="section-title mt-2 collapse-toggle" @click="open = !open" :aria-expanded="open">
-    Recently Resolved ({{ resolved|length }})
-  </h2>
-  <div class="collapse-body" x-show="open" x-transition>
-    <table>
-      <thead>
-        <tr>
-          <th>Summary</th>
-          <th>Status</th>
-          <th>By</th>
-          <th>At</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for g in resolved %}
-        <tr>
-          <td>{{ g.summary }}</td>
-          <td>
-            {% if g.status == "approved" %}
-            <span class="badge badge-low">approved</span>
-            {% else %}
-            <span class="badge badge-critical">rejected</span>
-            {% endif %}
-          </td>
-          <td class="text-sm">{{ g.resolved_by or "" }}</td>
-          <td class="text-sm text-muted">{{ (g.resolved_at or "")[:16] }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</div>
+<details>
+  <summary class="section-toggle">Recently Resolved ({{ resolved | length }})</summary>
+  <table>
+    <thead><tr><th>Summary</th><th>Status</th><th>Resolved</th></tr></thead>
+    <tbody>
+    {% for gate in resolved %}
+    <tr>
+      <td>{{ gate.summary[:80] }}</td>
+      <td><span class="badge badge-{{ 'success' if gate.status == 'approved' else 'danger' }}">{{ gate.status | upper }}</span></td>
+      <td data-timestamp="{{ gate.resolved_at }}">{{ gate.resolved_at[:16] if gate.resolved_at else '—' }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</details>
 {% endif %}
 {% endblock %}

@@ -251,6 +251,8 @@
   .badge-medium   { background: var(--color-warning); color: var(--color-bg); }
   .badge-low      { background: var(--color-success); color: var(--color-bg); }
   .badge-info     { background: var(--color-info); color: #fff; }
+  .badge-success  { background: var(--color-success); color: var(--color-bg); }
+  .badge-danger   { background: var(--color-danger); color: #fff; }
 
   /* ── Buttons ───────────────────────────────────────────────────── */
   .btn {
@@ -333,14 +335,22 @@
     width: 100%;
     transition: border-color 0.15s;
   }
-  input:focus, select:focus { outline: none; border-color: var(--color-accent); }
+  input:focus, select:focus, textarea:focus {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+    border-color: var(--color-accent);
+  }
+  .btn:focus-visible, a:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
 
   /* ── Tables ────────────────────────────────────────────────────── */
-  table { width: 100%; border-collapse: collapse; margin-top: var(--space-5); }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; margin-top: var(--space-5); }
   th, td { text-align: left; padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--color-border); }
-  th { color: var(--color-accent); font-size: var(--font-sm); text-transform: uppercase; letter-spacing: 0.3px; }
-  tbody tr { transition: background 0.1s; }
-  tbody tr:hover { background: color-mix(in srgb, var(--color-surface) 80%, var(--color-border)); }
+  th { color: var(--color-accent); font-size: var(--font-xs); text-transform: uppercase; letter-spacing: 1px; }
+  tbody tr { transition: background 0.15s; }
+  tbody tr:hover { background: rgba(233,69,96,0.05); }
   .row-border-green  { border-left: 3px solid var(--color-success); }
   .row-border-yellow { border-left: 3px solid var(--color-warning); }
   .row-border-red    { border-left: 3px solid var(--color-danger); }
@@ -460,6 +470,11 @@
   .mb-3 { margin-bottom: var(--space-8); }
   .mt-1 { margin-top: var(--space-5); }
   .mt-2 { margin-top: var(--space-8); }
+  .my-4 { margin: var(--space-4) 0; }
+
+  /* ── Gate Reject Row ──────────────────────────────────────────────── */
+  .gate-reject-row { display: flex; gap: var(--space-3); align-items: center; }
+  .gate-reject-input { min-width: 250px; }
 
   /* ── htmx + Spinner ────────────────────────────────────────────── */
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -504,15 +519,14 @@
 
   /* ── Modal ─────────────────────────────────────────────────────── */
   .modal-overlay {
-    display: none;
     position: fixed;
     inset: 0;
-    background: rgba(0,0,0,0.6);
+    background: rgba(0,0,0,0.7);
     z-index: 200;
+    display: flex;
     justify-content: center;
     align-items: center;
   }
-  .modal-overlay.open { display: flex; }
   .modal {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
@@ -539,6 +553,29 @@
   nav .links-secondary { display: flex; gap: var(--space-5); margin-left: auto; }
   nav .links-secondary a { color: var(--color-muted); font-size: var(--font-sm); }
   nav .links-secondary a:hover { color: var(--color-text); text-decoration: none; }
+
+  /* ── Nav Toggle (mobile hamburger) ────────────────────────────── */
+  .nav-toggle { display: none; background: none; border: none; color: var(--color-text); font-size: 1.5rem; cursor: pointer; }
+  .nav-badge { background: var(--color-accent); color: #fff; font-size: var(--font-xs); padding: 1px 6px; border-radius: var(--radius-pill); margin-left: 4px; }
+
+  /* ── Skip Link ─────────────────────────────────────────────────── */
+  .skip-link { position: absolute; left: -9999px; top: 0; z-index: 999; padding: var(--space-3) var(--space-5); background: var(--color-accent); color: #fff; border-radius: 0 0 var(--radius-md) 0; }
+  .skip-link:focus { left: 0; }
+
+  /* ── Confirm Modal (Alpine) ────────────────────────────────────── */
+  .modal-title { color: var(--color-accent); font-family: var(--font-display); margin-bottom: var(--space-3); }
+  .modal-message { color: var(--color-muted); margin-bottom: var(--space-5); }
+  .modal-actions { justify-content: flex-end; margin-top: var(--space-5); }
+  [x-cloak] { display: none !important; }
+
+  /* ── Toast Notifications ──────────────────────────────────────── */
+  .toast-container { position: fixed; top: 70px; right: 20px; z-index: 300; display: flex; flex-direction: column; gap: 8px; }
+  .toast { padding: var(--space-3) var(--space-5); border-radius: var(--radius-md); color: #fff; font-size: var(--font-sm); display: flex; align-items: center; gap: var(--space-3); min-width: 280px; max-width: 420px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+  .toast-info { background: var(--color-info); }
+  .toast-success { background: var(--color-success); }
+  .toast-warning { background: var(--color-warning); color: #1a1a2e; }
+  .toast-error { background: var(--color-danger); }
+  .toast-close { background: none; border: none; color: inherit; cursor: pointer; font-size: 1.2rem; margin-left: auto; }
 
   /* ── Hero CTA ──────────────────────────────────────────────────── */
   .hero-cta {
@@ -571,11 +608,40 @@
     transition: width 8s cubic-bezier(0.1, 0.5, 0.1, 1);
   }
 
+  /* ── Pagination ────────────────────────────────────────────────── */
+  .pagination { display: flex; align-items: center; justify-content: center; gap: var(--space-5); margin-top: var(--space-5); padding: var(--space-5) 0; }
+
+  /* ── Empty State ───────────────────────────────────────────────── */
+  .empty-state { text-align: center; padding: var(--space-8) var(--space-5); color: var(--color-muted); }
+  .empty-state h3 { color: var(--color-text); margin-bottom: var(--space-3); }
+
+  /* ── Timeline ──────────────────────────────────────────────────── */
+  .timeline { position: relative; padding-left: 30px; }
+  .timeline::before { content: ''; position: absolute; left: 10px; top: 0; bottom: 0; width: 2px; background: var(--color-border); }
+  .timeline-item { position: relative; margin-bottom: var(--space-5); }
+  .timeline-marker { position: absolute; left: -24px; top: 4px; width: 12px; height: 12px; border-radius: 50%; background: var(--color-border); border: 2px solid var(--color-bg); }
+  .marker-success { background: var(--color-success); }
+  .marker-danger { background: var(--color-danger); }
+  .marker-info { background: var(--color-info); }
+  .marker-default { background: var(--color-muted); }
+  .timeline-header { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-1); }
+  .timeline-content { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: var(--space-3) var(--space-4); }
+
+  /* ── Agent Rate Bar (insights) ────────────────────────────────── */
+  .agent-rate-bar { display: flex; align-items: center; gap: var(--space-3); }
+  .agent-rate-bar .score-bar-bg { flex: 1; }
+
+  /* ── Section Toggle (details/summary) ──────────────────────────── */
+  .section-toggle { cursor: pointer; font-family: var(--font-display); color: var(--color-accent); margin: var(--space-7) 0 var(--space-4); }
+
   /* ── Responsive ────────────────────────────────────────────────── */
   @media (max-width: 768px) {
     .stat-grid { grid-template-columns: 1fr; }
     .card-grid { grid-template-columns: 1fr; }
-    nav { flex-direction: column; gap: var(--space-4); padding: var(--space-4); }
+    nav { flex-wrap: wrap; gap: var(--space-4); padding: var(--space-4); }
+    .nav-toggle { display: block; margin-left: auto; }
+    .links-secondary { display: none; flex-direction: column; width: 100%; }
+    .links-secondary.links-open { display: flex; }
     .container { padding: var(--space-5); }
     .dimension-row { flex-direction: column; align-items: stretch; }
     .dimension-label { width: auto; }
@@ -586,13 +652,20 @@
 </style>
 </head>
 <body hx-boost="true">
-<nav>
+<a href="#main-content" class="skip-link">Skip to content</a>
+<nav x-data="{ navOpen: false }">
   <span class="logo">AgentIT</span>
   <div class="links">
     <a href="/" class="{{ 'nav-active' if request.url.path == '/' or request.url.path.startswith('/assessments') or request.url.path == '/fleet' }}">Fleet</a>
+    <a href="/gates" class="{{ 'nav-active' if request.url.path.startswith('/gates') }}">Gates
+      {% if pending_gates %}<span class="nav-badge">{{ pending_gates }}</span>{% endif %}
+    </a>
   </div>
-  <div class="links-secondary">
-    <a href="/gates" class="{{ 'nav-active' if request.url.path.startswith('/gates') }}">Gates</a>
+  <button class="nav-toggle" @click="navOpen = !navOpen" aria-label="Toggle menu">
+    <span x-show="!navOpen">&#9776;</span>
+    <span x-show="navOpen">&#10005;</span>
+  </button>
+  <div class="links-secondary" :class="{ 'links-open': navOpen }">
     <a href="/events" class="{{ 'nav-active' if request.url.path == '/events' }}">Events</a>
     <a href="/events/dlq" class="{{ 'nav-active' if request.url.path == '/events/dlq' }}">DLQ</a>
     <a href="/agents" class="{{ 'nav-active' if request.url.path.startswith('/agents') }}">Agents</a>
@@ -603,8 +676,30 @@
   </div>
 </nav>
 <div id="nav-loading" class="nav-loading-bar"></div>
-<div class="container">
+<div id="main-content" class="container">
 {% block content %}{% endblock %}
+</div>
+<!-- Confirm Modal -->
+<div id="confirm-modal" x-data="confirmModal()" x-show="open" x-cloak
+     class="modal-overlay" @keydown.escape.window="cancel()" @show-confirm.window="show($event.detail.title, $event.detail.message, $event.detail.form, $event.detail.opts)" role="dialog" aria-modal="true">
+  <div class="modal" @click.outside="cancel()">
+    <h3 x-text="title" class="modal-title"></h3>
+    <p x-text="message" class="modal-message"></p>
+    <div class="action-bar modal-actions">
+      <button class="btn btn-outline" @click="cancel()">Cancel</button>
+      <button class="btn" :class="dangerClass" @click="proceed()" x-text="confirmText"></button>
+    </div>
+  </div>
+</div>
+<!-- Toast Notifications -->
+<div id="toasts" x-data="toastManager()" class="toast-container">
+  <template x-for="t in toasts" :key="t.id">
+    <div class="toast" :class="'toast-' + t.type" x-show="t.visible"
+         x-transition:enter="toast-enter" x-transition:leave="toast-leave">
+      <span x-text="t.message"></span>
+      <button @click="dismiss(t.id)" class="toast-close">&times;</button>
+    </div>
+  </template>
 </div>
 <script>
 htmx.config.timeout = 120000;
@@ -642,6 +737,89 @@ document.querySelectorAll('nav a').forEach(function(link) {
   link.addEventListener('click', showLoading);
 });
 document.addEventListener('submit', function() { showLoading(); });
+// Loading bar completion on htmx settle
+document.body.addEventListener('htmx:afterSettle', function() {
+  var bar = document.querySelector('.nav-loading-bar');
+  if (bar && bar.classList.contains('active')) {
+    bar.style.transition = 'width 0.2s';
+    bar.style.width = '100%';
+    setTimeout(function() {
+      bar.classList.remove('active');
+      bar.style.width = '0';
+      bar.style.transition = '';
+      document.body.style.cursor = '';
+    }, 300);
+  }
+});
+// Confirm modal component
+function confirmModal() {
+  return {
+    open: false,
+    title: '',
+    message: '',
+    confirmText: 'Confirm',
+    dangerClass: 'btn-green',
+    _form: null,
+    show(title, message, form, opts) {
+      opts = opts || {};
+      this.title = title;
+      this.message = message;
+      this.confirmText = opts.confirmText || 'Confirm';
+      this.dangerClass = opts.danger ? 'btn-danger' : 'btn-green';
+      this._form = form;
+      this.open = true;
+    },
+    cancel() { this.open = false; this._form = null; },
+    proceed() { this.open = false; if (this._form) this._form.submit(); }
+  };
+}
+// Toast notification manager
+function toastManager() {
+  return {
+    toasts: [],
+    _id: 0,
+    show(message, type, duration) {
+      type = type || 'info';
+      duration = (duration === undefined) ? 5000 : duration;
+      var id = ++this._id;
+      this.toasts.push({ id: id, message: message, type: type, visible: true });
+      var self = this;
+      if (duration > 0) setTimeout(function() { self.dismiss(id); }, duration);
+    },
+    dismiss(id) {
+      var t = this.toasts.find(function(t) { return t.id === id; });
+      if (t) t.visible = false;
+      var self = this;
+      setTimeout(function() { self.toasts = self.toasts.filter(function(t) { return t.id !== id; }); }, 300);
+    }
+  };
+}
+// Auto-show toasts from URL params
+document.addEventListener('alpine:init', function() {
+  var params = new URLSearchParams(window.location.search);
+  var tm = document.getElementById('toasts');
+  if (params.get('error') && Alpine.$data(tm)) Alpine.$data(tm).show(params.get('error'), 'error');
+  if (params.get('warning') && Alpine.$data(tm)) Alpine.$data(tm).show(params.get('warning'), 'warning');
+  if ((params.get('success') || params.get('pr_url')) && Alpine.$data(tm)) Alpine.$data(tm).show(params.get('success') || 'Operation successful', 'success');
+});
+// Relative timestamps
+function relativeTime(iso) {
+  var d = new Date(iso);
+  var now = new Date();
+  var diff = (now - d) / 1000;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  if (diff < 604800) return Math.floor(diff / 86400) + 'd ago';
+  return d.toLocaleDateString();
+}
+document.addEventListener('DOMContentLoaded', function() {
+  document.querySelectorAll('[data-timestamp]').forEach(function(el) {
+    var iso = el.getAttribute('data-timestamp');
+    el.textContent = relativeTime(iso);
+    el.title = iso;
+  });
+});
 </script>
 </body>
 </html>

@@ -28,8 +28,8 @@
     ">{{ "%.0f"|format(avg_score) }}</div>
   </div>
   <div class="stat-card">
-    <div class="stat-label">Critical</div>
-    <div class="stat-value {% if critical_total > 0 %}text-danger{% else %}text-success{% endif %}">{{ critical_total }}</div>
+    <div class="stat-label">Critical Findings</div>
+    <div class="stat-value {% if critical_total > 0 %}text-danger{% else %}text-success{% endif %}" title="Total critical findings across all managed apps">{{ critical_total }}</div>
   </div>
 </div>
 {% endif %}
@@ -95,7 +95,7 @@
           </form>
           <form method="post" action="/assessments/{{ r.id }}/delete" class="inline-form"
                 data-repo-name="{{ r.repo_name }}">
-            <button type="submit" class="btn btn-sm btn-danger-outline">×</button>
+            <button type="submit" class="btn btn-sm btn-danger-outline" aria-label="Delete {{ r.repo_name }}">×</button>
           </form>
         </div>
       </td>
@@ -103,6 +103,12 @@
     {% endfor %}
   </tbody>
 </table>
+{% endif %}
+{% if not fleet %}
+<div class="empty-state">
+  <h3>No apps assessed yet</h3>
+  <p class="text-muted">Click "Assess New Repo" to evaluate your first application across 7 enterprise readiness dimensions.</p>
+</div>
 {% endif %}
 
 <!-- Assess Modal -->

@@ -1,37 +1,41 @@
 {% extends "base.html" %}
-{% block title %}Dead Letter Queue - AgentIT{% endblock %}
+{% block title %}Dead-Letter Queue - AgentIT{% endblock %}
 {% block content %}
-<h1>Dead Letter Queue</h1>
+<h1>Dead-Letter Queue</h1>
+<p class="text-muted">Events that failed processing after {{ max_retries | default(3) }} retries. Review and retry or dismiss.</p>
 
 {% if dlq_messages %}
-<div class="stat-grid">
-  <div class="stat-card">
-    <div class="stat-label">DLQ Messages</div>
-    <div class="stat-value">{{ dlq_messages | length }}</div>
-  </div>
+<div class="action-bar" style="margin-bottom: var(--space-5);">
+  <span class="text-muted">{{ dlq_messages | length }} message(s)</span>
 </div>
 
-<table>
-  <thead>
-    <tr>
-      <th>Timestamp</th>
-      <th>Original Topic</th>
-      <th>Error</th>
-      <th>Message Preview</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for msg in dlq_messages %}
-    <tr>
-      <td class="text-sm">{{ msg.timestamp[:19] }}</td>
-      <td>{{ msg.target_app or '—' }}</td>
-      <td class="text-danger text-sm">{{ msg.summary[:200] }}</td>
-      <td class="text-muted text-sm">{{ msg.details_json[:200] }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
+{% for msg in dlq_messages %}
+<div class="card" style="margin-bottom: var(--space-4);">
+  <div style="display: flex; justify-content: space-between; align-items: start;">
+    <div>
+      <span class="badge badge-danger">FAILED</span>
+      <strong>{{ msg.get('action', 'unknown') }}</strong>
+      <span class="text-muted">→ {{ msg.get('target_app', '—') }}</span>
+    </div>
+    <span class="text-muted text-sm" data-timestamp="{{ msg.get('timestamp', '') }}">{{ msg.get('timestamp', '')[:16] }}</span>
+  </div>
+
+  {% if msg.get('summary') %}
+  <div class="code-block" style="margin-top: var(--space-3); font-size: var(--font-xs); max-height: 100px; overflow-y: auto;">
+    {{ msg.get('summary', '') }}
+  </div>
+  {% endif %}
+
+  <div style="margin-top: var(--space-3); display: flex; gap: var(--space-3);">
+    <span class="text-muted text-xs">Agent: {{ msg.get('agent_id', '—') }}</span>
+    <span class="text-muted text-xs">Severity: {{ msg.get('severity', '—') }}</span>
+  </div>
+</div>
+{% endfor %}
 {% else %}
-<p class="text-muted mt-2">No dead-lettered messages.</p>
+<div class="empty-state">
+  <h3>Queue is empty</h3>
+  <p class="text-muted">No failed events. All messages processed successfully.</p>
+</div>
 {% endif %}
 {% endblock %}

@@ -105,6 +105,27 @@
 </div>
 {% endif %}
 
+{% if timeline %}
+<details open>
+  <summary class="section-toggle">Timeline</summary>
+  <div class="timeline">
+    {% for event in timeline %}
+    <div class="timeline-item">
+      <div class="timeline-marker {% if event.severity == 'critical' %}marker-danger{% elif event.action == 'completed' or event.action == 'approved' %}marker-success{% elif event.action == 'remediation' %}marker-info{% else %}marker-default{% endif %}"></div>
+      <div class="timeline-content">
+        <div class="timeline-header">
+          <span class="badge badge-{{ event.severity | default('info') }}">{{ event.agent_id }}</span>
+          <strong>{{ event.action }}</strong>
+          <span class="text-muted text-sm" data-timestamp="{{ event.timestamp }}">{{ event.timestamp[:16] }}</span>
+        </div>
+        <p class="text-sm text-muted">{{ event.summary[:200] }}</p>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</details>
+{% endif %}
+
 <div class="action-bar mt-2">
   <a href="/assessments/{{ assessment_id }}/remediations" class="btn btn-sm btn-outline">Remediations ({{ remediation_count }})</a>
   <a href="/assessments/{{ assessment_id }}/slos" class="btn btn-sm btn-outline">SLOs ({{ slo_count }})</a>

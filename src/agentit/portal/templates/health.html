@@ -1,10 +1,9 @@
 {% extends "base.html" %}
 {% block title %}System Health - AgentIT{% endblock %}
-{% block head_extra %}<meta http-equiv="refresh" content="30">{% endblock %}
 {% block content %}
 <h1>System Health</h1>
 
-<div class="stat-grid">
+<div class="stat-grid" hx-get="/health" hx-trigger="every 30s" hx-select=".stat-grid" hx-target="this" hx-swap="outerHTML">
   <div class="stat-card">
     <div class="stat-label">Platform</div>
     <div class="stat-value {% if argo_synced %}text-success{% else %}text-danger{% endif %}">

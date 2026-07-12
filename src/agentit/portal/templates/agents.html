@@ -26,6 +26,7 @@
       <th>Category</th>
       <th>Status</th>
       <th>Capabilities</th>
+      <th>Track Record</th>
       <th>Registered</th>
       <th>Last Heartbeat</th>
     </tr>
@@ -43,6 +44,16 @@
         {% endif %}
       </td>
       <td class="text-sm text-muted">{{ a.capabilities if a.capabilities and a.capabilities not in ("[]", "", "—") else "—" }}</td>
+      <td>
+        {% set stats = agent_stats.get(a.agent_name, {}) %}
+        {% if stats %}
+        <span title="{{ stats.successes }} succeeded, {{ stats.failures }} failed">
+          {{ stats.success_rate }}% ({{ stats.successes + stats.failures }} runs)
+        </span>
+        {% else %}
+        <span class="text-muted">—</span>
+        {% endif %}
+      </td>
       <td class="text-sm">{{ a.registered_at[:19] }}</td>
       <td class="text-sm">{{ a.last_heartbeat[:19] if a.last_heartbeat else "—" }}</td>
     </tr>
