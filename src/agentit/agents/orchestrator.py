@@ -72,18 +72,28 @@ class FleetOrchestrator:
     - Track overall onboarding status
     """
 
+    PROFILES = {
+        "lightweight": ["security", "cicd"],
+        "standard": ["security", "observability", "cicd", "compliance", "infrastructure", "release"],
+        "full": None,  # None = all available agents
+    }
+
     def __init__(
         self,
         report: AssessmentReport,
         output_dir: Path,
         store: object | None = None,
         assessment_id: str | None = None,
+        profile: str = "standard",
+        agent_filter: list[str] | None = None,
     ):
         self.report = report
         self.output_dir = Path(output_dir)
         self._store = store
         self._assessment_id = assessment_id
         self._events: list[dict] = []
+        self._profile = profile
+        self._agent_filter = agent_filter
 
     def plan(self) -> OrchestrationPlan:
         """Analyze the assessment and create an orchestration plan."""
@@ -373,19 +383,23 @@ class FleetOrchestrator:
         return results
 
     def _select_agents(self) -> list[str]:
-        """Select which agents to run based on assessment findings."""
-        agents = ["security", "observability", "cicd", "compliance", "infrastructure", "release"]
+        """Select which agents to run based on profile, filter, and assessment."""
+        if self._agent_filter:
+            return list(self._agent_filter)
 
-        # Always run these core 5, then add based on findings/criticality
-        if self.report.criticality in ("high", "critical"):
-            agents.extend(["dependency", "incident", "cost"])
+        profile_agents = self.PROFILES.get(self._profile)
+        if profile_agents is not None:
+            agents = list(profile_agents)
+        else:
+            agents = ["security", "observability", "cicd", "compliance", "infrastructure", "release"]
 
-        if self.report.overall_score < 30:
-            agents.append("retirement")  # Consider if app is worth hardening
-
-        # Code change agent runs for high/critical or when score is low
-        if self.report.criticality in ("high", "critical") or self.report.overall_score < 50:
-            agents.append("codechange")
+        if self._profile in ("standard", "full") or profile_agents is None:
+            if self.report.criticality in ("high", "critical"):
+                agents.extend(["dependency", "incident", "cost"])
+            if self.report.overall_score < 30:
+                agents.append("retirement")
+            if self.report.criticality in ("high", "critical") or self.report.overall_score < 50:
+                agents.append("codechange")
 
         return agents
 

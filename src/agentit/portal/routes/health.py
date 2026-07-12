@@ -29,11 +29,14 @@ def _run_cmd(cmd: list[str], timeout: int = 10) -> str | None:
 def _get_cluster_health() -> dict:
     from agentit import kube
 
+    import os
     result: dict = {
         "argo_apps": [], "argo_synced": False,
         "pods": [], "pods_running": 0, "pods_failed": 0,
         "pipelines": [], "pipeline_status": "Unknown",
         "kafka_ready": False, "publisher_ok": False,
+        "namespace": os.environ.get("AGENTIT_NAMESPACE", "agentit"),
+        "cluster_url": os.environ.get("KUBERNETES_SERVICE_HOST", "local"),
     }
 
     managed_names = {"agentit"}

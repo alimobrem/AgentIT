@@ -109,11 +109,15 @@
   purged after {{ retention_days }} days. Set <code>AGENTIT_RETENTION_DAYS</code> to change (default: 30).
 </p>
 <div class="action-bar mb-2">
-  <form method="post" action="/settings/purge" class="inline-form"
-        onsubmit="return confirm('Purge data older than {{ retention_days }} days?')">
-    <button type="submit" class="btn btn-outline">
-      <span class="btn-label">Purge Now</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+  <form method="post" action="/settings/purge" class="inline-form" x-ref="purgeForm">
+    <button type="button" class="btn btn-outline"
+      @click="$dispatch('show-confirm', {
+        title: 'Purge Old Data',
+        message: 'This will permanently delete events, jobs, and gates older than {{ retention_days }} days. This cannot be undone.',
+        form: $refs.purgeForm,
+        opts: { confirmText: 'Purge Now', danger: true }
+      })">
+      Purge Now
     </button>
   </form>
 </div>

@@ -57,8 +57,28 @@ def _resolve_and_assess(
 
 
 @click.group()
+@click.version_option(version="0.1.0", prog_name="agentit")
 def main() -> None:
-    """AgentIT -- Enterprise Readiness Assessor"""
+    """AgentIT -- Enterprise Readiness Assessor.
+
+    \b
+    User commands:
+      assess       Score a repo across 7 enterprise dimensions
+      onboard      Assess + generate hardening manifests
+      harden       Generate security manifests only
+      watch        Continuously re-assess on a schedule
+      portal       Launch the web UI
+      self-assess  AgentIT assesses itself
+
+    \b
+    Internal/daemon commands:
+      run-agent      Run a single agent (used by K8s Jobs)
+      consume        Start Kafka event consumer
+      vuln-watch     Start vulnerability watcher
+      slo-track      Start SLO tracker
+      drift-detect   Start drift detector
+      orchestrate    Run full orchestration (low-level)
+    """
     from agentit.logging_config import configure_logging
     configure_logging()
 
@@ -231,8 +251,12 @@ def orchestrate(repo_url: str, output_dir: str, criticality: str, use_llm: bool,
 @click.option("--criticality", type=click.Choice(["low", "medium", "high", "critical"]), default="medium")
 @click.option("--llm", "use_llm", is_flag=True, default=None, help="Enable Claude LLM (auto-detects credentials if omitted).")
 @click.option("--llm-model", default=None, help="Claude model to use.")
-def onboard(repo_url: str, output_dir: str, criticality: str, use_llm: bool, llm_model: str | None) -> None:
-    """Run full enterprise onboarding: assess -> harden -> observe -> cicd -> comply."""
+@click.option("--profile", type=click.Choice(["lightweight", "standard", "full"]), default="standard",
+              help="Agent profile: lightweight (security+cicd), standard (core 6), full (all agents).")
+@click.option("--agents", default=None, help="Comma-separated agent list (overrides --profile).")
+def onboard(repo_url: str, output_dir: str, criticality: str, use_llm: bool, llm_model: str | None,
+            profile: str, agents: str | None) -> None:
+    """Run enterprise onboarding: assess + generate hardening manifests."""
     import json
 
     out = Path(output_dir)
@@ -247,8 +271,10 @@ def onboard(repo_url: str, output_dir: str, criticality: str, use_llm: bool, llm
             assessment_path.write_text(render_json_report(report), encoding="utf-8")
 
             # Run full orchestration
-            click.echo("Running Fleet Orchestrator...", err=True)
-            orch = FleetOrchestrator(report=report, output_dir=out)
+            agent_filter = agents.split(",") if agents else None
+            click.echo(f"Running Fleet Orchestrator (profile={profile})...", err=True)
+            orch = FleetOrchestrator(report=report, output_dir=out,
+                                    profile=profile, agent_filter=agent_filter)
             result = orch.run()
 
             # Summary

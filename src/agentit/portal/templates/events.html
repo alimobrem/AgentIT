@@ -2,7 +2,18 @@
 {% block title %}Agent Activity Feed - AgentIT{% endblock %}
 {% block content %}
 <h1>Agent Activity Feed</h1>
-<div hx-get="/events?page={{ page }}" hx-trigger="every 30s" hx-select=".events-table" hx-target=".events-table" hx-swap="outerHTML">
+<form method="get" action="/events" class="action-bar">
+  <input type="text" name="q" value="{{ q | default('') }}" placeholder="Filter by agent, action, or app..." class="filter-input">
+  <select name="severity">
+    <option value="">All severities</option>
+    <option value="critical" {{ 'selected' if severity_filter == 'critical' }}>Critical</option>
+    <option value="warning" {{ 'selected' if severity_filter == 'warning' }}>Warning</option>
+    <option value="info" {{ 'selected' if severity_filter == 'info' }}>Info</option>
+  </select>
+  <button type="submit" class="btn btn-sm btn-outline">Filter</button>
+  {% if q or severity_filter %}<a href="/events" class="btn btn-sm btn-outline">Clear</a>{% endif %}
+</form>
+<div hx-get="/events?page={{ page }}&q={{ q | default('') }}&severity={{ severity_filter | default('') }}" hx-trigger="every 30s" hx-select=".events-table" hx-target=".events-table" hx-swap="outerHTML">
 {% if events %}
 <table class="events-table">
   <thead>

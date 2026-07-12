@@ -87,7 +87,7 @@
   <div class="collapse-body" x-show="open" x-transition>
     <table>
       <thead>
-        <tr><th>#</th><th>Dimension</th><th>Description</th><th>Effort</th><th>Agent</th></tr>
+        <tr><th>#</th><th>Dimension</th><th>Description</th><th>Effort</th><th>Agent</th><th></th></tr>
       </thead>
       <tbody>
         {% for item in report.remediation_plan %}
@@ -97,6 +97,17 @@
           <td>{{ item.description }}</td>
           <td>{{ item.estimated_effort }}</td>
           <td>{{ item.agent_responsible }}</td>
+          <td>
+            {% set cat = item.description | lower %}
+            {% if 'container' in cat or 'network' in cat or 'rbac' in cat or 'pipeline' in cat or 'metrics' in cat or 'policy' in cat or 'sbom' in cat or 'scan' in cat or 'resource' in cat or 'gitops' in cat or 'audit' in cat %}
+            <form method="post" action="/assessments/{{ assessment_id }}/fix" class="inline-form">
+              <input type="hidden" name="category" value="{{ item.dimension }}">
+              <button type="submit" class="btn btn-sm btn-green">Fix</button>
+            </form>
+            {% else %}
+            <span class="text-muted text-xs" title="This finding requires manual review">Manual</span>
+            {% endif %}
+          </td>
         </tr>
         {% endfor %}
       </tbody>

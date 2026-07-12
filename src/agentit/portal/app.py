@@ -251,16 +251,27 @@ async def insights_page(request: Request) -> HTMLResponse:
 
 
 @app.get("/events", response_class=HTMLResponse)
-async def events_page(request: Request, page: int = 1, per_page: int = 25) -> HTMLResponse:
+async def events_page(request: Request, page: int = 1, per_page: int = 25,
+                      q: str = "", severity: str = "") -> HTMLResponse:
     s = get_store()
-    all_events = s.list_events(limit=1000)
+    all_events = s.list_events(limit=2000)
+    if q:
+        ql = q.lower()
+        all_events = [e for e in all_events
+                      if ql in e.get("agent_id", "").lower()
+                      or ql in e.get("action", "").lower()
+                      or ql in (e.get("target_app") or "").lower()
+                      or ql in e.get("summary", "").lower()]
+    if severity:
+        all_events = [e for e in all_events if e.get("severity") == severity]
     total = len(all_events)
     total_pages = max(1, (total + per_page - 1) // per_page)
     page = max(1, min(page, total_pages))
     start = (page - 1) * per_page
     events = all_events[start:start + per_page]
     return templates.TemplateResponse(request, "events.html", {
-        "events": events, "page": page, "total_pages": total_pages, "per_page": per_page,
+        "events": events, "page": page, "total_pages": total_pages,
+        "per_page": per_page, "q": q, "severity_filter": severity,
     })
 
 
