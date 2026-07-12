@@ -109,15 +109,19 @@ spec:
         steps:
           - name: tag
             image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+            env:
+              - name: REVISION
+                value: $(params.revision)
             computeResources:
               requests:
                 memory: 64Mi
                 cpu: 50m
             script: |
               set -euo pipefail
-              oc tag {{ .Release.Namespace }}/agentit:$(params.revision) \
-                     {{ .Release.Namespace }}/agentit:latest
-              echo "Tagged :$(params.revision) as :latest"
+              [[ "${REVISION}" =~ ^[a-zA-Z0-9._-]+$ ]] || { echo "Invalid revision: ${REVISION}"; exit 1; }
+              oc tag "{{ .Release.Namespace }}/agentit:${REVISION}" \
+                     "{{ .Release.Namespace }}/agentit:latest"
+              echo "Tagged :${REVISION} as :latest"
       params:
         - name: image-ref
           value: $(params.image-ref)
@@ -153,9 +157,6 @@ spec:
       timeout: "3m"
       runAfter: [notify-argocd]
       taskSpec:
-        params:
-          - name: revision
-            type: string
         steps:
           - name: verify
             image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
@@ -184,9 +185,6 @@ spec:
               done
               echo "WARN: image mismatch after 2m — pod may need manual restart"
               exit 1
-      params:
-        - name: revision
-          value: $(params.revision)
 
   finally:
     - name: self-assess
