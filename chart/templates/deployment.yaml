@@ -45,6 +45,7 @@ spec:
                   matchLabels:
                     app.kubernetes.io/name: {{ .Chart.Name }}
                 topologyKey: kubernetes.io/hostname
+      serviceAccountName: {{ .Release.Name }}
       securityContext:
         runAsNonRoot: true
         seccompProfile:
