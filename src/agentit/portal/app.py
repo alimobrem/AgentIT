@@ -346,6 +346,14 @@ def _clone_assess_cleanup(repo_url: str, criticality: str, infra_repo_url: str |
         shutil.rmtree(repo_path, ignore_errors=True)
 
 
+def _assess_sync(repo_url: str, criticality: str, infra_repo_url: str | None = None):
+    """Run assessment synchronously. Used by webhooks and background threads."""
+    infra = infra_repo_url
+    if not infra:
+        infra = _auto_create_infra_repo(repo_url)
+    return _clone_assess_cleanup(repo_url, criticality, infra)
+
+
 @app.post("/assess", response_model=None)
 async def assess_submit(
     request: Request,
@@ -354,35 +362,49 @@ async def assess_submit(
     infra_repo_url: str = Form(""),
 ):
     infra = infra_repo_url.strip() or None
+    s = get_store()
+    job_id = s.create_assessment_job(repo_url)
 
-    # Auto-create infra repo if not provided
-    if not infra:
-        infra = await asyncio.to_thread(_auto_create_infra_repo, repo_url)
+    import threading
 
-    try:
-        report = await _with_timeout(asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality, infra))
-    except asyncio.TimeoutError:
-        return templates.TemplateResponse(
-            request, "assess_form.html",
-            {"error": "Assessment timed out. The repository may be too large or the server is under load."},
-            status_code=504,
-        )
-    except Exception as exc:
-        log.exception("Assessment failed for %s", repo_url)
-        from agentit.portal.metrics import assessments_total as _at
-        _at.labels(criticality=criticality, status="error").inc()
-        msg = str(exc)
-        if "clone" in msg.lower() or "git" in msg.lower():
-            msg = f"Could not clone repository. Check the URL and permissions. ({msg[:100]})"
-        elif "GITHUB_TOKEN" in msg:
-            msg = "GitHub integration is not configured. Contact your administrator."
-        return templates.TemplateResponse(
-            request, "assess_form.html", {"error": msg}, status_code=400,
-        )
-    from agentit.portal.metrics import assessments_total as _at
-    _at.labels(criticality=criticality, status="success").inc()
-    assessment_id = get_store().save(report)
-    return RedirectResponse(url=f"/assessments/{assessment_id}", status_code=303)
+    def _run():
+        try:
+            s.update_assessment_job(job_id, "cloning", "Cloning repository...")
+            s.update_assessment_job(job_id, "assessing", "Analyzing repository...")
+            report = _assess_sync(repo_url, criticality, infra)
+            s.update_assessment_job(job_id, "saving", "Saving results...")
+            from agentit.portal.metrics import assessments_total as _at
+            _at.labels(criticality=criticality, status="success").inc()
+            assessment_id = s.save(report)
+            s.update_assessment_job(job_id, "completed", "Assessment complete", assessment_id=assessment_id)
+        except Exception as exc:
+            log.exception("Assessment failed for %s", repo_url)
+            from agentit.portal.metrics import assessments_total as _at
+            _at.labels(criticality=criticality, status="error").inc()
+            msg = str(exc)
+            if "clone" in msg.lower() or "git" in msg.lower():
+                msg = f"Could not clone repository. Check the URL and permissions. ({msg[:100]})"
+            elif "GITHUB_TOKEN" in msg:
+                msg = "GitHub integration is not configured. Contact your administrator."
+            s.update_assessment_job(job_id, "failed", msg[:200])
+
+    threading.Thread(target=_run, daemon=True).start()
+    return RedirectResponse(url=f"/assess/progress/{job_id}", status_code=303)
+
+
+@app.get("/assess/progress/{job_id}", response_class=HTMLResponse)
+async def assess_progress(request: Request, job_id: str):
+    s = get_store()
+    job = s.get_remediation_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    if job["status"] == "completed" and job.get("assessment_id"):
+        return RedirectResponse(url=f"/assessments/{job['assessment_id']}", status_code=303)
+
+    return templates.TemplateResponse(request, "assess_progress.html", {
+        "job": job, "job_id": job_id,
+    })
 
 
 def _auto_create_infra_repo(repo_url: str) -> str | None:

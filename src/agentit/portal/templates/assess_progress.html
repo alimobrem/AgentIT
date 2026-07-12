@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Assessing... - AgentIT{% endblock %}
+{% block content %}
+<div hx-get="/assess/progress/{{ job_id }}" hx-trigger="every 2s" hx-target="body" hx-select=".container" hx-swap="innerHTML">
+
+<h1>Running Assessment</h1>
+
+<div class="card" class="form-narrow">
+  <div class="lifecycle-stepper">
+    {% set stages = [("cloning", "Cloning"), ("assessing", "Analyzing"), ("saving", "Saving")] %}
+    {% for key, label in stages %}
+    {% set step_lower = (job.current_step or "")|lower %}
+    {% set is_active = key in step_lower %}
+    {% set is_done = job.status == "completed" or
+       (key == "cloning" and "clon" not in step_lower and step_lower != "") or
+       (key == "assessing" and ("saving" in step_lower or job.status == "completed")) %}
+    <div class="lifecycle-step {% if is_active %}step-active{% elif is_done %}step-done{% else %}step-pending{% endif %}">
+      <div class="step-marker">{% if is_done and not is_active %}&#10003;{% else %}{{ loop.index }}{% endif %}</div>
+      <div class="step-label">{{ label }}</div>
+    </div>
+    {% if not loop.last %}<div class="step-connector {% if is_done %}connector-done{% endif %}"></div>{% endif %}
+    {% endfor %}
+  </div>
+
+  <p class="text-muted text-center">{{ job.current_step or "Starting..." }}</p>
+
+  {% if job.status == "failed" %}
+  <div class="alert alert-error">
+    Assessment failed: {{ job.current_step }}
+  </div>
+  <a href="/" class="btn btn-outline">Back to Fleet</a>
+  {% endif %}
+</div>
+</div>
+{% endblock %}

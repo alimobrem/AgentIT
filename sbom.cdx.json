@@ -1,0 +1,21 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:placeholder",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2025-01-01T00:00:00Z",
+    "component": {
+      "type": "application",
+      "name": "agentit",
+      "version": "0.1.0"
+    },
+    "tools": [
+      {
+        "vendor": "anchore",
+        "name": "syft"
+      }
+    ]
+  },
+  "components": []
+}

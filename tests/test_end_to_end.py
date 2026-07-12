@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -18,6 +19,20 @@ from agentit.models import (
 )
 from agentit.portal.app import app, get_store
 from conftest import make_store
+
+
+def _poll_assess_progress(client, job_id: str, max_wait: float = 5.0) -> str:
+    """Poll /assess/progress/{job_id} until it redirects to /assessments/{id}.
+    Returns the assessment_id."""
+    deadline = time.monotonic() + max_wait
+    while time.monotonic() < deadline:
+        resp = client.get(f"/assess/progress/{job_id}", follow_redirects=False)
+        if resp.status_code == 303:
+            loc = resp.headers["location"]
+            if "/assessments/" in loc:
+                return loc.split("/assessments/")[1]
+        time.sleep(0.1)
+    raise TimeoutError(f"Assessment job {job_id} did not complete within {max_wait}s")
 
 
 def _make_report_with_findings(repo_name: str = "e2e-repo") -> AssessmentReport:
@@ -116,11 +131,11 @@ def client():
 
 
 def test_assess_onboard_flow(client, _override_store):
-    """POST /assess -> redirect to detail -> POST onboard -> redirect -> GET results shows manifests."""
+    """POST /assess -> async progress -> redirect to detail -> POST onboard -> redirect -> GET results shows manifests."""
     store = _override_store
     report = _make_report_with_findings("flow-repo")
 
-    # Step 1: assess with mocked clone/run
+    # Step 1: assess with mocked clone/run — now async via background thread
     with patch("agentit.portal.app.clone_repo", return_value=Path("/tmp/fake")), \
          patch("agentit.portal.app.run_assessment", return_value=report):
         resp = client.post(
@@ -128,10 +143,11 @@ def test_assess_onboard_flow(client, _override_store):
             data={"repo_url": "https://github.com/org/flow-repo", "criticality": "high"},
             follow_redirects=False,
         )
-    assert resp.status_code == 303
-    location = resp.headers["location"]
-    assert location.startswith("/assessments/")
-    assessment_id = location.split("/assessments/")[1]
+        assert resp.status_code == 303
+        location = resp.headers["location"]
+        assert "/assess/progress/" in location
+        job_id = location.split("/assess/progress/")[1]
+        assessment_id = _poll_assess_progress(client, job_id)
 
     # Step 2: onboard
     resp = client.post(f"/assessments/{assessment_id}/onboard", follow_redirects=False)
@@ -225,8 +241,8 @@ def test_webhook_onboard_full_flow(client, _override_store):
 # ------------------------------------------------------------------
 
 
-def test_assess_error_shows_form(client):
-    """When run_assessment raises, POST /assess returns 400 with the assess form and error."""
+def test_assess_error_shows_progress(client):
+    """When run_assessment raises, the progress page shows the error."""
     with patch("agentit.portal.app.clone_repo", return_value=Path("/tmp/fake")), \
          patch("agentit.portal.app.run_assessment", side_effect=RuntimeError("clone failed: repo not found")):
         resp = client.post(
@@ -234,9 +250,16 @@ def test_assess_error_shows_form(client):
             data={"repo_url": "https://github.com/org/bad-repo", "criticality": "medium"},
             follow_redirects=False,
         )
-    assert resp.status_code == 400
-    assert "<form" in resp.text
-    assert "clone failed" in resp.text
+        assert resp.status_code == 303
+        job_id = resp.headers["location"].split("/assess/progress/")[1]
+        # Wait for background thread to fail
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            resp = client.get(f"/assess/progress/{job_id}")
+            if "failed" in resp.text.lower() or "clone failed" in resp.text.lower():
+                break
+            time.sleep(0.1)
+    assert "clone" in resp.text.lower()
 
 
 # ------------------------------------------------------------------
@@ -245,7 +268,7 @@ def test_assess_error_shows_form(client):
 
 
 def test_reassess_from_dashboard(client, _override_store):
-    """Save a report, POST /assess with the same repo_url -> redirect to a new assessment."""
+    """Save a report, POST /assess with the same repo_url -> async progress -> redirect to a new assessment."""
     store = _override_store
     original = _make_report_with_findings("reassess-repo")
     original_aid = store.save(original)
@@ -260,9 +283,10 @@ def test_reassess_from_dashboard(client, _override_store):
             data={"repo_url": "https://github.com/org/reassess-repo", "criticality": "high"},
             follow_redirects=False,
         )
-    assert resp.status_code == 303
-    location = resp.headers["location"]
-    new_aid = location.split("/assessments/")[1]
+        assert resp.status_code == 303
+        job_id = resp.headers["location"].split("/assess/progress/")[1]
+        new_aid = _poll_assess_progress(client, job_id)
+
     # New assessment created, different from the original
     assert new_aid != original_aid
 

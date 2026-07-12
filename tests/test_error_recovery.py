@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -231,6 +232,19 @@ def test_store_event_logging_on_assessment(_override_store):
 # ------------------------------------------------------------------
 
 
+def _poll_assess_progress(client, job_id: str, max_wait: float = 5.0) -> str:
+    """Poll /assess/progress/{job_id} until it redirects to /assessments/{id}."""
+    deadline = time.monotonic() + max_wait
+    while time.monotonic() < deadline:
+        resp = client.get(f"/assess/progress/{job_id}", follow_redirects=False)
+        if resp.status_code == 303:
+            loc = resp.headers["location"]
+            if "/assessments/" in loc:
+                return loc.split("/assessments/")[1]
+        time.sleep(0.1)
+    raise TimeoutError(f"Assessment job {job_id} did not complete within {max_wait}s")
+
+
 def test_portal_llm_unavailable(client, _override_store):
     """Assessment completes successfully when LLM client is None."""
     report = _make_report_with_findings("no-llm-repo")
@@ -243,6 +257,8 @@ def test_portal_llm_unavailable(client, _override_store):
             data={"repo_url": "https://github.com/org/no-llm-repo", "criticality": "medium"},
             follow_redirects=False,
         )
+        assert resp.status_code == 303
+        job_id = resp.headers["location"].split("/assess/progress/")[1]
+        assessment_id = _poll_assess_progress(client, job_id)
 
-    assert resp.status_code == 303
-    assert "/assessments/" in resp.headers["location"]
+    assert assessment_id  # non-empty means it completed

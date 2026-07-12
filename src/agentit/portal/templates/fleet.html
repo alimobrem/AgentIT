@@ -94,8 +94,14 @@
             </button>
           </form>
           <form method="post" action="/assessments/{{ r.id }}/delete" class="inline-form"
-                data-repo-name="{{ r.repo_name }}">
-            <button type="submit" class="btn btn-sm btn-danger-outline" aria-label="Delete {{ r.repo_name }}">×</button>
+                x-ref="deleteForm{{ r.id }}">
+            <button type="button" class="btn btn-sm btn-danger-outline" aria-label="Delete {{ r.repo_name }}"
+              @click="$dispatch('show-confirm', {
+                title: 'Delete App',
+                message: 'Delete {{ r.repo_name }} and all related data?',
+                form: $refs.deleteForm{{ r.id }},
+                opts: { confirmText: 'Delete', danger: true }
+              })">×</button>
           </form>
         </div>
       </td>
@@ -143,11 +149,4 @@
   </div>
 </div>
 
-<script>
-document.querySelectorAll('form[data-repo-name]').forEach(function(f) {
-  f.addEventListener('submit', function(e) {
-    if (!confirm('Delete ' + f.dataset.repoName + ' and all related data?')) e.preventDefault();
-  });
-});
-</script>
 {% endblock %}

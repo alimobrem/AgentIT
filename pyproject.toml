@@ -42,6 +42,7 @@ pythonpath = ["src"]
 markers = [
     "real_repo: tests that clone real repositories (use --run-real-repos to enable)",
     "live_cluster: e2e tests against a live OpenShift cluster (use --live-cluster to enable)",
+    "browser: Playwright browser tests (run with --browser-tests)",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:starlette",

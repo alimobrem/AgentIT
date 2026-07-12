@@ -136,9 +136,16 @@
           </form>
           {% endif %}
         {% else %}
-          <form method="post" action="/schedules/delete" class="inline-form">
+          <form method="post" action="/schedules/delete" class="inline-form"
+                x-ref="deleteSchedule{{ s.id }}">
             <input type="hidden" name="schedule_id" value="{{ s.id }}">
-            <button type="submit" class="btn btn-sm btn-danger-outline" onclick="return confirm('Delete this schedule?')">Delete</button>
+            <button type="button" class="btn btn-sm btn-danger-outline"
+              @click="$dispatch('show-confirm', {
+                title: 'Delete Schedule',
+                message: 'Delete this schedule?',
+                form: $refs.deleteSchedule{{ s.id }},
+                opts: { confirmText: 'Delete', danger: true }
+              })">Delete</button>
           </form>
         {% endif %}
       </td>

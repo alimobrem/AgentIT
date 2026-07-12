@@ -64,8 +64,14 @@
     </button>
   </form>
   <form method="post" action="/assessments/{{ assessment_id }}/delete" class="inline-form"
-        onsubmit="return confirm('Delete this assessment and all related data?')">
-    <button type="submit" class="btn btn-sm btn-danger-outline">Delete</button>
+        x-ref="deleteAssessment">
+    <button type="button" class="btn btn-sm btn-danger-outline"
+      @click="$dispatch('show-confirm', {
+        title: 'Delete Assessment',
+        message: 'Delete this assessment and all related data?',
+        form: $refs.deleteAssessment,
+        opts: { confirmText: 'Delete', danger: true }
+      })">Delete</button>
   </form>
 </div>
 
@@ -83,12 +89,17 @@
         {% if f.file_path %}<span class="finding-file">{{ f.file_path }}</span>{% endif %}
         {% if f.category in fixable_categories %}
         <form method="post" action="/assessments/{{ assessment_id }}/fix" class="inline-form"
-              onsubmit="return confirm('Generate a fix for this finding?')">
+              x-ref="fixFinding{{ loop.index }}">
           <input type="hidden" name="category" value="{{ f.category }}">
           <input type="hidden" name="description" value="{{ f.description }}">
-          <button type="submit" class="btn btn-sm btn-green">
+          <button type="button" class="btn btn-sm btn-green"
+            @click="$dispatch('show-confirm', {
+              title: 'Generate Fix',
+              message: 'Generate a fix for this finding?',
+              form: $refs.fixFinding{{ loop.index }},
+              opts: { confirmText: 'Generate Fix', danger: false }
+            })">
             <span class="btn-label">Fix</span>
-            <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
           </button>
         </form>
         {% endif %}

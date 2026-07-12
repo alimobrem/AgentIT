@@ -53,11 +53,16 @@
   </form>
   {% else %}
   <form method="post" action="/settings/auto-mode" class="inline-form"
-        onsubmit="return confirm('Enable auto-mode? Agents will automatically apply safe changes to your clusters.')">
+        x-ref="enableAutoMode">
     <input type="hidden" name="value" value="true">
-    <button type="submit" class="btn btn-green">
+    <button type="button" class="btn btn-green"
+      @click="$dispatch('show-confirm', {
+        title: 'Enable Auto-Mode',
+        message: 'Enable auto-mode? Agents will automatically apply safe changes to your clusters.',
+        form: $refs.enableAutoMode,
+        opts: { confirmText: 'Enable', danger: false }
+      })">
       <span class="btn-label">Enable Auto-Mode</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
     </button>
   </form>
   {% endif %}

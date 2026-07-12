@@ -790,6 +790,34 @@ class AssessmentStore:
         self._conn.commit()
         return cursor.rowcount > 0
 
+    # ── Assessment Jobs ──────────────────────────────────────────────────
+
+    def create_assessment_job(self, repo_url: str) -> str:
+        """Create a tracking job for an async assessment run."""
+        job_id = uuid.uuid4().hex
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            """INSERT INTO remediation_jobs
+                (id, assessment_id, status, current_step, steps_completed, error, created_at, updated_at)
+            VALUES (?, ?, 'assessing', ?, '[]', '', ?, ?)""",
+            (job_id, "", repo_url[:200], now, now),
+        )
+        self._conn.commit()
+        return job_id
+
+    def update_assessment_job(
+        self, job_id: str, status: str, step: str = "", assessment_id: str = "",
+    ) -> None:
+        """Update an assessment job's status and optionally link to the final assessment."""
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            """UPDATE remediation_jobs
+            SET status = ?, current_step = ?, assessment_id = ?, updated_at = ?
+            WHERE id = ?""",
+            (status, step, assessment_id, now, job_id),
+        )
+        self._conn.commit()
+
     # ── Remediation Jobs ──────────────────────────────────────────────────
 
     def create_remediation_job(self, assessment_id: str) -> str:

@@ -183,12 +183,18 @@
       <td>
         {% if op.get('package') and op.get('source') == 'redhat-operators' %}
         <form method="post" action="/api/install-operator" class="inline-form"
-              onsubmit="return confirm('Install {{ op.name }}? This will create a Subscription in a dedicated namespace.')">
+              x-ref="installOp{{ loop.index }}">
           <input type="hidden" name="package" value="{{ op.package }}">
           <input type="hidden" name="channel" value="{{ op.get('channel', 'stable') }}">
           <input type="hidden" name="source" value="{{ op.source }}">
           <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
-          <button type="submit" class="btn btn-sm btn-green">Install</button>
+          <button type="button" class="btn btn-sm btn-green"
+            @click="$dispatch('show-confirm', {
+              title: 'Install Operator',
+              message: 'Install {{ op.name }}? This will create a Subscription in a dedicated namespace.',
+              form: $refs.installOp{{ loop.index }},
+              opts: { confirmText: 'Install', danger: false }
+            })">Install</button>
         </form>
         {% elif op.get('note') %}
         <span class="text-xs text-muted">{{ op.note }}</span>
