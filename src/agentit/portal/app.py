@@ -232,6 +232,44 @@ async def fleet_redirect() -> RedirectResponse:
     return RedirectResponse(url="/", status_code=301)
 
 
+@app.get("/fleet/slos", response_class=HTMLResponse)
+async def fleet_slos(request: Request) -> HTMLResponse:
+    """Fleet-wide SLO view — all SLOs across all apps."""
+    s = get_store()
+    fleet = s.get_fleet_data()
+    all_slos = []
+    for app_data in fleet:
+        slos = s.list_slos(app_data["id"])
+        for slo in slos:
+            slo["app_name"] = app_data["repo_name"]
+            slo["app_id"] = app_data["id"]
+            all_slos.append(slo)
+    breached = [sl for sl in all_slos if sl.get("status") == "breached"]
+    return templates.TemplateResponse(request, "fleet_slos.html", {
+        "slos": all_slos, "breached_count": len(breached),
+        "total_count": len(all_slos),
+    })
+
+
+@app.get("/fleet/remediations", response_class=HTMLResponse)
+async def fleet_remediations(request: Request) -> HTMLResponse:
+    """Fleet-wide remediation view — all remediations across all apps."""
+    s = get_store()
+    fleet = s.get_fleet_data()
+    all_remediations = []
+    for app_data in fleet:
+        remeds = s.list_remediations(app_data["id"])
+        for r in remeds:
+            r["app_name"] = app_data["repo_name"]
+            r["app_id"] = app_data["id"]
+            all_remediations.append(r)
+    pending = [r for r in all_remediations if r.get("status") != "completed"]
+    return templates.TemplateResponse(request, "fleet_remediations.html", {
+        "remediations": all_remediations, "pending_count": len(pending),
+        "total_count": len(all_remediations),
+    })
+
+
 @app.get("/api/fleet")
 async def api_fleet() -> JSONResponse:
     return JSONResponse(get_store().get_fleet_data())

@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Fleet SLOs - AgentIT{% endblock %}
+{% block content %}
+<h1>Fleet SLOs</h1>
+<p class="text-muted">SLO status across all managed applications.</p>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-label">Total SLOs</div>
+    <div class="stat-value">{{ total_count }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Breached</div>
+    <div class="stat-value {% if breached_count > 0 %}text-danger{% else %}text-success{% endif %}">{{ breached_count }}</div>
+  </div>
+</div>
+
+{% if slos %}
+<table>
+  <thead>
+    <tr><th>App</th><th>Metric</th><th>Target</th><th>Current</th><th>Status</th></tr>
+  </thead>
+  <tbody>
+    {% for sl in slos %}
+    <tr>
+      <td><a href="/assessments/{{ sl.app_id }}">{{ sl.app_name }}</a></td>
+      <td>{{ sl.metric_name }}</td>
+      <td>{{ sl.target_value }}</td>
+      <td>{{ sl.current_value if sl.current_value is not none else '—' }}</td>
+      <td>
+        {% if sl.status == "breached" %}
+          <span class="badge badge-critical">breached</span>
+        {% elif sl.status == "met" %}
+          <span class="badge badge-low">met</span>
+        {% else %}
+          <span class="badge badge-info">{{ sl.status | default('pending') }}</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty-state">
+  <h3>No SLOs defined</h3>
+  <p class="text-muted">SLOs are created when apps are onboarded. Assess and onboard an app to see SLOs here.</p>
+</div>
+{% endif %}
+{% endblock %}
