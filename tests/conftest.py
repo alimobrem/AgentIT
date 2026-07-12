@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -89,3 +90,29 @@ def create_mock_repo(tmp_path: Path):
             full_path.write_text(content)
         return repo_dir
     return _create
+
+
+@pytest.fixture()
+def portal_client():
+    """TestClient with all store locations patched and seeded with test data."""
+    from fastapi.testclient import TestClient
+    from agentit.portal.app import app
+
+    store = make_store()
+    report = make_report()
+    assessment_id = store.save(report)
+    store.save_onboarding(assessment_id, [
+        {"category": "security", "path": "test.yaml",
+         "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test",
+         "description": "test file"}
+    ])
+    store.log_event("test", "test-action", "test-app", "info", "test event")
+
+    with patch("agentit.portal.app.get_store", return_value=store), \
+         patch("agentit.portal.helpers.get_store", return_value=store), \
+         patch("agentit.portal.helpers._store", store), \
+         patch("agentit.portal.routes.webhooks.get_store", return_value=store), \
+         patch("agentit.portal.routes.health.get_store", return_value=store), \
+         patch("agentit.portal.routes.schedules.get_store", return_value=store):
+        client = TestClient(app)
+        yield client, store, assessment_id
