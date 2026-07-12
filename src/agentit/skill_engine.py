@@ -127,6 +127,7 @@ class SkillEngine:
             for output_kind in skill.outputs:
                 if not self.platform.has_api(output_kind.lower() + "s") and not self.platform.has_api(output_kind.lower()):
                     logger.debug("Skipping skill %s: %s not available", skill.name, output_kind)
+                    return []
 
         return [GeneratedFile(
             path=f"{app_name}-{skill.name}.yaml",

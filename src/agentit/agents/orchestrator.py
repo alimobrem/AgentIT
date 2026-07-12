@@ -5,12 +5,18 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from agentit.models import AssessmentReport, Severity
 from agentit.portal.metrics import agent_runs_total, agent_run_duration_seconds
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_path(base: Path, relative: str) -> Path:
+    """Resolve a relative path under base, rejecting traversal."""
+    clean = PurePosixPath(relative).name  # strips directory components and ..
+    return base / clean
 
 AGENT_MODE = os.environ.get("AGENTIT_AGENT_MODE", "local")
 
@@ -151,7 +157,8 @@ class FleetOrchestrator:
                 skill_dir = self.output_dir / "skills"
                 skill_dir.mkdir(parents=True, exist_ok=True)
                 for f in skill_files:
-                    (skill_dir / f.path).write_text(f.content, encoding="utf-8")
+                    safe = _safe_path(skill_dir, f.path)
+                    safe.write_text(f.content, encoding="utf-8")
         except Exception as exc:
             logger.debug("Skill engine failed (non-fatal): %s", exc)
 
@@ -324,7 +331,8 @@ class FleetOrchestrator:
                         sub_dir = self.output_dir / category
                         sub_dir.mkdir(parents=True, exist_ok=True)
                         for f in files:
-                            (sub_dir / f.path).write_text(f.content, encoding="utf-8")
+                            safe = _safe_path(sub_dir, f.path)
+                            safe.write_text(f.content, encoding="utf-8")
                     except Exception as exc:
                         logger.warning("Failed to parse Job output for %s: %s", agent_name, exc)
                         agent_runs_total.labels(agent=agent_name, mode="kubernetes", status="error").inc()

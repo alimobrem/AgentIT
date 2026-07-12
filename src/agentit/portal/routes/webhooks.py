@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from agentit.portal.helpers import (
-    clone_assess_cleanup, get_store, publish_event, run_onboarding, with_timeout,
+    clone_assess_cleanup, get_llm_client, get_store, publish_event, run_onboarding, with_timeout,
 )
 
 log = logging.getLogger(__name__)
@@ -310,7 +310,7 @@ async def webhook_finding(request: Request):
     if not category:
         raise HTTPException(400, "category required")
     s.log_event(source, "finding-received", app_name, severity, f"{category}: {description}")
-    publish_event(source, "finding-received", app_name, severity, f"{category}: {description}")
+    publish_event("finding-received", app_name, f"{category}: {description}", agent_id=source)
 
     fleet = s.get_fleet_data()
     app = next((a for a in fleet if a["repo_name"] == app_name), None)
@@ -329,22 +329,22 @@ async def webhook_finding(request: Request):
 
     from agentit.automode import AutoMode
     from agentit.events import get_publisher as _gp
-    auto = AutoMode(store=s, publisher=_gp())
+    auto = AutoMode(store=s, publisher=_gp(), llm_client=get_llm_client())
 
     if auto.enabled and result["files"]:
-        from agentit.portal.cluster_apply import apply_manifests_to_cluster
         namespace = app.get("deploy_namespace", app_name)
-        apply_result = await asyncio.to_thread(
-            apply_manifests_to_cluster, result["files"], namespace, dry_run=False,
+        auto_result = await asyncio.to_thread(
+            auto.execute, app["id"], result["files"], namespace,
+            app.get("criticality", "medium"), False, app_name,
         )
-        s.log_event("dispatcher", "auto-applied", app_name, "info",
-                    f"Applied {len(apply_result['applied'])} fixes for {category}")
+        s.log_event("dispatcher", auto_result["action"], app_name, "info",
+                    f"Auto-mode {auto_result['action']} for {category}: {auto_result['reason']}")
         s.mark_webhook_processed(delivery_id)
         return JSONResponse({
             "status": "accepted",
-            "action": "auto-applied",
+            "action": auto_result["action"],
+            "reason": auto_result["reason"],
             "files_generated": len(result["files"]),
-            "applied": len(apply_result["applied"]),
             "agent": result["agent"],
         })
 

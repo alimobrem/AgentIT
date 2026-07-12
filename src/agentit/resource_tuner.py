@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 
 import httpx
@@ -19,6 +20,11 @@ class ResourceRecommendation:
     recommended_value: str
     reason: str
     confidence: float
+
+
+def _sanitize_prom_label(value: str) -> str:
+    """Strip non-safe characters for PromQL label values."""
+    return re.sub(r'[^a-zA-Z0-9_.\-]', '', value)
 
 
 def query_prometheus(query: str, timeout: int = 10) -> float | None:
@@ -41,6 +47,8 @@ def query_prometheus(query: str, timeout: int = 10) -> float | None:
 
 def analyze_resource_usage(app_name: str, namespace: str) -> list[ResourceRecommendation]:
     recommendations: list[ResourceRecommendation] = []
+    app_name = _sanitize_prom_label(app_name)
+    namespace = _sanitize_prom_label(namespace)
 
     avg_cpu = query_prometheus(
         f'avg(rate(container_cpu_usage_seconds_total{{namespace="{namespace}",pod=~"{app_name}.*"}}[7d]))'

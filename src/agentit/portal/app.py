@@ -598,10 +598,10 @@ async def onboard_submit(request: Request, assessment_id: str):
             s.log_event("image-builder", "build-failed", report.repo_name, "warning",
                         f"Image build failed: {build_result['error'][:200]}")
             warnings.append(f"Image build failed: {build_result['error'][:100]}")
-    else:
-        log.info("Image build triggered: %s → %s", report.repo_name, build_result.get("image_ref"))
-        s.log_event("image-builder", "build-triggered", report.repo_name, "info",
-                    f"Building image: {build_result.get('image_ref')}")
+        else:
+            log.info("Image build triggered: %s → %s", report.repo_name, build_result.get("image_ref"))
+            s.log_event("image-builder", "build-triggered", report.repo_name, "info",
+                        f"Building image: {build_result.get('image_ref')}")
 
     from agentit.portal.github_pr import ensure_webhook
     webhook_url = str(request.base_url).rstrip("/") + "/api/webhook/github-push"

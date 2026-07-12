@@ -1,39 +1,48 @@
 from __future__ import annotations
 
 import logging
-from functools import lru_cache
+import time as _time
 
 logger = logging.getLogger(__name__)
 
+_client_cache = None
+_client_cache_time: float = 0
+_CLIENT_TTL = 600  # 10 minutes
 
-@lru_cache(maxsize=1)
+
 def get_client():
-    """Get a configured kubernetes client. Auto-detects in-cluster vs kubeconfig."""
+    """Get a configured kubernetes client. Auto-detects in-cluster vs kubeconfig.
+
+    Cached with a 10-minute TTL so bound service-account tokens (which rotate
+    hourly) are picked up after expiry.
+    """
+    global _client_cache, _client_cache_time
+    now = _time.monotonic()
+    if _client_cache is not None and (now - _client_cache_time) < _CLIENT_TTL:
+        return _client_cache
     from kubernetes import client, config
 
     try:
         config.load_incluster_config()
     except config.ConfigException:
         config.load_kube_config()
+    _client_cache = client
+    _client_cache_time = now
     return client
 
 
-@lru_cache(maxsize=1)
 def core_v1():
     return get_client().CoreV1Api()
 
 
-@lru_cache(maxsize=1)
 def apps_v1():
     return get_client().AppsV1Api()
 
 
-@lru_cache(maxsize=1)
 def custom_objects():
     return get_client().CustomObjectsApi()
 
 
-@lru_cache(maxsize=1)
 def batch_v1():
     return get_client().BatchV1Api()
 
@@ -49,6 +58,10 @@ def list_pods(namespace: str, label_selector: str = "") -> list[dict]:
                 "restarts": sum(cs.restart_count for cs in (p.status.container_statuses or [])),
                 "age": p.metadata.creation_timestamp.isoformat()[:16] if p.metadata.creation_timestamp else "",
                 "ready": all(cs.ready for cs in (p.status.container_statuses or [])),
+                "crash_looping": any(
+                    cs.state and cs.state.waiting and cs.state.waiting.reason == "CrashLoopBackOff"
+                    for cs in (p.status.container_statuses or [])
+                ),
                 "container_statuses": p.status.container_statuses or [],
             }
             for p in pods.items
@@ -62,7 +75,7 @@ def get_pod_count(namespace: str) -> tuple[int, int]:
     """Returns (running_count, failed_count)."""
     pods = list_pods(namespace)
     running = sum(1 for p in pods if p["status"] == "Running")
-    failed = sum(1 for p in pods if p["status"] in ("Failed", "Error", "CrashLoopBackOff"))
+    failed = sum(1 for p in pods if p["status"] == "Failed" or p.get("crash_looping", False))
     return running, failed
 
 
@@ -79,7 +92,7 @@ def list_custom_resources(group: str, version: str, plural: str, namespace: str 
         return []
 
 
-def apply_yaml(content: str, namespace: str, dry_run: bool = False) -> dict:
+def apply_yaml(content: str, namespace: str) -> dict:
     """Apply a YAML manifest using create_from_yaml. Returns {"applied": bool, "error": str|None}."""
     import os
     import tempfile
@@ -111,13 +124,31 @@ def apply_yaml(content: str, namespace: str, dry_run: bool = False) -> dict:
 
 
 def rollout_undo(deployment: str, namespace: str) -> dict:
-    """Rollback a deployment. Returns {"success": bool, "message": str}."""
+    """Restart a deployment to trigger a new rollout.
+
+    Note: apps/v1 does not support spec.rollbackTo (that was extensions/v1beta1).
+    This triggers a restart by annotating the pod template, equivalent to
+    ``kubectl rollout restart``. For a true rollback to a previous ReplicaSet
+    revision, use ``kubectl rollout undo`` directly.
+    """
+    from datetime import datetime, timezone
+
     try:
-        body = {"spec": {"rollbackTo": {"revision": 0}}}
+        body = {
+            "spec": {
+                "template": {
+                    "metadata": {
+                        "annotations": {
+                            "kubectl.kubernetes.io/restartedAt": datetime.now(timezone.utc).isoformat(),
+                        }
+                    }
+                }
+            }
+        }
         apps_v1().patch_namespaced_deployment(deployment, namespace, body, _request_timeout=15)
-        return {"success": True, "message": f"Rollback initiated for {deployment}"}
+        return {"success": True, "message": f"Rollout restart initiated for {deployment}"}
     except Exception as exc:
-        logger.warning("Rollback failed for %s/%s: %s", namespace, deployment, exc)
+        logger.warning("Rollout restart failed for %s/%s: %s", namespace, deployment, exc)
         return {"success": False, "message": str(exc)}
 
 

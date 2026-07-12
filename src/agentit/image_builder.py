@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 import subprocess
 import time
 
@@ -27,7 +28,7 @@ if [ -f Dockerfile ] || [ -f Containerfile ]; then
   fi
   exit 0
 fi
-echo "No Dockerfile found — auto-generating for {app_name}"
+echo "No Dockerfile found — auto-generating for {shlex.quote(app_name)}"
 # Detect language
 if [ -f go.mod ]; then
   cat > Dockerfile <<'GOEOF'
@@ -81,7 +82,7 @@ USER 1001
 EXPOSE 8080
 DEFAULTEOF
 fi
-echo "Generated Dockerfile for {app_name}"
+echo "Generated Dockerfile for {shlex.quote(app_name)}"
 cat Dockerfile
 """
 

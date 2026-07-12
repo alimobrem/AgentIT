@@ -451,10 +451,25 @@ def commit_to_infra_repo(
         return {"error": str(exc)}
 
 
+_TRUSTED_GIT_DOMAINS = frozenset(
+    d.strip() for d in os.environ.get("AGENTIT_TRUSTED_GIT_DOMAINS", "github.com,gitlab.com").split(",") if d.strip()
+)
+
+
 def ensure_applicationset(infra_repo_url: str) -> bool:
     """Ensure an Argo CD ApplicationSet exists for the infra repo."""
     import subprocess
     import yaml
+    from urllib.parse import urlparse as _urlparse
+
+    parsed = _urlparse(infra_repo_url)
+    host = (parsed.hostname or "").lower()
+    if not any(host == d or host.endswith("." + d) for d in _TRUSTED_GIT_DOMAINS):
+        logger.warning(
+            "Skipping ApplicationSet: infra_repo_url host '%s' not in trusted domains %s",
+            host, _TRUSTED_GIT_DOMAINS,
+        )
+        return False
 
     appset = {
         "apiVersion": "argoproj.io/v1alpha1",

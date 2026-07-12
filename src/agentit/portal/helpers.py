@@ -90,7 +90,7 @@ def publish_event(
 
 def safe_url(value: str) -> str:
     parsed = urlparse(value)
-    if parsed.scheme not in ("https", "http", ""):
+    if parsed.scheme not in ("https", "http"):
         return "#"
     return value
 

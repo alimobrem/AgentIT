@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_PORTAL = os.environ.get("AGENTIT_PORTAL_URL", "http://localhost:8080")
 
 _active_jobs: dict[str, threading.Thread] = {}
+_active_jobs_lock = threading.Lock()
 MAX_CONCURRENT_REMEDIATIONS = int(os.environ.get("AGENTIT_MAX_REMEDIATIONS", "3"))
 VERIFY_WINDOW_SECONDS = 60  # 60s SLO watch after apply
 VERIFY_POLL_INTERVAL = 5  # poll every 5s
@@ -82,23 +83,24 @@ class RemediationLoop:
         if job_store is None:
             raise RuntimeError("store is required for async job tracking")
 
-        # Clean up dead threads
-        for jid, t in list(_active_jobs.items()):
-            if not t.is_alive():
-                del _active_jobs[jid]
+        with _active_jobs_lock:
+            # Clean up dead threads
+            for jid, t in list(_active_jobs.items()):
+                if not t.is_alive():
+                    del _active_jobs[jid]
 
-        if len(_active_jobs) >= MAX_CONCURRENT_REMEDIATIONS:
-            raise RuntimeError("Max concurrent remediations reached")
+            if len(_active_jobs) >= MAX_CONCURRENT_REMEDIATIONS:
+                raise RuntimeError("Max concurrent remediations reached")
 
-        job_id = job_store.create_remediation_job(assessment_id="")
-        thread = threading.Thread(
-            target=self._run_with_job_tracking,
-            args=(job_id, repo_url, app_name, criticality, reason, job_store),
-            daemon=True,
-        )
-        thread.start()
-        _active_jobs[job_id] = thread
-        return job_id
+            job_id = job_store.create_remediation_job(assessment_id="")
+            thread = threading.Thread(
+                target=self._run_with_job_tracking,
+                args=(job_id, repo_url, app_name, criticality, reason, job_store),
+                daemon=True,
+            )
+            thread.start()
+            _active_jobs[job_id] = thread
+            return job_id
 
     def _run_with_job_tracking(
         self,
@@ -289,7 +291,8 @@ class RemediationLoop:
 
 def active_job_count() -> int:
     """Return the number of currently running remediation threads."""
-    for jid, t in list(_active_jobs.items()):
-        if not t.is_alive():
-            del _active_jobs[jid]
-    return len(_active_jobs)
+    with _active_jobs_lock:
+        for jid, t in list(_active_jobs.items()):
+            if not t.is_alive():
+                del _active_jobs[jid]
+        return len(_active_jobs)

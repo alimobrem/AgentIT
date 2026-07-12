@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
+import socket
 import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
@@ -15,6 +17,21 @@ class CloneError(Exception):
 
 _ALLOWED_SCHEMES = {"https", "http"}
 _DANGEROUS_URL_RE = re.compile(r"ext::|--upload-pack|--config")
+_INTERNAL_SUFFIXES = ('.internal', '.local', '.corp', '.lan', '.svc')
+
+
+def _is_private_host(hostname: str) -> bool:
+    """Check if hostname resolves to a private/internal IP."""
+    try:
+        for info in socket.getaddrinfo(hostname, None):
+            addr = ipaddress.ip_address(info[4][0])
+            if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+                return True
+    except (socket.gaierror, ValueError):
+        pass
+    # Block common internal suffixes
+    lower = hostname.lower()
+    return any(lower.endswith(s) for s in _INTERNAL_SUFFIXES)
 
 
 def _validate_repo_url(repo_url: str) -> None:
@@ -28,6 +45,12 @@ def _validate_repo_url(repo_url: str) -> None:
     if parsed.scheme and parsed.scheme not in _ALLOWED_SCHEMES:
         raise CloneError(
             f"Rejected URL scheme '{parsed.scheme}'. Only https:// and http:// are allowed."
+        )
+
+    hostname = parsed.hostname
+    if hostname and _is_private_host(hostname):
+        raise CloneError(
+            f"Rejected URL with private/internal host: {hostname}"
         )
 
 
