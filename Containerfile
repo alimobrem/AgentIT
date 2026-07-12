@@ -1,4 +1,4 @@
-FROM registry.access.redhat.com/ubi9/python-312:9.6-1749538917
+FROM registry.access.redhat.com/ubi9/python-312:latest
 
 USER 0
 RUN curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz \
