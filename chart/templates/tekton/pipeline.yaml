@@ -85,13 +85,13 @@ spec:
             value: openshift-pipelines
       params:
         - name: IMAGE
-          value: $(params.image-ref):$(params.revision)
+          value: $(params.image-ref):latest
         - name: DOCKERFILE
           value: ./Containerfile
         - name: CONTEXT
           value: .
         - name: BUILD_EXTRA_ARGS
-          value: "--tag $(params.image-ref):latest"
+          value: "--tag $(params.image-ref):$(params.revision)"
       workspaces:
         - name: source
           workspace: source
