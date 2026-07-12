@@ -16,7 +16,7 @@ RUN mkdir -p src/agentit && touch src/agentit/__init__.py && \
     rm -rf src/agentit
 
 COPY src/ src/
-RUN pip install --no-cache-dir --no-deps .
+RUN pip install --no-cache-dir --no-deps --force-reinstall .
 
 EXPOSE 8080
 
