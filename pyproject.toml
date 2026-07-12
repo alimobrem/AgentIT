@@ -43,6 +43,7 @@ markers = [
     "real_repo: tests that clone real repositories (use --run-real-repos to enable)",
     "live_cluster: e2e tests against a live OpenShift cluster (use --live-cluster to enable)",
     "browser: Playwright browser tests (run with --browser-tests)",
+    "llm_eval: LLM evaluation tests (run with --run-llm-evals, requires API key)",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:starlette",
