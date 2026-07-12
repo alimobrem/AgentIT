@@ -54,6 +54,9 @@ instrument_app(app)
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
+_maintenance_task = None
+
+
 async def _background_maintenance() -> None:
     """Hourly: expire stale gates. Daily: purge old data."""
     tick = 0
@@ -78,7 +81,24 @@ async def _background_maintenance() -> None:
 
 @app.on_event("startup")
 async def _start_background_tasks() -> None:
-    asyncio.create_task(_background_maintenance())
+    global _maintenance_task
+    _maintenance_task = asyncio.create_task(_background_maintenance())
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    if _maintenance_task:
+        _maintenance_task.cancel()
+    try:
+        from agentit.events import get_publisher
+        get_publisher().close()
+    except Exception:
+        log.debug("Publisher close failed", exc_info=True)
+    try:
+        from agentit.portal.helpers import get_store
+        get_store()._conn.close()
+    except Exception:
+        log.debug("Store close failed", exc_info=True)
 
 
 templates.env.filters["safe_url"] = _safe_url
@@ -1184,6 +1204,12 @@ async def toggle_auto_mode(request: Request):
 @app.get("/api/settings")
 async def api_settings():
     return JSONResponse(get_store().list_settings())
+
+
+@app.get("/api/export")
+async def export_data():
+    """Export all data as JSON for backup/migration."""
+    return get_store().export_all()
 
 
 @app.get("/api/settings/{key}")

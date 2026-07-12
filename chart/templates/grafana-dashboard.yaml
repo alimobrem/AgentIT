@@ -1,0 +1,100 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-grafana-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: monitoring
+    grafana_dashboard: "1"
+data:
+  agentit-dashboard.json: |
+    {
+      "annotations": { "list": [] },
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 0,
+      "id": null,
+      "links": [],
+      "panels": [
+        {
+          "title": "Request Rate",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "targets": [
+            {
+              "expr": "sum(rate(http_requests_total{job=\"{{ .Release.Name }}\"}[5m]))",
+              "legendFormat": "req/s"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "reqps" }
+          }
+        },
+        {
+          "title": "Error Rate",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "targets": [
+            {
+              "expr": "sum(rate(http_requests_total{job=\"{{ .Release.Name }}\", status=~\"5..\"}[5m])) / sum(rate(http_requests_total{job=\"{{ .Release.Name }}\"}[5m]))",
+              "legendFormat": "error %"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "percentunit", "max": 1 }
+          }
+        },
+        {
+          "title": "p99 Latency",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job=\"{{ .Release.Name }}\"}[5m])) by (le))",
+              "legendFormat": "p99"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "s" }
+          }
+        },
+        {
+          "title": "Assessments Total",
+          "type": "stat",
+          "gridPos": { "h": 8, "w": 6, "x": 12, "y": 8 },
+          "targets": [
+            {
+              "expr": "sum(agentit_assessments_total{job=\"{{ .Release.Name }}\"})",
+              "legendFormat": "total"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "short" }
+          }
+        },
+        {
+          "title": "Fleet Average Score",
+          "type": "gauge",
+          "gridPos": { "h": 8, "w": 6, "x": 18, "y": 8 },
+          "targets": [
+            {
+              "expr": "agentit_fleet_avg_score{job=\"{{ .Release.Name }}\"}",
+              "legendFormat": "avg score"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "short", "min": 0, "max": 100, "thresholds": { "steps": [{ "value": 0, "color": "red" }, { "value": 50, "color": "yellow" }, { "value": 75, "color": "green" }] } }
+          }
+        }
+      ],
+      "schemaVersion": 39,
+      "tags": ["agentit"],
+      "templating": { "list": [] },
+      "time": { "from": "now-6h", "to": "now" },
+      "title": "AgentIT Overview",
+      "uid": "agentit-overview"
+    }
+{{- end }}

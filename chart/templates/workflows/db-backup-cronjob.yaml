@@ -1,0 +1,57 @@
+{{- if .Values.backup.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}-db-backup
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: "17 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 120
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: backup
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              command: [/bin/sh, -c]
+              args:
+                - |
+                  set -eu
+                  BACKUP_DIR=/backups
+                  DB=/data/agentit.db
+                  STAMP=$(date +%Y%m%d-%H%M%S)
+                  if [ ! -f "$DB" ]; then echo "No database at $DB"; exit 0; fi
+                  sqlite3 "$DB" ".backup $BACKUP_DIR/agentit-$STAMP.db"
+                  ls -t $BACKUP_DIR/agentit-*.db 2>/dev/null | tail -n +8 | xargs rm -f 2>/dev/null || true
+                  COUNT=$(ls $BACKUP_DIR/agentit-*.db 2>/dev/null | wc -l)
+                  echo "Backup $STAMP done ($COUNT retained)"
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+                  readOnly: true
+                - name: backups
+                  mountPath: /backups
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: {{ .Release.Name }}-data
+            - name: backups
+              persistentVolumeClaim:
+                claimName: {{ .Release.Name }}-backups
+{{- end }}

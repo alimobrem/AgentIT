@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import json
 import logging
+import os
 import shutil
 
 from fastapi import APIRouter, HTTPException, Request
@@ -12,6 +16,26 @@ from agentit.cloner import clone_repo
 from agentit.portal.helpers import get_llm_client, get_store, publish_event
 
 log = logging.getLogger(__name__)
+
+
+def _get_delivery_id(request: Request, body: dict) -> str:
+    """Get a unique delivery ID from GitHub header or body hash."""
+    gh_delivery = request.headers.get("X-GitHub-Delivery")
+    if gh_delivery:
+        return gh_delivery
+    return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()[:32]
+
+
+def _verify_github_signature(request: Request, body_bytes: bytes) -> bool:
+    """Verify GitHub webhook HMAC-SHA256 signature. Skips if secret not set (dev mode)."""
+    secret = os.environ.get("GITHUB_WEBHOOK_SECRET")
+    if not secret:
+        return True
+    sig_header = request.headers.get("X-Hub-Signature-256", "")
+    if not sig_header.startswith("sha256="):
+        return False
+    expected = hmac.new(secret.encode(), body_bytes, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(sig_header[7:], expected)
 
 router = APIRouter()
 
@@ -91,6 +115,12 @@ def _run_onboarding(report, assessment_id: str | None = None):
 async def webhook_assess(request: Request):
     """Trigger an assessment via webhook. Accepts JSON body: {repo_url, criticality}"""
     body = await request.json()
+
+    delivery_id = _get_delivery_id(request, body)
+    s = get_store()
+    if s.webhook_already_processed(delivery_id):
+        return JSONResponse({"status": "duplicate", "delivery_id": delivery_id})
+
     repo_url = body.get("repo_url")
     if not repo_url:
         raise HTTPException(400, "repo_url required")
@@ -103,13 +133,14 @@ async def webhook_assess(request: Request):
         raise
     from agentit.portal.metrics import assessments_total as _at
     _at.labels(criticality=criticality, status="success").inc()
-    assessment_id = get_store().save(report)
+    assessment_id = s.save(report)
     from agentit.events import TOPIC_ASSESSMENTS
     publish_event("assessment-complete", report.repo_name,
                   f"Assessment complete: {report.overall_score:.0f}/100",
                   {"assessment_id": assessment_id, "score": report.overall_score},
                   correlation_id=assessment_id,
                   extra_topic=TOPIC_ASSESSMENTS)
+    s.mark_webhook_processed(delivery_id)
     return JSONResponse({"assessment_id": assessment_id, "overall_score": report.overall_score})
 
 
@@ -122,7 +153,17 @@ async def webhook_github_push(request: Request):
     if event_type != "push":
         return JSONResponse({"status": "ignored", "reason": f"event type '{event_type}' not handled"})
 
-    body = await request.json()
+    body_bytes = await request.body()
+    if not _verify_github_signature(request, body_bytes):
+        raise HTTPException(403, "Invalid webhook signature")
+
+    body = json.loads(body_bytes)
+
+    delivery_id = _get_delivery_id(request, body)
+    s_dedup = get_store()
+    if s_dedup.webhook_already_processed(delivery_id):
+        return JSONResponse({"status": "duplicate", "delivery_id": delivery_id})
+
     ref = body.get("ref", "")
     repo_url = body.get("repository", {}).get("html_url", "")
     default_branch = body.get("repository", {}).get("default_branch", "main")
@@ -164,6 +205,7 @@ async def webhook_github_push(request: Request):
                       {"assessment_id": assessment_id, "score": report.overall_score},
                       correlation_id=assessment_id,
                       extra_topic=_TOPIC_ASSESSMENTS)
+        s_dedup.mark_webhook_processed(delivery_id)
         return JSONResponse({
             "status": "assessed",
             "repo": managed["repo_name"],
@@ -182,6 +224,12 @@ async def webhook_github_push(request: Request):
 async def webhook_onboard(request: Request):
     """Trigger onboarding via webhook (called by Argo Events Sensor for low-score assessments)."""
     body = await request.json()
+
+    delivery_id = _get_delivery_id(request, body)
+    s = get_store()
+    if s.webhook_already_processed(delivery_id):
+        return JSONResponse({"status": "duplicate", "delivery_id": delivery_id})
+
     log.info("webhook_onboard received event: %s", body.get("eventId", "unknown"))
 
     assessment_id = body.get("correlationId")
@@ -192,7 +240,6 @@ async def webhook_onboard(request: Request):
     if not assessment_id:
         raise HTTPException(400, "assessment_id not found in event body")
 
-    s = get_store()
     report = s.get(assessment_id)
     if report is None:
         raise HTTPException(404, f"Assessment {assessment_id} not found")
@@ -224,6 +271,7 @@ async def webhook_onboard(request: Request):
                         f"Building image: {build_result['image_ref']}")
 
     log.info("webhook_onboard completed for %s: %d files, build=%s", assessment_id, len(files), build_status)
+    s.mark_webhook_processed(delivery_id)
     return JSONResponse({
         "assessment_id": assessment_id,
         "repo_url": report.repo_url,
@@ -273,6 +321,12 @@ async def webhook_finding(request: Request):
     Accepts: {"app_name": "...", "category": "container", "description": "...", "severity": "high", "source": "trivy"}
     """
     body = await request.json()
+
+    delivery_id = _get_delivery_id(request, body)
+    s = get_store()
+    if s.webhook_already_processed(delivery_id):
+        return JSONResponse({"status": "duplicate", "delivery_id": delivery_id})
+
     app_name = body.get("app_name", "unknown")
     category = body.get("category", "")
     description = body.get("description", "")
@@ -281,14 +335,13 @@ async def webhook_finding(request: Request):
 
     if not category:
         raise HTTPException(400, "category required")
-
-    s = get_store()
     s.log_event(source, "finding-received", app_name, severity, f"{category}: {description}")
     publish_event(source, "finding-received", app_name, severity, f"{category}: {description}")
 
     fleet = s.get_fleet_data()
     app = next((a for a in fleet if a["repo_name"] == app_name), None)
     if not app:
+        s.mark_webhook_processed(delivery_id)
         return JSONResponse({"status": "accepted", "action": "alert-only", "reason": f"app '{app_name}' not in fleet"})
 
     from agentit.remediation.dispatcher import RemediationDispatcher
@@ -297,6 +350,7 @@ async def webhook_finding(request: Request):
 
     if result.get("error") and not result["files"]:
         s.log_event("dispatcher", "no-fix-available", app_name, "warning", result["error"])
+        s.mark_webhook_processed(delivery_id)
         return JSONResponse({"status": "accepted", "action": "alert-only", "reason": result["error"]})
 
     from agentit.automode import AutoMode
@@ -311,6 +365,7 @@ async def webhook_finding(request: Request):
         )
         s.log_event("dispatcher", "auto-applied", app_name, "info",
                     f"Applied {len(apply_result['applied'])} fixes for {category}")
+        s.mark_webhook_processed(delivery_id)
         return JSONResponse({
             "status": "accepted",
             "action": "auto-applied",
@@ -326,6 +381,7 @@ async def webhook_finding(request: Request):
         )
         s.log_event("dispatcher", "gated", app_name, "info",
                     f"Fix for {category} gated for review (gate {gate_id})")
+        s.mark_webhook_processed(delivery_id)
         return JSONResponse({
             "status": "accepted",
             "action": "gated",
@@ -334,6 +390,7 @@ async def webhook_finding(request: Request):
             "agent": result["agent"],
         })
 
+    s.mark_webhook_processed(delivery_id)
     return JSONResponse({"status": "accepted", "action": "alert-only"})
 
 

@@ -3,9 +3,45 @@ from __future__ import annotations
 
 import logging
 import os
+import time as _time
 from urllib.parse import urlparse
 
 log = logging.getLogger(__name__)
+
+
+# ── Circuit breaker ──────────────────────────────────────────────────
+
+
+class CircuitBreaker:
+    """Simple circuit breaker: opens after threshold failures, resets after reset_after seconds."""
+
+    def __init__(self, name: str, threshold: int = 3, reset_after: float = 30.0):
+        self.name = name
+        self._threshold = threshold
+        self._reset_after = reset_after
+        self._failures = 0
+        self._last_failure: float = 0
+
+    @property
+    def is_open(self) -> bool:
+        if self._failures < self._threshold:
+            return False
+        return (_time.monotonic() - self._last_failure) < self._reset_after
+
+    def record_failure(self) -> None:
+        self._failures += 1
+        self._last_failure = _time.monotonic()
+
+    def record_success(self) -> None:
+        self._failures = 0
+
+    def __repr__(self) -> str:
+        state = "OPEN" if self.is_open else "CLOSED"
+        return f"CircuitBreaker({self.name}, {state}, failures={self._failures})"
+
+
+llm_breaker = CircuitBreaker("llm", threshold=3, reset_after=30)
+kube_breaker = CircuitBreaker("kube", threshold=5, reset_after=60)
 
 
 # ── Store singleton ───────────────────────────────────────────────────

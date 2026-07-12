@@ -187,6 +187,14 @@ class AssessmentStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS processed_webhooks (
+                delivery_id TEXT PRIMARY KEY,
+                processed_at TEXT NOT NULL
+            )
+            """
+        )
         self._conn.commit()
 
     # ── Settings ───────────────────────────────────────────────────────
@@ -894,6 +902,38 @@ class AssessmentStore:
         self._conn.commit()
         return cursor.rowcount > 0
 
+    # ── Webhook Deduplication ────────────────────────────────────────────
+
+    def webhook_already_processed(self, delivery_id: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM processed_webhooks WHERE delivery_id = ?", (delivery_id,)
+        ).fetchone()
+        return row is not None
+
+    def mark_webhook_processed(self, delivery_id: str) -> None:
+        self._conn.execute(
+            "INSERT OR IGNORE INTO processed_webhooks (delivery_id, processed_at) VALUES (?, ?)",
+            (delivery_id, datetime.now(timezone.utc).isoformat()),
+        )
+        self._conn.commit()
+
+    def export_all(self) -> dict:
+        """Export all tables as JSON for disaster recovery."""
+        tables = ["assessments", "onboarding_results", "events", "gates",
+                  "remediations", "agent_registry", "slos", "apply_results",
+                  "settings", "remediation_jobs", "scheduled_operations",
+                  "processed_webhooks"]
+        result = {}
+        for table in tables:
+            try:
+                cursor = self._conn.execute(f"SELECT * FROM {table}")
+                cols = [d[0] for d in cursor.description]
+                rows = [dict(zip(cols, row)) for row in cursor.fetchall()]
+                result[table] = rows
+            except Exception:
+                result[table] = []
+        return result
+
     def purge_old_data(self, retention_days: int = 30) -> dict[str, int]:
         """Delete data older than retention_days. Returns count of deleted rows per table."""
         cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
@@ -929,6 +969,13 @@ class AssessmentStore:
             (cutoff,),
         )
         counts["gates"] = cursor.rowcount
+
+        webhook_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        cursor = self._conn.execute(
+            "DELETE FROM processed_webhooks WHERE processed_at < ?",
+            (webhook_cutoff,),
+        )
+        counts["processed_webhooks"] = cursor.rowcount
 
         self._conn.commit()
         total = sum(counts.values())

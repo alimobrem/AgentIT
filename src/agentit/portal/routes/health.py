@@ -293,6 +293,21 @@ async def pipeline_detail_page(request: Request, pipeline_name: str) -> HTMLResp
     })
 
 
+@router.get("/healthz")
+async def healthz():
+    return {"status": "ok"}
+
+
+@router.get("/readyz")
+async def readyz():
+    try:
+        s = get_store()
+        s._conn.execute("SELECT 1")
+        return {"status": "ready"}
+    except Exception as exc:
+        return JSONResponse({"status": "not ready", "error": str(exc)}, status_code=503)
+
+
 @router.get("/api/health")
 async def api_health():
     data = await asyncio.to_thread(_get_cluster_health)

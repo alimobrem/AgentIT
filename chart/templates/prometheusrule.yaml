@@ -1,0 +1,54 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: monitoring
+spec:
+  groups:
+    - name: agentit.rules
+      rules:
+        - alert: AgentITHighErrorRate
+          expr: |
+            sum(rate(http_requests_total{job="{{ .Release.Name }}", status=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{job="{{ .Release.Name }}"}[5m]))
+            > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "AgentIT error rate exceeds 5%"
+            description: >-
+              More than 5% of HTTP requests to {{ .Release.Name }} are returning
+              5xx status codes for the last 5 minutes.
+
+        - alert: AgentITHighLatency
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(http_request_duration_seconds_bucket{job="{{ .Release.Name }}"}[5m])) by (le)
+            ) > 2
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "AgentIT p99 latency exceeds 2s"
+            description: >-
+              The 99th percentile request latency for {{ .Release.Name }} has been
+              above 2 seconds for 5 minutes.
+
+        - alert: AgentITPodCrashLooping
+          expr: |
+            increase(kube_pod_container_status_restarts_total{namespace="{{ .Release.Namespace }}", pod=~"{{ .Release.Name }}.*"}[10m]) > 3
+          labels:
+            severity: critical
+          annotations:
+            summary: "AgentIT pod is crash-looping"
+            description: >-
+              Pod {{ "{{" }} $labels.pod {{ "}}" }} in namespace {{ .Release.Namespace }}
+              has restarted more than 3 times in the last 10 minutes.
+{{- end }}

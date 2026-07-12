@@ -1,0 +1,19 @@
+{{- if .Values.backup.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-backups
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/component: backup
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.backup.storageSize | default "2Gi" }}
+  {{- if .Values.backup.storageClassName }}
+  storageClassName: {{ .Values.backup.storageClassName }}
+  {{- end }}
+{{- end }}

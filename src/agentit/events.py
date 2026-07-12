@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +23,35 @@ class EventPublisher:
     def __init__(self, bootstrap_servers: str | None = None) -> None:
         self._bootstrap = bootstrap_servers or os.environ.get("AGENTIT_KAFKA_BOOTSTRAP")
         self._producer = None
+        self._buffer_db = self._resolve_buffer_db()
+        self._init_buffer_db()
         if self._bootstrap:
             self._connect()
+
+    @staticmethod
+    def _resolve_buffer_db() -> str:
+        db_path = os.environ.get("AGENTIT_DB_PATH", "")
+        if db_path:
+            return str(Path(db_path).parent / "event-buffer.db")
+        data_dir = Path("/data")
+        if data_dir.is_dir():
+            return str(data_dir / "event-buffer.db")
+        return "event-buffer.db"
+
+    def _init_buffer_db(self) -> None:
+        conn = sqlite3.connect(self._buffer_db)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS buffered_events (
+                id INTEGER PRIMARY KEY,
+                topic TEXT NOT NULL,
+                event_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
 
     def _connect(self) -> None:
         try:
@@ -33,9 +62,50 @@ class EventPublisher:
                 value_serializer=lambda v: json.dumps(v).encode(),
                 acks="all",
             )
+            self._drain_buffer()
         except Exception as exc:
             logger.warning("Kafka unavailable: %s", exc)
             self._producer = None
+
+    def _buffer_locally(self, topic: str, event: dict) -> None:
+        try:
+            conn = sqlite3.connect(self._buffer_db)
+            conn.execute(
+                "INSERT INTO buffered_events (topic, event_json, created_at) VALUES (?, ?, ?)",
+                (topic, json.dumps(event), datetime.now(timezone.utc).isoformat()),
+            )
+            conn.commit()
+            conn.close()
+            logger.info("Buffered event %s/%s locally", topic, event.get("action", "?"))
+        except Exception as exc:
+            logger.error("Failed to buffer event locally: %s", exc)
+
+    def _drain_buffer(self) -> None:
+        if not self._producer:
+            return
+        try:
+            conn = sqlite3.connect(self._buffer_db)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, topic, event_json FROM buffered_events ORDER BY id ASC"
+            ).fetchall()
+            if not rows:
+                conn.close()
+                return
+            logger.info("Draining %d buffered events", len(rows))
+            for row in rows:
+                event = json.loads(row["event_json"])
+                try:
+                    self._producer.send(row["topic"], event)
+                    self._producer.flush(timeout=5)
+                    conn.execute("DELETE FROM buffered_events WHERE id = ?", (row["id"],))
+                    conn.commit()
+                except Exception as exc:
+                    logger.warning("Failed to drain buffered event %d: %s", row["id"], exc)
+                    break
+            conn.close()
+        except Exception as exc:
+            logger.error("Buffer drain failed: %s", exc)
 
     @property
     def kafka_enabled(self) -> bool:
@@ -66,15 +136,17 @@ class EventPublisher:
             },
             "correlationId": correlation_id,
         }
-        if self._producer:
-            try:
-                self._producer.send(topic, event)
-                self._producer.flush(timeout=5)
-            except Exception as exc:
-                logger.error("Kafka publish failed for %s/%s: %s — attempting reconnect",
-                             topic, action, exc)
-                self._producer = None
-                self._connect()
+        if self._producer is None:
+            self._buffer_locally(topic, event)
+            return event
+        try:
+            self._producer.send(topic, event)
+            self._producer.flush(timeout=5)
+        except Exception as exc:
+            logger.error("Kafka publish failed for %s/%s: %s — buffering locally",
+                         topic, action, exc)
+            self._buffer_locally(topic, event)
+            self._producer = None
         return event
 
     def close(self) -> None:

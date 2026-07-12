@@ -6,6 +6,8 @@ import os
 
 import anthropic
 
+from agentit.portal.helpers import llm_breaker
+
 logger = logging.getLogger(__name__)
 
 _CLASSIFY_SYSTEM = (
@@ -129,6 +131,9 @@ class LLMClient:
             return None
 
     def _chat(self, system: str, user: str) -> str | None:
+        if llm_breaker.is_open:
+            logger.warning("LLM circuit breaker open — skipping call")
+            return None
         try:
             resp = self._client.messages.create(
                 model=self.model,
@@ -136,8 +141,11 @@ class LLMClient:
                 system=system,
                 messages=[{"role": "user", "content": user}],
                 temperature=0.2,
+                timeout=60,
             )
+            llm_breaker.record_success()
             return resp.content[0].text.strip()
         except Exception as exc:
+            llm_breaker.record_failure()
             logger.warning("LLM call failed: %s", exc)
             return None

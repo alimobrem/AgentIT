@@ -40,7 +40,7 @@ def batch_v1():
 def list_pods(namespace: str, label_selector: str = "") -> list[dict]:
     """List pods in a namespace, returns simplified dicts."""
     try:
-        pods = core_v1().list_namespaced_pod(namespace, label_selector=label_selector)
+        pods = core_v1().list_namespaced_pod(namespace, label_selector=label_selector, _request_timeout=10)
         return [
             {
                 "name": p.metadata.name,
@@ -69,9 +69,9 @@ def list_custom_resources(group: str, version: str, plural: str, namespace: str 
     """List custom resources. Returns raw dicts."""
     try:
         if namespace:
-            result = custom_objects().list_namespaced_custom_object(group, version, namespace, plural)
+            result = custom_objects().list_namespaced_custom_object(group, version, namespace, plural, _request_timeout=10)
         else:
-            result = custom_objects().list_cluster_custom_object(group, version, plural)
+            result = custom_objects().list_cluster_custom_object(group, version, plural, _request_timeout=10)
         return result.get("items", [])
     except Exception as exc:
         logger.warning("Failed to list %s/%s %s: %s", group, version, plural, exc)
@@ -113,7 +113,7 @@ def rollout_undo(deployment: str, namespace: str) -> dict:
     """Rollback a deployment. Returns {"success": bool, "message": str}."""
     try:
         body = {"spec": {"rollbackTo": {"revision": 0}}}
-        apps_v1().patch_namespaced_deployment(deployment, namespace, body)
+        apps_v1().patch_namespaced_deployment(deployment, namespace, body, _request_timeout=15)
         return {"success": True, "message": f"Rollback initiated for {deployment}"}
     except Exception as exc:
         logger.warning("Rollback failed for %s/%s: %s", namespace, deployment, exc)
@@ -124,7 +124,7 @@ def get_api_resources() -> set[str]:
     """Get available API resource kinds on the cluster."""
     try:
         resources = set()
-        for api in core_v1().get_api_resources().resources:
+        for api in core_v1().get_api_resources(_request_timeout=10).resources:
             resources.add(api.kind.lower())
         return resources
     except Exception as exc:
@@ -157,7 +157,7 @@ def delete_config_map(name: str, namespace: str) -> None:
     try:
         core_v1().delete_namespaced_config_map(name, namespace)
     except Exception:
-        pass
+        logger.debug("delete_config_map %s/%s failed", namespace, name, exc_info=True)
 
 
 def get_current_pod_image() -> str | None:
@@ -258,7 +258,7 @@ def create_job(
 def get_job_status(name: str, namespace: str) -> str:
     """Get Job status: 'active', 'succeeded', 'failed', or 'unknown'."""
     try:
-        job = batch_v1().read_namespaced_job_status(name, namespace)
+        job = batch_v1().read_namespaced_job_status(name, namespace, _request_timeout=10)
         if job.status.succeeded and job.status.succeeded > 0:
             return "succeeded"
         if job.status.failed and job.status.failed > 0:
@@ -275,12 +275,12 @@ def get_job_pod_log(job_name: str, namespace: str) -> str:
     """Read logs from the pod created by a Job."""
     try:
         pods = core_v1().list_namespaced_pod(
-            namespace, label_selector=f"agentit/job={job_name}",
+            namespace, label_selector=f"agentit/job={job_name}", _request_timeout=10,
         )
         if not pods.items:
             return ""
         pod_name = pods.items[0].metadata.name
-        return core_v1().read_namespaced_pod_log(pod_name, namespace)
+        return core_v1().read_namespaced_pod_log(pod_name, namespace, _request_timeout=30)
     except Exception as exc:
         logger.warning("Failed to read Job pod log %s: %s", job_name, exc)
         return ""
@@ -295,12 +295,12 @@ def delete_job(name: str, namespace: str) -> None:
             body=V1DeleteOptions(propagation_policy="Background"),
         )
     except Exception:
-        pass
+        logger.debug("delete_job %s/%s failed", namespace, name, exc_info=True)
 
 
 def namespace_exists(namespace: str) -> bool:
     try:
-        core_v1().read_namespace(namespace)
+        core_v1().read_namespace(namespace, _request_timeout=5)
         return True
     except Exception:
         return False
@@ -310,6 +310,6 @@ def create_namespace(namespace: str) -> None:
     from kubernetes.client import V1Namespace, V1ObjectMeta
 
     try:
-        core_v1().create_namespace(V1Namespace(metadata=V1ObjectMeta(name=namespace)))
+        core_v1().create_namespace(V1Namespace(metadata=V1ObjectMeta(name=namespace)), _request_timeout=10)
     except Exception as exc:
         logger.warning("Failed to create namespace %s: %s", namespace, exc)
