@@ -15,6 +15,9 @@ from agentit.check_engine import (
 )
 from agentit.models import Severity
 
+SAMPLE_APP = Path(__file__).resolve().parent / "fixtures" / "sample-app"
+REAL_CHECKS_DIR = Path(__file__).resolve().parent.parent / "checks"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -308,6 +311,67 @@ class TestRunnerIntegration:
             checks_dir=checks_dir,
         )
         assert len(report.scores) == 7
+
+
+# ---------------------------------------------------------------------------
+# Sample-app fixture tests
+# ---------------------------------------------------------------------------
+
+
+class TestSampleAppFixture:
+    """Run real checks against the sample-app fixture to verify end-to-end behavior."""
+
+    @pytest.fixture()
+    def real_checks(self) -> list[CheckDefinition]:
+        if not REAL_CHECKS_DIR.is_dir():
+            pytest.skip("checks/ dir not found")
+        checks = load_checks(REAL_CHECKS_DIR)
+        assert len(checks) >= 15
+        return checks
+
+    def test_dockerfile_check_passes(self, real_checks: list[CheckDefinition]) -> None:
+        """sample-app has a Dockerfile, so file_exists Dockerfile* must pass."""
+        docker_checks = [c for c in real_checks if "dockerfile" in c.name.lower() or "containerfile" in c.name.lower()]
+        assert docker_checks, "no dockerfile/containerfile check found"
+        findings = run_checks(docker_checks, SAMPLE_APP)
+        # Dockerfile exists in the fixture -> at least the dockerfile check should pass
+        docker_findings = [f for f in findings if "dockerfile" in f.description.lower()]
+        assert len(docker_findings) == 0, "Dockerfile exists but check fired"
+
+    def test_network_policy_check_fires(self, real_checks: list[CheckDefinition]) -> None:
+        """sample-app has no NetworkPolicy YAML, so that check must fire."""
+        np_checks = [c for c in real_checks if c.pattern == "NetworkPolicy"]
+        assert np_checks, "no NetworkPolicy check found"
+        findings = run_checks(np_checks, SAMPLE_APP)
+        assert len(findings) >= 1
+
+    def test_all_checks_produce_findings_list(self, real_checks: list[CheckDefinition]) -> None:
+        """Running all checks must return a list (may be empty or not)."""
+        findings = run_checks(real_checks, SAMPLE_APP)
+        assert isinstance(findings, list)
+        # sample-app is minimal so many checks should fire
+        assert len(findings) >= 5
+
+    def test_dimension_grouping_against_fixture(self, real_checks: list[CheckDefinition]) -> None:
+        """Grouped findings must key by known dimensions."""
+        grouped = run_checks_by_dimension(real_checks, SAMPLE_APP)
+        assert isinstance(grouped, dict)
+        for dim in grouped:
+            assert isinstance(dim, str)
+            assert len(grouped[dim]) >= 1
+
+    def test_runner_integration_with_fixture(self) -> None:
+        """run_assessment against sample-app with real checks dir produces a report."""
+        if not REAL_CHECKS_DIR.is_dir():
+            pytest.skip("checks/ dir not found")
+        from agentit.runner import run_assessment
+        report = run_assessment(
+            SAMPLE_APP, repo_url="https://github.com/test/sample-app",
+            checks_dir=REAL_CHECKS_DIR,
+        )
+        assert len(report.scores) == 7
+        total_findings = sum(len(s.findings) for s in report.scores)
+        assert total_findings >= 5
 
 
 # ---------------------------------------------------------------------------

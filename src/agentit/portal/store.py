@@ -222,6 +222,19 @@ class AssessmentStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS suppressed_checks (
+                id TEXT PRIMARY KEY,
+                app_name TEXT NOT NULL,
+                check_source TEXT NOT NULL,
+                reason TEXT,
+                suppressed_by TEXT DEFAULT 'user',
+                created_at TEXT NOT NULL,
+                UNIQUE(app_name, check_source)
+            )
+            """
+        )
         self._conn.commit()
 
     # ── Settings ───────────────────────────────────────────────────────
@@ -1193,12 +1206,54 @@ class AssessmentStore:
                 low.append({'skill': name, 'approval_rate': round(rate, 2), 'total': s['total']})
         return low
 
+    def get_recent_skill_activity(self, limit: int = 20) -> list[dict]:
+        cursor = self._conn.execute(
+            "SELECT skill_name, app_name, outcome, reason, created_at "
+            "FROM skill_effectiveness ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    # ── Check Suppression ───────────────────────────────────────────
+
+    def suppress_check(self, app_name: str, check_source: str, reason: str = "") -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO suppressed_checks (id, app_name, check_source, reason, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (f"{app_name}:{check_source}", app_name, check_source, reason,
+             datetime.now(timezone.utc).isoformat()),
+        )
+        self._conn.commit()
+
+    def unsuppress_check(self, app_name: str, check_source: str) -> None:
+        self._conn.execute(
+            "DELETE FROM suppressed_checks WHERE app_name = ? AND check_source = ?",
+            (app_name, check_source),
+        )
+        self._conn.commit()
+
+    def get_suppressions(self, app_name: str) -> list[dict]:
+        cursor = self._conn.execute(
+            "SELECT check_source, reason, suppressed_by, created_at "
+            "FROM suppressed_checks WHERE app_name = ? ORDER BY created_at DESC",
+            (app_name,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_suppressed_sources(self, app_name: str) -> set[str]:
+        cursor = self._conn.execute(
+            "SELECT check_source FROM suppressed_checks WHERE app_name = ?",
+            (app_name,),
+        )
+        return {row["check_source"] for row in cursor.fetchall()}
+
     def export_all(self) -> dict:
         """Export all tables as JSON for disaster recovery."""
         tables = ["assessments", "onboarding_results", "events", "gates",
                   "remediations", "agent_registry", "slos", "apply_results",
                   "settings", "remediation_jobs", "scheduled_operations",
-                  "processed_webhooks", "agent_feedback", "skill_effectiveness"]
+                  "processed_webhooks", "agent_feedback", "skill_effectiveness",
+                  "suppressed_checks"]
         result = {}
         for table in tables:
             try:

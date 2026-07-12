@@ -37,6 +37,7 @@ class ComplianceAnalyzer:
                 severity=Severity.high,
                 description="No LICENSE file found",
                 recommendation="Add a LICENSE file (Apache 2.0 recommended for enterprise open source)",
+                source="analyzer:compliance",
             ))
         if not has_sbom:
             findings.append(Finding(
@@ -44,6 +45,7 @@ class ComplianceAnalyzer:
                 severity=Severity.high,
                 description="No SBOM (Software Bill of Materials) found",
                 recommendation="Generate SBOM using Syft, store in ODF",
+                source="analyzer:compliance",
             ))
         if not has_audit_log:
             findings.append(Finding(
@@ -51,6 +53,7 @@ class ComplianceAnalyzer:
                 severity=Severity.high,
                 description="No audit logging implementation detected",
                 recommendation="Add audit logging for privileged actions and data access",
+                source="analyzer:compliance",
             ))
         if not has_policy:
             findings.append(Finding(
@@ -58,6 +61,7 @@ class ComplianceAnalyzer:
                 severity=Severity.medium,
                 description="No admission policies (Kyverno/OPA/Gatekeeper) found",
                 recommendation="Create Kyverno policies for resource limits, labels, approved base images",
+                source="analyzer:compliance",
             ))
 
         return DimensionScore(

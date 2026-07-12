@@ -262,6 +262,8 @@
   .badge-info     { background: var(--color-info); color: #fff; }
   .badge-success  { background: var(--color-success); color: var(--color-bg); }
   .badge-danger   { background: var(--color-danger); color: #fff; }
+  .badge-warning  { background: var(--color-warning); color: var(--color-bg); }
+  .badge-muted    { background: var(--color-border); color: var(--color-muted); }
 
   /* ── Buttons ───────────────────────────────────────────────────── */
   .btn {
@@ -450,6 +452,7 @@
   }
   .finding-badge    { margin-right: var(--space-2); }
   .finding-file     { color: #666; margin-left: var(--space-2); }
+  .finding-source   { font-size: var(--font-xs); margin-left: var(--space-2); }
 
   /* ── Manifest Cards ────────────────────────────────────────────── */
   .manifest-card {
@@ -780,6 +783,7 @@
     <a href="/events/dlq" class="{{ 'nav-active' if request.url.path == '/events/dlq' }}">DLQ</a>
     <a href="/agents" class="{{ 'nav-active' if request.url.path.startswith('/agents') }}">Agents</a>
     <a href="/workflows" class="{{ 'nav-active' if request.url.path == '/workflows' }}">Workflows</a>
+    <a href="/capabilities" class="{{ 'nav-active' if request.url.path == '/capabilities' }}">Capabilities</a>
     <a href="/schedules" class="{{ 'nav-active' if request.url.path == '/schedules' }}">Schedules</a>
     <a href="/health" class="{{ 'nav-active' if request.url.path.startswith('/health') }}">Health</a>
     <a href="/settings" class="{{ 'nav-active' if request.url.path == '/settings' }}">Settings</a>

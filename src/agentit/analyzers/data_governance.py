@@ -41,6 +41,7 @@ class DataGovernanceAnalyzer:
                 severity=Severity.high,
                 description="No backup configuration detected",
                 recommendation="Configure Crunchy PostgreSQL backup schedule or add backup CronJob",
+                source="analyzer:data_governance",
             ))
         if not has_migration:
             findings.append(Finding(
@@ -48,6 +49,7 @@ class DataGovernanceAnalyzer:
                 severity=Severity.medium,
                 description="No database migration tooling detected",
                 recommendation="Add database migration tool (Alembic, Flyway, golang-migrate)",
+                source="analyzer:data_governance",
             ))
         if not has_retention:
             findings.append(Finding(
@@ -55,6 +57,7 @@ class DataGovernanceAnalyzer:
                 severity=Severity.medium,
                 description="No data retention policy detected",
                 recommendation="Define data retention policies for compliance (GDPR, SOC 2)",
+                source="analyzer:data_governance",
             ))
 
         return DimensionScore(

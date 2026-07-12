@@ -49,6 +49,7 @@ class CICDAnalyzer:
                 severity=Severity.high,
                 description="No CI/CD pipeline configuration found",
                 recommendation="Create Tekton Pipeline for build/test/scan/deploy",
+                source="analyzer:cicd",
             ))
         if not has_container:
             findings.append(Finding(
@@ -56,6 +57,7 @@ class CICDAnalyzer:
                 severity=Severity.high,
                 description="No Containerfile or Dockerfile found",
                 recommendation="Create multi-stage Containerfile with UBI base image",
+                source="analyzer:cicd",
             ))
         if not has_gitops:
             findings.append(Finding(
@@ -63,6 +65,7 @@ class CICDAnalyzer:
                 severity=Severity.medium,
                 description="No GitOps configuration (Argo CD) detected",
                 recommendation="Create Argo CD Application for GitOps delivery",
+                source="analyzer:cicd",
             ))
         if has_ci and not has_tekton:
             findings.append(Finding(
@@ -70,6 +73,7 @@ class CICDAnalyzer:
                 severity=Severity.low,
                 description="CI pipeline exists but is not Tekton-based",
                 recommendation="Consider migrating to OpenShift Pipelines (Tekton) for OpenShift-native CI",
+                source="analyzer:cicd",
             ))
 
         return DimensionScore(

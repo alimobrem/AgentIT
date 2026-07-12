@@ -48,6 +48,7 @@ def run_assessment(
     llm_client: object | None = None,
     infra_repo_url: str | None = None,
     checks_dir: Path | None = None,
+    suppressions: set[str] | None = None,
 ) -> AssessmentReport:
     detector = StackDetector()
     stack = detector.detect(repo_path)
@@ -71,6 +72,9 @@ def run_assessment(
     check_defs = load_checks(resolved_checks_dir)
     if check_defs:
         scores = _merge_check_findings(scores, check_defs, repo_path)
+
+    if suppressions:
+        scores = _apply_suppressions(scores, suppressions)
 
     remediation_plan = generate_remediation_plan(scores)
 
@@ -146,6 +150,23 @@ def _merge_check_findings(
     return [score_map[s.dimension] for s in scores] + [
         score_map[d] for d in score_map if d not in {s.dimension for s in scores}
     ]
+
+
+def _apply_suppressions(
+    scores: list[DimensionScore],
+    suppressions: set[str],
+) -> list[DimensionScore]:
+    """Remove findings whose source matches a suppressed check."""
+    result = []
+    for s in scores:
+        filtered = [f for f in s.findings if f.source not in suppressions]
+        result.append(DimensionScore(
+            dimension=s.dimension,
+            score=calculate_score(filtered),
+            max_score=s.max_score,
+            findings=filtered,
+        ))
+    return result
 
 
 def generate_remediation_plan(scores: list[DimensionScore]) -> list[RemediationItem]:

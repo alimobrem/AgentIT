@@ -73,6 +73,7 @@ class SecurityAnalyzer:
                         description=f"Potential {secret_type} found in {rel_path}",
                         file_path=rel_path,
                         recommendation="Migrate to ExternalSecrets Operator or HashiCorp Vault",
+                        source="analyzer:security",
                     ))
         return findings
 
@@ -86,6 +87,7 @@ class SecurityAnalyzer:
                 severity=Severity.medium,
                 description="No Dockerfile or Containerfile found",
                 recommendation="Create a multi-stage Containerfile using UBI base image",
+                source="analyzer:security",
             ))
             return findings
 
@@ -103,6 +105,7 @@ class SecurityAnalyzer:
                     description=f"Container runs as root (no USER directive) in {rel_path}",
                     file_path=rel_path,
                     recommendation="Add USER 1001 directive to run as non-root",
+                    source="analyzer:security",
                 ))
 
             if not re.search(r"^\s*HEALTHCHECK\s+", content, re.MULTILINE):
@@ -112,6 +115,7 @@ class SecurityAnalyzer:
                     description=f"No HEALTHCHECK defined in {rel_path}",
                     file_path=rel_path,
                     recommendation="Add HEALTHCHECK for container orchestration readiness probes",
+                    source="analyzer:security",
                 ))
 
             if re.search(r":latest\b", content):
@@ -121,6 +125,7 @@ class SecurityAnalyzer:
                     description=f"Using :latest tag in base image in {rel_path}",
                     file_path=rel_path,
                     recommendation="Pin base image to specific version for reproducible builds",
+                    source="analyzer:security",
                 ))
 
         return findings
@@ -140,6 +145,7 @@ class SecurityAnalyzer:
             severity=Severity.high,
             description="No NetworkPolicy manifests found",
             recommendation="Add deny-all default NetworkPolicy with explicit allow rules",
+            source="analyzer:security",
         )]
 
     def _check_scanning(self, repo_path: Path) -> list[Finding]:
@@ -156,6 +162,7 @@ class SecurityAnalyzer:
             severity=Severity.high,
             description="No container or dependency vulnerability scanning detected in CI",
             recommendation="Add ACS (StackRox) or Trivy scanning to the CI pipeline",
+            source="analyzer:security",
         )]
 
     def _check_base_image(self, repo_path: Path) -> list[Finding]:
@@ -172,6 +179,7 @@ class SecurityAnalyzer:
                     description=f"Base image is not UBI (Red Hat Universal Base Image) in {df.name}",
                     file_path=str(df.relative_to(repo_path)),
                     recommendation="Use registry.access.redhat.com/ubi9/ubi-minimal for supported, secure base image",
+                    source="analyzer:security",
                 ))
         return findings
 

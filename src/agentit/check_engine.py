@@ -188,6 +188,7 @@ def _make_finding(check: CheckDefinition, file_path: str | None = None) -> Findi
         description=check.description,
         file_path=file_path,
         recommendation=check.recommendation,
+        source=f"check:{check.source_path}",
     )
 
 

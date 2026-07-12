@@ -86,6 +86,7 @@
       <li class="finding-item {% if f.severity.name == 'critical' %}finding-critical{% else %}finding-high{% endif %}">
         <span class="badge badge-{{ f.severity.name }} finding-badge">{{ f.severity.name }}</span>
         {{ f.description }}
+        {% if f.source %}<span class="badge badge-muted finding-source">{{ f.source }}</span>{% endif %}
         {% if f.file_path %}<span class="finding-file">{{ f.file_path }}</span>{% endif %}
         {% if f.category in fixable_categories %}
         <form method="post" action="/assessments/{{ assessment_id }}/fix" class="inline-form"
@@ -101,6 +102,20 @@
             })">
             <span class="btn-label">Fix</span>
           </button>
+        </form>
+        {% endif %}
+        {% if f.source %}
+        <form method="post" action="/api/suppress" class="inline-form"
+              x-data="{ suppressing: false }">
+          <input type="hidden" name="app_name" value="{{ report.repo_name }}">
+          <input type="hidden" name="check_source" value="{{ f.source }}">
+          <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
+          <button type="button" class="btn btn-sm btn-outline" x-show="!suppressing"
+            @click="suppressing = true">Suppress</button>
+          <div x-show="suppressing" class="gate-reject-row">
+            <input type="text" name="reason" placeholder="Why suppress? (e.g. handled externally)" class="gate-reject-input">
+            <button type="submit" class="btn btn-sm btn-outline">Confirm</button>
+          </div>
         </form>
         {% endif %}
       </li>
@@ -177,6 +192,37 @@
     {% endfor %}
   </div>
 </details>
+{% endif %}
+
+{% if suppressions %}
+<div x-data="{ open: false }">
+  <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
+    Suppressed Checks ({{ suppressions|length }})
+  </h2>
+  <div class="collapse-body" x-show="open" x-transition>
+    <p class="text-muted text-sm">These checks are suppressed for this app and won't fire on future assessments.</p>
+    <table>
+      <thead><tr><th>Check</th><th>Reason</th><th>Suppressed</th><th></th></tr></thead>
+      <tbody>
+      {% for sup in suppressions %}
+      <tr>
+        <td><span class="badge badge-muted">{{ sup.check_source }}</span></td>
+        <td class="text-muted text-sm">{{ sup.reason or '—' }}</td>
+        <td><span class="text-sm" data-timestamp="{{ sup.created_at }}">{{ sup.created_at[:16] }}</span></td>
+        <td>
+          <form method="post" action="/api/unsuppress" class="inline-form">
+            <input type="hidden" name="app_name" value="{{ report.repo_name }}">
+            <input type="hidden" name="check_source" value="{{ sup.check_source }}">
+            <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
+            <button type="submit" class="btn btn-sm btn-outline">Unsuppress</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
 {% endif %}
 
 <div class="action-bar mt-2">

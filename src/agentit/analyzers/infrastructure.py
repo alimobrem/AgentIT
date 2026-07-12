@@ -38,6 +38,7 @@ class InfrastructureAnalyzer:
                 severity=Severity.high,
                 description="No IaC tooling detected (no Helm chart, Kustomize, or Terraform)",
                 recommendation="Generate Helm chart with values.yaml and environment overlays",
+                source="analyzer:infrastructure",
             ))
         if not has_k8s_manifests and not has_helm:
             findings.append(Finding(
@@ -45,6 +46,7 @@ class InfrastructureAnalyzer:
                 severity=Severity.high,
                 description="No Kubernetes manifests found",
                 recommendation="Create deployment, service, and ingress manifests",
+                source="analyzer:infrastructure",
             ))
         if has_k8s_manifests and not has_resource_limits:
             findings.append(Finding(
@@ -52,6 +54,7 @@ class InfrastructureAnalyzer:
                 severity=Severity.medium,
                 description="No resource limits/requests defined in manifests",
                 recommendation="Add CPU and memory requests/limits to all containers",
+                source="analyzer:infrastructure",
             ))
         if has_k8s_manifests and not has_quota:
             findings.append(Finding(
@@ -59,6 +62,7 @@ class InfrastructureAnalyzer:
                 severity=Severity.low,
                 description="No ResourceQuota or LimitRange defined",
                 recommendation="Add ResourceQuota and LimitRange for namespace governance",
+                source="analyzer:infrastructure",
             ))
 
         return DimensionScore(

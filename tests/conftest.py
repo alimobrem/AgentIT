@@ -108,11 +108,21 @@ def portal_client():
     ])
     store.log_event("test", "test-action", "test-app", "info", "test event")
 
+    fake_health = {
+        "argo_apps": [], "argo_synced": True,
+        "pods": [], "pods_running": 0, "pods_failed": 0,
+        "pipelines": [], "pipeline_status": "Unknown",
+        "kafka_ready": False, "publisher_ok": False,
+        "namespace": "agentit", "cluster_url": "local",
+        "kafka_stats": {"available": False, "topics": {}, "consumer_groups": []},
+    }
+
     with patch("agentit.portal.app.get_store", return_value=store), \
          patch("agentit.portal.helpers.get_store", return_value=store), \
          patch("agentit.portal.helpers._store", store), \
          patch("agentit.portal.routes.webhooks.get_store", return_value=store), \
          patch("agentit.portal.routes.health.get_store", return_value=store), \
+         patch("agentit.portal.routes.health._get_cluster_health", return_value=fake_health), \
          patch("agentit.portal.routes.schedules.get_store", return_value=store):
         client = TestClient(app)
         yield client, store, assessment_id

@@ -491,6 +491,8 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     else:
         lifecycle_stage = "assessed"
 
+    suppressions = s.get_suppressions(report.repo_name)
+
     return templates.TemplateResponse(
         request,
         "assessment_detail.html",
@@ -507,6 +509,7 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "trend": trend,
             "score_history": score_history,
             "lifecycle_stage": lifecycle_stage,
+            "suppressions": suppressions,
         },
     )
 
@@ -995,6 +998,37 @@ async def record_feedback_endpoint(request: Request):
     return {"status": "recorded", "feedback_id": fid}
 
 
+@app.post("/api/suppress")
+async def suppress_check_endpoint(request: Request):
+    """Suppress a check for a specific app — it won't fire on future assessments."""
+    form = await request.form()
+    app_name = str(form.get("app_name", ""))
+    check_source = str(form.get("check_source", ""))
+    reason = str(form.get("reason", ""))
+    assessment_id = str(form.get("assessment_id", ""))
+    if not app_name or not check_source:
+        raise HTTPException(status_code=400, detail="app_name and check_source required")
+    get_store().suppress_check(app_name, check_source, reason)
+    if assessment_id:
+        return RedirectResponse(f"/assessments/{assessment_id}", status_code=303)
+    return {"status": "suppressed", "app_name": app_name, "check_source": check_source}
+
+
+@app.post("/api/unsuppress")
+async def unsuppress_check_endpoint(request: Request):
+    """Remove a suppression for a check on a specific app."""
+    form = await request.form()
+    app_name = str(form.get("app_name", ""))
+    check_source = str(form.get("check_source", ""))
+    assessment_id = str(form.get("assessment_id", ""))
+    if not app_name or not check_source:
+        raise HTTPException(status_code=400, detail="app_name and check_source required")
+    get_store().unsuppress_check(app_name, check_source)
+    if assessment_id:
+        return RedirectResponse(f"/assessments/{assessment_id}", status_code=303)
+    return {"status": "unsuppressed", "app_name": app_name, "check_source": check_source}
+
+
 @app.get("/api/gates")
 async def api_gates(status: str = "pending"):
     return JSONResponse(get_store().list_gates(status=status))
@@ -1214,6 +1248,48 @@ async def workflows_page(request: Request) -> HTMLResponse:
         "watchers": watchers,
         "fix_categories": fix_categories,
         "retention_days": retention_days,
+    })
+
+
+# ── Capabilities ─────────────────────────────────────────────────────
+
+
+@app.get("/capabilities", response_class=HTMLResponse)
+async def capabilities_page(request: Request) -> HTMLResponse:
+    from agentit.skill_engine import load_all_skills
+    from agentit.check_engine import load_checks
+
+    skills = load_all_skills(Path("skills"))
+    checks = load_checks(Path("checks"))
+
+    s = get_store()
+    effectiveness = s.get_skill_effectiveness()
+    recent_activity = s.get_recent_skill_activity(limit=20)
+
+    # Group skills by domain
+    skills_by_domain: dict[str, list] = {}
+    for skill in skills:
+        skills_by_domain.setdefault(skill.domain, []).append(skill)
+
+    # Group checks by dimension
+    checks_by_dimension: dict[str, list] = {}
+    for check in checks:
+        checks_by_dimension.setdefault(check.dimension, []).append(check)
+
+    total_skills = len(skills)
+    active_skills = sum(1 for sk in skills if sk.status == "active")
+    deprecated_skills = sum(1 for sk in skills if sk.status == "deprecated")
+    total_checks = len(checks)
+
+    return templates.TemplateResponse(request, "capabilities.html", {
+        "skills_by_domain": skills_by_domain,
+        "checks_by_dimension": checks_by_dimension,
+        "effectiveness": effectiveness,
+        "recent_activity": recent_activity,
+        "total_skills": total_skills,
+        "active_skills": active_skills,
+        "deprecated_skills": deprecated_skills,
+        "total_checks": total_checks,
     })
 
 

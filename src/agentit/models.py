@@ -20,6 +20,7 @@ class Finding(BaseModel):
     description: str
     file_path: str | None = None
     recommendation: str
+    source: str = ""
 
 
 class DimensionScore(BaseModel):

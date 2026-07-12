@@ -33,6 +33,7 @@ class HADRAnalyzer:
                 severity=Severity.high,
                 description="Single replica or no replica count defined -- no redundancy",
                 recommendation="Set replicas >= 2 for high availability",
+                source="analyzer:ha_dr",
             ))
         if not has_pdb:
             findings.append(Finding(
@@ -40,6 +41,7 @@ class HADRAnalyzer:
                 severity=Severity.medium,
                 description="No PodDisruptionBudget defined",
                 recommendation="Add PDB to prevent all pods being evicted during maintenance",
+                source="analyzer:ha_dr",
             ))
         if not has_hpa:
             findings.append(Finding(
@@ -47,6 +49,7 @@ class HADRAnalyzer:
                 severity=Severity.medium,
                 description="No HorizontalPodAutoscaler defined",
                 recommendation="Add HPA for automatic scaling under load",
+                source="analyzer:ha_dr",
             ))
         if not has_health_probes:
             findings.append(Finding(
@@ -54,6 +57,7 @@ class HADRAnalyzer:
                 severity=Severity.high,
                 description="No liveness or readiness probes defined",
                 recommendation="Add livenessProbe and readinessProbe to all containers",
+                source="analyzer:ha_dr",
             ))
 
         return DimensionScore(

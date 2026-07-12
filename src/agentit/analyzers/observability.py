@@ -36,6 +36,7 @@ class ObservabilityAnalyzer:
                     severity=Severity.high if category in ("instrumentation", "metrics") else Severity.medium,
                     description=description,
                     recommendation=recommendation,
+                    source="analyzer:observability",
                 ))
 
         return DimensionScore(

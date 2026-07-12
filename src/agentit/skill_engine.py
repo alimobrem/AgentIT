@@ -122,6 +122,18 @@ def load_skill(path: Path) -> Skill | None:
     )
 
 
+def load_all_skills(skills_dir: Path) -> list[Skill]:
+    """Load every Markdown skill definition under *skills_dir* (recursively)."""
+    if not skills_dir.is_dir():
+        return []
+    results: list[Skill] = []
+    for md in sorted(skills_dir.rglob("*.md")):
+        skill = load_skill(md)
+        if skill is not None:
+            results.append(skill)
+    return results
+
+
 class SkillEngine:
     """Loads skills from a directory and applies them to assessment reports."""
 
