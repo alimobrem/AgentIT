@@ -137,7 +137,7 @@
           {% endif %}
         {% else %}
           <form method="post" action="/schedules/delete" class="inline-form"
-                x-ref="deleteSchedule{{ s.id }}">
+                x-data x-ref="deleteSchedule{{ s.id }}">
             <input type="hidden" name="schedule_id" value="{{ s.id }}">
             <button type="button" class="btn btn-sm btn-danger-outline"
               @click="$dispatch('show-confirm', {

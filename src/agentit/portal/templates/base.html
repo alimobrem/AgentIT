@@ -875,6 +875,16 @@ document.body.addEventListener('htmx:afterSettle', completeLoading);
 document.body.addEventListener('htmx:responseError', completeLoading);
 document.body.addEventListener('htmx:timeout', completeLoading);
 window.addEventListener('pageshow', completeLoading);
+// Dead-button detector: flag @click handlers outside Alpine x-data scope
+document.addEventListener('alpine:init', function() {
+  setTimeout(function() {
+    document.querySelectorAll('[\\@click], [x-on\\:click]').forEach(function(el) {
+      if (!el.closest('[x-data]')) {
+        console.error('Dead button: @click outside x-data scope', el);
+      }
+    });
+  }, 100);
+});
 // Confirm modal component
 function confirmModal() {
   return {

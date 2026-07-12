@@ -77,7 +77,7 @@
           </form>
         {% endif %}
         <form method="post" action="/assessments/{{ assessment_id }}/remediations/{{ r.id }}/delete" class="inline-form"
-              x-ref="deleteRem{{ r.id }}">
+              x-data x-ref="deleteRem{{ r.id }}">
           <button type="button" class="btn btn-sm btn-danger-outline"
             @click="$dispatch('show-confirm', {
               title: 'Delete Remediation',

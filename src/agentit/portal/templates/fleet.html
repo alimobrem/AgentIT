@@ -94,7 +94,7 @@
             </button>
           </form>
           <form method="post" action="/assessments/{{ r.id }}/delete" class="inline-form"
-                x-ref="deleteForm{{ r.id }}">
+                x-data x-ref="deleteForm{{ r.id }}">
             <button type="button" class="btn btn-sm btn-danger-outline" aria-label="Delete {{ r.repo_name }}"
               @click="$dispatch('show-confirm', {
                 title: 'Delete App',

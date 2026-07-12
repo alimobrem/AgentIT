@@ -60,7 +60,7 @@
       <td class="text-sm">{{ sl.created_at[:19] }}</td>
       <td>
         <form method="post" action="/assessments/{{ assessment_id }}/slos/{{ sl.id }}/delete" class="inline-form"
-              x-ref="deleteSlo{{ sl.id }}">
+              x-data x-ref="deleteSlo{{ sl.id }}">
           <button type="button" class="btn btn-sm btn-danger-outline"
             @click="$dispatch('show-confirm', {
               title: 'Delete SLO',

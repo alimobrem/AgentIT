@@ -53,7 +53,7 @@
   </form>
   {% else %}
   <form method="post" action="/settings/auto-mode" class="inline-form"
-        x-ref="enableAutoMode">
+        x-data x-ref="enableAutoMode">
     <input type="hidden" name="value" value="true">
     <button type="button" class="btn btn-green"
       @click="$dispatch('show-confirm', {
@@ -114,7 +114,7 @@
   purged after {{ retention_days }} days. Set <code>AGENTIT_RETENTION_DAYS</code> to change (default: 30).
 </p>
 <div class="action-bar mb-2">
-  <form method="post" action="/settings/purge" class="inline-form" x-ref="purgeForm">
+  <form method="post" action="/settings/purge" class="inline-form" x-data x-ref="purgeForm">
     <button type="button" class="btn btn-outline"
       @click="$dispatch('show-confirm', {
         title: 'Purge Old Data',
