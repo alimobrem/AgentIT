@@ -1,14 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Dead-Letter Queue - AgentIT{% endblock %}
 {% block content %}
-<div class="tab-nav">
-  <a href="/events" class="tab-link">Events</a>
-  <a href="/events/dlq" class="tab-link tab-active">Dead-Letter Queue</a>
-</div>
+{% from "_macros.html" import tab_nav %}
+{{ tab_nav([
+  {"href": "/events", "label": "Events"},
+  {"href": "/events/dlq", "label": "Dead-Letter Queue"},
+], request) }}
 <h1>Dead-Letter Queue</h1>
-{% if request.query_params.get('success') %}
-<div class="alert alert-success">{{ request.query_params.get('success') }}</div>
-{% endif %}
 <p class="text-muted">Events that failed processing after {{ max_retries | default(3) }} retries. Review and retry or dismiss.</p>
 
 {% if dlq_messages %}

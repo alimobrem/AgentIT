@@ -5,6 +5,7 @@ import io
 import logging
 import shutil
 import tempfile
+import time as _time
 import zipfile
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -24,15 +25,37 @@ from agentit.portal.cluster_apply import apply_manifests_to_cluster, install_ope
 from agentit.portal.github_pr import create_onboarding_pr
 from agentit.portal.helpers import (
     get_store,
+    get_retention_days,
     publish_event as _publish_event,
     safe_url as _safe_url,
     format_dimension as _format_dimension,
     get_llm_client as _get_llm_client,
 )
-from agentit.agents.capabilities import AGENT_CAPABILITIES
+from agentit.agents.capabilities import AGENT_CAPABILITIES, WATCHER_AGENTS as _WATCHER_AGENTS
 from agentit.runner import run_assessment
 
 log = logging.getLogger(__name__)
+
+_skills_cache: dict = {"data": None, "ts": 0}
+_checks_cache: dict = {"data": None, "ts": 0}
+_CACHE_TTL = 60  # seconds
+
+
+def _cached_skills():
+    if _skills_cache["data"] is None or _time.monotonic() - _skills_cache["ts"] > _CACHE_TTL:
+        from agentit.skill_engine import load_all_skills
+        _skills_cache["data"] = load_all_skills(Path("skills"))
+        _skills_cache["ts"] = _time.monotonic()
+    return _skills_cache["data"]
+
+
+def _cached_checks():
+    if _checks_cache["data"] is None or _time.monotonic() - _checks_cache["ts"] > _CACHE_TTL:
+        from agentit.check_engine import load_checks
+        _checks_cache["data"] = load_checks(Path("checks"))
+        _checks_cache["ts"] = _time.monotonic()
+    return _checks_cache["data"]
+
 
 OPERATION_TIMEOUT = 300  # 5 minutes max for any blocking operation
 
@@ -69,8 +92,7 @@ async def _background_maintenance() -> None:
             if expired:
                 log.info("Background: expired %d stale gates", expired)
             if tick % 24 == 0:
-                import os
-                retention = int(os.environ.get("AGENTIT_RETENTION_DAYS", "30"))
+                retention = get_retention_days()
                 counts = s.purge_old_data(retention_days=retention)
                 total = sum(counts.values())
                 if total:
@@ -965,6 +987,19 @@ async def resolve_gate(request: Request, gate_id: str):
 
     if status == "approved" and gate.get("assessment_id"):
         assessment_id = gate["assessment_id"]
+
+        if gate.get("gate_type") == "rollback-review":
+            s.resolve_gate(gate_id, status, resolved_by)
+            s.log_event(
+                "gate-resolver", "rollback-approved",
+                gate.get("target_app"), "warning",
+                f"Rollback approved for assessment {assessment_id} — manual intervention required",
+            )
+            return RedirectResponse(
+                url=f"/assessments/{assessment_id}?success=Rollback+approved.+Review+the+deployment+and+roll+back+manually+or+via+Argo+Rollouts.",
+                status_code=303,
+            )
+
         files = s.get_onboarding(assessment_id)
         report = s.get(assessment_id)
         if files and report:
@@ -1146,12 +1181,6 @@ async def create_agent_prs_route(assessment_id: str):
 
 # ── Agents ────────────────────────────────────────────────────────────
 
-_WATCHER_AGENTS = [
-    {"name": "vuln-watcher", "mode": "Kafka consumer + polling", "interval": "6 hours"},
-    {"name": "slo-tracker", "mode": "Polling", "interval": "5 minutes"},
-    {"name": "drift-detector", "mode": "Argo CD polling", "interval": "10 minutes"},
-]
-
 
 @app.get("/agents", response_class=HTMLResponse)
 async def agents_page(request: Request) -> HTMLResponse:
@@ -1241,13 +1270,10 @@ async def workflows_redirect():
 
 @app.get("/capabilities", response_class=HTMLResponse)
 async def capabilities_page(request: Request) -> HTMLResponse:
-    import os
-    from agentit.skill_engine import load_all_skills
-    from agentit.check_engine import load_checks
     from agentit.remediation.registry import FIX_REGISTRY
 
-    skills = load_all_skills(Path("skills"))
-    checks = load_checks(Path("checks"))
+    skills = _cached_skills()
+    checks = _cached_checks()
 
     s = get_store()
     effectiveness = s.get_skill_effectiveness()
@@ -1268,29 +1294,14 @@ async def capabilities_page(request: Request) -> HTMLResponse:
     deprecated_skills = sum(1 for sk in skills if sk.status == "deprecated")
     total_checks = len(checks)
 
-    agents = [
-        {"name": "Security Hardening", "generates": "NetworkPolicies, Containerfile, RBAC, SCCs, resource limits, image scan task", "category": "security"},
-        {"name": "Observability", "generates": "ServiceMonitor, Grafana dashboard (ConfigMap), alerting rules, OTel collector", "category": "observability"},
-        {"name": "CI/CD & GitOps", "generates": "Tekton Pipeline (with scan + SBOM steps), Argo CD Application, Argo Rollout, Containerfile", "category": "cicd"},
-        {"name": "Compliance", "generates": "Kyverno policies, SBOM Tekton Task, audit policy, compliance evidence, CronJob", "category": "compliance"},
-        {"name": "Infrastructure", "generates": "HPA, PDB, ResourceQuota, LimitRange, Namespace", "category": "infrastructure"},
-        {"name": "Cost Optimization", "generates": "VPA, cost labels, cost report, CronJob", "category": "cost"},
-        {"name": "Dependency", "generates": "Dependency report, Renovate/Dependabot config, CronJob", "category": "dependency"},
-        {"name": "Incident Response", "generates": "Runbook, PagerDuty config, Alertmanager config", "category": "incident"},
-        {"name": "Release Coordinator", "generates": "AnalysisTemplate, Rollout patch, rollback policy, release runbook", "category": "release"},
-        {"name": "Code Change", "generates": ".gitignore, OTel instrumentation, structured logging config", "category": "codechange"},
-        {"name": "Retirement", "generates": "Decommission plan, cleanup Tekton Task, data archive job", "category": "retirement"},
-    ]
-    watchers = [
-        {"name": "vuln-watcher", "description": "Monitors fleet for critical/high findings, triggers remediation loop when auto-mode is on", "interval": "6 hours"},
-        {"name": "slo-tracker", "description": "Checks SLO status across all assessments, publishes breach alerts, recommends rollbacks", "interval": "5 minutes"},
-        {"name": "drift-detector", "description": "Queries Argo CD apps for OutOfSync state, optionally auto-syncs when auto-mode is on", "interval": "10 minutes"},
-    ]
+    from agentit.agents.capabilities import get_onboarding_agents, WATCHER_AGENTS
+    agents = get_onboarding_agents()
+    watchers = WATCHER_AGENTS
     fix_categories = [
         {"category": cat, "agent": agent_name, "method": method.lstrip("_").replace("_", " ")}
         for cat, (agent_name, method) in sorted(FIX_REGISTRY.items())
     ]
-    retention_days = int(os.environ.get("AGENTIT_RETENTION_DAYS", "30"))
+    retention_days = get_retention_days()
 
     return templates.TemplateResponse(request, "capabilities.html", {
         "skills_by_domain": skills_by_domain,
@@ -1513,8 +1524,7 @@ async def settings_page(request: Request) -> HTMLResponse:
     auto_mode = s.get_setting("auto_mode") in ("true", "1", "on")
     llm_available = _get_llm_client() is not None
     recent_actions = s.list_events_by_agent("auto-mode", limit=20)
-    import os
-    retention_days = int(os.environ.get("AGENTIT_RETENTION_DAYS", "30"))
+    retention_days = get_retention_days()
     purge_result = request.query_params.get("purged")
     return templates.TemplateResponse(request, "settings.html", {
         "auto_mode": auto_mode,
@@ -1527,8 +1537,7 @@ async def settings_page(request: Request) -> HTMLResponse:
 
 @app.post("/settings/purge", response_model=None)
 async def purge_old_data(request: Request):
-    import os
-    retention = int(os.environ.get("AGENTIT_RETENTION_DAYS", "30"))
+    retention = get_retention_days()
     s = get_store()
     counts = s.purge_old_data(retention_days=retention)
     total = sum(counts.values())

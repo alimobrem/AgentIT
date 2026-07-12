@@ -5,9 +5,6 @@
   <a href="/">&larr; Dashboard</a>
 </p>
 <h1>{{ report.repo_name }}</h1>
-{% if request.query_params.get('error') %}
-<div class="alert alert-error">{{ request.query_params.get('error') }}</div>
-{% endif %}
 <p class="mb-2">
   <a href="{{ report.repo_url | safe_url }}" target="_blank" hx-boost="false">{{ report.repo_url }}</a>
   &nbsp;

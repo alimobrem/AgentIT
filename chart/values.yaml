@@ -75,5 +75,8 @@ backup:
   storageSize: 2Gi
   # storageClassName: gp3-csi
 
+rbac:
+  clusterWideApply: false
+
 monitoring:
   enabled: false

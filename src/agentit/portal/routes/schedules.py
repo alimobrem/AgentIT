@@ -31,11 +31,7 @@ _SCHEDULE_FILES = {
     "chaos-schedule.yaml": ("chaos", "Chaos experiments"),
 }
 
-_WATCHER_AGENTS = [
-    {"name": "vuln-watcher", "mode": "Kafka consumer + polling", "interval": "6 hours"},
-    {"name": "slo-tracker", "mode": "Polling", "interval": "5 minutes"},
-    {"name": "drift-detector", "mode": "Argo CD polling", "interval": "10 minutes"},
-]
+from agentit.agents.capabilities import WATCHER_AGENTS as _WATCHER_AGENTS
 
 
 def _get_watcher_deploy_status() -> dict[str, str]:

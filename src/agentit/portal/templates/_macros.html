@@ -1,0 +1,7 @@
+{% macro tab_nav(tabs, request) %}
+<div class="tab-nav">
+  {% for tab in tabs %}
+  <a href="{{ tab.href }}" class="tab-link{% if request.url.path == tab.href or (tab.prefix and request.url.path.startswith(tab.prefix)) %} tab-active{% endif %}">{{ tab.label }}</a>
+  {% endfor %}
+</div>
+{% endmacro %}

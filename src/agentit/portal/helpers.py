@@ -9,6 +9,10 @@ from urllib.parse import urlparse
 log = logging.getLogger(__name__)
 
 
+def get_retention_days() -> int:
+    return int(os.environ.get("AGENTIT_RETENTION_DAYS", "30"))
+
+
 # ── Circuit breaker ──────────────────────────────────────────────────
 
 

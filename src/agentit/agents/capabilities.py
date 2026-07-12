@@ -44,6 +44,34 @@ AGENT_CLASSES: dict[str, tuple[str, str, str, str]] = {
 }
 
 
+AGENT_DISPLAY_NAMES: dict[str, str] = {
+    "security": "Security Hardening",
+    "observability": "Observability",
+    "cicd": "CI/CD & GitOps",
+    "compliance": "Compliance",
+    "infrastructure": "Infrastructure",
+    "cost": "Cost Optimization",
+    "dependency": "Dependency",
+    "incident": "Incident Response",
+    "release": "Release Coordinator",
+    "codechange": "Code Change",
+    "retirement": "Retirement",
+}
+
+WATCHER_AGENTS: list[dict[str, str]] = [
+    {"name": "vuln-watcher", "mode": "Kafka consumer + polling", "interval": "6 hours", "description": "Monitors fleet for critical/high findings, triggers remediation loop when auto-mode is on"},
+    {"name": "slo-tracker", "mode": "Polling", "interval": "5 minutes", "description": "Checks SLO status across all assessments, publishes breach alerts, recommends rollbacks"},
+    {"name": "drift-detector", "mode": "Argo CD polling", "interval": "10 minutes", "description": "Queries Argo CD apps for OutOfSync state, optionally auto-syncs when auto-mode is on"},
+]
+
+
+def get_onboarding_agents() -> list[dict[str, str]]:
+    return [
+        {"name": AGENT_DISPLAY_NAMES[cat], "generates": AGENT_CAPABILITIES[cat], "category": cat}
+        for cat in AGENT_CLASSES
+    ]
+
+
 def get_agent_class(name: str):
     """Lazy-import and return the agent class for the given name."""
     import importlib

@@ -77,6 +77,7 @@ class AssessmentStore:
             )
             """
         )
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_action ON events(action)")
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS gates (

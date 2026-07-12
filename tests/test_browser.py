@@ -10,9 +10,9 @@ import re
 
 import pytest
 from unittest.mock import patch
-from playwright.sync_api import Page, expect
 
 pytest.importorskip("playwright")
+from playwright.sync_api import Page, expect
 
 
 @pytest.fixture(scope="module")
