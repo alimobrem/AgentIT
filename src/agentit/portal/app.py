@@ -9,6 +9,10 @@ import zipfile
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
+from agentit.logging_config import configure_logging
+
+configure_logging()
+
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.responses import StreamingResponse
@@ -43,6 +47,10 @@ async def _with_timeout(coro, timeout: int = OPERATION_TIMEOUT):
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 app = FastAPI(title="AgentIT Portal")
+
+from agentit.portal.metrics import instrument_app
+instrument_app(app)
+
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
@@ -172,6 +180,11 @@ async def home(request: Request) -> HTMLResponse:
         })
     avg_score = sum(r["latest_score"] for r in fleet) / total_apps
     critical_total = sum(r["critical_count"] for r in fleet)
+
+    from agentit.portal.metrics import fleet_size as _fs, fleet_avg_score as _fas
+    _fs.set(total_apps)
+    _fas.set(avg_score)
+
     return templates.TemplateResponse(
         request,
         "fleet.html",
@@ -255,6 +268,8 @@ async def assess_submit(
         )
     except Exception as exc:
         log.exception("Assessment failed for %s", repo_url)
+        from agentit.portal.metrics import assessments_total as _at
+        _at.labels(criticality=criticality, status="error").inc()
         msg = str(exc)
         if "clone" in msg.lower() or "git" in msg.lower():
             msg = f"Could not clone repository. Check the URL and permissions. ({msg[:100]})"
@@ -263,6 +278,8 @@ async def assess_submit(
         return templates.TemplateResponse(
             request, "assess_form.html", {"error": msg}, status_code=400,
         )
+    from agentit.portal.metrics import assessments_total as _at
+    _at.labels(criticality=criticality, status="success").inc()
     assessment_id = get_store().save(report)
     return RedirectResponse(url=f"/assessments/{assessment_id}", status_code=303)
 
@@ -362,6 +379,10 @@ async def fix_finding(request: Request, assessment_id: str):
     from agentit.remediation.dispatcher import RemediationDispatcher
     dispatcher = RemediationDispatcher(s)
     result = dispatcher.dispatch(assessment_id, category, report.repo_name)
+
+    from agentit.portal.metrics import remediations_total as _rt
+    _status = "success" if result["files"] else ("error" if result.get("error") else "empty")
+    _rt.labels(agent=result.get("agent", "unknown"), status=_status).inc()
 
     if result.get("error") and not result["files"]:
         return RedirectResponse(
@@ -529,10 +550,14 @@ async def onboard_submit(request: Request, assessment_id: str):
         raise
     except Exception:
         log.exception("Onboarding failed for %s", assessment_id)
+        from agentit.portal.metrics import onboardings_total as _ot
+        _ot.labels(status="error").inc()
         return RedirectResponse(
             url=f"/assessments/{assessment_id}?error={quote('Onboarding failed — check server logs')}",
             status_code=303,
         )
+    from agentit.portal.metrics import onboardings_total as _ot
+    _ot.labels(status="success").inc()
     s.save_onboarding(assessment_id, files, orchestration=orch_summary)
 
     _publish_event("onboarding-complete", report.repo_name,

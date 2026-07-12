@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agentit.models import AssessmentReport, Severity
+from agentit.portal.metrics import agent_runs_total, agent_run_duration_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -176,9 +177,13 @@ class FleetOrchestrator:
             category, agent_cls = agent_map[agent_name]
             sub_dir = self.output_dir / category
 
+            t0 = time.monotonic()
             try:
                 agent_instance = agent_cls(report=self.report, output_dir=sub_dir)
                 result = agent_instance.run()
+                elapsed = time.monotonic() - t0
+                agent_run_duration_seconds.labels(agent=agent_name, mode="local").observe(elapsed)
+                agent_runs_total.labels(agent=agent_name, mode="local", status="success").inc()
                 results.append(AgentResult(
                     agent_name=agent_name,
                     category=category,
@@ -191,6 +196,9 @@ class FleetOrchestrator:
                 if agent_name == "release":
                     self._create_default_slos()
             except Exception as exc:
+                elapsed = time.monotonic() - t0
+                agent_run_duration_seconds.labels(agent=agent_name, mode="local").observe(elapsed)
+                agent_runs_total.labels(agent=agent_name, mode="local", status="error").inc()
                 logger.warning("Agent %s failed: %s", agent_name, exc)
                 results.append(AgentResult(
                     agent_name=agent_name,
@@ -271,6 +279,7 @@ class FleetOrchestrator:
                         result_json = self._extract_result_json(log_output)
                         files_data = json.loads(result_json)
                         files = [GeneratedFile(**f) for f in files_data]
+                        agent_runs_total.labels(agent=agent_name, mode="kubernetes", status="success").inc()
                         results.append(AgentResult(
                             agent_name=agent_name, category=category,
                             files_generated=[f.path for f in files],
@@ -285,6 +294,7 @@ class FleetOrchestrator:
                             (sub_dir / f.path).write_text(f.content, encoding="utf-8")
                     except Exception as exc:
                         logger.warning("Failed to parse Job output for %s: %s", agent_name, exc)
+                        agent_runs_total.labels(agent=agent_name, mode="kubernetes", status="error").inc()
                         results.append(AgentResult(
                             agent_name=agent_name, category=category,
                             files_generated=[], success=False,
@@ -294,6 +304,7 @@ class FleetOrchestrator:
                     pending.discard(agent_name)
                     category = agent_map[agent_name][0]
                     log_output = kube.get_job_pod_log(job_names[agent_name], namespace)
+                    agent_runs_total.labels(agent=agent_name, mode="kubernetes", status="error").inc()
                     results.append(AgentResult(
                         agent_name=agent_name, category=category,
                         files_generated=[], success=False,
@@ -306,6 +317,7 @@ class FleetOrchestrator:
         # Handle timed-out agents
         for agent_name in pending:
             category = agent_map[agent_name][0]
+            agent_runs_total.labels(agent=agent_name, mode="kubernetes", status="timeout").inc()
             results.append(AgentResult(
                 agent_name=agent_name, category=category,
                 files_generated=[], success=False, error="K8s Job timed out",

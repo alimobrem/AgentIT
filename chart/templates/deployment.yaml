@@ -71,6 +71,8 @@ spec:
             - name: AGENTIT_KAFKA_BOOTSTRAP
               value: {{ .Values.kafka.bootstrapServers | quote }}
             {{- end }}
+            - name: AGENTIT_LOG_FORMAT
+              value: json
             - name: GITHUB_TOKEN
               valueFrom:
                 secretKeyRef:

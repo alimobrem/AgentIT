@@ -95,7 +95,14 @@ async def webhook_assess(request: Request):
     if not repo_url:
         raise HTTPException(400, "repo_url required")
     criticality = body.get("criticality", "medium")
-    report = await _with_timeout(asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality))
+    try:
+        report = await _with_timeout(asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality))
+    except Exception:
+        from agentit.portal.metrics import assessments_total as _at
+        _at.labels(criticality=criticality, status="error").inc()
+        raise
+    from agentit.portal.metrics import assessments_total as _at
+    _at.labels(criticality=criticality, status="success").inc()
     assessment_id = get_store().save(report)
     from agentit.events import TOPIC_ASSESSMENTS
     publish_event("assessment-complete", report.repo_name,

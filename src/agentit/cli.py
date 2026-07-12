@@ -59,6 +59,8 @@ def _resolve_and_assess(
 @click.group()
 def main() -> None:
     """AgentIT -- Enterprise Readiness Assessor"""
+    from agentit.logging_config import configure_logging
+    configure_logging()
 
 
 @main.command()
