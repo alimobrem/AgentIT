@@ -878,6 +878,12 @@ function completeLoading() {
   document.body.style.cursor = '';
 }
 document.body.addEventListener('htmx:afterSettle', completeLoading);
+// Re-initialize Alpine on htmx-swapped content so x-data, @click, $dispatch work
+document.body.addEventListener('htmx:afterSettle', function(e) {
+  if (e.detail && e.detail.target && window.Alpine) {
+    Alpine.initTree(e.detail.target);
+  }
+});
 document.body.addEventListener('htmx:responseError', completeLoading);
 document.body.addEventListener('htmx:timeout', completeLoading);
 window.addEventListener('pageshow', completeLoading);
