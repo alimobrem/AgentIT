@@ -857,8 +857,8 @@ document.querySelectorAll('nav a, a[href^="/"]').forEach(function(link) {
 document.addEventListener('submit', function() { showLoading(); });
 // Also trigger on htmx boosted requests
 document.body.addEventListener('htmx:beforeRequest', function() { showLoading(); });
-// Loading bar completion on htmx settle
-document.body.addEventListener('htmx:afterSettle', function() {
+// Loading bar completion
+function completeLoading() {
   var bar = document.querySelector('.nav-loading-bar');
   if (bar && bar.classList.contains('active')) {
     bar.style.transition = 'width 0.2s';
@@ -867,10 +867,14 @@ document.body.addEventListener('htmx:afterSettle', function() {
       bar.classList.remove('active');
       bar.style.width = '0';
       bar.style.transition = '';
-      document.body.style.cursor = '';
     }, 300);
   }
-});
+  document.body.style.cursor = '';
+}
+document.body.addEventListener('htmx:afterSettle', completeLoading);
+document.body.addEventListener('htmx:responseError', completeLoading);
+document.body.addEventListener('htmx:timeout', completeLoading);
+window.addEventListener('pageshow', completeLoading);
 // Confirm modal component
 function confirmModal() {
   return {
