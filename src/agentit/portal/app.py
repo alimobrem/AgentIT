@@ -1240,6 +1240,51 @@ async def dependency_status(assessment_id: str):
     }
 
 
+# ── Property Verification ─────────────────────────────────────────────
+
+
+@app.get("/api/assessments/{assessment_id}/verify")
+async def verify_properties(assessment_id: str):
+    """Verify enterprise properties hold on the cluster for this app."""
+    s = get_store()
+    report = s.get(assessment_id)
+    if not report:
+        raise HTTPException(404, "Assessment not found")
+    from agentit.property_verifier import verify_all_properties
+    results = verify_all_properties(report.repo_name, report.repo_name)
+    return {
+        "app": report.repo_name,
+        "results": [{"property": r.property_name, "passed": r.passed,
+                     "checks": r.checks, "summary": r.summary()} for r in results],
+        "all_passed": all(r.passed for r in results),
+    }
+
+
+# ── Platform Drift ────────────────────────────────────────────────────
+
+
+@app.get("/api/platform/drift")
+async def platform_drift():
+    """Check for API drift on the cluster."""
+    from agentit.platform_context import discover_platform, offline_context
+    from agentit.api_drift_detector import detect_drift
+    try:
+        ctx = discover_platform()
+    except Exception:
+        ctx = offline_context()
+    drift = detect_drift(ctx.available_kinds, ctx.installed_operators)
+    return {
+        "platform": ctx.summary(),
+        "drift": {
+            "removed_apis": drift.removed_apis,
+            "deprecated_apis": [d.get("api", "") for d in drift.deprecated_apis] if hasattr(drift, 'deprecated_apis') and isinstance(drift.deprecated_apis, list) and drift.deprecated_apis and isinstance(drift.deprecated_apis[0], dict) else drift.deprecated_apis,
+            "new_apis": drift.new_apis[:20],
+            "has_breaking_changes": drift.has_breaking_changes,
+        },
+        "summary": drift.summary(),
+    }
+
+
 # ── SLOs ──────────────────────────────────────────────────────────────
 
 

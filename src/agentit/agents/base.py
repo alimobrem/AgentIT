@@ -9,30 +9,6 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-KNOWN_API_GROUPS = {
-    "v1",
-    "apps/v1",
-    "batch/v1",
-    "networking.k8s.io/v1",
-    "rbac.authorization.k8s.io/v1",
-    "policy/v1",
-    "autoscaling/v1",
-    "autoscaling/v2",
-    "autoscaling.k8s.io/v1",
-    "monitoring.coreos.com/v1",
-    "argoproj.io/v1alpha1",
-    "tekton.dev/v1beta1",
-    "tekton.dev/v1",
-    "triggers.tekton.dev/v1beta1",
-    "triggers.tekton.dev/v1alpha1",
-    "kyverno.io/v1",
-    "opentelemetry.io/v1alpha1",
-    "integreatly.org/v1alpha1",
-    "argoproj.io/v1",
-    "route.openshift.io/v1",
-}
-
-
 class GeneratedFile(BaseModel):
     path: str
     content: str

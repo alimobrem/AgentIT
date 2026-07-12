@@ -59,6 +59,32 @@ class DriftDetector:
                 self._maybe_auto_sync(name)
 
         click.echo(f"[drift-detect] Checked {len(items)} Argo CD apps", err=True)
+
+        # API drift detection — check if cluster APIs changed since last run
+        try:
+            from agentit.platform_context import discover_platform
+            from agentit.api_drift_detector import detect_drift
+
+            ctx = discover_platform()
+            api_drift = detect_drift(ctx.available_kinds, ctx.installed_operators)
+            if api_drift.has_breaking_changes:
+                for removed in api_drift.removed_apis:
+                    self._publisher.publish(
+                        "agentit-events",
+                        agent_id="drift-detector",
+                        action="api-removed",
+                        target_app="cluster",
+                        severity="critical",
+                        summary=f"API removed from cluster: {removed}",
+                    )
+                click.echo(f"[drift-detect] CRITICAL: {len(api_drift.removed_apis)} API(s) removed from cluster", err=True)
+            if api_drift.has_warnings:
+                click.echo(f"[drift-detect] WARNING: {len(api_drift.deprecated_apis)} deprecated API(s)", err=True)
+            if api_drift.new_apis:
+                click.echo(f"[drift-detect] INFO: {len(api_drift.new_apis)} new API(s) available", err=True)
+        except Exception as exc:
+            logger.debug("API drift check failed (non-fatal): %s", exc)
+
         return drifted
 
     def _fetch_argo_apps(self) -> dict | None:

@@ -296,9 +296,13 @@ class ComplianceAgent:
         if not hits:
             return []
 
+        name = self._name
         doc = {
             "apiVersion": "audit.k8s.io/v1",
             "kind": "Policy",
+            "metadata": {
+                "name": f"{name}-audit-policy",
+            },
             "rules": [
                 {
                     "level": "RequestResponse",

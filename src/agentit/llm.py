@@ -58,7 +58,10 @@ class LLMClient:
     - ANTHROPIC_API_KEY → direct Anthropic API
     """
 
-    def __init__(self, model: str = "claude-sonnet-4-6", **_kwargs) -> None:
+    DEFAULT_MODEL = os.environ.get("AGENTIT_LLM_MODEL", "claude-sonnet-4-6")
+
+    def __init__(self, model: str | None = None, **_kwargs) -> None:
+        model = model or self.DEFAULT_MODEL
         self.model = model
         self._client = _create_client()
 

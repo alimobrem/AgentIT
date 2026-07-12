@@ -44,7 +44,7 @@ def _resolve_and_assess(
         if use_llm:
             try:
                 from agentit.llm import LLMClient
-                llm_client = LLMClient(model=llm_model or "claude-sonnet-4-6")
+                llm_client = LLMClient(model=llm_model)
             except Exception as exc:
                 click.echo(f"LLM init failed (continuing without): {exc}", err=True)
 
@@ -89,7 +89,7 @@ def main() -> None:
 @click.option("--format", "output_format", type=click.Choice(["json", "terminal"]), default="json")
 @click.option("--output", "output_file", type=click.Path(), default=None)
 @click.option("--llm", "use_llm", is_flag=True, default=None, help="Enable Claude LLM (auto-detects credentials if omitted).")
-@click.option("--llm-model", default=None, help="Claude model to use (default: claude-sonnet-4-6).")
+@click.option("--llm-model", default=None, help="Claude model to use (default: env AGENTIT_LLM_MODEL).")
 def assess(repo_url: str, criticality: str, output_format: str, output_file: str | None, use_llm: bool, llm_model: str | None) -> None:
     """Assess enterprise readiness of a Git repository."""
     try:
@@ -454,7 +454,7 @@ def self_assess(repo_url: str, criticality: str, auto_apply: bool, use_llm: bool
                 if use_llm:
                     try:
                         from agentit.llm import LLMClient
-                        llm_client = LLMClient(model=llm_model or "claude-sonnet-4-6")
+                        llm_client = LLMClient(model=llm_model)
                     except Exception:
                         click.echo("LLM unavailable — continuing without safety classification.", err=True)
 
