@@ -38,6 +38,9 @@ class CICDAnalyzer:
                 has_argoproj = True
             if "kind: Application" in content:
                 has_app_kind = True
+            if "kind: Pipeline" in content and "tekton.dev" in content:
+                has_tekton = True
+                has_ci = True
         has_gitops = has_argoproj and has_app_kind
 
         if not has_ci:

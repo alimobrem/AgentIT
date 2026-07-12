@@ -1,4 +1,4 @@
-FROM registry.access.redhat.com/ubi9/python-312:latest
+FROM registry.access.redhat.com/ubi9/python-312:9.6-1749538917
 
 USER 0
 RUN curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz \
@@ -16,5 +16,8 @@ COPY src/ src/
 RUN pip install --no-cache-dir .
 
 EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+  CMD python -c "import httpx; httpx.get('http://localhost:8080/healthz', timeout=2).raise_for_status()" || exit 1
 
 ENTRYPOINT ["python", "-m", "agentit", "portal", "--port", "8080"]

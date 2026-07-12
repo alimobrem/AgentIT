@@ -135,9 +135,20 @@
               <input type="hidden" name="category" value="{{ item.dimension }}">
               <button type="submit" class="btn btn-sm btn-green">Fix</button>
             </form>
-            {% else %}
-            <span class="text-muted text-xs" title="This finding requires manual review">Manual</span>
             {% endif %}
+            <form method="post" action="/api/feedback" class="inline-form"
+                  x-data="{ dismissing: false }">
+              <input type="hidden" name="app_name" value="{{ report.repo_name }}">
+              <input type="hidden" name="agent_name" value="{{ item.agent_responsible }}">
+              <input type="hidden" name="finding_category" value="{{ item.dimension }}">
+              <input type="hidden" name="action" value="dismissed">
+              <button type="button" class="btn btn-sm btn-outline" x-show="!dismissing"
+                @click="dismissing = true">Dismiss</button>
+              <div x-show="dismissing" class="gate-reject-row">
+                <input type="text" name="reason" placeholder="Why? (e.g. handled in Helm chart)" class="gate-reject-input">
+                <button type="submit" class="btn btn-sm btn-outline">Confirm</button>
+              </div>
+            </form>
           </td>
         </tr>
         {% endfor %}

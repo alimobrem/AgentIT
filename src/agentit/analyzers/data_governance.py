@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agentit.analyzers.base import calculate_score, iter_yaml_files
+from agentit.analyzers.base import calculate_score, iter_text_files, iter_yaml_files
 from agentit.models import DimensionScore, Finding, Severity
 
 
@@ -21,6 +21,13 @@ class DataGovernanceAnalyzer:
                 has_backup = True
             if "retention" in content_lower:
                 has_retention = True
+
+        for fp, content in iter_text_files(repo_path, {".py", ".go", ".js", ".ts"}):
+            content_lower = content.lower()
+            if "purge" in content_lower and ("retention" in content_lower or "days" in content_lower):
+                has_retention = True
+            if "backup" in content_lower and ("schedule" in content_lower or "cron" in content_lower):
+                has_backup = True
 
         migration_dirs = ["migrations", "migrate", "alembic", "flyway", "liquibase", "db/migrate"]
         for d in migration_dirs:
