@@ -11,7 +11,9 @@ RUN git config --global user.email "agentit@agentit.local" && \
 WORKDIR /opt/app-root/src
 
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir .
+RUN mkdir -p src/agentit && touch src/agentit/__init__.py && \
+    pip install --no-cache-dir . && \
+    rm -rf src/agentit
 
 COPY src/ src/
 RUN pip install --no-cache-dir --no-deps .
