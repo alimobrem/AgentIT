@@ -300,6 +300,33 @@
   .btn-reject  { background: var(--color-danger); }
   .btn-danger-outline { border-color: var(--color-danger); color: var(--color-danger); background: transparent; }
   .btn-danger-outline:hover { background: var(--color-danger); color: #fff; }
+  .btn-loading {
+    opacity: 0.6;
+    pointer-events: none;
+    position: relative;
+  }
+  .btn-loading::after {
+    content: '';
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: btn-spin 0.6s linear infinite;
+    margin-left: var(--space-2);
+  }
+  @keyframes btn-spin {
+    to { transform: rotate(360deg); }
+  }
+  .btn-clicked {
+    transform: scale(0.95);
+    opacity: 0.8;
+  }
+  .btn[aria-busy="true"] {
+    opacity: 0.6;
+    pointer-events: none;
+  }
 
   /* ── Action Bar ────────────────────────────────────────────────── */
   .action-bar {
@@ -735,14 +762,18 @@ document.body.addEventListener('htmx:afterRequest', function(e) {
 document.addEventListener('submit', function(e) {
   var form = e.target;
   if (form.hasAttribute('hx-post') || form.hasAttribute('hx-get')) return;
-  var btn = form.querySelector('button[type="submit"]');
+  var btn = form.querySelector('button[type="submit"]') || form.querySelector('.btn');
   if (!btn) return;
-  var label = btn.querySelector('.btn-label');
-  var spinner = btn.querySelector('.htmx-indicator');
-  if (label) label.style.display = 'none';
-  if (spinner) spinner.style.display = 'inline-flex';
   btn.disabled = true;
-  btn.style.opacity = '0.7';
+  btn.classList.add('btn-loading');
+  btn.setAttribute('aria-busy', 'true');
+});
+// Instant feedback on ALL clickable buttons (not just form submits)
+document.addEventListener('click', function(e) {
+  var btn = e.target.closest('.btn, button[type="submit"]');
+  if (!btn || btn.disabled) return;
+  btn.classList.add('btn-clicked');
+  setTimeout(function() { btn.classList.remove('btn-clicked'); }, 300);
 });
 // Show loading bar on nav clicks and form submits
 var loadingBar = document.getElementById('nav-loading');
@@ -753,10 +784,12 @@ function showLoading() {
   loadingBar.classList.add('active');
   document.body.style.cursor = 'progress';
 }
-document.querySelectorAll('nav a').forEach(function(link) {
+document.querySelectorAll('nav a, a[href^="/"]').forEach(function(link) {
   link.addEventListener('click', showLoading);
 });
 document.addEventListener('submit', function() { showLoading(); });
+// Also trigger on htmx boosted requests
+document.body.addEventListener('htmx:beforeRequest', function() { showLoading(); });
 // Loading bar completion on htmx settle
 document.body.addEventListener('htmx:afterSettle', function() {
   var bar = document.querySelector('.nav-loading-bar');

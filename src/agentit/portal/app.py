@@ -138,27 +138,37 @@ app.include_router(schedules_router)
 # ── Fleet enrichment ─────────────────────────────────────────────────
 
 
+_argo_cache: dict = {"data": {}, "ts": 0}
+_ARGO_CACHE_TTL = 60  # seconds
+
+
 def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None) -> list[dict]:
-    """Check cluster for each app's deployment status."""
+    """Check cluster for each app's deployment status. Caches Argo CD data for 60s."""
+    import time as _t
     from agentit import kube
 
-    # Get all Argo CD apps in one call
-    argo_status: dict[str, dict] = {}
-    try:
-        items = kube.list_custom_resources("argoproj.io", "v1alpha1", "applications", namespace="openshift-gitops")
-        for a in items:
-            name = a.get("metadata", {}).get("name", "")
-            dest = a.get("spec", {}).get("destination", {})
-            cluster = dest.get("server", "unknown")
-            namespace = dest.get("namespace", "default")
-            argo_status[name] = {
-                "sync": a.get("status", {}).get("sync", {}).get("status", "Unknown"),
-                "health": a.get("status", {}).get("health", {}).get("status", "Unknown"),
-                "cluster": cluster,
-                "namespace": namespace,
-            }
-    except Exception:
-        log.debug("Failed to fetch Argo CD apps for fleet enrichment", exc_info=True)
+    now = _t.monotonic()
+    if _argo_cache["data"] and (now - _argo_cache["ts"]) < _ARGO_CACHE_TTL:
+        argo_status = _argo_cache["data"]
+    else:
+        argo_status = {}
+        try:
+            items = kube.list_custom_resources("argoproj.io", "v1alpha1", "applications", namespace="openshift-gitops")
+            for a in items:
+                name = a.get("metadata", {}).get("name", "")
+                dest = a.get("spec", {}).get("destination", {})
+                cluster = dest.get("server", "unknown")
+                namespace = dest.get("namespace", "default")
+                argo_status[name] = {
+                    "sync": a.get("status", {}).get("sync", {}).get("status", "Unknown"),
+                    "health": a.get("status", {}).get("health", {}).get("status", "Unknown"),
+                    "cluster": cluster,
+                    "namespace": namespace,
+                }
+        except Exception:
+            log.debug("Failed to fetch Argo CD apps for fleet enrichment", exc_info=True)
+        _argo_cache["data"] = argo_status
+        _argo_cache["ts"] = now
 
     for app_item in fleet:
         app_name = app_item["repo_name"].lower().replace("_", "-").replace(".", "-")
