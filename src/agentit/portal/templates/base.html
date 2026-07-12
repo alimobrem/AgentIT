@@ -766,6 +766,7 @@
     <a href="/gates" class="{{ 'nav-active' if request.url.path.startswith('/gates') }}">Gates
       {% if pending_gates %}<span class="nav-badge">{{ pending_gates }}</span>{% endif %}
     </a>
+    <a href="/insights" class="{{ 'nav-active' if request.url.path == '/insights' }}">Insights</a>
   </div>
   <button class="nav-toggle" @click="navOpen = !navOpen" aria-label="Toggle menu">
     <span x-show="!navOpen">&#9776;</span>
@@ -777,7 +778,6 @@
     <a href="/agents" class="{{ 'nav-active' if request.url.path.startswith('/agents') }}">Agents</a>
     <a href="/workflows" class="{{ 'nav-active' if request.url.path == '/workflows' }}">Workflows</a>
     <a href="/schedules" class="{{ 'nav-active' if request.url.path == '/schedules' }}">Schedules</a>
-    <a href="/insights" class="{{ 'nav-active' if request.url.path == '/insights' }}">Insights</a>
     <a href="/health" class="{{ 'nav-active' if request.url.path.startswith('/health') }}">Health</a>
     <a href="/settings" class="{{ 'nav-active' if request.url.path == '/settings' }}">Settings</a>
   </div>
