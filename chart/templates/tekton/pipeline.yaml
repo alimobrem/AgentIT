@@ -87,7 +87,10 @@ spec:
             script: |
               set -euo pipefail
               pip install --no-cache-dir -e . 2>&1 | tail -1
-              echo "Running self-assessment..."
+              echo "Running self-fix (assess → fix → verify)..."
+              python -m agentit self-fix --dry-run --criticality high 2>&1 || true
+              echo ""
+              echo "Running final assessment..."
               RESULT=$(python -m agentit assess . --format json --criticality high 2>/dev/null)
               SCORE=$(echo "$RESULT" | python3 -c "import sys,json; print(int(json.load(sys.stdin).get('overall_score',0)))")
               CRITICAL=$(echo "$RESULT" | python3 -c "
