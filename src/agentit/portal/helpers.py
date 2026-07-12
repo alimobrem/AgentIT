@@ -121,3 +121,97 @@ def get_llm_client():
         except Exception as exc:
             log.warning("LLM client init failed (continuing without): %s", exc)
     return None
+
+
+# ── Templates singleton ──────────────────────────────────────────────
+
+_templates = None
+
+
+def get_templates():
+    """Lazy-load Jinja2 templates from the portal app."""
+    global _templates
+    if _templates is None:
+        from agentit.portal.app import templates
+        _templates = templates
+    return _templates
+
+
+# ── Async timeout wrapper ────────────────────────────────────────────
+
+import asyncio  # noqa: E402
+
+OPERATION_TIMEOUT = 300
+
+
+async def with_timeout(coro, timeout: int = OPERATION_TIMEOUT):
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout)
+    except asyncio.TimeoutError:
+        from fastapi import HTTPException
+        raise HTTPException(504, f"Operation timed out after {timeout}s")
+
+
+# ── Clone + assess + cleanup ─────────────────────────────────────────
+
+import shutil  # noqa: E402
+
+
+def clone_assess_cleanup(repo_url: str, criticality: str, infra_repo_url: str | None = None):
+    """Clone a repo, run assessment, clean up the clone."""
+    from agentit.cloner import clone_repo
+    from agentit.runner import run_assessment
+    repo_path = clone_repo(repo_url)
+    try:
+        return run_assessment(
+            repo_path, repo_url, criticality,
+            llm_client=get_llm_client(), infra_repo_url=infra_repo_url,
+        )
+    finally:
+        shutil.rmtree(repo_path, ignore_errors=True)
+
+
+# ── Run onboarding ───────────────────────────────────────────────────
+
+
+def run_onboarding(report, assessment_id: str | None = None):
+    """Run orchestrated onboarding. Returns (files, orchestration_summary)."""
+    import tempfile
+    from pathlib import Path
+    from agentit.agents.orchestrator import FleetOrchestrator
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base = Path(tmpdir)
+        orch = FleetOrchestrator(
+            report=report, output_dir=base,
+            store=get_store(), assessment_id=assessment_id,
+        )
+        result = orch.run()
+
+        all_files: list[dict] = []
+        for ar in result.agent_results:
+            if not ar.success:
+                continue
+            category_dir = base / ar.category
+            for rel_path in ar.files_generated:
+                file_path = category_dir / rel_path
+                if file_path.is_file():
+                    all_files.append({
+                        "category": ar.category,
+                        "path": rel_path,
+                        "description": rel_path,
+                        "content": file_path.read_text(encoding="utf-8"),
+                    })
+
+        orch_summary = {
+            "agents": [
+                {"name": ar.agent_name, "category": ar.category,
+                 "success": ar.success, "files": ar.files_generated,
+                 "error": ar.error}
+                for ar in result.agent_results
+            ],
+            "conflicts": result.conflicts,
+            "recommendation": result.recommendation,
+        }
+
+        return all_files, orch_summary

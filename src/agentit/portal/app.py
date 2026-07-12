@@ -1137,6 +1137,56 @@ async def api_remediations(assessment_id: str):
     return JSONResponse(get_store().list_remediations(assessment_id))
 
 
+@app.get("/api/assessments/{assessment_id}/resource-recommendations")
+async def resource_recommendations(assessment_id: str):
+    """Get resource tuning recommendations based on Prometheus data."""
+    from agentit.resource_tuner import analyze_resource_usage
+
+    s = get_store()
+    report = s.get(assessment_id)
+    if not report:
+        raise HTTPException(404, "Assessment not found")
+    recs = analyze_resource_usage(report.repo_name, report.repo_name)
+    return {
+        "recommendations": [
+            {
+                "type": r.resource_type,
+                "current": r.current_value,
+                "recommended": r.recommended_value,
+                "reason": r.reason,
+                "confidence": r.confidence,
+            }
+            for r in recs
+        ]
+    }
+
+
+@app.get("/api/assessments/{assessment_id}/dependencies")
+async def dependency_status(assessment_id: str):
+    """Get dependency update status from GitHub PRs."""
+    from agentit.dependency_manager import process_dependency_prs
+
+    s = get_store()
+    report = s.get(assessment_id)
+    if not report:
+        raise HTTPException(404, "Assessment not found")
+    updates = process_dependency_prs(report.repo_url)
+    return {
+        "updates": [
+            {
+                "name": u.name,
+                "old": u.old_version,
+                "new": u.new_version,
+                "type": u.update_type,
+                "risk": u.risk_level,
+                "auto_mergeable": u.auto_mergeable,
+                "pr_url": u.pr_url,
+            }
+            for u in updates
+        ]
+    }
+
+
 # ── SLOs ──────────────────────────────────────────────────────────────
 
 

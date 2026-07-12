@@ -7,7 +7,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from agentit.portal.helpers import get_store
+from agentit.portal.helpers import get_store, get_templates
 
 log = logging.getLogger(__name__)
 
@@ -170,26 +170,13 @@ def _get_cluster_health() -> dict:
     return result
 
 
-# ── Templates (lazy, set by app.py after include_router) ─────────────
-
-_templates = None
-
-
-def _get_templates():
-    global _templates
-    if _templates is None:
-        from agentit.portal.app import templates as _t
-        _templates = _t
-    return _templates
-
-
 # ── Routes ────────────────────────────────────────────────────────────
 
 
 @router.get("/health", response_class=HTMLResponse)
 async def health_page(request: Request) -> HTMLResponse:
     data = await asyncio.to_thread(_get_cluster_health)
-    return _get_templates().TemplateResponse(request, "health.html", data)
+    return get_templates().TemplateResponse(request, "health.html", data)
 
 
 @router.get("/health/pods/{pod_name}", response_class=HTMLResponse)
@@ -236,7 +223,7 @@ async def pod_detail_page(request: Request, pod_name: str) -> HTMLResponse:
         except Exception:
             log.debug("Failed to parse pod events", exc_info=True)
 
-    return _get_templates().TemplateResponse(request, "pod_detail.html", {
+    return get_templates().TemplateResponse(request, "pod_detail.html", {
         "pod_name": pod_name,
         "status": status,
         "restarts": total_restarts,
@@ -283,7 +270,7 @@ async def pipeline_detail_page(request: Request, pipeline_name: str) -> HTMLResp
                 _run_cmd, ["oc", "logs", last_pod, "-n", "agentit", "--tail=50", "--all-containers"], 15,
             ) or ""
 
-    return _get_templates().TemplateResponse(request, "pipeline_detail.html", {
+    return get_templates().TemplateResponse(request, "pipeline_detail.html", {
         "pipeline_name": pipeline_name,
         "status": status,
         "start_time": start_time,

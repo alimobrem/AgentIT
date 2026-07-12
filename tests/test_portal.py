@@ -402,10 +402,7 @@ def test_events_page_renders(client, _override_store):
 
 def test_webhook_triggers_assessment(client, _override_store):
     report = _make_report("webhook-repo")
-    with patch("agentit.portal.routes.webhooks.clone_repo") as mock_clone, \
-         patch("agentit.portal.routes.webhooks.get_llm_client", return_value=None), \
-         patch("agentit.runner.run_assessment", return_value=report):
-        mock_clone.return_value = Path("/tmp/fake")
+    with patch("agentit.portal.routes.webhooks.clone_assess_cleanup", return_value=report):
         resp = client.post(
             "/api/webhook/assess",
             json={"repo_url": "https://github.com/org/webhook-repo", "criticality": "high"},
@@ -428,7 +425,7 @@ def test_webhook_onboard_triggers_onboarding(client, _override_store):
 
     fake_files = [{"category": "security", "path": "netpol.yaml", "content": "kind: NetworkPolicy", "description": "netpol"}]
     fake_summary = {"agents": [], "conflicts": [], "recommendation": "READY", "auto_approve": False, "gates": []}
-    with patch("agentit.portal.routes.webhooks._run_onboarding", return_value=(fake_files, fake_summary)):
+    with patch("agentit.portal.routes.webhooks.run_onboarding", return_value=(fake_files, fake_summary)):
         resp = client.post(
             "/api/webhook/onboard",
             json={"correlationId": aid},

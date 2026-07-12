@@ -7,13 +7,13 @@ import hmac
 import json
 import logging
 import os
-import shutil
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from agentit.cloner import clone_repo
-from agentit.portal.helpers import get_llm_client, get_store, publish_event
+from agentit.portal.helpers import (
+    clone_assess_cleanup, get_store, publish_event, run_onboarding, with_timeout,
+)
 
 log = logging.getLogger(__name__)
 
@@ -39,77 +39,6 @@ def _verify_github_signature(request: Request, body_bytes: bytes) -> bool:
 
 router = APIRouter()
 
-OPERATION_TIMEOUT = 300
-
-
-async def _with_timeout(coro, timeout: int = OPERATION_TIMEOUT):
-    try:
-        return await asyncio.wait_for(coro, timeout=timeout)
-    except asyncio.TimeoutError:
-        raise HTTPException(504, f"Operation timed out after {timeout}s")
-
-
-def _clone_assess_cleanup(repo_url: str, criticality: str, infra_repo_url: str | None = None):
-    from agentit.runner import run_assessment
-    repo_path = clone_repo(repo_url)
-    try:
-        return run_assessment(
-            repo_path, repo_url, criticality,
-            llm_client=get_llm_client(), infra_repo_url=infra_repo_url,
-        )
-    finally:
-        shutil.rmtree(repo_path, ignore_errors=True)
-
-
-def _run_onboarding(report, assessment_id: str | None = None):
-    """Run orchestrated onboarding. Returns (files, orchestration_summary)."""
-    import tempfile
-    from pathlib import Path
-    from agentit.agents.orchestrator import FleetOrchestrator
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        base = Path(tmpdir)
-        orch = FleetOrchestrator(
-            report=report, output_dir=base,
-            store=get_store(), assessment_id=assessment_id,
-        )
-        result = orch.run()
-
-        all_files: list[dict] = []
-        for ar in result.agent_results:
-            if not ar.success:
-                continue
-            category_dir = base / ar.category
-            for rel_path in ar.files_generated:
-                file_path = category_dir / rel_path
-                if file_path.is_file():
-                    all_files.append(
-                        {
-                            "category": ar.category,
-                            "path": rel_path,
-                            "description": rel_path,
-                            "content": file_path.read_text(encoding="utf-8"),
-                        }
-                    )
-
-        orch_summary = {
-            "agents": [
-                {
-                    "name": ar.agent_name,
-                    "category": ar.category,
-                    "success": ar.success,
-                    "files_count": len(ar.files_generated),
-                    "error": ar.error,
-                }
-                for ar in result.agent_results
-            ],
-            "conflicts": result.conflicts,
-            "recommendation": result.recommendation,
-            "auto_approve": result.plan.auto_approve,
-            "gates": result.gates_created,
-        }
-        return all_files, orch_summary
-
 
 @router.post("/api/webhook/assess")
 async def webhook_assess(request: Request):
@@ -126,7 +55,7 @@ async def webhook_assess(request: Request):
         raise HTTPException(400, "repo_url required")
     criticality = body.get("criticality", "medium")
     try:
-        report = await _with_timeout(asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality))
+        report = await with_timeout(asyncio.to_thread(clone_assess_cleanup, repo_url, criticality))
     except Exception:
         from agentit.portal.metrics import assessments_total as _at
         _at.labels(criticality=criticality, status="error").inc()
@@ -193,8 +122,8 @@ async def webhook_github_push(request: Request):
 
     criticality = managed.get("criticality", "medium")
     try:
-        report = await _with_timeout(
-            asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality)
+        report = await with_timeout(
+            asyncio.to_thread(clone_assess_cleanup, repo_url, criticality)
         )
         assessment_id = s.save(report)
         s.log_event("github-webhook", "reassessment-complete", managed["repo_name"],
@@ -290,7 +219,7 @@ async def webhook_onboard(request: Request):
         raise HTTPException(404, f"Assessment {assessment_id} not found")
 
     try:
-        files, orch_summary = await _with_timeout(asyncio.to_thread(_run_onboarding, report, assessment_id))
+        files, orch_summary = await with_timeout(asyncio.to_thread(run_onboarding, report, assessment_id))
     except HTTPException:
         raise
     except Exception as exc:

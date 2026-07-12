@@ -6,6 +6,7 @@ from functools import lru_cache
 logger = logging.getLogger(__name__)
 
 
+@lru_cache(maxsize=1)
 def get_client():
     """Get a configured kubernetes client. Auto-detects in-cluster vs kubeconfig."""
     from kubernetes import client, config

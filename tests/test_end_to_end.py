@@ -207,7 +207,7 @@ def test_webhook_onboard_full_flow(client, _override_store):
         "agents": [], "conflicts": [], "recommendation": "",
         "auto_approve": False, "gates": [],
     }
-    with patch("agentit.portal.routes.webhooks._run_onboarding", return_value=(fake_files, fake_summary)):
+    with patch("agentit.portal.routes.webhooks.run_onboarding", return_value=(fake_files, fake_summary)):
         resp = client.post(
             "/api/webhook/onboard",
             json={"correlationId": aid},

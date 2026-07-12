@@ -163,7 +163,7 @@ def test_webhook_onboard_failure_returns_500(client, _override_store):
     aid = store.save(report)
 
     with patch(
-        "agentit.portal.routes.webhooks._run_onboarding",
+        "agentit.portal.routes.webhooks.run_onboarding",
         side_effect=Exception("agent crashed"),
     ):
         resp = client.post(

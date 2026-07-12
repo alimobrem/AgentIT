@@ -7,7 +7,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from agentit.portal.helpers import get_store
+from agentit.portal.helpers import get_store, get_templates
 
 log = logging.getLogger(__name__)
 
@@ -53,19 +53,6 @@ def _get_watcher_deploy_status() -> dict[str, str]:
     except Exception:
         log.debug("Failed to get deployment status", exc_info=True)
     return result
-
-
-# ── Templates (lazy, set by app.py after include_router) ─────────────
-
-_templates = None
-
-
-def _get_templates():
-    global _templates
-    if _templates is None:
-        from agentit.portal.app import templates as _t
-        _templates = _t
-    return _templates
 
 
 # ── Routes ────────────────────────────────────────────────────────────
@@ -148,7 +135,7 @@ async def schedules_page(request: Request) -> HTMLResponse:
             status = "not deployed"
         watchers.append({**w, "status": status})
 
-    return _get_templates().TemplateResponse(request, "schedules.html", {
+    return get_templates().TemplateResponse(request, "schedules.html", {
         "schedules": schedules,
         "watchers": watchers,
         "apps": fleet,

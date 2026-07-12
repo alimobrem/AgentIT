@@ -19,10 +19,14 @@ class PlatformContext:
     installed_operators: list[str] = field(default_factory=list)
     deprecated_apis: list[dict] = field(default_factory=list)
     namespace: str = "default"
+    _lower_kinds: set[str] = field(default_factory=set, repr=False)
+
+    def __post_init__(self) -> None:
+        self._lower_kinds = {k.lower() for k in self.available_kinds}
 
     def has_api(self, kind: str) -> bool:
         """Check if a K8s resource kind is available on this cluster."""
-        return kind.lower() in {k.lower() for k in self.available_kinds}
+        return kind.lower() in self._lower_kinds
 
     def api_version_for(self, kind: str) -> str | None:
         """Get the preferred API version for a resource kind."""

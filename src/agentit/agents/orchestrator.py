@@ -125,18 +125,16 @@ class FleetOrchestrator:
         # Run property-based skills (additive — supplements agent output)
         try:
             from agentit.skill_engine import SkillEngine
-            from agentit.platform_context import offline_context
-
             skills_dir = Path(__file__).parent.parent.parent.parent / "skills"
             if not skills_dir.exists():
                 skills_dir = Path("skills")
 
-            platform = offline_context()
             try:
                 from agentit.platform_context import discover_platform
                 platform = discover_platform(os.environ.get("AGENTIT_NAMESPACE", "default"))
             except Exception:
-                pass
+                from agentit.platform_context import offline_context
+                platform = offline_context()
 
             engine = SkillEngine(skills_dir, platform=platform)
             skill_files = engine.run_all(self.report, store=self._store)
