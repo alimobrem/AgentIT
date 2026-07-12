@@ -795,7 +795,7 @@ def test_gates_uses_design_system_classes(client, _override_store):
     resp = client.get("/gates")
     assert "gate-actions" in resp.text
     assert "btn-approve" in resp.text
-    assert "btn-reject" in resp.text
+    assert "btn-danger-outline" in resp.text
     assert "section-title" in resp.text
 
 

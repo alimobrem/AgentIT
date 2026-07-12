@@ -326,6 +326,27 @@ async def dlq_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "dlq.html", {"dlq_messages": dlq_messages})
 
 
+@app.post("/events/dlq/{event_id}/retry")
+async def dlq_retry(event_id: str):
+    s = get_store()
+    s.retry_dlq_message(event_id)
+    return RedirectResponse(url="/events/dlq?success=Message+queued+for+retry", status_code=303)
+
+
+@app.post("/events/dlq/{event_id}/dismiss")
+async def dlq_dismiss(event_id: str):
+    s = get_store()
+    s.dismiss_dlq_message(event_id)
+    return RedirectResponse(url="/events/dlq?success=Message+dismissed", status_code=303)
+
+
+@app.post("/events/dlq/dismiss-all")
+async def dlq_dismiss_all():
+    s = get_store()
+    count = s.dismiss_all_dlq()
+    return RedirectResponse(url=f"/events/dlq?success=Dismissed+{count}+messages", status_code=303)
+
+
 @app.get("/api/events")
 async def api_events(limit: int = 50, target_app: str | None = None):
     return JSONResponse(get_store().list_events(limit=limit, target_app=target_app))
@@ -484,7 +505,10 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     score_history = s.get_score_history(report.repo_url) if hasattr(s, 'get_score_history') else []
     apply_results = s.get_apply_results(assessment_id)
 
-    if apply_results and apply_results.get("applied"):
+    schedules_exist = bool(s.list_schedules()) if hasattr(s, 'list_schedules') else False
+    if apply_results and apply_results.get("applied") and (slos or schedules_exist):
+        lifecycle_stage = "monitored"
+    elif apply_results and apply_results.get("applied"):
         lifecycle_stage = "applied"
     elif onboardings:
         lifecycle_stage = "onboarded"
@@ -1211,44 +1235,9 @@ async def api_agents(status: str = "active"):
 # ── Workflows ─────────────────────────────────────────────────────────
 
 
-@app.get("/workflows", response_class=HTMLResponse)
-async def workflows_page(request: Request) -> HTMLResponse:
-    import os
-    from agentit.remediation.registry import FIX_REGISTRY
-
-    agents = [
-        {"name": "Security Hardening", "generates": "NetworkPolicies, Containerfile, RBAC, SCCs, resource limits, image scan task", "category": "security"},
-        {"name": "Observability", "generates": "ServiceMonitor, Grafana dashboard (ConfigMap), alerting rules, OTel collector", "category": "observability"},
-        {"name": "CI/CD & GitOps", "generates": "Tekton Pipeline (with scan + SBOM steps), Argo CD Application, Argo Rollout, Containerfile", "category": "cicd"},
-        {"name": "Compliance", "generates": "Kyverno policies, SBOM Tekton Task, audit policy, compliance evidence, CronJob", "category": "compliance"},
-        {"name": "Infrastructure", "generates": "HPA, PDB, ResourceQuota, LimitRange, Namespace", "category": "infrastructure"},
-        {"name": "Cost Optimization", "generates": "VPA, cost labels, cost report, CronJob", "category": "cost"},
-        {"name": "Dependency", "generates": "Dependency report, Renovate/Dependabot config, CronJob", "category": "dependency"},
-        {"name": "Incident Response", "generates": "Runbook, PagerDuty config, Alertmanager config", "category": "incident"},
-        {"name": "Release Coordinator", "generates": "AnalysisTemplate, Rollout patch, rollback policy, release runbook", "category": "release"},
-        {"name": "Code Change", "generates": ".gitignore, OTel instrumentation, structured logging config", "category": "codechange"},
-        {"name": "Retirement", "generates": "Decommission plan, cleanup Tekton Task, data archive job", "category": "retirement"},
-    ]
-
-    watchers = [
-        {"name": "vuln-watcher", "description": "Monitors fleet for critical/high findings, triggers remediation loop when auto-mode is on", "interval": "6 hours"},
-        {"name": "slo-tracker", "description": "Checks SLO status across all assessments, publishes breach alerts, recommends rollbacks", "interval": "5 minutes"},
-        {"name": "drift-detector", "description": "Queries Argo CD apps for OutOfSync state, optionally auto-syncs when auto-mode is on", "interval": "10 minutes"},
-    ]
-
-    fix_categories = [
-        {"category": cat, "agent": agent, "method": method.lstrip("_").replace("_", " ")}
-        for cat, (agent, method) in sorted(FIX_REGISTRY.items())
-    ]
-
-    retention_days = int(os.environ.get("AGENTIT_RETENTION_DAYS", "30"))
-
-    return templates.TemplateResponse(request, "workflows.html", {
-        "agents": agents,
-        "watchers": watchers,
-        "fix_categories": fix_categories,
-        "retention_days": retention_days,
-    })
+@app.get("/workflows")
+async def workflows_page(request: Request):
+    return RedirectResponse(url="/capabilities", status_code=301)
 
 
 # ── Capabilities ─────────────────────────────────────────────────────
@@ -1256,8 +1245,10 @@ async def workflows_page(request: Request) -> HTMLResponse:
 
 @app.get("/capabilities", response_class=HTMLResponse)
 async def capabilities_page(request: Request) -> HTMLResponse:
+    import os
     from agentit.skill_engine import load_all_skills
     from agentit.check_engine import load_checks
+    from agentit.remediation.registry import FIX_REGISTRY
 
     skills = load_all_skills(Path("skills"))
     checks = load_checks(Path("checks"))
@@ -1281,6 +1272,30 @@ async def capabilities_page(request: Request) -> HTMLResponse:
     deprecated_skills = sum(1 for sk in skills if sk.status == "deprecated")
     total_checks = len(checks)
 
+    agents = [
+        {"name": "Security Hardening", "generates": "NetworkPolicies, Containerfile, RBAC, SCCs, resource limits, image scan task", "category": "security"},
+        {"name": "Observability", "generates": "ServiceMonitor, Grafana dashboard (ConfigMap), alerting rules, OTel collector", "category": "observability"},
+        {"name": "CI/CD & GitOps", "generates": "Tekton Pipeline (with scan + SBOM steps), Argo CD Application, Argo Rollout, Containerfile", "category": "cicd"},
+        {"name": "Compliance", "generates": "Kyverno policies, SBOM Tekton Task, audit policy, compliance evidence, CronJob", "category": "compliance"},
+        {"name": "Infrastructure", "generates": "HPA, PDB, ResourceQuota, LimitRange, Namespace", "category": "infrastructure"},
+        {"name": "Cost Optimization", "generates": "VPA, cost labels, cost report, CronJob", "category": "cost"},
+        {"name": "Dependency", "generates": "Dependency report, Renovate/Dependabot config, CronJob", "category": "dependency"},
+        {"name": "Incident Response", "generates": "Runbook, PagerDuty config, Alertmanager config", "category": "incident"},
+        {"name": "Release Coordinator", "generates": "AnalysisTemplate, Rollout patch, rollback policy, release runbook", "category": "release"},
+        {"name": "Code Change", "generates": ".gitignore, OTel instrumentation, structured logging config", "category": "codechange"},
+        {"name": "Retirement", "generates": "Decommission plan, cleanup Tekton Task, data archive job", "category": "retirement"},
+    ]
+    watchers = [
+        {"name": "vuln-watcher", "description": "Monitors fleet for critical/high findings, triggers remediation loop when auto-mode is on", "interval": "6 hours"},
+        {"name": "slo-tracker", "description": "Checks SLO status across all assessments, publishes breach alerts, recommends rollbacks", "interval": "5 minutes"},
+        {"name": "drift-detector", "description": "Queries Argo CD apps for OutOfSync state, optionally auto-syncs when auto-mode is on", "interval": "10 minutes"},
+    ]
+    fix_categories = [
+        {"category": cat, "agent": agent_name, "method": method.lstrip("_").replace("_", " ")}
+        for cat, (agent_name, method) in sorted(FIX_REGISTRY.items())
+    ]
+    retention_days = int(os.environ.get("AGENTIT_RETENTION_DAYS", "30"))
+
     return templates.TemplateResponse(request, "capabilities.html", {
         "skills_by_domain": skills_by_domain,
         "checks_by_dimension": checks_by_dimension,
@@ -1290,6 +1305,10 @@ async def capabilities_page(request: Request) -> HTMLResponse:
         "active_skills": active_skills,
         "deprecated_skills": deprecated_skills,
         "total_checks": total_checks,
+        "agents": agents,
+        "watchers": watchers,
+        "fix_categories": fix_categories,
+        "retention_days": retention_days,
     })
 
 

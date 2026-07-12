@@ -75,7 +75,10 @@
   </tbody>
 </table>
 {% else %}
-<p class="text-muted mt-2">No SLOs defined yet. Run onboarding or add one manually below.</p>
+<div class="empty-state">
+  <h3>No SLOs Defined</h3>
+  <p class="text-muted">No SLOs defined yet.</p>
+</div>
 {% endif %}
 
 <h2 class="section-title">Add SLO</h2>

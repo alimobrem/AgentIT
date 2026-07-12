@@ -1,7 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Agent Activity Feed - AgentIT{% endblock %}
 {% block content %}
-<h1>Agent Activity Feed</h1>
+<div class="tab-nav">
+  <a href="/events" class="tab-link tab-active">Events</a>
+  <a href="/events/dlq" class="tab-link">Dead-Letter Queue</a>
+</div>
+<h1>Events</h1>
 <form method="get" action="/events" class="action-bar">
   <input type="text" name="q" value="{{ q | default('') }}" placeholder="Filter by agent, action, or app..." class="filter-input">
   <select name="severity">

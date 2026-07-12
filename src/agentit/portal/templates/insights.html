@@ -11,7 +11,7 @@
   </div>
   <div class="stat-card">
     <div class="stat-label">Apps Managed</div>
-    <div class="stat-value" style="color: var(--color-success);">{{ insights.unique_apps }}</div>
+    <div class="stat-value text-success">{{ insights.unique_apps }}</div>
   </div>
   <div class="stat-card">
     <div class="stat-label">Onboardings</div>
@@ -23,7 +23,7 @@
   </div>
   <div class="stat-card">
     <div class="stat-label">Pending Gates</div>
-    <div class="stat-value" style="color: {% if insights.pending_gates > 0 %}var(--color-warning){% else %}var(--color-success){% endif %};">{{ insights.pending_gates }}</div>
+    <div class="stat-value {% if insights.pending_gates > 0 %}text-warning{% else %}text-success{% endif %}">{{ insights.pending_gates }}</div>
   </div>
   <div class="stat-card">
     <div class="stat-label">Events Logged</div>

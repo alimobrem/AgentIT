@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Capabilities - AgentIT{% endblock %}
 {% block content %}
-<h1>Capabilities</h1>
-<p class="text-muted">What AgentIT can assess and generate — {{ total_skills }} skills and {{ total_checks }} checks across all dimensions.</p>
+<h1>Capabilities &amp; Workflows</h1>
+<p class="text-muted">Skills, checks, agents, and automation — everything AgentIT can do.</p>
 
 <div class="stat-grid">
   <div class="stat-card">
@@ -133,6 +133,96 @@
 <div class="empty-state">
   <p>No skill activity yet. Run an assessment and provide feedback to see activity here.</p>
 </div>
+{% endif %}
+
+<h2 class="section-title">Onboarding Pipeline</h2>
+<div class="pipeline-flow mb-2">
+  <div class="pipeline-step">
+    <div class="pipeline-step-number">1</div>
+    <div class="pipeline-step-title">Assess</div>
+    <div class="pipeline-step-desc">Clone repo, detect stack, score 7 dimensions</div>
+  </div>
+  <div class="pipeline-arrow">&rarr;</div>
+  <div class="pipeline-step">
+    <div class="pipeline-step-number">2</div>
+    <div class="pipeline-step-title">Onboard</div>
+    <div class="pipeline-step-desc">{{ agents|length }} agents generate manifests in parallel</div>
+  </div>
+  <div class="pipeline-arrow">&rarr;</div>
+  <div class="pipeline-step">
+    <div class="pipeline-step-number">3</div>
+    <div class="pipeline-step-title">Review</div>
+    <div class="pipeline-step-desc">Dry-run, preview, approve or create PR</div>
+  </div>
+  <div class="pipeline-arrow">&rarr;</div>
+  <div class="pipeline-step">
+    <div class="pipeline-step-number">4</div>
+    <div class="pipeline-step-title">Apply</div>
+    <div class="pipeline-step-desc">Deploy to cluster with canary rollout</div>
+  </div>
+  <div class="pipeline-arrow">&rarr;</div>
+  <div class="pipeline-step">
+    <div class="pipeline-step-number">5</div>
+    <div class="pipeline-step-title">Monitor</div>
+    <div class="pipeline-step-desc">Watchers verify SLOs, detect drift, scan CVEs</div>
+  </div>
+</div>
+
+{% if agents %}
+<h2 class="section-title">Onboarding Agents ({{ agents|length }})</h2>
+<p class="text-muted mb-1">Each agent reads the assessment report and generates manifests for its domain.</p>
+<table>
+  <thead>
+    <tr><th>Agent</th><th>What It Generates</th><th>Category</th></tr>
+  </thead>
+  <tbody>
+    {% for a in agents %}
+    <tr>
+      <td class="text-bold">{{ a.name }}</td>
+      <td class="text-sm">{{ a.generates }}</td>
+      <td><span class="badge badge-info">{{ a.category }}</span></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if watchers %}
+<h2 class="section-title">Long-Lived Watchers</h2>
+<p class="text-muted mb-1">Continuously monitor managed apps after onboarding.</p>
+<table>
+  <thead>
+    <tr><th>Watcher</th><th>What It Does</th><th>Interval</th></tr>
+  </thead>
+  <tbody>
+    {% for w in watchers %}
+    <tr>
+      <td class="text-bold">{{ w.name }}</td>
+      <td class="text-sm">{{ w.description }}</td>
+      <td>{{ w.interval }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if fix_categories %}
+<h2 class="section-title">Auto-Fix Capabilities ({{ fix_categories|length }})</h2>
+<p class="text-muted mb-1">Findings in these categories can be fixed automatically. Click "Fix" on any finding in an assessment detail page.</p>
+<table>
+  <thead>
+    <tr><th>Finding Category</th><th>Agent</th><th>Fix Method</th></tr>
+  </thead>
+  <tbody>
+    {% for fc in fix_categories %}
+    <tr>
+      <td class="text-bold">{{ fc.category }}</td>
+      <td>{{ fc.agent }}</td>
+      <td class="text-sm text-muted">{{ fc.method }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
 {% endif %}
 
 {% endblock %}

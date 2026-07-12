@@ -1,17 +1,34 @@
 {% extends "base.html" %}
 {% block title %}Dead-Letter Queue - AgentIT{% endblock %}
 {% block content %}
+<div class="tab-nav">
+  <a href="/events" class="tab-link">Events</a>
+  <a href="/events/dlq" class="tab-link tab-active">Dead-Letter Queue</a>
+</div>
 <h1>Dead-Letter Queue</h1>
+{% if request.query_params.get('success') %}
+<div class="alert alert-success">{{ request.query_params.get('success') }}</div>
+{% endif %}
 <p class="text-muted">Events that failed processing after {{ max_retries | default(3) }} retries. Review and retry or dismiss.</p>
 
 {% if dlq_messages %}
-<div class="action-bar" style="margin-bottom: var(--space-5);">
+<div class="action-bar mb-1">
   <span class="text-muted">{{ dlq_messages | length }} message(s)</span>
+  <form method="post" action="/events/dlq/dismiss-all" class="inline-form"
+        x-data x-ref="dismissAllDlq">
+    <button type="button" class="btn btn-sm btn-danger-outline"
+      @click="$dispatch('show-confirm', {
+        title: 'Dismiss All',
+        message: 'Dismiss all dead-letter messages? This cannot be undone.',
+        form: $refs.dismissAllDlq,
+        opts: { confirmText: 'Dismiss All', danger: true }
+      })">Dismiss All</button>
+  </form>
 </div>
 
 {% for msg in dlq_messages %}
-<div class="card" style="margin-bottom: var(--space-4);">
-  <div style="display: flex; justify-content: space-between; align-items: start;">
+<div class="card mb-1">
+  <div class="card-header">
     <div>
       <span class="badge badge-danger">FAILED</span>
       <strong>{{ msg.get('action', 'unknown') }}</strong>
@@ -21,14 +38,25 @@
   </div>
 
   {% if msg.get('summary') %}
-  <div class="code-block" style="margin-top: var(--space-3); font-size: var(--font-xs); max-height: 100px; overflow-y: auto;">
+  <div class="code-block text-xs mt-1">
     {{ msg.get('summary', '') }}
   </div>
   {% endif %}
 
-  <div style="margin-top: var(--space-3); display: flex; gap: var(--space-3);">
+  <div class="card-meta">
     <span class="text-muted text-xs">Agent: {{ msg.get('agent_id', '—') }}</span>
     <span class="text-muted text-xs">Severity: {{ msg.get('severity', '—') }}</span>
+  </div>
+  <div class="dlq-card-actions">
+    <form method="post" action="/events/dlq/{{ msg.id }}/retry" class="inline-form">
+      <button type="submit" class="btn btn-sm btn-green">
+        <span class="btn-label">Retry</span>
+        <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+      </button>
+    </form>
+    <form method="post" action="/events/dlq/{{ msg.id }}/dismiss" class="inline-form">
+      <button type="submit" class="btn btn-sm btn-outline">Dismiss</button>
+    </form>
   </div>
 </div>
 {% endfor %}

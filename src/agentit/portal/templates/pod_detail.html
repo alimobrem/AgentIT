@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Pod: {{ pod_name }} - AgentIT{% endblock %}
-{% block head_extra %}<meta http-equiv="refresh" content="15">{% endblock %}
 {% block content %}
+<div id="pod-content" hx-get="/health/pods/{{ pod_name }}" hx-trigger="every 15s" hx-select="#pod-content" hx-target="#pod-content" hx-swap="outerHTML">
 <p class="mb-1"><a href="/health">&larr; System Health</a></p>
 <h1>{{ pod_name }}</h1>
 
@@ -56,4 +56,5 @@
   </tbody>
 </table>
 {% endif %}
+</div>
 {% endblock %}

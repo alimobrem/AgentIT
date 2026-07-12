@@ -302,7 +302,7 @@
     border: 2px solid var(--color-accent);
   }
   .btn-approve { background: var(--color-success); }
-  .btn-reject  { background: var(--color-danger); }
+
   .btn-danger-outline { border-color: var(--color-danger); color: var(--color-danger); background: transparent; }
   .btn-danger-outline:hover { background: var(--color-danger); color: #fff; }
   .btn-loading {
@@ -711,6 +711,17 @@
   .filter-input { max-width: 300px; }
   .pagination { display: flex; align-items: center; justify-content: center; gap: var(--space-5); margin-top: var(--space-5); padding: var(--space-5) 0; }
 
+  /* -- Tab Navigation -- */
+  .tab-nav { display: flex; gap: 0; border-bottom: 2px solid var(--color-border); margin-bottom: var(--space-7); }
+  .tab-link { padding: var(--space-3) var(--space-6); font-size: var(--font-base); font-weight: 600; color: var(--color-muted); border-bottom: 2px solid transparent; margin-bottom: -2px; transition: color 0.15s, border-color 0.15s; text-decoration: none; }
+  .tab-link:hover { color: var(--color-text); text-decoration: none; }
+  .tab-link.tab-active { color: var(--color-accent); border-bottom-color: var(--color-accent); }
+  .step-guide { background: var(--color-surface-2); border: 1px solid var(--color-border); border-radius: var(--radius-lg); padding: var(--space-4) var(--space-5); margin-bottom: var(--space-5); display: flex; align-items: center; gap: var(--space-4); }
+  .step-guide-icon { font-size: var(--font-xl); }
+  .step-guide-text { font-size: var(--font-sm); color: var(--color-muted); }
+  .step-guide-text strong { color: var(--color-text); }
+  .dlq-card-actions { display: flex; gap: var(--space-2); margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--color-border); }
+
   /* ── Empty State ───────────────────────────────────────────────── */
   .empty-state { text-align: center; padding: var(--space-8) var(--space-5); color: var(--color-muted); }
   .empty-state h3 { color: var(--color-text); margin-bottom: var(--space-3); }
@@ -769,6 +780,8 @@
     <a href="/gates" class="{{ 'nav-active' if request.url.path.startswith('/gates') }}">Gates
       {% if pending_gates %}<span class="nav-badge">{{ pending_gates }}</span>{% endif %}
     </a>
+    <a href="/events" class="{{ 'nav-active' if request.url.path.startswith('/events') }}">Events</a>
+    <a href="/health" class="{{ 'nav-active' if request.url.path.startswith('/health') }}">Health</a>
     <a href="/insights" class="{{ 'nav-active' if request.url.path == '/insights' }}">Insights</a>
   </div>
   <button class="nav-toggle" @click="navOpen = !navOpen" aria-label="Toggle menu">
@@ -776,13 +789,9 @@
     <span x-show="navOpen">&#10005;</span>
   </button>
   <div class="links-secondary" :class="{ 'links-open': navOpen }">
-    <a href="/events" class="{{ 'nav-active' if request.url.path == '/events' }}">Events</a>
-    <a href="/events/dlq" class="{{ 'nav-active' if request.url.path == '/events/dlq' }}">DLQ</a>
     <a href="/agents" class="{{ 'nav-active' if request.url.path.startswith('/agents') }}">Agents</a>
-    <a href="/workflows" class="{{ 'nav-active' if request.url.path == '/workflows' }}">Workflows</a>
     <a href="/capabilities" class="{{ 'nav-active' if request.url.path == '/capabilities' }}">Capabilities</a>
     <a href="/schedules" class="{{ 'nav-active' if request.url.path == '/schedules' }}">Schedules</a>
-    <a href="/health" class="{{ 'nav-active' if request.url.path.startswith('/health') }}">Health</a>
     <a href="/settings" class="{{ 'nav-active' if request.url.path == '/settings' }}">Settings</a>
   </div>
 </nav>
@@ -929,9 +938,9 @@ function toastManager() {
 document.addEventListener('alpine:init', function() {
   var params = new URLSearchParams(window.location.search);
   var tm = document.getElementById('toasts');
-  if (params.get('error') && Alpine.$data(tm)) Alpine.$data(tm).show(params.get('error'), 'error');
-  if (params.get('warning') && Alpine.$data(tm)) Alpine.$data(tm).show(params.get('warning'), 'warning');
-  if ((params.get('success') || params.get('pr_url')) && Alpine.$data(tm)) Alpine.$data(tm).show(params.get('success') || 'Operation successful', 'success');
+  if (params.get('error') && Alpine.$data(tm) && !document.querySelector('.alert-error')) Alpine.$data(tm).show(params.get('error'), 'error');
+  if (params.get('warning') && Alpine.$data(tm) && !document.querySelector('.alert-warn')) Alpine.$data(tm).show(params.get('warning'), 'warning');
+  if ((params.get('success') || params.get('pr_url')) && Alpine.$data(tm) && !document.querySelector('.alert-success')) Alpine.$data(tm).show(params.get('success') || 'Operation successful', 'success');
   if (params.get('purged') && Alpine.$data(tm)) Alpine.$data(tm).show('Purged ' + params.get('purged') + ' stale rows', 'success');
 });
 // Relative timestamps

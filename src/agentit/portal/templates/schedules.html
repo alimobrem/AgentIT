@@ -154,6 +154,9 @@
   </tbody>
 </table>
 {% else %}
-<p class="text-muted mt-2">No scheduled operations yet. Onboard an app to generate CronWorkflows, or create one manually.</p>
+<div class="empty-state">
+  <h3>No Scheduled Operations</h3>
+  <p class="text-muted">No scheduled operations yet.</p>
+</div>
 {% endif %}
 {% endblock %}

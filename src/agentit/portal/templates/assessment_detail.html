@@ -40,22 +40,6 @@
   {% endfor %}
 </div>
 
-{% for s in scores_sorted %}
-<div class="dimension-row">
-  <div class="dimension-label">{{ s.dimension | dimension_label }}</div>
-  <div class="dimension-bar">
-    <div class="score-bar-bg">
-      <div class="score-bar-fill
-        {% if s.score > 70 %} score-green
-        {% elif s.score >= 40 %} score-yellow
-        {% else %} score-red{% endif %}"
-        style="width:{{ s.score }}%"></div>
-    </div>
-  </div>
-  <div class="dimension-value">{{ s.score }}</div>
-</div>
-{% endfor %}
-
 <div class="action-bar mt-2 mb-2">
   <form method="post" action="/assessments/{{ assessment_id }}/onboard" class="inline-form">
     <button type="submit" class="btn btn-action btn-lg">
@@ -75,155 +59,185 @@
   </form>
 </div>
 
-{% if urgent_findings %}
-<div x-data="{ open: true }">
-  <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
-    Findings ({{ urgent_findings|length }})
-  </h2>
-  <div class="collapse-body" x-show="open" x-transition>
-    <ul class="finding-list">
-      {% for f in urgent_findings %}
-      <li class="finding-item {% if f.severity.name == 'critical' %}finding-critical{% else %}finding-high{% endif %}">
-        <span class="badge badge-{{ f.severity.name }} finding-badge">{{ f.severity.name }}</span>
-        {{ f.description }}
-        {% if f.source %}<span class="badge badge-muted finding-source">{{ f.source }}</span>{% endif %}
-        {% if f.file_path %}<span class="finding-file">{{ f.file_path }}</span>{% endif %}
-        {% if f.category in fixable_categories %}
-        <form method="post" action="/assessments/{{ assessment_id }}/fix" class="inline-form"
-              x-data x-ref="fixFinding{{ loop.index }}">
-          <input type="hidden" name="category" value="{{ f.category }}">
-          <input type="hidden" name="description" value="{{ f.description }}">
-          <button type="button" class="btn btn-sm btn-green"
-            @click="$dispatch('show-confirm', {
-              title: 'Generate Fix',
-              message: 'Generate a fix for this finding?',
-              form: $refs.fixFinding{{ loop.index }},
-              opts: { confirmText: 'Generate Fix', danger: false }
-            })">
-            <span class="btn-label">Fix</span>
-          </button>
-        </form>
-        {% endif %}
-        {% if f.source %}
-        <form method="post" action="/api/suppress" class="inline-form"
-              x-data="{ suppressing: false }">
-          <input type="hidden" name="app_name" value="{{ report.repo_name }}">
-          <input type="hidden" name="check_source" value="{{ f.source }}">
-          <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
-          <button type="button" class="btn btn-sm btn-outline" x-show="!suppressing"
-            @click="suppressing = true">Suppress</button>
-          <div x-show="suppressing" class="gate-reject-row">
-            <input type="text" name="reason" placeholder="Why suppress? (e.g. handled externally)" class="gate-reject-input">
-            <button type="submit" class="btn btn-sm btn-outline">Confirm</button>
-          </div>
-        </form>
-        {% endif %}
-      </li>
-      {% endfor %}
-    </ul>
-  </div>
+<div x-data="{ tab: 'overview' }">
+<div class="tab-nav">
+  <a href="#" class="tab-link" :class="{ 'tab-active': tab === 'overview' }" @click.prevent="tab = 'overview'">Overview</a>
+  <a href="#" class="tab-link" :class="{ 'tab-active': tab === 'findings' }" @click.prevent="tab = 'findings'">Findings{% if urgent_findings %} ({{ urgent_findings|length }}){% endif %}</a>
+  <a href="#" class="tab-link" :class="{ 'tab-active': tab === 'timeline' }" @click.prevent="tab = 'timeline'">Timeline</a>
 </div>
-{% endif %}
 
-{% if report.remediation_plan %}
-<div x-data="{ open: true }">
-  <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
-    Remediation Plan ({{ report.remediation_plan|length }})
-  </h2>
-  <div class="collapse-body" x-show="open" x-transition>
-    <table>
-      <thead>
-        <tr><th>#</th><th>Dimension</th><th>Description</th><th>Effort</th><th>Agent</th><th></th></tr>
-      </thead>
-      <tbody>
-        {% for item in report.remediation_plan %}
+<div x-show="tab === 'overview'">
+  {% for s in scores_sorted %}
+  <div class="dimension-row">
+    <div class="dimension-label">{{ s.dimension | dimension_label }}</div>
+    <div class="dimension-bar">
+      <div class="score-bar-bg">
+        <div class="score-bar-fill
+          {% if s.score > 70 %} score-green
+          {% elif s.score >= 40 %} score-yellow
+          {% else %} score-red{% endif %}"
+          style="width:{{ s.score }}%"></div>
+      </div>
+    </div>
+    <div class="dimension-value">{{ s.score }}</div>
+  </div>
+  {% endfor %}
+</div>
+
+<div x-show="tab === 'findings'" x-cloak>
+  {% if urgent_findings %}
+  <div x-data="{ open: true }">
+    <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
+      Findings ({{ urgent_findings|length }})
+    </h2>
+    <div class="collapse-body" x-show="open" x-transition>
+      <ul class="finding-list">
+        {% for f in urgent_findings %}
+        <li class="finding-item {% if f.severity.name == 'critical' %}finding-critical{% else %}finding-high{% endif %}">
+          <span class="badge badge-{{ f.severity.name }} finding-badge">{{ f.severity.name }}</span>
+          {{ f.description }}
+          {% if f.source %}<span class="badge badge-muted finding-source">{{ f.source }}</span>{% endif %}
+          {% if f.file_path %}<span class="finding-file">{{ f.file_path }}</span>{% endif %}
+          {% if f.category in fixable_categories %}
+          <form method="post" action="/assessments/{{ assessment_id }}/fix" class="inline-form"
+                x-data x-ref="fixFinding{{ loop.index }}">
+            <input type="hidden" name="category" value="{{ f.category }}">
+            <input type="hidden" name="description" value="{{ f.description }}">
+            <button type="button" class="btn btn-sm btn-green"
+              @click="$dispatch('show-confirm', {
+                title: 'Generate Fix',
+                message: 'Generate a fix for this finding?',
+                form: $refs.fixFinding{{ loop.index }},
+                opts: { confirmText: 'Generate Fix', danger: false }
+              })">
+              <span class="btn-label">Fix</span>
+            </button>
+          </form>
+          {% endif %}
+          {% if f.source %}
+          <form method="post" action="/api/suppress" class="inline-form"
+                x-data="{ suppressing: false }">
+            <input type="hidden" name="app_name" value="{{ report.repo_name }}">
+            <input type="hidden" name="check_source" value="{{ f.source }}">
+            <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
+            <button type="button" class="btn btn-sm btn-outline" x-show="!suppressing"
+              @click="suppressing = true">Suppress</button>
+            <div x-show="suppressing" class="gate-reject-row">
+              <input type="text" name="reason" placeholder="Why suppress? (e.g. handled externally)" class="gate-reject-input">
+              <button type="submit" class="btn btn-sm btn-outline">Confirm</button>
+            </div>
+          </form>
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if report.remediation_plan %}
+  <div x-data="{ open: true }">
+    <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
+      Remediation Plan ({{ report.remediation_plan|length }})
+    </h2>
+    <div class="collapse-body" x-show="open" x-transition>
+      <table>
+        <thead>
+          <tr><th>#</th><th>Dimension</th><th>Description</th><th>Effort</th><th>Agent</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for item in report.remediation_plan %}
+          <tr>
+            <td>{{ item.priority }}</td>
+            <td>{{ item.dimension | dimension_label }}</td>
+            <td>{{ item.description }}</td>
+            <td>{{ item.estimated_effort }}</td>
+            <td>{{ item.agent_responsible }}</td>
+            <td>
+              {% set cat = item.description | lower %}
+              {% if 'container' in cat or 'network' in cat or 'rbac' in cat or 'pipeline' in cat or 'metrics' in cat or 'policy' in cat or 'sbom' in cat or 'scan' in cat or 'resource' in cat or 'gitops' in cat or 'audit' in cat %}
+              <form method="post" action="/assessments/{{ assessment_id }}/fix" class="inline-form">
+                <input type="hidden" name="category" value="{{ item.dimension }}">
+                <button type="submit" class="btn btn-sm btn-green">Fix</button>
+              </form>
+              {% endif %}
+              <form method="post" action="/api/feedback" class="inline-form"
+                    x-data="{ dismissing: false }">
+                <input type="hidden" name="app_name" value="{{ report.repo_name }}">
+                <input type="hidden" name="agent_name" value="{{ item.agent_responsible }}">
+                <input type="hidden" name="finding_category" value="{{ item.dimension }}">
+                <input type="hidden" name="action" value="dismissed">
+                <button type="button" class="btn btn-sm btn-outline" x-show="!dismissing"
+                  @click="dismissing = true">Dismiss</button>
+                <div x-show="dismissing" class="gate-reject-row">
+                  <input type="text" name="reason" placeholder="Why? (e.g. handled in Helm chart)" class="gate-reject-input">
+                  <button type="submit" class="btn btn-sm btn-outline">Confirm</button>
+                </div>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+<div x-show="tab === 'timeline'" x-cloak>
+  {% if timeline %}
+  <details open>
+    <summary class="section-toggle">Timeline</summary>
+    <div class="timeline">
+      {% for event in timeline %}
+      <div class="timeline-item">
+        <div class="timeline-marker {% if event.severity == 'critical' %}marker-danger{% elif event.action == 'completed' or event.action == 'approved' %}marker-success{% elif event.action == 'remediation' %}marker-info{% else %}marker-default{% endif %}"></div>
+        <div class="timeline-content">
+          <div class="timeline-header">
+            <span class="badge badge-{{ event.severity | default('info') }}">{{ event.agent_id }}</span>
+            <strong>{{ event.action }}</strong>
+            <span class="text-muted text-sm" data-timestamp="{{ event.timestamp }}">{{ event.timestamp[:16] }}</span>
+          </div>
+          <p class="text-sm text-muted">{{ event.summary[:200] }}</p>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </details>
+  {% endif %}
+
+  {% if suppressions %}
+  <div x-data="{ open: false }">
+    <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
+      Suppressed Checks ({{ suppressions|length }})
+    </h2>
+    <div class="collapse-body" x-show="open" x-transition>
+      <p class="text-muted text-sm">These checks are suppressed for this app and won't fire on future assessments.</p>
+      <table>
+        <thead><tr><th>Check</th><th>Reason</th><th>Suppressed</th><th></th></tr></thead>
+        <tbody>
+        {% for sup in suppressions %}
         <tr>
-          <td>{{ item.priority }}</td>
-          <td>{{ item.dimension | dimension_label }}</td>
-          <td>{{ item.description }}</td>
-          <td>{{ item.estimated_effort }}</td>
-          <td>{{ item.agent_responsible }}</td>
+          <td><span class="badge badge-muted">{{ sup.check_source }}</span></td>
+          <td class="text-muted text-sm">{{ sup.reason or '—' }}</td>
+          <td><span class="text-sm" data-timestamp="{{ sup.created_at }}">{{ sup.created_at[:16] }}</span></td>
           <td>
-            {% set cat = item.description | lower %}
-            {% if 'container' in cat or 'network' in cat or 'rbac' in cat or 'pipeline' in cat or 'metrics' in cat or 'policy' in cat or 'sbom' in cat or 'scan' in cat or 'resource' in cat or 'gitops' in cat or 'audit' in cat %}
-            <form method="post" action="/assessments/{{ assessment_id }}/fix" class="inline-form">
-              <input type="hidden" name="category" value="{{ item.dimension }}">
-              <button type="submit" class="btn btn-sm btn-green">Fix</button>
-            </form>
-            {% endif %}
-            <form method="post" action="/api/feedback" class="inline-form"
-                  x-data="{ dismissing: false }">
+            <form method="post" action="/api/unsuppress" class="inline-form">
               <input type="hidden" name="app_name" value="{{ report.repo_name }}">
-              <input type="hidden" name="agent_name" value="{{ item.agent_responsible }}">
-              <input type="hidden" name="finding_category" value="{{ item.dimension }}">
-              <input type="hidden" name="action" value="dismissed">
-              <button type="button" class="btn btn-sm btn-outline" x-show="!dismissing"
-                @click="dismissing = true">Dismiss</button>
-              <div x-show="dismissing" class="gate-reject-row">
-                <input type="text" name="reason" placeholder="Why? (e.g. handled in Helm chart)" class="gate-reject-input">
-                <button type="submit" class="btn btn-sm btn-outline">Confirm</button>
-              </div>
+              <input type="hidden" name="check_source" value="{{ sup.check_source }}">
+              <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
+              <button type="submit" class="btn btn-sm btn-outline">Unsuppress</button>
             </form>
           </td>
         </tr>
         {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</div>
-{% endif %}
-
-{% if timeline %}
-<details open>
-  <summary class="section-toggle">Timeline</summary>
-  <div class="timeline">
-    {% for event in timeline %}
-    <div class="timeline-item">
-      <div class="timeline-marker {% if event.severity == 'critical' %}marker-danger{% elif event.action == 'completed' or event.action == 'approved' %}marker-success{% elif event.action == 'remediation' %}marker-info{% else %}marker-default{% endif %}"></div>
-      <div class="timeline-content">
-        <div class="timeline-header">
-          <span class="badge badge-{{ event.severity | default('info') }}">{{ event.agent_id }}</span>
-          <strong>{{ event.action }}</strong>
-          <span class="text-muted text-sm" data-timestamp="{{ event.timestamp }}">{{ event.timestamp[:16] }}</span>
-        </div>
-        <p class="text-sm text-muted">{{ event.summary[:200] }}</p>
-      </div>
+        </tbody>
+      </table>
     </div>
-    {% endfor %}
   </div>
-</details>
-{% endif %}
-
-{% if suppressions %}
-<div x-data="{ open: false }">
-  <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
-    Suppressed Checks ({{ suppressions|length }})
-  </h2>
-  <div class="collapse-body" x-show="open" x-transition>
-    <p class="text-muted text-sm">These checks are suppressed for this app and won't fire on future assessments.</p>
-    <table>
-      <thead><tr><th>Check</th><th>Reason</th><th>Suppressed</th><th></th></tr></thead>
-      <tbody>
-      {% for sup in suppressions %}
-      <tr>
-        <td><span class="badge badge-muted">{{ sup.check_source }}</span></td>
-        <td class="text-muted text-sm">{{ sup.reason or '—' }}</td>
-        <td><span class="text-sm" data-timestamp="{{ sup.created_at }}">{{ sup.created_at[:16] }}</span></td>
-        <td>
-          <form method="post" action="/api/unsuppress" class="inline-form">
-            <input type="hidden" name="app_name" value="{{ report.repo_name }}">
-            <input type="hidden" name="check_source" value="{{ sup.check_source }}">
-            <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
-            <button type="submit" class="btn btn-sm btn-outline">Unsuppress</button>
-          </form>
-        </td>
-      </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
+  {% endif %}
 </div>
-{% endif %}
+</div>
 
 <div class="action-bar mt-2">
   <a href="/assessments/{{ assessment_id }}/remediations" class="btn btn-sm btn-outline">Remediations ({{ remediation_count }})</a>

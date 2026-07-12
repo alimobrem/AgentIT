@@ -61,6 +61,9 @@
   </tbody>
 </table>
 {% else %}
-<p class="text-muted mt-2">No agents registered yet. Run an onboarding to populate the registry.</p>
+<div class="empty-state">
+  <h3>No Agents Registered</h3>
+  <p class="text-muted">No agents registered yet.</p>
+</div>
 {% endif %}
 {% endblock %}

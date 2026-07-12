@@ -32,6 +32,10 @@
     <div class="stat-value {% if critical_total > 0 %}text-danger{% else %}text-success{% endif %}" title="Total critical findings across all managed apps">{{ critical_total }}</div>
   </div>
 </div>
+<div class="action-bar">
+  <a href="/fleet/slos" class="btn btn-sm btn-outline">Fleet SLOs</a>
+  <a href="/fleet/remediations" class="btn btn-sm btn-outline">Fleet Remediations</a>
+</div>
 {% endif %}
 
 {% if fleet %}

@@ -508,6 +508,35 @@ class AssessmentStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def retry_dlq_message(self, event_id: str) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE events SET action = 'dlq-retry' WHERE id = ? AND action = 'dead-letter'",
+            (event_id,),
+        )
+        self._conn.commit()
+        if cursor.rowcount > 0:
+            self.log_event(
+                'portal', 'dlq-retry', None, 'info',
+                f'Retried dead-letter event {event_id}',
+            )
+            return True
+        return False
+
+    def dismiss_dlq_message(self, event_id: str) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE events SET action = 'dlq-dismissed' WHERE id = ? AND action = 'dead-letter'",
+            (event_id,),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def dismiss_all_dlq(self) -> int:
+        cursor = self._conn.execute(
+            "UPDATE events SET action = 'dlq-dismissed' WHERE action = 'dead-letter'",
+        )
+        self._conn.commit()
+        return cursor.rowcount
+
     def list_remediations_by_agent(self, agent_name: str) -> list[dict]:
         rows = self._conn.execute(
             "SELECT * FROM remediations WHERE agent_name = ? ORDER BY created_at DESC",

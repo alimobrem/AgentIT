@@ -49,8 +49,15 @@
       </div>
     </form>
 
-    <form method="POST" action="/gates/{{ gate.id }}/cancel">
-      <button type="submit" class="btn btn-outline btn-sm">Dismiss</button>
+    <form method="POST" action="/gates/{{ gate.id }}/cancel" class="inline-form"
+          x-data x-ref="dismissGate{{ gate.id }}">
+      <button type="button" class="btn btn-outline btn-sm"
+        @click="$dispatch('show-confirm', {
+          title: 'Dismiss Gate',
+          message: 'Dismiss this gate? The pending action will be cancelled.',
+          form: $refs.dismissGate{{ gate.id }},
+          opts: { confirmText: 'Dismiss', danger: true }
+        })">Dismiss</button>
     </form>
   </div>
 </div>
