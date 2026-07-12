@@ -210,6 +210,18 @@ class AssessmentStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS skill_effectiveness (
+                skill_name TEXT NOT NULL,
+                app_name TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                reason TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (skill_name, app_name, created_at)
+            )
+            """
+        )
         self._conn.commit()
 
     # ── Settings ───────────────────────────────────────────────────────
@@ -1144,12 +1156,49 @@ class AssessmentStore:
         ).fetchall()
         return [dict(r) for r in reversed(rows)]
 
+    # ── Skill Effectiveness ──────────────────────────────────────────
+
+    def record_skill_outcome(self, skill_name: str, app_name: str, outcome: str, reason: str = '') -> None:
+        self._conn.execute(
+            'INSERT INTO skill_effectiveness (skill_name, app_name, outcome, reason, created_at) VALUES (?, ?, ?, ?, ?)',
+            (skill_name, app_name, outcome, reason, datetime.now(timezone.utc).isoformat()),
+        )
+        self._conn.commit()
+
+    def get_skill_effectiveness(self, skill_name: str = '', min_count: int = 5) -> dict:
+        if skill_name:
+            rows = self._conn.execute(
+                'SELECT skill_name, outcome, COUNT(*) as cnt FROM skill_effectiveness WHERE skill_name = ? GROUP BY skill_name, outcome',
+                (skill_name,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                'SELECT skill_name, outcome, COUNT(*) as cnt FROM skill_effectiveness GROUP BY skill_name, outcome',
+            ).fetchall()
+        stats: dict[str, dict] = {}
+        for r in rows:
+            name = r['skill_name']
+            if name not in stats:
+                stats[name] = {'approved': 0, 'rejected': 0, 'total': 0}
+            stats[name][r['outcome']] = r['cnt']
+            stats[name]['total'] += r['cnt']
+        return {k: v for k, v in stats.items() if v['total'] >= min_count}
+
+    def get_low_effectiveness_skills(self, min_count: int = 5, max_rate: float = 0.3) -> list[dict]:
+        stats = self.get_skill_effectiveness(min_count=min_count)
+        low: list[dict] = []
+        for name, s in stats.items():
+            rate = s['approved'] / s['total'] if s['total'] > 0 else 0
+            if rate < max_rate:
+                low.append({'skill': name, 'approval_rate': round(rate, 2), 'total': s['total']})
+        return low
+
     def export_all(self) -> dict:
         """Export all tables as JSON for disaster recovery."""
         tables = ["assessments", "onboarding_results", "events", "gates",
                   "remediations", "agent_registry", "slos", "apply_results",
                   "settings", "remediation_jobs", "scheduled_operations",
-                  "processed_webhooks", "agent_feedback"]
+                  "processed_webhooks", "agent_feedback", "skill_effectiveness"]
         result = {}
         for table in tables:
             try:

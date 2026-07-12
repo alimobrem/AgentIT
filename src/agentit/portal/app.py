@@ -281,10 +281,12 @@ async def insights_page(request: Request) -> HTMLResponse:
     fleet_insights = s.get_fleet_insights()
     agent_stats = s.get_agent_stats()
     feedback = s.get_feedback_for_app("") if hasattr(s, 'get_feedback_for_app') else []
+    low_skills = s.get_low_effectiveness_skills() if hasattr(s, 'get_low_effectiveness_skills') else []
     return templates.TemplateResponse(request, "insights.html", {
         "insights": fleet_insights,
         "agent_stats": agent_stats,
         "recent_feedback": feedback[:10],
+        "low_skills": low_skills,
     })
 
 
@@ -376,6 +378,15 @@ async def assess_submit(
             from agentit.portal.metrics import assessments_total as _at
             _at.labels(criticality=criticality, status="success").inc()
             assessment_id = s.save(report)
+            # Publish event on first assessment for this repo
+            history = s.list_history(report.repo_url)
+            if len(history) <= 1:
+                _publish_event(
+                    'first-assessment', report.repo_name,
+                    f'First assessment — consider running: agentit learn-for {report.repo_url}',
+                    {'assessment_id': assessment_id, 'score': report.overall_score},
+                    correlation_id=assessment_id,
+                )
             s.update_assessment_job(job_id, "completed", "Assessment complete", assessment_id=assessment_id)
         except Exception as exc:
             log.exception("Assessment failed for %s", repo_url)

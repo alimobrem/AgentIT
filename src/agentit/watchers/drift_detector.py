@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 
 import click
 
@@ -78,6 +79,27 @@ class DriftDetector:
                         summary=f"API removed from cluster: {removed}",
                     )
                 click.echo(f"[drift-detect] CRITICAL: {len(api_drift.removed_apis)} API(s) removed from cluster", err=True)
+
+                # Auto-deprecate skills that generate removed API kinds
+                try:
+                    from agentit.skill_engine import load_skill
+                    skills_dir = Path(__file__).parent.parent.parent.parent / 'skills'
+                    if skills_dir.exists():
+                        for md_file in skills_dir.rglob('*.md'):
+                            skill = load_skill(md_file)
+                            if skill and skill.status == 'active':
+                                for output in skill.outputs:
+                                    if output.lower() in [r.lower() for r in api_drift.removed_apis]:
+                                        content = md_file.read_text(encoding='utf-8')
+                                        if 'status: active' in content:
+                                            updated = content.replace('status: active', 'status: deprecated', 1)
+                                            updated = updated.replace('deprecated_reason: ""', f'deprecated_reason: "API {output} removed from cluster"', 1)
+                                            md_file.write_text(updated, encoding='utf-8')
+                                            self._publisher.publish('agentit-events', agent_id='drift-detector', action='skill-deprecated', target_app='cluster', severity='warning', summary=f'Auto-deprecated skill {skill.name}: {output} API removed')
+                                            click.echo(f'[drift-detect] Auto-deprecated skill {skill.name}: {output} removed', err=True)
+                except Exception as exc:
+                    logger.debug('Skill deprecation failed: %s', exc)
+
             if api_drift.has_warnings:
                 click.echo(f"[drift-detect] WARNING: {len(api_drift.deprecated_apis)} deprecated API(s)", err=True)
             if api_drift.new_apis:

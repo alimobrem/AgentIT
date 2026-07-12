@@ -72,6 +72,23 @@
 </div>
 {% endif %}
 
+{% if low_skills %}
+<h2>Skills Needing Review</h2>
+<p class="text-muted">Skills with approval rate below 30% after 5+ generations. Consider updating or deprecating.</p>
+<table>
+  <thead><tr><th>Skill</th><th>Approval Rate</th><th>Total Runs</th></tr></thead>
+  <tbody>
+  {% for ls in low_skills %}
+  <tr>
+    <td>{{ ls.skill }}</td>
+    <td class="text-danger">{{ (ls.approval_rate * 100)|round }}%</td>
+    <td>{{ ls.total }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 {% if insights.total_feedback > 0 %}
 <h2>Learning from You</h2>
 <p class="text-muted">The system learns from your decisions. {{ insights.total_feedback }} feedback events recorded, {{ insights.total_rejections }} rejections.</p>

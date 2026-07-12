@@ -619,6 +619,20 @@ def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bool) ->
 
             click.echo(f"\n  Approved: {len(approved_files)}, Rejected: {len(rejected)}", err=True)
 
+            import os
+            db_path = os.environ.get('AGENTIT_DB_PATH')
+            if db_path:
+                eff_store = AssessmentStore(db_path)
+                for finding, fix_file in generated:
+                    outcome = 'approved' if fix_file in approved_files else 'rejected'
+                    skill_name = fix_file.path.replace('.yaml', '')
+                    if fix_file.description and "'" in fix_file.description:
+                        parts = fix_file.description.split("'")
+                        if len(parts) >= 2:
+                            skill_name = parts[1]
+                    eff_store.record_skill_outcome(skill_name, report.repo_name, outcome)
+                click.echo(f'  Effectiveness recorded to {db_path}', err=True)
+
             if not approved_files:
                 click.echo("\nNo fixes approved by LLM.", err=True)
                 return
@@ -688,6 +702,7 @@ def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bool) ->
 def learn(source: str, topic: str | None, limit: int, dry_run: bool, llm_model: str | None) -> None:
     """Research CVEs or best practices via LLM and generate new skills."""
     from agentit.learning_agent import (
+        check_skill_exists,
         generate_skill_from_research,
         research_best_practices,
         research_cves,
@@ -729,6 +744,10 @@ def learn(source: str, topic: str | None, limit: int, dry_run: bool, llm_model: 
 
     for i, item in enumerate(items, 1):
         click.echo(f"\n[{i}/{len(items)}] Generating skill...", err=True)
+        item_name = item.get("title") or item.get("id") or item.get("name", "")
+        if item_name and check_skill_exists(skills_dir, item_name, domain):
+            click.echo(f"  Skipped (duplicate): {item_name}", err=True)
+            continue
         content = generate_skill_from_research(llm_client, item, domain=domain)
         if not content:
             click.echo("  Failed to generate skill content.", err=True)
@@ -838,7 +857,7 @@ def learn_for(repo_url: str, criticality: str, limit: int, dry_run: bool) -> Non
     3. Generates skills tailored to the app's technology choices
     """
     from agentit.learning_agent import (
-        research_for_app, generate_skill_from_research, save_skill,
+        check_skill_exists, research_for_app, generate_skill_from_research, save_skill,
     )
 
     try:
@@ -884,6 +903,10 @@ def learn_for(repo_url: str, criticality: str, limit: int, dry_run: bool) -> Non
                 click.echo(f"\n  [{priority.upper()}] {title}", err=True)
                 click.echo(f"    {item.get('description', '')[:100]}", err=True)
 
+                if check_skill_exists(skills_dir, title, category):
+                    click.echo(f"    Skipped (duplicate): {title}", err=True)
+                    continue
+
                 content = generate_skill_from_research(llm, item, domain=category)
                 if not content:
                     click.echo(f"    Failed to generate skill.", err=True)
@@ -904,3 +927,17 @@ def learn_for(repo_url: str, criticality: str, limit: int, dry_run: bool) -> Non
     except CloneError as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
+
+
+@main.command("activate-skill")
+@click.argument("skill_path", type=click.Path(exists=True))
+def activate_skill(skill_path: str) -> None:
+    """Activate a draft skill after testing."""
+    path = Path(skill_path)
+    content = path.read_text(encoding="utf-8")
+    if "status: draft" not in content:
+        click.echo("Skill is not in draft status.", err=True)
+        return
+    updated = content.replace("status: draft", "status: active", 1)
+    path.write_text(updated, encoding="utf-8")
+    click.echo(f"Activated: {skill_path}", err=True)

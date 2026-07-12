@@ -151,7 +151,7 @@ def generate_skill_from_research(
         "A skill is a Markdown file with YAML frontmatter and a body. "
         "The frontmatter must have: name, domain, version (int), triggers (list of keywords), "
         "outputs (list of Kubernetes resource kinds), property (one sentence), mode (llm or template), "
-        "status (active), source (learned), created_at (ISO date). "
+        "status (draft), source (learning-agent), created_at (ISO date). "
         "The body must have sections: Property, Key decisions for the LLM, Constraints, Verification. "
         "Output the complete Markdown file content. No extra fences around the whole output."
     )
@@ -166,6 +166,27 @@ def generate_skill_from_research(
         logger.warning("LLM returned no skill content")
         return ""
     return raw.strip()
+
+
+def check_skill_exists(skills_dir: Path, name: str, domain: str) -> bool:
+    """Check if a skill with a similar name already exists in the domain directory."""
+    safe_name = re.sub(r"[^a-z0-9-]", "-", name.lower()).strip("-")
+    target = skills_dir / domain / f"{safe_name}.md"
+    if target.exists():
+        return True
+    # Also check for similar names
+    domain_dir = skills_dir / domain
+    if domain_dir.exists():
+        for existing in domain_dir.glob("*.md"):
+            existing_name = existing.stem.lower()
+            # Fuzzy match: if >60% of words overlap
+            new_words = set(safe_name.split("-"))
+            old_words = set(existing_name.split("-"))
+            if new_words and old_words:
+                overlap = len(new_words & old_words) / max(len(new_words), len(old_words))
+                if overlap > 0.6:
+                    return True
+    return False
 
 
 def save_skill(content: str, skills_dir: Path, domain: str = "security", name: str = "") -> Path | None:
