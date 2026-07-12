@@ -1,0 +1,8 @@
+name: ci-pipeline-exists
+dimension: cicd
+severity: high
+category: pipeline
+type: file_exists
+pattern: ".gitlab-ci.yml"
+description: No GitLab CI pipeline configuration found
+recommendation: Create .gitlab-ci.yml or Tekton Pipeline for build/test/scan/deploy

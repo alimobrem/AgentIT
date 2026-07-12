@@ -1,0 +1,8 @@
+name: dockerfile-exists
+dimension: cicd
+severity: high
+category: container
+type: file_exists
+pattern: "Dockerfile*"
+description: No Dockerfile found for container builds
+recommendation: Create multi-stage Dockerfile with UBI base image

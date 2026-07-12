@@ -1,0 +1,8 @@
+name: license-file-exists
+dimension: compliance
+severity: high
+category: license
+type: file_exists
+pattern: "LICENSE*"
+description: No LICENSE file found
+recommendation: Add a LICENSE file (Apache 2.0 recommended for enterprise open source)

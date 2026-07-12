@@ -1,0 +1,8 @@
+name: k8s-deployment-exists
+dimension: infrastructure
+severity: high
+category: manifests
+type: yaml_kind_exists
+pattern: Deployment
+description: No Kubernetes Deployment manifests found
+recommendation: Create deployment, service, and ingress manifests

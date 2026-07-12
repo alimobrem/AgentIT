@@ -1,0 +1,8 @@
+name: containerfile-exists
+dimension: security
+severity: medium
+category: container
+type: file_exists
+pattern: "Containerfile*"
+description: No Containerfile found for container builds
+recommendation: Create a multi-stage Containerfile using UBI base image

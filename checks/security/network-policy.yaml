@@ -1,0 +1,8 @@
+name: network-policy-exists
+dimension: security
+severity: high
+category: network
+type: yaml_kind_exists
+pattern: NetworkPolicy
+description: No NetworkPolicy manifests found
+recommendation: Add deny-all NetworkPolicy + allow rules

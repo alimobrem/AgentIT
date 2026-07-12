@@ -9,24 +9,25 @@
   <img alt="GitOps" src="https://img.shields.io/badge/deploy-Argo%20CD-orange">
 </p>
 
-<p align="center"><b>An agent fleet that assesses, hardens, and continuously operates applications on Red Hat OpenShift — turning an MVP repo into an enterprise-ready, GitOps-managed, self-healing workload.</b></p>
+<p align="center"><b>An agent-powered platform that assesses, hardens, and continuously operates applications on Red Hat OpenShift — turning an MVP repo into an enterprise-ready, self-healing workload.</b></p>
 
 ---
 
 Point AgentIT at a Git repository and it will:
 
 1. **Assess** the repo across 7 enterprise-readiness dimensions and produce a scored report.
-2. **Generate** the Kubernetes/Helm/Tekton/Argo manifests needed to close the gaps, via a fleet of specialized agents.
-3. **Onboard** the app onto the cluster through a human-gated or (optionally) fully autonomous apply pipeline.
-4. **Operate** it going forward — watching for CVEs, SLO breaches, and GitOps drift, and closing the loop by re-assessing, re-generating, and re-applying fixes.
-
-📐 **For the full system diagrams, event-driven pipeline, agent fleet reference, and deployment topology, see [`docs/architecture.md`](docs/architecture.md).**
+2. **Generate** Kubernetes/Helm/Tekton/Argo manifests to close the gaps — via property-based skills (LLM-tailored) backed by a fleet of specialized agents.
+3. **Onboard** the app onto the cluster through a human-gated or (optionally) fully autonomous apply pipeline, with an LLM safety gate that fails closed.
+4. **Operate** it going forward — watching for CVEs, SLO breaches, API drift, and GitOps drift, then closing the loop by re-assessing, re-generating, and re-applying fixes.
+5. **Learn** from outcomes — the learning agent researches CVEs and best practices, generates new skills, and deprecates ineffective ones.
 
 ## Table of Contents
 
 - [Why AgentIT](#why-agentit)
 - [Architecture, at a glance](#architecture-at-a-glance)
-- [The agent fleet, briefly](#the-agent-fleet-briefly)
+- [Skills & check engine](#skills--check-engine)
+- [The agent fleet](#the-agent-fleet)
+- [Self-improvement loop](#self-improvement-loop)
 - [Web portal](#web-portal)
 - [Getting started](#getting-started)
   - [CLI](#cli)
@@ -40,7 +41,9 @@ Point AgentIT at a Git repository and it will:
 
 ## Why AgentIT
 
-Most "enterprise readiness" work — NetworkPolicies, RBAC, SLOs, GitOps wiring, dependency scanning, chaos testing, cost tagging — is repetitive, well-understood, and rarely the reason a team built their MVP in the first place. AgentIT treats that work as something a fleet of specialized agents can plan and generate, with a human (or an LLM safety gate) approving anything destructive before it touches a live cluster.
+AI makes building software trivial — a team can go from idea to working MVP in days. But that MVP is a liability: no security posture, no observability, no compliance evidence, no CI/CD. The gap between "it works" and "it's enterprise-ready" takes 10x longer than building the app itself and requires specialized expertise most organizations can't scale.
+
+AgentIT treats that work as something a fleet of specialized agents and property-based skills can plan and generate, with a human (or an LLM safety gate) approving anything destructive before it touches a live cluster.
 
 It is built to run **on** OpenShift, **for** OpenShift: Argo CD for GitOps, Argo Rollouts for canary delivery, Tekton for CI, Argo Events + Kafka for the event-driven loop, and OLM Subscriptions for any operator dependencies the generated manifests need.
 
@@ -48,34 +51,121 @@ It is built to run **on** OpenShift, **for** OpenShift: Argo CD for GitOps, Argo
 
 ```mermaid
 flowchart LR
-    A["Git repo"] --> B["Assess\n7 dimensions, scored"]
-    B --> C["FleetOrchestrator\nselects agents"]
-    C --> D["Agent fleet\ngenerates manifests"]
-    D --> E{"Auto-approve?"}
-    E -->|"yes"| F["Apply to cluster"]
-    E -->|"no"| G["Human-approval gate"]
+    A["Git repo"] --> B["Assess\n7 dimensions + data-driven checks"]
+    B --> C["Skill Engine\nmatches property-based skills"]
+    C --> D["LLM generates\ntailored manifests"]
+    D --> E{"LLM safety gate\n(first approver)"}
+    E -->|"safe + confident"| F["Apply to cluster"]
+    E -->|"destructive or unsure"| G["Human gate\n(second approver)"]
     G --> F
-    F --> H["Watchers\nCVE / SLO / drift"]
-    H -.->|"re-trigger on issue"| B
+    F --> H["Watchers\nCVE / SLO / API drift"]
+    H -.->|"re-trigger"| B
+    B -.->|"first assessment"| I["Learning agent\nresearch stack-specific gaps"]
+    I -.->|"new skills"| C
 ```
 
-That's the loop end-to-end. The real system has more moving parts — an event-driven path via Kafka + Argo Events, an LLM safety gate that fails closed, canary delivery via Argo Rollouts, and a dedicated orchestrator conflict-resolution step. **All of it is diagrammed in detail in [`docs/architecture.md`](docs/architecture.md).**
+The real system has more moving parts — an event-driven path via Kafka + Argo Events, platform context discovery, canary delivery via Argo Rollouts, and conflict resolution. **See [`docs/architecture.md`](docs/architecture.md) for full diagrams.**
 
-## The agent fleet, briefly
+## Skills & check engine
 
-10 one-shot onboarding agents (security hardening, observability, CI/CD, compliance, release coordination, dependency risk, incident response, cost optimization, chaos testing, retirement/decommission, plus an LLM-driven code-change agent) and 3 long-lived watchers (vuln-watcher, slo-tracker, drift-detector). Every agent shares one contract — `Agent(report, output_dir).run() -> Result` — and a `FleetOrchestrator` decides which ones run per assessment and resolves overlaps.
+AgentIT uses two complementary systems for assessment and remediation:
 
-→ Full agent-by-agent breakdown of what each one generates: [`docs/architecture.md#the-agent-fleet`](docs/architecture.md#the-agent-fleet).
+### Property-based skills (40 skills across 11 domains)
+
+Skills are Markdown files with YAML frontmatter that define **what must be true** (properties), not how to generate manifests. The skill engine matches skills to assessment findings; the LLM generates tailored fixes using the skill's constraints and the app's platform context.
+
+```
+skills/
+├── security/       # network-policy, rbac, containerfile, security-context, resource-limits, image-scan-task
+├── observability/   # service-monitor, grafana-dashboard, alerting-rules, otel-collector
+├── cicd/            # tekton-pipeline, argocd-application, argo-rollout
+├── compliance/      # kyverno-policies, audit-policy, sbom-task, compliance-evidence, image-registry-policy, compliance-cronjob
+├── infrastructure/  # hpa, pdb, resourcequota, limitrange, namespace
+├── cost/            # vpa, cost-labels, cost-cronjob
+├── dependency/      # renovate-config, dependabot-config, dependency-cronjob
+├── incident/        # runbook, pagerduty-config, alertmanager-config
+├── release/         # analysis-template, rollout-patch, rollback-policy, release-runbook
+├── retirement/      # decommission-plan, cleanup-task, data-archive-job
+└── custom/          # learning-agent-generated skills
+```
+
+Skills have lifecycle management: `draft` → `active` → `deprecated` → `retired`. The API drift detector auto-deprecates skills when their target APIs are removed from the cluster. Low-effectiveness skills (< 30% human approval rate) are flagged for review.
+
+### Data-driven checks (20 checks across 7 dimensions)
+
+YAML check files in `checks/` define declarative rules that supplement the Python analyzers. Check types: `file_exists`, `file_contains`, `file_missing`, `yaml_kind_exists`, `yaml_kind_missing`. The learning agent can create new checks without touching Python code.
+
+```
+checks/
+├── security/         # containerfile, network-policy, secrets-scanning
+├── observability/    # health-check, metrics-endpoint, structured-logging
+├── cicd/             # ci-pipeline, dockerfile, gitops
+├── compliance/       # admission-policies, license, sbom
+├── infrastructure/   # helm-chart, k8s-manifests, resource-quota
+├── ha_dr/            # hpa, pdb, replicas
+└── data_governance/  # backup-config, retention-policy
+```
+
+## The agent fleet
+
+11 one-shot onboarding agents and 3 long-lived watchers. Skills run **first** as the primary generation path; Python agents supplement for findings that no skill covers.
+
+| Agent | Category | Always runs? | Generates |
+|---|---|---|---|
+| **HardeningAgent** | `security` | Yes | NetworkPolicy, Containerfile, RBAC, SecurityContext |
+| **ObservabilityAgent** | `observability` | Yes | ServiceMonitor, Grafana dashboard, alerting rules, OTel config |
+| **CICDAgent** | `cicd` | Yes | Tekton Pipeline, Argo CD Application, Argo Rollout |
+| **ComplianceAgent** | `compliance` | Yes | Kyverno policies, SBOM task, compliance evidence |
+| **InfrastructureAgent** | `infrastructure` | Yes | HPA, PDB, ResourceQuota, LimitRange, Namespace |
+| **ReleaseCoordinatorAgent** | `release` | Yes | AnalysisTemplate, rollout patch, rollback policy |
+| **DependencyAgent** | `dependency` | high/critical | Dependency report, Renovate config, CVE-scan CronWorkflow |
+| **IncidentAgent** | `incident` | high/critical | Incident runbook, PagerDuty config, Alertmanager routing |
+| **CostOptimizationAgent** | `cost` | high/critical | Cost report, right-sizing, cost labels |
+| **ChaosAgent** | `chaos` | not critical | LitmusChaos experiments |
+| **RetirementAgent** | `retirement` | score < 30 | Decommission plan, cleanup, data archive |
+
+Long-lived watchers (deployed as separate pods):
+
+| Watcher | Loop | Role |
+|---|---|---|
+| **vuln-watcher** | 6h | Fleet CVE monitoring, triggers remediation |
+| **slo-tracker** | 5m | SLO polling, breach alerts, rollback gates |
+| **drift-detector** | 10m | Argo CD sync monitoring, API drift detection, auto-deprecation of affected skills |
+
+## Self-improvement loop
+
+AgentIT improves itself through three tiers of learning:
+
+1. **Feedback loop** — tracks human decisions (approve/reject/modify) on generated fixes. Skills with < 30% approval rate are flagged for review. Agents query the feedback store before generating to avoid repeating rejected patterns.
+
+2. **Learning agent** — triggered on first assessment of a new app. Researches CVEs and best practices specific to the app's detected stack (languages, frameworks, databases). Generates draft skills and checks that go through human review before activation.
+
+3. **Platform awareness** — `PlatformContext` discovers the cluster's K8s version, available APIs, CRDs, and operators. Every skill generation includes this context. The API drift detector snapshots the cluster API surface and auto-deprecates skills when APIs are removed.
 
 ## Web portal
 
-`agentit portal` launches a FastAPI + Jinja2 app (no frontend framework — server-rendered HTML, styling centralized in `base.html`, no inline styles). Key pages: **Fleet** (dashboard), **Assess**, **Assessment detail**, **Onboarding**, **Gates** (human approvals), **Events**, **Agents**, **Schedules** (watcher status), **Health** (Rollout/pod/pipeline status), **SLOs**, **Remediations**, **Settings** (auto-mode toggle).
+`agentit portal` launches a FastAPI + Jinja2 app (htmx + Alpine.js for interactivity, no frontend framework). 56+ routes.
+
+Key pages:
+
+| Page | Purpose |
+|---|---|
+| **Fleet** | Dashboard of all managed apps with scores and lifecycle stage |
+| **Assessment Detail** | 7-dimension scores, lifecycle stepper, score trend, timeline, remediation items |
+| **Gates** | Human approval queue with LLM reasoning, confirm/reject with reason |
+| **Insights** | Fleet stats, agent performance, low-effectiveness skills, learning feedback |
+| **Events** | Activity feed with DLQ for failed events |
+| **Agents** | Agent registry with capabilities and performance stats |
+| **Health** | Rollout/pod/pipeline status |
+| **SLOs** | SLO definitions and error budgets |
+| **Schedules** | Watcher agent status |
+| **Settings** | Auto-mode toggle, configuration |
 
 Webhook endpoints power the event-driven loop: `/api/webhook/assess`, `/api/webhook/github-push`, `/api/webhook/onboard`, `/api/webhook/auto-apply`, `/api/webhook/remediate`.
 
 ## Getting started
 
-Requires **Python ≥ 3.12**. Uses [`uv`](https://docs.astral.sh/uv/) for dependency management (a `pyproject.toml` + `uv.lock` are provided; plain `pip install -e ".[dev]"` also works).
+Requires **Python >= 3.12**. Uses [`uv`](https://docs.astral.sh/uv/) for dependency management (a `pyproject.toml` + `uv.lock` are provided; plain `pip install -e ".[dev]"` also works).
 
 ```bash
 git clone https://github.com/alimobrem/AgentIT.git
@@ -89,23 +179,40 @@ uv sync --extra dev
 # Score a repo across all 7 dimensions
 uv run agentit assess https://github.com/some-org/some-app --format terminal
 
-# Generate hardening manifests only
+# Generate hardening manifests
 uv run agentit harden https://github.com/some-org/some-app --output-dir ./out
 
-# Full pipeline: assess → plan → run every applicable agent → validate → summarize
+# Full pipeline: assess + plan + run agents + skills + validate + summarize
 uv run agentit orchestrate https://github.com/some-org/some-app --output-dir ./out
 
-# assess + orchestrate + write assessment.json, in one command
+# assess + orchestrate + write assessment.json
 uv run agentit onboard https://github.com/some-org/some-app --output-dir ./out
 
-# Continuously re-assess on an interval, optionally POST results to a webhook
+# Continuously re-assess on an interval
 uv run agentit watch https://github.com/some-org/some-app --interval 3600
 
 # Dogfood: assess AgentIT's own repo
 uv run agentit self-assess
+
+# Self-fix loop: assess → skill engine generates → LLM reviews → verify → PR
+uv run agentit self-fix . --create-pr
+
+# Learn new skills from CVE/best-practice research
+uv run agentit learn --source cves --limit 5
+
+# Targeted learning from an app's specific stack
+uv run agentit learn-for https://github.com/some-org/some-app
+
+# Test a skill loads, matches, and generates valid output
+uv run agentit test-skill skills/security/network-policy.md
+
+# Promote a draft skill to active
+uv run agentit activate-skill skills/custom/new-skill.md
 ```
 
-Add `--llm` to enable Claude-backed secret classification and architecture summaries (auto-detected if `ANTHROPIC_API_KEY` or `ANTHROPIC_VERTEX_PROJECT_ID` is set).
+Add `--llm` to enable Claude-backed reasoning (auto-detected if `ANTHROPIC_API_KEY` or `ANTHROPIC_VERTEX_PROJECT_ID` is set).
+
+Agent containerization: agents can run as K8s Jobs with `--profile lightweight|standard|full` and `--agents` filter. Set `AGENT_MODE=kubernetes` to dispatch agents as Jobs instead of local threads.
 
 ### Portal (local)
 
@@ -127,26 +234,30 @@ All configuration is via environment variables (no config file). Nothing here be
 |---|---|---|
 | `ANTHROPIC_API_KEY` | `llm.py` | Direct Anthropic API auth (alternative to Vertex) |
 | `ANTHROPIC_VERTEX_PROJECT_ID` + `CLOUD_ML_REGION` | `llm.py` | Use Claude via Vertex AI instead of the direct API |
+| `AGENTIT_LLM_MODEL` | `llm.py` | Override LLM model (default from env) |
 | `GITHUB_TOKEN` | `portal/github_pr.py` | Required for PR creation, infra-repo management, webhook registration |
 | `AGENTIT_DB_PATH` | `portal/store.py` | SQLite file path (default `agentit.db`) |
 | `AGENTIT_KAFKA_BOOTSTRAP` | `events.py`, `consumer.py` | Kafka bootstrap servers; publisher/consumer no-op gracefully if unset |
 | `AGENTIT_AUTO_MODE` | `automode.py` | `1`/`true`/`on` to enable autonomous apply (also togglable at runtime via `/settings`) |
 | `AGENTIT_PORTAL_URL` | `remediation_loop.py` | Base URL the remediation loop calls back into (default `http://localhost:8080`) |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Vertex SDK | Path to mounted GCP credentials JSON (set automatically by the chart when `gcp.credentialsSecret` is configured) |
+| `AGENT_MODE` | `orchestrator.py` | `local` (default) or `kubernetes` — run agents as K8s Jobs |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Vertex SDK | Path to mounted GCP credentials JSON |
 
 </details>
 
 ## Deploying to OpenShift
 
-AgentIT deploys itself the same way it onboards other apps — via the Helm chart in `chart/` and the Argo CD `Application` in `argocd/application.yaml`. **Argo CD is the sole deployer**; see [`docs/deployment.md`](docs/deployment.md) for the full operational runbook (how to change config, rotate secrets, and troubleshoot Rollouts/Argo CD conflicts). In short:
+AgentIT deploys itself the same way it onboards other apps — via the Helm chart in `chart/` and the Argo CD `Application` in `argocd/application.yaml`. **Argo CD is the sole deployer**; see [`docs/deployment.md`](docs/deployment.md) for the full operational runbook.
 
-- Change behavior → edit `argocd/application.yaml` Helm parameters → commit → push → Argo CD auto-syncs.
-- Change a secret → `oc create secret` on-cluster, then reference it via a Helm parameter. Never in Git.
-- Never `helm upgrade` manually or `oc edit` the `Rollout` — both conflict with Argo CD / Rollouts controller ownership.
+- Change behavior: edit `argocd/application.yaml` Helm parameters, commit, push. Argo CD auto-syncs.
+- Change a secret: `oc create secret` on-cluster, then reference it via a Helm parameter. Never in Git.
+- Never `helm upgrade` manually or `oc edit` the `Rollout`.
 
 Key `chart/values.yaml` feature flags: `rollout.enabled` (canary via Argo Rollouts), `kafka.enabled` / `argoEvents.enabled` (event-driven loop), `tektonCI.enabled` (build pipeline), `cronJobs.cveScan.enabled`, and `agents.{vulnWatcher,sloTracker,driftDetector}.enabled`.
 
-→ See the full deployment topology diagram: [`docs/architecture.md#deployment-topology-openshift`](docs/architecture.md#deployment-topology-openshift).
+The chart includes: NetworkPolicy, ResourceQuota, LimitRange, PodDisruptionBudget, anti-affinity, backup CronJob, dedicated ServiceAccount (not `default`), and a self-assess step in the CI pipeline.
+
+See the full deployment topology diagram: [`docs/architecture.md#deployment-topology-openshift`](docs/architecture.md#deployment-topology-openshift).
 
 ## Testing
 
@@ -154,15 +265,35 @@ Key `chart/values.yaml` feature flags: `rollout.enabled` (canary via Argo Rollou
 uv run pytest -q
 ```
 
-502 tests, covering analyzers, agents, the orchestrator's conflict/gate logic, the portal routes, the SQLite store, cluster-apply pre-flight logic, and Helm template rendering. A small set of `real_repo`-marked tests that clone live GitHub repos are skipped by default (enable with `--run-real-repos`).
+787 tests across 65 test files:
+
+| Suite | Tests | What it covers |
+|---|---|---|
+| Unit tests | ~600 | Analyzers, agents, orchestrator conflict/gate logic, portal routes, SQLite store, Helm templates |
+| LLM evals | 17 | Safety classification, fix review quality, generation correctness, learning agent, architecture summary |
+| Browser tests | 49 | Playwright end-to-end tests for all portal pages |
+| Performance tests | 22 | Response time assertions on portal endpoints |
+| API contract tests | 14 | JSON response shape validation |
+| Template rendering | 16 | HTML rendering correctness |
+| Webhook security | 9 | Auth, SSRF, replay protection |
+| Fleet tests | 5 | Multi-app fleet operations |
+| Containerization | 22 | K8s Job agent dispatch |
+| Futureproof | 16 | Platform context, skill lifecycle, API drift |
+| Durability | 12 | Circuit breaker, TTL cache, error recovery |
+| Check engine | ~15 | Data-driven check loading, each check type, integration |
+| Skill validation | ~15 | All 40 skills load, valid frontmatter, generate valid YAML |
+
+Additional test markers: `--run-real-repos` (clone live GitHub repos), `--live-cluster` (e2e against OpenShift), `--browser-tests` (Playwright), `--run-llm-evals` (requires API key).
 
 ## Security notes
 
-- **No authentication is currently implemented in the portal.** Every route — including ones that apply manifests to a live cluster or delete records — is unauthenticated. Run this behind a trusted network boundary (e.g., an OpenShift `Route` restricted to your cluster's ingress rules or an authenticating proxy) until portal auth is added.
-- **GitHub webhooks are not signature-verified.** `/api/webhook/github-push` does not check `X-Hub-Signature-256`; treat the webhook endpoint as trusted-network-only, or add HMAC verification before exposing it publicly.
-- **Secrets never belong in Git.** This repo is public — see [Configuration](#configuration) and `docs/deployment.md`. `scripts/pre-commit-secrets-check.sh` provides an optional local pre-commit hook that blocks common secret patterns (AWS keys, private keys, GitHub/GitLab tokens, `sk-` API keys) from being committed.
-- **Destructive actions are LLM-gated and fail closed.** `automode.py` will only auto-apply when the orchestrator approves *and* an LLM classifies the change as non-destructive with ≥ 0.8 confidence; if the LLM is unavailable, unconfident, or flags a risk, the change is gated for human review instead.
-- **Manifests are validated before being trusted.** `agents/base.py::validate_manifest()` checks every generated YAML file has the required Kubernetes fields, and `cluster_apply.py` runs a `--dry-run=client` pass before any real apply, skips cluster-scoped kinds (needs `cluster-admin`), and skips CRDs that aren't installed on the target cluster (surfacing the missing operator instead of failing silently).
+- **No authentication is currently implemented in the portal.** Every route is unauthenticated. Run behind a trusted network boundary until portal auth is added (Keycloak integration planned).
+- **GitHub webhooks are not signature-verified.** Treat the webhook endpoint as trusted-network-only, or add HMAC verification before exposing publicly.
+- **Secrets never belong in Git.** See [Configuration](#configuration) and `docs/deployment.md`.
+- **Destructive actions are LLM-gated and fail closed.** `automode.py` only auto-applies when the orchestrator approves *and* the LLM classifies the change as non-destructive with >= 0.8 confidence; if the LLM is unavailable, unconfident, or flags a risk, the change is gated for human review.
+- **Manifests are validated before being trusted.** `agents/base.py::validate_manifest()` checks every generated YAML, and `cluster_apply.py` runs a `--dry-run=client` pass before any real apply.
+- **SSRF prevention.** `cloner.py` rejects private IPs, localhost, and internal DNS suffixes. `portal/helpers.py::safe_url()` rejects protocol-relative URLs.
+- **Circuit breakers.** LLM and Kubernetes API clients use circuit breakers (`CircuitBreaker` in `portal/helpers.py`) to prevent cascading failures.
 
 ## Repository layout
 
@@ -171,35 +302,55 @@ uv run pytest -q
 
 ```
 AgentIT/
-├── src/agentit/
-│   ├── cli.py                 # click CLI: assess, harden, onboard, orchestrate,
-│   │                          #   watch, portal, vuln-watch, slo-track, drift-detect, self-assess
-│   ├── runner.py               # run_assessment(): stack detection + analyzers → AssessmentReport
-│   ├── cloner.py                # shallow git clone helper
-│   ├── reporter.py              # JSON / terminal report rendering
-│   ├── models.py                # Pydantic models: Finding, DimensionScore, AssessmentReport, ...
-│   ├── llm.py                    # Claude client (Anthropic direct or Vertex AI), fail-open design
-│   ├── automode.py               # LLM-gated auto-apply decision engine (fail-closed)
-│   ├── remediation_loop.py       # detect → assess → onboard → apply → verify pipeline
-│   ├── events.py / consumer.py   # Kafka publisher / consumer (no-op if Kafka unavailable)
-│   ├── image_builder.py          # Tekton-driven image build (auto-generates Dockerfile if missing)
-│   ├── analyzers/                # 7 read-only analyzers + stack_detector + shared base utilities
-│   ├── agents/                   # 10 manifest/code-generating agents + orchestrator + shared base
+├── src/agentit/                    # ~21K lines across 71 Python files
+│   ├── cli.py                      # click CLI: 15+ commands (assess, harden, onboard, orchestrate,
+│   │                               #   watch, portal, self-assess, self-fix, learn, learn-for,
+│   │                               #   test-skill, activate-skill, run-agent, vuln-watch, slo-track,
+│   │                               #   drift-detect, consume)
+│   ├── runner.py                   # run_assessment(): stack detection + analyzers + check engine
+│   ├── skill_engine.py             # Property-based skill matching, lifecycle, LLM generation
+│   ├── check_engine.py             # Data-driven YAML check loader and runner
+│   ├── learning_agent.py           # CVE/best-practice research, skill generation
+│   ├── platform_context.py         # Cluster API discovery (K8s version, CRDs, operators)
+│   ├── api_drift_detector.py       # Snapshot-based API surface comparison
+│   ├── assessment_diff.py          # Compare two reports, find new/resolved findings
+│   ├── property_verifier.py        # Verify skill properties hold after generation
+│   ├── dependency_manager.py       # Dependency lifecycle management
+│   ├── resource_tuner.py           # Resource right-sizing recommendations
+│   ├── llm.py                      # Claude client (Anthropic/Vertex), safety gate, fail-open
+│   ├── automode.py                 # LLM-gated auto-apply (fail-closed)
+│   ├── remediation_loop.py         # detect → assess → onboard → apply → verify pipeline
+│   ├── cloner.py                   # Shallow git clone with SSRF prevention
+│   ├── models.py                   # Pydantic models
+│   ├── events.py / consumer.py     # Kafka publisher/consumer (no-op if unavailable)
+│   ├── image_builder.py            # Tekton-driven image build
+│   ├── kube.py                     # K8s client with TTL cache, Job dispatch
+│   ├── analyzers/                  # 7 read-only analyzers + stack detector + shared base
+│   ├── agents/                     # 11 agents + orchestrator + capabilities registry
+│   │   ├── orchestrator.py         # FleetOrchestrator: skills-first, agents supplement
+│   │   ├── capabilities.py         # Agent registry with resource tiers
+│   │   └── base.py                 # Shared contract: Agent(report, output_dir).run()
+│   ├── watchers/                   # Long-lived watcher agents
 │   └── portal/
-│       ├── app.py                # FastAPI routes (dashboard, onboarding, gates, health, settings, webhooks)
-│       ├── store.py               # SQLite persistence (assessments, events, gates, SLOs, remediations)
-│       ├── cluster_apply.py       # oc/kubectl apply with pre-flight CRD/namespace checks, operator install
-│       ├── github_pr.py            # GitHub REST API: PR creation, infra-repo management, webhooks
-│       └── templates/              # Jinja2 templates for every portal page
-├── chart/                       # Helm chart (Deployment/Rollout, Services, Route, RBAC, PVC,
-│                                #   Tekton pipeline/trigger, Kafka + Argo Events, watcher agents)
-├── argocd/application.yaml       # Argo CD Application definition for self-deployment
+│       ├── app.py                  # FastAPI routes (56+), async assessment, lifecycle stages
+│       ├── store.py                # SQLite persistence (12+ tables: assessments, events, gates,
+│       │                           #   SLOs, remediations, skill_effectiveness, agent_feedback,
+│       │                           #   processed_webhooks)
+│       ├── helpers.py              # CircuitBreaker, clone_assess_cleanup, safe_url
+│       ├── cluster_apply.py        # oc/kubectl apply with pre-flight checks
+│       ├── github_pr.py            # GitHub REST API integration
+│       └── templates/              # 25 Jinja2 templates (htmx + Alpine.js)
+├── skills/                         # 40 property-based skill definitions (11 domains)
+├── checks/                         # 20 data-driven YAML check files (7 dimensions)
+├── chart/                          # Helm chart (30+ templates: Rollout, Services, Route, RBAC,
+│                                   #   NetworkPolicy, ResourceQuota, LimitRange, PDB, Tekton,
+│                                   #   Kafka, Argo Events, watcher agents, backup CronJob)
+├── argocd/application.yaml         # Argo CD Application for self-deployment
 ├── docs/
-│   ├── architecture.md            # System diagrams, pipeline, event loop, agent fleet reference
-│   └── deployment.md               # GitOps operational rules (Argo CD is the sole deployer)
-├── scripts/pre-commit-secrets-check.sh  # optional local pre-commit hook against committed secrets
-├── Containerfile                  # UBI9 Python 3.12 image, installs oc/kubectl, runs the portal
-└── tests/                          # pytest suite (502 tests)
+│   ├── architecture.md             # System diagrams, pipeline, event loop, agent fleet
+│   └── deployment.md               # GitOps operational rules
+├── Containerfile                   # UBI9 Python 3.12, HEALTHCHECK, non-root
+└── tests/                          # 787 tests across 65 files
 ```
 
 </details>

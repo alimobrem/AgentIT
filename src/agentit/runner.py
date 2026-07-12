@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agentit.analyzers.base import is_ignored
+from agentit.analyzers.base import is_ignored, calculate_score
 from agentit.analyzers.cicd import CICDAnalyzer
 from agentit.analyzers.compliance import ComplianceAnalyzer
 from agentit.analyzers.data_governance import DataGovernanceAnalyzer
@@ -12,6 +12,7 @@ from agentit.analyzers.infrastructure import InfrastructureAnalyzer
 from agentit.analyzers.observability import ObservabilityAnalyzer
 from agentit.analyzers.security import SecurityAnalyzer
 from agentit.analyzers.stack_detector import StackDetector
+from agentit.check_engine import load_checks, run_checks_by_dimension
 from agentit.models import (
     ArchitectureInfo, AssessmentReport, DimensionScore, RemediationItem, Severity,
 )
@@ -35,12 +36,18 @@ EFFORT_MAP = {
 }
 
 
+def _default_checks_dir() -> Path:
+    """Return the ``checks/`` directory at the project root."""
+    return Path(__file__).resolve().parent.parent.parent / "checks"
+
+
 def run_assessment(
     repo_path: Path,
     repo_url: str,
     criticality: str = "medium",
     llm_client: object | None = None,
     infra_repo_url: str | None = None,
+    checks_dir: Path | None = None,
 ) -> AssessmentReport:
     detector = StackDetector()
     stack = detector.detect(repo_path)
@@ -58,6 +65,13 @@ def run_assessment(
     ]
 
     scores = [analyzer.analyze(repo_path) for analyzer in analyzers]
+
+    # Run data-driven checks and merge findings into dimension scores
+    resolved_checks_dir = checks_dir if checks_dir is not None else _default_checks_dir()
+    check_defs = load_checks(resolved_checks_dir)
+    if check_defs:
+        scores = _merge_check_findings(scores, check_defs, repo_path)
+
     remediation_plan = generate_remediation_plan(scores)
 
     repo_name = repo_url.rstrip("/").split("/")[-1].removesuffix(".git")
@@ -83,6 +97,55 @@ def run_assessment(
         remediation_plan=remediation_plan,
         infra_repo_url=infra_repo_url or None,
     )
+
+
+def _merge_check_findings(
+    scores: list[DimensionScore],
+    check_defs: list,
+    repo_path: Path,
+) -> list[DimensionScore]:
+    """Merge data-driven check findings into existing analyzer scores.
+
+    New findings from checks supplement (don't replace) analyzer findings.
+    Findings are deduplicated by (category, description) so overlapping
+    checks don't double-count.
+    """
+    extra = run_checks_by_dimension(check_defs, repo_path)
+    if not extra:
+        return scores
+
+    score_map = {s.dimension: s for s in scores}
+
+    for dimension, findings in extra.items():
+        existing = score_map.get(dimension)
+        if existing is not None:
+            existing_keys = {
+                (f.category, f.description) for f in existing.findings
+            }
+            new_findings = [
+                f for f in findings
+                if (f.category, f.description) not in existing_keys
+            ]
+            if new_findings:
+                merged = existing.findings + new_findings
+                score_map[dimension] = DimensionScore(
+                    dimension=dimension,
+                    score=calculate_score(merged),
+                    max_score=existing.max_score,
+                    findings=merged,
+                )
+        else:
+            # Dimension from checks not covered by any analyzer
+            score_map[dimension] = DimensionScore(
+                dimension=dimension,
+                score=calculate_score(findings),
+                max_score=100,
+                findings=findings,
+            )
+
+    return [score_map[s.dimension] for s in scores] + [
+        score_map[d] for d in score_map if d not in {s.dimension for s in scores}
+    ]
 
 
 def generate_remediation_plan(scores: list[DimensionScore]) -> list[RemediationItem]:

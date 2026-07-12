@@ -1,0 +1,8 @@
+name: retention-policy-exists
+dimension: data_governance
+severity: medium
+category: retention
+type: file_contains
+pattern: retention
+description: No data retention policy detected
+recommendation: Define data retention policies for compliance (GDPR, SOC 2)

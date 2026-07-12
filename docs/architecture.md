@@ -1,12 +1,15 @@
 # Architecture
 
-This doc covers how AgentIT is put together: the system components, the assessment/onboarding pipeline, the event-driven autonomous loop, and how it deploys itself on OpenShift. For setup and usage, see the [README](../README.md).
+This doc covers how AgentIT is put together: the system components, the assessment/onboarding pipeline, the skill engine, the self-improvement loop, and how it deploys itself on OpenShift. For setup and usage, see the [README](../README.md).
 
 ## Table of Contents
 
 - [System overview](#system-overview)
-- [Assessment → onboarding pipeline](#assessment--onboarding-pipeline)
+- [Assessment pipeline](#assessment-pipeline)
+- [Skill engine & check engine](#skill-engine--check-engine)
+- [Self-improvement loop](#self-improvement-loop)
 - [Autonomous remediation loop](#autonomous-remediation-loop)
+- [Platform awareness & API drift](#platform-awareness--api-drift)
 - [Deployment topology (OpenShift)](#deployment-topology-openshift)
 - [The agent fleet](#the-agent-fleet)
 - [Assessment dimensions](#assessment-dimensions)
@@ -16,146 +19,265 @@ This doc covers how AgentIT is put together: the system components, the assessme
 ```mermaid
 graph TB
     subgraph Sources["Sources"]
-        Repo["Target Git repo\n(the app being onboarded)"]
+        Repo["Target Git repo"]
         GH["GitHub API\n(PRs, webhooks)"]
     end
 
     subgraph Core["AgentIT Core (src/agentit)"]
-        CLI["CLI\n(click)"]
-        Portal["Portal\nFastAPI + Jinja2"]
-        Cloner["cloner.py\nshallow git clone"]
+        CLI["CLI\n(click, 15+ commands)"]
+        Portal["Portal\nFastAPI + Jinja2\n56+ routes"]
+        Cloner["cloner.py\nshallow clone + SSRF prevention"]
         Runner["runner.py\nrun_assessment()"]
-        Analyzers["7 Analyzers\n(stack, security, cicd,\ninfra, compliance,\ndata-gov, ha/dr)"]
-        Orchestrator["FleetOrchestrator\nagents/orchestrator.py"]
-        Agents["Agent Fleet\n(10 specialized agents)"]
-        AutoMode["automode.py\nLLM safety gate"]
+        Analyzers["7 Analyzers\n(security, observability, cicd,\ninfra, compliance, data-gov, ha/dr)"]
+        CheckEngine["CheckEngine\n20 YAML checks"]
+        SkillEngine["SkillEngine\n40 property-based skills"]
+        Orchestrator["FleetOrchestrator\nskills-first, agents supplement"]
+        Agents["Agent Fleet\n(11 specialized agents)"]
+        AutoMode["AutoMode\nLLM safety gate (fail-closed)"]
         RemLoop["remediation_loop.py\ndetect→fix→apply→verify"]
-        LLM["llm.py\nClaude (Anthropic / Vertex)"]
-        Store[("SQLite\nportal/store.py")]
+        LLM["LLM client\nClaude (Anthropic / Vertex)\ncircuit breaker"]
+        Learning["Learning Agent\nCVE research, skill generation"]
+        Platform["PlatformContext\nK8s version, APIs, CRDs, operators"]
+        DriftDetector["API Drift Detector\nsnapshot comparison"]
+        Store[("SQLite\n12+ tables\nWAL mode")]
     end
 
     subgraph Cluster["OpenShift Cluster"]
         ArgoCD["Argo CD\n(GitOps sync)"]
-        Rollout["Argo Rollouts\n(canary Deployment)"]
-        Kafka["Kafka\n(Strimzi, topics:\nagentit-events / -alerts)"]
-        ArgoEvents["Argo Events\n(EventSource + Sensors)"]
+        Rollout["Argo Rollouts\n(canary)"]
+        Kafka["Kafka (Strimzi)\nagentit-events / alerts"]
+        ArgoEvents["Argo Events\nEventSource + Sensors"]
         Tekton["Tekton\n(build/push pipeline)"]
-        Watchers["Long-lived watcher agents\nvuln-watcher / slo-tracker\ndrift-detector"]
-        Target["Onboarded app\nDeployment/Rollout"]
+        Watchers["Watcher agents\nvuln / slo / drift"]
+        Target["Onboarded app"]
     end
 
-    Repo -->|"clone"| Cloner --> Runner --> Analyzers --> Runner
-    CLI --> Runner
-    Portal --> Runner
+    Repo -->|"clone"| Cloner --> Runner
+    Runner --> Analyzers & CheckEngine
+    Analyzers & CheckEngine --> Runner
+    CLI & Portal --> Runner
     Runner -->|"AssessmentReport"| Orchestrator
+    Orchestrator --> SkillEngine -->|"LLM-tailored"| LLM
     Orchestrator --> Agents
-    Agents -->|"generated files"| Store
-    Agents -.->|"classify secrets, summarize, classify actions"| LLM
-    Orchestrator -->|"plan + gates"| Store
+    SkillEngine -->|"platform context"| Platform
+    SkillEngine & Agents -->|"generated files"| Store
+    AutoMode -->|"classify action"| LLM
     Portal --> Store
     Portal -->|"create PR"| GH
     Portal -->|"dry-run + apply"| Cluster
     AutoMode -->|"LLM-gated apply"| Cluster
     RemLoop -->|"calls portal webhooks"| Portal
+    Learning -->|"research"| LLM
+    Learning -->|"new skills/checks"| SkillEngine & CheckEngine
+    DriftDetector -->|"auto-deprecate"| SkillEngine
+    DriftDetector -->|"snapshot"| Platform
 
     ArgoCD -->|"renders chart/"| Target
     ArgoCD --> Rollout
-    Tekton -->|"build & push image"| Target
+    Tekton -->|"build & push"| Target
     Kafka <--> ArgoEvents
-    ArgoEvents -->|"score under 70 → onboard"| Portal
-    Portal -->|"publish events"| Kafka
+    ArgoEvents -->|"score < 70 → onboard"| Portal
+    Portal -->|"events"| Kafka
     Watchers <--> Kafka
-    Watchers -->|"CVE / SLO / drift alerts"| Portal
 ```
 
-## Assessment → onboarding pipeline
+## Assessment pipeline
 
-This is what happens for a single `assess` / `onboard` run (CLI, portal form, or webhook — same code path).
+This is what happens for a single `assess` / `onboard` run (CLI, portal, or webhook — same code path).
 
 ```mermaid
 flowchart TD
-    A["Repo URL"] --> B["cloner.py: shallow clone\n(or use local path)"]
+    A["Repo URL"] --> B["cloner.py: shallow clone\n(SSRF prevention)"]
     B --> C["StackDetector\nlanguages, frameworks, DBs, runtimes"]
-    B --> D["7 Analyzers run\n(read-only, no writes)"]
-    D --> E["DimensionScore + Findings\nper dimension, 0-100"]
-    C --> F["AssessmentReport\noverall_score, criticality, summary,\nremediation_plan"]
-    E --> F
-    F -->|"optional"| G["LLM: summarize_architecture()\n2-3 sentence summary"]
+    B --> D["7 Python Analyzers\n(read-only)"]
+    B --> E["CheckEngine\n20 YAML checks"]
+    C & D & E --> F["AssessmentReport\noverall_score, criticality,\nremediation_plan"]
+    F -->|"optional"| G["LLM: summarize_architecture()"]
     G --> F
 
     F --> H["FleetOrchestrator.plan()"]
-    H --> I{"_select_agents()\nbased on criticality\n+ overall_score"}
-    I --> J["Always: security, observability,\ncicd, compliance, release"]
-    I --> K["high/critical → +dependency,\n+incident, +cost"]
-    I --> L["score under 30 → +retirement"]
-    I --> M["not critical → +chaos"]
-    I --> N["high/critical OR score under 50\n→ +codechange"]
+    H --> I{"Select agents by\ncriticality + score"}
+    I --> J["Skills run FIRST\n(property-based, LLM-tailored)"]
+    J --> K["Python agents supplement\n(uncovered findings only)"]
+    J & K --> L["validate_manifest()\non every output"]
+    L --> M["_detect_conflicts()\npriority matrix"]
+    M --> N{"_can_auto_approve()?\nnot high/critical\nno critical findings\nscore >= 70"}
+    N -->|"yes"| O["AUTO-APPROVED"]
+    N -->|"no"| P["Gates created:\nsecurity-review\ndeploy-approval\nfinal-approval"]
+    O & P --> Q["orchestration-summary.md"]
 
-    J & K & L & M & N --> O["Run each agent:\n(report, output_dir) → GeneratedFile list"]
-    O --> P["validate_manifest()\non every .yaml/.yml output"]
-    P --> Q["_detect_conflicts()\npriority matrix, e.g.\nsecurity beats cicd/observability/compliance"]
-    Q --> R{"_can_auto_approve()?\ncriticality not high/critical\nAND no critical findings\nAND score 70 or higher"}
-    R -->|"yes, no warnings"| S["AUTO-APPROVED"]
-    R -->|"no"| T["Gates created:\nsecurity-review (if critical findings)\ndeploy-approval (if high/critical)\nfinal-approval (always)"]
-    S --> U["orchestration-summary.md\n+ recommendation"]
-    T --> U
-
-    U --> V{"Human / operator decides"}
-    V -->|"create PR"| W["github_pr.py\nper-agent branches + PRs\n.agentit/CATEGORY/*.yaml"]
-    V -->|"apply directly"| X["cluster_apply.py\ndry-run → classify → oc apply"]
+    Q --> R{"Human / operator decides"}
+    R -->|"create PR"| S["github_pr.py"]
+    R -->|"apply"| T["cluster_apply.py\ndry-run → LLM classify → apply"]
 ```
+
+## Skill engine & check engine
+
+### Skill engine (`skill_engine.py`)
+
+Skills are Markdown files with YAML frontmatter. They define properties (what must be true), not templates (how to generate). The LLM generates tailored manifests using:
+
+- The skill's property, constraints, and key decisions
+- The assessment report (stack, findings, criticality)
+- Platform context (K8s version, available APIs, CRDs, operators)
+- Feedback history (what was approved/rejected before)
+
+Skill lifecycle: `draft` → `active` → `deprecated` → `retired`
+
+- `draft`: created by learning agent, not matched until promoted
+- `active`: matched and used for generation
+- `deprecated`: matched with warning, superseded_by field points to replacement
+- `retired`: never matched, kept for history
+
+Skills have: `conflicts_with` (priority resolution), `requires_crd` (skip if CRD not on cluster), `source` (manual/learning-agent), `effectiveness` tracking.
+
+### Check engine (`check_engine.py`)
+
+YAML check files define declarative rules:
+
+| Check type | What it checks |
+|---|---|
+| `file_exists` | A file matching a glob pattern exists in the repo |
+| `file_contains` | A file's content matches a regex |
+| `file_missing` | No file matches a glob (triggers finding) |
+| `yaml_kind_exists` | A YAML file with a specific `kind` exists |
+| `yaml_kind_missing` | No YAML file with a specific `kind` exists |
+
+Checks produce `Finding` objects that feed into the same scoring and remediation pipeline as analyzer findings. The learning agent can create new check files without modifying Python code.
+
+### How they work together
+
+```
+Assessment:  Analyzers + CheckEngine → Findings → Score
+Remediation: SkillEngine.match(findings) → LLM generates → validate → gate
+Fallback:    Python agents cover anything skills don't match
+```
+
+## Self-improvement loop
+
+AgentIT improves through three tiers:
+
+### Tier 1: Feedback store
+
+The `agent_feedback` table in SQLite records every human decision on generated fixes:
+
+- **approve**: fix was applied as-is
+- **modify**: fix was applied with changes (the modified version is stored)
+- **reject**: fix was rejected (reason stored)
+
+Skills query this before generating. The `skill_effectiveness` table tracks approval rates per skill. Skills below 30% are surfaced on the Insights page for review.
+
+### Tier 2: Learning agent (`learning_agent.py`)
+
+Triggered on first assessment of a new app, or manually via `agentit learn` / `agentit learn-for`:
+
+1. `research_for_app()` — targeted research based on the app's detected stack
+2. `research_cves()` — generic CVE research for K8s/container workloads
+3. `research_best_practices()` — best practices for a specific topic
+4. `generate_skill_from_research()` — LLM generates a complete skill MD file
+5. `check_skill_exists()` — dedup with fuzzy name matching
+6. `save_skill()` — writes to `skills/custom/` as `draft` status
+
+Draft skills require `agentit activate-skill` (human gate) before they're used.
+
+### Tier 3: Platform-aware deprecation
+
+The drift detector (`watchers/drift_detector.py`) and API drift detector (`api_drift_detector.py`) work together:
+
+1. `PlatformContext.discover_platform()` snapshots the cluster's API surface
+2. `detect_drift()` compares against previous snapshot
+3. If APIs are removed from the cluster, skills that generate those API kinds are auto-deprecated
+4. If APIs are deprecated, warnings are published to the event stream
+5. If new APIs appear, they're logged for potential skill creation
 
 ## Autonomous remediation loop
 
-When Kafka + Argo Events + auto-mode are all enabled, AgentIT can close the loop without a human in it — but every apply still goes through an LLM safety gate that **fails closed** (gates for human review) if the LLM is unavailable, unconfident, or flags the change as destructive.
+When Kafka + Argo Events + auto-mode are all enabled, AgentIT closes the loop autonomously. Every apply still goes through an LLM safety gate that **fails closed**.
 
 ```mermaid
 sequenceDiagram
     participant GH as GitHub
     participant Portal as Portal (FastAPI)
-    participant Kafka as Kafka (agentit-events)
+    participant Kafka as Kafka
     participant Sensor as Argo Events Sensor
-    participant Orch as FleetOrchestrator
+    participant Skills as SkillEngine
     participant Auto as AutoMode
     participant LLM as Claude (LLM)
     participant K8s as OpenShift API
-    participant SLO as SLO Tracker
 
     GH->>Portal: POST /api/webhook/github-push
-    Portal->>Portal: re-assess managed repo
-    Portal->>Kafka: publish "assessment-complete" (score)
+    Portal->>Portal: re-assess (analyzers + checks)
+    Portal->>Kafka: publish "assessment-complete"
     Kafka->>Sensor: event delivered
-    Sensor->>Portal: POST /api/webhook/onboard\n(if score under 70)
-    Portal->>Orch: FleetOrchestrator.run()
-    Orch-->>Portal: manifests + auto_approve flag
-    Portal->>Auto: execute(files, criticality, auto_approve)
-    Auto->>LLM: classify_action(manifests)\nis_destructive? confidence?
-    alt LLM says safe, confidence ≥ 0.8, auto_approve true
-        Auto->>K8s: dry-run apply
-        Auto->>K8s: apply
+    Sensor->>Portal: POST /api/webhook/onboard (score < 70)
+    Portal->>Skills: match findings → generate fixes
+    Skills->>LLM: generate tailored manifests
+    Skills-->>Portal: generated files
+    Portal->>Auto: execute(files, criticality)
+    Auto->>LLM: classify_action(manifests)
+    alt safe + confidence >= 0.8 + auto_approve
+        Auto->>K8s: dry-run → apply
         Auto->>Portal: mark remediations complete
         Portal->>Kafka: publish "auto-applied"
-        loop for 5 minutes
-            SLO->>SLO: poll SLO status
-        end
-        alt SLO breach after apply
-            SLO->>Portal: create gate "rollback-review"
-            SLO->>Kafka: publish "rollback-recommended"
-        end
     else gated
         Auto->>Portal: create_gate("auto-mode-review")
-        Portal->>Kafka: publish "gated" (severity=warning)
+        Portal->>Kafka: publish "gated"
     end
 ```
 
+### Self-fix command
+
+`agentit self-fix` runs the full loop on a single repo:
+
+1. Assess the repo (analyzers + checks)
+2. Skill engine matches findings → LLM generates tailored fixes
+3. LLM reviews each fix (first approver): approved/rejected with confidence + reason
+4. Verify: re-assess to confirm score improved
+5. Create PR with approved fixes (human is second approver)
+
+## Platform awareness & API drift
+
+### PlatformContext (`platform_context.py`)
+
+Discovers the cluster environment and passes it to every skill generation:
+
+- Kubernetes version
+- Available API groups and resource kinds
+- Installed CRDs
+- Running operators (via OLM Subscriptions)
+- Known API deprecations (built-in table)
+
+Provides `offline_context()` for testing without a live cluster.
+
+### API drift detector (`api_drift_detector.py`)
+
+Snapshot-based comparison of the cluster API surface:
+
+- `save_snapshot()` — records current API groups, kinds, operators
+- `detect_drift()` — compares current vs. previous snapshot
+- Returns: `removed_apis`, `deprecated_apis`, `new_apis`, `has_breaking_changes`
+
+The drift detector watcher (`watchers/drift_detector.py`) runs this on every tick and:
+- Auto-deprecates skills that generate removed API kinds
+- Publishes critical events for removed APIs
+- Publishes warnings for deprecated APIs
+- Logs new APIs for potential skill creation
+
+### Assessment diff (`assessment_diff.py`)
+
+Compares two assessment reports to find:
+- New findings (regression)
+- Resolved findings (improvement)
+- Auto-fixable gaps (findings that match skills)
+
 ## Deployment topology (OpenShift)
 
-AgentIT deploys **itself** the same way it onboards other apps: Argo CD is the sole deployer (see [`deployment.md`](deployment.md) — never `helm upgrade` manually against a running install).
+AgentIT deploys **itself** the same way it onboards other apps: Argo CD is the sole deployer.
 
 ```mermaid
 graph LR
     subgraph Git["This repo"]
-        Chart["chart/ (Helm)"]
+        Chart["chart/ (Helm, 30+ templates)"]
         AppYaml["argocd/application.yaml"]
     end
 
@@ -164,74 +286,80 @@ graph LR
     end
 
     subgraph NS["agentit namespace"]
-        Rollout["Rollout: agentit\n(canary 5%→25%→50%→100%,\n60s pauses)"]
+        Rollout["Rollout: agentit\n(canary 5%→25%→50%→100%)"]
         SvcStable["Service: agentit"]
         SvcCanary["Service: agentit-canary"]
         Route["Route"]
-        PVC["PVC: agentit-data\n(SQLite db)"]
-        KafkaCluster["Kafka cluster (Strimzi)\ntopics: agentit-events, agentit-alerts"]
-        EventSource["EventSource\n(Kafka → Argo Events)"]
-        SensorOnboard["Sensor: agentit-onboard\n(score under 70 → /api/webhook/onboard)"]
-        SensorAutoApply["Sensor: auto-apply triggers"]
-        Pipeline["Tekton Pipeline\ngit-clone→build→test→\nimage-build→image-push→deploy"]
-        CronCVE["CronWorkflow: CVE scan"]
-        VulnWatcher["vuln-watcher\n(long-lived agent)"]
-        SloTracker["slo-tracker\n(long-lived agent)"]
-        DriftDetector["drift-detector\n(long-lived agent)"]
+        PVC["PVC: agentit-data"]
+        NetPol["NetworkPolicy"]
+        Quota["ResourceQuota"]
+        LimitRange["LimitRange"]
+        PDB["PodDisruptionBudget"]
+        KafkaCluster["Kafka cluster (Strimzi)"]
+        EventSource["EventSource (Kafka → Argo Events)"]
+        SensorOnboard["Sensor: onboard (score < 70)"]
+        Pipeline["Tekton Pipeline\n+ self-assess step"]
+        BackupCron["Backup CronJob"]
+        VulnWatcher["vuln-watcher"]
+        SloTracker["slo-tracker"]
+        DriftDetector["drift-detector"]
     end
 
     AppYaml -->|"watched by"| ArgoCD
     ArgoCD -->|"renders + syncs"| Chart
     Chart --> Rollout & SvcStable & SvcCanary & Route & PVC
-    Chart --> KafkaCluster & EventSource & SensorOnboard & SensorAutoApply
-    Chart --> Pipeline & CronCVE
+    Chart --> NetPol & Quota & LimitRange & PDB
+    Chart --> KafkaCluster & EventSource & SensorOnboard
+    Chart --> Pipeline & BackupCron
     Chart --> VulnWatcher & SloTracker & DriftDetector
-    Rollout --> SvcStable
-    Rollout -.canary steps.-> SvcCanary
-    KafkaCluster --> EventSource --> SensorOnboard & SensorAutoApply
-    VulnWatcher & SloTracker & DriftDetector <--> KafkaCluster
-    DriftDetector -->|"reads"| ArgoCD
 ```
 
 ## The agent fleet
 
-Every agent shares the same contract (`agents/base.py`): `Agent(report: AssessmentReport, output_dir: Path).run() -> Result` where `Result.files` is a `list[GeneratedFile]`. The `FleetOrchestrator` decides which agents run for a given assessment (see the pipeline diagram above) and resolves overlaps via a priority matrix.
+Every agent shares the same contract (`agents/base.py`): `Agent(report, output_dir).run() -> Result` where `Result.files` is a `list[GeneratedFile]`. The `FleetOrchestrator` runs **skills first** as the primary generation path, then Python agents supplement for findings that no skill covers.
 
-| Agent | Category | Always runs? | Generates |
-|---|---|---|---|
-| **HardeningAgent** | `security` | Yes | Deny-all `NetworkPolicy`, hardened `Containerfile`, minimal RBAC (`ServiceAccount`/`Role`/`RoleBinding`), `SecurityContext` patches |
-| **ObservabilityAgent** | `observability` | Yes | `ServiceMonitor`, Grafana dashboard JSON, Prometheus alerting rules, OpenTelemetry Collector config |
-| **CICDAgent** | `cicd` | Yes | Tekton `Pipeline`, Argo CD `Application`/`ApplicationSet`, Argo `Rollout` canary manifest |
-| **ComplianceAgent** | `compliance` | Yes | Kyverno `ClusterPolicy` set (require-labels, require-limits, restrict-registries, disallow-`:latest`), SBOM generation script, compliance evidence doc |
-| **ReleaseCoordinatorAgent** | `release` | Yes | Argo Rollouts `AnalysisTemplate`, rollout patch, rollback policy, release runbook; also seeds default SLOs by criticality |
-| **DependencyAgent** | `dependency` | high/critical | Dependency risk report, Renovate config, weekly CVE-scan `CronWorkflow` |
-| **IncidentAgent** | `incident` | high/critical | Incident runbook, PagerDuty service config, Alertmanager routing |
-| **CostOptimizationAgent** | `cost` | high/critical | Cost report, right-sizing recommendations, cost-attribution labels, weekly cost `CronWorkflow` |
-| **ChaosAgent** | `chaos` | not critical | LitmusChaos experiments: pod-kill recovery, network-latency injection, CPU-stress vs. HPA |
-| **RetirementAgent** | `retirement` | score under 30 | Decommission plan, cleanup script, pre-deletion data-archive `Job` |
-| **CodeChangeAgent** | `codechange` | high/critical or score under 50 | LLM-generated **source-level** patches (e.g., health-check endpoints, `.gitignore`, OTel instrumentation) — the only agent that touches app code rather than infra |
-| **FleetOrchestrator** | — | meta-agent | Selects agents, resolves conflicts, decides auto-approve, writes `orchestration-summary.md` |
+| Agent | Category | Tier | Always runs? | Generates |
+|---|---|---|---|---|
+| **HardeningAgent** | `security` | standard | Yes | NetworkPolicy, Containerfile, RBAC, SecurityContext |
+| **ObservabilityAgent** | `observability` | small | Yes | ServiceMonitor, Grafana dashboard, alerting rules, OTel config |
+| **CICDAgent** | `cicd` | standard | Yes | Tekton Pipeline, Argo CD Application, Argo Rollout |
+| **ComplianceAgent** | `compliance` | small | Yes | Kyverno policies, SBOM task, audit policy, compliance evidence |
+| **InfrastructureAgent** | `infrastructure` | small | Yes | HPA, PDB, ResourceQuota, LimitRange, Namespace |
+| **ReleaseCoordinatorAgent** | `release` | small | Yes | AnalysisTemplate, rollout patch, rollback policy, release runbook |
+| **DependencyAgent** | `dependency` | small | high/critical | Dependency report, Renovate config, CVE-scan CronWorkflow |
+| **IncidentAgent** | `incident` | small | high/critical | Incident runbook, PagerDuty config, Alertmanager routing |
+| **CostOptimizationAgent** | `cost` | small | high/critical | Cost report, right-sizing, cost labels, cost CronWorkflow |
+| **ChaosAgent** | `chaos` | — | not critical | LitmusChaos experiments |
+| **RetirementAgent** | `retirement` | small | score < 30 | Decommission plan, cleanup, data archive Job |
 
-Three additional agents run as **long-lived processes** (via `agentit vuln-watch` / `slo-track` / `drift-detect`, deployed as their own Deployments in the chart) rather than one-shot onboarding agents:
+Resource tiers control K8s Job resource requests/limits when agents run in containerized mode (`AGENT_MODE=kubernetes`):
 
-| Long-lived agent | Loop | Role |
+| Tier | CPU request/limit | Memory request/limit |
 |---|---|---|
-| **vuln-watcher** | every 6h (default) | Consumes Kafka events, checks fleet for critical findings, triggers `RemediationLoop` when auto-mode is on |
-| **slo-tracker** | every 5m (default) | Polls SLO status per assessment, publishes breach alerts, opens a `rollback-review` gate if a breach follows a recent apply |
-| **drift-detector** | every 10m (default) | Polls Argo CD `Applications` for `OutOfSync`, publishes drift alerts, auto-syncs if auto-mode is on |
+| small | 50m / 250m | 128Mi / 256Mi |
+| standard | 100m / 500m | 256Mi / 512Mi |
+| large | 250m / 1000m | 512Mi / 1Gi |
+
+Three long-lived watcher agents run as separate Deployments:
+
+| Watcher | Default interval | Role |
+|---|---|---|
+| **vuln-watcher** | 6h | Fleet CVE monitoring, triggers RemediationLoop |
+| **slo-tracker** | 5m | SLO polling, breach alerts, rollback gates |
+| **drift-detector** | 10m | Argo CD sync + API drift detection, auto-deprecation |
 
 ## Assessment dimensions
 
-`runner.py` runs the `StackDetector` plus 7 analyzers over the cloned repo (read-only — analyzers never write to the repo). Each produces a `DimensionScore` (0–100) with `Finding`s at `critical`/`high`/`medium`/`low`/`info` severity, which feed both the overall score and the `RemediationItem` plan.
+`runner.py` runs the `StackDetector` plus 7 Python analyzers plus the `CheckEngine` (20 YAML checks) over the cloned repo. Each produces a `DimensionScore` (0-100) with `Finding`s at `critical`/`high`/`medium`/`low`/`info` severity.
 
-| Dimension | Analyzer | Checks (examples) |
-|---|---|---|
-| `security` | `SecurityAnalyzer` | Hardcoded secrets (regex + LLM false-positive filtering), root containers, missing `HEALTHCHECK`, `:latest` tags, missing `NetworkPolicy`, missing vuln scanning in CI, non-UBI base images |
-| `observability` | `ObservabilityAnalyzer` | Metrics/tracing/logging instrumentation, health probes |
-| `cicd` | `CICDAnalyzer` | CI pipeline presence, GitOps wiring, deployment automation |
-| `infrastructure` | `InfrastructureAnalyzer` | IaC presence, manifest completeness |
-| `compliance` | `ComplianceAnalyzer` | Policy-as-code, labeling, SBOM/provenance |
-| `data_governance` | `DataGovernanceAnalyzer` | Data handling, retention, PII exposure signals |
-| `ha_dr` | `HADRAnalyzer` | Replica counts, backup/restore, multi-AZ signals |
+| Dimension | Analyzer | Check files | Example checks |
+|---|---|---|---|
+| `security` | `SecurityAnalyzer` | 3 | Hardcoded secrets, root containers, missing HEALTHCHECK, :latest tags, missing NetworkPolicy, non-UBI base |
+| `observability` | `ObservabilityAnalyzer` | 3 | Health probes, metrics endpoint, structured logging |
+| `cicd` | `CICDAnalyzer` | 3 | CI pipeline, Dockerfile/Containerfile, GitOps wiring |
+| `infrastructure` | `InfrastructureAnalyzer` | 3 | Helm chart, K8s manifests, ResourceQuota |
+| `compliance` | `ComplianceAnalyzer` | 3 | Admission policies, license, SBOM |
+| `data_governance` | `DataGovernanceAnalyzer` | 2 | Backup config, retention policy |
+| `ha_dr` | `HADRAnalyzer` | 3 | HPA, PDB, replica count |
 
-Findings are sorted by severity into a prioritized `remediation_plan`, each with an estimated effort (`critical` → 2 agent-hours … `info` → 5 agent-minutes) and the agent responsible for fixing it.
+Findings are sorted by severity into a prioritized `remediation_plan`, each with an estimated effort and the skill or agent responsible for fixing it.

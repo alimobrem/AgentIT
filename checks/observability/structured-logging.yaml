@@ -1,0 +1,8 @@
+name: structured-logging-detected
+dimension: observability
+severity: medium
+category: logging
+type: file_contains
+pattern: structlog
+description: No structured logging library detected
+recommendation: Add structured JSON logging (e.g., structlog for Python, zap for Go)

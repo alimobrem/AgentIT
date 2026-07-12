@@ -253,6 +253,38 @@ class SkillEngine:
 
         return []
 
+    def run_all(
+        self,
+        report: AssessmentReport,
+        *,
+        store: object | None = None,
+        llm_client: object | None = None,
+    ) -> list[GeneratedFile]:
+        """Match skills to the report and generate all files.
+
+        Returns every GeneratedFile produced, tagged with source='skill' metadata
+        via the description field.  The caller can inspect each file's
+        ``finding_addressed`` to determine coverage.
+        """
+        matched = self.match(report)
+        all_files: list[GeneratedFile] = []
+        for skill in matched:
+            files = self.generate(skill, report, llm_client=llm_client)
+            all_files.extend(files)
+        return all_files
+
+    def covered_domains(self, files: list[GeneratedFile]) -> set[str]:
+        """Return the set of skill domains that produced output.
+
+        Works by matching ``finding_addressed`` back to loaded skills.
+        """
+        addressed = {f.finding_addressed for f in files if f.finding_addressed}
+        domains: set[str] = set()
+        for skill in self.skills:
+            if skill.property_description in addressed:
+                domains.add(skill.domain)
+        return domains
+
     def generate_for_finding(self, finding_category: str, finding_description: str,
                              report: AssessmentReport,
                              llm_client: object | None = None) -> list[GeneratedFile]:

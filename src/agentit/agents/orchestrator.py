@@ -133,12 +133,9 @@ class FleetOrchestrator:
                 except Exception as exc:
                     logger.warning("Failed to register agent '%s': %s", name, exc)
 
-        if AGENT_MODE == "kubernetes":
-            results = self._run_agents_as_jobs(plan, agent_map)
-        else:
-            results = self._run_agents_local(plan, agent_map)
-
-        # Run property-based skills (additive — supplements agent output)
+        # --- Step 1: Run skills FIRST (primary generation path) ---
+        skill_files: list = []
+        skill_covered_domains: set[str] = set()
         try:
             from agentit.skill_engine import SkillEngine
             skills_dir = Path(__file__).parent.parent.parent.parent / "skills"
@@ -154,16 +151,12 @@ class FleetOrchestrator:
 
             engine = SkillEngine(skills_dir, platform=platform)
             skill_files = engine.run_all(self.report, store=self._store)
+            skill_covered_domains = engine.covered_domains(skill_files)
 
             if skill_files:
-                results.append(AgentResult(
-                    agent_name="skills",
-                    category="skills",
-                    files_generated=[f.path for f in skill_files],
-                    success=True,
-                    findings_count=len(skill_files),
-                ))
-                self._log_event("skills", "completed", f"Skills generated {len(skill_files)} files")
+                self._log_event("skills", "completed",
+                                f"Skills generated {len(skill_files)} files covering domains: "
+                                f"{', '.join(sorted(skill_covered_domains)) or 'none'}")
                 skill_dir = self.output_dir / "skills"
                 skill_dir.mkdir(parents=True, exist_ok=True)
                 for f in skill_files:
@@ -171,6 +164,34 @@ class FleetOrchestrator:
                     safe.write_text(f.content, encoding="utf-8")
         except Exception as exc:
             logger.debug("Skill engine failed (non-fatal): %s", exc)
+
+        # --- Step 2: Determine which agents to skip (covered by skills) ---
+        skip_agents: set[str] = set()
+        if skill_covered_domains:
+            for agent_name in plan.agents_to_run:
+                agent_category = agent_map.get(agent_name, (agent_name,))[0]
+                if agent_category in skill_covered_domains:
+                    skip_agents.add(agent_name)
+            if skip_agents:
+                logger.info("Skills covered domains %s — skipping Python agents: %s",
+                            ", ".join(sorted(skill_covered_domains)),
+                            ", ".join(sorted(skip_agents)))
+
+        # --- Step 3: Run Python agents only for uncovered domains (fallback) ---
+        if AGENT_MODE == "kubernetes":
+            results = self._run_agents_as_jobs(plan, agent_map, skip_agents=skip_agents)
+        else:
+            results = self._run_agents_local(plan, agent_map, skip_agents=skip_agents)
+
+        # --- Step 4: Add skill results to the result list ---
+        if skill_files:
+            results.append(AgentResult(
+                agent_name="skills",
+                category="skills",
+                files_generated=[f.path for f in skill_files],
+                success=True,
+                findings_count=len(skill_files),
+            ))
 
         # Validate generated output
         validation_issues = self._post_hardening_validation(results)
@@ -209,11 +230,16 @@ class FleetOrchestrator:
         self,
         plan: OrchestrationPlan,
         agent_map: dict[str, tuple[str, type]],
+        *,
+        skip_agents: set[str] | None = None,
     ) -> list[AgentResult]:
         """Run agents in-process (default mode)."""
         results: list[AgentResult] = []
 
         for agent_name in plan.agents_to_run:
+            if skip_agents and agent_name in skip_agents:
+                logger.info("Skipping agent '%s' — already covered by skills", agent_name)
+                continue
             if agent_name not in agent_map:
                 logger.warning("Agent '%s' was planned but not available (import failed?)", agent_name)
                 results.append(AgentResult(
@@ -276,6 +302,8 @@ class FleetOrchestrator:
         self,
         plan: OrchestrationPlan,
         agent_map: dict[str, tuple[str, type]],
+        *,
+        skip_agents: set[str] | None = None,
     ) -> list[AgentResult]:
         """Run agents as K8s Jobs in parallel."""
         from agentit import kube
@@ -289,11 +317,14 @@ class FleetOrchestrator:
         cm_name = f"agentit-report-{self._assessment_id or 'manual'}"[:63]
         if not kube.create_config_map(cm_name, namespace, {"report.json": report_json}):
             logger.warning("Failed to create report ConfigMap, falling back to local mode")
-            return self._run_agents_local(plan, agent_map)
+            return self._run_agents_local(plan, agent_map, skip_agents=skip_agents)
 
         # Launch all Jobs
         job_names: dict[str, str] = {}
         for agent_name in plan.agents_to_run:
+            if skip_agents and agent_name in skip_agents:
+                logger.info("Skipping K8s job for agent '%s' — already covered by skills", agent_name)
+                continue
             if agent_name not in agent_map:
                 continue
             job_name = f"agentit-{agent_name}-{self._assessment_id or 'manual'}"[:63]

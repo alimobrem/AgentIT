@@ -1,0 +1,8 @@
+name: prometheus-metrics-exists
+dimension: observability
+severity: high
+category: metrics
+type: yaml_kind_exists
+pattern: ServiceMonitor
+description: No Prometheus ServiceMonitor found
+recommendation: Create ServiceMonitor for Prometheus scraping

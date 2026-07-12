@@ -1,0 +1,8 @@
+name: backup-config-exists
+dimension: data_governance
+severity: high
+category: backup
+type: file_contains
+pattern: backup
+description: No backup configuration detected
+recommendation: Configure Crunchy PostgreSQL backup schedule or add backup CronJob

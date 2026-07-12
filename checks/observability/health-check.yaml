@@ -1,0 +1,8 @@
+name: health-probes-exist
+dimension: observability
+severity: high
+category: health
+type: file_contains
+pattern: livenessProbe
+description: No liveness/readiness probes detected in manifests
+recommendation: Add livenessProbe and readinessProbe to all containers

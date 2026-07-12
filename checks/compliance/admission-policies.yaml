@@ -1,0 +1,8 @@
+name: admission-policies-exist
+dimension: compliance
+severity: medium
+category: policy
+type: yaml_kind_exists
+pattern: ClusterPolicy
+description: No admission policies (Kyverno/OPA/Gatekeeper) found
+recommendation: Create Kyverno policies for resource limits, labels, approved base images

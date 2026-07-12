@@ -1,0 +1,8 @@
+name: resource-quota-exists
+dimension: infrastructure
+severity: low
+category: quota
+type: yaml_kind_exists
+pattern: ResourceQuota
+description: No ResourceQuota defined for namespace governance
+recommendation: Add ResourceQuota and LimitRange for namespace governance

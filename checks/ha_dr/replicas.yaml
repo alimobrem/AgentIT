@@ -1,0 +1,8 @@
+name: multi-replica-deployment
+dimension: ha_dr
+severity: high
+category: availability
+type: file_contains
+pattern: "replicas: 2"
+description: No multi-replica deployment found -- no redundancy
+recommendation: Set replicas >= 2 for high availability
