@@ -25,6 +25,12 @@ env:
 
 rollout:
   enabled: true
+  steps:
+    - setWeight: 10
+    - pause: {duration: 30s}
+    - setWeight: 50
+    - pause: {duration: 30s}
+    - setWeight: 100
 
 gcp:
   credentialsSecret: ""

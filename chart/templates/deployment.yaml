@@ -20,13 +20,7 @@ spec:
   strategy:
     canary:
       steps:
-        - setWeight: 5
-        - pause: { duration: 60s }
-        - setWeight: 25
-        - pause: { duration: 60s }
-        - setWeight: 50
-        - pause: { duration: 60s }
-        - setWeight: 100
+        {{- toYaml .Values.rollout.steps | nindent 8 }}
       canaryService: {{ .Release.Name }}-canary
       stableService: {{ .Release.Name }}
   {{- end }}

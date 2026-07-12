@@ -73,7 +73,7 @@ spec:
     - name: build-image
       retries: 1
       timeout: "15m"
-      runAfter: [run-tests]
+      runAfter: [git-clone]
       taskRef:
         resolver: cluster
         params:
@@ -99,7 +99,7 @@ spec:
     - name: notify-argocd
       retries: 1
       timeout: "2m"
-      runAfter: [build-image]
+      runAfter: [run-tests, build-image]
       taskSpec:
         steps:
           - name: refresh
@@ -138,7 +138,7 @@ spec:
                 memory: 1Gi
             script: |
               set -uo pipefail
-              pip install --no-cache-dir -e . 2>&1 | tail -1
+              pip install --no-cache-dir --no-deps -e . 2>&1 | tail -1
               echo "Running self-assessment..."
               RESULT=$(python -m agentit assess . --format json --criticality high 2>/dev/null || echo '{}')
               SCORE=$(echo "$RESULT" | python3 -c "import sys,json; print(int(json.load(sys.stdin).get('overall_score',0)))" 2>/dev/null || echo 0)
