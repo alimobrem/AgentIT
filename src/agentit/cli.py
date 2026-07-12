@@ -676,3 +676,231 @@ def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bool) ->
     except CloneError as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
+
+
+@main.command()
+@click.option("--source", type=click.Choice(["cves", "best-practices", "topic"]), default="cves",
+              help="Research source: cves, best-practices, or a custom topic.")
+@click.option("--topic", default=None, help="Topic string (required when --source=topic or best-practices).")
+@click.option("--limit", default=5, type=int, help="Max items to research (default: 5).")
+@click.option("--dry-run", is_flag=True, help="Show generated skills without saving.")
+@click.option("--llm-model", default=None, help="Claude model to use.")
+def learn(source: str, topic: str | None, limit: int, dry_run: bool, llm_model: str | None) -> None:
+    """Research CVEs or best practices via LLM and generate new skills."""
+    from agentit.learning_agent import (
+        generate_skill_from_research,
+        research_best_practices,
+        research_cves,
+        save_skill,
+    )
+
+    try:
+        from agentit.llm import LLMClient
+        llm_client = LLMClient(model=llm_model)
+    except Exception as exc:
+        click.echo(f"LLM required for learn command: {exc}", err=True)
+        sys.exit(1)
+
+    # Research phase
+    if source == "cves":
+        click.echo(f"Researching up to {limit} CVEs...", err=True)
+        items = research_cves(llm_client, limit=limit)
+        domain = "security"
+    elif source in ("best-practices", "topic"):
+        if not topic:
+            click.echo("--topic is required for best-practices/topic source.", err=True)
+            sys.exit(1)
+        click.echo(f"Researching best practices for: {topic}", err=True)
+        items = research_best_practices(llm_client, topic)
+        domain = "custom"
+    else:
+        click.echo(f"Unknown source: {source}", err=True)
+        sys.exit(1)
+
+    if not items:
+        click.echo("No research results returned.", err=True)
+        return
+
+    click.echo(f"Found {len(items)} item(s). Generating skills...", err=True)
+
+    skills_dir = Path(__file__).parent.parent.parent / "skills"
+    if not skills_dir.exists():
+        skills_dir = Path("skills")
+
+    for i, item in enumerate(items, 1):
+        click.echo(f"\n[{i}/{len(items)}] Generating skill...", err=True)
+        content = generate_skill_from_research(llm_client, item, domain=domain)
+        if not content:
+            click.echo("  Failed to generate skill content.", err=True)
+            continue
+
+        if dry_run:
+            click.echo(f"  [DRY RUN] Would save skill:\n{content[:200]}...", err=True)
+        else:
+            path = save_skill(content, skills_dir, domain=domain)
+            if path:
+                click.echo(f"  Saved: {path}", err=True)
+            else:
+                click.echo("  Failed to save skill.", err=True)
+
+    click.echo(f"\nDone. Generated {len(items)} skill(s).", err=True)
+
+
+@main.command("test-skill")
+@click.argument("skill_path", type=click.Path(exists=True))
+@click.option("--repo", default=None, type=click.Path(exists=True), help="Repository path to test against.")
+def test_skill(skill_path: str, repo: str | None) -> None:
+    """Test a skill definition: load, validate, optionally match against a repo."""
+    from agentit.skill_engine import SkillEngine, load_skill
+
+    skill_file = Path(skill_path)
+    click.echo(f"Loading skill: {skill_file}", err=True)
+    skill = load_skill(skill_file)
+
+    if skill is None:
+        click.echo("FAIL: Could not parse skill file.", err=True)
+        sys.exit(1)
+
+    click.echo(f"  name: {skill.name}", err=True)
+    click.echo(f"  domain: {skill.domain}", err=True)
+    click.echo(f"  version: {skill.version}", err=True)
+    click.echo(f"  status: {skill.status}", err=True)
+    click.echo(f"  triggers: {skill.triggers}", err=True)
+    click.echo(f"  outputs: {skill.outputs}", err=True)
+    click.echo(f"  mode: {skill.mode}", err=True)
+
+    # Validate frontmatter completeness
+    issues: list[str] = []
+    if not skill.triggers:
+        issues.append("no triggers defined")
+    if not skill.outputs:
+        issues.append("no outputs defined")
+    if not skill.body.strip():
+        issues.append("empty body")
+    if skill.status not in ("active", "deprecated", "retired", "draft"):
+        issues.append(f"invalid status: {skill.status}")
+
+    # Check body for expected sections
+    body_lower = skill.body.lower()
+    for section in ["property", "constraint", "verification"]:
+        if section not in body_lower:
+            issues.append(f"missing '{section}' section in body")
+
+    # If a repo is provided, run assessment and check match
+    if repo:
+        click.echo(f"\nAssessing repo: {repo}", err=True)
+        try:
+            report = run_assessment(Path(repo), repo_url=repo, criticality="medium")
+            matched = skill.matches(report)
+            click.echo(f"  Skill matches repo: {matched}", err=True)
+
+            # Try template generation
+            if matched:
+                from agentit.skill_engine import _extract_template
+                template = _extract_template(skill.body)
+                if template:
+                    import re as _re
+                    import yaml as _yaml
+                    # Replace {{placeholder}} with dummy values for validation
+                    _sanitized = _re.sub(r"\{\{(\w+)\}\}", r"placeholder_\1", template)
+                    try:
+                        list(_yaml.safe_load_all(_sanitized))
+                        click.echo("  Template YAML: valid", err=True)
+                    except _yaml.YAMLError as exc:
+                        issues.append(f"template YAML invalid: {exc}")
+                        click.echo(f"  Template YAML: INVALID -- {exc}", err=True)
+        except Exception as exc:
+            click.echo(f"  Assessment failed: {exc}", err=True)
+            issues.append(f"assessment error: {exc}")
+
+    # Report
+    if issues:
+        click.echo(f"\nFAIL: {len(issues)} issue(s):", err=True)
+        for issue in issues:
+            click.echo(f"  - {issue}", err=True)
+        sys.exit(1)
+    else:
+        click.echo("\nPASS: Skill is valid.", err=True)
+
+
+@main.command("learn-for")
+@click.argument("repo_url")
+@click.option("--criticality", default="medium")
+@click.option("--limit", default=5, help="Number of improvements to research.")
+@click.option("--dry-run", is_flag=True, help="Show what would be created without saving.")
+def learn_for(repo_url: str, criticality: str, limit: int, dry_run: bool) -> None:
+    """Targeted learning: assess an app, then research improvements for its specific stack.
+
+    \b
+    Unlike 'learn' (generic research), this command:
+    1. Assesses the repo to understand its stack
+    2. Asks the LLM specifically about THAT stack's risks and best practices
+    3. Generates skills tailored to the app's technology choices
+    """
+    from agentit.learning_agent import (
+        research_for_app, generate_skill_from_research, save_skill,
+    )
+
+    try:
+        from agentit.llm import LLMClient
+        llm = LLMClient()
+    except Exception as exc:
+        click.echo(f"LLM required for learning. Error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo("Step 1: Assessing app to understand its stack...", err=True)
+    try:
+        with _resolve_and_assess(repo_url, criticality) as report:
+            stack_parts = []
+            for lang in report.stack.languages:
+                stack_parts.append(lang.name)
+            for fw in report.stack.frameworks:
+                stack_parts.append(fw.name)
+            for db in report.stack.databases:
+                stack_parts.append(db.name)
+            click.echo(f"  Stack: {', '.join(stack_parts) or 'unknown'}", err=True)
+            click.echo(f"  Score: {report.overall_score:.0f}/100", err=True)
+            click.echo(f"  Findings: {sum(len(s.findings) for s in report.scores)}", err=True)
+
+            click.echo(f"\nStep 2: Researching improvements for this stack...", err=True)
+            findings = research_for_app(llm, report, limit)
+
+            if not findings:
+                click.echo("No research findings.", err=True)
+                return
+
+            click.echo(f"  Found {len(findings)} improvement(s).", err=True)
+
+            click.echo(f"\nStep 3: Generating skills...", err=True)
+            skills_dir = Path(__file__).parent.parent.parent / "skills"
+            if not skills_dir.exists():
+                skills_dir = Path("skills")
+
+            created = []
+            for item in findings:
+                title = item.get("title", "unknown")
+                category = item.get("category", "security")
+                priority = item.get("priority", "medium")
+                click.echo(f"\n  [{priority.upper()}] {title}", err=True)
+                click.echo(f"    {item.get('description', '')[:100]}", err=True)
+
+                content = generate_skill_from_research(llm, item, domain=category)
+                if not content:
+                    click.echo(f"    Failed to generate skill.", err=True)
+                    continue
+
+                if dry_run:
+                    click.echo(f"    [DRY RUN] Would save to skills/{category}/", err=True)
+                else:
+                    path = save_skill(content, skills_dir, domain=category)
+                    if path:
+                        click.echo(f"    Saved: {path}", err=True)
+                        created.append(path)
+
+            click.echo(f"\nLearning complete. {len(created)} skill(s) created for {report.repo_name}.", err=True)
+            if created:
+                click.echo("Review the new skills, then commit and merge.", err=True)
+
+    except CloneError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)

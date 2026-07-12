@@ -28,9 +28,29 @@ class Skill:
     body: str
     file_path: str
     mode: str = "template"
+    # Lifecycle fields
+    status: str = "active"  # active / deprecated / retired / draft
+    superseded_by: str = ""
+    deprecated_reason: str = ""
+    conflicts_with: list[str] = field(default_factory=list)
+    requires_crd: list[str] = field(default_factory=list)
+    source: str = "manual"
+    created_at: str = ""
 
     def matches(self, report: AssessmentReport) -> bool:
-        """Return True if any trigger keyword appears in the report findings."""
+        """Return True if any trigger keyword appears in the report findings.
+
+        Retired and draft skills never match. Deprecated skills match but log a warning.
+        """
+        if self.status in ("retired", "draft"):
+            return False
+        if self.status == "deprecated":
+            msg = f"Skill '{self.name}' is deprecated"
+            if self.deprecated_reason:
+                msg += f": {self.deprecated_reason}"
+            if self.superseded_by:
+                msg += f" (use '{self.superseded_by}' instead)"
+            logger.warning(msg)
         haystack = _report_text(report).lower()
         return any(t.lower() in haystack for t in self.triggers)
 
@@ -74,6 +94,14 @@ def load_skill(path: Path) -> Skill | None:
         logger.warning("Skill %s missing fields: %s", path, missing)
         return None
 
+    status = meta.get("status", "active")
+    if status not in ("active", "deprecated", "retired", "draft"):
+        logger.warning("Skill %s has invalid status '%s', defaulting to 'active'", path, status)
+        status = "active"
+
+    conflicts_raw = meta.get("conflicts_with", [])
+    requires_crd_raw = meta.get("requires_crd", [])
+
     return Skill(
         name=meta["name"],
         domain=meta["domain"],
@@ -84,6 +112,13 @@ def load_skill(path: Path) -> Skill | None:
         body=match.group(2),
         file_path=str(path),
         mode=meta.get("mode", "template"),
+        status=status,
+        superseded_by=meta.get("superseded_by", ""),
+        deprecated_reason=meta.get("deprecated_reason", ""),
+        conflicts_with=list(conflicts_raw) if isinstance(conflicts_raw, list) else [conflicts_raw],
+        requires_crd=list(requires_crd_raw) if isinstance(requires_crd_raw, list) else [requires_crd_raw],
+        source=meta.get("source", "manual"),
+        created_at=meta.get("created_at", ""),
     )
 
 
@@ -107,8 +142,35 @@ class SkillEngine:
         logger.info("Loaded %d skills from %s", len(self.skills), self.skills_dir)
 
     def match(self, report: AssessmentReport) -> list[Skill]:
-        """Return all skills whose triggers match the report."""
-        return [s for s in self.skills if s.matches(report)]
+        """Return all skills whose triggers match the report.
+
+        Retired/draft skills are excluded by Skill.matches().
+        Conflicts between active and deprecated skills are resolved (active wins).
+        """
+        matched = [s for s in self.skills if s.matches(report)]
+        return self._resolve_conflicts(matched)
+
+    @staticmethod
+    def _resolve_conflicts(skills: list[Skill]) -> list[Skill]:
+        """When two matched skills conflict, prefer active over deprecated."""
+        by_name: dict[str, Skill] = {s.name: s for s in skills}
+        to_remove: set[str] = set()
+        for skill in skills:
+            for conflict_name in skill.conflicts_with:
+                if conflict_name not in by_name:
+                    continue
+                other = by_name[conflict_name]
+                # active beats deprecated
+                if skill.status == "active" and other.status == "deprecated":
+                    to_remove.add(other.name)
+                elif skill.status == "deprecated" and other.status == "active":
+                    to_remove.add(skill.name)
+                # same status: keep the higher-versioned one
+                elif skill.version >= other.version:
+                    to_remove.add(other.name)
+                else:
+                    to_remove.add(skill.name)
+        return [s for s in skills if s.name not in to_remove]
 
     def generate(self, skill: Skill, report: AssessmentReport,
                  llm_client: object | None = None) -> list[GeneratedFile]:
