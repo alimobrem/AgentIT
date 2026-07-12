@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Insights - AgentIT{% endblock %}
+{% block content %}
+<h1>Platform Insights</h1>
+<p class="text-muted">How AgentIT is managing your fleet — total work done, agent performance, and system health.</p>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-label">Assessments Run</div>
+    <div class="stat-value">{{ insights.total_assessments }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Apps Managed</div>
+    <div class="stat-value" style="color: var(--color-success);">{{ insights.unique_apps }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Onboardings</div>
+    <div class="stat-value">{{ insights.total_onboardings }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Remediations</div>
+    <div class="stat-value">{{ insights.total_remediations }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Pending Gates</div>
+    <div class="stat-value" style="color: {% if insights.pending_gates > 0 %}var(--color-warning){% else %}var(--color-success){% endif %};">{{ insights.pending_gates }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Events Logged</div>
+    <div class="stat-value">{{ insights.total_events }}</div>
+  </div>
+</div>
+
+<h2>Agent Performance</h2>
+<p class="text-muted">Track record of each agent — how often they run, how often they succeed.</p>
+
+{% if agent_stats %}
+<table>
+  <thead>
+    <tr>
+      <th>Agent</th>
+      <th>Total Runs</th>
+      <th>Successes</th>
+      <th>Failures</th>
+      <th>Success Rate</th>
+      <th>Last Active</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for a in agent_stats %}
+    <tr>
+      <td><strong>{{ a.agent }}</strong></td>
+      <td>{{ a.total_events }}</td>
+      <td class="text-success">{{ a.successes }}</td>
+      <td class="{% if a.failures > 0 %}text-danger{% else %}text-muted{% endif %}">{{ a.failures }}</td>
+      <td>
+        <div class="agent-rate-bar">
+          <div class="score-bar-bg">
+            <div class="score-bar-fill {% if a.success_rate >= 90 %}score-green{% elif a.success_rate >= 70 %}score-yellow{% else %}score-red{% endif %}" style="width: {{ a.success_rate }}%;"></div>
+          </div>
+          <span class="text-sm">{{ a.success_rate }}%</span>
+        </div>
+      </td>
+      <td><span data-timestamp="{{ a.last_seen }}">{{ a.last_seen[:16] if a.last_seen else '—' }}</span></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty-state">
+  <p>No agent activity yet. Run an assessment to see agent performance.</p>
+</div>
+{% endif %}
+
+{% if insights.total_feedback > 0 %}
+<h2>Learning from You</h2>
+<p class="text-muted">The system learns from your decisions. {{ insights.total_feedback }} feedback events recorded, {{ insights.total_rejections }} rejections.</p>
+
+{% if recent_feedback %}
+<table>
+  <thead><tr><th>App</th><th>Agent</th><th>Category</th><th>Decision</th><th>Reason</th></tr></thead>
+  <tbody>
+  {% for fb in recent_feedback %}
+  <tr>
+    <td>{{ fb.app_name }}</td>
+    <td>{{ fb.agent_name }}</td>
+    <td>{{ fb.finding_category }}</td>
+    <td><span class="badge badge-{{ 'success' if fb.action == 'approved' else 'danger' if fb.action == 'rejected' else 'info' }}">{{ fb.action }}</span></td>
+    <td class="text-muted text-sm">{{ fb.human_reason or '—' }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endif %}
+
+{% endblock %}
