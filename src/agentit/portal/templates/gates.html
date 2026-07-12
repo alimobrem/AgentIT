@@ -12,7 +12,7 @@
 </div>
 {% else %}
 {% for gate in pending %}
-<div class="card mb-1">
+<div class="card mb-1" x-data="{ showReason: false }">
   <div class="card-header">
     <div>
       <span class="badge badge-{{ gate.severity | default('info') }}">{{ gate.gate_type | upper }}</span>
@@ -26,22 +26,22 @@
   <p class="my-4">{{ gate.summary }}</p>
 
   <div class="action-bar">
-    <form method="POST" action="/gates/{{ gate.id }}/resolve" x-ref="approveForm{{ loop.index }}">
+    <form method="POST" action="/gates/{{ gate.id }}/resolve" x-ref="approveForm">
       <input type="hidden" name="status" value="approved">
       <button type="button" class="btn btn-green"
         @click="$dispatch('show-confirm', {
           title: 'Approve & Apply to Cluster',
           message: 'This will apply the generated manifests to your cluster. This action modifies production resources.',
-          form: $refs['approveForm{{ loop.index }}'],
+          form: $refs.approveForm,
           opts: { confirmText: 'Apply to Cluster', danger: false }
         })">
         Approve & Apply
       </button>
     </form>
 
-    <form method="POST" action="/gates/{{ gate.id }}/resolve" x-data="{ showReason: false }">
+    <form method="POST" action="/gates/{{ gate.id }}/resolve">
       <input type="hidden" name="status" value="rejected">
-      <button type="button" class="btn btn-danger-outline" @click="showReason = true" x-show="!showReason">Reject</button>
+      <button type="button" class="btn btn-outline" @click="showReason = true" x-show="!showReason">Reject</button>
       <div x-show="showReason" class="gate-reject-row">
         <input type="text" name="reason" placeholder="Why? (helps agents learn)" class="gate-reject-input">
         <button type="submit" class="btn btn-danger-outline">Confirm Reject</button>
