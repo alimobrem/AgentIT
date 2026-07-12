@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from agentit.models import AssessmentReport, Severity
 
 logger = logging.getLogger(__name__)
+
+AGENT_MODE = os.environ.get("AGENTIT_AGENT_MODE", "local")
 
 # Priority matrix from the spec (Section 4)
 PRIORITY_MATRIX = {
@@ -93,54 +98,15 @@ class FleetOrchestrator:
         plan = self.plan()
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Import agents
-        from agentit.agents.hardening import HardeningAgent
-        from agentit.agents.observability import ObservabilityAgent
-        from agentit.agents.cicd import CICDAgent
-        from agentit.agents.compliance import ComplianceAgent
-        from agentit.agents.infrastructure import InfrastructureAgent
+        from agentit.agents.capabilities import AGENT_CAPABILITIES, AGENT_CLASSES, get_agent_class
 
-        agent_map: dict[str, tuple[str, type]] = {
-            "security": ("security", HardeningAgent),
-            "observability": ("observability", ObservabilityAgent),
-            "cicd": ("cicd", CICDAgent),
-            "compliance": ("compliance", ComplianceAgent),
-            "infrastructure": ("infrastructure", InfrastructureAgent),
-        }
-
-        # Import optional agents — log failures instead of silently swallowing
-        try:
-            from agentit.agents.dependency import DependencyAgent
-            agent_map["dependency"] = ("dependency", DependencyAgent)
-        except ImportError:
-            logger.warning("Failed to import DependencyAgent — agent will be skipped")
-        try:
-            from agentit.agents.incident import IncidentAgent
-            agent_map["incident"] = ("incident", IncidentAgent)
-        except ImportError:
-            logger.warning("Failed to import IncidentAgent — agent will be skipped")
-        try:
-            from agentit.agents.cost import CostOptimizationAgent
-            agent_map["cost"] = ("cost", CostOptimizationAgent)
-        except ImportError:
-            logger.warning("Failed to import CostOptimizationAgent — agent will be skipped")
-        try:
-            from agentit.agents.retirement import RetirementAgent
-            agent_map["retirement"] = ("retirement", RetirementAgent)
-        except ImportError:
-            logger.warning("Failed to import RetirementAgent — agent will be skipped")
-        try:
-            from agentit.agents.release import ReleaseCoordinatorAgent
-            agent_map["release"] = ("release", ReleaseCoordinatorAgent)
-        except ImportError:
-            logger.warning("Failed to import ReleaseCoordinatorAgent — agent will be skipped")
-        try:
-            from agentit.agents.codechange import CodeChangeAgent
-            agent_map["codechange"] = ("codechange", CodeChangeAgent)
-        except ImportError:
-            logger.warning("Failed to import CodeChangeAgent — agent will be skipped")
-
-        from agentit.agents.capabilities import AGENT_CAPABILITIES
+        # Build agent_map: name -> (category, class)
+        agent_map: dict[str, tuple[str, type]] = {}
+        for name, (category, _mod, _cls_name, _tier) in AGENT_CLASSES.items():
+            try:
+                agent_map[name] = (category, get_agent_class(name))
+            except (ImportError, ValueError) as exc:
+                logger.warning("Failed to import %s agent: %s", name, exc)
 
         if self._store is not None:
             for name, (cat, _cls) in agent_map.items():
@@ -150,6 +116,50 @@ class FleetOrchestrator:
                 except Exception as exc:
                     logger.warning("Failed to register agent '%s': %s", name, exc)
 
+        if AGENT_MODE == "kubernetes":
+            results = self._run_agents_as_jobs(plan, agent_map)
+        else:
+            results = self._run_agents_local(plan, agent_map)
+
+        # Validate generated output
+        validation_issues = self._post_hardening_validation(results)
+        if validation_issues:
+            for issue in validation_issues:
+                logger.warning("Post-hardening validation: %s", issue)
+            self._log_event("orchestrator", "validation-issues",
+                            f"{len(validation_issues)} manifest validation issue(s) found")
+
+        # Resolve conflicts
+        conflicts = self._detect_conflicts(results)
+
+        if validation_issues:
+            conflicts.append({
+                "type": "validation",
+                "agents": list({i.split(":")[0].split("/")[0] for i in validation_issues}),
+                "resolution": f"{len(validation_issues)} manifest(s) failed validation — review before deploying",
+                "winner": "validation",
+            })
+
+        # Determine recommendation
+        recommendation = self._generate_recommendation(plan, results, conflicts)
+
+        # Write orchestration summary
+        self._write_summary(plan, results, conflicts, recommendation)
+
+        return OrchestrationResult(
+            plan=plan,
+            agent_results=results,
+            conflicts=conflicts,
+            gates_created=plan.gates_required,
+            recommendation=recommendation,
+        )
+
+    def _run_agents_local(
+        self,
+        plan: OrchestrationPlan,
+        agent_map: dict[str, tuple[str, type]],
+    ) -> list[AgentResult]:
+        """Run agents in-process (default mode)."""
         results: list[AgentResult] = []
 
         for agent_name in plan.agents_to_run:
@@ -191,38 +201,123 @@ class FleetOrchestrator:
                 ))
                 self._log_event(agent_name, "failed", str(exc))
 
-        # Validate generated output
-        validation_issues = self._post_hardening_validation(results)
-        if validation_issues:
-            for issue in validation_issues:
-                logger.warning("Post-hardening validation: %s", issue)
-            self._log_event("orchestrator", "validation-issues",
-                            f"{len(validation_issues)} manifest validation issue(s) found")
+        return results
 
-        # Resolve conflicts
-        conflicts = self._detect_conflicts(results)
+    @staticmethod
+    def _extract_result_json(log_output: str) -> str:
+        """Extract JSON from between result markers, ignoring any other log noise."""
+        begin = "--- AGENTIT_RESULT_BEGIN ---"
+        end = "--- AGENTIT_RESULT_END ---"
+        b = log_output.find(begin)
+        e = log_output.find(end)
+        if b != -1 and e != -1:
+            return log_output[b + len(begin):e].strip()
+        return log_output.strip()
 
-        if validation_issues:
-            conflicts.append({
-                "type": "validation",
-                "agents": list({i.split(":")[0].split("/")[0] for i in validation_issues}),
-                "resolution": f"{len(validation_issues)} manifest(s) failed validation — review before deploying",
-                "winner": "validation",
-            })
+    def _run_agents_as_jobs(
+        self,
+        plan: OrchestrationPlan,
+        agent_map: dict[str, tuple[str, type]],
+    ) -> list[AgentResult]:
+        """Run agents as K8s Jobs in parallel."""
+        from agentit import kube
+        from agentit.agents.capabilities import AGENT_CLASSES, RESOURCE_TIERS
 
-        # Determine recommendation
-        recommendation = self._generate_recommendation(plan, results, conflicts)
+        namespace = os.environ.get("AGENTIT_NAMESPACE", "agentit")
+        image = os.environ.get("AGENTIT_IMAGE") or kube.get_current_pod_image() or "quay.io/amobrem/agentit:latest"
 
-        # Write orchestration summary
-        self._write_summary(plan, results, conflicts, recommendation)
+        # Serialize report to ConfigMap
+        report_json = self.report.model_dump_json()
+        cm_name = f"agentit-report-{self._assessment_id or 'manual'}"[:63]
+        if not kube.create_config_map(cm_name, namespace, {"report.json": report_json}):
+            logger.warning("Failed to create report ConfigMap, falling back to local mode")
+            return self._run_agents_local(plan, agent_map)
 
-        return OrchestrationResult(
-            plan=plan,
-            agent_results=results,
-            conflicts=conflicts,
-            gates_created=plan.gates_required,
-            recommendation=recommendation,
-        )
+        # Launch all Jobs
+        job_names: dict[str, str] = {}
+        for agent_name in plan.agents_to_run:
+            if agent_name not in agent_map:
+                continue
+            job_name = f"agentit-{agent_name}-{self._assessment_id or 'manual'}"[:63]
+            command = [
+                "python", "-m", "agentit", "run-agent", agent_name,
+                "--report", "/input/report.json",
+            ]
+            tier_name = AGENT_CLASSES.get(agent_name, ("", "", "", "standard"))[3]
+            tier = RESOURCE_TIERS.get(tier_name, RESOURCE_TIERS["standard"])
+            if kube.create_job(
+                job_name, namespace, image, command,
+                config_map_name=cm_name,
+                labels={"agentit/agent": agent_name, "agentit/managed-by": "orchestrator"},
+                resources=tier,
+            ):
+                job_names[agent_name] = job_name
+                self._log_event(agent_name, "job-created", f"K8s Job {job_name} created")
+
+        # Poll until all complete (timeout 5 min)
+        results: list[AgentResult] = []
+        deadline = time.monotonic() + 300
+        pending = set(job_names.keys())
+
+        while pending and time.monotonic() < deadline:
+            for agent_name in list(pending):
+                status = kube.get_job_status(job_names[agent_name], namespace)
+                if status == "succeeded":
+                    pending.discard(agent_name)
+                    log_output = kube.get_job_pod_log(job_names[agent_name], namespace)
+                    category = agent_map[agent_name][0]
+                    try:
+                        from agentit.agents.base import GeneratedFile
+                        result_json = self._extract_result_json(log_output)
+                        files_data = json.loads(result_json)
+                        files = [GeneratedFile(**f) for f in files_data]
+                        results.append(AgentResult(
+                            agent_name=agent_name, category=category,
+                            files_generated=[f.path for f in files],
+                            success=True, findings_count=len(files),
+                        ))
+                        self._log_event(agent_name, "completed", f"Generated {len(files)} files (K8s Job)")
+                        self._record_remediations(agent_name, files)
+                        # Write files to output_dir for downstream consumption
+                        sub_dir = self.output_dir / category
+                        sub_dir.mkdir(parents=True, exist_ok=True)
+                        for f in files:
+                            (sub_dir / f.path).write_text(f.content, encoding="utf-8")
+                    except Exception as exc:
+                        logger.warning("Failed to parse Job output for %s: %s", agent_name, exc)
+                        results.append(AgentResult(
+                            agent_name=agent_name, category=category,
+                            files_generated=[], success=False,
+                            error=f"Failed to parse Job output: {exc}",
+                        ))
+                elif status == "failed":
+                    pending.discard(agent_name)
+                    category = agent_map[agent_name][0]
+                    log_output = kube.get_job_pod_log(job_names[agent_name], namespace)
+                    results.append(AgentResult(
+                        agent_name=agent_name, category=category,
+                        files_generated=[], success=False,
+                        error=f"K8s Job failed: {log_output[:200]}",
+                    ))
+                    self._log_event(agent_name, "failed", "K8s Job failed")
+            if pending:
+                time.sleep(5)
+
+        # Handle timed-out agents
+        for agent_name in pending:
+            category = agent_map[agent_name][0]
+            results.append(AgentResult(
+                agent_name=agent_name, category=category,
+                files_generated=[], success=False, error="K8s Job timed out",
+            ))
+            self._log_event(agent_name, "timeout", "K8s Job timed out after 5 minutes")
+
+        # Cleanup
+        for job_name in job_names.values():
+            kube.delete_job(job_name, namespace)
+        kube.delete_config_map(cm_name, namespace)
+
+        return results
 
     def _select_agents(self) -> list[str]:
         """Select which agents to run based on assessment findings."""

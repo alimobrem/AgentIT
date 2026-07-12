@@ -356,6 +356,35 @@ def drift_detect(interval: int) -> None:
     detector.run()
 
 
+@main.command("run-agent")
+@click.argument("agent_name")
+@click.option("--report", "report_path", required=True, type=click.Path(exists=True))
+def run_agent(agent_name: str, report_path: str) -> None:
+    """Run a single agent from a serialized AssessmentReport JSON. Used by K8s Jobs."""
+    import json
+    from agentit.agents.capabilities import get_agent_class, AGENT_CLASSES
+
+    if agent_name not in AGENT_CLASSES:
+        click.echo(f"Unknown agent: {agent_name}. Available: {', '.join(sorted(AGENT_CLASSES))}", err=True)
+        sys.exit(1)
+
+    report_json = Path(report_path).read_text(encoding="utf-8")
+    report = AssessmentReport.model_validate_json(report_json)
+
+    category = AGENT_CLASSES[agent_name][0]
+    output_dir = Path(f"/tmp/agent-output/{category}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    agent_cls = get_agent_class(agent_name)
+    agent_instance = agent_cls(report=report, output_dir=output_dir)
+    result = agent_instance.run()
+
+    files_data = [f.model_dump() for f in result.files]
+    click.echo("--- AGENTIT_RESULT_BEGIN ---")
+    click.echo(json.dumps(files_data))
+    click.echo("--- AGENTIT_RESULT_END ---")
+
+
 @main.command("self-assess")
 @click.option("--repo-url", default="https://github.com/alimobrem/AgentIT", help="AgentIT repo URL.")
 @click.option("--criticality", type=click.Choice(["low", "medium", "high", "critical"]), default="high")

@@ -61,6 +61,19 @@ spec:
                     fi
                   done
                   echo "Deleted $PVC_DELETED orphaned PVCs"
+
+                  echo "Cleaning orphaned agent Jobs (older than 1 hour)..."
+                  JOB_DELETED=0
+                  for job in $(oc get jobs -n {{ .Release.Namespace }} -l agentit/managed-by=orchestrator -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.creationTimestamp}{"\n"}{end}'); do
+                    NAME=$(echo "$job" | awk '{print $1}')
+                    CREATED=$(echo "$job" | awk '{print $2}')
+                    if [ -z "$NAME" ] || [ -z "$CREATED" ]; then continue; fi
+                    AGE_CUTOFF=$(date -u -d '1 hour ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-1H '+%Y-%m-%dT%H:%M:%SZ')
+                    if [ "$CREATED" \< "$AGE_CUTOFF" ]; then
+                      oc delete job "$NAME" -n {{ .Release.Namespace }} --wait=false 2>/dev/null && JOB_DELETED=$((JOB_DELETED+1))
+                    fi
+                  done
+                  echo "Deleted $JOB_DELETED orphaned agent Jobs"
               resources:
                 requests:
                   cpu: 50m

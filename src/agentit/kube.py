@@ -132,6 +132,172 @@ def get_api_resources() -> set[str]:
         return set()
 
 
+def create_config_map(name: str, namespace: str, data: dict[str, str]) -> bool:
+    """Create a ConfigMap. Returns True on success."""
+    from kubernetes.client import V1ConfigMap, V1ObjectMeta
+    try:
+        cm = V1ConfigMap(
+            metadata=V1ObjectMeta(name=name, namespace=namespace),
+            data=data,
+        )
+        core_v1().create_namespaced_config_map(namespace, cm)
+        return True
+    except Exception as exc:
+        if "already exists" in str(exc).lower():
+            core_v1().replace_namespaced_config_map(name, namespace, V1ConfigMap(
+                metadata=V1ObjectMeta(name=name, namespace=namespace),
+                data=data,
+            ))
+            return True
+        logger.warning("Failed to create ConfigMap %s: %s", name, exc)
+        return False
+
+
+def delete_config_map(name: str, namespace: str) -> None:
+    try:
+        core_v1().delete_namespaced_config_map(name, namespace)
+    except Exception:
+        pass
+
+
+def get_current_pod_image() -> str | None:
+    """Auto-detect the image of the current pod (when running in-cluster)."""
+    import os
+    hostname = os.environ.get("HOSTNAME", "")
+    if not hostname:
+        return None
+    namespace = os.environ.get("AGENTIT_NAMESPACE", "agentit")
+    try:
+        pod = core_v1().read_namespaced_pod(hostname, namespace)
+        if pod.spec.containers:
+            return pod.spec.containers[0].image
+    except Exception as exc:
+        logger.warning("Failed to auto-detect pod image: %s", exc)
+    return None
+
+
+def create_job(
+    name: str,
+    namespace: str,
+    image: str,
+    command: list[str],
+    config_map_name: str | None = None,
+    config_map_mount: str = "/input",
+    active_deadline: int = 300,
+    backoff_limit: int = 1,
+    labels: dict[str, str] | None = None,
+    resources: dict[str, str] | None = None,
+) -> bool:
+    """Create a K8s Job. Returns True on success."""
+    from kubernetes.client import (
+        V1Job, V1JobSpec, V1ObjectMeta, V1PodTemplateSpec, V1PodSpec,
+        V1Container, V1ResourceRequirements, V1SecurityContext,
+        V1Volume, V1VolumeMount, V1ConfigMapVolumeSource,
+        V1EnvVar,
+    )
+
+    volumes = []
+    volume_mounts = []
+    if config_map_name:
+        volumes.append(V1Volume(
+            name="input",
+            config_map=V1ConfigMapVolumeSource(name=config_map_name),
+        ))
+        volume_mounts.append(V1VolumeMount(
+            name="input", mount_path=config_map_mount, read_only=True,
+        ))
+
+    all_labels = {"app.kubernetes.io/component": "agent", "agentit/job": name}
+    if labels:
+        all_labels.update(labels)
+
+    res = resources or {}
+    cpu_req = res.get("cpu_req", "100m")
+    cpu_lim = res.get("cpu_lim", "500m")
+    mem_req = res.get("mem_req", "256Mi")
+    mem_lim = res.get("mem_lim", "512Mi")
+
+    job = V1Job(
+        metadata=V1ObjectMeta(name=name, namespace=namespace, labels=all_labels),
+        spec=V1JobSpec(
+            active_deadline_seconds=active_deadline,
+            backoff_limit=backoff_limit,
+            template=V1PodTemplateSpec(
+                metadata=V1ObjectMeta(labels=all_labels),
+                spec=V1PodSpec(
+                    restart_policy="Never",
+                    containers=[V1Container(
+                        name="agent",
+                        image=image,
+                        command=command,
+                        volume_mounts=volume_mounts or None,
+                        resources=V1ResourceRequirements(
+                            requests={"cpu": cpu_req, "memory": mem_req},
+                            limits={"cpu": cpu_lim, "memory": mem_lim},
+                        ),
+                        security_context=V1SecurityContext(
+                            allow_privilege_escalation=False,
+                            run_as_non_root=True,
+                        ),
+                        env=[V1EnvVar(name="PYTHONUNBUFFERED", value="1")],
+                    )],
+                    volumes=volumes or None,
+                ),
+            ),
+        ),
+    )
+
+    try:
+        batch_v1().create_namespaced_job(namespace, job)
+        return True
+    except Exception as exc:
+        logger.warning("Failed to create Job %s: %s", name, exc)
+        return False
+
+
+def get_job_status(name: str, namespace: str) -> str:
+    """Get Job status: 'active', 'succeeded', 'failed', or 'unknown'."""
+    try:
+        job = batch_v1().read_namespaced_job_status(name, namespace)
+        if job.status.succeeded and job.status.succeeded > 0:
+            return "succeeded"
+        if job.status.failed and job.status.failed > 0:
+            return "failed"
+        if job.status.active and job.status.active > 0:
+            return "active"
+        return "unknown"
+    except Exception as exc:
+        logger.warning("Failed to get Job status %s: %s", name, exc)
+        return "unknown"
+
+
+def get_job_pod_log(job_name: str, namespace: str) -> str:
+    """Read logs from the pod created by a Job."""
+    try:
+        pods = core_v1().list_namespaced_pod(
+            namespace, label_selector=f"agentit/job={job_name}",
+        )
+        if not pods.items:
+            return ""
+        pod_name = pods.items[0].metadata.name
+        return core_v1().read_namespaced_pod_log(pod_name, namespace)
+    except Exception as exc:
+        logger.warning("Failed to read Job pod log %s: %s", job_name, exc)
+        return ""
+
+
+def delete_job(name: str, namespace: str) -> None:
+    """Delete a Job and its pods."""
+    from kubernetes.client import V1DeleteOptions
+    try:
+        batch_v1().delete_namespaced_job(
+            name, namespace,
+            body=V1DeleteOptions(propagation_policy="Background"),
+        )
+    except Exception:
+        pass
+
+
 def namespace_exists(namespace: str) -> bool:
     try:
         core_v1().read_namespace(namespace)
