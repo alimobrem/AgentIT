@@ -20,6 +20,26 @@
   {% else %} text-danger{% endif %}
 ">{{ "%.0f"|format(report.overall_score) }}<span class="score-unit">/100</span></div>
 
+{% if trend and trend.delta is not none %}
+<span class="trend {% if trend.delta > 0 %}trend-up{% elif trend.delta < 0 %}trend-down{% else %}trend-flat{% endif %}">
+  {% if trend.delta > 0 %}&#x25B2; +{{ "%.0f"|format(trend.delta) }}{% elif trend.delta < 0 %}&#x25BC; {{ "%.0f"|format(trend.delta) }}{% else %}&#x2500; 0{% endif %}
+  <span class="text-muted text-sm">vs previous</span>
+</span>
+{% endif %}
+
+<div class="lifecycle-stepper">
+  {% set stages = [("assessed", "Assessed"), ("onboarded", "Onboarded"), ("applied", "Applied"), ("monitored", "Monitored")] %}
+  {% for key, label in stages %}
+  {% set is_active = lifecycle_stage == key %}
+  {% set is_done = (key == "assessed") or (key == "onboarded" and lifecycle_stage in ("onboarded", "applied", "monitored")) or (key == "applied" and lifecycle_stage in ("applied", "monitored")) or (key == "monitored" and lifecycle_stage == "monitored") %}
+  <div class="lifecycle-step {% if is_active %}step-active{% elif is_done %}step-done{% else %}step-pending{% endif %}">
+    <div class="step-marker">{% if is_done and not is_active %}&#10003;{% else %}{{ loop.index }}{% endif %}</div>
+    <div class="step-label">{{ label }}</div>
+  </div>
+  {% if not loop.last %}<div class="step-connector {% if is_done and not is_active %}connector-done{% endif %}"></div>{% endif %}
+  {% endfor %}
+</div>
+
 {% for s in scores_sorted %}
 <div class="dimension-row">
   <div class="dimension-label">{{ s.dimension | dimension_label }}</div>

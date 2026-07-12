@@ -291,9 +291,10 @@ async def api_events(limit: int = 50, target_app: str | None = None):
     return JSONResponse(get_store().list_events(limit=limit, target_app=target_app))
 
 
-@app.get("/assess", response_class=HTMLResponse)
-async def assess_form(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(request, "assess_form.html")
+@app.get("/assess")
+async def assess_form():
+    """Redirect to fleet with modal open — single entry point for assessment."""
+    return RedirectResponse(url="/?assess=1", status_code=303)
 
 
 def _clone_assess_cleanup(repo_url: str, criticality: str, infra_repo_url: str | None = None):
@@ -410,6 +411,14 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     timeline = s.get_assessment_timeline(assessment_id) if hasattr(s, 'get_assessment_timeline') else []
     trend = s.get_trend(report.repo_url) if hasattr(s, 'get_trend') else {}
     score_history = s.get_score_history(report.repo_url) if hasattr(s, 'get_score_history') else []
+    apply_results = s.get_apply_results(assessment_id)
+
+    if apply_results and apply_results.get("applied"):
+        lifecycle_stage = "applied"
+    elif onboardings:
+        lifecycle_stage = "onboarded"
+    else:
+        lifecycle_stage = "assessed"
 
     return templates.TemplateResponse(
         request,
@@ -426,6 +435,7 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "timeline": timeline,
             "trend": trend,
             "score_history": score_history,
+            "lifecycle_stage": lifecycle_stage,
         },
     )
 

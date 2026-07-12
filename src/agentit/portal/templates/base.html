@@ -650,6 +650,60 @@
   }
 
   /* ── Pagination ────────────────────────────────────────────────── */
+  /* ── Lifecycle Stepper ──────────────────────────────────────────── */
+  .lifecycle-stepper {
+    display: flex;
+    align-items: center;
+    margin: var(--space-5) 0 var(--space-7);
+    gap: 0;
+  }
+  .lifecycle-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-1);
+  }
+  .step-marker {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: var(--font-sm);
+    font-weight: 600;
+    border: 2px solid var(--color-border);
+    background: var(--color-surface);
+    color: var(--color-muted);
+  }
+  .step-label {
+    font-size: var(--font-xs);
+    color: var(--color-muted);
+    white-space: nowrap;
+  }
+  .step-active .step-marker {
+    border-color: var(--color-accent);
+    background: var(--color-accent);
+    color: #fff;
+    box-shadow: var(--glow-accent);
+  }
+  .step-active .step-label { color: var(--color-accent); font-weight: 600; }
+  .step-done .step-marker {
+    border-color: var(--color-success);
+    background: var(--color-success);
+    color: #fff;
+  }
+  .step-done .step-label { color: var(--color-success); }
+  .step-connector {
+    flex: 1;
+    height: 2px;
+    background: var(--color-border);
+    min-width: 30px;
+    margin: 0 var(--space-2);
+    margin-bottom: 18px;
+  }
+  .connector-done { background: var(--color-success); }
+
   .filter-input { max-width: 300px; }
   .pagination { display: flex; align-items: center; justify-content: center; gap: var(--space-5); margin-top: var(--space-5); padding: var(--space-5) 0; }
 

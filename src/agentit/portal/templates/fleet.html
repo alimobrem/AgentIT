@@ -112,7 +112,7 @@
 {% endif %}
 
 <!-- Assess Modal -->
-<div id="assess-modal" class="modal-overlay" onclick="if(event.target===this)this.classList.remove('open')">
+<div id="assess-modal" class="modal-overlay {% if request.query_params.get('assess') %}open{% endif %}" onclick="if(event.target===this)this.classList.remove('open')">
   <div class="modal">
     <button class="modal-close" onclick="this.closest('.modal-overlay').classList.remove('open')">&times;</button>
     <h2>New Assessment</h2>
