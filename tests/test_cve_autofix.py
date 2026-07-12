@@ -160,7 +160,10 @@ class TestCVEWebhook:
     @pytest.fixture(autouse=True)
     def _override_store(self):
         test_store = make_store()
-        with patch("agentit.portal.app.get_store", return_value=test_store):
+        with patch("agentit.portal.app.get_store", return_value=test_store), \
+             patch("agentit.portal.routes.webhooks.get_store", return_value=test_store), \
+             patch("agentit.portal.routes.health.get_store", return_value=test_store), \
+             patch("agentit.portal.routes.schedules.get_store", return_value=test_store):
             yield test_store
 
     @pytest.fixture()

@@ -83,7 +83,10 @@ def _make_report(repo_name: str = "test-repo") -> AssessmentReport:
 def _override_store():
     """Patch get_store so every test gets a fresh in-memory DB."""
     test_store = make_store()
-    with patch("agentit.portal.app.get_store", return_value=test_store):
+    with patch("agentit.portal.app.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.webhooks.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.health.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.schedules.get_store", return_value=test_store):
         yield test_store
 
 
@@ -399,8 +402,9 @@ def test_events_page_renders(client, _override_store):
 
 def test_webhook_triggers_assessment(client, _override_store):
     report = _make_report("webhook-repo")
-    with patch("agentit.portal.app.clone_repo") as mock_clone, \
-         patch("agentit.portal.app.run_assessment", return_value=report):
+    with patch("agentit.portal.routes.webhooks.clone_repo") as mock_clone, \
+         patch("agentit.portal.routes.webhooks.get_llm_client", return_value=None), \
+         patch("agentit.runner.run_assessment", return_value=report):
         mock_clone.return_value = Path("/tmp/fake")
         resp = client.post(
             "/api/webhook/assess",
@@ -424,7 +428,7 @@ def test_webhook_onboard_triggers_onboarding(client, _override_store):
 
     fake_files = [{"category": "security", "path": "netpol.yaml", "content": "kind: NetworkPolicy", "description": "netpol"}]
     fake_summary = {"agents": [], "conflicts": [], "recommendation": "READY", "auto_approve": False, "gates": []}
-    with patch("agentit.portal.app._run_onboarding", return_value=(fake_files, fake_summary)):
+    with patch("agentit.portal.routes.webhooks._run_onboarding", return_value=(fake_files, fake_summary)):
         resp = client.post(
             "/api/webhook/onboard",
             json={"correlationId": aid},

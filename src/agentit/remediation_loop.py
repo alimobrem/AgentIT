@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
-import subprocess
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -227,33 +225,19 @@ class RemediationLoop:
             return {"error": str(exc)}
 
     def _rollback(self, app_name: str, namespace: str) -> dict:
-        """Execute rollback via oc rollout undo."""
-        cli = shutil.which("oc") or shutil.which("kubectl")
-        if cli is None:
-            logger.error("Neither oc nor kubectl found, cannot rollback %s", app_name)
-            return {"outcome": "rollback_failed", "error": "no CLI tool found"}
+        """Execute rollback via kubernetes client."""
+        from agentit import kube
 
-        try:
-            result = subprocess.run(
-                [cli, "rollout", "undo", f"deployment/{app_name}", "-n", namespace],
-                capture_output=True, text=True, timeout=30,
-            )
-        except subprocess.TimeoutExpired:
-            logger.exception("Rollback timed out for %s/%s", namespace, app_name)
-            self._log("rollback-failed", app_name, "critical", "Rollback timed out")
-            return {"outcome": "rollback_failed", "error": "timeout"}
-
-        if result.returncode == 0:
-            detail = result.stdout.strip()
-            logger.info("Rollback succeeded for %s/%s: %s", namespace, app_name, detail)
+        result = kube.rollout_undo(app_name, namespace)
+        if result["success"]:
+            logger.info("Rollback succeeded for %s/%s: %s", namespace, app_name, result["message"])
             self._log("rolled-back", app_name, "critical",
-                      f"Rollback executed: {detail}")
-            return {"outcome": "rolled_back", "details": detail}
+                      f"Rollback executed: {result['message']}")
+            return {"outcome": "rolled_back", "details": result["message"]}
 
-        err = result.stderr.strip()
-        logger.error("Rollback failed for %s/%s: %s", namespace, app_name, err)
-        self._log("rollback-failed", app_name, "critical", f"Rollback failed: {err}")
-        return {"outcome": "rollback_failed", "error": err}
+        logger.error("Rollback failed for %s/%s: %s", namespace, app_name, result["message"])
+        self._log("rollback-failed", app_name, "critical", f"Rollback failed: {result['message']}")
+        return {"outcome": "rollback_failed", "error": result["message"]}
 
     def _verify_slos(self, assessment_id: str, app_name: str) -> dict:
         """Watch SLOs for VERIFY_WINDOW_SECONDS after apply."""

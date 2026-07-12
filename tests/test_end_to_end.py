@@ -98,7 +98,10 @@ def _make_report_with_findings(repo_name: str = "e2e-repo") -> AssessmentReport:
 @pytest.fixture(autouse=True)
 def _override_store():
     test_store = make_store()
-    with patch("agentit.portal.app.get_store", return_value=test_store):
+    with patch("agentit.portal.app.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.webhooks.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.health.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.schedules.get_store", return_value=test_store):
         yield test_store
 
 
@@ -204,7 +207,7 @@ def test_webhook_onboard_full_flow(client, _override_store):
         "agents": [], "conflicts": [], "recommendation": "",
         "auto_approve": False, "gates": [],
     }
-    with patch("agentit.portal.app._run_onboarding", return_value=(fake_files, fake_summary)):
+    with patch("agentit.portal.routes.webhooks._run_onboarding", return_value=(fake_files, fake_summary)):
         resp = client.post(
             "/api/webhook/onboard",
             json={"correlationId": aid},

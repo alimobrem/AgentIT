@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import logging
-import shutil
-import subprocess
-import tempfile
 from pathlib import Path
 
 import yaml
+
+from agentit import kube
 
 logger = logging.getLogger(__name__)
 
@@ -186,49 +185,14 @@ _CLUSTER_SCOPED_KINDS = frozenset({
 })
 
 
-def _find_cli() -> str:
-    for cmd in ("oc", "kubectl"):
-        if shutil.which(cmd):
-            return cmd
-    raise FileNotFoundError("Neither oc nor kubectl found on PATH")
-
-
-def _get_available_resources(cli: str) -> set[str]:
+def _get_available_resources() -> set[str]:
     """Get available API resource kinds on the cluster."""
-    result = subprocess.run(
-        [cli, "api-resources", "--no-headers", "-o", "name"],
-        capture_output=True, text=True, timeout=15,
-    )
-    if result.returncode != 0:
-        logger.warning("api-resources failed, skipping pre-flight: %s", result.stderr)
-        return set()
-    kinds: set[str] = set()
-    for line in result.stdout.splitlines():
-        parts = line.strip().split(".")
-        if parts:
-            kinds.add(parts[0].lower())
-    result2 = subprocess.run(
-        [cli, "api-resources", "--no-headers"],
-        capture_output=True, text=True, timeout=15,
-    )
-    if result2.returncode == 0:
-        for line in result2.stdout.splitlines():
-            cols = line.split()
-            if cols:
-                kinds.add(cols[-1].lower())
-    return kinds
+    return kube.get_api_resources()
 
 
-def _ensure_namespace(cli: str, namespace: str, dry_run: bool) -> None:
-    check = subprocess.run(
-        [cli, "get", "namespace", namespace],
-        capture_output=True, text=True, timeout=10,
-    )
-    if check.returncode != 0 and not dry_run:
-        subprocess.run(
-            [cli, "create", "namespace", namespace],
-            capture_output=True, text=True, timeout=10,
-        )
+def _ensure_namespace(namespace: str, dry_run: bool) -> None:
+    if not kube.namespace_exists(namespace) and not dry_run:
+        kube.create_namespace(namespace)
         logger.info("Created namespace %s", namespace)
 
 
@@ -286,74 +250,67 @@ def apply_manifests_to_cluster(
     dry_run: bool = False,
 ) -> dict:
     """Apply manifests to the cluster with pre-flight validation."""
-    cli = _find_cli()
     applied: list[str] = []
     skipped: list[str] = []
     errors: list[str] = []
     missing_operators: dict[str, dict] = {}
     repo_files: list[dict] = []
 
-    _ensure_namespace(cli, namespace, dry_run)
-    available = _get_available_resources(cli)
+    _ensure_namespace(namespace, dry_run)
+    available = _get_available_resources()
 
-    tmpdir = tempfile.mkdtemp(prefix="agentit-apply-")
-    try:
-        for entry in files:
-            fpath = entry["path"]
-            suffix = Path(fpath).suffix.lower()
+    for entry in files:
+        fpath = entry["path"]
+        suffix = Path(fpath).suffix.lower()
 
-            if suffix in _SKIP_EXTENSIONS or suffix not in (".yaml", ".yml"):
-                purpose = _NON_MANIFEST_PURPOSE.get(suffix, "Not a Kubernetes manifest")
-                repo_files.append({
-                    "path": fpath,
-                    "purpose": purpose,
-                    "description": entry.get("description", ""),
-                })
-                continue
+        if suffix in _SKIP_EXTENSIONS or suffix not in (".yaml", ".yml"):
+            purpose = _NON_MANIFEST_PURPOSE.get(suffix, "Not a Kubernetes manifest")
+            repo_files.append({
+                "path": fpath,
+                "purpose": purpose,
+                "description": entry.get("description", ""),
+            })
+            continue
 
-            docs = _parse_manifest(entry["content"])
-            if not docs:
-                skipped.append(f"{fpath} (empty or unparseable)")
-                continue
+        docs = _parse_manifest(entry["content"])
+        if not docs:
+            skipped.append(f"{fpath} (empty or unparseable)")
+            continue
 
-            all_skip = True
-            skip_reasons = []
-            apply_docs = []
+        all_skip = True
+        skip_reasons = []
+        apply_docs = []
 
-            for doc in docs:
-                action, reason, fixed = _classify_and_fix(doc, namespace, available)
-                if action == "apply":
-                    all_skip = False
-                    apply_docs.append(fixed)
-                else:
-                    skip_reasons.append(reason)
-                    if action == "skip_crd_missing":
-                        kind = doc.get("kind", "")
-                        if kind in _CRD_TO_OPERATOR:
-                            op = _CRD_TO_OPERATOR[kind]
-                            missing_operators[kind] = op
-
-            if all_skip:
-                skipped.append(f"{fpath} ({'; '.join(skip_reasons)})")
-                continue
-
-            content = yaml.dump_all(apply_docs, default_flow_style=False)
-            tmp_file = Path(tmpdir) / Path(fpath).name
-            tmp_file.write_text(content)
-
-            cmd = [cli, "apply", "-f", str(tmp_file), "-n", namespace]
-            if dry_run:
-                cmd.append("--dry-run=client")
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if result.returncode == 0:
-                applied.append(fpath)
-                logger.info("Applied %s: %s", fpath, result.stdout.strip())
+        for doc in docs:
+            action, reason, fixed = _classify_and_fix(doc, namespace, available)
+            if action == "apply":
+                all_skip = False
+                apply_docs.append(fixed)
             else:
-                errors.append(f"{fpath}: {result.stderr.strip()}")
-                logger.error("Failed %s: %s", fpath, result.stderr.strip())
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+                skip_reasons.append(reason)
+                if action == "skip_crd_missing":
+                    kind = doc.get("kind", "")
+                    if kind in _CRD_TO_OPERATOR:
+                        op = _CRD_TO_OPERATOR[kind]
+                        missing_operators[kind] = op
+
+        if all_skip:
+            skipped.append(f"{fpath} ({'; '.join(skip_reasons)})")
+            continue
+
+        content = yaml.dump_all(apply_docs, default_flow_style=False)
+
+        if dry_run:
+            applied.append(fpath)
+            logger.info("Dry-run validated %s", fpath)
+        else:
+            result = kube.apply_yaml(content, namespace)
+            if result["applied"]:
+                applied.append(fpath)
+                logger.info("Applied %s", fpath)
+            else:
+                errors.append(f"{fpath}: {result['error']}")
+                logger.error("Failed %s: %s", fpath, result["error"])
 
     return {
         "applied": applied,
@@ -375,7 +332,6 @@ def install_operator(package: str, channel: str, source: str) -> dict:
         return {"status": "error", "package": package,
                 "error": f"Only Red Hat operators are supported (source={source})"}
 
-    cli = _find_cli()
     ns = f"openshift-{package.replace('_', '-')}"
 
     docs = [
@@ -405,19 +361,10 @@ def install_operator(package: str, channel: str, source: str) -> dict:
     ]
 
     content = yaml.dump_all(docs, default_flow_style=False)
-    tmpdir = tempfile.mkdtemp(prefix="agentit-install-")
-    try:
-        tmp_file = Path(tmpdir) / "operator-install.yaml"
-        tmp_file.write_text(content)
-        result = subprocess.run(
-            [cli, "apply", "-f", str(tmp_file)],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0:
-            logger.info("Operator %s install started in %s: %s", package, ns, result.stdout.strip())
-            return {"status": "installing", "package": package, "namespace": ns}
-        else:
-            logger.error("Operator %s install failed: %s", package, result.stderr.strip())
-            return {"status": "error", "package": package, "error": result.stderr.strip()}
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+    result = kube.apply_yaml(content, ns)
+    if result["applied"]:
+        logger.info("Operator %s install started in %s", package, ns)
+        return {"status": "installing", "package": package, "namespace": ns}
+    else:
+        logger.error("Operator %s install failed: %s", package, result["error"])
+        return {"status": "error", "package": package, "error": result["error"] or "unknown"}

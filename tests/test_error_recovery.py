@@ -109,7 +109,10 @@ def _make_report_with_findings(repo_name: str = "error-repo") -> AssessmentRepor
 @pytest.fixture(autouse=True)
 def _override_store():
     test_store = make_store()
-    with patch("agentit.portal.app.get_store", return_value=test_store):
+    with patch("agentit.portal.app.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.webhooks.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.health.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.schedules.get_store", return_value=test_store):
         yield test_store
 
 
@@ -160,7 +163,7 @@ def test_webhook_onboard_failure_returns_500(client, _override_store):
     aid = store.save(report)
 
     with patch(
-        "agentit.portal.app._run_onboarding",
+        "agentit.portal.routes.webhooks._run_onboarding",
         side_effect=Exception("agent crashed"),
     ):
         resp = client.post(

@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import subprocess
 import time
 
 import click
 
+from agentit import kube
 from agentit.events import EventPublisher
 
 logger = logging.getLogger(__name__)
@@ -63,20 +62,11 @@ class DriftDetector:
         return drifted
 
     def _fetch_argo_apps(self) -> dict | None:
-        """Try ``oc`` then ``kubectl`` to list Argo CD Application resources."""
-        for cli in ("oc", "kubectl"):
-            try:
-                result = subprocess.run(
-                    [cli, "get", "applications.argoproj.io", "-A", "-o", "json"],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                if result.returncode == 0:
-                    return json.loads(result.stdout)
-            except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as exc:
-                logger.warning("%s query failed: %s", cli, exc)
-        return None
+        """List Argo CD Application resources via the kubernetes client."""
+        items = kube.list_custom_resources("argoproj.io", "v1alpha1", "applications")
+        if not items:
+            return None
+        return {"items": items}
 
     def _maybe_auto_sync(self, app_name: str) -> None:
         """If auto-mode is enabled, patch the Application to trigger a sync."""
@@ -90,23 +80,18 @@ class DriftDetector:
 
         click.echo(f"[drift-detect] Auto-syncing {app_name}...", err=True)
         try:
-            sync_result = subprocess.run(
-                [
-                    "oc", "-n", "openshift-gitops", "patch",
-                    "applications.argoproj.io", app_name,
-                    "--type=merge",
-                    "-p", '{"operation":{"sync":{"revision":"HEAD"}}}',
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
+            kube.custom_objects().patch_namespaced_custom_object(
+                group="argoproj.io",
+                version="v1alpha1",
+                namespace="openshift-gitops",
+                plural="applications",
+                name=app_name,
+                body={"operation": {"sync": {"revision": "HEAD"}}},
             )
-            if sync_result.returncode == 0:
-                click.echo(f"[drift-detect] Sync triggered for {app_name}", err=True)
-            else:
-                click.echo(f"[drift-detect] Sync failed: {sync_result.stderr[:100]}", err=True)
-        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            click.echo(f"[drift-detect] Sync triggered for {app_name}", err=True)
+        except Exception as exc:
             logger.warning("Auto-sync failed for %s: %s", app_name, exc)
+            click.echo(f"[drift-detect] Sync failed: {str(exc)[:100]}", err=True)
 
     def run(self) -> None:
         """Main loop: detect drift, sleep."""

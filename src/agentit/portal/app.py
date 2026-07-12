@@ -18,7 +18,14 @@ from agentit.cloner import clone_repo
 from agentit.models import AssessmentReport, Severity
 from agentit.portal.cluster_apply import apply_manifests_to_cluster, install_operator
 from agentit.portal.github_pr import create_onboarding_pr
-from agentit.portal.store import AssessmentStore
+from agentit.portal.helpers import (
+    get_store,
+    publish_event as _publish_event,
+    safe_url as _safe_url,
+    format_dimension as _format_dimension,
+    get_llm_client as _get_llm_client,
+)
+from agentit.agents.capabilities import AGENT_CAPABILITIES
 from agentit.runner import run_assessment
 
 log = logging.getLogger(__name__)
@@ -66,28 +73,6 @@ async def _start_background_tasks() -> None:
     asyncio.create_task(_background_maintenance())
 
 
-def _safe_url(value: str) -> str:
-    parsed = urlparse(value)
-    if parsed.scheme not in ("https", "http", ""):
-        return "#"
-    return value
-
-
-_DIMENSION_LABELS: dict[str, str] = {
-    "ha_dr": "HA/DR",
-    "cicd": "CI/CD",
-    "data_governance": "Data Governance",
-}
-
-
-def _format_dimension(value: str) -> str:
-    """Format dimension names for display. Uses explicit mapping for acronyms,
-    falls back to replacing underscores and title-casing."""
-    if value in _DIMENSION_LABELS:
-        return _DIMENSION_LABELS[value]
-    return value.replace("_", " ").title()
-
-
 templates.env.filters["safe_url"] = _safe_url
 templates.env.filters["dimension_label"] = _format_dimension
 
@@ -111,87 +96,66 @@ async def server_error_handler(request: Request, exc: Exception) -> HTMLResponse
     )
 
 
-store = AssessmentStore()
+# ── Register route modules ───────────────────────────────────────────
+
+from agentit.portal.routes.webhooks import router as webhooks_router  # noqa: E402
+from agentit.portal.routes.health import router as health_router  # noqa: E402
+from agentit.portal.routes.schedules import router as schedules_router  # noqa: E402
+
+app.include_router(webhooks_router)
+app.include_router(health_router)
+app.include_router(schedules_router)
 
 
-def get_store() -> AssessmentStore:
-    return store
+# ── Fleet enrichment ─────────────────────────────────────────────────
 
 
-def _publish_event(
-    action: str,
-    target_app: str | None,
-    summary: str,
-    details: dict | None = None,
-    correlation_id: str | None = None,
-    agent_id: str = "assessor",
-    extra_topic: str | None = None,
-) -> None:
-    try:
-        from agentit.events import get_publisher, TOPIC_EVENTS
-        pub = get_publisher()
-        kwargs = dict(
-            agent_id=agent_id,
-            action=action,
-            target_app=target_app,
-            summary=summary,
-            details=details,
-            correlation_id=correlation_id,
-        )
-        pub.publish(TOPIC_EVENTS, **kwargs)
-        if extra_topic:
-            pub.publish(extra_topic, **kwargs)
-    except Exception:
-        log.warning("Failed to publish event %s", action, exc_info=True)
-
-
-def _enrich_fleet_with_cluster_status(fleet: list[dict], _store: AssessmentStore | None = None) -> list[dict]:
+def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None) -> list[dict]:
     """Check cluster for each app's deployment status."""
-    import json as _json
+    from agentit import kube
 
     # Get all Argo CD apps in one call
     argo_status: dict[str, dict] = {}
-    raw = _run_cmd(["oc", "get", "applications.argoproj.io", "-n", "openshift-gitops", "-o", "json"])
-    if raw:
-        try:
-            for a in _json.loads(raw).get("items", []):
-                name = a.get("metadata", {}).get("name", "")
-                dest = a.get("spec", {}).get("destination", {})
-                cluster = dest.get("server", "unknown")
-                namespace = dest.get("namespace", "default")
-                argo_status[name] = {
-                    "sync": a.get("status", {}).get("sync", {}).get("status", "Unknown"),
-                    "health": a.get("status", {}).get("health", {}).get("status", "Unknown"),
-                    "cluster": cluster,
-                    "namespace": namespace,
-                }
-        except Exception:
-            log.debug("Failed to fetch Argo CD apps for fleet enrichment", exc_info=True)
+    try:
+        items = kube.list_custom_resources("argoproj.io", "v1alpha1", "applications", namespace="openshift-gitops")
+        for a in items:
+            name = a.get("metadata", {}).get("name", "")
+            dest = a.get("spec", {}).get("destination", {})
+            cluster = dest.get("server", "unknown")
+            namespace = dest.get("namespace", "default")
+            argo_status[name] = {
+                "sync": a.get("status", {}).get("sync", {}).get("status", "Unknown"),
+                "health": a.get("status", {}).get("health", {}).get("status", "Unknown"),
+                "cluster": cluster,
+                "namespace": namespace,
+            }
+    except Exception:
+        log.debug("Failed to fetch Argo CD apps for fleet enrichment", exc_info=True)
 
-    for app in fleet:
-        app_name = app["repo_name"].lower().replace("_", "-").replace(".", "-")
+    for app_item in fleet:
+        app_name = app_item["repo_name"].lower().replace("_", "-").replace(".", "-")
         argo = argo_status.get(app_name)
         apply_results = None
         try:
-            apply_results = _store.get_apply_results(app["id"]) if _store else None
+            apply_results = _store.get_apply_results(app_item["id"]) if _store else None
         except Exception:
-            log.debug("Failed to get apply results for %s", app["id"], exc_info=True)
+            log.debug("Failed to get apply results for %s", app_item["id"], exc_info=True)
 
         if argo:
-            app["deploy_status"] = "synced" if argo["sync"] == "Synced" else "out-of-sync"
-            app["deploy_health"] = argo["health"].lower()
-            app["deploy_cluster"] = argo["cluster"]
-            app["deploy_namespace"] = argo["namespace"]
+            app_item["deploy_status"] = "synced" if argo["sync"] == "Synced" else "out-of-sync"
+            app_item["deploy_health"] = argo["health"].lower()
+            app_item["deploy_cluster"] = argo["cluster"]
+            app_item["deploy_namespace"] = argo["namespace"]
         elif apply_results and apply_results.get("applied"):
-            app["deploy_status"] = "applied"
-            app["deploy_health"] = "unknown"
-            app["deploy_cluster"] = "local"
-            app["deploy_namespace"] = apply_results.get("namespace", "default")
+            app_item["deploy_status"] = "applied"
+            app_item["deploy_health"] = "unknown"
+            app_item["deploy_cluster"] = "local"
+            app_item["deploy_namespace"] = apply_results.get("namespace", "default")
         else:
-            app["deploy_status"] = "not deployed"
-            app["deploy_health"] = "—"
-            app["deploy_cluster"] = "—"
-            app["deploy_namespace"] = "—"
+            app_item["deploy_status"] = "not deployed"
+            app_item["deploy_health"] = "—"
+            app_item["deploy_cluster"] = "—"
+            app_item["deploy_namespace"] = "—"
 
     return fleet
 
@@ -247,147 +211,6 @@ async def dlq_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "dlq.html", {"dlq_messages": dlq_messages})
 
 
-@app.post("/api/webhook/assess")
-async def webhook_assess(request: Request):
-    """Trigger an assessment via webhook. Accepts JSON body: {repo_url, criticality}"""
-    body = await request.json()
-    repo_url = body.get("repo_url")
-    if not repo_url:
-        raise HTTPException(400, "repo_url required")
-    criticality = body.get("criticality", "medium")
-    report = await _with_timeout(asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality))
-    assessment_id = get_store().save(report)
-    from agentit.events import TOPIC_ASSESSMENTS
-    _publish_event("assessment-complete", report.repo_name,
-                   f"Assessment complete: {report.overall_score:.0f}/100",
-                   {"assessment_id": assessment_id, "score": report.overall_score},
-                   correlation_id=assessment_id,
-                   extra_topic=TOPIC_ASSESSMENTS)
-    return JSONResponse({"assessment_id": assessment_id, "overall_score": report.overall_score})
-
-
-@app.post("/api/webhook/github-push")
-async def webhook_github_push(request: Request):
-    """Handle GitHub push webhooks — triggers re-assessment for managed repos."""
-    event_type = request.headers.get("X-GitHub-Event", "")
-    if event_type == "ping":
-        return JSONResponse({"status": "pong"})
-    if event_type != "push":
-        return JSONResponse({"status": "ignored", "reason": f"event type '{event_type}' not handled"})
-
-    body = await request.json()
-    ref = body.get("ref", "")
-    repo_url = body.get("repository", {}).get("html_url", "")
-    default_branch = body.get("repository", {}).get("default_branch", "main")
-
-    if ref != f"refs/heads/{default_branch}":
-        return JSONResponse({"status": "ignored", "reason": f"push to {ref}, not {default_branch}"})
-
-    if not repo_url:
-        raise HTTPException(400, "No repository URL in push payload")
-
-    s = get_store()
-    fleet = s.get_fleet_data()
-    managed = next(
-        (app for app in fleet if app["repo_url"].rstrip("/").lower() == repo_url.rstrip("/").lower()),
-        None,
-    )
-    if managed is None:
-        return JSONResponse({"status": "ignored", "reason": f"{repo_url} not in fleet"})
-
-    commit_sha = body.get("after", "")[:12]
-    pusher = body.get("pusher", {}).get("name", "unknown")
-    log.info("GitHub push on managed repo %s by %s (commit %s) — triggering re-assessment",
-             managed["repo_name"], pusher, commit_sha)
-
-    s.log_event("github-webhook", "push-received", managed["repo_name"],
-                "info", f"Push by {pusher} (commit {commit_sha}) — re-assessing")
-
-    criticality = managed.get("criticality", "medium")
-    try:
-        report = await _with_timeout(
-            asyncio.to_thread(_clone_assess_cleanup, repo_url, criticality)
-        )
-        assessment_id = s.save(report)
-        s.log_event("github-webhook", "reassessment-complete", managed["repo_name"],
-                    "info", f"Re-assessment complete: {report.overall_score:.0f}/100 (was {managed.get('latest_score', '?')})")
-        from agentit.events import TOPIC_ASSESSMENTS as _TOPIC_ASSESSMENTS
-        _publish_event("assessment-complete", managed["repo_name"],
-                       f"Re-assessment: {report.overall_score:.0f}/100",
-                       {"assessment_id": assessment_id, "score": report.overall_score},
-                       correlation_id=assessment_id,
-                       extra_topic=_TOPIC_ASSESSMENTS)
-        return JSONResponse({
-            "status": "assessed",
-            "repo": managed["repo_name"],
-            "assessment_id": assessment_id,
-            "score": report.overall_score,
-            "previous_score": managed.get("latest_score"),
-        })
-    except Exception as exc:
-        log.exception("Re-assessment failed for %s", managed["repo_name"])
-        s.log_event("github-webhook", "reassessment-failed", managed["repo_name"],
-                    "warning", f"Re-assessment failed: {str(exc)[:200]}")
-        return JSONResponse({"status": "error", "reason": str(exc)[:200]})
-
-
-@app.post("/api/webhook/onboard")
-async def webhook_onboard(request: Request):
-    """Trigger onboarding via webhook (called by Argo Events Sensor for low-score assessments)."""
-    body = await request.json()
-    log.info("webhook_onboard received event: %s", body.get("eventId", "unknown"))
-
-    # Extract assessment_id: correlationId first, then result.details.assessment_id
-    assessment_id = body.get("correlationId")
-    if not assessment_id:
-        result = body.get("result") or {}
-        details = result.get("details") or {}
-        assessment_id = details.get("assessment_id")
-    if not assessment_id:
-        raise HTTPException(400, "assessment_id not found in event body")
-
-    s = get_store()
-    report = s.get(assessment_id)
-    if report is None:
-        raise HTTPException(404, f"Assessment {assessment_id} not found")
-
-    try:
-        files, orch_summary = await _with_timeout(asyncio.to_thread(_run_onboarding, report, assessment_id))
-    except HTTPException:
-        raise
-    except Exception as exc:
-        log.exception("Onboarding failed for assessment %s", assessment_id)
-        return JSONResponse(
-            {"error": str(exc), "assessment_id": assessment_id},
-            status_code=500,
-        )
-
-    s.save_onboarding(assessment_id, files, orchestration=orch_summary)
-
-    # Trigger image build only if a Containerfile was generated or exists in the repo
-    has_containerfile = any(
-        f["path"].lower() in ("containerfile", "dockerfile") for f in files
-    )
-    build_result: dict = {}
-    build_status = "skipped"
-    if has_containerfile:
-        from agentit.image_builder import build_app_image
-        build_result = await asyncio.to_thread(build_app_image, report.repo_url, report.repo_name)
-        build_status = build_result.get("image_ref", build_result.get("error", "unknown"))
-        if "error" not in build_result:
-            s.log_event("image-builder", "build-triggered", report.repo_name, "info",
-                        f"Building image: {build_result['image_ref']}")
-
-    log.info("webhook_onboard completed for %s: %d files, build=%s", assessment_id, len(files), build_status)
-    return JSONResponse({
-        "assessment_id": assessment_id,
-        "repo_url": report.repo_url,
-        "files_generated": len(files),
-        "categories": list({f["category"] for f in files}),
-        "image_build": build_status,
-    })
-
-
 @app.get("/api/events")
 async def api_events(limit: int = 50, target_app: str | None = None):
     return JSONResponse(get_store().list_events(limit=limit, target_app=target_app))
@@ -396,17 +219,6 @@ async def api_events(limit: int = 50, target_app: str | None = None):
 @app.get("/assess", response_class=HTMLResponse)
 async def assess_form(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "assess_form.html")
-
-
-def _get_llm_client():
-    import os
-    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID"):
-        try:
-            from agentit.llm import LLMClient
-            return LLMClient()
-        except Exception as exc:
-            log.warning("LLM client init failed (continuing without): %s", exc)
-    return None
 
 
 def _clone_assess_cleanup(repo_url: str, criticality: str, infra_repo_url: str | None = None):
@@ -472,7 +284,7 @@ def _auto_create_infra_repo(repo_url: str) -> str | None:
 
 @app.post("/self-assess", response_model=None)
 async def self_assess_route(request: Request):
-    """One-click self-assessment — AgentIT assesses its own repo."""
+    """One-click self-assessment -- AgentIT assesses its own repo."""
     repo_url = "https://github.com/alimobrem/AgentIT"
     infra = await asyncio.to_thread(_auto_create_infra_repo, repo_url)
     try:
@@ -916,56 +728,6 @@ async def install_operator_endpoint(request: Request):
     return JSONResponse(result)
 
 
-@app.get("/api/operator-status")
-async def operator_status(request: Request):
-    """Check if an OLM operator is installed and ready. Used by htmx polling."""
-    package = request.query_params.get("package", "")
-    if not package:
-        return HTMLResponse("<span>Missing package name</span>")
-
-    import shutil
-    import subprocess
-    cli = shutil.which("oc") or shutil.which("kubectl")
-    if not cli:
-        return HTMLResponse(f"<strong>{package}</strong> — cannot check (no oc/kubectl)")
-
-    op_ns = f"openshift-{package.replace('_', '-')}"
-    try:
-        result = subprocess.run(
-            [cli, "get", "csv", "-n", op_ns, "-o",
-             f"jsonpath={{.items[?(@.spec.displayName=='{package}')].status.phase}}"],
-            capture_output=True, text=True, timeout=10,
-        )
-        phase = result.stdout.strip()
-        if not phase:
-            result2 = subprocess.run(
-                [cli, "get", "subscription.operators.coreos.com", package, "-n", op_ns,
-                 "-o", "jsonpath={.status.state}"],
-                capture_output=True, text=True, timeout=10,
-            )
-            state = result2.stdout.strip()
-            if state:
-                return HTMLResponse(
-                    f"<strong>{package}</strong> — subscription {state}. Waiting for operator pod..."
-                    '<span class="spinner"></span>'
-                )
-            return HTMLResponse(
-                f"<strong>{package}</strong> — installing..."
-                '<span class="spinner"></span>'
-            )
-        if phase == "Succeeded":
-            return HTMLResponse(
-                f'<strong>{package}</strong> — <span class="badge badge-low">Installed</span>. '
-                "Re-run Dry Run to apply the previously skipped manifests."
-            )
-        return HTMLResponse(
-            f"<strong>{package}</strong> — phase: {phase}"
-            '<span class="spinner"></span>'
-        )
-    except Exception:
-        return HTMLResponse(f"<strong>{package}</strong> — checking..." '<span class="spinner"></span>')
-
-
 @app.get("/gates", response_class=HTMLResponse)
 async def gates_page(request: Request):
     """Show pending approval gates. Auto-expires gates older than 24h."""
@@ -1126,305 +888,87 @@ async def create_agent_prs_route(assessment_id: str):
     )
 
 
-# ── System Health ──────────────────────────────────────────────────────
-
-
-def _get_watcher_deploy_status() -> dict[str, str]:
-    import json as _json
-    raw = _run_cmd(["oc", "get", "deployments", "-n", "agentit",
-                    "-l", "app.kubernetes.io/instance=agentit", "-o", "json"])
-    result: dict[str, str] = {}
-    if not raw:
-        return result
-    try:
-        for dep in _json.loads(raw).get("items", []):
-            name = dep.get("metadata", {}).get("name", "")
-            ready = dep.get("status", {}).get("readyReplicas", 0)
-            result[name] = "running" if ready and ready > 0 else "not running"
-    except Exception:
-        log.debug("Failed to parse deployment status JSON", exc_info=True)
-    return result
-
-
-def _run_cmd(cmd: list[str], timeout: int = 10) -> str | None:
-    import subprocess
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return r.stdout if r.returncode == 0 else None
-    except (OSError, subprocess.SubprocessError):
-        return None
-
-
-def _get_cluster_health() -> dict:
-    import json as _json
-    from concurrent.futures import ThreadPoolExecutor
-
-    result: dict = {
-        "argo_apps": [], "argo_synced": False,
-        "pods": [], "pods_running": 0, "pods_failed": 0,
-        "pipelines": [], "pipeline_status": "Unknown",
-        "kafka_ready": False, "publisher_ok": False,
-    }
-
-    managed_names = {"agentit"}
-    try:
-        _s = get_store()
-        for app_data in _s.get_fleet_data():
-            managed_names.add(app_data["repo_name"].lower().replace("_", "-").replace(".", "-"))
-    except Exception:
-        log.debug("Failed to load fleet for health check", exc_info=True)
-
-    cmds = {
-        "argo": ["oc", "get", "applications.argoproj.io", "-n", "openshift-gitops", "-o", "json"],
-        "pods": ["oc", "get", "pods", "-n", "agentit", "-o", "json"],
-        "pipelines": ["oc", "get", "pipelineruns", "-n", "agentit",
-                       "-l", "tekton.dev/pipeline=agentit-ci", "-o", "json"],
-        "rollout": ["oc", "get", "rollouts.argoproj.io", "agentit", "-n", "agentit", "-o", "json"],
-        "commit": ["oc", "get", "applications.argoproj.io", "agentit", "-n", "openshift-gitops",
-                    "-o", "jsonpath={.status.sync.revision}"],
-        "kafka": ["oc", "get", "kafka", "-n", "agentit", "-o",
-                  "jsonpath={.items[0].status.conditions[?(@.type=='Ready')].status}"],
-    }
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        futures = {key: pool.submit(_run_cmd, cmd, 5 if key == "pipelines" else 10) for key, cmd in cmds.items()}
-        raw = {key: f.result() for key, f in futures.items()}
-
-    if raw["argo"]:
-        try:
-            apps = _json.loads(raw["argo"]).get("items", [])
-            for a in apps:
-                name = a.get("metadata", {}).get("name", "?")
-                bare_name = name.removeprefix("managed-")
-                if name not in managed_names and bare_name not in managed_names:
-                    continue
-                sync = a.get("status", {}).get("sync", {}).get("status", "Unknown")
-                health = a.get("status", {}).get("health", {}).get("status", "Unknown")
-                result["argo_apps"].append({"name": name, "sync": sync, "health": health})
-            result["argo_synced"] = all(a["sync"] == "Synced" for a in result["argo_apps"]) if result["argo_apps"] else True
-        except Exception:
-            log.warning("Failed to parse Argo CD apps JSON", exc_info=True)
-
-    if raw["pods"]:
-        try:
-            pods = _json.loads(raw["pods"]).get("items", [])
-            for p in pods:
-                name = p.get("metadata", {}).get("name", "?")
-                phase = p.get("status", {}).get("phase", "Unknown")
-                if phase in ("Succeeded", "Completed"):
-                    continue
-                restarts = sum(
-                    cs.get("restartCount", 0)
-                    for cs in p.get("status", {}).get("containerStatuses", [])
-                )
-                created = p.get("metadata", {}).get("creationTimestamp", "")
-                result["pods"].append({
-                    "name": name, "status": phase,
-                    "restarts": restarts, "age": created[:16],
-                })
-            result["pods_running"] = sum(1 for p in result["pods"] if p["status"] == "Running")
-            result["pods_failed"] = sum(1 for p in result["pods"] if p["status"] in ("Failed", "Error", "CrashLoopBackOff"))
-        except Exception:
-            log.warning("Failed to parse pods JSON", exc_info=True)
-
-    if raw["pipelines"]:
-        try:
-            all_runs = _json.loads(raw["pipelines"]).get("items", [])
-            runs = all_runs[-5:]
-            for r in runs:
-                name = r.get("metadata", {}).get("name", "?")
-                conditions = r.get("status", {}).get("conditions", [{}])
-                status = conditions[0].get("reason", "Unknown") if conditions else "Unknown"
-                start = r.get("status", {}).get("startTime", "")
-                completion = r.get("status", {}).get("completionTime", "")
-                duration = ""
-                if start and completion:
-                    duration = f"{start[:16]} → {completion[:16]}"
-                elif start:
-                    duration = f"Started {start[:16]}"
-                result["pipelines"].append({"name": name, "status": status, "duration": duration})
-            if result["pipelines"]:
-                result["pipeline_status"] = result["pipelines"][-1]["status"]
-            for r in reversed(all_runs):
-                conds = r.get("status", {}).get("conditions", [{}])
-                if conds and conds[0].get("reason") == "Succeeded":
-                    ct = r.get("status", {}).get("completionTime", "")
-                    result["last_successful_ci"] = ct[:19] if ct else "?"
-                    break
-        except Exception:
-            log.warning("Failed to parse pipeline runs JSON", exc_info=True)
-
-    if raw["rollout"]:
-        try:
-            ro = _json.loads(raw["rollout"])
-            result["rollout_phase"] = ro.get("status", {}).get("phase", "Unknown")
-            result["rollout_step"] = ro.get("status", {}).get("currentStepIndex", 0)
-            result["rollout_total_steps"] = len(ro.get("spec", {}).get("strategy", {}).get("canary", {}).get("steps", []))
-        except Exception:
-            log.debug("Failed to parse rollout JSON", exc_info=True)
-
-    result["current_commit"] = (raw["commit"] or "").strip()[:12]
-    result["kafka_ready"] = raw["kafka"] is not None and "True" in raw["kafka"]
-
-    try:
-        from agentit.events import get_publisher
-        pub = get_publisher()
-        result["publisher_ok"] = pub._producer is not None
-    except Exception:
-        log.debug("Failed to check event publisher", exc_info=True)
-
-    try:
-        from agentit.events import get_kafka_stats
-        kafka_stats = get_kafka_stats()
-        result["kafka_stats"] = kafka_stats
-    except Exception:
-        log.debug("Failed to collect Kafka stats", exc_info=True)
-        result["kafka_stats"] = {"available": False, "topics": {}, "consumer_groups": []}
-
-    return result
-
-
-@app.get("/health", response_class=HTMLResponse)
-async def health_page(request: Request) -> HTMLResponse:
-    data = await asyncio.to_thread(_get_cluster_health)
-    return templates.TemplateResponse(request, "health.html", data)
-
-
-@app.get("/health/pods/{pod_name}", response_class=HTMLResponse)
-async def pod_detail_page(request: Request, pod_name: str) -> HTMLResponse:
-    import json as _json
-
-    raw = await asyncio.to_thread(_run_cmd, ["oc", "get", "pod", pod_name, "-n", "agentit", "-o", "json"])
-    if not raw:
-        raise HTTPException(404, f"Pod {pod_name} not found")
-
-    pod = _json.loads(raw)
-    status = pod.get("status", {}).get("phase", "Unknown")
-    created = pod.get("metadata", {}).get("creationTimestamp", "")[:19]
-    containers = []
-    total_restarts = 0
-    for cs in pod.get("status", {}).get("containerStatuses", []):
-        restarts = cs.get("restartCount", 0)
-        total_restarts += restarts
-        containers.append({
-            "name": cs.get("name", "?"),
-            "image": cs.get("image", "?"),
-            "ready": cs.get("ready", False),
-            "restarts": restarts,
-        })
-
-    logs = await asyncio.to_thread(
-        _run_cmd, ["oc", "logs", pod_name, "-n", "agentit", "--tail=100"], 15,
-    ) or "No logs available"
-
-    events_raw = await asyncio.to_thread(
-        _run_cmd, ["oc", "get", "events", "-n", "agentit", "--field-selector",
-                   f"involvedObject.name={pod_name}", "-o", "json"],
-    )
-    events = []
-    if events_raw:
-        try:
-            for e in _json.loads(events_raw).get("items", []):
-                events.append({
-                    "time": e.get("lastTimestamp", "")[:19],
-                    "type": e.get("type", "Normal"),
-                    "reason": e.get("reason", "?"),
-                    "message": e.get("message", "")[:200],
-                })
-        except Exception:
-            log.debug("Failed to parse pod events", exc_info=True)
-
-    return templates.TemplateResponse(request, "pod_detail.html", {
-        "pod_name": pod_name,
-        "status": status,
-        "restarts": total_restarts,
-        "created": created,
-        "containers": containers,
-        "logs": logs,
-        "events": events,
-    })
-
-
-@app.get("/health/pipelines/{pipeline_name}", response_class=HTMLResponse)
-async def pipeline_detail_page(request: Request, pipeline_name: str) -> HTMLResponse:
-    import json as _json
-
-    raw = await asyncio.to_thread(
-        _run_cmd, ["oc", "get", "pipelinerun", pipeline_name, "-n", "agentit", "-o", "json"],
-    )
-    if not raw:
-        raise HTTPException(404, f"PipelineRun {pipeline_name} not found")
-
-    pr = _json.loads(raw)
-    conditions = pr.get("status", {}).get("conditions", [{}])
-    status = conditions[0].get("reason", "Unknown") if conditions else "Unknown"
-    start_time = pr.get("status", {}).get("startTime", "")[:19]
-    completion_time = (pr.get("status", {}).get("completionTime") or "")[:19]
-
-    tasks = []
-    for child in pr.get("status", {}).get("childReferences", []):
-        task_name = child.get("pipelineTaskName", child.get("name", "?"))
-        conds = child.get("conditions", [])
-        task_status = "Unknown"
-        if conds:
-            task_status = conds[0].get("reason", "Unknown")
-        elif child.get("status"):
-            task_status = child["status"]
-        pod = child.get("name", "")
-        tasks.append({"name": task_name, "status": task_status, "pod": pod})
-
-    # Get logs from the last task pod
-    logs = ""
-    if tasks:
-        last_pod = tasks[-1].get("pod", "")
-        if last_pod:
-            logs = await asyncio.to_thread(
-                _run_cmd, ["oc", "logs", last_pod, "-n", "agentit", "--tail=50", "--all-containers"], 15,
-            ) or ""
-
-    return templates.TemplateResponse(request, "pipeline_detail.html", {
-        "pipeline_name": pipeline_name,
-        "status": status,
-        "start_time": start_time,
-        "completion_time": completion_time,
-        "tasks": tasks,
-        "logs": logs,
-    })
-
-
-@app.get("/api/health")
-async def api_health():
-    data = await asyncio.to_thread(_get_cluster_health)
-    return JSONResponse({
-        "argo_synced": data["argo_synced"],
-        "pods_running": data["pods_running"],
-        "pipeline_status": data["pipeline_status"],
-        "kafka_ready": data["kafka_ready"],
-    })
-
-
-# ── Schedules ──────────────────────────────────────────────────────────
-
-
-_CRON_HUMAN = {
-    "0 3 1 * *": "Monthly (1st, 3am UTC)",
-    "0 4 * * 1": "Weekly (Mon 4am UTC)",
-    "0 5 * * 1": "Weekly (Mon 5am UTC)",
-    "0 2 * * 3": "Weekly (Wed 2am UTC)",
-    "0 6 * * 1": "Weekly (Mon 6am UTC)",
-}
-
-_SCHEDULE_FILES = {
-    "compliance-cronjob.yaml": ("compliance", "Compliance re-assessment"),
-    "cost-cronjob.yaml": ("cost", "Cost optimization report"),
-    "dependency-cronjob.yaml": ("dependency", "Dependency scan"),
-    "chaos-schedule.yaml": ("chaos", "Chaos experiments"),
-}
+# ── Agents ────────────────────────────────────────────────────────────
 
 _WATCHER_AGENTS = [
     {"name": "vuln-watcher", "mode": "Kafka consumer + polling", "interval": "6 hours"},
     {"name": "slo-tracker", "mode": "Polling", "interval": "5 minutes"},
     {"name": "drift-detector", "mode": "Argo CD polling", "interval": "10 minutes"},
 ]
+
+
+@app.get("/agents", response_class=HTMLResponse)
+async def agents_page(request: Request) -> HTMLResponse:
+    agents = get_store().list_agents()
+
+    for a in agents:
+        if not a.get("capabilities") or a["capabilities"] in ("[]", ""):
+            a["capabilities"] = AGENT_CAPABILITIES.get(a["agent_name"], "")
+
+    # Merge long-lived watcher agents that aren't in the registry
+    registered_names = {a["agent_name"] for a in agents}
+    for w in _WATCHER_AGENTS:
+        if w["name"] not in registered_names:
+            agents.append({
+                "agent_name": w["name"],
+                "category": w["mode"],
+                "status": "deployed",
+                "capabilities": AGENT_CAPABILITIES.get(w["name"], f"interval: {w['interval']}"),
+                "registered_at": "—",
+                "last_heartbeat": "—",
+            })
+
+    active = sum(1 for a in agents if a["status"] == "active")
+    last_hb = max((a["last_heartbeat"] or "" for a in agents), default="—")
+    return templates.TemplateResponse(request, "agents.html", {
+        "agents": agents,
+        "total": len(agents),
+        "active": active,
+        "last_heartbeat": last_hb[:19] if last_hb != "—" else "—",
+    })
+
+
+@app.get("/agents/{agent_name}", response_class=HTMLResponse)
+async def agent_detail(request: Request, agent_name: str) -> HTMLResponse:
+    s = get_store()
+    agents = s.list_agents()
+    agent = next((a for a in agents if a["agent_name"] == agent_name), None)
+
+    # Long-lived agents may not be in the registry -- create a synthetic entry
+    if agent is None:
+        watcher = next((w for w in _WATCHER_AGENTS if w["name"] == agent_name), None)
+        if watcher is not None:
+            agent = {
+                "agent_name": agent_name,
+                "category": watcher["mode"],
+                "status": "deployed",
+                "capabilities": f"interval: {watcher['interval']}",
+                "registered_at": "—",
+                "last_heartbeat": "—",
+            }
+        else:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+    events = s.list_events_by_agent(agent_name, limit=50)
+    remediations = s.list_remediations_by_agent(agent_name)
+    pending = sum(1 for r in remediations if r["status"] not in ("completed", "applied"))
+    completed = sum(1 for r in remediations if r["status"] in ("completed", "applied"))
+
+    return templates.TemplateResponse(request, "agent_detail.html", {
+        "agent": agent,
+        "events": events,
+        "remediations": remediations,
+        "pending": pending,
+        "completed": completed,
+    })
+
+
+@app.get("/api/agents")
+async def api_agents(status: str = "active"):
+    return JSONResponse(get_store().list_agents(status=status))
+
+
+# ── Workflows ─────────────────────────────────────────────────────────
 
 
 @app.get("/workflows", response_class=HTMLResponse)
@@ -1467,252 +1011,7 @@ async def workflows_page(request: Request) -> HTMLResponse:
     })
 
 
-@app.get("/schedules", response_class=HTMLResponse)
-async def schedules_page(request: Request) -> HTMLResponse:
-    import yaml as _yaml
-
-    s = get_store()
-    fleet = s.get_fleet_data()
-    schedules: list[dict] = []
-
-    for app_data in fleet:
-        aid = app_data["id"]
-        files = s.get_onboarding(aid)
-        if not files:
-            continue
-        for f in files:
-            sched_info = _SCHEDULE_FILES.get(f["path"])
-            if sched_info is None:
-                continue
-            agent, desc = sched_info
-            try:
-                doc = _yaml.safe_load(f["content"])
-                cron = doc.get("spec", {}).get("schedule", "unknown")
-                concurrency = doc.get("spec", {}).get("concurrencyPolicy", "Allow")
-            except (ValueError, AttributeError, _yaml.YAMLError):
-                cron = "unknown"
-                concurrency = "unknown"
-            override_key = f"schedule:{app_data['repo_name']}:{agent}"
-            override = s.get_setting(override_key)
-            if override:
-                cron = override
-            enabled_key = f"schedule:{app_data['repo_name']}:{agent}:enabled"
-            enabled_val = s.get_setting(enabled_key)
-            enabled = enabled_val != "false"
-
-            schedules.append({
-                "app_name": app_data["repo_name"],
-                "job_name": desc,
-                "schedule": cron,
-                "human_schedule": _CRON_HUMAN.get(cron, cron),
-                "agent": agent,
-                "concurrency": concurrency,
-                "enabled": enabled,
-            })
-
-    # Merge manually created schedules from the store
-    manual_schedules = s.list_schedules()
-    for ms in manual_schedules:
-        schedules.append({
-            "id": ms["id"],
-            "app_name": ms["app_name"],
-            "job_name": ms["job_name"],
-            "schedule": ms["schedule"],
-            "human_schedule": _CRON_HUMAN.get(ms["schedule"], ms["schedule"]),
-            "agent": ms["agent"],
-            "concurrency": "Allow",
-            "enabled": bool(ms["enabled"]),
-            "source": "manual",
-        })
-
-    # Tag onboarding-generated schedules with source
-    for sched in schedules:
-        if "source" not in sched:
-            sched["source"] = "onboarding"
-
-    agents = s.list_agents()
-    deploy_status = await asyncio.to_thread(_get_watcher_deploy_status)
-    watchers = []
-    for w in _WATCHER_AGENTS:
-        agent_record = next((a for a in agents if a["agent_name"] == w["name"]), None)
-        deploy_name = f"agentit-{w['name']}"
-        if agent_record:
-            status = agent_record["status"]
-        elif deploy_status.get(deploy_name) == "running":
-            status = "active"
-        else:
-            status = "not deployed"
-        watchers.append({**w, "status": status})
-
-    return templates.TemplateResponse(request, "schedules.html", {
-        "schedules": schedules,
-        "watchers": watchers,
-        "apps": fleet,
-    })
-
-
-@app.post("/schedules/update", response_model=None)
-async def update_schedule(request: Request):
-    form = await request.form()
-    app_name = str(form.get("app_name", ""))
-    job_key = str(form.get("job_key", ""))
-    schedule = str(form.get("schedule", "")).strip()
-    if app_name and job_key and schedule:
-        if len(schedule.split()) != 5:
-            raise HTTPException(400, "Invalid cron expression: must have exactly 5 fields")
-        get_store().set_setting(f"schedule:{app_name}:{job_key}", schedule)
-        get_store().log_event(
-            "portal", "schedule-updated", app_name, "info",
-            f"Schedule for {job_key} updated to: {schedule}",
-        )
-    return RedirectResponse(url="/schedules", status_code=303)
-
-
-@app.post("/schedules/toggle", response_model=None)
-async def toggle_schedule(request: Request):
-    form = await request.form()
-    app_name = str(form.get("app_name", ""))
-    job_key = str(form.get("job_key", ""))
-    enabled = str(form.get("enabled", "true"))
-    if app_name and job_key:
-        get_store().set_setting(f"schedule:{app_name}:{job_key}:enabled", enabled)
-        action = "enabled" if enabled == "true" else "disabled"
-        get_store().log_event(
-            "portal", f"schedule-{action}", app_name, "info",
-            f"Schedule {job_key} {action} for {app_name}",
-        )
-    return RedirectResponse(url="/schedules", status_code=303)
-
-
-@app.post("/schedules/create", response_model=None)
-async def create_schedule(request: Request):
-    form = await request.form()
-    app_name = str(form.get("app_name", "")).strip()
-    job_name = str(form.get("job_name", "")).strip()
-    agent = str(form.get("agent", "")).strip()
-    schedule = str(form.get("schedule", "")).strip()
-    command = str(form.get("command", "")).strip()
-
-    if not all([app_name, job_name, agent, schedule, command]):
-        raise HTTPException(400, "All fields are required: app_name, job_name, agent, schedule, command")
-    if len(schedule.split()) != 5:
-        raise HTTPException(400, "Invalid cron expression: must have exactly 5 fields")
-
-    s = get_store()
-    s.create_schedule(app_name, job_name, agent, schedule, command)
-    s.log_event(
-        "portal", "schedule-created", app_name, "info",
-        f"Manual schedule created: {job_name} ({schedule})",
-    )
-    return RedirectResponse(url="/schedules?created=true", status_code=303)
-
-
-@app.post("/schedules/delete", response_model=None)
-async def delete_schedule_route(request: Request):
-    form = await request.form()
-    schedule_id = str(form.get("schedule_id", "")).strip()
-    if not schedule_id:
-        raise HTTPException(400, "schedule_id required")
-
-    s = get_store()
-    if not s.delete_schedule(schedule_id):
-        raise HTTPException(404, "Schedule not found")
-    s.log_event("portal", "schedule-deleted", None, "info", f"Deleted manual schedule {schedule_id}")
-    return RedirectResponse(url="/schedules?deleted=true", status_code=303)
-
-
-# ── Agents ─────────────────────────────────────────────────────────────
-
-_AGENT_CAPS: dict[str, str] = {
-    "security": "NetworkPolicy, Containerfile, RBAC, SCCs, resource limits, image scan task",
-    "observability": "ServiceMonitor, Grafana dashboard, alerting rules, OTel collector",
-    "cicd": "Tekton Pipeline (scan + SBOM), Argo CD Application, Argo Rollout",
-    "compliance": "Kyverno policies, SBOM task, audit policy, compliance evidence",
-    "infrastructure": "HPA, PDB, ResourceQuota, LimitRange, Namespace",
-    "cost": "VPA, cost labels, cost report",
-    "dependency": "Dependency report, Renovate/Dependabot config",
-    "incident": "Runbook, PagerDuty config, Alertmanager config",
-    "release": "AnalysisTemplate, Rollout patch, rollback policy",
-    "codechange": ".gitignore, OTel instrumentation, structured logging",
-    "retirement": "Decommission plan, cleanup task, data archive job",
-    "vuln-watcher": "Monitors fleet for CVEs, triggers remediation when auto-mode on",
-    "slo-tracker": "Checks SLO status, publishes breach alerts, recommends rollbacks",
-    "drift-detector": "Queries Argo CD for OutOfSync apps, optionally auto-syncs",
-}
-
-
-@app.get("/agents", response_class=HTMLResponse)
-async def agents_page(request: Request) -> HTMLResponse:
-    agents = get_store().list_agents()
-
-    for a in agents:
-        if not a.get("capabilities") or a["capabilities"] in ("[]", ""):
-            a["capabilities"] = _AGENT_CAPS.get(a["agent_name"], "")
-
-    # Merge long-lived watcher agents that aren't in the registry
-    registered_names = {a["agent_name"] for a in agents}
-    for w in _WATCHER_AGENTS:
-        if w["name"] not in registered_names:
-            agents.append({
-                "agent_name": w["name"],
-                "category": w["mode"],
-                "status": "deployed",
-                "capabilities": _AGENT_CAPS.get(w["name"], f"interval: {w['interval']}"),
-                "registered_at": "—",
-                "last_heartbeat": "—",
-            })
-
-    active = sum(1 for a in agents if a["status"] == "active")
-    last_hb = max((a["last_heartbeat"] or "" for a in agents), default="—")
-    return templates.TemplateResponse(request, "agents.html", {
-        "agents": agents,
-        "total": len(agents),
-        "active": active,
-        "last_heartbeat": last_hb[:19] if last_hb != "—" else "—",
-    })
-
-
-@app.get("/agents/{agent_name}", response_class=HTMLResponse)
-async def agent_detail(request: Request, agent_name: str) -> HTMLResponse:
-    s = get_store()
-    agents = s.list_agents()
-    agent = next((a for a in agents if a["agent_name"] == agent_name), None)
-
-    # Long-lived agents may not be in the registry — create a synthetic entry
-    if agent is None:
-        watcher = next((w for w in _WATCHER_AGENTS if w["name"] == agent_name), None)
-        if watcher is not None:
-            agent = {
-                "agent_name": agent_name,
-                "category": watcher["mode"],
-                "status": "deployed",
-                "capabilities": f"interval: {watcher['interval']}",
-                "registered_at": "—",
-                "last_heartbeat": "—",
-            }
-        else:
-            raise HTTPException(status_code=404, detail="Agent not found")
-
-    events = s.list_events_by_agent(agent_name, limit=50)
-    remediations = s.list_remediations_by_agent(agent_name)
-    pending = sum(1 for r in remediations if r["status"] not in ("completed", "applied"))
-    completed = sum(1 for r in remediations if r["status"] in ("completed", "applied"))
-
-    return templates.TemplateResponse(request, "agent_detail.html", {
-        "agent": agent,
-        "events": events,
-        "remediations": remediations,
-        "pending": pending,
-        "completed": completed,
-    })
-
-
-@app.get("/api/agents")
-async def api_agents(status: str = "active"):
-    return JSONResponse(get_store().list_agents(status=status))
-
-
-# ── Remediations ───────────────────────────────────────────────────────
+# ── Remediations ──────────────────────────────────────────────────────
 
 
 @app.get("/assessments/{assessment_id}/remediations", response_class=HTMLResponse)
@@ -1766,7 +1065,7 @@ async def api_remediations(assessment_id: str):
     return JSONResponse(get_store().list_remediations(assessment_id))
 
 
-# ── SLOs ───────────────────────────────────────────────────────────────
+# ── SLOs ──────────────────────────────────────────────────────────────
 
 
 @app.get("/assessments/{assessment_id}/slos", response_class=HTMLResponse)
@@ -1813,7 +1112,7 @@ async def api_slos(assessment_id: str):
     return JSONResponse(get_store().list_slos(assessment_id))
 
 
-# ── Settings + Auto-Mode ───────────────────────────────────────────────
+# ── Settings + Auto-Mode ─────────────────────────────────────────────
 
 
 @app.get("/settings", response_class=HTMLResponse)
@@ -1878,151 +1177,3 @@ async def api_set_setting(request: Request, key: str):
         raise HTTPException(400, "value required")
     get_store().set_setting(key, str(value))
     return JSONResponse({"key": key, "value": str(value)})
-
-
-@app.post("/api/webhook/auto-apply")
-async def webhook_auto_apply(request: Request):
-    """Auto-apply manifests if auto-mode is on and LLM classifies as safe."""
-    body = await request.json()
-    assessment_id = body.get("assessment_id")
-    namespace = body.get("namespace", "default")
-    if not assessment_id:
-        raise HTTPException(400, "assessment_id required")
-
-    s = get_store()
-    report = s.get(assessment_id)
-    if report is None:
-        raise HTTPException(404, "Assessment not found")
-
-    files = s.get_onboarding(assessment_id)
-    if files is None:
-        raise HTTPException(404, "Onboarding not found — run onboarding first")
-
-    orch = s.get_orchestration(assessment_id) or {}
-    auto_approve = orch.get("auto_approve", False)
-
-    from agentit.automode import AutoMode
-    engine = AutoMode(store=s, publisher=None, llm_client=_get_llm_client())
-
-    result = await asyncio.to_thread(
-        engine.execute, assessment_id, files, namespace,
-        report.criticality, auto_approve, report.repo_name,
-    )
-
-    log.info("auto-apply result for %s: %s — %s", assessment_id, result["action"], result["reason"])
-    return JSONResponse(result)
-
-
-@app.post("/api/webhook/finding")
-async def webhook_finding(request: Request):
-    """Generic finding remediation — routes to the right agent generator via the dispatcher.
-
-    Accepts: {"app_name": "...", "category": "container", "description": "...", "severity": "high", "source": "trivy"}
-    """
-    body = await request.json()
-    app_name = body.get("app_name", "unknown")
-    category = body.get("category", "")
-    description = body.get("description", "")
-    severity = body.get("severity", "info")
-    source = body.get("source", "webhook")
-
-    if not category:
-        raise HTTPException(400, "category required")
-
-    s = get_store()
-    s.log_event(source, "finding-received", app_name, severity, f"{category}: {description}")
-    _publish_event(source, "finding-received", app_name, severity, f"{category}: {description}")
-
-    fleet = s.get_fleet_data()
-    app = next((a for a in fleet if a["repo_name"] == app_name), None)
-    if not app:
-        return JSONResponse({"status": "accepted", "action": "alert-only", "reason": f"app '{app_name}' not in fleet"})
-
-    from agentit.remediation.dispatcher import RemediationDispatcher
-    dispatcher = RemediationDispatcher(s)
-    result = dispatcher.dispatch(app["id"], category, app_name)
-
-    if result.get("error") and not result["files"]:
-        s.log_event("dispatcher", "no-fix-available", app_name, "warning", result["error"])
-        return JSONResponse({"status": "accepted", "action": "alert-only", "reason": result["error"]})
-
-    from agentit.automode import AutoMode
-    from agentit.events import get_publisher as _gp
-    auto = AutoMode(store=s, publisher=_gp())
-
-    if auto.enabled and result["files"]:
-        from agentit.portal.cluster_apply import apply_manifests_to_cluster
-        namespace = app.get("deploy_namespace", app_name)
-        apply_result = await asyncio.to_thread(
-            apply_manifests_to_cluster, result["files"], namespace, dry_run=False,
-        )
-        s.log_event("dispatcher", "auto-applied", app_name, "info",
-                    f"Applied {len(apply_result['applied'])} fixes for {category}")
-        return JSONResponse({
-            "status": "accepted",
-            "action": "auto-applied",
-            "files_generated": len(result["files"]),
-            "applied": len(apply_result["applied"]),
-            "agent": result["agent"],
-        })
-
-    if result["files"]:
-        gate_id = s.create_gate(
-            app["id"], f"finding-{category}",
-            f"Dispatcher generated {len(result['files'])} fix(es) for '{category}' — review and approve",
-        )
-        s.log_event("dispatcher", "gated", app_name, "info",
-                    f"Fix for {category} gated for review (gate {gate_id})")
-        return JSONResponse({
-            "status": "accepted",
-            "action": "gated",
-            "gate_id": gate_id,
-            "files_generated": len(result["files"]),
-            "agent": result["agent"],
-        })
-
-    return JSONResponse({"status": "accepted", "action": "alert-only"})
-
-
-@app.post("/api/webhook/remediate")
-async def webhook_remediate(request: Request):
-    """Trigger the full remediation loop asynchronously.
-
-    Returns HTTP 202 with a job_id for polling status.
-    """
-    body = await request.json()
-    repo_url = body.get("repo_url")
-    if not repo_url:
-        raise HTTPException(400, "repo_url required")
-
-    app_name = body.get("app_name", repo_url.rstrip("/").split("/")[-1].removesuffix(".git"))
-    criticality = body.get("criticality", "medium")
-    reason = body.get("reason", "webhook trigger")
-
-    from agentit.remediation_loop import RemediationLoop
-    from agentit.events import get_publisher
-
-    s = get_store()
-    loop = RemediationLoop(store=s, publisher=get_publisher())
-    try:
-        job_id = loop.start(repo_url, app_name, criticality, reason, store=s)
-    except Exception as exc:
-        log.exception("Failed to start remediation loop for %s", app_name)
-        return JSONResponse({"outcome": "failed", "error": str(exc)}, status_code=500)
-
-    return JSONResponse({"status": "accepted", "job_id": job_id}, status_code=202)
-
-
-@app.get("/api/remediation-jobs/{job_id}")
-async def get_remediation_job(job_id: str):
-    """Return the status of a single remediation job."""
-    job = get_store().get_remediation_job(job_id)
-    if job is None:
-        raise HTTPException(404, "Remediation job not found")
-    return JSONResponse(job)
-
-
-@app.get("/api/remediation-jobs")
-async def list_remediation_jobs(assessment_id: str | None = None):
-    """List remediation jobs, optionally filtered by assessment_id."""
-    return JSONResponse(get_store().list_remediation_jobs(assessment_id))
