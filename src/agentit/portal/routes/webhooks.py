@@ -205,6 +205,45 @@ async def webhook_github_push(request: Request):
                       {"assessment_id": assessment_id, "score": report.overall_score},
                       correlation_id=assessment_id,
                       extra_topic=_TOPIC_ASSESSMENTS)
+
+        # --- Change impact analysis and targeted re-hardening ---
+        commits = body.get("commits", [])
+        changed_files: list[str] = []
+        added_files: list[str] = []
+        for c in commits:
+            changed_files.extend(c.get("modified", []))
+            changed_files.extend(c.get("added", []))
+            added_files.extend(c.get("added", []))
+        changed_files = list(set(changed_files))
+
+        from agentit.change_analyzer import analyze_changes
+        impact = analyze_changes(changed_files, added_files)
+
+        # Diff against previous assessment
+        prev_history = s.list_history(repo_url)
+        if len(prev_history) >= 2:
+            prev_report = s.get(prev_history[-2]["id"])
+            if prev_report:
+                from agentit.assessment_diff import diff_assessments
+                diff = diff_assessments(prev_report, report)
+                s.log_event("reassessment", "score-diff", managed["repo_name"],
+                            "warning" if diff.degraded else "info",
+                            diff.summary())
+
+                # Auto-fix new findings that are auto-fixable
+                if diff.auto_fixable and s.get_setting("auto_mode") == "true":
+                    from agentit.remediation.dispatcher import RemediationDispatcher
+                    dispatcher = RemediationDispatcher(s)
+                    for finding in diff.auto_fixable:
+                        if s.get_rejection_count(managed["repo_name"], finding.category) >= 3:
+                            s.log_event("learning", "skipped-rejected", managed["repo_name"],
+                                        "info", f"Skipping {finding.category} -- rejected 3+ times")
+                            continue
+                        dispatcher.dispatch(assessment_id, finding.category, managed["repo_name"])
+
+        s.log_event("change-analysis", "impact-analyzed", managed["repo_name"],
+                    "info", impact.summary())
+
         s_dedup.mark_webhook_processed(delivery_id)
         return JSONResponse({
             "status": "assessed",
@@ -212,6 +251,12 @@ async def webhook_github_push(request: Request):
             "assessment_id": assessment_id,
             "score": report.overall_score,
             "previous_score": managed.get("latest_score"),
+            "change_impact": {
+                "files_changed": len(impact.changed_files),
+                "agents_to_rerun": impact.agents_to_rerun,
+                "new_services": impact.new_services,
+                "dependency_changes": impact.dependency_changes,
+            },
         })
     except Exception as exc:
         log.exception("Re-assessment failed for %s", managed["repo_name"])

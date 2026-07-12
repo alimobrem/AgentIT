@@ -835,7 +835,34 @@ async def resolve_gate(request: Request, gate_id: str):
             )
 
     s.resolve_gate(gate_id, status, resolved_by)
+
+    if status == "rejected":
+        s.record_feedback(
+            app_name=gate.get("target_app", ""),
+            agent_name=gate.get("agent_name", "gate"),
+            finding_category=gate.get("gate_type", ""),
+            action="rejected",
+            human_reason=str(form.get("reason", "")),
+        )
+
     return RedirectResponse(url="/gates", status_code=303)
+
+
+@app.post("/api/feedback")
+async def record_feedback_endpoint(request: Request):
+    """Record human feedback on agent recommendations."""
+    body = await request.json()
+    s = get_store()
+    fid = s.record_feedback(
+        app_name=body.get("app_name", ""),
+        agent_name=body.get("agent_name", ""),
+        finding_category=body.get("finding_category", ""),
+        action=body.get("action", ""),
+        human_reason=body.get("reason", ""),
+        original_value=body.get("original_value", ""),
+        human_value=body.get("human_value", ""),
+    )
+    return {"status": "recorded", "feedback_id": fid}
 
 
 @app.get("/api/gates")

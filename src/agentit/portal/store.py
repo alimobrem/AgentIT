@@ -195,6 +195,21 @@ class AssessmentStore:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_feedback (
+                id TEXT PRIMARY KEY,
+                app_name TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                finding_category TEXT NOT NULL,
+                action TEXT NOT NULL,
+                human_reason TEXT,
+                original_value TEXT,
+                human_value TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         self._conn.commit()
 
     # ── Settings ───────────────────────────────────────────────────────
@@ -917,12 +932,75 @@ class AssessmentStore:
         )
         self._conn.commit()
 
+    # ── Agent Feedback ──────────────────────────────────────────────────
+
+    def record_feedback(
+        self,
+        app_name: str,
+        agent_name: str,
+        finding_category: str,
+        action: str,
+        human_reason: str = "",
+        original_value: str = "",
+        human_value: str = "",
+    ) -> str:
+        """Record human feedback on an agent recommendation."""
+        feedback_id = uuid.uuid4().hex
+        self._conn.execute(
+            """INSERT INTO agent_feedback (id, app_name, agent_name, finding_category,
+               action, human_reason, original_value, human_value, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                feedback_id, app_name, agent_name, finding_category, action,
+                human_reason, original_value, human_value,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self._conn.commit()
+        return feedback_id
+
+    def get_feedback_for_app(
+        self,
+        app_name: str,
+        agent_name: str = "",
+        finding_category: str = "",
+    ) -> list[dict]:
+        """Get feedback history for an app, optionally filtered by agent/category."""
+        query = "SELECT * FROM agent_feedback WHERE app_name = ?"
+        params: list[str] = [app_name]
+        if agent_name:
+            query += " AND agent_name = ?"
+            params.append(agent_name)
+        if finding_category:
+            query += " AND finding_category = ?"
+            params.append(finding_category)
+        query += " ORDER BY created_at DESC"
+        return [dict(r) for r in self._conn.execute(query, params).fetchall()]
+
+    def get_rejection_count(self, app_name: str, finding_category: str) -> int:
+        """How many times has this category been rejected for this app?"""
+        row = self._conn.execute(
+            "SELECT COUNT(*) as cnt FROM agent_feedback WHERE app_name = ? AND finding_category = ? AND action = 'rejected'",
+            (app_name, finding_category),
+        ).fetchone()
+        return row["cnt"] if row else 0
+
+    def get_human_override(self, app_name: str, finding_category: str) -> str | None:
+        """Get the most recent human override value for this app/category."""
+        row = self._conn.execute(
+            """SELECT human_value FROM agent_feedback
+               WHERE app_name = ? AND finding_category = ? AND action = 'modified' AND human_value != ''
+               ORDER BY created_at DESC LIMIT 1""",
+            (app_name, finding_category),
+        ).fetchone()
+        return row["human_value"] if row else None
+
     def export_all(self) -> dict:
         """Export all tables as JSON for disaster recovery."""
         tables = ["assessments", "onboarding_results", "events", "gates",
                   "remediations", "agent_registry", "slos", "apply_results",
                   "settings", "remediation_jobs", "scheduled_operations",
-                  "processed_webhooks"]
+                  "processed_webhooks", "agent_feedback"]
         result = {}
         for table in tables:
             try:
