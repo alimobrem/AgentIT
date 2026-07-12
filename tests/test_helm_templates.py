@@ -173,8 +173,10 @@ class TestTektonPipeline:
         doc = _load(self.TEMPLATE)
         assert "finally" in doc["spec"], "Pipeline missing 'finally' block"
         finally_tasks = doc["spec"]["finally"]
-        assert len(finally_tasks) >= 1
-        assert finally_tasks[0]["name"] == "report-status"
+        assert len(finally_tasks) >= 2
+        task_names = {t["name"] for t in finally_tasks}
+        assert "report-status" in task_names
+        assert "self-assess" in task_names
 
 
 # ---------------------------------------------------------------------------
