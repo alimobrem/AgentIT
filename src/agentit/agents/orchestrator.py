@@ -122,6 +122,41 @@ class FleetOrchestrator:
         else:
             results = self._run_agents_local(plan, agent_map)
 
+        # Run property-based skills (additive — supplements agent output)
+        try:
+            from agentit.skill_engine import SkillEngine
+            from agentit.platform_context import offline_context
+
+            skills_dir = Path(__file__).parent.parent.parent.parent / "skills"
+            if not skills_dir.exists():
+                skills_dir = Path("skills")
+
+            platform = offline_context()
+            try:
+                from agentit.platform_context import discover_platform
+                platform = discover_platform(os.environ.get("AGENTIT_NAMESPACE", "default"))
+            except Exception:
+                pass
+
+            engine = SkillEngine(skills_dir, platform=platform)
+            skill_files = engine.run_all(self.report, store=self._store)
+
+            if skill_files:
+                results.append(AgentResult(
+                    agent_name="skills",
+                    category="skills",
+                    files_generated=[f.path for f in skill_files],
+                    success=True,
+                    findings_count=len(skill_files),
+                ))
+                self._log_event("skills", "completed", f"Skills generated {len(skill_files)} files")
+                skill_dir = self.output_dir / "skills"
+                skill_dir.mkdir(parents=True, exist_ok=True)
+                for f in skill_files:
+                    (skill_dir / f.path).write_text(f.content, encoding="utf-8")
+        except Exception as exc:
+            logger.debug("Skill engine failed (non-fatal): %s", exc)
+
         # Validate generated output
         validation_issues = self._post_hardening_validation(results)
         if validation_issues:
