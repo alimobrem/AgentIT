@@ -57,7 +57,7 @@
                style="width: {{ [pct, 100] | min }}%"></div>
         </div>
       </td>
-      <td class="text-sm">{{ sl.created_at[:19] }}</td>
+      <td class="text-sm"><span data-timestamp="{{ sl.created_at }}">{{ sl.created_at[:19] }}</span></td>
       <td>
         <form method="post" action="/assessments/{{ assessment_id }}/slos/{{ sl.id }}/delete" class="inline-form"
               x-data x-ref="deleteSlo{{ sl.id }}">

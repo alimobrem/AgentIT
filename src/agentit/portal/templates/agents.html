@@ -54,8 +54,8 @@
         <span class="text-muted">—</span>
         {% endif %}
       </td>
-      <td class="text-sm">{{ a.registered_at[:19] }}</td>
-      <td class="text-sm">{{ a.last_heartbeat[:19] if a.last_heartbeat else "—" }}</td>
+      <td class="text-sm"><span data-timestamp="{{ a.registered_at }}">{{ a.registered_at[:19] }}</span></td>
+      <td class="text-sm">{% if a.last_heartbeat %}<span data-timestamp="{{ a.last_heartbeat }}">{{ a.last_heartbeat[:19] }}</span>{% else %}—{% endif %}</td>
     </tr>
     {% endfor %}
   </tbody>

@@ -59,7 +59,7 @@
 <div class="alert {% if pr_status.state == 'merged' %}alert-success{% elif pr_status.state == 'open' %}alert-warn{% else %}alert-info{% endif %}">
   {% if pr_status.state == 'merged' %}
     <span class="badge badge-low">MERGED</span>
-    PR merged{% if pr_status.merged_at %} on {{ pr_status.merged_at[:10] }}{% endif %} —
+    PR merged{% if pr_status.merged_at %} <span data-timestamp="{{ pr_status.merged_at }}">{{ pr_status.merged_at[:10] }}</span>{% endif %} —
   {% elif pr_status.state == 'open' %}
     <span class="badge badge-medium">OPEN</span>
     PR awaiting review —
@@ -112,7 +112,7 @@
 {# ── Apply Report ────────────────────────────────────────────────── #}
 {% if apply_results %}
 <h2 class="section-title">Apply Report{% if apply_results.dry_run %} (dry run){% endif %}</h2>
-<p class="text-muted text-sm mb-1">{{ apply_results.namespace }} &middot; {{ apply_results.created_at[:19] }}</p>
+<p class="text-muted text-sm mb-1">{{ apply_results.namespace }} &middot; <span data-timestamp="{{ apply_results.created_at }}">{{ apply_results.created_at[:19] }}</span></p>
 
 {% if apply_results.applied %}
 <div x-data="{ open: true }">

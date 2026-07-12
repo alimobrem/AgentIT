@@ -62,7 +62,7 @@
         {% else %} score-red{% endif %}"
         style="width:{{ a.overall_score }}%"></div>
     </div>
-    <div class="card-meta">{{ a.assessed_at[:10] }}</div>
+    <div class="card-meta"><span data-timestamp="{{ a.assessed_at }}">{{ a.assessed_at[:10] }}</span></div>
     </a>
   </div>
   {% endfor %}

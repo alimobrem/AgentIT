@@ -160,6 +160,35 @@ class TestFormActions:
         )
 
 
+class TestTimestamps:
+    """All timestamps must use data-timestamp for human-readable display."""
+
+    TIMESTAMP_FIELDS = re.compile(
+        r"\{\{\s*\w+\.(created_at|timestamp|assessed_at|registered_at|"
+        r"last_heartbeat|completed_at|resolved_at|merged_at|updated_at)"
+        r"\[:\d+\]\s*\}\}"
+    )
+
+    @pytest.mark.parametrize("template_name", [
+        f.name for f in TEMPLATES_DIR.glob("*.html") if f.name != "base.html"
+    ])
+    def test_timestamps_use_data_attribute(self, template_name):
+        """Every displayed timestamp must be wrapped in <span data-timestamp=...>."""
+        path = TEMPLATES_DIR / template_name
+        html = path.read_text(encoding="utf-8")
+        lines = html.splitlines()
+
+        raw = []
+        for i, line in enumerate(lines, 1):
+            if self.TIMESTAMP_FIELDS.search(line) and "data-timestamp" not in line:
+                raw.append(f"  line {i}: {line.strip()[:120]}")
+
+        assert not raw, (
+            f"{template_name} has raw timestamps without data-timestamp:\n"
+            + "\n".join(raw)
+        )
+
+
 class TestHTMXErrorHandling:
     """Verify the portal has error handling for htmx requests."""
 

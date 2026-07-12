@@ -36,8 +36,8 @@
 </div>
 
 <p class="text-muted text-sm mb-1">
-  Registered: {{ agent.registered_at[:19] }}
-  {% if agent.last_heartbeat %} &mdash; Last heartbeat: {{ agent.last_heartbeat[:19] }}{% endif %}
+  Registered: <span data-timestamp="{{ agent.registered_at }}">{{ agent.registered_at[:19] }}</span>
+  {% if agent.last_heartbeat %} &mdash; Last heartbeat: <span data-timestamp="{{ agent.last_heartbeat }}">{{ agent.last_heartbeat[:19] }}</span>{% endif %}
   {% if agent.capabilities and agent.capabilities != '[]' %} &mdash; Capabilities: {{ agent.capabilities }}{% endif %}
 </p>
 
@@ -66,8 +66,8 @@
           <span class="badge badge-medium">pending</span>
         {% endif %}
       </td>
-      <td class="text-sm">{{ r.created_at[:19] }}</td>
-      <td class="text-sm">{{ r.completed_at[:19] if r.completed_at else "—" }}</td>
+      <td class="text-sm"><span data-timestamp="{{ r.created_at }}">{{ r.created_at[:19] }}</span></td>
+      <td class="text-sm">{% if r.completed_at %}<span data-timestamp="{{ r.completed_at }}">{{ r.completed_at[:19] }}</span>{% else %}—{% endif %}</td>
       <td>
         {% if r.status not in ("completed", "applied") %}
         <form method="post" action="/assessments/{{ r.assessment_id }}/remediations/{{ r.id }}/status" class="inline-form">
@@ -103,7 +103,7 @@
   <tbody>
     {% for e in events %}
     <tr>
-      <td class="text-sm">{{ e.timestamp[:19] }}</td>
+      <td class="text-sm"><span data-timestamp="{{ e.timestamp }}">{{ e.timestamp[:19] }}</span></td>
       <td class="text-bold">{{ e.action }}</td>
       <td>{{ e.target_app or "—" }}</td>
       <td>

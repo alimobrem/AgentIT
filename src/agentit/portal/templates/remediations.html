@@ -51,7 +51,7 @@
           <span class="badge badge-medium">{{ r.status }}</span>
         {% endif %}
       </td>
-      <td class="text-sm text-muted">{{ r.created_at[:10] }}</td>
+      <td class="text-sm text-muted"><span data-timestamp="{{ r.created_at }}">{{ r.created_at[:10] }}</span></td>
       <td>
         {% if r.status == "generated" %}
           <a href="/assessments/{{ assessment_id }}/onboard-results" class="btn btn-sm btn-outline">View &amp; Apply</a>

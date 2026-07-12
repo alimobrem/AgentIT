@@ -22,7 +22,7 @@
   <tbody>
     {% for ob in onboardings %}
     <tr class="{% if 'AUTO-APPROVED' in ob.recommendation %}row-border-green{% elif 'BLOCKED' in ob.recommendation %}row-border-red{% else %}row-border-yellow{% endif %}">
-      <td class="text-sm">{{ ob.created_at[:19] }}</td>
+      <td class="text-sm"><span data-timestamp="{{ ob.created_at }}">{{ ob.created_at[:19] }}</span></td>
       <td class="text-bold">{{ ob.file_count }}</td>
       <td class="text-sm">{{ ob.categories | join(", ") }}</td>
       <td class="text-sm">
