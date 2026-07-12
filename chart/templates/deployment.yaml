@@ -88,6 +88,12 @@ spec:
                   name: github-token
                   key: token
                   optional: true
+            - name: GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: github-webhook-secret
+                  key: secret
+                  optional: true
           volumeMounts:
             - name: data
               mountPath: /data

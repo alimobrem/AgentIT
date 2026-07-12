@@ -18,7 +18,7 @@ def configure_logging() -> None:
     for h in root.handlers[:]:
         root.removeHandler(h)
 
-    handler = logging.StreamHandler(sys.stdout)
+    handler = logging.StreamHandler(sys.stderr)
 
     if log_format == "json":
         from pythonjsonlogger.json import JsonFormatter

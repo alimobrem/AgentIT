@@ -14,21 +14,23 @@ INTERNAL_REGISTRY = "image-registry.openshift-image-registry.svc:5000"
 BUILD_TIMEOUT = 600  # 10 minutes
 
 
-def _generate_dockerfile_script(app_name: str) -> str:
-    """Generate a shell script that creates a Dockerfile if none exists."""
-    return f"""\
+def _generate_dockerfile_script() -> str:
+    """Generate a shell script that creates a Dockerfile if none exists.
+
+    Uses $APP_NAME env var (set by the Tekton step) instead of shell interpolation.
+    """
+    return """\
 #!/bin/sh
 set -e
 cd $(workspaces.source.path)
 if [ -f Dockerfile ] || [ -f Containerfile ]; then
   echo "Dockerfile found — using existing"
-  # Ensure the DOCKERFILE param matches what exists
   if [ -f Containerfile ] && [ ! -f Dockerfile ]; then
     cp Containerfile Dockerfile
   fi
   exit 0
 fi
-echo "No Dockerfile found — auto-generating for {shlex.quote(app_name)}"
+echo "No Dockerfile found — auto-generating for $APP_NAME"
 # Detect language
 if [ -f go.mod ]; then
   cat > Dockerfile <<'GOEOF'
@@ -82,7 +84,7 @@ USER 1001
 EXPOSE 8080
 DEFAULTEOF
 fi
-echo "Generated Dockerfile for {shlex.quote(app_name)}"
+echo "Generated Dockerfile for $APP_NAME"
 cat Dockerfile
 """
 
@@ -148,7 +150,8 @@ def build_app_image(
                             "steps": [{
                                 "name": "check-or-create",
                                 "image": "registry.access.redhat.com/ubi9/ubi-minimal:latest",
-                                "script": _generate_dockerfile_script(app_name),
+                                "env": [{"name": "APP_NAME", "value": name}],
+                                "script": _generate_dockerfile_script(),
                             }],
                         },
                         "workspaces": [{"name": "source", "workspace": "source"}],
