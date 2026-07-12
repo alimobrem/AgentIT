@@ -133,6 +133,48 @@ class LLMClient:
             logger.warning("LLM returned unparseable action classification: %s", raw)
             return None
 
+    def review_fix(
+        self,
+        finding_description: str,
+        finding_category: str,
+        fix_content: str,
+        app_summary: str,
+    ) -> dict | None:
+        """Review a generated fix before applying. First approver gate.
+
+        Returns {"approved": bool, "confidence": float, "reason": str}
+        or None on failure (caller must treat None as rejected — fail-closed).
+        """
+        system = (
+            "You are a senior platform engineer reviewing auto-generated Kubernetes "
+            "manifests. Your job is to decide if a proposed fix is CORRECT and SAFE "
+            "for the specific application. Respond with JSON only:\n"
+            '{"approved": true/false, "confidence": 0.0-1.0, "reason": "one sentence"}\n\n'
+            "Approve if: the fix addresses the finding, uses correct API versions, "
+            "doesn't break existing functionality, and is appropriate for the app's stack.\n"
+            "Reject if: wrong API version, wrong ports/resources for this app, "
+            "overly permissive security settings, or the fix doesn't match the finding."
+        )
+        user = (
+            f"Application: {app_summary}\n\n"
+            f"Finding: [{finding_category}] {finding_description}\n\n"
+            f"Proposed fix:\n{fix_content[:3000]}\n\n"
+            "Is this fix correct and safe to apply? JSON only."
+        )
+        raw = self._chat(system, user)
+        if raw is None:
+            return None
+        try:
+            parsed = json.loads(raw)
+            return {
+                "approved": bool(parsed["approved"]),
+                "confidence": float(parsed["confidence"]),
+                "reason": str(parsed["reason"]),
+            }
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            logger.warning("LLM returned unparseable fix review: %s", raw)
+            return None
+
     def _chat(self, system: str, user: str) -> str | None:
         if llm_breaker.is_open:
             logger.warning("LLM circuit breaker open — skipping call")

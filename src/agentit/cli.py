@@ -524,37 +524,74 @@ def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bool) ->
 
             click.echo(f"\nStep 2: Generating fixes for {len(fixable)} finding(s)...", err=True)
             dispatcher = RemediationDispatcher(store)
-            all_fix_files = []
+            generated = []
 
             for finding in fixable:
                 result = dispatcher.dispatch(assessment_id, finding.category, report.repo_name)
                 if result.get("files"):
                     for fix_file in result["files"]:
                         click.echo(f"  Generated: {fix_file.path} ({result['agent']})", err=True)
-                        all_fix_files.append(fix_file)
+                        generated.append((finding, fix_file))
                 elif result.get("error"):
                     click.echo(f"  Skip {finding.category}: {result['error']}", err=True)
 
-            if not all_fix_files:
+            if not generated:
                 click.echo("\nNo fixes generated.", err=True)
                 return
 
-            click.echo(f"\nGenerated {len(all_fix_files)} fix file(s).", err=True)
+            click.echo(f"\nStep 3: LLM review — first approver gate...", err=True)
+            llm_client = None
+            try:
+                from agentit.llm import LLMClient
+                llm_client = LLMClient()
+                click.echo("  LLM available — reviewing each fix.", err=True)
+            except Exception:
+                click.echo("  LLM unavailable — skipping review (all fixes gated).", err=True)
+
+            app_summary = f"{report.repo_name} ({', '.join(l.name for l in report.stack.languages)}, score {before_score:.0f}/100)"
+            approved_files = []
+            rejected = []
+
+            for finding, fix_file in generated:
+                if llm_client:
+                    review = llm_client.review_fix(
+                        finding_description=finding.description,
+                        finding_category=finding.category,
+                        fix_content=fix_file.content[:3000],
+                        app_summary=app_summary,
+                    )
+                    if review is None:
+                        click.echo(f"  ⚠ {fix_file.path}: LLM unavailable — rejected (fail-closed)", err=True)
+                        rejected.append(fix_file)
+                    elif review["approved"] and review["confidence"] >= 0.7:
+                        click.echo(f"  ✓ {fix_file.path}: approved ({review['confidence']:.0%}) — {review['reason']}", err=True)
+                        approved_files.append(fix_file)
+                    else:
+                        click.echo(f"  ✗ {fix_file.path}: rejected ({review['confidence']:.0%}) — {review['reason']}", err=True)
+                        rejected.append(fix_file)
+                else:
+                    approved_files.append(fix_file)
+
+            click.echo(f"\n  Approved: {len(approved_files)}, Rejected: {len(rejected)}", err=True)
+
+            if not approved_files:
+                click.echo("\nNo fixes approved by LLM.", err=True)
+                return
 
             if dry_run:
                 click.echo("\n[DRY RUN] Would apply:", err=True)
-                for ff in all_fix_files:
+                for ff in approved_files:
                     click.echo(f"  {ff.path}: {ff.description}", err=True)
                 return
 
-            click.echo("\nStep 3: Writing fixes to disk...", err=True)
-            for ff in all_fix_files:
+            click.echo(f"\nStep 4: Writing {len(approved_files)} approved fix(es) to disk...", err=True)
+            for ff in approved_files:
                 target = Path(ff.path)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(ff.content, encoding="utf-8")
                 click.echo(f"  Wrote: {ff.path}", err=True)
 
-            click.echo("\nStep 4: Re-assessing to verify improvement...", err=True)
+            click.echo("\nStep 5: Re-assessing to verify improvement...", err=True)
             with _resolve_and_assess(repo_url, criticality) as report2:
                 after_score = report2.overall_score
                 delta = after_score - before_score
@@ -567,16 +604,16 @@ def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bool) ->
                     sys.exit(1)
 
                 if create_pr:
-                    click.echo("\nStep 5: Creating PR...", err=True)
+                    click.echo("\nStep 6: Creating PR...", err=True)
                     import subprocess
                     import time as _t
                     branch = f"agentit-self-fix-{int(_t.time()) % 100000}"
                     try:
                         subprocess.run(["git", "checkout", "-b", branch], check=True, capture_output=True)
-                        subprocess.run(["git", "add"] + [ff.path for ff in all_fix_files],
+                        subprocess.run(["git", "add"] + [ff.path for ff in approved_files],
                                        check=True, capture_output=True)
                         msg = (
-                            f"fix: self-heal {len(all_fix_files)} finding(s) — "
+                            f"fix: self-heal {len(approved_files)} finding(s) — "
                             f"score {before_score:.0f}→{after_score:.0f}\n\n"
                             f"Auto-generated by agentit self-fix.\n"
                             f"Findings fixed: {', '.join(f.category for f in fixable[:10])}"
