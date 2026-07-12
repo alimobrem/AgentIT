@@ -106,11 +106,7 @@ def load_checks(checks_dir: Path) -> list[CheckDefinition]:
     checks: list[CheckDefinition] = []
     if not checks_dir.is_dir():
         return checks
-    for path in sorted(checks_dir.rglob("*.yaml")):
-        defn = _parse_check_file(path)
-        if defn is not None:
-            checks.append(defn)
-    for path in sorted(checks_dir.rglob("*.yml")):
+    for path in sorted(p for ext in ("*.yaml", "*.yml") for p in checks_dir.rglob(ext)):
         defn = _parse_check_file(path)
         if defn is not None:
             checks.append(defn)
@@ -198,15 +194,7 @@ def _make_finding(check: CheckDefinition, file_path: str | None = None) -> Findi
 
 def run_checks(checks: list[CheckDefinition], repo_path: Path) -> list[Finding]:
     """Execute all checks against *repo_path* and return triggered findings."""
-    findings: list[Finding] = []
-    for check in checks:
-        runner = _RUNNERS.get(check.check_type)
-        if runner is None:
-            continue
-        finding = runner(check, repo_path)
-        if finding is not None:
-            findings.append(finding)
-    return findings
+    return [f for fl in run_checks_by_dimension(checks, repo_path).values() for f in fl]
 
 
 def run_checks_by_dimension(

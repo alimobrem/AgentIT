@@ -147,8 +147,9 @@ def _merge_check_findings(
                 findings=findings,
             )
 
+    original_dims = {s.dimension for s in scores}
     return [score_map[s.dimension] for s in scores] + [
-        score_map[d] for d in score_map if d not in {s.dimension for s in scores}
+        score_map[d] for d in score_map if d not in original_dims
     ]
 
 
@@ -160,12 +161,15 @@ def _apply_suppressions(
     result = []
     for s in scores:
         filtered = [f for f in s.findings if f.source not in suppressions]
-        result.append(DimensionScore(
-            dimension=s.dimension,
-            score=calculate_score(filtered),
-            max_score=s.max_score,
-            findings=filtered,
-        ))
+        if len(filtered) == len(s.findings):
+            result.append(s)
+        else:
+            result.append(DimensionScore(
+                dimension=s.dimension,
+                score=calculate_score(filtered),
+                max_score=s.max_score,
+                findings=filtered,
+            ))
     return result
 
 

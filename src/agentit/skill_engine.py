@@ -144,13 +144,7 @@ class SkillEngine:
         self._load_all()
 
     def _load_all(self) -> None:
-        if not self.skills_dir.is_dir():
-            logger.debug("Skills directory does not exist: %s", self.skills_dir)
-            return
-        for md in sorted(self.skills_dir.rglob("*.md")):
-            skill = load_skill(md)
-            if skill is not None:
-                self.skills.append(skill)
+        self.skills = load_all_skills(self.skills_dir)
         logger.info("Loaded %d skills from %s", len(self.skills), self.skills_dir)
 
     def match(self, report: AssessmentReport) -> list[Skill]:
