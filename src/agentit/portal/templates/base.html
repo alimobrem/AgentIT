@@ -913,6 +913,7 @@ document.addEventListener('alpine:init', function() {
   if (params.get('error') && Alpine.$data(tm)) Alpine.$data(tm).show(params.get('error'), 'error');
   if (params.get('warning') && Alpine.$data(tm)) Alpine.$data(tm).show(params.get('warning'), 'warning');
   if ((params.get('success') || params.get('pr_url')) && Alpine.$data(tm)) Alpine.$data(tm).show(params.get('success') || 'Operation successful', 'success');
+  if (params.get('purged') && Alpine.$data(tm)) Alpine.$data(tm).show('Purged ' + params.get('purged') + ' stale rows', 'success');
 });
 // Relative timestamps
 function relativeTime(iso) {
