@@ -564,7 +564,17 @@ def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bool) ->
                 # Fall back to dispatcher (Python agent templates)
                 result = dispatcher.dispatch(assessment_id, finding.category, report.repo_name)
                 if result.get("files"):
-                    for fix_file in result["files"]:
+                    from agentit.agents.base import GeneratedFile
+                    for ff_raw in result["files"]:
+                        if isinstance(ff_raw, GeneratedFile):
+                            fix_file = ff_raw
+                        else:
+                            fix_file = GeneratedFile(
+                                path=ff_raw.get("path", "fix.yaml"),
+                                content=ff_raw.get("content", ""),
+                                description=ff_raw.get("description", ""),
+                                finding_addressed=ff_raw.get("finding_addressed", finding.category),
+                            )
                         click.echo(f"  Generated: {fix_file.path} (agent/{result['agent']})", err=True)
                         generated.append((finding, fix_file))
                 elif result.get("error"):
