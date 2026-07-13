@@ -1,0 +1,37 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: agentit-alerts
+  labels:
+    app.kubernetes.io/name: agentit
+spec:
+  groups:
+  - name: agentit.rules
+    rules:
+    - alert: HighErrorRate
+      expr: sum(rate(http_requests_total{app="agentit",code=~"5.."}[5m])) / sum(rate(http_requests_total{app="agentit"}[5m]))
+        > 0.05
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: High error rate on agentit
+        description: Error rate exceeds 5% for 5 minutes.
+    - alert: HighLatency
+      expr: histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{app="agentit"}[5m]))
+        by (le)) > 1
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: High p99 latency on agentit
+        description: P99 latency exceeds 1s for 5 minutes.
+    - alert: PodCrashLooping
+      expr: increase(kube_pod_container_status_restarts_total{pod=~"agentit-.*"}[10m])
+        > 3
+      for: 0m
+      labels:
+        severity: critical
+      annotations:
+        summary: Pod crash looping for agentit
+        description: Pod has restarted more than 3 times in 10 minutes.
