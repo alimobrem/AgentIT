@@ -41,6 +41,12 @@ spec:
           value: "true"
         - name: agents.driftDetector.enabled
           value: "true"
+        - name: agents.skillLearner.enabled
+          value: "true"
+        - name: agents.skillLearner.interval
+          value: "86400"
+        - name: agents.skillLearner.limit
+          value: "3"
   ignoreDifferences:
     - group: ""
       kind: Service

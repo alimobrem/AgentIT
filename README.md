@@ -131,7 +131,7 @@ Long-lived watchers (deployed as separate pods):
 | **vuln-watcher** | 6h | Fleet CVE monitoring, triggers remediation |
 | **slo-tracker** | 5m | SLO polling, breach alerts, rollback gates |
 | **drift-detector** | 10m | Argo CD sync monitoring, API drift detection, auto-deprecation of affected skills |
-| **skill-learner** | 24h | Researches CVEs via LLM, drafts new skills for human review — disabled by default (`agents.skillLearner.enabled`), requires an LLM connection |
+| **skill-learner** | 24h | Researches CVEs via LLM, drafts new skills for human review — opt-in via `agents.skillLearner.enabled` (chart default: disabled; enabled on the live deployment via `argocd/application.yaml`), requires an LLM connection |
 
 ## Self-improvement loop
 
@@ -139,7 +139,7 @@ AgentIT improves itself through three tiers of learning:
 
 1. **Feedback loop** — tracks human decisions (approve/reject/modify) on generated fixes. Skills with < 30% approval rate are flagged for review on the Insights page, though a human still decides whether to act on that flag. Agents query the feedback store before generating to avoid repeating rejected patterns.
 
-2. **Learning agent** — researches CVEs and best practices via LLM and generates draft skills that go through human review before activation. Runs automatically every 24h via the `skill-learner` watcher (disabled by default — enable with `agents.skillLearner.enabled=true`), and can also be triggered on demand from the Capabilities page ("Research CVEs & Generate Skills") or via `agentit learn` / `agentit learn-for` on the CLI. Draft skills get an "Activate" button right next to them on the Capabilities page — the full research → draft → human-review → active loop runs end-to-end in the portal, no CLI required.
+2. **Learning agent** — researches CVEs and best practices via LLM and generates draft skills that go through human review before activation. Runs automatically every 24h via the `skill-learner` watcher (chart default: disabled — enable with `agents.skillLearner.enabled=true`; currently enabled on the live deployment via `argocd/application.yaml`), and can also be triggered on demand from the Capabilities page ("Research CVEs & Generate Skills") or via `agentit learn` / `agentit learn-for` on the CLI. Draft skills get an "Activate" button right next to them on the Capabilities page — the full research → draft → human-review → active loop runs end-to-end in the portal, no CLI required.
 
 3. **Platform awareness** — `PlatformContext` discovers the cluster's K8s version, available APIs, CRDs, and operators. Every skill generation includes this context. The API drift detector auto-deprecates a skill specifically when the API kind it generates has been removed from the cluster (a narrower guarantee than the effectiveness-based flagging in tier 1).
 
