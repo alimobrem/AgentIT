@@ -96,42 +96,10 @@ spec:
         - name: source
           workspace: source
 
-    - name: tag-latest
-      retries: 2
-      timeout: "2m"
-      runAfter: [build-image, run-tests]
-      taskSpec:
-        params:
-          - name: image-ref
-            type: string
-          - name: revision
-            type: string
-        steps:
-          - name: tag
-            image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
-            env:
-              - name: REVISION
-                value: $(params.revision)
-            computeResources:
-              requests:
-                memory: 64Mi
-                cpu: 50m
-            script: |
-              set -euo pipefail
-              [[ "${REVISION}" =~ ^[a-zA-Z0-9._-]+$ ]] || { echo "Invalid revision: ${REVISION}"; exit 1; }
-              oc tag "{{ .Release.Namespace }}/agentit:${REVISION}" \
-                     "{{ .Release.Namespace }}/agentit:latest"
-              echo "Tagged :${REVISION} as :latest"
-      params:
-        - name: image-ref
-          value: $(params.image-ref)
-        - name: revision
-          value: $(params.revision)
-
     - name: notify-argocd
       retries: 1
       timeout: "2m"
-      runAfter: [run-tests, tag-latest]
+      runAfter: [run-tests, build-image]
       taskSpec:
         params:
           - name: revision
@@ -156,53 +124,6 @@ spec:
                 -p "[{\"op\":\"replace\",\"path\":\"/spec/source/helm/parameters/${TAG_INDEX}/value\",\"value\":\"${REVISION}\"}]"
               echo "Updated Application image.tag to ${REVISION}"
       params:
-        - name: revision
-          value: $(params.revision)
-
-    - name: verify-deploy
-      retries: 2
-      timeout: "3m"
-      runAfter: [notify-argocd]
-      taskSpec:
-        params:
-          - name: image-ref
-            type: string
-          - name: revision
-            type: string
-        steps:
-          - name: verify
-            image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
-            env:
-              - name: REVISION
-                value: $(params.revision)
-              - name: IMAGE_REF
-                value: $(params.image-ref)
-            computeResources:
-              requests:
-                memory: 64Mi
-                cpu: 50m
-            script: |
-              set -euo pipefail
-              EXPECTED="${IMAGE_REF}:${REVISION}"
-              echo "Expected image: ${EXPECTED}"
-
-              echo "Waiting for rollout..."
-              for i in $(seq 1 12); do
-                RUNNING=$(oc get pods -n {{ .Release.Namespace }} \
-                  -l app.kubernetes.io/name=agentit \
-                  -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null)
-                if [ "${RUNNING}" = "${EXPECTED}" ]; then
-                  echo "Verified: running image matches ${REVISION}"
-                  exit 0
-                fi
-                echo "Attempt $i: running=${RUNNING} expected=${EXPECTED}"
-                sleep 10
-              done
-              echo "WARN: image tag mismatch after 2m"
-              exit 1
-      params:
-        - name: image-ref
-          value: $(params.image-ref)
         - name: revision
           value: $(params.revision)
 

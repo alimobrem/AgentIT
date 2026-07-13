@@ -62,6 +62,19 @@ spec:
                   done
                   echo "Deleted $AA_DELETED orphaned affinity-assistant pods"
 
+                  echo "Cleaning orphaned affinity-assistant StatefulSets..."
+                  SS_DELETED=0
+                  for ss in $(oc get statefulset -n {{ .Release.Namespace }} -l app.kubernetes.io/managed-by=tekton-pipelines -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.labels.tekton\.dev/pipelineRun}{"\n"}{end}' 2>/dev/null); do
+                    SS_NAME=$(echo "$ss" | awk '{print $1}')
+                    PR_NAME=$(echo "$ss" | awk '{print $2}')
+                    if [ -z "$SS_NAME" ] || [ -z "$PR_NAME" ]; then continue; fi
+                    EXISTS=$(oc get pipelinerun "$PR_NAME" -n {{ .Release.Namespace }} -o name 2>/dev/null || echo "")
+                    if [ -z "$EXISTS" ]; then
+                      oc delete statefulset "$SS_NAME" -n {{ .Release.Namespace }} --wait=false 2>/dev/null && SS_DELETED=$((SS_DELETED+1))
+                    fi
+                  done
+                  echo "Deleted $SS_DELETED orphaned affinity-assistant StatefulSets"
+
                   echo "Cleaning orphaned PVCs..."
                   PVC_DELETED=0
                   for pvc in $(oc get pvc -n {{ .Release.Namespace }} -l tekton.dev/pipeline -o jsonpath='{.items[*].metadata.name}'); do
