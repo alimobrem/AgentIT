@@ -1,15 +1,13 @@
 {{- if .Values.postgres.bundled.enabled }}
-# Standalone (non-operator) Postgres — the pivot away from the CNPG certified
-# operator in postgres-cluster.yaml above, which is blocked on paid EDB/Red
-# Hat Marketplace entitlements (see docs/postgres-migration-plan.md). Uses
-# the same RHEL9-based image OpenShift's own `postgresql` ImageStream in the
-# `openshift` namespace ships (registry.redhat.io/rhel9/postgresql-15),
-# already pullable via this cluster's global pull secret — no new
-# entitlements needed. This is a single-instance, non-HA Deployment (not a
-# drop-in replacement for the CNPG Cluster above) so AgentIT has a real,
-# reachable Postgres to eventually point at once AGENTIT_DB_BACKEND is wired
-# up — see the CNPG postgres.* block above for the HA path once entitlements
-# are available.
+# Standalone (non-operator) Postgres that AgentIT deploys and maintains
+# itself — no OLM operator, no Subscription. Uses the RHEL9-based image
+# OpenShift's own `postgresql` ImageStream in the `openshift` namespace ships
+# (registry.redhat.io/rhel9/postgresql-15), already pullable via this
+# cluster's global pull secret. This is a single-instance, non-HA Deployment
+# so AgentIT has a real, reachable Postgres to eventually point at once
+# AGENTIT_DB_BACKEND is wired up — see docs/postgres-migration-plan.md for
+# the full plan (including why an earlier CloudNativePG-operator design was
+# tried and abandoned) and the upgrade path if HA is ever needed.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

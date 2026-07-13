@@ -53,67 +53,15 @@ Requires the **Strimzi** operator (`strimzi-kafka-operator`) installed via a `Su
 
 **Current state is single-broker, plaintext, no auth** — any pod in the namespace can produce/consume on any topic. See [`docs/kafka-hardening-plan.md`](kafka-hardening-plan.md) for the deferred plan to add TLS + SASL/SCRAM auth via Strimzi `KafkaUser` CRs and wire credentials into `events.py`/`consumer.py`.
 
-### Postgres (`postgres.enabled: true`)
+### Postgres (`postgres.bundled.enabled: true`)
 
-Requires the **CloudNativePG** operator installed via a `Subscription` (Red Hat-certified, available on OperatorHub as `cloud-native-postgresql`):
+**No operator required.** AgentIT ships and maintains its own bundled, non-operator Postgres instance — a plain `Deployment`+`PersistentVolumeClaim`+`Service`+`Secret` (`chart/templates/postgres/postgres-bundled.yaml`, `postgres-bundled-secret.yaml`) using the RHEL9-based image OpenShift's own `postgresql` `ImageStream` already tracks (`registry.redhat.io/rhel9/postgresql-15`), pullable via this cluster's existing global pull secret with no new entitlements. Optional pg_dump-based backups are gated behind `postgres.bundled.backup.enabled` (`chart/templates/postgres/postgres-bundled-backup.yaml`).
 
-```bash
-oc get packagemanifests -n openshift-marketplace cloud-native-postgresql
-```
+An earlier design used the **CloudNativePG** operator (installed via OLM `Subscription`, same "operator pre-installed, chart only ships the CR" convention as Kafka/Strimzi below) for 3-instance HA failover. That path was abandoned — not for a technical reason, but because the certified-operator image required a paid EDB/Red Hat Marketplace entitlement (`postgresql-operator-pull-secret`) that was never provisioned on this cluster, and there was no ETA for it. All of that path's chart templates, values, and cluster remnants have been removed. See [`docs/postgres-migration-plan.md`](postgres-migration-plan.md) for the full history (why CNPG was chosen, exactly how it got stuck, and why the bundled approach was chosen instead) and for what's actually done vs. remaining on the SQLite → Postgres application-level cutover.
 
-```yaml
-apiVersion: operators.coreos.com/v1alpha1
-kind: Subscription
-metadata:
-  name: cloud-native-postgresql
-  namespace: openshift-operators
-spec:
-  channel: stable
-  name: cloud-native-postgresql
-  source: certified-operators
-  sourceNamespace: openshift-marketplace
-```
+**Enabling this only stands up the standalone instance** — it does not change what `store.py`/the running app talk to. That's a separate, deliberate step: setting `AGENTIT_DB_BACKEND=postgres` (and wiring a real DSN) across all 5 Deployments in a single coordinated Argo CD sync, per `docs/postgres-migration-plan.md` §7. Never flip that env var incrementally across pods — the portal (2 replicas) and all 4 watchers share the same logical state, and a partial rollout would silently diverge data between backends.
 
-Once installed, the chart renders a 3-instance HA `Cluster` CR (`chart/templates/postgres/postgres-cluster.yaml`) plus an app-credentials `Secret` (`chart/templates/postgres/postgres-secret.yaml`). See [`docs/postgres-migration-plan.md`](postgres-migration-plan.md) for why CloudNativePG was chosen and the plan for actually cutting `store.py` over to it — as of this writing the chart resources exist but the app still talks to SQLite (`postgres.enabled` defaults to `false`).
-
-**Current state on the live dev cluster (`api.aws-jb-acsacm-1.dev05.red-chesterfield.com`, applied 2026-07-13):** the exact `Subscription` above was applied via `oc apply -f -`. `openshift-operators` already has a cluster-wide `OperatorGroup` (`global-operators`, `AllNamespaces` install mode, pre-existing — same one Strimzi/AMQ Streams uses), so no new `OperatorGroup` was needed, matching the Kafka pattern exactly. The package (`cloud-native-postgresql`, Certified Operators catalog) offers channels `candidate`, `fast`, `stable`, and per-minor `stable-v1.2x` channels; `stable` (documented above) currently resolves to `cloud-native-postgresql.v1.29.0`.
-
-**Blocked, not installed** — the `Subscription` is applied but has not resolved to a CSV (`status.currentCSV`/`status.state` are both empty). `oc describe subscription cloud-native-postgresql -n openshift-operators` shows:
-
-```
-type: ResolutionFailed
-reason: ConstraintsNotSatisfiable
-message: constraints not satisfiable: no operators found in package kyverno in
-  the catalog referenced by subscription kyverno, subscription kyverno exists
-```
-
-Root cause: a **pre-existing, unrelated** `kyverno` `Subscription` already in `openshift-operators` (created 2026-07-11, not part of this work) points at a package that no longer exists in the `community-operators` catalog. OLM resolves all `Subscriptions` sharing an `AllNamespaces` `OperatorGroup` together as one dependency set, so that one broken subscription blocks resolution for every subscription in the namespace — confirmed by checking the other pre-existing subscriptions there (`amq-streams`, `openshift-pipelines-operator`, `servicemeshoperator3`): all three showed the same `ConstraintsNotSatisfiable` condition, but each still had a cached `currentCSV`/`AtLatestKnown` state from before the `kyverno` subscription broke — new subscriptions (like this one, at the time) never got to compute a `currentCSV` at all while the namespace-wide resolution was broken. This was not a permissions or catalog-source-connectivity issue (`oc auth can-i create subscriptions.operators.coreos.com` and `... get csv` both returned `yes`; all `CatalogSource`s reported `healthy: true`/`READY`).
-
-**Resolved 2026-07-13 (follow-up session):** before touching anything, verified the `kyverno` `Subscription` was pure dead weight — `status.currentCSV`/`status.installedCSV` were empty since its creation two days earlier (it had *never* resolved to any CSV, not even once), no InstallPlan anywhere on the cluster ever referenced it, and there was no live Kyverno install to protect: no `kyverno`-named pods/Deployments/namespaces, and the `kyverno.io` CRDs (`ClusterPolicy`, `Policy`) don't exist on this cluster at all — so nothing (including AgentIT's own compliance-agent-generated Kyverno `Policy` manifests, which are template artifacts, not applied resources) was actively depending on it. Confirmed it was safe to delete outright and ran:
-
-```bash
-oc delete subscriptions.operators.coreos.com kyverno -n openshift-operators
-```
-
-OLM's resolver re-ran within ~2 minutes (`catalog-operator` logs in `openshift-operator-lifecycle-manager` stopped referencing `kyverno` and picked up `cloud-native-postgresql` immediately after). Result: `cloud-native-postgresql` resolved to `cloud-native-postgresql.v1.29.0` (state `UpgradePending` → InstallPlan `install-m27gf`, approval `Manual` like every other subscription in this namespace), and `amq-streams`/`openshift-pipelines-operator`/`servicemeshoperator3` all lost their `ResolutionFailed` condition and returned to normal (`AtLatestKnown`). The InstallPlan was manually approved (`oc patch installplan install-m27gf -n openshift-operators --type merge -p '{"spec":{"approved":true}}'`, same manual-approval convention already in use for every other subscription here) to complete end-to-end verification, and the InstallPlan reached `Complete`.
-
-**New, separate, unrelated blocker found during verification — not fixed, out of scope:** the CNPG CSV is stuck in `Installing` because its controller pod can't pull its image:
-
-```
-Failed to pull image "docker.enterprisedb.com/k8s/edb-postgres-for-cloudnativepg@sha256:...":
-unable to retrieve auth token: invalid username/password: unauthorized
-Unable to retrieve some image pull secrets (postgresql-operator-pull-secret)
-```
-
-The CSV's install strategy references an `imagePullSecrets: [{name: postgresql-operator-pull-secret}]` Secret that has never existed on this cluster (`oc get secret postgresql-operator-pull-secret -n openshift-operators` → `NotFound`). This is expected for EDB's certified "EDB Postgres for Kubernetes" build (this package, `cloud-native-postgresql` from `certified-operators`, is EnterpriseDB's certified operator) — it requires a real registry entitlement/pull secret for `docker.enterprisedb.com` that was simply never provisioned. **This has nothing to do with the kyverno fix**; it only became visible once resolution was unblocked. Fixing it requires whoever owns EDB/Red Hat Marketplace credentials for this cluster to create the `postgresql-operator-pull-secret` Secret in `openshift-operators` — not attempted here, since no real credentials were available and fabricating one would be worse than leaving it visibly broken. Re-check with:
-
-```bash
-oc get subscriptions.operators.coreos.com cloud-native-postgresql -n openshift-operators -o custom-columns=CURRENTCSV:.status.currentCSV,STATE:.status.state
-oc get csv cloud-native-postgresql.v1.29.0 -n openshift-operators -o jsonpath='{.status.phase}{"\n"}{.status.message}{"\n"}'
-oc get pods -n openshift-operators | grep postgresql-operator
-```
-
-No `Cluster` CR, namespace, or `OperatorGroup` was created as part of either change, and nothing in the AgentIT chart/Argo CD `Application` was touched. `postgres.enabled` still cannot be safely set to `true` until the pull-secret issue above is resolved and the operator pod is actually `Running`.
+To enable the instance itself: set `postgres.bundled.enabled: true` via an `argocd/application.yaml` Helm parameter, commit, push — same GitOps convention as any other flag in this chart.
 
 ## Authentication
 

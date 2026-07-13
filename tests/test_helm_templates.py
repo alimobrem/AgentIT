@@ -17,8 +17,10 @@ HELM_VARS = {
     "{{ .Release.Name }}": "agentit",
     "{{ .Release.Service }}": "Helm",
     "{{ .Chart.Name }}": "agentit",
-    "{{ .Values.postgres.instances }}": "3",
-    "{{ .Values.postgres.credentials.secretName }}": "agentit-postgres-app",
+    "{{ .Values.postgres.bundled.image | quote }}": '"registry.redhat.io/rhel9/postgresql-15@sha256:06aeada2ca417445bc4fb711729e65a02ee78421a09c862cbd136ebdd51d7cfa"',
+    "{{ .Values.postgres.bundled.credentials.secretName }}": "agentit-postgres-bundled-app",
+    "{{ .Values.postgres.bundled.credentials.database | quote }}": '"agentit"',
+    '{{ .Values.postgres.bundled.backup.schedule | default "23 */6 * * *" | quote }}': '"23 */6 * * *"',
 }
 
 
@@ -287,35 +289,109 @@ class TestTektonCleanup:
 
 
 # ---------------------------------------------------------------------------
-# Postgres (CloudNativePG): postgres/postgres-cluster.yaml, postgres-secret.yaml
+# Postgres (bundled, non-operator): postgres/postgres-bundled.yaml,
+# postgres-bundled-secret.yaml. An earlier CloudNativePG-operator-based
+# design was tried and abandoned (blocked on unprovisioned paid EDB/Red Hat
+# Marketplace entitlements) — see docs/postgres-migration-plan.md.
 # ---------------------------------------------------------------------------
 
-class TestPostgresCluster:
-    TEMPLATE = CHART_DIR / "postgres" / "postgres-cluster.yaml"
+class TestPostgresBundled:
+    TEMPLATE = CHART_DIR / "postgres" / "postgres-bundled.yaml"
+
+    def _docs(self):
+        rendered = _render(self.TEMPLATE)
+        docs = list(yaml.safe_load_all(rendered))
+        return {d["kind"]: d for d in docs if d}
+
+    def test_parseable(self):
+        by_kind = self._docs()
+        assert set(by_kind) == {"PersistentVolumeClaim", "Deployment", "Service"}
+
+    def test_no_operator_apis_used(self):
+        """Regression guard: this path must never reintroduce a CNPG/operator CRD."""
+        rendered = _render(self.TEMPLATE)
+        assert "cnpg.io" not in rendered
+        assert "postgresql.cnpg.io" not in rendered
+
+    def test_pvc_requests_persistent_storage(self):
+        by_kind = self._docs()
+        pvc = by_kind["PersistentVolumeClaim"]
+        assert pvc["spec"]["accessModes"] == ["ReadWriteOnce"]
+        assert "storage" in pvc["spec"]["resources"]["requests"]
+
+    def test_deployment_uses_rhel_image_and_credentials_secret(self):
+        by_kind = self._docs()
+        container = by_kind["Deployment"]["spec"]["template"]["spec"]["containers"][0]
+        assert "rhel9/postgresql-15" in container["image"]
+        env_names = {e["name"] for e in container["env"]}
+        assert {"POSTGRESQL_USER", "POSTGRESQL_PASSWORD", "POSTGRESQL_DATABASE"} <= env_names
+
+    def test_deployment_has_restrictive_security_context(self):
+        by_kind = self._docs()
+        pod_spec = by_kind["Deployment"]["spec"]["template"]["spec"]
+        assert pod_spec["securityContext"]["runAsNonRoot"] is True
+        container = pod_spec["containers"][0]
+        assert container["securityContext"]["allowPrivilegeEscalation"] is False
+        assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
+
+    def test_service_targets_postgres_port(self):
+        by_kind = self._docs()
+        svc = by_kind["Service"]
+        ports = svc["spec"]["ports"]
+        assert any(p["port"] == 5432 for p in ports)
+
+
+class TestPostgresBundledBackup:
+    TEMPLATE = CHART_DIR / "postgres" / "postgres-bundled-backup.yaml"
+
+    def _docs(self):
+        rendered = _render(self.TEMPLATE)
+        docs = list(yaml.safe_load_all(rendered))
+        return {d["kind"]: d for d in docs if d}
+
+    def test_parseable(self):
+        by_kind = self._docs()
+        assert set(by_kind) == {"PersistentVolumeClaim", "CronJob"}
+
+    def test_cronjob_has_valid_schedule(self):
+        by_kind = self._docs()
+        parts = by_kind["CronJob"]["spec"]["schedule"].split()
+        assert len(parts) == 5
+
+    def test_cronjob_uses_pg_dump_against_bundled_service(self):
+        by_kind = self._docs()
+        container = by_kind["CronJob"]["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]
+        args = "\n".join(container["args"])
+        assert "pg_dump" in args
+        assert "agentit-postgres-bundled" in args
+
+
+class TestPostgresBundledNetworkPolicy:
+    """Regression test: the bundled Postgres pod carries the chart-wide
+    app.kubernetes.io/name label, so it's also selected by the main
+    NetworkPolicy (chart/templates/networkpolicy.yaml), which only allows
+    ingress on port 8080. Without this dedicated policy, 5432 would be
+    silently unreachable even though every other resource looks healthy."""
+
+    TEMPLATE = CHART_DIR / "postgres" / "postgres-bundled-networkpolicy.yaml"
 
     def test_parseable(self):
         doc = _load(self.TEMPLATE)
-        assert doc["kind"] == "Cluster"
-        assert doc["apiVersion"] == "postgresql.cnpg.io/v1"
+        assert doc["kind"] == "NetworkPolicy"
 
-    def test_ha_instance_count_at_least_three(self):
-        """HA requires >=3 instances (1 primary + 2 replicas) for quorum-safe failover."""
+    def test_selects_only_the_bundled_postgres_pod(self):
         doc = _load(self.TEMPLATE)
-        assert doc["spec"]["instances"] >= 3
+        labels = doc["spec"]["podSelector"]["matchLabels"]
+        assert labels["app.kubernetes.io/component"] == "postgres-bundled"
 
-    def test_bootstrap_references_credentials_secret(self):
+    def test_allows_ingress_on_postgres_port(self):
         doc = _load(self.TEMPLATE)
-        secret = doc["spec"]["bootstrap"]["initdb"]["secret"]
-        assert secret["name"] == "agentit-postgres-app"
-
-    def test_has_pod_anti_affinity(self):
-        """Replicas must spread across nodes, or a single node loss could take down quorum."""
-        doc = _load(self.TEMPLATE)
-        assert doc["spec"]["affinity"]["topologyKey"] == "kubernetes.io/hostname"
+        ports = [p["port"] for rule in doc["spec"]["ingress"] for p in rule["ports"]]
+        assert 5432 in ports
 
 
-class TestPostgresSecret:
-    TEMPLATE = CHART_DIR / "postgres" / "postgres-secret.yaml"
+class TestPostgresBundledSecret:
+    TEMPLATE = CHART_DIR / "postgres" / "postgres-bundled-secret.yaml"
 
     def test_parseable(self):
         doc = _load(self.TEMPLATE)

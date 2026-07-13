@@ -53,39 +53,18 @@ kafka:
   enabled: false
   bootstrapServers: agentit-kafka-kafka-bootstrap.agentit.svc:9092
 
-# HA Postgres via the CloudNativePG operator (assumed pre-installed via OLM,
-# same convention as Kafka/Strimzi above — see docs/deployment.md). Disabled
-# by default: store.py is still SQLite today, this just prepares the cluster.
+# Bundled (non-operator) Postgres: a single Deployment+PVC+Service+Secret
+# using the RHEL9-based image OpenShift's own `postgresql` ImageStream ships
+# (registry.redhat.io/rhel9/postgresql-15), already pullable via this
+# cluster's global pull secret — no operator, no OLM Subscription, no extra
+# entitlements needed. This is the only Postgres path this chart ships; an
+# earlier CloudNativePG-operator-based HA design was tried and abandoned
+# (blocked on paid EDB/Red Hat Marketplace entitlements that were never
+# provisioned) — see docs/postgres-migration-plan.md for that history.
+# Disabled by default and NOT wired into AGENTIT_DB_BACKEND/AGENTIT_PG_DSN —
+# enabling this only stands up the standalone instance; store.py still talks
+# to SQLite until that env var is flipped as a separate, deliberate step.
 postgres:
-  enabled: false
-  instances: 3
-  storageSize: 10Gi
-  # storageClassName: gp3-csi
-  # imageName: ""   # override CNPG's default PostgreSQL image if needed
-  credentials:
-    secretName: agentit-postgres-app
-    username: agentit
-    database: agentit
-  resources:
-    requests:
-      cpu: 250m
-      memory: 512Mi
-    limits:
-      cpu: "1"
-      memory: 1Gi
-  backup:
-    enabled: false
-    # destinationPath: s3://my-bucket/agentit-postgres
-    # credentialsSecretName: agentit-postgres-backup
-    retentionPolicy: "30d"
-  # Standalone (non-operator) Postgres — the pivot away from the CNPG
-  # certified operator above while it's blocked on paid EDB/Red Hat
-  # Marketplace entitlements (see docs/postgres-migration-plan.md). A single
-  # Deployment+PVC+Service+Secret using the RHEL9-based image OpenShift's own
-  # `postgresql` ImageStream ships (registry.redhat.io/rhel9/postgresql-15),
-  # already pullable via this cluster's global pull secret. Disabled by
-  # default and NOT wired into AGENTIT_DB_BACKEND/AGENTIT_PG_DSN yet — this
-  # only prepares the standalone component, same as the CNPG block above.
   bundled:
     enabled: false
     image: registry.redhat.io/rhel9/postgresql-15@sha256:06aeada2ca417445bc4fb711729e65a02ee78421a09c862cbd136ebdd51d7cfa
@@ -102,6 +81,16 @@ postgres:
       limits:
         cpu: "1"
         memory: 1Gi
+    # pg_dump-based backup CronJob, mirroring the existing SQLite
+    # `.Values.backup`/db-backup-cronjob.yaml pattern below. Disabled by
+    # default — see docs/postgres-migration-plan.md's "Backup/retention" gap
+    # for what's covered and what isn't.
+    backup:
+      enabled: false
+      schedule: "23 */6 * * *"
+      retentionCount: 8
+      storageSize: 2Gi
+      # storageClassName: gp3-csi
 
 argoEvents:
   enabled: false
@@ -123,6 +112,20 @@ agents:
     enabled: false
     interval: 86400   # 24 hours
     limit: 3          # max CVEs researched per cycle
+    persistence:
+      # Dedicated PVC (single-consumer, this Deployment only -- never shared
+      # with the main portal Deployment, so no ReadWriteOnce multi-attach
+      # risk) so draft skills this watcher writes survive ITS OWN pod
+      # restarts. Deliberately separate from the portal's own `{{ .Release.Name }}-data`
+      # PVC: this does NOT make drafts visible to the portal's Capabilities
+      # page (that needs shared/RWX storage or a git write-back pipeline --
+      # a real, documented gap; see README's Self-improvement loop section
+      # and the startup log warning in watchers/skill_learner.py). Without
+      # this, drafts were invisible AND unrecoverable; with it, they're
+      # still invisible to the portal today but at least survive a restart.
+      enabled: true
+      size: 256Mi
+      # storageClassName: gp3-csi
 
 backup:
   enabled: false

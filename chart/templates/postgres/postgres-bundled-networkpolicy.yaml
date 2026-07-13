@@ -1,0 +1,40 @@
+{{- if .Values.postgres.bundled.enabled }}
+# The bundled Postgres Deployment's pod carries the chart-wide
+# app.kubernetes.io/name={{ .Chart.Name }} label (for consistency with every
+# other resource here), which means it is also selected by the main
+# {{ .Release.Name }} NetworkPolicy (chart/templates/networkpolicy.yaml) --
+# that policy only allows ingress on port 8080 (the portal's HTTP port), so
+# without this policy the bundled Postgres pod would silently reject any
+# connection on 5432 even though the Service/Secret/Deployment all look
+# healthy. NetworkPolicies are additive (a pod's effective allowed ingress is
+# the union of every policy that selects it), so this only *adds* an allow
+# rule for 5432 -- it does not need to (and must not) redeclare or restrict
+# the existing 8080 rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-postgres-bundled
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: postgres-bundled
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: postgres-bundled
+  policyTypes:
+    - Ingress
+  ingress:
+    # Scoped to same-namespace only (no namespaceSelector = same namespace as
+    # this policy) -- every legitimate caller (the portal, all 4 watchers,
+    # and the backup CronJob) runs in this namespace. Not narrowed further to
+    # specific pod selectors so this doesn't need updating every time a new
+    # in-namespace consumer is added (e.g. a future migration Job).
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}

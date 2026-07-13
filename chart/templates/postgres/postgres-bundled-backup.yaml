@@ -1,0 +1,101 @@
+{{- if and .Values.postgres.bundled.enabled .Values.postgres.bundled.backup.enabled }}
+# pg_dump-based backup for the bundled Postgres instance, mirroring the
+# existing SQLite backup pattern (chart/templates/pvc-backup.yaml +
+# chart/templates/workflows/db-backup-cronjob.yaml): a dedicated
+# ReadWriteOnce PVC holds a rotating set of dump files, written by a CronJob
+# on a schedule, oldest dumps pruned once the retention count is exceeded.
+# See docs/postgres-migration-plan.md for why this exists and what it does
+# NOT cover (point-in-time recovery, off-cluster storage).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-postgres-bundled-backups
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: postgres-bundled-backup
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.postgres.bundled.backup.storageSize | default "2Gi" }}
+  {{- if .Values.postgres.bundled.backup.storageClassName }}
+  storageClassName: {{ .Values.postgres.bundled.backup.storageClassName }}
+  {{- end }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}-postgres-bundled-backup
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: postgres-bundled-backup
+spec:
+  schedule: {{ .Values.postgres.bundled.backup.schedule | default "23 */6 * * *" | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 300
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: pg-backup
+              image: {{ .Values.postgres.bundled.image | quote }}
+              command: [/bin/sh, -c]
+              args:
+                - |
+                  set -eu
+                  BACKUP_DIR=/backups
+                  STAMP=$(date +%Y%m%d-%H%M%S)
+                  OUT="$BACKUP_DIR/agentit-postgres-$STAMP.sql.gz"
+                  pg_dump -h {{ .Release.Name }}-postgres-bundled -p 5432 -U "$POSTGRESQL_USER" -d "$POSTGRESQL_DATABASE" --no-owner | gzip > "$OUT"
+                  KEEP={{ .Values.postgres.bundled.backup.retentionCount | default 8 }}
+                  ls -t $BACKUP_DIR/agentit-postgres-*.sql.gz 2>/dev/null | tail -n +$((KEEP + 1)) | xargs rm -f 2>/dev/null || true
+                  COUNT=$(ls $BACKUP_DIR/agentit-postgres-*.sql.gz 2>/dev/null | wc -l)
+                  echo "Backup $STAMP done ($COUNT retained)"
+              env:
+                - name: POSTGRESQL_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.postgres.bundled.credentials.secretName }}
+                      key: username
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.postgres.bundled.credentials.secretName }}
+                      key: password
+                - name: POSTGRESQL_DATABASE
+                  value: {{ .Values.postgres.bundled.credentials.database | quote }}
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: false
+                capabilities:
+                  drop:
+                    - ALL
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 256Mi
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: {{ .Release.Name }}-postgres-bundled-backups
+{{- end }}

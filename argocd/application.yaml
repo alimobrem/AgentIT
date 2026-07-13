@@ -49,6 +49,15 @@ spec:
           value: "3"
         - name: monitoring.enabled
           value: "true"
+        # Stands up AgentIT's own bundled, non-operator Postgres instance
+        # (Deployment+PVC+Service+Secret) live in the agentit namespace.
+        # Deliberately NOT paired with AGENTIT_DB_BACKEND=postgres here — the
+        # instance existing is safe to roll out independently; flipping the
+        # app's actual data backend is a separate, coordinated cutover across
+        # all 5 Deployments (see docs/postgres-migration-plan.md §7) and
+        # requires its own explicit go-ahead.
+        - name: postgres.bundled.enabled
+          value: "true"
   ignoreDifferences:
     - group: ""
       kind: Service

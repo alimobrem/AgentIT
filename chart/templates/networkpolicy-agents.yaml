@@ -56,11 +56,12 @@ spec:
         - protocol: TCP
           port: 9092
     {{- end }}
-    {{- if .Values.postgres.enabled }}
+    {{- if .Values.postgres.bundled.enabled }}
     - to:
         - podSelector:
             matchLabels:
-              cnpg.io/cluster: {{ .Release.Name }}-postgres
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: postgres-bundled
       ports:
         - protocol: TCP
           port: 5432
@@ -111,11 +112,12 @@ spec:
         - protocol: TCP
           port: 9092
     {{- end }}
-    {{- if .Values.postgres.enabled }}
+    {{- if .Values.postgres.bundled.enabled }}
     - to:
         - podSelector:
             matchLabels:
-              cnpg.io/cluster: {{ .Release.Name }}-postgres
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: postgres-bundled
       ports:
         - protocol: TCP
           port: 5432
@@ -166,11 +168,12 @@ spec:
         - protocol: TCP
           port: 9092
     {{- end }}
-    {{- if .Values.postgres.enabled }}
+    {{- if .Values.postgres.bundled.enabled }}
     - to:
         - podSelector:
             matchLabels:
-              cnpg.io/cluster: {{ .Release.Name }}-postgres
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: postgres-bundled
       ports:
         - protocol: TCP
           port: 5432
