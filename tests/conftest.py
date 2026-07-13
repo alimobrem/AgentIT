@@ -22,6 +22,7 @@ def pytest_addoption(parser):
     parser.addoption("--run-real-repos", action="store_true", default=False, help="Run tests against real repos")
     parser.addoption("--live-cluster", action="store_true", default=False, help="Run e2e tests against a live OpenShift cluster")
     parser.addoption("--run-llm-evals", action="store_true", default=False, help="Run tests requiring real LLM credentials")
+    parser.addoption("--run-postgres-tests", action="store_true", default=False, help="Run tests requiring a real Postgres instance (podman/docker or AGENTIT_TEST_PG_DSN)")
 
 
 def pytest_collection_modifyitems(config, items):
@@ -42,6 +43,11 @@ def pytest_collection_modifyitems(config, items):
         skip = pytest.mark.skip(reason="needs --run-llm-evals flag (and real LLM credentials)")
         for item in items:
             if "llm_eval" in item.keywords:
+                item.add_marker(skip)
+    if not config.getoption("--run-postgres-tests"):
+        skip = pytest.mark.skip(reason="needs --run-postgres-tests flag (and podman/docker or AGENTIT_TEST_PG_DSN)")
+        for item in items:
+            if "postgres" in item.keywords:
                 item.add_marker(skip)
 
 

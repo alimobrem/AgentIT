@@ -31,6 +31,9 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "httpx>=0.27",
+    # For the async Postgres store tests (tests/test_store_pg.py) — see
+    # docs/postgres-migration-plan.md §8.
+    "pytest-asyncio>=0.24",
 ]
 
 [project.scripts]
@@ -47,7 +50,9 @@ markers = [
     "live_cluster: e2e tests against a live OpenShift cluster (use --live-cluster to enable)",
     "browser: Playwright browser tests (run with --browser-tests)",
     "llm_eval: LLM evaluation tests (run with --run-llm-evals, requires API key)",
+    "postgres: tests requiring a real Postgres instance (use --run-postgres-tests to enable)",
 ]
+asyncio_mode = "auto"
 filterwarnings = [
     "ignore::DeprecationWarning:starlette",
 ]

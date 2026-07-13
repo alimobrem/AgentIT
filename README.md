@@ -149,6 +149,8 @@ AgentIT improves itself through three tiers of learning:
 
 3. **Platform awareness** — `PlatformContext` discovers the cluster's K8s version, available APIs, CRDs, and operators. Every skill generation includes this context. The API drift detector auto-deprecates a skill specifically when the API kind it generates has been removed from the cluster (a narrower guarantee than the effectiveness-based flagging in tier 1).
 
+**Auditing LLM decisions.** Two places the LLM's output directly gates an outcome (not just generates content) persist a real, attributed record today, surfaced on the **Decisions** page: `self-fix`'s Step 3 first-approver gate (`LLMClient.review_fix`) — attributed by real skill name via `skill_effectiveness` — and auto-mode's safety classification (`LLMClient.classify_action`, `AutoMode.execute`) — attributed by the real originating agent when the caller knows it (e.g. the dispatcher's `result["agent"]`), otherwise the generic `auto-mode` component name, which is still the common case since most callers apply a whole bundle of manifests spanning several agents at once. A third real decision point — the security analyzer's LLM-based secret false-positive filter (`classify_secret`) — decides per match whether to keep or drop a finding but persists nothing today; see `llm_decisions.py`'s module docstring.
+
 ## Web portal
 
 `agentit portal` launches a FastAPI + Jinja2 app (htmx + Alpine.js for interactivity, no frontend framework). 56+ routes.
@@ -161,6 +163,7 @@ Key pages:
 | **Assessment Detail** | 7-dimension scores, lifecycle stepper, score trend, timeline, remediation items |
 | **Gates** | Human approval queue with LLM reasoning, confirm/reject with reason |
 | **Insights** | Fleet stats, agent performance, low-effectiveness skills, learning feedback |
+| **Decisions** | Audit of every real LLM *decision* point (fix-review, auto-mode classify — not just LLM-generated content), attributed by the agent or skill that triggered it, with the LLM's actual reasoning and a per-agent/skill approve/reject/gate breakdown. See `llm_decisions.py` for exactly what's covered and what isn't. |
 | **Capabilities** | Skills/checks catalog, onboarding agents, watchers, and the "Research CVEs & Generate Skills" trigger. Tabbed with **Agents** (live registry of who's actually run, and their success rate) |
 | **Events** | Activity feed with DLQ for failed events |
 | **Health** | Rollout/pod/pipeline status |
@@ -234,7 +237,7 @@ uv run agentit portal --port 8080
 # open http://localhost:8080
 ```
 
-The portal uses a local SQLite file (`agentit.db` by default) — no external database required for local use. A migration to an HA Postgres backend (async, via `asyncpg`) is planned but not yet wired in — see [`docs/postgres-migration-plan.md`](docs/postgres-migration-plan.md) for the design and rollout plan, and the `postgres.enabled` chart flag below for the (currently unused) CloudNativePG cluster prep.
+The portal uses a local SQLite file (`agentit.db` by default) — no external database required for local use. A migration to an HA Postgres backend (async, via `asyncpg`) is in progress: `portal/store_pg.py` is a full async counterpart to `store.py`, schema and all, verified against a real Postgres instance, but nothing in the app imports it yet — see [`docs/postgres-migration-plan.md`](docs/postgres-migration-plan.md) for exactly what's done vs. remaining, and the `postgres.enabled` chart flag below for the (currently unused) CloudNativePG cluster prep.
 
 ## Configuration
 
@@ -354,6 +357,8 @@ AgentIT/
 │       ├── store.py                # SQLite persistence (12+ tables: assessments, events, gates,
 │       │                           #   SLOs, remediations, skill_effectiveness, agent_feedback,
 │       │                           #   processed_webhooks)
+│       ├── store_pg.py             # Async Postgres counterpart to store.py (asyncpg) — schema +
+│       │                           #   all methods ported and tested; not wired into the app yet
 │       ├── helpers.py              # CircuitBreaker, clone_assess_cleanup, safe_url
 │       ├── cluster_apply.py        # oc/kubectl apply with pre-flight checks
 │       ├── github_pr.py            # GitHub REST API integration
