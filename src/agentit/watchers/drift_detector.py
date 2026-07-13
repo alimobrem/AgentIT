@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import time
 from pathlib import Path
 
 import click
 
 from agentit import kube
 from agentit.events import EventPublisher
+from agentit.watchers import record_tick
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +24,11 @@ class DriftDetector:
         self,
         publisher: EventPublisher,
         interval: int = 600,
+        store: object | None = None,
     ) -> None:
         self._publisher = publisher
         self._interval = interval
+        self._store = store
 
     def detect_once(self) -> list[dict]:
         """Query Argo CD applications and return any that are OutOfSync.
@@ -125,7 +128,7 @@ class DriftDetector:
         from agentit.automode import AutoMode
         from agentit.portal.store import AssessmentStore
 
-        store = AssessmentStore()
+        store = self._store or AssessmentStore()
         auto = AutoMode(store=store, publisher=self._publisher)
         if not auto.enabled:
             return
@@ -145,22 +148,32 @@ class DriftDetector:
             logger.warning("Auto-sync failed for %s: %s", app_name, exc)
             click.echo(f"[drift-detect] Sync failed: {str(exc)[:100]}", err=True)
 
-    def run(self) -> None:
-        """Main loop: detect drift, sleep."""
+    async def run(self) -> None:
+        """Main loop: detect drift, sleep.
+
+        The tick body (``detect_once``, and ``_maybe_auto_sync``'s
+        ``AutoMode`` call) is unconverted synchronous code this pass (see
+        docs/postgres-migration-plan.md's Phase 3 progress notes), so it
+        still runs inline here -- only this outer loop is async-shaped for
+        now (``await asyncio.sleep`` instead of ``time.sleep``), per the
+        plan's §5.
+        """
         click.echo(f"Starting drift detector (interval={self._interval}s)...", err=True)
         while True:
             try:
                 self.detect_once()
                 Path("/tmp/heartbeat").touch()
+                record_tick(self._store, "drift-detector", success=True)
             except KeyboardInterrupt:
                 click.echo("Drift detector stopped.", err=True)
                 break
             except Exception as exc:
                 logger.exception("drift-detect tick failed")
                 click.echo(f"[drift-detect] Error: {exc}", err=True)
+                record_tick(self._store, "drift-detector", success=False, error=str(exc))
 
             try:
-                time.sleep(self._interval)
+                await asyncio.sleep(self._interval)
             except KeyboardInterrupt:
                 click.echo("Drift detector stopped.", err=True)
                 break

@@ -75,3 +75,31 @@ def test_learn_watch_cli_options_registered():
     assert result.exit_code == 0
     assert "--interval" in result.output
     assert "--limit" in result.output
+
+
+def test_accepts_optional_store_for_tick_telemetry():
+    from conftest import make_store
+    store = make_store()
+    learner, _ = _learner(store=store)
+    assert learner._store is store
+
+
+def test_defaults_to_none_store_when_omitted():
+    learner, _ = _learner()
+    assert learner._store is None
+
+
+class TestAsyncRunLoop:
+    """Phase 3 (docs/postgres-migration-plan.md §9): run() became async def,
+    with time.sleep() -> await asyncio.sleep()."""
+
+    @patch("agentit.watchers.skill_learner.asyncio.sleep", side_effect=KeyboardInterrupt)
+    async def test_run_ticks_once_then_stops_on_interrupt(self, mock_sleep, capsys):
+        learner, _ = _learner()
+        with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")):
+            await learner.run()
+
+        captured = capsys.readouterr()
+        assert "Starting skill learner" in captured.err
+        assert "Skill learner stopped." in captured.err
+        mock_sleep.assert_called_once_with(86400)

@@ -70,3 +70,42 @@ class TestApiDriftWarnings:
         result = DriftResult()
         assert not hasattr(result, "has_warnings")
         assert not hasattr(result, "deprecated_apis")
+
+
+class TestDriftDetectorTickTelemetry:
+    def test_accepts_optional_store_for_tick_telemetry(self):
+        from conftest import make_store
+        store = make_store()
+        detector = DriftDetector(publisher=MagicMock(), interval=1, store=store)
+        assert detector._store is store
+
+    def test_defaults_to_none_store_when_omitted(self):
+        detector = _detector()
+        assert detector._store is None
+
+    @patch("agentit.watchers.drift_detector.kube.list_custom_resources")
+    def test_maybe_auto_sync_reuses_injected_store(self, mock_list):
+        """_maybe_auto_sync previously always created a brand-new AssessmentStore()
+        even when the detector already had one -- it should reuse the injected
+        store when present."""
+        from conftest import make_store
+        store = make_store()
+        store.set_setting("auto_mode", "false")
+        detector = DriftDetector(publisher=MagicMock(), interval=1, store=store)
+        detector._maybe_auto_sync("some-app")  # auto-mode off -> returns early, no crash
+
+
+class TestAsyncRunLoop:
+    """Phase 3 (docs/postgres-migration-plan.md §9): run() became async def,
+    with time.sleep() -> await asyncio.sleep()."""
+
+    @patch("agentit.watchers.drift_detector.asyncio.sleep", side_effect=KeyboardInterrupt)
+    @patch("agentit.watchers.drift_detector.kube.list_custom_resources", return_value=None)
+    async def test_run_ticks_once_then_stops_on_interrupt(self, mock_list, mock_sleep, capsys):
+        detector = _detector()
+        await detector.run()
+
+        captured = capsys.readouterr()
+        assert "Starting drift detector" in captured.err
+        assert "Drift detector stopped." in captured.err
+        mock_sleep.assert_called_once_with(1)

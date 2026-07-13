@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import time
 from pathlib import Path
 
 import click
@@ -11,6 +11,7 @@ import click
 from agentit.consumer import EventConsumer
 from agentit.events import EventPublisher, TOPIC_ALERTS, TOPIC_EVENTS
 from agentit.portal.store import AssessmentStore
+from agentit.watchers import record_tick
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +95,17 @@ class VulnWatcher:
                                 summary=f"Remediation loop failed: {exc}",
                             )
 
-    def run(self) -> None:
-        """Main loop: poll events, check fleet, sleep."""
+    async def run(self) -> None:
+        """Main loop: poll events, check fleet, sleep.
+
+        The tick body (``poll_once``/``check_fleet``, and everything they
+        call -- ``AutoMode``, ``RemediationLoop``) is unconverted
+        synchronous code this pass (see
+        docs/postgres-migration-plan.md's Phase 3 progress notes), so it
+        still runs inline here rather than via ``asyncio.to_thread`` --
+        only this outer loop is async-shaped for now (``await
+        asyncio.sleep`` instead of ``time.sleep``), per the plan's §5.
+        """
         click.echo(f"Starting vulnerability watcher (interval={self._interval}s)...", err=True)
         while True:
             try:
@@ -104,15 +114,17 @@ class VulnWatcher:
                     self._handle_event(event)
                 self.check_fleet()
                 Path("/tmp/heartbeat").touch()
+                record_tick(self._store, "vuln-watcher", success=True)
             except KeyboardInterrupt:
                 click.echo("Vulnerability watcher stopped.", err=True)
                 break
             except Exception as exc:
                 logger.exception("vuln-watch tick failed")
                 click.echo(f"[vuln-watch] Error: {exc}", err=True)
+                record_tick(self._store, "vuln-watcher", success=False, error=str(exc))
 
             try:
-                time.sleep(self._interval)
+                await asyncio.sleep(self._interval)
             except KeyboardInterrupt:
                 click.echo("Vulnerability watcher stopped.", err=True)
                 break

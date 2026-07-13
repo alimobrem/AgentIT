@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import time
 from pathlib import Path
 
 import click
@@ -12,6 +12,7 @@ from agentit.consumer import EventConsumer
 from agentit.events import EventPublisher, TOPIC_ALERTS
 from agentit.portal.store import AssessmentStore
 from agentit.slo_collector import collect_slo, is_breached
+from agentit.watchers import record_tick
 
 logger = logging.getLogger(__name__)
 
@@ -119,23 +120,33 @@ class SloTracker:
         )
         click.echo(f"[slo-track] ROLLBACK RECOMMENDED: {repo_name}", err=True)
 
-    def run(self) -> None:
-        """Main loop: drain events, check SLOs, sleep."""
+    async def run(self) -> None:
+        """Main loop: drain events, check SLOs, sleep.
+
+        The tick body (``poll_once``/``check_once``) is unconverted
+        synchronous code this pass (see
+        docs/postgres-migration-plan.md's Phase 3 progress notes), so it
+        still runs inline here -- only this outer loop is async-shaped for
+        now (``await asyncio.sleep`` instead of ``time.sleep``), per the
+        plan's §5.
+        """
         click.echo(f"Starting SLO tracker (interval={self._interval}s)...", err=True)
         while True:
             try:
                 self._consumer.poll_once()
                 self.check_once()
                 Path("/tmp/heartbeat").touch()
+                record_tick(self._store, "slo-tracker", success=True)
             except KeyboardInterrupt:
                 click.echo("SLO tracker stopped.", err=True)
                 break
             except Exception as exc:
                 logger.exception("slo-track tick failed")
                 click.echo(f"[slo-track] Error: {exc}", err=True)
+                record_tick(self._store, "slo-tracker", success=False, error=str(exc))
 
             try:
-                time.sleep(self._interval)
+                await asyncio.sleep(self._interval)
             except KeyboardInterrupt:
                 click.echo("SLO tracker stopped.", err=True)
                 break

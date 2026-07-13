@@ -13,13 +13,14 @@ auto-activates.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
-import time
 from pathlib import Path
 
 import click
 
 from agentit.events import EventPublisher
+from agentit.watchers import record_tick
 
 logger = logging.getLogger(__name__)
 
@@ -36,12 +37,14 @@ class SkillLearner:
         interval: int = 86400,
         limit: int = 3,
         skills_dir: Path | None = None,
+        store: object | None = None,
     ) -> None:
         self._publisher = publisher
         self._llm_model = llm_model
         self._interval = interval
         self._limit = limit
         self._skills_dir = skills_dir or Path("skills")
+        self._store = store
 
     def research_once(self) -> tuple[list[str], list[str]]:
         """Research CVEs and draft skills for any gaps. Returns (saved, skipped)."""
@@ -91,22 +94,31 @@ class SkillLearner:
 
         return saved, skipped
 
-    def run(self) -> None:
-        """Main loop: research, sleep."""
+    async def run(self) -> None:
+        """Main loop: research, sleep.
+
+        ``research_once`` is unconverted synchronous code this pass (see
+        docs/postgres-migration-plan.md's Phase 3 progress notes), so it
+        still runs inline here -- only this outer loop is async-shaped for
+        now (``await asyncio.sleep`` instead of ``time.sleep``), per the
+        plan's §5.
+        """
         click.echo(f"Starting skill learner (interval={self._interval}s)...", err=True)
         while True:
             try:
                 self.research_once()
                 Path("/tmp/heartbeat").touch()
+                record_tick(self._store, "skill-learner", success=True)
             except KeyboardInterrupt:
                 click.echo("Skill learner stopped.", err=True)
                 break
             except Exception as exc:
                 logger.exception("skill-learn tick failed")
                 click.echo(f"[skill-learn] Error: {exc}", err=True)
+                record_tick(self._store, "skill-learner", success=False, error=str(exc))
 
             try:
-                time.sleep(self._interval)
+                await asyncio.sleep(self._interval)
             except KeyboardInterrupt:
                 click.echo("Skill learner stopped.", err=True)
                 break

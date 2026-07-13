@@ -98,3 +98,18 @@ class TestBreachDirection:
         tracker.check_once()
 
         assert store.list_slos(aid)[0]["status"] == "met"
+
+
+class TestAsyncRunLoop:
+    """Phase 3 (docs/postgres-migration-plan.md §9): run() became async def,
+    with time.sleep() -> await asyncio.sleep()."""
+
+    @patch("agentit.watchers.slo_tracker.asyncio.sleep", side_effect=KeyboardInterrupt)
+    async def test_run_ticks_once_then_stops_on_interrupt(self, mock_sleep, capsys):
+        tracker = _tracker(make_store())
+        await tracker.run()
+
+        captured = capsys.readouterr()
+        assert "Starting SLO tracker" in captured.err
+        assert "SLO tracker stopped." in captured.err
+        mock_sleep.assert_called_once_with(1)
