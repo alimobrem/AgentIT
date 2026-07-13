@@ -224,7 +224,18 @@ class TestAgentRegistryTable:
         store = make_store()
         store.register_agent("observability", "monitoring")
         assert store.agent_heartbeat("observability") is True
-        assert store.agent_heartbeat("nonexistent") is False
+
+    def test_heartbeat_upserts_unregistered_agent(self):
+        """Long-lived watchers (vuln-watcher, slo-tracker, ...) never call
+        register_agent -- agent_heartbeat must create the row itself so their
+        "last seen" actually shows up on the Agents/Schedules pages."""
+        store = make_store()
+        assert store.agent_heartbeat("vuln-watcher") is True
+        agents = store.list_agents()
+        assert any(a["agent_name"] == "vuln-watcher" for a in agents)
+        watcher = next(a for a in agents if a["agent_name"] == "vuln-watcher")
+        assert watcher["category"] == "watcher"
+        assert watcher["last_heartbeat"] is not None
 
     def test_register_replaces_existing(self):
         store = make_store()
@@ -470,3 +481,202 @@ class TestOnboardingHistory:
         store = make_store()
         aid = store.save(make_report())
         assert store.list_onboardings(aid) == []
+
+
+# ── Fleet-wide feedback (Insights page) ──────────────────────────────────
+
+
+class TestGetAllFeedback:
+    def test_get_all_feedback_returns_feedback_across_apps(self):
+        """Regression: get_feedback_for_app("") filters on app_name = '' and
+        always returns nothing -- get_all_feedback is the fleet-wide fix."""
+        store = make_store()
+        store.record_feedback("app-a", "security", "network-policy", "approved")
+        store.record_feedback("app-b", "compliance", "sbom", "rejected", human_reason="not needed")
+
+        feedback = store.get_all_feedback()
+        assert len(feedback) == 2
+        assert {f["app_name"] for f in feedback} == {"app-a", "app-b"}
+        # get_feedback_for_app("") remains the old (broken for this use case) behavior
+        assert store.get_feedback_for_app("") == []
+
+    def test_get_all_feedback_respects_limit_and_order(self):
+        store = make_store()
+        for i in range(5):
+            store.record_feedback(f"app-{i}", "security", "cat", "approved")
+        feedback = store.get_all_feedback(limit=3)
+        assert len(feedback) == 3
+        # most recent first
+        assert feedback[0]["app_name"] == "app-4"
+
+
+# ── Dead-letter queue republish ──────────────────────────────────────────
+
+
+class TestRetryDlqMessage:
+    def test_retry_republishes_to_original_topic(self):
+        store = make_store()
+        eid = store.log_event(
+            "event-consumer", "dead-letter", "my-app", "error",
+            "Dead-lettered from agentit-events: boom",
+            details={
+                "original_topic": "agentit-events",
+                "original_message": {
+                    "agentId": "watcher", "action": "tick", "targetApp": "my-app",
+                    "severity": "info", "result": {"summary": "hi", "details": {}},
+                    "correlationId": "abc123",
+                },
+                "error": "boom",
+            },
+        )
+
+        assert store.retry_dlq_message(eid) is True
+
+        events = store.list_events(limit=10)
+        retry_event = next(e for e in events if e["action"] == "dlq-retry")
+        assert "republished to agentit-events" in retry_event["summary"]
+        # original dead-letter row is relabelled, not duplicated
+        assert store.list_dlq_messages() == []
+
+    def test_retry_falls_back_to_relabel_when_no_original_topic(self):
+        """Rows written before original_topic tracking existed (or a Kafka
+        failure) must still mark the row retried instead of silently no-op'ing."""
+        store = make_store()
+        eid = store.log_event(
+            "event-consumer", "dead-letter", "my-app", "error", "old-style row",
+            details={"original_message": {"foo": "bar"}, "error": "boom"},
+        )
+        assert store.retry_dlq_message(eid) is True
+        events = store.list_events(limit=10)
+        retry_event = next(e for e in events if e["action"] == "dlq-retry")
+        assert "relabelled only" in retry_event["summary"]
+
+    def test_retry_unknown_event_returns_false(self):
+        store = make_store()
+        assert store.retry_dlq_message("nonexistent") is False
+
+
+# ── Agent Runs ────────────────────────────────────────────────────────────
+
+
+class TestAgentRuns:
+    def test_save_and_list_agent_runs(self):
+        store = make_store()
+        store.save_agent_run("security", "local", "success", duration_ms=1200, resource_tier="standard")
+        store.save_agent_run("security", "local", "error", duration_ms=50, error="boom")
+
+        runs = store.list_agent_runs("security")
+        assert len(runs) == 2
+        assert runs[0]["status"] == "error"  # most recent first
+        assert runs[1]["status"] == "success"
+        assert runs[1]["duration_ms"] == 1200
+
+    def test_get_agent_stats_uses_agent_runs_not_events(self):
+        """Regression: get_agent_stats previously LIKE-matched event `action`
+        strings ('%complete%'/'%failed%'), which double-counted unrelated
+        events. It must now be derived purely from agent_runs."""
+        store = make_store()
+        # An unrelated event containing "complete" must not be counted.
+        store.log_event("security", "onboarding-complete", "app", "info", "noise")
+        store.save_agent_run("security", "local", "success", duration_ms=100)
+        store.save_agent_run("security", "local", "success", duration_ms=200)
+        store.save_agent_run("security", "local", "error", duration_ms=50)
+
+        stats = store.get_agent_stats("security")
+        assert len(stats) == 1
+        assert stats[0]["total_events"] == 3
+        assert stats[0]["successes"] == 2
+        assert stats[0]["failures"] == 1
+        assert stats[0]["success_rate"] == round(2 / 3 * 100, 1)
+
+    def test_list_agent_runs_for_assessment(self):
+        store = make_store()
+        aid = store.save(make_report())
+        store.save_agent_run("security", "local", "success", assessment_id=aid)
+        store.save_agent_run("cicd", "local", "success", assessment_id="other-assessment")
+
+        runs = store.list_agent_runs_for_assessment(aid)
+        assert len(runs) == 1
+        assert runs[0]["agent_name"] == "security"
+
+
+# ── Check Result Snapshots ────────────────────────────────────────────────
+
+
+class TestCheckResults:
+    def test_save_and_get_check_compliance(self):
+        store = make_store()
+        aid = store.save(make_report())
+        store.save_check_results(aid, [
+            {"check_name": "has-network-policy", "dimension": "security", "passed": True},
+            {"check_name": "has-network-policy", "dimension": "security", "passed": False},
+            {"check_name": "has-sbom", "dimension": "compliance", "passed": True},
+        ])
+
+        compliance = store.get_check_compliance()
+        by_name = {c["check_name"]: c for c in compliance}
+        assert by_name["has-network-policy"]["passes"] == 1
+        assert by_name["has-network-policy"]["total"] == 2
+        assert by_name["has-network-policy"]["pass_rate"] == 50.0
+        assert by_name["has-sbom"]["pass_rate"] == 100.0
+
+    def test_save_check_results_noop_on_empty_list(self):
+        store = make_store()
+        aid = store.save(make_report())
+        store.save_check_results(aid, [])
+        assert store.get_check_compliance() == []
+
+
+# ── Correlation IDs ───────────────────────────────────────────────────────
+
+
+class TestCorrelationId:
+    def test_log_event_persists_correlation_id(self):
+        store = make_store()
+        store.log_event("orchestrator", "completed", "app", "info", "done", correlation_id="chain-1")
+        store.log_event("orchestrator", "completed", "app", "info", "unrelated", correlation_id="chain-2")
+
+        chain = store.list_events_by_correlation_id("chain-1")
+        assert len(chain) == 1
+        assert chain[0]["summary"] == "done"
+
+    def test_save_sets_correlation_id_to_assessment_id(self):
+        store = make_store()
+        aid = store.save(make_report())
+        chain = store.list_events_by_correlation_id(aid)
+        assert len(chain) == 1
+        assert chain[0]["action"] == "assessment-complete"
+
+
+# ── DB stats / metrics ────────────────────────────────────────────────────
+
+
+class TestGetDbStats:
+    def test_get_db_stats_returns_row_counts(self):
+        store = make_store()
+        store.save(make_report())
+        stats = store.get_db_stats()
+        assert stats["row_counts"]["assessments"] == 1
+        assert stats["size_bytes"] == 0  # :memory: has no file size
+
+    def test_get_db_stats_with_real_file(self, tmp_path):
+        from agentit.portal.store import AssessmentStore
+        db_path = tmp_path / "test.db"
+        store = AssessmentStore(db_path=str(db_path))
+        stats = store.get_db_stats()
+        assert stats["size_bytes"] > 0
+
+
+# ── Active gates gauge ─────────────────────────────────────────────────────
+
+
+class TestActiveGatesMetric:
+    def test_create_and_resolve_gate_updates_gauge(self):
+        from agentit.portal.metrics import active_gates
+        store = make_store()
+        aid = store.save(make_report())
+        gate_id = store.create_gate(aid, "security-review", "review needed")
+        assert active_gates._value.get() == 1.0
+
+        store.resolve_gate(gate_id, "approved", "tester")
+        assert active_gates._value.get() == 0.0

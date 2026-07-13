@@ -17,7 +17,7 @@ from agentit.models import (
     Finding,
     Severity,
 )
-from conftest import make_report
+from conftest import make_report, make_store
 
 
 class TestPlanSelectsAgents:
@@ -155,6 +155,29 @@ class TestRun:
         content = summary_path.read_text()
         assert "Orchestration Summary" in content
         assert "test-app" in content
+
+    def test_run_records_structured_agent_runs(self, tmp_path: Path) -> None:
+        """Every local agent execution must write a real agent_runs row so
+        get_agent_stats()/list_agent_runs() reflect actual history, not a
+        LIKE-matched heuristic over unrelated events."""
+        store = make_store()
+        report = make_report(criticality="medium")
+        aid = store.save(report)
+        orch = FleetOrchestrator(
+            report, tmp_path / "out", store=store, assessment_id=aid,
+            agent_filter=["security"],
+        )
+        orch.run()
+
+        runs = store.list_agent_runs("security")
+        assert len(runs) == 1
+        assert runs[0]["status"] == "success"
+        assert runs[0]["mode"] == "local"
+        assert runs[0]["assessment_id"] == aid
+        assert runs[0]["duration_ms"] is not None
+
+        stats = store.get_agent_stats("security")
+        assert stats[0]["successes"] == 1
 
 
 class TestConflicts:

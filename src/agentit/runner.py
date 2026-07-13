@@ -12,7 +12,7 @@ from agentit.analyzers.infrastructure import InfrastructureAnalyzer
 from agentit.analyzers.observability import ObservabilityAnalyzer
 from agentit.analyzers.security import SecurityAnalyzer
 from agentit.analyzers.stack_detector import StackDetector
-from agentit.check_engine import load_checks, run_checks_by_dimension
+from agentit.check_engine import load_checks, run_checks_by_dimension_with_status
 from agentit.models import (
     ArchitectureInfo, AssessmentReport, DimensionScore, RemediationItem, Severity,
 )
@@ -49,7 +49,15 @@ def run_assessment(
     infra_repo_url: str | None = None,
     checks_dir: Path | None = None,
     suppressions: set[str] | None = None,
+    check_results_out: list[dict] | None = None,
 ) -> AssessmentReport:
+    """Run a full assessment.
+
+    ``check_results_out``, if provided, is populated (in place) with one
+    ``{"check_name", "dimension", "passed"}`` row per data-driven check that
+    ran — the caller (typically the portal, once it has an `assessment_id`)
+    can then persist this via `AssessmentStore.save_check_results`.
+    """
     detector = StackDetector()
     stack = detector.detect(repo_path)
 
@@ -71,7 +79,9 @@ def run_assessment(
     resolved_checks_dir = checks_dir if checks_dir is not None else _default_checks_dir()
     check_defs = load_checks(resolved_checks_dir)
     if check_defs:
-        scores = _merge_check_findings(scores, check_defs, repo_path)
+        scores, check_statuses = _merge_check_findings(scores, check_defs, repo_path)
+        if check_results_out is not None:
+            check_results_out.extend(check_statuses)
 
     if suppressions:
         scores = _apply_suppressions(scores, suppressions)
@@ -107,16 +117,17 @@ def _merge_check_findings(
     scores: list[DimensionScore],
     check_defs: list,
     repo_path: Path,
-) -> list[DimensionScore]:
+) -> tuple[list[DimensionScore], list[dict]]:
     """Merge data-driven check findings into existing analyzer scores.
 
     New findings from checks supplement (don't replace) analyzer findings.
     Findings are deduplicated by (category, description) so overlapping
-    checks don't double-count.
+    checks don't double-count. Returns the merged scores plus a pass/fail
+    status row for every check that ran (for `check_results_out`).
     """
-    extra = run_checks_by_dimension(check_defs, repo_path)
+    extra, check_statuses = run_checks_by_dimension_with_status(check_defs, repo_path)
     if not extra:
-        return scores
+        return scores, check_statuses
 
     score_map = {s.dimension: s for s in scores}
 
@@ -148,9 +159,10 @@ def _merge_check_findings(
             )
 
     original_dims = {s.dimension for s in scores}
-    return [score_map[s.dimension] for s in scores] + [
+    merged_scores = [score_map[s.dimension] for s in scores] + [
         score_map[d] for d in score_map if d not in original_dims
     ]
+    return merged_scores, check_statuses
 
 
 def _apply_suppressions(

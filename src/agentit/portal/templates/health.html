@@ -108,6 +108,22 @@
   </tbody>
 </table>
 
+{% if circuit_breakers %}
+<h2 class="section-title">Circuit Breakers</h2>
+<table>
+  <thead><tr><th>Breaker</th><th>State</th><th>Recent Failures</th></tr></thead>
+  <tbody>
+    {% for name, state in circuit_breakers.items() %}
+    <tr class="{% if state.open %}row-border-red{% else %}row-border-green{% endif %}">
+      <td class="text-bold">{{ name }}</td>
+      <td><span class="badge {% if state.open %}badge-critical{% else %}badge-low{% endif %}">{{ "OPEN" if state.open else "closed" }}</span></td>
+      <td>{{ state.failures }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 {% if kafka_stats and kafka_stats.available %}
 <h3 class="text-sm mt-1 mb-1">Topics</h3>
 <table>

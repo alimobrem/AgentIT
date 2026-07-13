@@ -139,6 +139,8 @@ Long-lived watchers (deployed as separate pods):
 | **drift-detector** | 10m | Argo CD sync monitoring, API drift detection, auto-deprecation of affected skills, reports still-in-use deprecated APIs (`PlatformContext.deprecated_apis`) |
 | **skill-learner** | 24h | Researches CVEs via LLM, drafts new skills for human review — opt-in via `agents.skillLearner.enabled` (chart default: disabled; enabled on the live deployment via `argocd/application.yaml`), requires an LLM connection |
 
+Every watcher records real tick telemetry after each loop iteration — a `tick-complete`/`tick-failed` event plus an `AssessmentStore.agent_heartbeat()` call (`agentit/watchers/__init__.py::record_tick`) — so "last seen" on the **Agents** and **Schedules** pages reflects an actual heartbeat instead of a static "—". A Prometheus gauge, `agentit_watcher_last_success_timestamp{watcher=...}`, backs an `AgentITWatcherStale` alert (one rule per watcher, threshold = 2x its expected interval) in the chart's `PrometheusRule`.
+
 ## Self-improvement loop
 
 AgentIT improves itself through three tiers of learning:
@@ -160,17 +162,31 @@ Key pages:
 | Page | Purpose |
 |---|---|
 | **Fleet** | Dashboard of all managed apps with scores and lifecycle stage |
-| **Assessment Detail** | 7-dimension scores, lifecycle stepper, score trend, timeline, remediation items |
+| **Assessment Detail** | 7-dimension scores, lifecycle stepper, score trend + a rendered score-history table with deltas, timeline, remediation items |
 | **Gates** | Human approval queue with LLM reasoning, confirm/reject with reason |
-| **Insights** | Fleet stats, agent performance, low-effectiveness skills, learning feedback |
+| **Insights** | Fleet stats, agent performance (from real `agent_runs` records), low-effectiveness skills, fleet-wide check compliance (pass rate per data-driven check across every recorded assessment), and fleet-wide learning feedback |
 | **Decisions** | Audit of every real LLM *decision* point (fix-review, auto-mode classify — not just LLM-generated content), attributed by the agent or skill that triggered it, with the LLM's actual reasoning and a per-agent/skill approve/reject/gate breakdown. See `llm_decisions.py` for exactly what's covered and what isn't. |
-| **Capabilities** | Skills/checks catalog, onboarding agents, watchers, and the "Research CVEs & Generate Skills" trigger. Tabbed with **Agents** (live registry of who's actually run, and their success rate) |
-| **Events** | Activity feed with DLQ for failed events |
-| **Health** | Rollout/pod/pipeline status |
+| **Capabilities** | Skills/checks catalog, onboarding agents, watchers, and the "Research CVEs & Generate Skills" trigger. Tabbed with **Agents** (live registry of who's actually run, their real success rate, and a per-agent run-history table with duration/resource tier/error) |
+| **Events** | Activity feed with a `correlation_id` "Chain" column (click through to trace a single assess → onboard → apply run end to end) and a DLQ for failed events that now actually populates from Kafka dead-letters and republishes to the original topic on retry |
+| **Health** | Rollout/pod/pipeline status, Kafka topic/consumer-group stats, and live circuit breaker (LLM/Kubernetes) open/closed state |
 | **SLOs** | SLO definitions and error budgets |
-| **Settings** | Auto-mode toggle, decision matrix, configuration. Tabbed with **Schedules** (watcher status, cron jobs) |
+| **Settings** | Auto-mode toggle, decision matrix, configuration. Tabbed with **Schedules** (watcher status — now backed by real heartbeats — and cron jobs) |
 
 Webhook endpoints power the event-driven loop: `/api/webhook/assess`, `/api/webhook/github-push`, `/api/webhook/onboard`, `/api/webhook/auto-apply`, `/api/webhook/remediate`. All but `github-push` require the shared-secret `X-Internal-Webhook-Token` header (see [Security notes](#security-notes)).
+
+### Self-observability
+
+AgentIT's own SQLite store and `/metrics` endpoint are the source of truth for "what is the platform actually doing", not just what it can do:
+
+- **`agent_runs` table** — `FleetOrchestrator` writes one structured row (agent, mode, status, duration, resource tier, error, assessment_id) per agent execution, local or Kubernetes-Job. `AssessmentStore.get_agent_stats()` and the new `list_agent_runs()` read from this table instead of pattern-matching event `action` strings, so the Agents/Insights pages reflect real run history.
+- **`check_results` table** — every data-driven check run during an assessment (`check_engine.run_checks_by_dimension_with_status`) is snapshotted pass/fail, keyed by assessment. `get_check_compliance()` aggregates this into a fleet-wide pass-rate view on the Insights page.
+- **`correlation_id` on events** — `AssessmentStore.log_event()` accepts a `correlation_id` (populated with the `assessment_id` by `save()`, `save_onboarding()`, and `FleetOrchestrator`), matching the same id already used for Kafka's `correlationId`. The Events page's new "Chain" column links straight to `/events?correlation_id=...` to trace an assess → onboard → apply run end to end.
+- **DLQ end-to-end** — `EventConsumer._dead_letter()` now persists to the SQLite `events` table (not just the Kafka `agentit-dlq` topic) so `/events/dlq` actually shows failures, and `retry_dlq_message()` republishes the original message to its original topic via the Kafka producer instead of only relabelling the row.
+- **Circuit breaker visibility** — `portal/helpers.py::get_circuit_breaker_states()` exposes live LLM/Kubernetes breaker state, shown on the Health page and set on the `agentit_circuit_breaker_open{name=...}` gauge every time `/health` is polled.
+- **Prometheus gauges actually set** — `agentit_active_gates` updates on every gate create/resolve/expire; `agentit_build` is populated once at startup (package version + `AGENTIT_GIT_COMMIT`/`AGENTIT_IMAGE_TAG` if the environment provides them); `agentit_db_size_bytes` / `agentit_db_rows_total{table=...}` / `agentit_event_buffer_backlog` refresh every 5 minutes from the portal's background maintenance loop; `agentit_watcher_last_success_timestamp{watcher=...}` backs the `AgentITWatcherStale` alert described above.
+- **Audit log** — `agentit/audit.py::audit_log()` is now wired into every privileged action call site: apply-to-cluster, gate approve/reject, auto-mode toggle, and data purge.
+
+Deferred by design (see [`docs/architecture.md`](docs/architecture.md) if you want to pick this up): distributed tracing (OpenTelemetry spans across the Kafka event chain) and a unified Kafka→SQLite ingestion path (today, watchers and the portal write to the shared `AssessmentStore` directly rather than all events flowing through one consumer) — both are real architectural additions, not incremental fixes, and are intentionally out of scope until the above is stable.
 
 ## Getting started
 
@@ -270,7 +286,7 @@ AgentIT deploys itself the same way it onboards other apps — via the Helm char
 - Change a secret: `oc create secret` on-cluster, then reference it via a Helm parameter. Never in Git.
 - Never `helm upgrade` manually or `oc edit` the `Rollout`.
 
-Key `chart/values.yaml` feature flags: `rollout.enabled` (canary via Argo Rollouts), `kafka.enabled` / `argoEvents.enabled` (event-driven loop), `tektonCI.enabled` (build pipeline), `cronJobs.cveScan.enabled`, `agents.{vulnWatcher,sloTracker,driftDetector}.enabled`, `postgres.enabled` (HA Postgres via CloudNativePG — chart-only prep, `store.py` doesn't use it yet), and `auth.enabled` (OpenShift `oauth-proxy` sidecar in front of the portal — see [Security notes](#security-notes) and [`docs/deployment.md#authentication`](docs/deployment.md#authentication)).
+Key `chart/values.yaml` feature flags: `rollout.enabled` (canary via Argo Rollouts), `kafka.enabled` / `argoEvents.enabled` (event-driven loop), `tektonCI.enabled` (build pipeline), `cronJobs.cveScan.enabled`, `agents.{vulnWatcher,sloTracker,driftDetector}.enabled`, `monitoring.enabled` (ServiceMonitor + PrometheusRule + Grafana dashboard — chart default: disabled; **enabled on the live deployment via `argocd/application.yaml`**, so AgentIT scrapes and alerts on its own `/metrics`), `postgres.enabled` (HA Postgres via CloudNativePG — chart-only prep, `store.py` doesn't use it yet), and `auth.enabled` (OpenShift `oauth-proxy` sidecar in front of the portal — see [Security notes](#security-notes) and [`docs/deployment.md#authentication`](docs/deployment.md#authentication)).
 
 The chart includes: NetworkPolicy, ResourceQuota, LimitRange, PodDisruptionBudget, anti-affinity, backup CronJob, dedicated ServiceAccount (not `default`), and a self-assess step in the CI pipeline.
 
@@ -284,7 +300,7 @@ See the full deployment topology diagram: [`docs/architecture.md#deployment-topo
 uv run pytest -q
 ```
 
-1400+ tests across 80+ test files:
+1,490+ tests across 84 test files (grows continuously; the counts below are a representative breakdown, not an exact partition):
 
 | Suite | Tests | What it covers |
 |---|---|---|
@@ -302,6 +318,7 @@ uv run pytest -q
 | Durability | 12 | Circuit breaker, TTL cache, error recovery |
 | Check engine | ~15 | Data-driven check loading, each check type, integration |
 | Skill validation | ~15 | All 40 skills load, valid frontmatter, generate valid YAML |
+| Self-observability | ~50 | `agent_runs`/`check_results` persistence, DLQ republish, correlation-id tracing, circuit-breaker/DB-size/event-buffer/watcher-staleness metrics, watcher tick telemetry (`tests/test_watchers_telemetry.py`, `tests/test_durability.py`, extensions to `tests/test_store_extended.py`) |
 
 Additional test markers: `--run-real-repos` (clone live GitHub repos), `--live-cluster` (e2e against OpenShift), `--browser-tests` (Playwright), `--run-llm-evals` (requires API key).
 

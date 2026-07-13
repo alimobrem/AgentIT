@@ -760,6 +760,13 @@ class AssessmentStore:
         )
         return _rows_to_dicts(rows)
 
+    async def delete_remediation(self, remediation_id: str, assessment_id: str) -> bool:
+        result = await self._pool.execute(
+            "DELETE FROM remediations WHERE id = $1 AND assessment_id = $2",
+            remediation_id, assessment_id,
+        )
+        return _affected(result) > 0
+
     async def complete_remediation(self, remediation_id: str) -> bool:
         result = await self._pool.execute(
             """
@@ -836,6 +843,13 @@ class AssessmentStore:
             WHERE id = $4
             """,
             current_value, status, _now(), slo_id,
+        )
+        return _affected(result) > 0
+
+    async def delete_slo(self, slo_id: str, assessment_id: str) -> bool:
+        result = await self._pool.execute(
+            "DELETE FROM slos WHERE id = $1 AND assessment_id = $2",
+            slo_id, assessment_id,
         )
         return _affected(result) > 0
 

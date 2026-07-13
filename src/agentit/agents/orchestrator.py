@@ -267,6 +267,8 @@ class FleetOrchestrator:
         skip_agents: set[str] | None = None,
     ) -> list[AgentResult]:
         """Run agents in-process (default mode)."""
+        from agentit.agents.capabilities import AGENT_CLASSES
+
         results: list[AgentResult] = []
 
         for agent_name in plan.agents_to_run:
@@ -285,6 +287,7 @@ class FleetOrchestrator:
                 continue
             category, agent_cls = agent_map[agent_name]
             sub_dir = self.output_dir / category
+            resource_tier = AGENT_CLASSES.get(agent_name, ("", "", "", "standard"))[3]
 
             t0 = time.monotonic()
             try:
@@ -293,6 +296,7 @@ class FleetOrchestrator:
                 elapsed = time.monotonic() - t0
                 agent_run_duration_seconds.labels(agent=agent_name, mode="local").observe(elapsed)
                 agent_runs_total.labels(agent=agent_name, mode="local", status="success").inc()
+                self._save_agent_run(agent_name, "local", "success", elapsed, resource_tier)
                 results.append(AgentResult(
                     agent_name=agent_name,
                     category=category,
@@ -308,6 +312,7 @@ class FleetOrchestrator:
                 elapsed = time.monotonic() - t0
                 agent_run_duration_seconds.labels(agent=agent_name, mode="local").observe(elapsed)
                 agent_runs_total.labels(agent=agent_name, mode="local", status="error").inc()
+                self._save_agent_run(agent_name, "local", "error", elapsed, resource_tier, error=str(exc))
                 logger.warning("Agent %s failed: %s", agent_name, exc)
                 results.append(AgentResult(
                     agent_name=agent_name,
@@ -319,6 +324,29 @@ class FleetOrchestrator:
                 self._log_event(agent_name, "failed", str(exc))
 
         return results
+
+    def _save_agent_run(
+        self,
+        agent_name: str,
+        mode: str,
+        status: str,
+        elapsed_seconds: float,
+        resource_tier: str,
+        error: str | None = None,
+    ) -> None:
+        """Persist a structured `agent_runs` row for this execution (best-effort)."""
+        if self._store is None:
+            return
+        try:
+            self._store.save_agent_run(
+                agent_name, mode, status,
+                assessment_id=self._assessment_id,
+                duration_ms=int(elapsed_seconds * 1000),
+                resource_tier=resource_tier,
+                error=error,
+            )
+        except Exception as exc:
+            logger.warning("Failed to record agent_runs row for %s: %s", agent_name, exc)
 
     @staticmethod
     def _extract_result_json(log_output: str) -> str:
@@ -354,6 +382,8 @@ class FleetOrchestrator:
 
         # Launch all Jobs
         job_names: dict[str, str] = {}
+        job_started_at: dict[str, float] = {}
+        job_tiers: dict[str, str] = {}
         for agent_name in plan.agents_to_run:
             if skip_agents and agent_name in skip_agents:
                 logger.info("Skipping K8s job for agent '%s' — already covered by skills", agent_name)
@@ -374,6 +404,8 @@ class FleetOrchestrator:
                 resources=tier,
             ):
                 job_names[agent_name] = job_name
+                job_started_at[agent_name] = time.monotonic()
+                job_tiers[agent_name] = tier_name
                 self._log_event(agent_name, "job-created", f"K8s Job {job_name} created")
 
         # Poll until all complete (timeout 5 min)
@@ -384,6 +416,8 @@ class FleetOrchestrator:
         while pending and time.monotonic() < deadline:
             for agent_name in list(pending):
                 status = kube.get_job_status(job_names[agent_name], namespace)
+                elapsed = time.monotonic() - job_started_at.get(agent_name, time.monotonic())
+                tier = job_tiers.get(agent_name, "standard")
                 if status == "succeeded":
                     pending.discard(agent_name)
                     log_output = kube.get_job_pod_log(job_names[agent_name], namespace)
@@ -394,6 +428,7 @@ class FleetOrchestrator:
                         files_data = json.loads(result_json)
                         files = [GeneratedFile(**f) for f in files_data]
                         agent_runs_total.labels(agent=agent_name, mode="kubernetes", status="success").inc()
+                        self._save_agent_run(agent_name, "kubernetes", "success", elapsed, tier)
                         results.append(AgentResult(
                             agent_name=agent_name, category=category,
                             files_generated=[f.path for f in files],
@@ -410,6 +445,7 @@ class FleetOrchestrator:
                     except Exception as exc:
                         logger.warning("Failed to parse Job output for %s: %s", agent_name, exc)
                         agent_runs_total.labels(agent=agent_name, mode="kubernetes", status="error").inc()
+                        self._save_agent_run(agent_name, "kubernetes", "error", elapsed, tier, error=str(exc))
                         results.append(AgentResult(
                             agent_name=agent_name, category=category,
                             files_generated=[], success=False,
@@ -420,6 +456,8 @@ class FleetOrchestrator:
                     category = agent_map[agent_name][0]
                     log_output = kube.get_job_pod_log(job_names[agent_name], namespace)
                     agent_runs_total.labels(agent=agent_name, mode="kubernetes", status="error").inc()
+                    self._save_agent_run(agent_name, "kubernetes", "error", elapsed, tier,
+                                         error=f"K8s Job failed: {log_output[:200]}")
                     results.append(AgentResult(
                         agent_name=agent_name, category=category,
                         files_generated=[], success=False,
@@ -432,7 +470,12 @@ class FleetOrchestrator:
         # Handle timed-out agents
         for agent_name in pending:
             category = agent_map[agent_name][0]
+            elapsed = time.monotonic() - job_started_at.get(agent_name, time.monotonic())
             agent_runs_total.labels(agent=agent_name, mode="kubernetes", status="timeout").inc()
+            self._save_agent_run(
+                agent_name, "kubernetes", "timeout", elapsed,
+                job_tiers.get(agent_name, "standard"), error="K8s Job timed out",
+            )
             results.append(AgentResult(
                 agent_name=agent_name, category=category,
                 files_generated=[], success=False, error="K8s Job timed out",
@@ -710,6 +753,7 @@ class FleetOrchestrator:
                 self.report.repo_name,
                 "info",
                 summary,
+                correlation_id=self._assessment_id,
             )
 
     def _write_summary(

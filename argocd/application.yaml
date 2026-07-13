@@ -47,6 +47,8 @@ spec:
           value: "86400"
         - name: agents.skillLearner.limit
           value: "3"
+        - name: monitoring.enabled
+          value: "true"
   ignoreDifferences:
     - group: ""
       kind: Service

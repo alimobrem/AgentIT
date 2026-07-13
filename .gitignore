@@ -8,6 +8,9 @@ build/
 .venv/
 *.egg
 *.db
+*.db-shm
+*.db-wal
+event-buffer.db*
 .env
 .env.*
 secrets/

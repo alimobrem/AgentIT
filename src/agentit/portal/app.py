@@ -22,6 +22,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.responses import StreamingResponse
 from fastapi.templating import Jinja2Templates
 
+from agentit.audit import audit_log
 from agentit.cloner import clone_repo
 from agentit.models import AssessmentReport, Severity
 from agentit.portal.cluster_apply import apply_manifests_to_cluster, install_operator
@@ -168,19 +169,31 @@ _maintenance_task = None
 
 
 async def _background_maintenance() -> None:
-    """Hourly: expire stale gates, diff the skill/check inventory. Daily: purge old data."""
+    """Every 5 min: refresh DB/event-buffer size metrics. Hourly: expire stale
+    gates, diff the skill/check inventory. Daily: purge old data."""
     tick = 0
     while True:
-        await asyncio.sleep(3600)
+        await asyncio.sleep(300)
         tick += 1
+
         try:
-            s = get_store()
-            expired = s.expire_stale_gates(hours=24)
+            from agentit.portal.metrics import refresh_db_metrics
+            s = await get_store()
+            refresh_db_metrics(s.raw if hasattr(s, "raw") else s)
+        except Exception:
+            log.debug("Background DB metrics refresh failed", exc_info=True)
+
+        if tick % 12 != 0:
+            continue  # everything below this line only runs hourly (12 * 5min)
+
+        try:
+            s = await get_store()
+            expired = await s.expire_stale_gates(hours=24)
             if expired:
                 log.info("Background: expired %d stale gates", expired)
-            if tick % 24 == 0:
+            if (tick // 12) % 24 == 0:
                 retention = get_retention_days()
-                counts = s.purge_old_data(retention_days=retention)
+                counts = await s.purge_old_data(retention_days=retention)
                 total = sum(counts.values())
                 if total:
                     log.info("Background: purged %d old rows (retention=%dd)", total, retention)
@@ -188,14 +201,36 @@ async def _background_maintenance() -> None:
             log.debug("Background maintenance failed", exc_info=True)
 
         try:
-            diff_and_log_inventory_changes(get_store())
+            s = await get_store()
+            diff_and_log_inventory_changes(s.raw if hasattr(s, "raw") else s)
         except Exception:
             log.debug("Background skill inventory diff failed", exc_info=True)
+
+
+def _set_build_info() -> None:
+    """Populate the `agentit_build` Info metric once at startup.
+
+    Best-effort: `AGENTIT_IMAGE_TAG`/`AGENTIT_GIT_COMMIT` are set by the CI
+    pipeline in the container's env; falls back to "unknown" locally rather
+    than failing the whole startup sequence.
+    """
+    from agentit.portal.metrics import build_info
+    try:
+        import importlib.metadata
+        version = importlib.metadata.version("agentit")
+    except Exception:
+        version = "unknown"
+    build_info.info({
+        "version": version,
+        "commit": os.environ.get("AGENTIT_GIT_COMMIT", "unknown"),
+        "image_tag": os.environ.get("AGENTIT_IMAGE_TAG", "unknown"),
+    })
 
 
 @app.on_event("startup")
 async def _start_background_tasks() -> None:
     global _maintenance_task
+    _set_build_info()
     _maintenance_task = asyncio.create_task(_background_maintenance())
 
 
@@ -210,7 +245,11 @@ async def _shutdown() -> None:
         log.debug("Publisher close failed", exc_info=True)
     try:
         from agentit.portal.helpers import get_store
-        get_store()._conn.close()
+        s = await get_store()
+        if hasattr(s, "close"):
+            await s.close()
+        else:
+            (s.raw if hasattr(s, "raw") else s)._conn.close()
     except Exception:
         log.debug("Store close failed", exc_info=True)
 
@@ -336,9 +375,9 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None) -> list[di
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request) -> HTMLResponse:
-    s = get_store()
-    fleet = s.get_fleet_data()
-    fleet = await asyncio.to_thread(_enrich_fleet_with_cluster_status, fleet, s)
+    s = await get_store()
+    fleet = await s.get_fleet_data()
+    fleet = await asyncio.to_thread(_enrich_fleet_with_cluster_status, fleet, s.raw if hasattr(s, "raw") else s)
     total_apps = len(fleet)
     if total_apps == 0:
         return templates.TemplateResponse(request, "dashboard.html", {
@@ -371,11 +410,11 @@ async def fleet_redirect() -> RedirectResponse:
 @app.get("/fleet/slos", response_class=HTMLResponse)
 async def fleet_slos(request: Request) -> HTMLResponse:
     """Fleet-wide SLO view — all SLOs across all apps."""
-    s = get_store()
-    fleet = s.get_fleet_data()
+    s = await get_store()
+    fleet = await s.get_fleet_data()
     all_slos = []
     for app_data in fleet:
-        slos = s.list_slos(app_data["id"])
+        slos = await s.list_slos(app_data["id"])
         for slo in slos:
             slo["app_name"] = app_data["repo_name"]
             slo["app_id"] = app_data["id"]
@@ -390,11 +429,11 @@ async def fleet_slos(request: Request) -> HTMLResponse:
 @app.get("/fleet/remediations", response_class=HTMLResponse)
 async def fleet_remediations(request: Request) -> HTMLResponse:
     """Fleet-wide remediation view — all remediations across all apps."""
-    s = get_store()
-    fleet = s.get_fleet_data()
+    s = await get_store()
+    fleet = await s.get_fleet_data()
     all_remediations = []
     for app_data in fleet:
-        remeds = s.list_remediations(app_data["id"])
+        remeds = await s.list_remediations(app_data["id"])
         for r in remeds:
             r["app_name"] = app_data["repo_name"]
             r["app_id"] = app_data["id"]
@@ -408,21 +447,24 @@ async def fleet_remediations(request: Request) -> HTMLResponse:
 
 @app.get("/api/fleet")
 async def api_fleet() -> JSONResponse:
-    return JSONResponse(get_store().get_fleet_data())
+    s = await get_store()
+    return JSONResponse(await s.get_fleet_data())
 
 
 @app.get("/insights", response_class=HTMLResponse)
 async def insights_page(request: Request) -> HTMLResponse:
-    s = get_store()
-    fleet_insights = s.get_fleet_insights()
-    agent_stats = s.get_agent_stats()
-    feedback = s.get_feedback_for_app("") if hasattr(s, 'get_feedback_for_app') else []
-    low_skills = s.get_low_effectiveness_skills() if hasattr(s, 'get_low_effectiveness_skills') else []
+    s = await get_store()
+    fleet_insights = await s.get_fleet_insights()
+    agent_stats = await s.get_agent_stats()
+    feedback = await s.get_all_feedback(limit=10) if hasattr(s, 'get_all_feedback') else []
+    low_skills = await s.get_low_effectiveness_skills() if hasattr(s, 'get_low_effectiveness_skills') else []
+    check_compliance = await s.get_check_compliance() if hasattr(s, 'get_check_compliance') else []
     return templates.TemplateResponse(request, "insights.html", {
         "insights": fleet_insights,
         "agent_stats": agent_stats,
-        "recent_feedback": feedback[:10],
+        "recent_feedback": feedback,
         "low_skills": low_skills,
+        "check_compliance": check_compliance,
     })
 
 
@@ -438,8 +480,8 @@ async def decisions_page(request: Request, decision_type: str = "", attribution:
     """
     from agentit.llm_decisions import list_llm_decisions, summarize_by_attribution
 
-    s = get_store()
-    all_decisions = list_llm_decisions(s, limit=500)
+    s = await get_store()
+    all_decisions = await asyncio.to_thread(list_llm_decisions, s.raw if hasattr(s, "raw") else s, 500)
     decision_types = sorted({d["decision_type"] for d in all_decisions})
     attributions = sorted({d["attribution"] for d in all_decisions})
 
@@ -463,16 +505,20 @@ async def decisions_page(request: Request, decision_type: str = "", attribution:
 
 @app.get("/events", response_class=HTMLResponse)
 async def events_page(request: Request, page: int = 1, per_page: int = 25,
-                      q: str = "", severity: str = "") -> HTMLResponse:
-    s = get_store()
-    all_events = s.list_events(limit=2000)
+                      q: str = "", severity: str = "", correlation_id: str = "") -> HTMLResponse:
+    s = await get_store()
+    if correlation_id and hasattr(s, "list_events_by_correlation_id"):
+        all_events = await s.list_events_by_correlation_id(correlation_id, limit=2000)
+    else:
+        all_events = await s.list_events(limit=2000)
     if q:
         ql = q.lower()
         all_events = [e for e in all_events
                       if ql in e.get("agent_id", "").lower()
                       or ql in e.get("action", "").lower()
                       or ql in (e.get("target_app") or "").lower()
-                      or ql in e.get("summary", "").lower()]
+                      or ql in e.get("summary", "").lower()
+                      or ql in (e.get("correlation_id") or "").lower()]
     if severity:
         all_events = [e for e in all_events if e.get("severity") == severity]
     total = len(all_events)
@@ -483,39 +529,45 @@ async def events_page(request: Request, page: int = 1, per_page: int = 25,
     return templates.TemplateResponse(request, "events.html", {
         "events": events, "page": page, "total_pages": total_pages,
         "per_page": per_page, "q": q, "severity_filter": severity,
+        "correlation_id_filter": correlation_id,
     })
 
 
 @app.get("/events/dlq", response_class=HTMLResponse)
 async def dlq_page(request: Request) -> HTMLResponse:
     """Show dead-lettered messages from the events store."""
-    dlq_messages = get_store().list_dlq_messages()
+    s = await get_store()
+    dlq_messages = await s.list_dlq_messages()
     return templates.TemplateResponse(request, "dlq.html", {"dlq_messages": dlq_messages})
 
 
 @app.post("/events/dlq/{event_id}/retry")
 async def dlq_retry(event_id: str):
-    if not get_store().retry_dlq_message(event_id):
+    s = await get_store()
+    if not await s.retry_dlq_message(event_id):
         return RedirectResponse(url="/events/dlq?error=Message+not+found+or+already+processed", status_code=303)
     return RedirectResponse(url="/events/dlq?success=Message+queued+for+retry", status_code=303)
 
 
 @app.post("/events/dlq/{event_id}/dismiss")
 async def dlq_dismiss(event_id: str):
-    if not get_store().dismiss_dlq_message(event_id):
+    s = await get_store()
+    if not await s.dismiss_dlq_message(event_id):
         return RedirectResponse(url="/events/dlq?error=Message+not+found+or+already+processed", status_code=303)
     return RedirectResponse(url="/events/dlq?success=Message+dismissed", status_code=303)
 
 
 @app.post("/events/dlq/dismiss-all")
 async def dlq_dismiss_all():
-    count = get_store().dismiss_all_dlq()
+    s = await get_store()
+    count = await s.dismiss_all_dlq()
     return RedirectResponse(url=f"/events/dlq?success=Dismissed+{count}+messages", status_code=303)
 
 
 @app.get("/api/events")
 async def api_events(limit: int = 50, target_app: str | None = None):
-    return JSONResponse(get_store().list_events(limit=limit, target_app=target_app))
+    s = await get_store()
+    return JSONResponse(await s.list_events(limit=limit, target_app=target_app))
 
 
 @app.get("/assess")
@@ -524,23 +576,34 @@ async def assess_form():
     return RedirectResponse(url="/?assess=1", status_code=303)
 
 
-def _clone_assess_cleanup(repo_url: str, criticality: str, infra_repo_url: str | None = None):
+def _clone_assess_cleanup(
+    repo_url: str,
+    criticality: str,
+    infra_repo_url: str | None = None,
+    check_results_out: list[dict] | None = None,
+):
     repo_path = clone_repo(repo_url)
     try:
         return run_assessment(
             repo_path, repo_url, criticality,
             llm_client=_get_llm_client(), infra_repo_url=infra_repo_url,
+            check_results_out=check_results_out,
         )
     finally:
         shutil.rmtree(repo_path, ignore_errors=True)
 
 
-def _assess_sync(repo_url: str, criticality: str, infra_repo_url: str | None = None):
+def _assess_sync(
+    repo_url: str,
+    criticality: str,
+    infra_repo_url: str | None = None,
+    check_results_out: list[dict] | None = None,
+):
     """Run assessment synchronously. Used by webhooks and background threads."""
     infra = infra_repo_url
     if not infra:
         infra = _auto_create_infra_repo(repo_url)
-    return _clone_assess_cleanup(repo_url, criticality, infra)
+    return _clone_assess_cleanup(repo_url, criticality, infra, check_results_out=check_results_out)
 
 
 @app.post("/assess", response_model=None)
@@ -551,22 +614,33 @@ async def assess_submit(
     infra_repo_url: str = Form(""),
 ):
     infra = infra_repo_url.strip() or None
-    s = get_store()
-    job_id = s.create_assessment_job(repo_url)
+    s = await get_store()
+    job_id = await s.create_assessment_job(repo_url)
+    # The work below runs in a background thread (long clone+assess pipeline),
+    # so it needs a synchronous store handle -- see helpers.run_onboarding's
+    # docstring / docs/postgres-migration-plan.md for why this is the
+    # established pattern for background-thread store access rather than
+    # awaiting the async facade from inside a non-async thread.
+    raw = s.raw if hasattr(s, "raw") else None
+    if raw is None:
+        raise HTTPException(500, "Background assessment jobs require the sqlite backend's synchronous handle "
+                                  "(store_pg.AssessmentStore has none yet) -- see docs/postgres-migration-plan.md")
 
     import threading
 
     def _run():
         try:
-            s.update_assessment_job(job_id, "cloning", "Cloning repository...")
-            s.update_assessment_job(job_id, "assessing", "Analyzing repository...")
-            report = _assess_sync(repo_url, criticality, infra)
-            s.update_assessment_job(job_id, "saving", "Saving results...")
+            raw.update_assessment_job(job_id, "cloning", "Cloning repository...")
+            raw.update_assessment_job(job_id, "assessing", "Analyzing repository...")
+            check_results: list[dict] = []
+            report = _assess_sync(repo_url, criticality, infra, check_results_out=check_results)
+            raw.update_assessment_job(job_id, "saving", "Saving results...")
             from agentit.portal.metrics import assessments_total as _at
             _at.labels(criticality=criticality, status="success").inc()
-            assessment_id = s.save(report)
+            assessment_id = raw.save(report)
+            raw.save_check_results(assessment_id, check_results)
             # Publish event on first assessment for this repo
-            history = s.list_history(report.repo_url)
+            history = raw.list_history(report.repo_url)
             if len(history) <= 1:
                 _publish_event(
                     'first-assessment', report.repo_name,
@@ -574,7 +648,7 @@ async def assess_submit(
                     {'assessment_id': assessment_id, 'score': report.overall_score},
                     correlation_id=assessment_id,
                 )
-            s.update_assessment_job(job_id, "completed", "Assessment complete", assessment_id=assessment_id)
+            raw.update_assessment_job(job_id, "completed", "Assessment complete", assessment_id=assessment_id)
         except Exception as exc:
             log.exception("Assessment failed for %s", repo_url)
             from agentit.portal.metrics import assessments_total as _at
@@ -584,7 +658,7 @@ async def assess_submit(
                 msg = f"Could not clone repository. Check the URL and permissions. ({msg[:100]})"
             elif "GITHUB_TOKEN" in msg:
                 msg = "GitHub integration is not configured. Contact your administrator."
-            s.update_assessment_job(job_id, "failed", msg[:200])
+            raw.update_assessment_job(job_id, "failed", msg[:200])
 
     threading.Thread(target=_run, daemon=True).start()
     return RedirectResponse(url=f"/assess/progress/{job_id}", status_code=303)
@@ -592,8 +666,8 @@ async def assess_submit(
 
 @app.get("/assess/progress/{job_id}", response_class=HTMLResponse)
 async def assess_progress(request: Request, job_id: str):
-    s = get_store()
-    job = s.get_remediation_job(job_id)
+    s = await get_store()
+    job = await s.get_remediation_job(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
 
@@ -625,16 +699,21 @@ async def self_assess_route(request: Request):
     """One-click self-assessment -- AgentIT assesses its own repo."""
     repo_url = "https://github.com/alimobrem/AgentIT"
     infra = await asyncio.to_thread(_auto_create_infra_repo, repo_url)
+    check_results: list[dict] = []
     try:
         report = await _with_timeout(
-            asyncio.to_thread(_clone_assess_cleanup, repo_url, "high", infra)
+            asyncio.to_thread(
+                _clone_assess_cleanup, repo_url, "high", infra, check_results_out=check_results,
+            )
         )
     except Exception as exc:
         log.exception("Self-assessment failed")
         return RedirectResponse(url=f"/?error={quote(str(exc)[:200])}", status_code=303)
-    assessment_id = get_store().save(report)
-    get_store().log_event("self-assess", "assessment-complete", "agentit", "info",
-                          f"Self-assessment complete: {report.overall_score:.0f}/100")
+    s = await get_store()
+    assessment_id = await s.save(report)
+    await s.save_check_results(assessment_id, check_results)
+    await s.log_event("self-assess", "assessment-complete", "agentit", "info",
+                       f"Self-assessment complete: {report.overall_score:.0f}/100")
     from agentit.events import TOPIC_ASSESSMENTS as _TOPIC_ASSESS
     _publish_event("assessment-complete", "agentit",
                    f"Self-assessment: {report.overall_score:.0f}/100",
@@ -646,33 +725,35 @@ async def self_assess_route(request: Request):
 
 @app.get("/assessments/{assessment_id}", response_class=HTMLResponse)
 async def assessment_detail(request: Request, assessment_id: str) -> HTMLResponse:
-    s = get_store()
-    report = s.get(assessment_id)
+    s = await get_store()
+    report = await s.get(assessment_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
 
-    scores_sorted = sorted(report.scores, key=lambda s: s.score)
+    scores_sorted = sorted(report.scores, key=lambda sc: sc.score)
     urgent_findings = [
         f
-        for s in report.scores
-        for f in s.findings
+        for sc in report.scores
+        for f in sc.findings
         if f.severity in (Severity.critical, Severity.high)
     ]
 
-    remediations = s.list_remediations(assessment_id)
-    slos = s.list_slos(assessment_id)
-    onboardings = s.list_onboardings(assessment_id)
+    remediations = await s.list_remediations(assessment_id)
+    slos = await s.list_slos(assessment_id)
+    onboardings = await s.list_onboardings(assessment_id)
 
     from agentit.remediation.registry import lookup
     fixable_categories = {f.category for f in urgent_findings if lookup(f.category) is not None}
 
-    timeline = s.get_assessment_timeline(assessment_id) if hasattr(s, 'get_assessment_timeline') else []
-    trend = s.get_trend(report.repo_url) if hasattr(s, 'get_trend') else {}
-    score_history = s.get_score_history(report.repo_url) if hasattr(s, 'get_score_history') else []
-    apply_results = s.get_apply_results(assessment_id)
+    timeline = await s.get_assessment_timeline(assessment_id) if hasattr(s, 'get_assessment_timeline') else []
+    trend = await s.get_trend(report.repo_url) if hasattr(s, 'get_trend') else {}
+    score_history = await s.get_score_history(report.repo_url) if hasattr(s, 'get_score_history') else []
+    for i, h in enumerate(score_history):
+        h["delta"] = round(h["overall_score"] - score_history[i - 1]["overall_score"], 2) if i > 0 else None
+    apply_results = await s.get_apply_results(assessment_id)
 
     app_name = report.repo_name
-    schedules_exist = s.has_schedules_for_app(app_name) if hasattr(s, 'has_schedules_for_app') else False
+    schedules_exist = await s.has_schedules_for_app(app_name) if hasattr(s, 'has_schedules_for_app') else False
     if apply_results and apply_results.get("applied") and (slos or schedules_exist):
         lifecycle_stage = "monitored"
     elif apply_results and apply_results.get("applied"):
@@ -682,7 +763,7 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     else:
         lifecycle_stage = "assessed"
 
-    suppressions = s.get_suppressions(report.repo_name)
+    suppressions = await s.get_suppressions(report.repo_name)
 
     return templates.TemplateResponse(
         request,
@@ -715,14 +796,22 @@ async def fix_finding(request: Request, assessment_id: str):
     if not category:
         raise HTTPException(400, "category required")
 
-    s = get_store()
-    report = s.get(assessment_id)
+    s = await get_store()
+    report = await s.get(assessment_id)
     if report is None:
         raise HTTPException(404, "Assessment not found")
 
+    # RemediationDispatcher is deliberately still fully synchronous (see
+    # docs/postgres-migration-plan.md's Phase 3 progress notes), so it needs
+    # the raw sync store handle, run off the event loop via to_thread.
+    raw = s.raw if hasattr(s, "raw") else None
+    if raw is None:
+        raise HTTPException(500, "Fix dispatch requires the sqlite backend's synchronous handle "
+                                  "(store_pg.AssessmentStore has none yet) -- see docs/postgres-migration-plan.md")
+
     from agentit.remediation.dispatcher import RemediationDispatcher
-    dispatcher = RemediationDispatcher(s)
-    result = dispatcher.dispatch(assessment_id, category, report.repo_name)
+    dispatcher = RemediationDispatcher(raw)
+    result = await asyncio.to_thread(dispatcher.dispatch, assessment_id, category, report.repo_name)
 
     from agentit.portal.metrics import remediations_total as _rt
     _status = "success" if result["files"] else ("error" if result.get("error") else "empty")
@@ -740,14 +829,14 @@ async def fix_finding(request: Request, assessment_id: str):
         apply_result = await asyncio.to_thread(
             apply_manifests_to_cluster, result["files"], namespace, dry_run=True,
         )
-        s.save_apply_results(assessment_id, apply_result, namespace, dry_run=True)
+        await s.save_apply_results(assessment_id, apply_result, namespace, dry_run=True)
 
         for f in result["files"]:
-            s.save_remediation(
+            await s.save_remediation(
                 assessment_id, result["agent"], f["description"],
                 status="generated", manifest_path=f["path"],
             )
-        s.log_event(
+        await s.log_event(
             "dispatcher", "fix-generated", report.repo_name, "info",
             f"Generated {len(result['files'])} fix(es) for '{category}' via {result['agent']}",
         )
@@ -764,12 +853,14 @@ async def fix_finding(request: Request, assessment_id: str):
 
 @app.get("/api/assessments")
 async def api_list() -> JSONResponse:
-    return JSONResponse(get_store().list_all())
+    s = await get_store()
+    return JSONResponse(await s.list_all())
 
 
 @app.get("/api/assessments/{assessment_id}")
 async def api_detail(assessment_id: str) -> JSONResponse:
-    report = get_store().get(assessment_id)
+    s = await get_store()
+    report = await s.get(assessment_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
     return JSONResponse(report.model_dump(mode="json"))
@@ -777,59 +868,60 @@ async def api_detail(assessment_id: str) -> JSONResponse:
 
 @app.post("/assessments/{assessment_id}/delete", response_model=None)
 async def delete_assessment(assessment_id: str):
-    s = get_store()
-    if not s.delete(assessment_id):
+    s = await get_store()
+    if not await s.delete(assessment_id):
         raise HTTPException(404, "Assessment not found")
-    s.log_event("portal", "assessment-deleted", None, "info", f"Deleted assessment {assessment_id}")
+    await s.log_event("portal", "assessment-deleted", None, "info", f"Deleted assessment {assessment_id}")
     return RedirectResponse(url="/", status_code=303)
 
 
 @app.post("/assessments/{assessment_id}/slos/{slo_id}/delete", response_model=None)
 async def delete_slo(assessment_id: str, slo_id: str):
-    s = get_store()
-    s._conn.execute("DELETE FROM slos WHERE id = ? AND assessment_id = ?", (slo_id, assessment_id))
-    s._conn.commit()
+    s = await get_store()
+    await s.delete_slo(slo_id, assessment_id)
     return RedirectResponse(url=f"/assessments/{assessment_id}/slos", status_code=303)
 
 
 @app.post("/assessments/{assessment_id}/remediations/{rem_id}/delete", response_model=None)
 async def delete_remediation(assessment_id: str, rem_id: str):
-    s = get_store()
-    s._conn.execute("DELETE FROM remediations WHERE id = ? AND assessment_id = ?", (rem_id, assessment_id))
-    s._conn.commit()
+    s = await get_store()
+    await s.delete_remediation(rem_id, assessment_id)
     return RedirectResponse(url=f"/assessments/{assessment_id}/remediations", status_code=303)
 
 
 @app.post("/gates/{gate_id}/cancel", response_model=None)
 async def cancel_gate(request: Request, gate_id: str):
-    s = get_store()
-    s.resolve_gate(gate_id, "cancelled", get_current_user(request))
+    s = await get_store()
+    await s.resolve_gate(gate_id, "cancelled", get_current_user(request))
     return RedirectResponse(url="/gates?success=Gate+dismissed", status_code=303)
 
 
 def _run_onboarding(
-    report: AssessmentReport, assessment_id: str | None = None,
+    report: AssessmentReport, assessment_id: str | None = None, raw_store: object | None = None,
 ) -> tuple[list[dict], dict]:
     """Run orchestrated onboarding. Returns (files, orchestration_summary).
 
     Delegates to the shared implementation in helpers.py so this route and
     the webhook-triggered path (routes/webhooks.py) can never drift apart on
     which summary fields get stored (e.g. auto_approve/gates).
+
+    Runs inside a worker thread via ``asyncio.to_thread`` (see the caller
+    below) -- ``raw_store`` must therefore already be the *synchronous*
+    store handle (``FleetOrchestrator`` is deliberately still fully
+    synchronous; see docs/postgres-migration-plan.md's Phase 3 notes), not
+    the async facade `get_store()` now returns.
     """
     from agentit.portal.helpers import run_onboarding as _shared_run_onboarding
-    # Pass this module's own get_store() explicitly (rather than letting
-    # helpers.run_onboarding resolve its own default) so store overrides
-    # applied via `patch("agentit.portal.app.get_store", ...)` still apply.
-    return _shared_run_onboarding(report, assessment_id, store=get_store())
+    return _shared_run_onboarding(report, assessment_id, store=raw_store)
 
 
 @app.get("/assessments/{assessment_id}/onboarding-history", response_class=HTMLResponse)
 async def onboarding_history(request: Request, assessment_id: str) -> HTMLResponse:
-    s = get_store()
-    report = s.get(assessment_id)
+    s = await get_store()
+    report = await s.get(assessment_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
-    onboardings = s.list_onboardings(assessment_id)
+    onboardings = await s.list_onboardings(assessment_id)
     pr_urls = [ob["pr_url"] for ob in onboardings if ob.get("pr_url")]
     if pr_urls:
         from agentit.portal.github_pr import get_pr_status
@@ -849,13 +941,17 @@ async def onboarding_history(request: Request, assessment_id: str) -> HTMLRespon
 
 @app.post("/assessments/{assessment_id}/onboard", response_model=None)
 async def onboard_submit(request: Request, assessment_id: str):
-    s = get_store()
-    report = s.get(assessment_id)
+    s = await get_store()
+    report = await s.get(assessment_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
 
+    raw = s.raw if hasattr(s, "raw") else None
+    if raw is None:
+        raise HTTPException(500, "Onboarding requires the sqlite backend's synchronous handle "
+                                  "(store_pg.AssessmentStore has none yet) -- see docs/postgres-migration-plan.md")
     try:
-        files, orch_summary = await _with_timeout(asyncio.to_thread(_run_onboarding, report, assessment_id))
+        files, orch_summary = await _with_timeout(asyncio.to_thread(_run_onboarding, report, assessment_id, raw))
     except HTTPException:
         raise
     except Exception:
@@ -868,7 +964,7 @@ async def onboard_submit(request: Request, assessment_id: str):
         )
     from agentit.portal.metrics import onboardings_total as _ot
     _ot.labels(status="success").inc()
-    s.save_onboarding(assessment_id, files, orchestration=orch_summary)
+    await s.save_onboarding(assessment_id, files, orchestration=orch_summary)
 
     _publish_event("onboarding-complete", report.repo_name,
                    f"Generated {len(files)} manifests",
@@ -885,13 +981,13 @@ async def onboard_submit(request: Request, assessment_id: str):
         build_result = await asyncio.to_thread(build_app_image, report.repo_url, report.repo_name)
         if "error" in build_result:
             log.warning("Image build trigger failed for %s: %s", report.repo_name, build_result["error"])
-            s.log_event("image-builder", "build-failed", report.repo_name, "warning",
-                        f"Image build failed: {build_result['error'][:200]}")
+            await s.log_event("image-builder", "build-failed", report.repo_name, "warning",
+                               f"Image build failed: {build_result['error'][:200]}")
             warnings.append(f"Image build failed: {build_result['error'][:100]}")
         else:
             log.info("Image build triggered: %s → %s", report.repo_name, build_result.get("image_ref"))
-            s.log_event("image-builder", "build-triggered", report.repo_name, "info",
-                        f"Building image: {build_result.get('image_ref')}")
+            await s.log_event("image-builder", "build-triggered", report.repo_name, "info",
+                               f"Building image: {build_result.get('image_ref')}")
 
     from agentit.portal.github_pr import ensure_webhook
     webhook_url = _get_trusted_base_url(request) + "/api/webhook/github-push"
@@ -900,8 +996,8 @@ async def onboard_submit(request: Request, assessment_id: str):
         log.warning("Webhook registration failed for %s: %s", report.repo_name, hook_result["error"])
         warnings.append(f"Auto-reassessment webhook not registered: {hook_result['error'][:100]}")
     elif hook_result.get("created"):
-        s.log_event("portal", "webhook-registered", report.repo_name,
-                    "info", "GitHub push webhook registered for auto-reassessment")
+        await s.log_event("portal", "webhook-registered", report.repo_name,
+                           "info", "GitHub push webhook registered for auto-reassessment")
 
     redirect_url = f"/assessments/{assessment_id}/onboard-results"
     if warnings:
@@ -911,11 +1007,11 @@ async def onboard_submit(request: Request, assessment_id: str):
 
 @app.get("/assessments/{assessment_id}/onboard-results", response_class=HTMLResponse)
 async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
-    s = get_store()
-    report = s.get(assessment_id)
+    s = await get_store()
+    report = await s.get(assessment_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
-    files = s.get_onboarding(assessment_id)
+    files = await s.get_onboarding(assessment_id)
     if files is None:
         raise HTTPException(status_code=404, detail="Onboarding not found")
 
@@ -923,8 +1019,8 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
     for f in files:
         grouped.setdefault(f["category"], []).append(f)
 
-    orchestration = s.get_orchestration(assessment_id) or {}
-    apply_results = s.get_apply_results(assessment_id)
+    orchestration = await s.get_orchestration(assessment_id) or {}
+    apply_results = await s.get_apply_results(assessment_id)
 
     missing_operators = {}
     if apply_results:
@@ -941,7 +1037,7 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
                         missing_operators[kind] = op
 
     pr_status = None
-    onboardings = s.list_onboardings(assessment_id)
+    onboardings = await s.list_onboardings(assessment_id)
     pr_url = onboardings[0]["pr_url"] if onboardings and onboardings[0]["pr_url"] else ""
     if pr_url:
         from agentit.portal.github_pr import get_pr_status
@@ -964,11 +1060,11 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
 
 @app.get("/api/assessments/{assessment_id}/manifests")
 async def api_manifests(assessment_id: str) -> JSONResponse:
-    s = get_store()
-    report = s.get(assessment_id)
+    s = await get_store()
+    report = await s.get(assessment_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
-    files = s.get_onboarding(assessment_id)
+    files = await s.get_onboarding(assessment_id)
     if files is None:
         raise HTTPException(status_code=404, detail="Onboarding not found")
     return JSONResponse(files)
@@ -977,11 +1073,11 @@ async def api_manifests(assessment_id: str) -> JSONResponse:
 @app.get("/api/assessments/{assessment_id}/manifests/download")
 async def download_manifests(assessment_id: str):
     """Download all onboarding manifests as a zip file."""
-    s = get_store()
-    report = s.get(assessment_id)
+    s = await get_store()
+    report = await s.get(assessment_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
-    files = s.get_onboarding(assessment_id)
+    files = await s.get_onboarding(assessment_id)
     if files is None:
         raise HTTPException(status_code=404, detail="Onboarding not found")
 
@@ -1003,11 +1099,11 @@ async def download_manifests(assessment_id: str):
 @app.post("/assessments/{assessment_id}/apply", response_model=None)
 async def apply_to_cluster(request: Request, assessment_id: str):
     """Apply onboarding manifests to the current cluster."""
-    s = get_store()
-    report = s.get(assessment_id)
+    s = await get_store()
+    report = await s.get(assessment_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
-    files = s.get_onboarding(assessment_id)
+    files = await s.get_onboarding(assessment_id)
     if files is None:
         raise HTTPException(status_code=404, detail="Onboarding not found")
 
@@ -1021,16 +1117,21 @@ async def apply_to_cluster(request: Request, assessment_id: str):
         )
     except Exception:
         log.exception("Cluster apply failed for assessment %s", assessment_id)
+        audit_log(actor="portal-user", action="apply-to-cluster", resource=f"assessment:{assessment_id}",
+                  outcome="error", details={"namespace": namespace, "dry_run": dry_run})
         return RedirectResponse(
             url=f"/assessments/{assessment_id}/onboard-results?error={quote('Cluster apply failed — check server logs')}",
             status_code=303,
         )
 
-    s.save_apply_results(assessment_id, results, namespace, dry_run)
+    await s.save_apply_results(assessment_id, results, namespace, dry_run)
 
     applied = len(results["applied"])
     skipped = len(results["skipped"])
     errs = len(results["errors"])
+    audit_log(actor="portal-user", action="apply-to-cluster", resource=f"assessment:{assessment_id}",
+              outcome="success" if not results["errors"] else "partial",
+              details={"namespace": namespace, "dry_run": dry_run, "applied": applied, "errors": errs})
     return RedirectResponse(
         url=(
             f"/assessments/{assessment_id}/onboard-results"
@@ -1070,15 +1171,15 @@ async def install_operator_endpoint(request: Request):
 @app.get("/gates", response_class=HTMLResponse)
 async def gates_page(request: Request):
     """Show pending approval gates. Auto-expires gates older than 24h."""
-    s = get_store()
-    expired_count = s.expire_stale_gates(hours=24)
+    s = await get_store()
+    expired_count = await s.expire_stale_gates(hours=24)
     if expired_count:
-        s.log_event("portal", "gates-expired", None, "info",
-                    f"Auto-expired {expired_count} stale gate(s)")
+        await s.log_event("portal", "gates-expired", None, "info",
+                           f"Auto-expired {expired_count} stale gate(s)")
 
-    all_gates = s.list_all_gates()
+    all_gates = await s.list_all_gates()
     pending = [g for g in all_gates if g["status"] == "pending"]
-    stale = s.get_stale_gates(hours=4)
+    stale = await s.get_stale_gates(hours=4)
     stale_ids = {g["id"] for g in stale}
     for g in pending:
         g["stale"] = g["id"] in stale_ids
@@ -1097,19 +1198,22 @@ async def resolve_gate(request: Request, gate_id: str):
     if status not in ("approved", "rejected", "dismissed"):
         raise HTTPException(400, "Invalid status: must be approved, rejected, or dismissed")
     resolved_by = form.get("resolved_by") or get_current_user(request)
-    s = get_store()
+    s = await get_store()
 
-    gates = s.list_gates(status="pending")
+    gates = await s.list_gates(status="pending")
     gate = next((g for g in gates if g["id"] == gate_id), None)
     if gate is None:
         raise HTTPException(404, "Gate not found")
+
+    audit_log(actor=str(resolved_by), action=f"gate-{status}", resource=f"gate:{gate_id}",
+              details={"gate_type": gate.get("gate_type"), "assessment_id": gate.get("assessment_id")})
 
     if status == "approved" and gate.get("assessment_id"):
         assessment_id = gate["assessment_id"]
 
         if gate.get("gate_type") == "rollback-review":
-            s.resolve_gate(gate_id, status, resolved_by)
-            s.log_event(
+            await s.resolve_gate(gate_id, status, resolved_by)
+            await s.log_event(
                 "gate-resolver", "rollback-approved",
                 gate.get("target_app"), "warning",
                 f"Rollback approved for assessment {assessment_id} — manual intervention required",
@@ -1119,8 +1223,8 @@ async def resolve_gate(request: Request, gate_id: str):
                 status_code=303,
             )
 
-        files = s.get_onboarding(assessment_id)
-        report = s.get(assessment_id)
+        files = await s.get_onboarding(assessment_id)
+        report = await s.get(assessment_id)
         if files and report:
             namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
             try:
@@ -1133,18 +1237,18 @@ async def resolve_gate(request: Request, gate_id: str):
                     url=f"/assessments/{assessment_id}/onboard-results?error={quote('Manifest apply failed — gate remains pending')}",
                     status_code=303,
                 )
-            s.resolve_gate(gate_id, status, resolved_by)
-            s.save_apply_results(assessment_id, results, namespace, False)
+            await s.resolve_gate(gate_id, status, resolved_by)
+            await s.save_apply_results(assessment_id, results, namespace, False)
             applied = len(results["applied"])
             return RedirectResponse(
                 url=f"/assessments/{assessment_id}/onboard-results?applied={applied}&gate_approved=true",
                 status_code=303,
             )
 
-    s.resolve_gate(gate_id, status, resolved_by)
+    await s.resolve_gate(gate_id, status, resolved_by)
 
     if status == "rejected":
-        s.record_feedback(
+        await s.record_feedback(
             app_name=gate.get("target_app", ""),
             agent_name=gate.get("agent_name", "gate"),
             finding_category=gate.get("gate_type", ""),
@@ -1159,8 +1263,8 @@ async def resolve_gate(request: Request, gate_id: str):
 async def record_feedback_endpoint(request: Request):
     """Record human feedback on agent recommendations."""
     form = await request.form()
-    s = get_store()
-    fid = s.record_feedback(
+    s = await get_store()
+    fid = await s.record_feedback(
         app_name=str(form.get("app_name", "")),
         agent_name=str(form.get("agent_name", "")),
         finding_category=str(form.get("finding_category", "")),
@@ -1182,7 +1286,8 @@ async def suppress_check_endpoint(request: Request):
     assessment_id = str(form.get("assessment_id", ""))
     if not app_name or not check_source:
         raise HTTPException(status_code=400, detail="app_name and check_source required")
-    get_store().suppress_check(app_name, check_source, reason)
+    s = await get_store()
+    await s.suppress_check(app_name, check_source, reason)
     if assessment_id:
         return RedirectResponse(f"/assessments/{assessment_id}", status_code=303)
     return {"status": "suppressed", "app_name": app_name, "check_source": check_source}
@@ -1197,7 +1302,8 @@ async def unsuppress_check_endpoint(request: Request):
     assessment_id = str(form.get("assessment_id", ""))
     if not app_name or not check_source:
         raise HTTPException(status_code=400, detail="app_name and check_source required")
-    get_store().unsuppress_check(app_name, check_source)
+    s = await get_store()
+    await s.unsuppress_check(app_name, check_source)
     if assessment_id:
         return RedirectResponse(f"/assessments/{assessment_id}", status_code=303)
     return {"status": "unsuppressed", "app_name": app_name, "check_source": check_source}
@@ -1205,7 +1311,8 @@ async def unsuppress_check_endpoint(request: Request):
 
 @app.get("/api/gates")
 async def api_gates(status: str = "pending"):
-    return JSONResponse(get_store().list_gates(status=status))
+    s = await get_store()
+    return JSONResponse(await s.list_gates(status=status))
 
 
 @app.post("/assessments/{assessment_id}/create-pr", response_model=None)
@@ -1213,9 +1320,9 @@ async def create_pr(assessment_id: str):
     """Commit manifests to GitOps infra repo (or app repo as fallback)."""
     from agentit.portal.github_pr import commit_to_infra_repo, ensure_applicationset
 
-    s = get_store()
-    report = s.get(assessment_id)
-    files = s.get_onboarding(assessment_id)
+    s = await get_store()
+    report = await s.get(assessment_id)
+    files = await s.get_onboarding(assessment_id)
     if report is None or files is None:
         raise HTTPException(status_code=404, detail="Assessment or onboarding not found")
 
@@ -1242,9 +1349,9 @@ async def create_pr(assessment_id: str):
             url=f"/assessments/{assessment_id}/onboard-results?error={quote(result['error'][:200])}",
             status_code=303,
         )
-    s.update_pr_url(assessment_id, result["pr_url"])
-    s.log_event("portal", "pr-created", report.repo_name,
-                "info", f"PR created: {result['pr_url']}")
+    await s.update_pr_url(assessment_id, result["pr_url"])
+    await s.log_event("portal", "pr-created", report.repo_name,
+                       "info", f"PR created: {result['pr_url']}")
     return RedirectResponse(
         url=f"/assessments/{assessment_id}/onboard-results?pr_url={result['pr_url']}",
         status_code=303,
@@ -1256,9 +1363,9 @@ async def create_agent_prs_route(assessment_id: str):
     """Create per-agent branches and PRs."""
     from agentit.portal.github_pr import create_agent_prs
 
-    s = get_store()
-    report = s.get(assessment_id)
-    files = s.get_onboarding(assessment_id)
+    s = await get_store()
+    report = await s.get(assessment_id)
+    files = await s.get_onboarding(assessment_id)
     if report is None or files is None:
         raise HTTPException(status_code=404, detail="Assessment or onboarding not found")
 
@@ -1281,9 +1388,9 @@ async def create_agent_prs_route(assessment_id: str):
     if successful:
         pr_list = ", ".join(f"{r['agent_name']}" for r in successful)
         all_pr_urls = " | ".join(r["pr_url"] for r in successful)
-        s.update_pr_url(assessment_id, all_pr_urls)
-        s.log_event("orchestrator", "agent-prs-created", report.repo_name,
-                    "info", f"Created {len(successful)} per-agent PRs: {pr_list}")
+        await s.update_pr_url(assessment_id, all_pr_urls)
+        await s.log_event("orchestrator", "agent-prs-created", report.repo_name,
+                           "info", f"Created {len(successful)} per-agent PRs: {pr_list}")
 
     if errors and not successful:
         return RedirectResponse(
@@ -1303,8 +1410,8 @@ async def create_agent_prs_route(assessment_id: str):
 
 @app.get("/agents", response_class=HTMLResponse)
 async def agents_page(request: Request) -> HTMLResponse:
-    s = get_store()
-    agents = s.list_agents()
+    s = await get_store()
+    agents = await s.list_agents()
 
     for a in agents:
         if not a.get("capabilities") or a["capabilities"] in ("[]", ""):
@@ -1323,7 +1430,7 @@ async def agents_page(request: Request) -> HTMLResponse:
                 "last_heartbeat": "—",
             })
 
-    agent_stats = {a["agent"]: a for a in s.get_agent_stats()} if hasattr(s, 'get_agent_stats') else {}
+    agent_stats = {a["agent"]: a for a in (await s.get_agent_stats())} if hasattr(s, 'get_agent_stats') else {}
 
     active = sum(1 for a in agents if a["status"] == "active")
     last_hb = max((a["last_heartbeat"] or "" for a in agents), default="—")
@@ -1338,8 +1445,8 @@ async def agents_page(request: Request) -> HTMLResponse:
 
 @app.get("/agents/{agent_name}", response_class=HTMLResponse)
 async def agent_detail(request: Request, agent_name: str) -> HTMLResponse:
-    s = get_store()
-    agents = s.list_agents()
+    s = await get_store()
+    agents = await s.list_agents()
     agent = next((a for a in agents if a["agent_name"] == agent_name), None)
 
     # Long-lived agents may not be in the registry -- create a synthetic entry
@@ -1357,10 +1464,11 @@ async def agent_detail(request: Request, agent_name: str) -> HTMLResponse:
         else:
             raise HTTPException(status_code=404, detail="Agent not found")
 
-    events = s.list_events_by_agent(agent_name, limit=50)
-    remediations = s.list_remediations_by_agent(agent_name)
+    events = await s.list_events_by_agent(agent_name, limit=50)
+    remediations = await s.list_remediations_by_agent(agent_name)
     pending = sum(1 for r in remediations if r["status"] not in ("completed", "applied"))
     completed = sum(1 for r in remediations if r["status"] in ("completed", "applied"))
+    agent_runs = await s.list_agent_runs(agent_name, limit=50) if hasattr(s, 'list_agent_runs') else []
 
     return templates.TemplateResponse(request, "agent_detail.html", {
         "agent": agent,
@@ -1368,12 +1476,14 @@ async def agent_detail(request: Request, agent_name: str) -> HTMLResponse:
         "remediations": remediations,
         "pending": pending,
         "completed": completed,
+        "agent_runs": agent_runs,
     })
 
 
 @app.get("/api/agents")
 async def api_agents(status: str = "active"):
-    return JSONResponse(get_store().list_agents(status=status))
+    s = await get_store()
+    return JSONResponse(await s.list_agents(status=status))
 
 
 # ── Workflows ─────────────────────────────────────────────────────────
@@ -1394,10 +1504,10 @@ async def capabilities_page(request: Request) -> HTMLResponse:
     skills = _cached_skills()
     checks = _cached_checks()
 
-    s = get_store()
-    effectiveness = s.get_skill_effectiveness()
-    recent_activity = s.get_recent_skill_activity(limit=20)
-    catalog_changes = s.list_events_by_agent("skill-inventory", limit=10)
+    s = await get_store()
+    effectiveness = await s.get_skill_effectiveness()
+    recent_activity = await s.get_recent_skill_activity(limit=20)
+    catalog_changes = await s.list_events_by_agent("skill-inventory", limit=10)
 
     # Group skills by domain
     skills_by_domain: dict[str, list] = {}
@@ -1488,11 +1598,11 @@ async def capabilities_learn_route(request: Request):
             status_code=303,
         )
 
-    s = get_store()
+    s = await get_store()
     if saved:
         _skills_cache["data"] = None  # bust the 60s cache so new skills show immediately
-        s.log_event("learning-agent", "skills-generated", None, "info",
-                     f"Generated {len(saved)} new skill(s): {', '.join(saved)}")
+        await s.log_event("learning-agent", "skills-generated", None, "info",
+                           f"Generated {len(saved)} new skill(s): {', '.join(saved)}")
         msg = f"Generated {len(saved)} new skill(s): {', '.join(saved)}"
         if skipped:
             msg += f" ({len(skipped)} already existed)"
@@ -1534,8 +1644,8 @@ async def activate_skill_route(request: Request):
 
     target.write_text(content.replace("status: draft", "status: active", 1), encoding="utf-8")
     _skills_cache["data"] = None
-    s = get_store()
-    s.log_event("portal", "skill-activated", None, "info", f"Activated skill: {target.stem}")
+    s = await get_store()
+    await s.log_event("portal", "skill-activated", None, "info", f"Activated skill: {target.stem}")
     return RedirectResponse(url=f"/capabilities?success={quote(f'Activated: {target.stem}')}", status_code=303)
 
 
@@ -1544,11 +1654,11 @@ async def activate_skill_route(request: Request):
 
 @app.get("/assessments/{assessment_id}/remediations", response_class=HTMLResponse)
 async def remediations_page(request: Request, assessment_id: str) -> HTMLResponse:
-    s = get_store()
-    report = s.get(assessment_id)
+    s = await get_store()
+    report = await s.get(assessment_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
-    remediations = s.list_remediations(assessment_id)
+    remediations = await s.list_remediations(assessment_id)
     pending = sum(1 for r in remediations if r["status"] not in ("completed", "applied"))
     completed = sum(1 for r in remediations if r["status"] in ("completed", "applied"))
     return templates.TemplateResponse(request, "remediations.html", {
@@ -1563,11 +1673,11 @@ async def remediations_page(request: Request, assessment_id: str) -> HTMLRespons
 
 @app.post("/assessments/{assessment_id}/remediations/{rem_id}/complete", response_model=None)
 async def complete_remediation(assessment_id: str, rem_id: str):
-    s = get_store()
-    remediations = s.list_remediations(assessment_id)
+    s = await get_store()
+    remediations = await s.list_remediations(assessment_id)
     if not any(r["id"] == rem_id for r in remediations):
         raise HTTPException(status_code=404, detail="Remediation not found for this assessment")
-    s.complete_remediation(rem_id)
+    await s.complete_remediation(rem_id)
     return RedirectResponse(
         url=f"/assessments/{assessment_id}/remediations", status_code=303,
     )
@@ -1580,8 +1690,8 @@ async def update_remediation_status(request: Request, assessment_id: str, rem_id
     if status not in ("generated", "applied", "blocked", "completed"):
         raise HTTPException(400, "Invalid status")
     redirect = str(form.get("redirect", ""))
-    s = get_store()
-    s.update_remediation_status(rem_id, status)
+    s = await get_store()
+    await s.update_remediation_status(rem_id, status)
     dest = f"/assessments/{assessment_id}/remediations"
     if redirect.startswith("/agents/"):
         dest = redirect
@@ -1590,7 +1700,8 @@ async def update_remediation_status(request: Request, assessment_id: str, rem_id
 
 @app.get("/api/assessments/{assessment_id}/remediations")
 async def api_remediations(assessment_id: str):
-    return JSONResponse(get_store().list_remediations(assessment_id))
+    s = await get_store()
+    return JSONResponse(await s.list_remediations(assessment_id))
 
 
 @app.get("/api/assessments/{assessment_id}/resource-recommendations")
@@ -1598,8 +1709,8 @@ async def resource_recommendations(assessment_id: str):
     """Get resource tuning recommendations based on Prometheus data."""
     from agentit.resource_tuner import analyze_resource_usage
 
-    s = get_store()
-    report = s.get(assessment_id)
+    s = await get_store()
+    report = await s.get(assessment_id)
     if not report:
         raise HTTPException(404, "Assessment not found")
     recs = analyze_resource_usage(report.repo_name, report.repo_name)
@@ -1622,8 +1733,8 @@ async def dependency_status(assessment_id: str):
     """Get dependency update status from GitHub PRs."""
     from agentit.dependency_manager import process_dependency_prs
 
-    s = get_store()
-    report = s.get(assessment_id)
+    s = await get_store()
+    report = await s.get(assessment_id)
     if not report:
         raise HTTPException(404, "Assessment not found")
     updates = process_dependency_prs(report.repo_url)
@@ -1654,11 +1765,11 @@ async def verify_properties(assessment_id: str):
     automatic onboarding/apply path -- verification only runs when this
     endpoint is called explicitly.
     """
-    s = get_store()
-    report = s.get(assessment_id)
+    s = await get_store()
+    report = await s.get(assessment_id)
     if not report:
         raise HTTPException(404, "Assessment not found")
-    files_data = s.get_onboarding(assessment_id)
+    files_data = await s.get_onboarding(assessment_id)
     if files_data is None:
         raise HTTPException(404, "Onboarding not found")
 
@@ -1711,11 +1822,11 @@ async def platform_drift():
 
 @app.get("/assessments/{assessment_id}/slos", response_class=HTMLResponse)
 async def slos_page(request: Request, assessment_id: str) -> HTMLResponse:
-    s = get_store()
-    report = s.get(assessment_id)
+    s = await get_store()
+    report = await s.get(assessment_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
-    slos = s.list_slos(assessment_id)
+    slos = await s.list_slos(assessment_id)
     met = sum(1 for sl in slos if sl["status"] == "met")
     breached = sum(1 for sl in slos if sl["status"] == "breached")
     return templates.TemplateResponse(request, "slos.html", {
@@ -1730,8 +1841,8 @@ async def slos_page(request: Request, assessment_id: str) -> HTMLResponse:
 
 @app.post("/assessments/{assessment_id}/slos/add", response_model=None)
 async def add_slo(request: Request, assessment_id: str):
-    s = get_store()
-    if s.get(assessment_id) is None:
+    s = await get_store()
+    if await s.get(assessment_id) is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
     form = await request.form()
     metric_name = str(form.get("metric_name", "")).strip()
@@ -1742,7 +1853,7 @@ async def add_slo(request: Request, assessment_id: str):
         target_value = float(target_str)
     except ValueError:
         raise HTTPException(status_code=400, detail="target_value must be a number")
-    s.save_slo(assessment_id, metric_name, target_value)
+    await s.save_slo(assessment_id, metric_name, target_value)
     return RedirectResponse(
         url=f"/assessments/{assessment_id}/slos", status_code=303,
     )
@@ -1750,7 +1861,8 @@ async def add_slo(request: Request, assessment_id: str):
 
 @app.get("/api/assessments/{assessment_id}/slos")
 async def api_slos(assessment_id: str):
-    return JSONResponse(get_store().list_slos(assessment_id))
+    s = await get_store()
+    return JSONResponse(await s.list_slos(assessment_id))
 
 
 # ── Settings + Auto-Mode ─────────────────────────────────────────────
@@ -1779,6 +1891,8 @@ async def purge_old_data(request: Request):
     s = get_store()
     counts = s.purge_old_data(retention_days=retention)
     total = sum(counts.values())
+    audit_log(actor="portal-user", action="purge", resource="store",
+              details={"retention_days": retention, "rows_deleted": total, "by_table": counts})
     return RedirectResponse(url=f"/settings?purged={total}", status_code=303)
 
 
@@ -1792,6 +1906,8 @@ async def toggle_auto_mode(request: Request):
         "portal", "auto-mode-toggled", None,
         "info", f"Auto-mode {'enabled' if value == 'true' else 'disabled'}",
     )
+    audit_log(actor="portal-user", action="auto-mode-toggle", resource="settings:auto_mode",
+              details={"value": value})
     return RedirectResponse(url="/settings", status_code=303)
 
 

@@ -197,17 +197,52 @@ def run_checks(checks: list[CheckDefinition], repo_path: Path) -> list[Finding]:
     return [f for fl in run_checks_by_dimension(checks, repo_path).values() for f in fl]
 
 
-def run_checks_by_dimension(
+def run_checks_by_dimension_with_status(
     checks: list[CheckDefinition],
     repo_path: Path,
-) -> dict[str, list[Finding]]:
-    """Run checks and group the resulting findings by dimension."""
+) -> tuple[dict[str, list[Finding]], list[dict]]:
+    """Run every check once, returning both the failed-check findings (grouped
+    by dimension, as `run_checks_by_dimension` does) and a pass/fail row for
+    *every* check (as `run_checks_with_status` does).
+
+    Both `run_checks_by_dimension` and `run_checks_with_status` delegate here
+    so callers that need one or the other don't pay for running checks twice,
+    while callers that need both (`runner.run_assessment`) can call this
+    directly.
+    """
     grouped: dict[str, list[Finding]] = {}
+    statuses: list[dict] = []
     for check in checks:
         runner = _RUNNERS.get(check.check_type)
         if runner is None:
             continue
         finding = runner(check, repo_path)
+        statuses.append({
+            "check_name": check.name,
+            "dimension": check.dimension,
+            "passed": finding is None,
+        })
         if finding is not None:
             grouped.setdefault(check.dimension, []).append(finding)
+    return grouped, statuses
+
+
+def run_checks_by_dimension(
+    checks: list[CheckDefinition],
+    repo_path: Path,
+) -> dict[str, list[Finding]]:
+    """Run checks and group the resulting findings by dimension."""
+    grouped, _ = run_checks_by_dimension_with_status(checks, repo_path)
     return grouped
+
+
+def run_checks_with_status(checks: list[CheckDefinition], repo_path: Path) -> list[dict]:
+    """Run every check and report pass/fail for each, regardless of outcome.
+
+    Unlike `run_checks`/`run_checks_by_dimension`, which only emit a result
+    for *failed* checks (a Finding), this returns one row per check so a
+    pass/fail snapshot can be persisted per assessment (see
+    `AssessmentStore.save_check_results`).
+    """
+    _, statuses = run_checks_by_dimension_with_status(checks, repo_path)
+    return statuses

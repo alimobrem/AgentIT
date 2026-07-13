@@ -169,6 +169,17 @@ class EventPublisher:
         if self._producer:
             self._producer.close()
 
+    def get_buffer_backlog(self) -> int:
+        """Number of events buffered locally in event-buffer.db, pending Kafka delivery."""
+        try:
+            conn = sqlite3.connect(self._buffer_db)
+            row = conn.execute("SELECT COUNT(*) FROM buffered_events").fetchone()
+            conn.close()
+            return row[0] if row else 0
+        except Exception:
+            logger.debug("Failed to read event buffer backlog", exc_info=True)
+            return 0
+
 
 def get_kafka_stats(bootstrap: str | None = None) -> dict:
     """Return topic partition counts, end offsets, and consumer group lag."""

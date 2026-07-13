@@ -56,6 +56,66 @@ class TestCircuitBreaker:
         assert not cb.is_open  # reset by success
 
 
+class TestCircuitBreakerStateAccessor:
+    def test_get_circuit_breaker_states_reports_llm_and_kube(self):
+        from agentit.portal.helpers import get_circuit_breaker_states, llm_breaker, kube_breaker
+
+        llm_breaker._failures = 0
+        kube_breaker._failures = 0
+        states = get_circuit_breaker_states()
+        assert set(states) == {"llm", "kube"}
+        assert states["llm"]["open"] is False
+        assert states["llm"]["failures"] == 0
+
+    def test_get_circuit_breaker_states_reflects_open_breaker(self):
+        from agentit.portal.helpers import get_circuit_breaker_states, kube_breaker
+
+        for _ in range(kube_breaker._threshold):
+            kube_breaker.record_failure()
+        try:
+            states = get_circuit_breaker_states()
+            assert states["kube"]["open"] is True
+        finally:
+            kube_breaker.record_success()  # don't leak state into other tests
+
+    def test_refresh_circuit_breaker_gauge_sets_prometheus_gauge(self):
+        from agentit.portal.helpers import kube_breaker
+        from agentit.portal.metrics import circuit_breaker_open, refresh_circuit_breaker_gauge
+
+        kube_breaker.record_success()
+        refresh_circuit_breaker_gauge()
+        assert circuit_breaker_open.labels(name="kube")._value.get() == 0.0
+
+
+class TestEventBufferBacklog:
+    def test_get_buffer_backlog_counts_buffered_events(self, tmp_path):
+        from agentit.events import EventPublisher
+
+        pub = EventPublisher.__new__(EventPublisher)
+        pub._buffer_db = str(tmp_path / "event-buffer.db")
+        pub._init_buffer_db()
+        assert pub.get_buffer_backlog() == 0
+
+        pub._buffer_locally("agentit-events", {"action": "test"})
+        assert pub.get_buffer_backlog() == 1
+
+    def test_get_buffer_backlog_missing_db_returns_zero(self, tmp_path):
+        from agentit.events import EventPublisher
+
+        pub = EventPublisher.__new__(EventPublisher)
+        pub._buffer_db = str(tmp_path / "does-not-exist" / "event-buffer.db")
+        assert pub.get_buffer_backlog() == 0
+
+
+class TestRefreshDbMetrics:
+    def test_refresh_db_metrics_sets_gauges_without_raising(self):
+        from agentit.portal.metrics import refresh_db_metrics
+
+        store = make_store()
+        store.save(make_report())
+        refresh_db_metrics(store)  # must not raise even with no Kafka configured
+
+
 class TestRemediationThreadLimits:
     def test_active_job_count(self):
         from agentit.remediation_loop import active_job_count

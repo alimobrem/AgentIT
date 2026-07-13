@@ -51,4 +51,52 @@ spec:
             description: >-
               Pod {{ "{{" }} $labels.pod {{ "}}" }} in namespace {{ .Release.Namespace }}
               has restarted more than 3 times in the last 10 minutes.
+
+        # Watcher staleness — fires if a long-lived watcher hasn't completed a
+        # successful tick in more than 2x its expected interval, which usually
+        # means the pod is stuck, crashed without restarting cleanly, or the
+        # loop is blocked on a downstream dependency (Kafka, cluster API, LLM).
+        - alert: AgentITWatcherStale
+          expr: |
+            (time() - agentit_watcher_last_success_timestamp{watcher="vuln-watcher"}) > 43200
+          labels:
+            severity: warning
+          annotations:
+            summary: "vuln-watcher has not completed a tick in over 12 hours"
+            description: >-
+              vuln-watcher's expected interval is 6h; no successful tick has
+              been recorded in over 2x that interval.
+
+        - alert: AgentITWatcherStale
+          expr: |
+            (time() - agentit_watcher_last_success_timestamp{watcher="slo-tracker"}) > 600
+          labels:
+            severity: warning
+          annotations:
+            summary: "slo-tracker has not completed a tick in over 10 minutes"
+            description: >-
+              slo-tracker's expected interval is 5m; no successful tick has
+              been recorded in over 2x that interval.
+
+        - alert: AgentITWatcherStale
+          expr: |
+            (time() - agentit_watcher_last_success_timestamp{watcher="drift-detector"}) > 1200
+          labels:
+            severity: warning
+          annotations:
+            summary: "drift-detector has not completed a tick in over 20 minutes"
+            description: >-
+              drift-detector's expected interval is 10m; no successful tick
+              has been recorded in over 2x that interval.
+
+        - alert: AgentITWatcherStale
+          expr: |
+            (time() - agentit_watcher_last_success_timestamp{watcher="skill-learner"}) > 172800
+          labels:
+            severity: warning
+          annotations:
+            summary: "skill-learner has not completed a tick in over 48 hours"
+            description: >-
+              skill-learner's expected interval is 24h; no successful tick
+              has been recorded in over 2x that interval.
 {{- end }}

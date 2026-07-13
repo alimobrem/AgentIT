@@ -64,6 +64,22 @@ class AsyncSQLiteStore:
 
         self.raw = AssessmentStore(db_path)
 
+    @classmethod
+    def wrap(cls, raw_store: Any) -> "AsyncSQLiteStore":
+        """Wrap an already-constructed synchronous ``AssessmentStore``.
+
+        Used by tests that need the exact same underlying connection (e.g.
+        an in-memory ``:memory:`` DB, which is a fresh, isolated database
+        per new ``sqlite3.connect()`` call) to be reachable both directly
+        (synchronous test assertions) and through this async facade (what
+        the app itself calls) -- constructing a second, separate
+        ``AsyncSQLiteStore(":memory:")`` would silently point at a
+        different, empty database.
+        """
+        self = cls.__new__(cls)
+        self.raw = raw_store
+        return self
+
     def __getattr__(self, name: str) -> Any:
         attr = getattr(self.raw, name)
         if not callable(attr):

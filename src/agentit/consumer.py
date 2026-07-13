@@ -27,6 +27,7 @@ class EventConsumer:
         group_id: str = "agentit-consumers",
         bootstrap_servers: str | None = None,
         max_retries: int = 3,
+        store: object | None = None,
     ) -> None:
         self._topics = topics
         self._group_id = group_id
@@ -36,6 +37,10 @@ class EventConsumer:
             "AGENTIT_KAFKA_BOOTSTRAP", ""
         )
         self._consumer = None
+        # Optional SQLite store — when provided, dead-lettered messages are
+        # also persisted to the `events` table (action='dead-letter') so the
+        # portal's /events/dlq page actually shows them, not just Kafka.
+        self._store = store
 
         if not self._bootstrap:
             logger.warning("No Kafka bootstrap servers — consumer will run in polling-only mode")
@@ -62,9 +67,15 @@ class EventConsumer:
         return self._consumer is not None
 
     def _dead_letter(self, topic: str, message: dict, error: Exception) -> None:
-        """Publish a failed message to the dead-letter topic."""
+        """Publish a failed message to the dead-letter topic and persist it locally.
+
+        ``original_topic`` is stored in ``details`` alongside the original message
+        so that a later retry (``store.retry_dlq_message``) knows where to
+        republish it.
+        """
         from agentit.events import get_publisher, TOPIC_DLQ
 
+        details = {"original_topic": topic, "original_message": message, "error": str(error)}
         publisher = get_publisher()
         publisher.publish(
             TOPIC_DLQ,
@@ -73,9 +84,22 @@ class EventConsumer:
             target_app=message.get("targetApp"),
             severity="error",
             summary=f"Dead-lettered from {topic}: {error}",
-            details={"original_message": message, "error": str(error)},
+            details=details,
         )
         logger.error("Dead-lettered message from %s: %s", topic, error)
+
+        if self._store is not None:
+            try:
+                self._store.log_event(
+                    "event-consumer",
+                    "dead-letter",
+                    message.get("targetApp"),
+                    "error",
+                    f"Dead-lettered from {topic}: {error}",
+                    details=details,
+                )
+            except Exception:
+                logger.exception("Failed to persist dead-letter event to store")
 
     def poll_once(self) -> list[dict]:
         """Poll for available events. Returns list of event dicts."""

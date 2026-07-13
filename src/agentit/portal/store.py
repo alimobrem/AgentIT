@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 
 from agentit.models import AssessmentReport, Severity
+
+logger = logging.getLogger(__name__)
 
 
 class AssessmentStore:
@@ -72,6 +75,17 @@ class AssessmentStore:
             """
         )
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_action ON events(action)")
+        # Migration: add correlation_id to existing DBs — populated by callers
+        # that know the chain-linking id (typically an assessment_id) so an
+        # assess -> onboard -> apply chain can be traced end to end.
+        try:
+            self._conn.execute("ALTER TABLE events ADD COLUMN correlation_id TEXT")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_correlation_id ON events(correlation_id)"
+        )
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS gates (
@@ -251,7 +265,42 @@ class AssessmentStore:
             )
             """
         )
+        # Structured per-run agent records — replaces the fragile
+        # action-string heuristic previously used by get_agent_stats().
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_runs (
+                id TEXT PRIMARY KEY,
+                assessment_id TEXT,
+                agent_name TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'local',
+                status TEXT NOT NULL,
+                duration_ms INTEGER,
+                resource_tier TEXT,
+                error TEXT,
+                started_at TEXT NOT NULL
+            )
+            """
+        )
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_agent ON agent_runs(agent_name)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_assessment ON agent_runs(assessment_id)")
+        # Per-check pass/fail snapshots, keyed by assessment, for fleet-wide
+        # check compliance reporting.
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS check_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                assessment_id TEXT NOT NULL,
+                check_name TEXT NOT NULL,
+                dimension TEXT NOT NULL,
+                passed INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_check_results_assessment ON check_results(assessment_id)")
         self._conn.commit()
+        self._refresh_active_gates_metric()
 
     # ── Settings ───────────────────────────────────────────────────────
 
@@ -343,6 +392,7 @@ class AssessmentStore:
             report.repo_name,
             "info",
             f"Assessment complete: {report.overall_score:.0f}/100",
+            correlation_id=assessment_id,
         )
         return assessment_id
 
@@ -405,6 +455,7 @@ class AssessmentStore:
             target_app,
             "info",
             f"Generated {len(files)} manifests",
+            correlation_id=assessment_id,
         )
         return onboarding_id
 
@@ -481,12 +532,13 @@ class AssessmentStore:
         severity: str,
         summary: str,
         details: dict | None = None,
+        correlation_id: str | None = None,
     ) -> str:
         event_id = uuid.uuid4().hex
         self._conn.execute(
             """
-            INSERT INTO events (id, timestamp, agent_id, action, target_app, severity, summary, details_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO events (id, timestamp, agent_id, action, target_app, severity, summary, details_json, correlation_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event_id,
@@ -497,6 +549,7 @@ class AssessmentStore:
                 severity,
                 summary,
                 json.dumps(details or {}),
+                correlation_id,
             ),
         )
         self._conn.commit()
@@ -537,6 +590,14 @@ class AssessmentStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_events_by_correlation_id(self, correlation_id: str, limit: int = 200) -> list[dict]:
+        """Trace a single assess -> onboard -> apply chain end to end."""
+        rows = self._conn.execute(
+            "SELECT * FROM events WHERE correlation_id = ? ORDER BY timestamp ASC LIMIT ?",
+            (correlation_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def list_dlq_messages(self, limit: int = 200) -> list[dict]:
         rows = self._conn.execute(
             "SELECT * FROM events WHERE action = 'dead-letter' ORDER BY timestamp DESC LIMIT ?",
@@ -553,12 +614,51 @@ class AssessmentStore:
         return cursor.rowcount > 0
 
     def retry_dlq_message(self, event_id: str) -> bool:
-        if not self._update_dlq(event_id, 'dlq-retry'):
+        """Republish a dead-lettered message to its original Kafka topic, then relabel the row.
+
+        Falls back to a relabel-only retry (with a warning in the log summary)
+        if the dead-letter event has no ``original_topic``/``original_message``
+        recorded (e.g. rows written before this was tracked) or if Kafka is
+        unavailable — the row is still marked retried either way so the
+        operator sees the outcome rather than a silent no-op.
+        """
+        row = self._conn.execute(
+            "SELECT * FROM events WHERE id = ? AND action = 'dead-letter'", (event_id,),
+        ).fetchone()
+        if row is None:
             return False
-        self.log_event(
-            'portal', 'dlq-retry', None, 'info',
-            f'Retried dead-letter event {event_id}',
+
+        details = json.loads(row["details_json"] or "{}")
+        original_topic = details.get("original_topic")
+        original_message = details.get("original_message")
+
+        republished = False
+        if original_topic and isinstance(original_message, dict):
+            try:
+                from agentit.events import get_publisher
+
+                result = original_message.get("result") or {}
+                get_publisher().publish(
+                    original_topic,
+                    agent_id=original_message.get("agentId", "dlq-retry"),
+                    action=original_message.get("action", "retry"),
+                    target_app=original_message.get("targetApp"),
+                    severity=original_message.get("severity", "info"),
+                    summary=result.get("summary", "") if isinstance(result, dict) else "",
+                    details=result.get("details") if isinstance(result, dict) else None,
+                    correlation_id=original_message.get("correlationId"),
+                )
+                republished = True
+            except Exception:
+                logger.exception("Failed to republish dead-letter event %s", event_id)
+
+        self._update_dlq(event_id, 'dlq-retry')
+        summary = (
+            f'Retried dead-letter event {event_id} (republished to {original_topic})'
+            if republished
+            else f'Retried dead-letter event {event_id} (relabelled only — republish unavailable)'
         )
+        self.log_event('portal', 'dlq-retry', row["target_app"], 'info', summary)
         return True
 
     def dismiss_dlq_message(self, event_id: str) -> bool:
@@ -658,6 +758,20 @@ class AssessmentStore:
 
     # ── Gates ────────────────────────────────────────────────────────────
 
+    def _refresh_active_gates_metric(self) -> None:
+        """Keep the `agentit_active_gates` gauge in sync with pending gate count.
+
+        Called from every method that creates/resolves/expires a gate so the
+        gauge is correct regardless of which caller (portal route, automode,
+        slo-tracker, ...) triggered the change.
+        """
+        try:
+            from agentit.portal.metrics import active_gates
+            row = self._conn.execute("SELECT COUNT(*) as c FROM gates WHERE status = 'pending'").fetchone()
+            active_gates.set(row["c"] if row else 0)
+        except Exception:
+            logger.debug("Failed to refresh active_gates gauge", exc_info=True)
+
     def create_gate(self, assessment_id: str, gate_type: str, summary: str) -> str:
         existing = self._conn.execute(
             "SELECT id FROM gates WHERE assessment_id = ? AND gate_type = ? AND status = 'pending'",
@@ -681,6 +795,7 @@ class AssessmentStore:
             ),
         )
         self._conn.commit()
+        self._refresh_active_gates_metric()
         return gate_id
 
     def expire_stale_gates(self, hours: int = 24) -> int:
@@ -694,6 +809,8 @@ class AssessmentStore:
             (datetime.now(timezone.utc).isoformat(), cutoff),
         )
         self._conn.commit()
+        if cursor.rowcount:
+            self._refresh_active_gates_metric()
         return cursor.rowcount
 
     def list_gates(self, status: str = "pending") -> list[dict]:
@@ -732,6 +849,8 @@ class AssessmentStore:
             ),
         )
         self._conn.commit()
+        if cursor.rowcount:
+            self._refresh_active_gates_metric()
         return cursor.rowcount > 0
 
     # ── Remediations ───────────────────────────────────────────────────
@@ -810,6 +929,14 @@ class AssessmentStore:
         self._conn.commit()
         return cursor.rowcount > 0
 
+    def delete_remediation(self, remediation_id: str, assessment_id: str) -> bool:
+        cursor = self._conn.execute(
+            "DELETE FROM remediations WHERE id = ? AND assessment_id = ?",
+            (remediation_id, assessment_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
     # ── Agent Registry ─────────────────────────────────────────────────
 
     def register_agent(
@@ -835,13 +962,31 @@ class AssessmentStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def agent_heartbeat(self, agent_name: str) -> bool:
+    def agent_heartbeat(self, agent_name: str, category: str = "watcher") -> bool:
+        """Record a liveness heartbeat for an agent.
+
+        Upserts: long-lived watchers (vuln-watcher, slo-tracker, drift-detector,
+        skill-learner) never go through ``register_agent`` the way onboarding
+        agents do, so without this an UPDATE against a non-existent row would
+        silently no-op and the Agents/Schedules pages would never show a real
+        "last seen" for them.
+        """
+        now = datetime.now(timezone.utc).isoformat()
         cursor = self._conn.execute(
             "UPDATE agent_registry SET last_heartbeat = ? WHERE agent_name = ?",
-            (datetime.now(timezone.utc).isoformat(), agent_name),
+            (now, agent_name),
         )
+        if cursor.rowcount == 0:
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO agent_registry
+                    (id, agent_name, category, status, capabilities, last_heartbeat, registered_at)
+                VALUES (?, ?, ?, 'active', '[]', ?, ?)
+                """,
+                (uuid.uuid4().hex, agent_name, category, now, now),
+            )
         self._conn.commit()
-        return cursor.rowcount > 0
+        return True
 
     # ── SLOs ───────────────────────────────────────────────────────────
 
@@ -881,6 +1026,14 @@ class AssessmentStore:
             WHERE id = ?
             """,
             (current_value, status, datetime.now(timezone.utc).isoformat(), slo_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def delete_slo(self, slo_id: str, assessment_id: str) -> bool:
+        cursor = self._conn.execute(
+            "DELETE FROM slos WHERE id = ? AND assessment_id = ?",
+            (slo_id, assessment_id),
         )
         self._conn.commit()
         return cursor.rowcount > 0
@@ -1100,6 +1253,19 @@ class AssessmentStore:
         query += " ORDER BY created_at DESC"
         return [dict(r) for r in self._conn.execute(query, params).fetchall()]
 
+    def get_all_feedback(self, limit: int = 50) -> list[dict]:
+        """Fleet-wide feedback history across all apps, most recent first.
+
+        Used by the Insights page — ``get_feedback_for_app("")`` filters on
+        ``WHERE app_name = ''`` and always returns nothing useful, so this is
+        the fleet-wide equivalent for that view.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM agent_feedback ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def get_rejection_count(self, app_name: str, finding_category: str) -> int:
         """How many times has this category been rejected for this app?"""
         row = self._conn.execute(
@@ -1121,36 +1287,139 @@ class AssessmentStore:
     # ── Trust / Transparency ────────────────────────────────────────────
 
     def get_agent_stats(self, agent_name: str = "") -> list[dict]:
-        """Get performance stats per agent: total runs, success rate, avg events."""
+        """Get performance stats per agent from structured `agent_runs` records.
+
+        Previously derived from LIKE-matching event `action` strings
+        ('%complete%' / '%failed%'), which double-counted unrelated actions
+        (e.g. 'onboarding-complete') and undercounted agents whose events
+        don't follow that naming convention. `agent_runs` (written by
+        FleetOrchestrator on every agent execution) is the authoritative
+        per-run record.
+        """
         query = """
-            SELECT agent_id,
-                   COUNT(*) as total_events,
-                   SUM(CASE WHEN action LIKE '%complete%' THEN 1 ELSE 0 END) as successes,
-                   SUM(CASE WHEN action LIKE '%failed%' OR action LIKE '%error%' THEN 1 ELSE 0 END) as failures,
-                   MIN(timestamp) as first_seen,
-                   MAX(timestamp) as last_seen
-            FROM events
+            SELECT agent_name,
+                   COUNT(*) as total_runs,
+                   SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successes,
+                   SUM(CASE WHEN status != 'success' THEN 1 ELSE 0 END) as failures,
+                   AVG(duration_ms) as avg_duration_ms,
+                   MIN(started_at) as first_seen,
+                   MAX(started_at) as last_seen
+            FROM agent_runs
         """
         params: list[str] = []
         if agent_name:
-            query += " WHERE agent_id = ?"
+            query += " WHERE agent_name = ?"
             params.append(agent_name)
-        query += " GROUP BY agent_id ORDER BY total_events DESC"
+        query += " GROUP BY agent_name ORDER BY total_runs DESC"
         rows = self._conn.execute(query, params).fetchall()
         stats = []
         for r in rows:
-            total = r["successes"] + r["failures"]
+            total = r["total_runs"] or 0
             success_rate = (r["successes"] / total * 100) if total > 0 else 0
             stats.append({
-                "agent": r["agent_id"],
-                "total_events": r["total_events"],
+                "agent": r["agent_name"],
+                "total_events": total,
                 "successes": r["successes"],
                 "failures": r["failures"],
                 "success_rate": round(success_rate, 1),
+                "avg_duration_ms": round(r["avg_duration_ms"]) if r["avg_duration_ms"] is not None else None,
                 "first_seen": r["first_seen"],
                 "last_seen": r["last_seen"],
             })
         return stats
+
+    # ── Agent Runs ───────────────────────────────────────────────────────
+
+    def save_agent_run(
+        self,
+        agent_name: str,
+        mode: str,
+        status: str,
+        assessment_id: str | None = None,
+        duration_ms: int | None = None,
+        resource_tier: str | None = None,
+        error: str | None = None,
+    ) -> str:
+        """Record a single structured agent execution (one row per run)."""
+        run_id = uuid.uuid4().hex
+        self._conn.execute(
+            """
+            INSERT INTO agent_runs
+                (id, assessment_id, agent_name, mode, status, duration_ms, resource_tier, error, started_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id, assessment_id, agent_name, mode, status,
+                duration_ms, resource_tier, error,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        self._conn.commit()
+        return run_id
+
+    def list_agent_runs(self, agent_name: str, limit: int = 50) -> list[dict]:
+        """Real per-run history for an agent, most recent first."""
+        rows = self._conn.execute(
+            "SELECT * FROM agent_runs WHERE agent_name = ? ORDER BY started_at DESC LIMIT ?",
+            (agent_name, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_agent_runs_for_assessment(self, assessment_id: str) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM agent_runs WHERE assessment_id = ? ORDER BY started_at ASC",
+            (assessment_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Check Result Snapshots ───────────────────────────────────────────
+
+    def save_check_results(self, assessment_id: str, results: list[dict]) -> None:
+        """Persist per-check pass/fail rows for one assessment.
+
+        `results` is a list of ``{"check_name": ..., "dimension": ..., "passed": bool}``
+        dicts, as produced by ``check_engine.run_checks_with_status``.
+        """
+        if not results:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.executemany(
+            """
+            INSERT INTO check_results (assessment_id, check_name, dimension, passed, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (assessment_id, r["check_name"], r["dimension"], int(bool(r["passed"])), now)
+                for r in results
+            ],
+        )
+        self._conn.commit()
+
+    def get_check_compliance(self) -> list[dict]:
+        """Fleet-wide check compliance: pass rate per check, across every
+        recorded assessment snapshot."""
+        rows = self._conn.execute(
+            """
+            SELECT check_name, dimension,
+                   SUM(passed) as passes,
+                   COUNT(*) as total
+            FROM check_results
+            GROUP BY check_name, dimension
+            ORDER BY dimension, check_name
+            """
+        ).fetchall()
+        result = []
+        for r in rows:
+            total = r["total"] or 0
+            pass_rate = (r["passes"] / total * 100) if total > 0 else 0
+            result.append({
+                "check_name": r["check_name"],
+                "dimension": r["dimension"],
+                "passes": r["passes"],
+                "total": total,
+                "pass_rate": round(pass_rate, 1),
+            })
+        return result
 
     def get_assessment_timeline(self, assessment_id: str) -> list[dict]:
         """Get chronological timeline of all events for an assessment."""
@@ -1323,7 +1592,8 @@ class AssessmentStore:
                   "remediations", "agent_registry", "slos", "apply_results",
                   "settings", "remediation_jobs", "scheduled_operations",
                   "processed_webhooks", "agent_feedback", "skill_effectiveness",
-                  "suppressed_checks", "skill_inventory_snapshots"]
+                  "suppressed_checks", "skill_inventory_snapshots",
+                  "agent_runs", "check_results"]
         result = {}
         for table in tables:
             try:
@@ -1344,6 +1614,8 @@ class AssessmentStore:
             ("events", "timestamp"),
             ("remediation_jobs", "created_at"),
             ("apply_results", "created_at"),
+            ("agent_runs", "started_at"),
+            ("check_results", "created_at"),
         ]:
             cursor = self._conn.execute(
                 f"DELETE FROM {table} WHERE {col} < ?", (cutoff,),
@@ -1404,6 +1676,38 @@ class AssessmentStore:
         self._conn.commit()
         row = self._conn.execute("SELECT last_insert_rowid() AS id").fetchone()
         return str(row["id"])
+
+    # ── DB size / row-count metrics ──────────────────────────────────────
+
+    _METRIC_TABLES = (
+        "assessments", "onboarding_results", "events", "gates", "remediations",
+        "agent_registry", "slos", "apply_results", "remediation_jobs",
+        "scheduled_operations", "agent_feedback", "skill_effectiveness",
+        "agent_runs", "check_results",
+    )
+
+    def get_db_stats(self) -> dict:
+        """Row counts per table plus the on-disk file size, for the
+        `agentit_db_size_bytes` / `agentit_db_rows` Prometheus gauges."""
+        import os
+
+        row_counts: dict[str, int] = {}
+        for table in self._METRIC_TABLES:
+            try:
+                row = self._conn.execute(f"SELECT COUNT(*) as c FROM {table}").fetchone()
+                row_counts[table] = row["c"] if row else 0
+            except sqlite3.OperationalError:
+                logger.debug("Failed to count rows in table %s", table, exc_info=True)
+                row_counts[table] = 0
+
+        size_bytes = 0
+        if self._db_path != ":memory:":
+            try:
+                size_bytes = os.path.getsize(self._db_path)
+            except OSError:
+                logger.debug("Failed to stat DB file %s", self._db_path, exc_info=True)
+
+        return {"row_counts": row_counts, "size_bytes": size_bytes}
 
     def get_last_skill_inventory_snapshot(self) -> dict | None:
         """Return the most recently saved snapshot dict, or ``None`` if none exists yet."""

@@ -41,6 +41,40 @@
   {% if agent.capabilities and agent.capabilities != '[]' %} &mdash; Capabilities: {{ agent.capabilities }}{% endif %}
 </p>
 
+{% if agent_runs %}
+<h2 class="section-title">Run History</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Started</th>
+      <th>Mode</th>
+      <th>Status</th>
+      <th>Duration</th>
+      <th>Resource Tier</th>
+      <th>Error</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for run in agent_runs %}
+    <tr class="{% if run.status == 'success' %}row-border-green{% else %}row-border-red{% endif %}">
+      <td class="text-sm"><span data-timestamp="{{ run.started_at }}">{{ run.started_at[:19] }}</span></td>
+      <td>{{ run.mode }}</td>
+      <td>
+        {% if run.status == "success" %}
+          <span class="badge badge-low">success</span>
+        {% else %}
+          <span class="badge badge-critical">{{ run.status }}</span>
+        {% endif %}
+      </td>
+      <td class="text-sm">{% if run.duration_ms is not none %}{{ (run.duration_ms / 1000) | round(2) }}s{% else %}—{% endif %}</td>
+      <td class="text-sm text-muted">{{ run.resource_tier or "—" }}</td>
+      <td class="text-sm text-muted">{{ run.error or "—" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 {% if remediations %}
 <h2 class="section-title">Remediations</h2>
 <table>

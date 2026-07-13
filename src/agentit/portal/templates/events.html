@@ -16,9 +16,12 @@
     <option value="info" {{ 'selected' if severity_filter == 'info' }}>Info</option>
   </select>
   <button type="submit" class="btn btn-sm btn-outline">Filter</button>
-  {% if q or severity_filter %}<a href="/events" class="btn btn-sm btn-outline">Clear</a>{% endif %}
+  {% if q or severity_filter or correlation_id_filter %}<a href="/events" class="btn btn-sm btn-outline">Clear</a>{% endif %}
 </form>
-<div hx-get="/events?page={{ page }}&q={{ q | default('') }}&severity={{ severity_filter | default('') }}" hx-trigger="every 30s" hx-select=".events-table" hx-target=".events-table" hx-swap="outerHTML">
+{% if correlation_id_filter %}
+<p class="text-muted text-sm">Showing chain <code>{{ correlation_id_filter }}</code> only — <a href="/events">clear</a>.</p>
+{% endif %}
+<div hx-get="/events?page={{ page }}&q={{ q | default('') }}&severity={{ severity_filter | default('') }}&correlation_id={{ correlation_id_filter | default('') }}" hx-trigger="every 30s" hx-select=".events-table" hx-target=".events-table" hx-swap="outerHTML">
 {% if events %}
 <table class="events-table">
   <thead>
@@ -29,6 +32,7 @@
       <th>Target App</th>
       <th>Severity</th>
       <th>Summary</th>
+      <th>Chain</th>
     </tr>
   </thead>
   <tbody>
@@ -50,6 +54,13 @@
         {% endif %}
       </td>
       <td>{{ e.summary }}</td>
+      <td class="text-sm">
+        {% if e.correlation_id %}
+        <a href="/events?correlation_id={{ e.correlation_id }}" title="View full assess → onboard → apply chain">{{ e.correlation_id[:8] }}&hellip;</a>
+        {% else %}
+        <span class="text-muted">—</span>
+        {% endif %}
+      </td>
     </tr>
     {% endfor %}
   </tbody>

@@ -1,6 +1,7 @@
 """Shared helpers used by app.py and route modules."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time as _time
@@ -63,13 +64,27 @@ def get_circuit_breaker_states() -> dict[str, dict[str, object]]:
 
 
 # ── Store singleton ───────────────────────────────────────────────────
+#
+# ``get_store()`` is async -- Phase 3 of docs/postgres-migration-plan.md.
+# The singleton is created lazily (not at import time) since pool/connection
+# setup is itself async; a lock guards against two concurrent requests both
+# racing to create it on first use. Sized per the plan's §5 Portal row
+# (min_size=5, max_size=20) -- only meaningful once AGENTIT_DB_BACKEND is
+# ever flipped to "postgres" (still unset/"sqlite" everywhere today; see
+# store_factory.py and the plan's §7 for why that switch must stay a single,
+# coordinated, all-components-at-once cutover rather than happening here).
 
-from agentit.portal.store import AssessmentStore  # noqa: E402
+_store: object | None = None
+_store_lock = asyncio.Lock()
 
-_store = AssessmentStore()
 
-
-def get_store() -> AssessmentStore:
+async def get_store():
+    global _store
+    if _store is None:
+        async with _store_lock:
+            if _store is None:
+                from agentit.portal.store_factory import create_store
+                _store = await create_store(min_size=5, max_size=20)
     return _store
 
 
@@ -175,8 +190,6 @@ def get_templates():
 
 # ── Async timeout wrapper ────────────────────────────────────────────
 
-import asyncio  # noqa: E402
-
 OPERATION_TIMEOUT = 300
 
 
@@ -193,8 +206,18 @@ async def with_timeout(coro, timeout: int = OPERATION_TIMEOUT):
 import shutil  # noqa: E402
 
 
-def clone_assess_cleanup(repo_url: str, criticality: str, infra_repo_url: str | None = None):
-    """Clone a repo, run assessment, clean up the clone."""
+def clone_assess_cleanup(
+    repo_url: str,
+    criticality: str,
+    infra_repo_url: str | None = None,
+    check_results_out: list[dict] | None = None,
+):
+    """Clone a repo, run assessment, clean up the clone.
+
+    ``check_results_out``, if given, is populated with per-check pass/fail
+    rows the caller can persist via ``store.save_check_results`` once it has
+    an ``assessment_id`` (see ``AssessmentStore.save_check_results``).
+    """
     from agentit.cloner import clone_repo
     from agentit.runner import run_assessment
     repo_path = clone_repo(repo_url)
@@ -202,6 +225,7 @@ def clone_assess_cleanup(repo_url: str, criticality: str, infra_repo_url: str | 
         return run_assessment(
             repo_path, repo_url, criticality,
             llm_client=get_llm_client(), infra_repo_url=infra_repo_url,
+            check_results_out=check_results_out,
         )
     finally:
         shutil.rmtree(repo_path, ignore_errors=True)
@@ -210,7 +234,7 @@ def clone_assess_cleanup(repo_url: str, criticality: str, infra_repo_url: str | 
 # ── Run onboarding ───────────────────────────────────────────────────
 
 
-def run_onboarding(report, assessment_id: str | None = None, store: AssessmentStore | None = None):
+def run_onboarding(report, assessment_id: str | None = None, store: object | None = None):
     """Run orchestrated onboarding. Returns (files, orchestration_summary).
 
     This is the single shared implementation used by both the inline portal
@@ -218,18 +242,27 @@ def run_onboarding(report, assessment_id: str | None = None, store: AssessmentSt
     the orchestration summary fields in sync between callers since
     `auto_approve`/`gates` are read downstream (e.g. webhook_auto_apply).
 
-    ``store`` defaults to this module's ``get_store()`` singleton, but callers
-    (namely app.py's `_run_onboarding`) should pass their own `get_store()`
-    result explicitly so store overrides applied via that caller's module
-    (e.g. `patch("agentit.portal.app.get_store", ...)` in tests) still take
-    effect here.
+    ``store`` must be a *synchronous* store (e.g. ``(await get_store()).raw``)
+    -- ``FleetOrchestrator`` (used below) is deliberately still fully
+    synchronous (see docs/postgres-migration-plan.md's Phase 3 progress
+    notes), and every real call site already runs this function inside a
+    worker thread via ``asyncio.to_thread``, so it cannot itself ``await``
+    the async store singleton. Callers (namely app.py's `_run_onboarding`
+    and webhooks.py's `webhook_onboard`) should resolve `get_store()` in
+    their own async context first and pass `.raw` explicitly. Falls back to
+    this module's own singleton's `.raw` (or a fresh sync store) only if a
+    caller omits `store` entirely.
     """
     import tempfile
     from pathlib import Path
     from agentit.agents.orchestrator import FleetOrchestrator
 
     if store is None:
-        store = get_store()
+        if _store is not None and hasattr(_store, "raw"):
+            store = _store.raw
+        else:
+            from agentit.portal.store import AssessmentStore
+            store = AssessmentStore()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         base = Path(tmpdir)

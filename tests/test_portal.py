@@ -537,6 +537,54 @@ def test_events_page_renders(client, _override_store):
     assert "Found vuln" in resp.text
 
 
+def test_events_page_filters_by_correlation_id(client, _override_store):
+    store = _override_store
+    store.log_event("orchestrator", "completed", "app-a", "info", "chain event", correlation_id="chain-xyz")
+    store.log_event("orchestrator", "completed", "app-b", "info", "other event", correlation_id="chain-other")
+    resp = client.get("/events?correlation_id=chain-xyz")
+    assert resp.status_code == 200
+    assert "chain event" in resp.text
+    assert "other event" not in resp.text
+
+
+def test_dlq_retry_republishes_and_redirects(client, _override_store):
+    store = _override_store
+    eid = store.log_event(
+        "event-consumer", "dead-letter", "app", "error", "Dead-lettered",
+        details={
+            "original_topic": "agentit-events",
+            "original_message": {"agentId": "x", "action": "tick", "result": {"summary": "", "details": {}}},
+            "error": "boom",
+        },
+    )
+    resp = client.post(f"/events/dlq/{eid}/retry", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "success" in resp.headers["location"]
+    assert store.list_dlq_messages() == []
+
+
+def test_insights_page_shows_fleet_wide_feedback(client, _override_store):
+    """Regression: insights_page used get_feedback_for_app(""), which filters
+    on app_name = '' and always returns nothing -- get_all_feedback fixes it."""
+    store = _override_store
+    store.record_feedback("app-a", "security", "network-policy", "rejected", human_reason="not needed here")
+    resp = client.get("/insights")
+    assert resp.status_code == 200
+    assert "not needed here" in resp.text
+
+
+def test_insights_page_shows_check_compliance(client, _override_store):
+    store = _override_store
+    aid = store.save(_make_report())
+    store.save_check_results(aid, [
+        {"check_name": "has-network-policy", "dimension": "security", "passed": True},
+    ])
+    resp = client.get("/insights")
+    assert resp.status_code == 200
+    assert "Fleet-Wide Check Compliance" in resp.text
+    assert "has-network-policy" in resp.text
+
+
 def test_webhook_triggers_assessment(client, _override_store):
     report = _make_report("webhook-repo")
     with patch("agentit.portal.routes.webhooks.clone_assess_cleanup", return_value=report):
@@ -1019,6 +1067,17 @@ def test_agent_detail_not_found(client, _override_store):
     assert resp.status_code == 404
 
 
+def test_agent_detail_shows_run_history(client, _override_store):
+    store = _override_store
+    store.register_agent("security", "hardening", "network,rbac")
+    store.save_agent_run("security", "local", "success", duration_ms=1500, resource_tier="standard")
+    store.save_agent_run("security", "local", "error", duration_ms=200, error="boom")
+    resp = client.get("/agents/security")
+    assert resp.status_code == 200
+    assert "Run History" in resp.text
+    assert "boom" in resp.text
+
+
 def test_agents_page_links_to_detail(client, _override_store):
     store = _override_store
     store.register_agent("observability", "monitoring")
@@ -1126,6 +1185,26 @@ def test_assessment_detail_shows_remediation_button(client, _override_store):
     assert resp.status_code == 200
     assert f"/assessments/{aid}/remediations" in resp.text
     assert "Remediations (1)" in resp.text
+
+
+def test_assessment_detail_renders_score_history(client, _override_store):
+    """Regression: score_history was fetched and passed to the template but
+    never rendered — the Overview tab now shows a history table with deltas."""
+    store = _override_store
+    first = _make_report("history-repo")
+    first.scores[0].score = 40
+    store.save(first)
+    second = _make_report("history-repo")
+    second.scores[0].score = 70
+    aid2 = store.save(second)
+
+    resp = client.get(f"/assessments/{aid2}")
+    assert resp.status_code == 200
+    assert "Score History" in resp.text
+    assert "score-history-table" in resp.text
+    # No new inline styles introduced by the score-history feature.
+    history_section = resp.text.split('<table class="score-history-table">')[1].split("</table>")[0]
+    assert "style=" not in history_section
 
 
 def test_assessment_detail_shows_links_with_zero_counts(client, _override_store):

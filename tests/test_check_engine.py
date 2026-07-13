@@ -11,6 +11,8 @@ from agentit.check_engine import (
     load_checks,
     run_checks,
     run_checks_by_dimension,
+    run_checks_by_dimension_with_status,
+    run_checks_with_status,
     _parse_check_file,
 )
 from agentit.models import Severity
@@ -232,6 +234,52 @@ class TestRunChecksByDimension:
         assert "compliance" in grouped
         assert len(grouped["security"]) == 1
         assert len(grouped["compliance"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Pass/fail status snapshots (for AssessmentStore.save_check_results)
+# ---------------------------------------------------------------------------
+
+
+class TestRunChecksWithStatus:
+    def test_reports_one_row_per_check_regardless_of_outcome(self, create_mock_repo) -> None:
+        """Unlike run_checks_by_dimension, this must report *passing* checks
+        too, not just the ones that produced a Finding."""
+        repo = create_mock_repo({"Dockerfile": "FROM python:3.12"})
+        checks_dir = repo.parent / "checks"
+        checks_dir.mkdir()
+        (checks_dir / "sec.yaml").write_text(VALID_CHECK)  # passes: Dockerfile* exists
+        checks = load_checks(checks_dir)
+
+        statuses = run_checks_with_status(checks, repo)
+        assert len(statuses) == 1
+        assert statuses[0]["check_name"] == "test-check"
+        assert statuses[0]["dimension"] == "security"
+        assert statuses[0]["passed"] is True
+
+    def test_reports_failed_check_as_not_passed(self, create_mock_repo) -> None:
+        repo = create_mock_repo({"main.py": ""})  # no Dockerfile -> check fails
+        checks_dir = repo.parent / "checks"
+        checks_dir.mkdir()
+        (checks_dir / "sec.yaml").write_text(VALID_CHECK)
+        checks = load_checks(checks_dir)
+
+        statuses = run_checks_with_status(checks, repo)
+        assert statuses[0]["passed"] is False
+
+    def test_by_dimension_with_status_runs_checks_only_once(self, create_mock_repo) -> None:
+        """Both the grouped findings and the per-check statuses must come
+        from a single pass over the checks, not two separate runs."""
+        repo = create_mock_repo({"Dockerfile": "FROM python:3.12"})
+        checks_dir = repo.parent / "checks"
+        checks_dir.mkdir()
+        (checks_dir / "sec.yaml").write_text(VALID_CHECK)
+        checks = load_checks(checks_dir)
+
+        grouped, statuses = run_checks_by_dimension_with_status(checks, repo)
+        assert grouped == {}  # check passed -> no findings
+        assert len(statuses) == 1
+        assert statuses[0]["passed"] is True
 
 
 # ---------------------------------------------------------------------------

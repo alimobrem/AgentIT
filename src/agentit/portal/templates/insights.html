@@ -89,6 +89,26 @@
 </table>
 {% endif %}
 
+{% if check_compliance %}
+<h2>Fleet-Wide Check Compliance</h2>
+<p class="text-muted">Pass rate for every data-driven check (checks/*.yaml), aggregated across every assessment run.</p>
+<table>
+  <thead><tr><th>Dimension</th><th>Check</th><th>Pass Rate</th><th>Passes / Total</th></tr></thead>
+  <tbody>
+  {% for c in check_compliance %}
+  <tr>
+    <td>{{ c.dimension | dimension_label }}</td>
+    <td>{{ c.check_name }}</td>
+    <td class="{% if c.pass_rate >= 90 %}text-success{% elif c.pass_rate >= 70 %}text-warning{% else %}text-danger{% endif %}">
+      {{ c.pass_rate }}%
+    </td>
+    <td class="text-sm">{{ c.passes }} / {{ c.total }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 {% if insights.total_feedback > 0 %}
 <h2>Learning from You</h2>
 <p class="text-muted">The system learns from your decisions. {{ insights.total_feedback }} feedback events recorded, {{ insights.total_rejections }} rejections.</p>

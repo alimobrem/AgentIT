@@ -39,6 +39,31 @@ class TestEventConsumer:
                 # Verify the init pattern works
                 assert consumer.connected is False
 
+    def test_dead_letter_persists_to_store_with_original_topic(self) -> None:
+        """Regression: _dead_letter previously only published to Kafka's DLQ
+        topic, so /events/dlq (which reads the SQLite `events` table) never
+        showed anything unless something else happened to consume that topic
+        and write to the store."""
+        mock_store = MagicMock()
+        consumer = EventConsumer.__new__(EventConsumer)
+        consumer._store = mock_store
+
+        with patch("agentit.events.get_publisher") as mock_get_pub:
+            consumer._dead_letter("agentit-events", {"targetApp": "app1", "action": "tick"}, RuntimeError("boom"))
+
+        mock_store.log_event.assert_called_once()
+        args, kwargs = mock_store.log_event.call_args
+        assert args[1] == "dead-letter"
+        assert kwargs["details"]["original_topic"] == "agentit-events"
+        assert kwargs["details"]["original_message"]["action"] == "tick"
+        mock_get_pub.return_value.publish.assert_called_once()
+
+    def test_dead_letter_without_store_does_not_raise(self) -> None:
+        consumer = EventConsumer.__new__(EventConsumer)
+        consumer._store = None
+        with patch("agentit.events.get_publisher"):
+            consumer._dead_letter("agentit-events", {"targetApp": "app1"}, RuntimeError("boom"))
+
     def test_poll_once_with_mock_consumer(self) -> None:
         consumer = EventConsumer.__new__(EventConsumer)
         consumer._topics = ["test"]

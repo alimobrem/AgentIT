@@ -17,6 +17,10 @@
 - `GeneratedFile` and `_sanitize_name` live in `agents/base.py` — import from there, never redefine locally.
 - `validate_manifest()` and `validate_generated_files()` live in `agents/base.py` — use to validate generated YAML.
 - Shared analyzer utilities (IGNORED_DIRS, iter_text_files, calculate_score) live in `analyzers/base.py` — don't duplicate.
+- Agent/check run history is tracked in structured SQLite tables (`agent_runs`, `check_results`), written by `FleetOrchestrator` and `runner.run_assessment`'s `check_results_out` param — don't reintroduce string-matching heuristics over `events.action` (that's exactly the bug `get_agent_stats()` used to have).
+- `AssessmentStore.log_event()` takes an optional `correlation_id` — pass the `assessment_id` whenever the caller has one (see `save()`, `save_onboarding()`, `FleetOrchestrator._log_event`) so an assess → onboard → apply chain stays traceable end to end on the Events page.
+- `agent_heartbeat()` upserts into `agent_registry` — never assume the row already exists for a long-lived watcher (they don't go through `register_agent`).
+- Circuit breaker state is read via `portal/helpers.py::get_circuit_breaker_states()` — use that accessor instead of reaching into `CircuitBreaker` internals directly, so `/health` and the `agentit_circuit_breaker_open` gauge never drift from each other.
 
 ## Frontend / Templates
 

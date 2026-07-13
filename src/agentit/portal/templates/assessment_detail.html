@@ -80,6 +80,33 @@
     <div class="dimension-value">{{ s.score }}</div>
   </div>
   {% endfor %}
+
+  {% if score_history and score_history|length > 1 %}
+  <h2 class="section-title mt-2">Score History</h2>
+  <table class="score-history-table">
+    <thead>
+      <tr><th>Assessed</th><th>Score</th><th>Criticality</th><th>Change</th></tr>
+    </thead>
+    <tbody>
+      {% for h in score_history|reverse %}
+      <tr class="{% if h.id == assessment_id %}row-border-green{% endif %}">
+        <td class="text-sm"><span data-timestamp="{{ h.assessed_at }}">{{ h.assessed_at[:16] }}</span></td>
+        <td class="text-bold">{{ "%.0f"|format(h.overall_score) }}</td>
+        <td><span class="badge badge-{{ h.criticality }}">{{ h.criticality }}</span></td>
+        <td>
+          {% if h.delta is not none %}
+            <span class="trend {% if h.delta > 0 %}trend-up{% elif h.delta < 0 %}trend-down{% else %}trend-flat{% endif %}">
+              {% if h.delta > 0 %}&#x25B2; +{{ "%.0f"|format(h.delta) }}{% elif h.delta < 0 %}&#x25BC; {{ "%.0f"|format(h.delta) }}{% else %}&#x2500; 0{% endif %}
+            </span>
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
 </div>
 
 <div x-show="tab === 'findings'" x-cloak>

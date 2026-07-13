@@ -25,3 +25,23 @@ def test_run_assessment_generates_remediation_plan(create_mock_repo):
     assert len(report.remediation_plan) > 0
     priorities = [item.priority for item in report.remediation_plan]
     assert priorities == sorted(priorities)
+
+
+def test_run_assessment_populates_check_results_out(create_mock_repo):
+    """check_results_out lets the portal persist a pass/fail snapshot per
+    check (AssessmentStore.save_check_results) once it has an assessment_id."""
+    repo = create_mock_repo({"README.md": "# Empty"})
+    check_results: list[dict] = []
+    run_assessment(
+        repo, repo_url="https://github.com/test/empty", criticality="medium",
+        check_results_out=check_results,
+    )
+    assert len(check_results) > 0
+    assert all({"check_name", "dimension", "passed"} <= set(row) for row in check_results)
+
+
+def test_run_assessment_check_results_out_defaults_to_none_safely(create_mock_repo):
+    repo = create_mock_repo({"README.md": "# Empty"})
+    # Must not raise when the caller doesn't care about check results.
+    report = run_assessment(repo, repo_url="https://github.com/test/empty", criticality="medium")
+    assert isinstance(report, AssessmentReport)
