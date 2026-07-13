@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentit-quay-config
+  labels:
+    app.kubernetes.io/name: agentit
+data:
+  repository: quay.io/org/agentit
+  description: Container image for agentit
+  visibility: private
+  image-scanning: enabled
+  vulnerability-notifications: enabled
+  tag-expiration: 4w
+  robot-account: agentit-ci
