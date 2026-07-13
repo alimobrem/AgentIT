@@ -214,7 +214,7 @@
           <button type="button" class="btn btn-sm btn-green"
             @click="$dispatch('show-confirm', {
               title: 'Install Operator',
-              message: 'Install ' + {{ op.name | tojson }} + '? This will create a Subscription in a dedicated namespace.',
+              message: 'Install ' + {{ op.name | tojson | forceescape }} + '? This will create a Subscription in a dedicated namespace.',
               form: $refs.installOp{{ loop.index }},
               opts: { confirmText: 'Install', danger: false }
             })">Install</button>

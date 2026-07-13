@@ -1097,7 +1097,7 @@ class AssessmentStore:
         query = """
             SELECT agent_id,
                    COUNT(*) as total_events,
-                   SUM(CASE WHEN action LIKE '%completed%' THEN 1 ELSE 0 END) as successes,
+                   SUM(CASE WHEN action LIKE '%complete%' THEN 1 ELSE 0 END) as successes,
                    SUM(CASE WHEN action LIKE '%failed%' OR action LIKE '%error%' THEN 1 ELSE 0 END) as failures,
                    MIN(timestamp) as first_seen,
                    MAX(timestamp) as last_seen
