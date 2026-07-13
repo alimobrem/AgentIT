@@ -3,6 +3,7 @@ crash from referencing DriftResult.has_warnings / DriftResult.deprecated_apis,
 neither of which exist on the real dataclass."""
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 from agentit.api_drift_detector import DriftResult
@@ -109,3 +110,25 @@ class TestAsyncRunLoop:
         assert "Starting drift detector" in captured.err
         assert "Drift detector stopped." in captured.err
         mock_sleep.assert_called_once_with(1)
+
+
+class TestTickRunsOffEventLoop:
+    """detect_once must be dispatched via asyncio.to_thread so it doesn't
+    block the event loop for the tick's full duration, and record_tick
+    telemetry must still fire afterwards."""
+
+    @patch("agentit.watchers.drift_detector.asyncio.sleep", side_effect=KeyboardInterrupt)
+    @patch("agentit.watchers.drift_detector.kube.list_custom_resources", return_value=None)
+    async def test_detect_once_dispatched_via_to_thread_and_telemetry_records(self, mock_list, mock_sleep):
+        from conftest import make_store
+        store = make_store()
+        detector = DriftDetector(publisher=MagicMock(), interval=1, store=store)
+
+        with patch(
+            "agentit.watchers.drift_detector.asyncio.to_thread", wraps=asyncio.to_thread
+        ) as mock_to_thread:
+            await detector.run()
+
+        mock_to_thread.assert_called_once_with(detector.detect_once)
+        events = store.list_events()
+        assert any(e["action"] == "tick-complete" for e in events)

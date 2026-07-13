@@ -111,8 +111,8 @@ def discover_platform(namespace: str = "") -> PlatformContext:
             items = data.get("items", [])
             if items:
                 ctx.ocp_version = items[0].get("status", {}).get("desired", {}).get("version", "")
-        except Exception:
-            pass  # Not OpenShift
+        except Exception as exc:
+            logger.warning("OpenShift version detection failed (may not be OpenShift): %s", exc)
 
         # Available API resources
         try:

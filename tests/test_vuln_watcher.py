@@ -4,6 +4,7 @@ alongside Phase 3 of docs/postgres-migration-plan.md §9, which converted
 """
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 from agentit.watchers.vuln_watcher import VulnWatcher
@@ -39,3 +40,25 @@ class TestAsyncRunLoop:
         assert "Starting vulnerability watcher" in captured.err
         assert "Vulnerability watcher stopped." in captured.err
         mock_sleep.assert_called_once_with(1)
+
+
+class TestTickRunsOffEventLoop:
+    """check_fleet must be dispatched via asyncio.to_thread so it doesn't
+    block the event loop for the tick's full duration, and record_tick
+    telemetry must still fire afterwards."""
+
+    @patch("agentit.watchers.vuln_watcher.asyncio.sleep", side_effect=KeyboardInterrupt)
+    async def test_check_fleet_dispatched_via_to_thread_and_telemetry_records(self, mock_sleep):
+        store = make_store()
+        consumer = MagicMock()
+        consumer.poll_once.return_value = []
+        watcher = _watcher(store=store, consumer=consumer)
+
+        with patch(
+            "agentit.watchers.vuln_watcher.asyncio.to_thread", wraps=asyncio.to_thread
+        ) as mock_to_thread:
+            await watcher.run()
+
+        mock_to_thread.assert_called_once_with(watcher.check_fleet)
+        events = store.list_events()
+        assert any(e["action"] == "tick-complete" for e in events)

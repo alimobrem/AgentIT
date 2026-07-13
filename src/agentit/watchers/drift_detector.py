@@ -151,17 +151,16 @@ class DriftDetector:
     async def run(self) -> None:
         """Main loop: detect drift, sleep.
 
-        The tick body (``detect_once``, and ``_maybe_auto_sync``'s
-        ``AutoMode`` call) is unconverted synchronous code this pass (see
-        docs/postgres-migration-plan.md's Phase 3 progress notes), so it
-        still runs inline here -- only this outer loop is async-shaped for
-        now (``await asyncio.sleep`` instead of ``time.sleep``), per the
-        plan's §5.
+        ``detect_once`` (and ``_maybe_auto_sync``'s ``AutoMode`` call) is
+        unconverted synchronous code this pass (see
+        docs/postgres-migration-plan.md's Phase 3 progress notes), so
+        it's dispatched via ``asyncio.to_thread`` to avoid blocking the
+        event loop for the tick's full duration.
         """
         click.echo(f"Starting drift detector (interval={self._interval}s)...", err=True)
         while True:
             try:
-                self.detect_once()
+                await asyncio.to_thread(self.detect_once)
                 Path("/tmp/heartbeat").touch()
                 record_tick(self._store, "drift-detector", success=True)
             except KeyboardInterrupt:

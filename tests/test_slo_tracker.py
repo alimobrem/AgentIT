@@ -3,6 +3,7 @@ check_once() never collected fresh metric values, only re-read stale
 pre-existing status from SQLite."""
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 from agentit.watchers.slo_tracker import SloTracker
@@ -113,3 +114,23 @@ class TestAsyncRunLoop:
         assert "Starting SLO tracker" in captured.err
         assert "SLO tracker stopped." in captured.err
         mock_sleep.assert_called_once_with(1)
+
+
+class TestTickRunsOffEventLoop:
+    """check_once must be dispatched via asyncio.to_thread so it doesn't
+    block the event loop for the tick's full duration, and record_tick
+    telemetry must still fire afterwards."""
+
+    @patch("agentit.watchers.slo_tracker.asyncio.sleep", side_effect=KeyboardInterrupt)
+    async def test_check_once_dispatched_via_to_thread_and_telemetry_records(self, mock_sleep):
+        store = make_store()
+        tracker = _tracker(store)
+
+        with patch(
+            "agentit.watchers.slo_tracker.asyncio.to_thread", wraps=asyncio.to_thread
+        ) as mock_to_thread:
+            await tracker.run()
+
+        mock_to_thread.assert_called_once_with(tracker.check_once)
+        events = store.list_events()
+        assert any(e["action"] == "tick-complete" for e in events)

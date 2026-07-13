@@ -2,6 +2,7 @@
 manual `agentit learn` CLI command and the portal's learn button."""
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -103,3 +104,25 @@ class TestAsyncRunLoop:
         assert "Starting skill learner" in captured.err
         assert "Skill learner stopped." in captured.err
         mock_sleep.assert_called_once_with(86400)
+
+
+class TestTickRunsOffEventLoop:
+    """research_once must be dispatched via asyncio.to_thread so it doesn't
+    block the event loop for the tick's full duration, and record_tick
+    telemetry must still fire afterwards."""
+
+    @patch("agentit.watchers.skill_learner.asyncio.sleep", side_effect=KeyboardInterrupt)
+    async def test_research_once_dispatched_via_to_thread_and_telemetry_records(self, mock_sleep):
+        from conftest import make_store
+        store = make_store()
+        learner, _ = _learner(store=store)
+
+        with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")), \
+             patch(
+                 "agentit.watchers.skill_learner.asyncio.to_thread", wraps=asyncio.to_thread
+             ) as mock_to_thread:
+            await learner.run()
+
+        mock_to_thread.assert_called_once_with(learner.research_once)
+        events = store.list_events()
+        assert any(e["action"] == "tick-complete" for e in events)

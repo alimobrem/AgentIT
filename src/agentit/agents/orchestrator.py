@@ -20,7 +20,14 @@ def _safe_path(base: Path, relative: str) -> Path:
     clean = PurePosixPath(relative).name  # strips directory components and ..
     return base / clean
 
-AGENT_MODE = os.environ.get("AGENTIT_AGENT_MODE", "local")
+def _read_agent_mode() -> str:
+    """AGENTIT_AGENT_MODE is the documented/canonical name; AGENT_MODE is
+    kept as a fallback for anyone already relying on the
+    previously-undocumented name."""
+    return os.environ.get("AGENTIT_AGENT_MODE") or os.environ.get("AGENT_MODE", "local")
+
+
+AGENT_MODE = _read_agent_mode()
 
 # Priority matrix from the spec (Section 4). This only supplies the
 # "winner" label used to describe how a *real* conflict (see
@@ -159,7 +166,8 @@ class FleetOrchestrator:
             try:
                 from agentit.platform_context import discover_platform
                 platform = discover_platform(os.environ.get("AGENTIT_NAMESPACE", "default"))
-            except Exception:
+            except Exception as exc:
+                logger.warning("Platform discovery failed, falling back to offline context: %s", exc)
                 from agentit.platform_context import offline_context
                 platform = offline_context()
 

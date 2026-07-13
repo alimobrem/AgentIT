@@ -124,7 +124,8 @@ class CodeChangeAgent:
         try:
             content = target.read_text(errors="ignore")[:3000]
             return f"\nExisting file ({finding.file_path}):\n```\n{content}\n```"
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to read file context for %s: %s", finding.file_path, exc)
             return ""
 
     def _actionable_findings(self) -> list[Finding]:

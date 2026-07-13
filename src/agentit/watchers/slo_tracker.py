@@ -123,18 +123,16 @@ class SloTracker:
     async def run(self) -> None:
         """Main loop: drain events, check SLOs, sleep.
 
-        The tick body (``poll_once``/``check_once``) is unconverted
-        synchronous code this pass (see
-        docs/postgres-migration-plan.md's Phase 3 progress notes), so it
-        still runs inline here -- only this outer loop is async-shaped for
-        now (``await asyncio.sleep`` instead of ``time.sleep``), per the
-        plan's §5.
+        ``check_once`` is unconverted synchronous code this pass (see
+        docs/postgres-migration-plan.md's Phase 3 progress notes), so
+        it's dispatched via ``asyncio.to_thread`` to avoid blocking the
+        event loop for the tick's full duration.
         """
         click.echo(f"Starting SLO tracker (interval={self._interval}s)...", err=True)
         while True:
             try:
                 self._consumer.poll_once()
-                self.check_once()
+                await asyncio.to_thread(self.check_once)
                 Path("/tmp/heartbeat").touch()
                 record_tick(self._store, "slo-tracker", success=True)
             except KeyboardInterrupt:

@@ -359,7 +359,7 @@ Every agent shares the same contract (`agents/base.py`): `Agent(report, output_d
 | **ChaosAgent** | `chaos` | — | not critical | LitmusChaos experiments |
 | **RetirementAgent** | `retirement` | small | score < 30 | Decommission plan, cleanup, data archive Job |
 
-Resource tiers control K8s Job resource requests/limits when agents run in containerized mode (`AGENT_MODE=kubernetes`):
+Resource tiers control K8s Job resource requests/limits when agents run in containerized mode (`AGENTIT_AGENT_MODE=kubernetes` — falls back to the undocumented `AGENT_MODE` if unset, for backward-compat):
 
 | Tier | CPU request/limit | Memory request/limit |
 |---|---|---|

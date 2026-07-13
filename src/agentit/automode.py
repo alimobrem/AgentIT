@@ -34,7 +34,8 @@ class AutoMode:
         try:
             val = self._store.get_setting("auto_mode")
             return val in ("1", "true", "on")
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to read auto_mode setting from store, defaulting to disabled: %s", exc)
             return False
 
     def should_auto_apply(

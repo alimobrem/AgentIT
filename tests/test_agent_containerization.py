@@ -341,3 +341,30 @@ class TestResultMarkers:
     def test_extract_no_markers_fallback(self):
         raw = '[{"path": "a.yaml"}]'
         assert _extract_result(raw) == raw
+
+
+class TestAgentModeEnvVarFallback:
+    """AGENTIT_AGENT_MODE is the documented/canonical env var; AGENT_MODE
+    (the previously-undocumented name README.md and docs/architecture.md
+    used to reference) is kept as a backward-compat fallback."""
+
+    def test_agentit_agent_mode_takes_precedence(self, monkeypatch):
+        from agentit.agents.orchestrator import _read_agent_mode
+
+        monkeypatch.setenv("AGENTIT_AGENT_MODE", "kubernetes")
+        monkeypatch.setenv("AGENT_MODE", "local")
+        assert _read_agent_mode() == "kubernetes"
+
+    def test_agent_mode_used_as_fallback_when_agentit_agent_mode_unset(self, monkeypatch):
+        from agentit.agents.orchestrator import _read_agent_mode
+
+        monkeypatch.delenv("AGENTIT_AGENT_MODE", raising=False)
+        monkeypatch.setenv("AGENT_MODE", "kubernetes")
+        assert _read_agent_mode() == "kubernetes"
+
+    def test_defaults_to_local_when_neither_env_var_set(self, monkeypatch):
+        from agentit.agents.orchestrator import _read_agent_mode
+
+        monkeypatch.delenv("AGENTIT_AGENT_MODE", raising=False)
+        monkeypatch.delenv("AGENT_MODE", raising=False)
+        assert _read_agent_mode() == "local"

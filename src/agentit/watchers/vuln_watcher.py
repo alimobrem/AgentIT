@@ -98,13 +98,11 @@ class VulnWatcher:
     async def run(self) -> None:
         """Main loop: poll events, check fleet, sleep.
 
-        The tick body (``poll_once``/``check_fleet``, and everything they
-        call -- ``AutoMode``, ``RemediationLoop``) is unconverted
-        synchronous code this pass (see
-        docs/postgres-migration-plan.md's Phase 3 progress notes), so it
-        still runs inline here rather than via ``asyncio.to_thread`` --
-        only this outer loop is async-shaped for now (``await
-        asyncio.sleep`` instead of ``time.sleep``), per the plan's §5.
+        ``check_fleet`` (and everything it calls -- ``AutoMode``,
+        ``RemediationLoop``) is unconverted synchronous code this pass
+        (see docs/postgres-migration-plan.md's Phase 3 progress notes),
+        so it's dispatched via ``asyncio.to_thread`` to avoid blocking
+        the event loop for the tick's full duration.
         """
         click.echo(f"Starting vulnerability watcher (interval={self._interval}s)...", err=True)
         while True:
@@ -112,7 +110,7 @@ class VulnWatcher:
                 events = self._consumer.poll_once()
                 for event in events:
                     self._handle_event(event)
-                self.check_fleet()
+                await asyncio.to_thread(self.check_fleet)
                 Path("/tmp/heartbeat").touch()
                 record_tick(self._store, "vuln-watcher", success=True)
             except KeyboardInterrupt:

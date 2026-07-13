@@ -98,15 +98,14 @@ class SkillLearner:
         """Main loop: research, sleep.
 
         ``research_once`` is unconverted synchronous code this pass (see
-        docs/postgres-migration-plan.md's Phase 3 progress notes), so it
-        still runs inline here -- only this outer loop is async-shaped for
-        now (``await asyncio.sleep`` instead of ``time.sleep``), per the
-        plan's §5.
+        docs/postgres-migration-plan.md's Phase 3 progress notes), so
+        it's dispatched via ``asyncio.to_thread`` to avoid blocking the
+        event loop for the tick's full duration.
         """
         click.echo(f"Starting skill learner (interval={self._interval}s)...", err=True)
         while True:
             try:
-                self.research_once()
+                await asyncio.to_thread(self.research_once)
                 Path("/tmp/heartbeat").touch()
                 record_tick(self._store, "skill-learner", success=True)
             except KeyboardInterrupt:
