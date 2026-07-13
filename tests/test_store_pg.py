@@ -301,6 +301,27 @@ class TestAgentRegistry:
         watcher = next(a for a in agents if a["agent_name"] == "cve-scanner")
         assert watcher["category"] == "security"
 
+    async def test_prune_stale_agents_removes_unknown_names(self, store):
+        await store.register_agent("security", "hardening")
+        await store.register_agent("cost", "cost")
+
+        pruned = await store.prune_stale_agents(known_names={"cost"})
+
+        assert pruned == ["security"]
+        remaining = {a["agent_name"] for a in await store.list_agents()}
+        assert remaining == {"cost"}
+
+    async def test_prune_stale_agents_preserves_known_names(self, store):
+        known = {"cost", "dependency", "codechange", "vuln-watcher"}
+        for name in known:
+            await store.register_agent(name, "test")
+
+        pruned = await store.prune_stale_agents(known_names=known)
+
+        assert pruned == []
+        remaining = {a["agent_name"] for a in await store.list_agents()}
+        assert remaining == known
+
 
 class TestApplyResultsJsonRoundtrip:
     async def test_save_and_get_apply_results(self, store):

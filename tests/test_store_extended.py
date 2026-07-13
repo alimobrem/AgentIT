@@ -261,6 +261,64 @@ class TestAgentRegistryTable:
         assert agents[0]["capabilities"] == "v2"
 
 
+class TestPruneStaleAgents:
+    """`prune_stale_agents()` -- removes agent_registry rows for agents no
+    longer known to the codebase (e.g. the 9 Python agents removed in favor
+    of skills-only generation)."""
+
+    def test_removes_names_outside_known_set(self):
+        store = make_store()
+        store.register_agent("security", "hardening")
+        store.register_agent("cost", "cost")
+
+        pruned = store.prune_stale_agents(known_names={"cost"})
+
+        assert pruned == ["security"]
+        remaining = {a["agent_name"] for a in store.list_agents()}
+        assert remaining == {"cost"}
+
+    def test_preserves_all_known_names(self):
+        store = make_store()
+        known = {"cost", "dependency", "codechange", "vuln-watcher",
+                  "slo-tracker", "drift-detector", "skill-learner"}
+        for name in known:
+            store.register_agent(name, "test")
+
+        pruned = store.prune_stale_agents(known_names=known)
+
+        assert pruned == []
+        remaining = {a["agent_name"] for a in store.list_agents()}
+        assert remaining == known
+
+    def test_no_stale_rows_returns_empty_list(self):
+        store = make_store()
+        store.register_agent("cost", "cost")
+        assert store.prune_stale_agents(known_names={"cost"}) == []
+
+    def test_prunes_multiple_stale_rows_at_once(self):
+        store = make_store()
+        for name in ("chaos", "cicd", "compliance", "hardening", "incident",
+                     "infrastructure", "observability", "release", "retirement"):
+            store.register_agent(name, name)
+        store.register_agent("cost", "cost")
+
+        known = {"cost", "dependency", "codechange", "vuln-watcher",
+                  "slo-tracker", "drift-detector", "skill-learner"}
+        pruned = store.prune_stale_agents(known_names=known)
+
+        assert len(pruned) == 9
+        remaining = {a["agent_name"] for a in store.list_agents()}
+        assert remaining == {"cost"}
+
+    def test_heartbeat_only_watcher_also_pruned_if_unknown(self):
+        """Rows created via agent_heartbeat() (never register_agent()) are
+        pruned the same way as rows created via register_agent()."""
+        store = make_store()
+        store.agent_heartbeat("some-removed-watcher")
+        pruned = store.prune_stale_agents(known_names={"vuln-watcher"})
+        assert pruned == ["some-removed-watcher"]
+
+
 # ── SLOs ───────────────────────────────────────────────────────────────
 
 

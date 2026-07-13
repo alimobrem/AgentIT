@@ -965,6 +965,20 @@ class AssessmentStore:
         )
         return True
 
+    async def prune_stale_agents(self, known_names: frozenset[str] | set[str]) -> list[str]:
+        """Delete `agent_registry` rows for agent names outside `known_names`.
+
+        See `store.py`'s `prune_stale_agents()` docstring -- same rationale,
+        ported for parity.
+        """
+        rows = await self._pool.fetch("SELECT DISTINCT agent_name FROM agent_registry")
+        stale = sorted(r["agent_name"] for r in rows if r["agent_name"] not in known_names)
+        if stale:
+            await self._pool.execute(
+                "DELETE FROM agent_registry WHERE agent_name = ANY($1::text[])", stale,
+            )
+        return stale
+
     # ── SLOs ───────────────────────────────────────────────────────────
 
     async def save_slo(

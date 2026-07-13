@@ -1007,6 +1007,27 @@ class AssessmentStore:
         self._conn.commit()
         return True
 
+    def prune_stale_agents(self, known_names: frozenset[str] | set[str]) -> list[str]:
+        """Delete `agent_registry` rows for agent names outside `known_names`.
+
+        Neither `register_agent()` nor `agent_heartbeat()` ever remove a row,
+        so a permanently-removed agent (e.g. a Python agent class deleted in
+        favor of skills-only generation) leaves its last-registered row
+        behind forever -- frozen at whatever `last_heartbeat` it had, still
+        reported as `status: active`, since nothing can call either method
+        for a class that no longer exists. Returns the sorted list of pruned
+        agent names (empty if nothing was stale).
+        """
+        rows = self._conn.execute("SELECT DISTINCT agent_name FROM agent_registry").fetchall()
+        stale = sorted(r["agent_name"] for r in rows if r["agent_name"] not in known_names)
+        if stale:
+            placeholders = ",".join("?" for _ in stale)
+            self._conn.execute(
+                f"DELETE FROM agent_registry WHERE agent_name IN ({placeholders})", stale,
+            )
+            self._conn.commit()
+        return stale
+
     # ── SLOs ───────────────────────────────────────────────────────────
 
     def save_slo(

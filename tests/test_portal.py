@@ -1952,6 +1952,60 @@ def test_background_skill_inventory_diff_surfaces_on_events_page(client, _overri
     assert "cve-2099-1" in caps_resp.text
 
 
+# ── Agent registry cleanup (agent_registry_cleanup) ───────────────────
+
+
+def test_background_agent_registry_prune_surfaces_on_events_page(client, _override_store):
+    """Simulates a tick of `_background_maintenance()`'s agent-registry-prune
+    step without waiting for the real hourly loop, then confirms the pruned
+    agents disappear from `/api/agents` and the resulting event shows up on
+    `/events`."""
+    from agentit.agent_registry_cleanup import prune_stale_agents_and_log
+
+    store = _override_store
+    # Rows left behind by Python agents removed in favor of skills-only
+    # generation, plus the legitimate agents/watchers that must survive.
+    store.register_agent("security", "security")
+    store.register_agent("observability", "observability")
+    store.register_agent("cost", "cost")
+    store.agent_heartbeat("vuln-watcher")
+
+    pruned = prune_stale_agents_and_log(store)
+    assert sorted(pruned) == ["observability", "security"]
+
+    api_resp = client.get("/api/agents")
+    assert api_resp.status_code == 200
+    names = {a["agent_name"] for a in api_resp.json()}
+    assert names == {"cost", "vuln-watcher"}
+
+    events_resp = client.get("/events")
+    assert events_resp.status_code == 200
+    assert "agent-registry-pruned" in events_resp.text
+
+    events = store.list_events_by_agent("agent-registry")
+    assert len(events) == 1
+    assert events[0]["action"] == "agent-registry-pruned"
+    assert "security" in events[0]["summary"]
+    assert "observability" in events[0]["summary"]
+
+
+def test_background_agent_registry_prune_is_noop_when_nothing_stale(client, _override_store):
+    """No stale rows -> no event, no change -- confirms the loop can run
+    safely on every tick without spamming the Events feed."""
+    from agentit.agent_registry_cleanup import prune_stale_agents_and_log
+
+    store = _override_store
+    store.register_agent("cost", "cost")
+    store.register_agent("dependency", "dependency")
+
+    pruned = prune_stale_agents_and_log(store)
+
+    assert pruned == []
+    assert store.list_events_by_agent("agent-registry") == []
+    names = {a["agent_name"] for a in store.list_agents()}
+    assert names == {"cost", "dependency"}
+
+
 # ── Loop health meta-metric ──────────────────────────────────────────────
 
 

@@ -32,6 +32,7 @@ from agentit.portal.csrf import (
     is_csrf_exempt,
     verify_csrf,
 )
+from agentit.agent_registry_cleanup import prune_stale_agents_and_log
 from agentit.skill_inventory import diff_and_log_inventory_changes
 
 log = logging.getLogger(__name__)
@@ -106,7 +107,8 @@ _maintenance_task = None
 
 async def _background_maintenance() -> None:
     """Every 5 min: refresh DB/event-buffer size metrics. Hourly: expire stale
-    gates, diff the skill/check inventory. Daily: purge old data."""
+    gates, diff the skill/check inventory, prune stale agent_registry rows.
+    Daily: purge old data."""
     tick = 0
     while True:
         await asyncio.sleep(300)
@@ -141,6 +143,15 @@ async def _background_maintenance() -> None:
             diff_and_log_inventory_changes(s.raw if hasattr(s, "raw") else s)
         except Exception:
             log.debug("Background skill inventory diff failed", exc_info=True)
+
+        try:
+            s = await get_store()
+            pruned = prune_stale_agents_and_log(s.raw if hasattr(s, "raw") else s)
+            if pruned:
+                log.info("Background: pruned %d stale agent registration(s): %s",
+                          len(pruned), ", ".join(pruned))
+        except Exception:
+            log.debug("Background agent-registry prune failed", exc_info=True)
 
 
 def _set_build_info() -> None:
