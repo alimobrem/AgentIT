@@ -168,7 +168,7 @@ spec:
                 memory: 1Gi
             script: |
               set -euo pipefail
-              pip install --no-cache-dir --no-deps -e . 2>&1 | tail -1
+              pip install --no-cache-dir -e . 2>&1 | tail -1
               echo "Running self-assessment..."
               if RESULT=$(python -m agentit assess . --format json --criticality high 2>&1); then
                 SCORE=$(echo "$RESULT" | python3 -c "import sys,json; print(int(json.load(sys.stdin).get('overall_score',0)))" 2>/dev/null || echo 0)

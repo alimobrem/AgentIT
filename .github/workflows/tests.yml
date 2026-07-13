@@ -1,0 +1,42 @@
+name: Tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      # Documented in CLAUDE.md's "Testing" section: on a machine with a real
+      # (even if currently unreachable) kubeconfig, fleet/health routes call
+      # kube.list_custom_resources(...) unconditionally, and the Kubernetes
+      # client's _request_timeout doesn't bound DNS/TCP-connect time — this
+      # can hang pytest for minutes. Point KUBECONFIG at a nonexistent path so
+      # those calls fail fast (<300ms) instead of hanging the job.
+      KUBECONFIG: /tmp/nonexistent-path
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - name: Install dependencies
+        run: uv sync --extra dev
+      - name: Run test suite
+        run: |
+          uv run python -m pytest tests/ -q --tb=short \
+            --ignore=tests/test_real_repos.py \
+            --ignore=tests/test_browser.py \
+            --ignore=tests/test_live_cluster_e2e.py
