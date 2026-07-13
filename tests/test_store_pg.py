@@ -123,7 +123,8 @@ async def store(postgres_dsn):
             "TRUNCATE assessments, onboarding_results, events, gates, remediations, "
             "agent_registry, slos, apply_results, settings, remediation_jobs, "
             "scheduled_operations, processed_webhooks, agent_feedback, "
-            "skill_effectiveness, suppressed_checks, skill_inventory_snapshots CASCADE"
+            "skill_effectiveness, suppressed_checks, skill_inventory_snapshots, "
+            "agent_runs, check_results CASCADE"
         )
     yield s
     await s.close()
@@ -282,7 +283,23 @@ class TestAgentRegistry:
     async def test_agent_heartbeat(self, store):
         await store.register_agent("scanner", "security")
         assert await store.agent_heartbeat("scanner") is True
-        assert await store.agent_heartbeat("nonexistent") is False
+
+    async def test_agent_heartbeat_upserts_unregistered_agent(self, store):
+        """Long-lived watchers (vuln-watcher, slo-tracker, ...) never call
+        register_agent -- agent_heartbeat must create the row itself so their
+        "last seen" actually shows up on the Agents/Schedules pages."""
+        assert await store.agent_heartbeat("vuln-watcher") is True
+        agents = await store.list_agents()
+        assert any(a["agent_name"] == "vuln-watcher" for a in agents)
+        watcher = next(a for a in agents if a["agent_name"] == "vuln-watcher")
+        assert watcher["category"] == "watcher"
+        assert watcher["last_heartbeat"] is not None
+
+    async def test_agent_heartbeat_custom_category(self, store):
+        await store.agent_heartbeat("cve-scanner", category="security")
+        agents = await store.list_agents()
+        watcher = next(a for a in agents if a["agent_name"] == "cve-scanner")
+        assert watcher["category"] == "security"
 
 
 class TestApplyResultsJsonRoundtrip:
@@ -375,6 +392,134 @@ class TestExportAll:
         data = await store.export_all()
         assert "assessments" in data
         assert len(data["assessments"]) == 1
-        # All 16 tables from the plan's §4 table list must be represented.
+        # All 18 tables (16 from the plan's original §4 list, plus the
+        # self-observability agent_runs/check_results tables) must be
+        # represented.
         from agentit.portal.store_pg import _ALL_TABLES
         assert set(data.keys()) == set(_ALL_TABLES)
+
+
+class TestEventsCorrelationAndAction:
+    async def test_log_event_with_correlation_id(self, store):
+        await store.log_event("agent", "step-1", "app", "info", "first", correlation_id="chain-1")
+        await store.log_event("agent", "step-2", "app", "info", "second", correlation_id="chain-1")
+        await store.log_event("agent", "step-3", "app", "info", "unrelated", correlation_id="chain-2")
+
+        chain = await store.list_events_by_correlation_id("chain-1")
+        assert [e["action"] for e in chain] == ["step-1", "step-2"]
+
+    async def test_save_populates_correlation_id(self, store):
+        """save() must pass its new assessment_id as the correlation_id,
+        matching store.py, so an assess -> onboard -> apply chain is
+        traceable end to end."""
+        assessment_id = await store.save(_make_report())
+        chain = await store.list_events_by_correlation_id(assessment_id)
+        assert any(e["action"] == "assessment-complete" for e in chain)
+
+    async def test_save_onboarding_populates_correlation_id(self, store):
+        assessment_id = await store.save(_make_report())
+        await store.save_onboarding(assessment_id, [{"category": "x", "path": "a.yaml", "content": "", "description": ""}])
+        chain = await store.list_events_by_correlation_id(assessment_id)
+        assert any(e["action"] == "onboarding-complete" for e in chain)
+
+    async def test_list_events_by_action(self, store):
+        await store.log_event("agent-a", "decision", "app", "info", "a")
+        await store.log_event("agent-b", "decision", "app", "info", "b")
+        await store.log_event("agent-c", "other-action", "app", "info", "c")
+        rows = await store.list_events_by_action("decision")
+        assert len(rows) == 2
+        assert {r["agent_id"] for r in rows} == {"agent-a", "agent-b"}
+
+
+class TestRetryDlqMessage:
+    async def test_retry_republishes_to_original_topic(self, store):
+        eid = await store.log_event(
+            "event-consumer", "dead-letter", "my-app", "error",
+            "Dead-lettered from agentit-events: boom",
+            details={
+                "original_topic": "agentit-events",
+                "original_message": {
+                    "agentId": "watcher", "action": "tick", "targetApp": "my-app",
+                    "severity": "info", "result": {"summary": "hi", "details": {}},
+                    "correlationId": "abc123",
+                },
+                "error": "boom",
+            },
+        )
+
+        assert await store.retry_dlq_message(eid) is True
+
+        events = await store.list_events(limit=10)
+        retry_event = next(e for e in events if e["action"] == "dlq-retry")
+        assert "republished to agentit-events" in retry_event["summary"]
+        # original dead-letter row is relabelled, not duplicated
+        assert await store.list_dlq_messages() == []
+
+    async def test_retry_falls_back_to_relabel_when_no_original_topic(self, store):
+        """Rows written before original_topic tracking existed (or a Kafka
+        failure) must still mark the row retried instead of silently no-op'ing."""
+        eid = await store.log_event(
+            "event-consumer", "dead-letter", "my-app", "error", "old-style row",
+            details={"original_message": {"foo": "bar"}, "error": "boom"},
+        )
+        assert await store.retry_dlq_message(eid) is True
+        events = await store.list_events(limit=10)
+        retry_event = next(e for e in events if e["action"] == "dlq-retry")
+        assert "relabelled only" in retry_event["summary"]
+
+    async def test_retry_unknown_event_returns_false(self, store):
+        assert await store.retry_dlq_message("nonexistent") is False
+
+
+class TestAgentRuns:
+    async def test_save_and_list_agent_runs(self, store):
+        assessment_id = await store.save(_make_report())
+        await store.save_agent_run(
+            "hardening", "local", "success", assessment_id=assessment_id, duration_ms=120,
+        )
+        await store.save_agent_run(
+            "hardening", "local", "failed", assessment_id=assessment_id, error="boom",
+        )
+
+        runs = await store.list_agent_runs("hardening")
+        assert len(runs) == 2
+        assert runs[0]["status"] == "failed"  # most recent first
+
+        by_assessment = await store.list_agent_runs_for_assessment(assessment_id)
+        assert [r["status"] for r in by_assessment] == ["success", "failed"]  # ascending
+
+
+class TestCheckResults:
+    async def test_save_and_get_check_compliance(self, store):
+        assessment_id = await store.save(_make_report())
+        await store.save_check_results(assessment_id, [
+            {"check_name": "health-check", "dimension": "observability", "passed": True},
+            {"check_name": "health-check", "dimension": "observability", "passed": False},
+        ])
+        compliance = await store.get_check_compliance()
+        row = next(r for r in compliance if r["check_name"] == "health-check")
+        assert row["total"] == 2
+        assert row["passes"] == 1
+        assert row["pass_rate"] == 50.0
+
+    async def test_save_check_results_no_op_on_empty_list(self, store):
+        assessment_id = await store.save(_make_report())
+        await store.save_check_results(assessment_id, [])
+        assert await store.get_check_compliance() == []
+
+
+class TestGetAllFeedback:
+    async def test_get_all_feedback_across_apps(self, store):
+        await store.record_feedback("app-a", "hardening", "security", "approved")
+        await store.record_feedback("app-b", "hardening", "security", "rejected")
+        feedback = await store.get_all_feedback()
+        assert len(feedback) == 2
+        assert {f["app_name"] for f in feedback} == {"app-a", "app-b"}
+
+
+class TestDbStats:
+    async def test_get_db_stats_row_counts_and_size(self, store):
+        await store.save(_make_report())
+        stats = await store.get_db_stats()
+        assert stats["row_counts"]["assessments"] == 1
+        assert stats["size_bytes"] > 0

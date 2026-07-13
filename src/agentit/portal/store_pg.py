@@ -30,7 +30,9 @@ the plan's §4:
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -39,6 +41,8 @@ from typing import Any
 import asyncpg
 
 from agentit.models import AssessmentReport, Severity
+
+logger = logging.getLogger(__name__)
 
 # Phase 1 of docs/postgres-migration-plan.md: idempotent DDL for all 16
 # tables, translated from store.py's inline CREATE TABLE statements per the
@@ -202,6 +206,44 @@ CREATE TABLE IF NOT EXISTS skill_inventory_snapshots (
     snapshot_json JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL
 );
+
+-- Structured per-run agent records — replaces the fragile action-string
+-- heuristic previously used by get_agent_stats(). Mirrors store.py's
+-- agent_runs table (see plan §4's type-mapping table: TIMESTAMPTZ for
+-- started_at, plain INTEGER for duration_ms since it's a measurement,
+-- not a boolean flag).
+CREATE TABLE IF NOT EXISTS agent_runs (
+    id TEXT PRIMARY KEY,
+    assessment_id TEXT,
+    agent_name TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'local',
+    status TEXT NOT NULL,
+    duration_ms INTEGER,
+    resource_tier TEXT,
+    error TEXT,
+    started_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_agent ON agent_runs(agent_name);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_assessment ON agent_runs(assessment_id);
+
+-- Per-check pass/fail snapshots, keyed by assessment, for fleet-wide check
+-- compliance reporting. `passed` is BOOLEAN here (store.py's INTEGER-as-
+-- boolean per plan §4's type-mapping table), not INTEGER.
+CREATE TABLE IF NOT EXISTS check_results (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    assessment_id TEXT NOT NULL,
+    check_name TEXT NOT NULL,
+    dimension TEXT NOT NULL,
+    passed BOOLEAN NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_check_results_assessment ON check_results(assessment_id);
+
+-- Migration: add correlation_id to events created before this column
+-- existed. Postgres supports ADD COLUMN IF NOT EXISTS natively, so (per
+-- plan §4) this needs none of store.py's try/except OperationalError dance.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS correlation_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_events_correlation_id ON events(correlation_id);
 """
 
 _ALL_TABLES = [
@@ -210,6 +252,7 @@ _ALL_TABLES = [
     "settings", "remediation_jobs", "scheduled_operations",
     "processed_webhooks", "agent_feedback", "skill_effectiveness",
     "suppressed_checks", "skill_inventory_snapshots",
+    "agent_runs", "check_results",
 ]
 
 
@@ -357,6 +400,7 @@ class AssessmentStore:
             report.repo_name,
             "info",
             f"Assessment complete: {report.overall_score:.0f}/100",
+            correlation_id=assessment_id,
         )
         return assessment_id
 
@@ -414,6 +458,7 @@ class AssessmentStore:
             target_app,
             "info",
             f"Generated {len(files)} manifests",
+            correlation_id=assessment_id,
         )
         return onboarding_id
 
@@ -489,12 +534,13 @@ class AssessmentStore:
         severity: str,
         summary: str,
         details: dict | None = None,
+        correlation_id: str | None = None,
     ) -> str:
         event_id = uuid.uuid4().hex
         await self._pool.execute(
             """
-            INSERT INTO events (id, timestamp, agent_id, action, target_app, severity, summary, details_json)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+            INSERT INTO events (id, timestamp, agent_id, action, target_app, severity, summary, details_json, correlation_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
             """,
             event_id,
             _now(),
@@ -504,6 +550,7 @@ class AssessmentStore:
             severity,
             summary,
             json.dumps(details or {}),
+            correlation_id,
         )
         return event_id
 
@@ -528,6 +575,27 @@ class AssessmentStore:
         )
         return _rows_to_dicts(rows)
 
+    async def list_events_by_action(self, action: str, limit: int = 50) -> list[dict]:
+        """Look up events by `action` rather than `agent_id`.
+
+        Used for decision points (e.g. auto-mode's 'decision' action) whose
+        `agent_id` varies by caller — the action name is the stable identity,
+        not the agent_id, which may or may not carry real agent/skill attribution.
+        """
+        rows = await self._pool.fetch(
+            "SELECT * FROM events WHERE action = $1 ORDER BY timestamp DESC LIMIT $2",
+            action, limit,
+        )
+        return _rows_to_dicts(rows)
+
+    async def list_events_by_correlation_id(self, correlation_id: str, limit: int = 200) -> list[dict]:
+        """Trace a single assess -> onboard -> apply chain end to end."""
+        rows = await self._pool.fetch(
+            "SELECT * FROM events WHERE correlation_id = $1 ORDER BY timestamp ASC LIMIT $2",
+            correlation_id, limit,
+        )
+        return _rows_to_dicts(rows)
+
     async def list_dlq_messages(self, limit: int = 200) -> list[dict]:
         rows = await self._pool.fetch(
             "SELECT * FROM events WHERE action = 'dead-letter' ORDER BY timestamp DESC LIMIT $1",
@@ -543,12 +611,55 @@ class AssessmentStore:
         return _affected(status) > 0
 
     async def retry_dlq_message(self, event_id: str) -> bool:
-        if not await self._update_dlq(event_id, 'dlq-retry'):
-            return False
-        await self.log_event(
-            'portal', 'dlq-retry', None, 'info',
-            f'Retried dead-letter event {event_id}',
+        """Republish a dead-lettered message to its original Kafka topic, then relabel the row.
+
+        Falls back to a relabel-only retry (with a warning in the log summary)
+        if the dead-letter event has no ``original_topic``/``original_message``
+        recorded (e.g. rows written before this was tracked) or if Kafka is
+        unavailable — the row is still marked retried either way so the
+        operator sees the outcome rather than a silent no-op.
+        """
+        row = await self._pool.fetchrow(
+            "SELECT * FROM events WHERE id = $1 AND action = 'dead-letter'", event_id,
         )
+        if row is None:
+            return False
+
+        details = json.loads(row["details_json"] or "{}")
+        original_topic = details.get("original_topic")
+        original_message = details.get("original_message")
+
+        republished = False
+        if original_topic and isinstance(original_message, dict):
+            try:
+                from agentit.events import get_publisher
+
+                result = original_message.get("result") or {}
+                # EventPublisher.publish is a synchronous Kafka client call
+                # (kafka-python has no async API) — bridge it onto a worker
+                # thread so it doesn't block the event loop.
+                await asyncio.to_thread(
+                    get_publisher().publish,
+                    original_topic,
+                    agent_id=original_message.get("agentId", "dlq-retry"),
+                    action=original_message.get("action", "retry"),
+                    target_app=original_message.get("targetApp"),
+                    severity=original_message.get("severity", "info"),
+                    summary=result.get("summary", "") if isinstance(result, dict) else "",
+                    details=result.get("details") if isinstance(result, dict) else None,
+                    correlation_id=original_message.get("correlationId"),
+                )
+                republished = True
+            except Exception:
+                logger.exception("Failed to republish dead-letter event %s", event_id)
+
+        await self._update_dlq(event_id, 'dlq-retry')
+        summary = (
+            f'Retried dead-letter event {event_id} (republished to {original_topic})'
+            if republished
+            else f'Retried dead-letter event {event_id} (relabelled only — republish unavailable)'
+        )
+        await self.log_event('portal', 'dlq-retry', row["target_app"], 'info', summary)
         return True
 
     async def dismiss_dlq_message(self, event_id: str) -> bool:
@@ -806,12 +917,26 @@ class AssessmentStore:
         )
         return _rows_to_dicts(rows)
 
-    async def agent_heartbeat(self, agent_name: str) -> bool:
-        result = await self._pool.execute(
-            "UPDATE agent_registry SET last_heartbeat = $1 WHERE agent_name = $2",
-            _now(), agent_name,
+    async def agent_heartbeat(self, agent_name: str, category: str = "watcher") -> bool:
+        """Record a liveness heartbeat for an agent.
+
+        Upserts: long-lived watchers (vuln-watcher, slo-tracker, drift-detector,
+        skill-learner) never go through ``register_agent`` the way onboarding
+        agents do, so without this an UPDATE against a non-existent row would
+        silently no-op and the Agents/Schedules pages would never show a real
+        "last seen" for them.
+        """
+        now = _now()
+        await self._pool.execute(
+            """
+            INSERT INTO agent_registry
+                (id, agent_name, category, status, capabilities, last_heartbeat, registered_at)
+            VALUES ($1, $2, $3, 'active', '[]'::jsonb, $4, $4)
+            ON CONFLICT (agent_name) DO UPDATE SET last_heartbeat = EXCLUDED.last_heartbeat
+            """,
+            uuid.uuid4().hex, agent_name, category, now,
         )
-        return _affected(result) > 0
+        return True
 
     # ── SLOs ───────────────────────────────────────────────────────────
 
@@ -1055,6 +1180,19 @@ class AssessmentStore:
         rows = await self._pool.fetch(query, *params)
         return _rows_to_dicts(rows)
 
+    async def get_all_feedback(self, limit: int = 50) -> list[dict]:
+        """Fleet-wide feedback history across all apps, most recent first.
+
+        Used by the Insights page — ``get_feedback_for_app("")`` filters on
+        ``WHERE app_name = ''`` and always returns nothing useful, so this is
+        the fleet-wide equivalent for that view.
+        """
+        rows = await self._pool.fetch(
+            "SELECT * FROM agent_feedback ORDER BY created_at DESC LIMIT $1",
+            limit,
+        )
+        return _rows_to_dicts(rows)
+
     async def get_rejection_count(self, app_name: str, finding_category: str) -> int:
         """How many times has this category been rejected for this app?"""
         row = await self._pool.fetchrow(
@@ -1106,6 +1244,94 @@ class AssessmentStore:
                 "last_seen": r["last_seen"].isoformat() if r["last_seen"] else None,
             })
         return stats
+
+    # ── Agent Runs ───────────────────────────────────────────────────────
+
+    async def save_agent_run(
+        self,
+        agent_name: str,
+        mode: str,
+        status: str,
+        assessment_id: str | None = None,
+        duration_ms: int | None = None,
+        resource_tier: str | None = None,
+        error: str | None = None,
+    ) -> str:
+        """Record a single structured agent execution (one row per run)."""
+        run_id = uuid.uuid4().hex
+        await self._pool.execute(
+            """
+            INSERT INTO agent_runs
+                (id, assessment_id, agent_name, mode, status, duration_ms, resource_tier, error, started_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            """,
+            run_id, assessment_id, agent_name, mode, status,
+            duration_ms, resource_tier, error, _now(),
+        )
+        return run_id
+
+    async def list_agent_runs(self, agent_name: str, limit: int = 50) -> list[dict]:
+        """Real per-run history for an agent, most recent first."""
+        rows = await self._pool.fetch(
+            "SELECT * FROM agent_runs WHERE agent_name = $1 ORDER BY started_at DESC LIMIT $2",
+            agent_name, limit,
+        )
+        return _rows_to_dicts(rows)
+
+    async def list_agent_runs_for_assessment(self, assessment_id: str) -> list[dict]:
+        rows = await self._pool.fetch(
+            "SELECT * FROM agent_runs WHERE assessment_id = $1 ORDER BY started_at ASC",
+            assessment_id,
+        )
+        return _rows_to_dicts(rows)
+
+    # ── Check Result Snapshots ───────────────────────────────────────────
+
+    async def save_check_results(self, assessment_id: str, results: list[dict]) -> None:
+        """Persist per-check pass/fail rows for one assessment.
+
+        `results` is a list of ``{"check_name": ..., "dimension": ..., "passed": bool}``
+        dicts, as produced by ``check_engine.run_checks_with_status``.
+        """
+        if not results:
+            return
+        now = _now()
+        await self._pool.executemany(
+            """
+            INSERT INTO check_results (assessment_id, check_name, dimension, passed, created_at)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            [
+                (assessment_id, r["check_name"], r["dimension"], bool(r["passed"]), now)
+                for r in results
+            ],
+        )
+
+    async def get_check_compliance(self) -> list[dict]:
+        """Fleet-wide check compliance: pass rate per check, across every
+        recorded assessment snapshot."""
+        rows = await self._pool.fetch(
+            """
+            SELECT check_name, dimension,
+                   SUM(CASE WHEN passed THEN 1 ELSE 0 END) as passes,
+                   COUNT(*) as total
+            FROM check_results
+            GROUP BY check_name, dimension
+            ORDER BY dimension, check_name
+            """
+        )
+        result = []
+        for r in rows:
+            total = r["total"] or 0
+            pass_rate = (r["passes"] / total * 100) if total > 0 else 0
+            result.append({
+                "check_name": r["check_name"],
+                "dimension": r["dimension"],
+                "passes": r["passes"],
+                "total": total,
+                "pass_rate": round(pass_rate, 1),
+            })
+        return result
 
     async def get_assessment_timeline(self, assessment_id: str) -> list[dict]:
         """Get chronological timeline of all events for an assessment."""
@@ -1263,6 +1489,8 @@ class AssessmentStore:
                     ("events", "timestamp"),
                     ("remediation_jobs", "created_at"),
                     ("apply_results", "created_at"),
+                    ("agent_runs", "started_at"),
+                    ("check_results", "created_at"),
                 ]:
                     status = await conn.execute(
                         f"DELETE FROM {table} WHERE {col} < $1", cutoff,
@@ -1336,3 +1564,38 @@ class AssessmentStore:
         data = json.loads(row["snapshot_json"])
         data["created_at"] = row["created_at"].isoformat()
         return data
+
+    # ── DB size / row-count metrics ──────────────────────────────────────
+
+    _METRIC_TABLES = (
+        "assessments", "onboarding_results", "events", "gates", "remediations",
+        "agent_registry", "slos", "apply_results", "remediation_jobs",
+        "scheduled_operations", "agent_feedback", "skill_effectiveness",
+        "agent_runs", "check_results",
+    )
+
+    async def get_db_stats(self) -> dict:
+        """Row counts per table plus the database size, for the
+        `agentit_db_size_bytes` / `agentit_db_rows` Prometheus gauges.
+
+        There's no single on-disk "file" to `os.path.getsize()` the way
+        store.py does for its SQLite file — `pg_database_size()` is the
+        Postgres equivalent of "how big is this database right now".
+        """
+        row_counts: dict[str, int] = {}
+        for table in self._METRIC_TABLES:
+            try:
+                row_counts[table] = await self._pool.fetchval(f"SELECT COUNT(*) FROM {table}") or 0
+            except asyncpg.PostgresError:
+                logger.debug("Failed to count rows in table %s", table, exc_info=True)
+                row_counts[table] = 0
+
+        size_bytes = 0
+        try:
+            size_bytes = await self._pool.fetchval(
+                "SELECT pg_database_size(current_database())"
+            ) or 0
+        except asyncpg.PostgresError:
+            logger.debug("Failed to fetch Postgres database size", exc_info=True)
+
+        return {"row_counts": row_counts, "size_bytes": size_bytes}
