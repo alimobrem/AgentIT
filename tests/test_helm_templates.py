@@ -420,6 +420,19 @@ class TestRBAC:
         assert crb["subjects"][0]["name"] == "agentit"
         assert crb["subjects"][0]["namespace"] == "test-ns"
 
+    def test_cluster_wide_apply_defaults_to_true_in_values(self):
+        """Regression test: rbac.clusterWideApply previously defaulted to false,
+        which left the ClusterRoleBinding above ungranted on real releases. Since
+        "Apply to Cluster" onboards apps into namespaces that don't exist yet,
+        kube.namespace_exists() 403s on the cluster-scoped namespace GET before
+        ever reaching manifest application -- surfacing as "Cluster apply failed
+        — check server logs" for any app not already sharing this release's own
+        namespace. The template logic (tested above) was already correct; only
+        the default value was wrong."""
+        values_path = CHART_DIR.parent / "values.yaml"
+        values = yaml.safe_load(values_path.read_text())
+        assert values["rbac"]["clusterWideApply"] is True
+
 
 # ---------------------------------------------------------------------------
 # Watcher NetworkPolicies (networkpolicy-agents.yaml)
