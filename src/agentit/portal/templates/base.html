@@ -567,9 +567,12 @@
     inset: 0;
     background: rgba(0,0,0,0.7);
     z-index: 200;
-    display: flex;
+    display: none;
     justify-content: center;
     align-items: center;
+  }
+  .modal-overlay.open {
+    display: flex;
   }
   .modal {
     background: var(--color-surface-2);
@@ -800,7 +803,7 @@
 {% block content %}{% endblock %}
 </div>
 <!-- Confirm Modal -->
-<div id="confirm-modal" x-data="confirmModal()" x-show="open" x-cloak
+<div id="confirm-modal" x-data="confirmModal()" :class="{ 'open': open }"
      class="modal-overlay" @keydown.escape.window="cancel()" @show-confirm.window="show($event.detail.title, $event.detail.message, $event.detail.form, $event.detail.opts)" role="dialog" aria-modal="true">
   <div class="modal" @click.outside="cancel()">
     <h3 x-text="title" class="modal-title"></h3>
