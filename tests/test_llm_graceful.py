@@ -10,8 +10,8 @@ def test_llm_client_init_failure_returns_none():
     """Portal _get_llm_client returns None when LLM init throws."""
     with patch.dict("os.environ", {"ANTHROPIC_VERTEX_PROJECT_ID": "test-project", "CLOUD_ML_REGION": "us-east5"}):
         with patch("agentit.llm._create_client", side_effect=Exception("DefaultCredentialsError: no creds")):
-            from agentit.portal.app import _get_llm_client
-            result = _get_llm_client()
+            from agentit.portal.helpers import get_llm_client
+            result = get_llm_client()
             assert result is None
 
 
@@ -73,8 +73,8 @@ def test_portal_assess_works_without_gcp_creds():
     """Portal assessment doesn't crash when GCP creds are missing."""
     with patch.dict("os.environ", {"ANTHROPIC_VERTEX_PROJECT_ID": "test", "CLOUD_ML_REGION": "global"}, clear=False):
         with patch("agentit.llm._create_client", side_effect=Exception("no credentials")):
-            from agentit.portal.app import _get_llm_client
-            client = _get_llm_client()
+            from agentit.portal.helpers import get_llm_client
+            client = get_llm_client()
             assert client is None
 
 

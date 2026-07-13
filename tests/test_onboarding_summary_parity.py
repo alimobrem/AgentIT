@@ -1,7 +1,7 @@
-"""Regression tests: helpers.run_onboarding (webhook path) and app.py's
-_run_onboarding (inline portal path) must produce orchestration summaries
-with the same fields -- especially auto_approve/gates, which
-webhook_auto_apply relies on to decide whether to auto-apply manifests.
+"""Regression tests: helpers.run_onboarding (webhook path) and
+routes/assessments.py's _run_onboarding (inline portal path) must produce
+orchestration summaries with the same fields -- especially auto_approve/gates,
+which webhook_auto_apply relies on to decide whether to auto-apply manifests.
 """
 from __future__ import annotations
 
@@ -45,21 +45,22 @@ def test_run_onboarding_summary_includes_auto_approve_and_gates(tmp_path: Path):
 
 
 def test_app_py_delegates_to_shared_run_onboarding():
-    """app.py's _run_onboarding must be the same shared implementation used
-    by the webhook path, so the two can never drift on which summary fields
-    get stored (the original bug: app.py included auto_approve/gates,
-    helpers.py silently omitted them)."""
-    from agentit.portal import app as app_module
+    """routes/assessments.py's _run_onboarding must be the same shared
+    implementation used by the webhook path, so the two can never drift on
+    which summary fields get stored (the original bug: the inline portal
+    path included auto_approve/gates, helpers.py silently omitted them)."""
+    from agentit.portal.routes import assessments as assessments_module
 
     store = make_store()
     report = make_report(criticality="low")
     aid = store.save(report)
 
-    # app.py's _run_onboarding runs inside asyncio.to_thread (Phase 3 of
-    # docs/postgres-migration-plan.md), so its route caller resolves the
-    # (now-async) get_store() itself and passes the sync store handle in
-    # explicitly -- verify _run_onboarding forwards that handle unchanged.
-    files, orch_summary = app_module._run_onboarding(report, aid, store)
+    # routes/assessments.py's _run_onboarding runs inside asyncio.to_thread
+    # (Phase 3 of docs/postgres-migration-plan.md), so its route caller
+    # resolves the (now-async) get_store() itself and passes the sync store
+    # handle in explicitly -- verify _run_onboarding forwards that handle
+    # unchanged.
+    files, orch_summary = assessments_module._run_onboarding(report, aid, store)
 
     assert "auto_approve" in orch_summary
     assert "gates" in orch_summary

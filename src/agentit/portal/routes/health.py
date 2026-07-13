@@ -399,6 +399,28 @@ async def api_health():
     return JSONResponse(body, status_code=503 if degraded else 200)
 
 
+@router.get("/api/platform/drift")
+async def platform_drift():
+    """Check for API drift on the cluster."""
+    from agentit.platform_context import discover_platform, offline_context
+    from agentit.api_drift_detector import detect_drift
+    try:
+        ctx = discover_platform()
+    except Exception:
+        ctx = offline_context()
+    drift = detect_drift(ctx.available_kinds, ctx.installed_operators)
+    return {
+        "platform": ctx.summary(),
+        "drift": {
+            "removed_apis": drift.removed_apis,
+            "deprecated_apis": [d.get("api", "") for d in drift.deprecated_apis] if hasattr(drift, 'deprecated_apis') and isinstance(drift.deprecated_apis, list) and drift.deprecated_apis and isinstance(drift.deprecated_apis[0], dict) else drift.deprecated_apis,
+            "new_apis": drift.new_apis[:20],
+            "has_breaking_changes": drift.has_breaking_changes,
+        },
+        "summary": drift.summary(),
+    }
+
+
 @router.get("/api/operator-status")
 async def operator_status(request: Request):
     """Check if an OLM operator is installed and ready. Used by htmx polling."""

@@ -21,7 +21,8 @@ from agentit.models import (
     Severity,
     StackInfo,
 )
-from agentit.portal.app import app, get_store, _get_trusted_base_url
+from agentit.portal.app import app, get_store
+from agentit.portal.routes.assessments import _get_trusted_base_url
 from agentit.portal.store_factory import AsyncSQLiteStore
 from conftest import make_store, prime_csrf
 
@@ -98,6 +99,14 @@ def _override_store():
          patch("agentit.portal.routes.webhooks.get_store", return_value=async_store), \
          patch("agentit.portal.routes.health.get_store", return_value=async_store), \
          patch("agentit.portal.routes.schedules.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.fleet.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.assessments.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.gates.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.capabilities.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.settings.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.insights.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.remediations.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.slos.get_store", return_value=async_store), \
          patch("agentit.image_builder.build_app_image",
                return_value={"image_ref": "test/image:test", "run_name": "test-run", "status": "skipped-in-tests"}):
         yield test_store
@@ -352,7 +361,7 @@ def test_trusted_base_url_ignores_forged_host_header(client, _override_store):
         {"metadata": {"labels": {"app.kubernetes.io/name": "agentit"}},
          "spec": {"host": "agentit.apps.cluster.example.com"}},
     ]
-    with patch("agentit.portal.app._run_onboarding", return_value=([], {})), \
+    with patch("agentit.portal.routes.assessments._run_onboarding", return_value=([], {})), \
          patch("agentit.portal.github_pr.ensure_webhook") as mock_ensure_webhook, \
          patch("agentit.kube.list_custom_resources", return_value=fake_routes), \
          patch.dict(os.environ, {"KUBERNETES_SERVICE_HOST": "10.0.0.1"}):
@@ -1649,7 +1658,7 @@ def test_capabilities_page_has_learn_button(client):
 
 
 def test_capabilities_learn_without_llm_shows_error(client):
-    with patch("agentit.portal.app._get_llm_client", return_value=None):
+    with patch("agentit.portal.routes.capabilities.get_llm_client", return_value=None):
         resp = client.post("/capabilities/learn", follow_redirects=False)
     assert resp.status_code == 303
     assert "error=" in resp.headers["location"]
@@ -1657,7 +1666,7 @@ def test_capabilities_learn_without_llm_shows_error(client):
 
 
 def test_capabilities_learn_generates_new_skill(client, _override_store):
-    with patch("agentit.portal.app._get_llm_client", return_value=object()), \
+    with patch("agentit.portal.routes.capabilities.get_llm_client", return_value=object()), \
          patch("agentit.learning_agent.research_cves", return_value=[{"id": "CVE-2099-00001"}]), \
          patch("agentit.learning_agent.check_skill_exists", return_value=False), \
          patch("agentit.learning_agent.generate_skill_from_research",
@@ -1672,7 +1681,7 @@ def test_capabilities_learn_generates_new_skill(client, _override_store):
 
 
 def test_capabilities_learn_skips_existing_skill(client, _override_store):
-    with patch("agentit.portal.app._get_llm_client", return_value=object()), \
+    with patch("agentit.portal.routes.capabilities.get_llm_client", return_value=object()), \
          patch("agentit.learning_agent.research_cves", return_value=[{"id": "CVE-2099-00002"}]), \
          patch("agentit.learning_agent.check_skill_exists", return_value=True):
         resp = client.post("/capabilities/learn", follow_redirects=False)
@@ -1683,7 +1692,7 @@ def test_capabilities_learn_skips_existing_skill(client, _override_store):
 
 
 def test_capabilities_learn_no_research_results(client):
-    with patch("agentit.portal.app._get_llm_client", return_value=object()), \
+    with patch("agentit.portal.routes.capabilities.get_llm_client", return_value=object()), \
          patch("agentit.learning_agent.research_cves", return_value=[]):
         resp = client.post("/capabilities/learn", follow_redirects=False)
     assert resp.status_code == 303

@@ -122,6 +122,14 @@ def _override_store():
          patch("agentit.portal.routes.webhooks.get_store", return_value=async_store), \
          patch("agentit.portal.routes.health.get_store", return_value=async_store), \
          patch("agentit.portal.routes.schedules.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.fleet.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.assessments.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.gates.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.capabilities.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.settings.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.insights.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.remediations.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.slos.get_store", return_value=async_store), \
          patch("agentit.image_builder.build_app_image",
                return_value={"image_ref": "test/image:test", "run_name": "test-run", "status": "skipped-in-tests"}):
         yield test_store
@@ -145,8 +153,8 @@ def test_assess_onboard_flow(client, _override_store):
     report = _make_report_with_findings("flow-repo")
 
     # Step 1: assess with mocked clone/run — now async via background thread
-    with patch("agentit.portal.app.clone_repo", return_value=Path("/tmp/fake")), \
-         patch("agentit.portal.app.run_assessment", return_value=report):
+    with patch("agentit.portal.routes.assessments.clone_repo", return_value=Path("/tmp/fake")), \
+         patch("agentit.portal.routes.assessments.run_assessment", return_value=report):
         resp = client.post(
             "/assess",
             data={"repo_url": "https://github.com/org/flow-repo", "criticality": "high"},
@@ -252,9 +260,9 @@ def test_webhook_onboard_full_flow(client, _override_store):
 
 def test_assess_error_shows_progress(client):
     """When run_assessment raises, the progress page shows the error."""
-    with patch("agentit.portal.app.clone_repo", return_value=Path("/tmp/fake")), \
-         patch("agentit.portal.app.run_assessment", side_effect=RuntimeError("clone failed: repo not found")), \
-         patch("agentit.portal.app._auto_create_infra_repo", return_value=None):
+    with patch("agentit.portal.routes.assessments.clone_repo", return_value=Path("/tmp/fake")), \
+         patch("agentit.portal.routes.assessments.run_assessment", side_effect=RuntimeError("clone failed: repo not found")), \
+         patch("agentit.portal.routes.assessments._auto_create_infra_repo", return_value=None):
         resp = client.post(
             "/assess",
             data={"repo_url": "https://github.com/org/bad-repo", "criticality": "medium"},
@@ -286,8 +294,8 @@ def test_reassess_from_dashboard(client, _override_store):
     new_report = _make_report_with_findings("reassess-repo")
     new_report.assessed_at = datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
 
-    with patch("agentit.portal.app.clone_repo", return_value=Path("/tmp/fake")), \
-         patch("agentit.portal.app.run_assessment", return_value=new_report):
+    with patch("agentit.portal.routes.assessments.clone_repo", return_value=Path("/tmp/fake")), \
+         patch("agentit.portal.routes.assessments.run_assessment", return_value=new_report):
         resp = client.post(
             "/assess",
             data={"repo_url": "https://github.com/org/reassess-repo", "criticality": "high"},

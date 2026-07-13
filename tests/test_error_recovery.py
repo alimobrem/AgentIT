@@ -119,6 +119,14 @@ def _override_store():
          patch("agentit.portal.routes.webhooks.get_store", return_value=async_store), \
          patch("agentit.portal.routes.health.get_store", return_value=async_store), \
          patch("agentit.portal.routes.schedules.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.fleet.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.assessments.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.gates.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.capabilities.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.settings.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.insights.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.remediations.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.slos.get_store", return_value=async_store), \
          patch("agentit.image_builder.build_app_image",
                return_value={"image_ref": "test/image:test", "run_name": "test-run", "status": "skipped-in-tests"}):
         yield test_store
@@ -258,9 +266,9 @@ def test_portal_llm_unavailable(client, _override_store):
     """Assessment completes successfully when LLM client is None."""
     report = _make_report_with_findings("no-llm-repo")
 
-    with patch("agentit.portal.app._get_llm_client", return_value=None), \
-         patch("agentit.portal.app.clone_repo", return_value=Path("/tmp/fake")), \
-         patch("agentit.portal.app.run_assessment", return_value=report):
+    with patch("agentit.portal.routes.assessments.get_llm_client", return_value=None), \
+         patch("agentit.portal.routes.assessments.clone_repo", return_value=Path("/tmp/fake")), \
+         patch("agentit.portal.routes.assessments.run_assessment", return_value=report):
         resp = client.post(
             "/assess",
             data={"repo_url": "https://github.com/org/no-llm-repo", "criticality": "medium"},
