@@ -60,6 +60,22 @@ spec:
             - name: AGENTIT_KAFKA_BOOTSTRAP
               value: {{ .Values.kafka.bootstrapServers }}
             {{- end }}
+            - name: AGENTIT_DB_BACKEND
+              value: {{ .Values.postgres.backend | default "sqlite" | quote }}
+            {{- if eq (.Values.postgres.backend | default "sqlite") "postgres" }}
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.bundled.credentials.secretName }}
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.bundled.credentials.secretName }}
+                  key: password
+            - name: AGENTIT_DB_DSN
+              value: "postgresql://$(PGUSER):$(PGPASSWORD)@{{ .Release.Name }}-postgres-bundled.{{ .Release.Namespace }}.svc:5432/{{ .Values.postgres.bundled.credentials.database }}"
+            {{- end }}
             - name: ANTHROPIC_VERTEX_PROJECT_ID
               value: {{ .Values.env.ANTHROPIC_VERTEX_PROJECT_ID | default "" | quote }}
             - name: CLOUD_ML_REGION

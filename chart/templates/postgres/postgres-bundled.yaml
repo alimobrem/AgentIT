@@ -4,9 +4,11 @@
 # OpenShift's own `postgresql` ImageStream in the `openshift` namespace ships
 # (registry.redhat.io/rhel9/postgresql-15), already pullable via this
 # cluster's global pull secret. This is a single-instance, non-HA Deployment
-# so AgentIT has a real, reachable Postgres to eventually point at once
-# AGENTIT_DB_BACKEND is wired up — see docs/postgres-migration-plan.md for
-# the full plan (including why an earlier CloudNativePG-operator design was
+# so AgentIT has a real, reachable Postgres to point at once
+# `.Values.postgres.backend` is set to "postgres" (each of the 5 Deployment
+# templates threads AGENTIT_DB_BACKEND/AGENTIT_DB_DSN from that value and
+# this Secret's credentials) — see docs/postgres-migration-plan.md for the
+# full plan (including why an earlier CloudNativePG-operator design was
 # tried and abandoned) and the upgrade path if HA is ever needed.
 apiVersion: v1
 kind: PersistentVolumeClaim

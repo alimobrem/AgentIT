@@ -360,6 +360,7 @@ async def healthz():
 @router.get("/readyz")
 async def readyz():
     import os
+    backend = os.environ.get("AGENTIT_DB_BACKEND", "sqlite").strip().lower()
     try:
         s = await get_store()
         if hasattr(s, "get_setting"):
@@ -367,13 +368,13 @@ async def readyz():
         else:
             s._conn.execute("SELECT 1")
     except Exception as exc:
-        return JSONResponse({"status": "not ready", "error": str(exc)}, status_code=503)
+        return JSONResponse({"status": "not ready", "backend": backend, "error": str(exc)}, status_code=503)
     if os.environ.get("AGENTIT_KAFKA_BOOTSTRAP"):
         from agentit.events import get_publisher
         pub = get_publisher()
         if not pub.kafka_enabled:
-            return JSONResponse({"status": "not ready", "error": "kafka publisher not connected"}, status_code=503)
-    return {"status": "ready"}
+            return JSONResponse({"status": "not ready", "backend": backend, "error": "kafka publisher not connected"}, status_code=503)
+    return {"status": "ready", "backend": backend}
 
 
 @router.get("/api/health")

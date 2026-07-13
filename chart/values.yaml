@@ -61,10 +61,18 @@ kafka:
 # earlier CloudNativePG-operator-based HA design was tried and abandoned
 # (blocked on paid EDB/Red Hat Marketplace entitlements that were never
 # provisioned) — see docs/postgres-migration-plan.md for that history.
-# Disabled by default and NOT wired into AGENTIT_DB_BACKEND/AGENTIT_PG_DSN —
-# enabling this only stands up the standalone instance; store.py still talks
-# to SQLite until that env var is flipped as a separate, deliberate step.
+# `bundled.enabled` only stands up the standalone instance — it does not by
+# itself change what the app talks to. `backend` below is the actual
+# AGENTIT_DB_BACKEND cutover switch (see docs/postgres-migration-plan.md §7):
+# "sqlite" (default) or "postgres". Threaded into all 5 Deployments (portal +
+# vuln-watcher + slo-tracker + drift-detector + skill-learner) identically by
+# their templates — must only ever be changed as a single coordinated value
+# for all 5 at once, never per-component, and only once `bundled.enabled` is
+# also true. AGENTIT_DB_DSN (built from bundled.credentials + the bundled
+# Service's DNS name) is threaded alongside it automatically when this is
+# "postgres" — there is no separate values key for the DSN itself.
 postgres:
+  backend: sqlite
   bundled:
     enabled: false
     image: registry.redhat.io/rhel9/postgresql-15@sha256:06aeada2ca417445bc4fb711729e65a02ee78421a09c862cbd136ebdd51d7cfa
