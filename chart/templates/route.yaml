@@ -15,9 +15,22 @@ spec:
   to:
     kind: Service
     name: {{ .Release.Name }}
+  {{- if .Values.auth.enabled }}
+  # Route through the oauth-proxy sidecar's HTTPS port, not the app's raw
+  # port -- browsers must complete the cluster OAuth login before the proxy
+  # forwards them to the app. Non-browser/in-cluster callers (Argo Events
+  # Sensors) bypass this Route entirely and call the Service's `http` port
+  # directly -- see webhooks.py's verify_internal_token for their auth.
+  port:
+    targetPort: proxy-https
+  tls:
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect
+  {{- else }}
   port:
     targetPort: 8080
   tls:
     termination: edge
     insecureEdgeTerminationPolicy: Redirect
+  {{- end }}
 {{- end }}

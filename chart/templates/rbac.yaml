@@ -6,7 +6,37 @@ metadata:
   labels:
     app.kubernetes.io/name: agentit
     app.kubernetes.io/instance: {{ .Release.Name }}
+  {{- if .Values.auth.enabled }}
+  annotations:
+    # Tells the OAuth server which Route the oauth-proxy sidecar (deployment.yaml)
+    # is allowed to redirect back to after login -- without this, the OAuthClient
+    # oauth-proxy auto-creates for this SA has no valid redirect URI and login fails.
+    serviceaccounts.openshift.io/oauth-redirectreference.primary: >-
+      {"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"{{ .Release.Name }}"}}
+  {{- end }}
 ---
+{{- if .Values.auth.enabled }}
+# oauth-proxy performs a SubjectAccessReview (via --openshift-sar) to decide
+# whether the logged-in user may access the app, using *this pod's own* SA
+# token (the sidecar shares the pod's serviceAccountName) -- that requires
+# the SA to be bound to the system:auth-delegator ClusterRole.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-auth-delegator
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/instance: {{ .Release.Name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}
+    namespace: {{ .Release.Namespace }}
+---
+{{- end }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:

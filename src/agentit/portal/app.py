@@ -29,10 +29,18 @@ from agentit.portal.github_pr import create_onboarding_pr
 from agentit.portal.helpers import (
     get_store,
     get_retention_days,
+    get_current_user,
     publish_event as _publish_event,
     safe_url as _safe_url,
     format_dimension as _format_dimension,
     get_llm_client as _get_llm_client,
+)
+from agentit.portal.csrf import (
+    CSRF_COOKIE_NAME,
+    STATE_CHANGING_METHODS,
+    generate_csrf_token,
+    is_csrf_exempt,
+    verify_csrf,
 )
 from agentit.agents.capabilities import AGENT_CAPABILITIES, WATCHER_AGENTS as _WATCHER_AGENTS
 from agentit.runner import run_assessment
@@ -115,7 +123,45 @@ app = FastAPI(title="AgentIT Portal")
 from agentit.portal.metrics import instrument_app
 instrument_app(app)
 
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+def _csrf_context_processor(request: Request) -> dict:
+    """Exposes `{{ csrf_token }}` to every template, sourced from the token
+    the csrf_middleware below already resolved for this request -- so any
+    template can render `<input type="hidden" name="csrf_token" value="{{
+    csrf_token }}">` if it isn't relying on the htmx:configRequest header
+    injection in base.html (e.g. a non-boosted form)."""
+    return {"csrf_token": getattr(request.state, "csrf_token", "")}
+
+
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR), context_processors=[_csrf_context_processor])
+
+
+@app.middleware("http")
+async def csrf_middleware(request: Request, call_next):
+    """Double-submit-cookie CSRF protection -- see csrf.py for the full
+    rationale. Runs on every request (not just POSTs) so GET requests always
+    have a fresh token available to hand out via the cookie + template
+    global above, ready for whatever POST/etc. the page subsequently makes."""
+    token = request.cookies.get(CSRF_COOKIE_NAME) or generate_csrf_token()
+    request.state.csrf_token = token
+
+    if request.method in STATE_CHANGING_METHODS and not is_csrf_exempt(request.url.path):
+        if not await verify_csrf(request):
+            return JSONResponse({"detail": "CSRF token missing or invalid"}, status_code=403)
+
+    response = await call_next(request)
+
+    if request.cookies.get(CSRF_COOKIE_NAME) != token:
+        # Secure only when the client actually arrived over HTTPS (checking
+        # X-Forwarded-Proto since TLS terminates at the Route/oauth-proxy,
+        # not this app) -- an unconditional Secure flag would make the
+        # cookie silently never get sent back in plain-HTTP dev/test setups.
+        proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+        response.set_cookie(
+            CSRF_COOKIE_NAME, token,
+            httponly=False, samesite="lax", secure=(proto == "https"), path="/",
+        )
+    return response
 
 
 _maintenance_task = None
@@ -755,9 +801,9 @@ async def delete_remediation(assessment_id: str, rem_id: str):
 
 
 @app.post("/gates/{gate_id}/cancel", response_model=None)
-async def cancel_gate(gate_id: str):
+async def cancel_gate(request: Request, gate_id: str):
     s = get_store()
-    s.resolve_gate(gate_id, "cancelled", "portal-user")
+    s.resolve_gate(gate_id, "cancelled", get_current_user(request))
     return RedirectResponse(url="/gates?success=Gate+dismissed", status_code=303)
 
 
@@ -1050,7 +1096,7 @@ async def resolve_gate(request: Request, gate_id: str):
     status = form.get("status")
     if status not in ("approved", "rejected", "dismissed"):
         raise HTTPException(400, "Invalid status: must be approved, rejected, or dismissed")
-    resolved_by = form.get("resolved_by", "portal-user")
+    resolved_by = form.get("resolved_by") or get_current_user(request)
     s = get_store()
 
     gates = s.list_gates(status="pending")

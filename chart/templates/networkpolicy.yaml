@@ -13,8 +13,29 @@ spec:
     - Ingress
     - Egress
   ingress:
+    # Left unrestricted-by-source (matches pre-auth.enabled behavior) since
+    # port 8080 is never reachable from outside the cluster regardless --
+    # only the Route (which now targets the proxy port below when
+    # auth.enabled) is internet-facing. Narrowing this further would risk
+    # breaking same-namespace consumers this change didn't audit for (e.g.
+    # ServiceMonitor scraping /metrics on this same port from a monitoring
+    # namespace).
     - ports:
         - protocol: TCP
           port: 8080
+    {{- if .Values.auth.enabled }}
+    # The router (openshift-ingress) is the only thing reaching the Route,
+    # which now targets the oauth-proxy sidecar's HTTPS port -- see route.yaml
+    # and deployment.yaml. `network.openshift.io/policy-group: ingress` is the
+    # label OpenShift's SDN/OVN-Kubernetes automatically applies to the
+    # default router's namespace for exactly this purpose.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              network.openshift.io/policy-group: ingress
+      ports:
+        - protocol: TCP
+          port: 8443
+    {{- end }}
   egress:
     - {}

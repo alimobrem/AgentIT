@@ -125,3 +125,28 @@ rbac:
 
 monitoring:
   enabled: false
+
+# OpenShift oauth-proxy sidecar in front of the portal UI. Disabled by default
+# so merging this doesn't change behavior on any existing deployment -- flip
+# on deliberately once the Route/SA prerequisites below are in place (see
+# docs/deployment.md "Authentication" section).
+auth:
+  enabled: false
+  # oauth-proxy image. The `openshift/oauth-proxy` upstream is unmaintained;
+  # registry.redhat.io/openshift4/ose-oauth-proxy is the supported OCP build.
+  image: registry.redhat.io/openshift4/ose-oauth-proxy:latest
+  # --openshift-service-account: which SA's OAuthClient the proxy authenticates
+  # against. Defaults to this release's own SA (see rbac.yaml) -- only
+  # override if you need to share one OAuthClient across multiple Routes.
+  serviceAccount: ""
+  # --openshift-sar restricts access to identities who can "get" this
+  # namespace (i.e. anyone with any role binding here) rather than merely
+  # "any authenticated cluster user". Tighten further (e.g. to a specific
+  # group) if a narrower audience is needed.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi

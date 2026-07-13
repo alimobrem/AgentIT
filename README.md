@@ -170,7 +170,7 @@ Key pages:
 | **SLOs** | SLO definitions and error budgets |
 | **Settings** | Auto-mode toggle, decision matrix, configuration. Tabbed with **Schedules** (watcher status, cron jobs) |
 
-Webhook endpoints power the event-driven loop: `/api/webhook/assess`, `/api/webhook/github-push`, `/api/webhook/onboard`, `/api/webhook/auto-apply`, `/api/webhook/remediate`.
+Webhook endpoints power the event-driven loop: `/api/webhook/assess`, `/api/webhook/github-push`, `/api/webhook/onboard`, `/api/webhook/auto-apply`, `/api/webhook/remediate`. All but `github-push` require the shared-secret `X-Internal-Webhook-Token` header (see [Security notes](#security-notes)).
 
 ## Getting started
 
@@ -270,7 +270,7 @@ AgentIT deploys itself the same way it onboards other apps — via the Helm char
 - Change a secret: `oc create secret` on-cluster, then reference it via a Helm parameter. Never in Git.
 - Never `helm upgrade` manually or `oc edit` the `Rollout`.
 
-Key `chart/values.yaml` feature flags: `rollout.enabled` (canary via Argo Rollouts), `kafka.enabled` / `argoEvents.enabled` (event-driven loop), `tektonCI.enabled` (build pipeline), `cronJobs.cveScan.enabled`, `agents.{vulnWatcher,sloTracker,driftDetector}.enabled`, and `postgres.enabled` (HA Postgres via CloudNativePG — chart-only prep, `store.py` doesn't use it yet).
+Key `chart/values.yaml` feature flags: `rollout.enabled` (canary via Argo Rollouts), `kafka.enabled` / `argoEvents.enabled` (event-driven loop), `tektonCI.enabled` (build pipeline), `cronJobs.cveScan.enabled`, `agents.{vulnWatcher,sloTracker,driftDetector}.enabled`, `postgres.enabled` (HA Postgres via CloudNativePG — chart-only prep, `store.py` doesn't use it yet), and `auth.enabled` (OpenShift `oauth-proxy` sidecar in front of the portal — see [Security notes](#security-notes) and [`docs/deployment.md#authentication`](docs/deployment.md#authentication)).
 
 The chart includes: NetworkPolicy, ResourceQuota, LimitRange, PodDisruptionBudget, anti-affinity, backup CronJob, dedicated ServiceAccount (not `default`), and a self-assess step in the CI pipeline.
 
@@ -284,7 +284,7 @@ See the full deployment topology diagram: [`docs/architecture.md#deployment-topo
 uv run pytest -q
 ```
 
-787 tests across 65 test files:
+1400+ tests across 80+ test files:
 
 | Suite | Tests | What it covers |
 |---|---|---|
@@ -294,7 +294,8 @@ uv run pytest -q
 | Performance tests | 22 | Response time assertions on portal endpoints |
 | API contract tests | 14 | JSON response shape validation |
 | Template rendering | 16 | HTML rendering correctness |
-| Webhook security | 9 | Auth, SSRF, replay protection |
+| Webhook security | 18 | GitHub HMAC signature, internal webhook shared-secret token, SSRF, replay protection |
+| CSRF & identity | 11 | Double-submit-cookie enforcement/exemptions, `get_current_user` oauth-proxy header fallback |
 | Fleet tests | 5 | Multi-app fleet operations |
 | Containerization | 22 | K8s Job agent dispatch |
 | Futureproof | 16 | Platform context, skill lifecycle, API drift |
@@ -306,8 +307,10 @@ Additional test markers: `--run-real-repos` (clone live GitHub repos), `--live-c
 
 ## Security notes
 
-- **No authentication is currently implemented in the portal.** Every route is unauthenticated. Run behind a trusted network boundary until portal auth is added (Keycloak integration planned).
-- **GitHub webhooks are not signature-verified.** Treat the webhook endpoint as trusted-network-only, or add HMAC verification before exposing publicly.
+- **Browser authentication is opt-in (`auth.enabled`, default `false`).** An OpenShift `oauth-proxy` sidecar can front the portal's Route with the cluster's built-in OAuth login — see [`docs/deployment.md#authentication`](docs/deployment.md#authentication). Off by default so this doesn't change behavior for any existing deployment; flip it on deliberately.
+- **CSRF protection is always on.** Every browser-originated `POST`/`PUT`/`PATCH`/`DELETE` route requires a matching double-submit-cookie token (`src/agentit/portal/csrf.py`) — auto-attached by htmx for every form, no per-template changes needed.
+- **`/api/webhook/*` requires a shared-secret token.** These routes are called only by in-cluster Argo Events Sensors, never a browser, so neither of the above protects them — `verify_internal_token` (`src/agentit/portal/routes/webhooks.py`) checks an `X-Internal-Webhook-Token` header against an auto-generated Secret instead. GitHub's push webhook keeps its own pre-existing HMAC-SHA256 signature check against `GITHUB_WEBHOOK_SECRET`.
+- **None of the above is a substitute for network boundaries.** Run the portal behind a trusted network until `auth.enabled` is turned on; even then, `--openshift-sar` only requires "any authenticated user with a role binding in this namespace" unless tightened further.
 - **Secrets never belong in Git.** See [Configuration](#configuration) and `docs/deployment.md`.
 - **Destructive actions are LLM-gated and fail closed.** `automode.py` only auto-applies when the orchestrator approves *and* the LLM classifies the change as non-destructive with >= 0.8 confidence; if the LLM is unavailable, unconfident, or flags a risk, the change is gated for human review.
 - **Manifests are validated before being trusted.** `agents/base.py::validate_manifest()` checks every generated YAML, and `cluster_apply.py` runs a `--dry-run=client` pass before any real apply.

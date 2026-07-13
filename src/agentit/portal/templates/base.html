@@ -830,6 +830,18 @@
 </div>
 <script>
 htmx.config.timeout = 120000;
+// CSRF: every state-changing route needs the double-submit-cookie token
+// (see csrf.py) echoed back as the X-CSRF-Token header. Since <body> has
+// hx-boost="true", htmx intercepts every plain <form method="post"> in
+// every template -- so attaching it here on htmx:configRequest covers all
+// of them without editing each template's <form> tag individually.
+function getCsrfCookie() {
+  var match = document.cookie.match(/(?:^|; )csrf_token=([^;]*)/);
+  return match ? decodeURIComponent(match[1]) : '';
+}
+document.body.addEventListener('htmx:configRequest', function(e) {
+  e.detail.headers['X-CSRF-Token'] = getCsrfCookie();
+});
 document.body.addEventListener('htmx:beforeRequest', function(e) {
   var btn = e.detail.elt.querySelector('button[type="submit"]');
   if (btn) btn.classList.add('btn-loading');

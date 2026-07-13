@@ -18,7 +18,7 @@ from agentit.models import (
     StackInfo,
 )
 from agentit.portal.app import app, get_store
-from conftest import make_store
+from conftest import make_store, prime_csrf
 
 
 def _make_report_with_findings(repo_name: str = "error-repo") -> AssessmentReport:
@@ -124,7 +124,9 @@ def _override_store():
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    c = TestClient(app)
+    prime_csrf(c)
+    return c
 
 
 # ------------------------------------------------------------------

@@ -53,6 +53,14 @@ spec:
           secret:
             secretName: {{ .Values.gcp.credentialsSecret }}
         {{- end }}
+        {{- if .Values.auth.enabled }}
+        - name: proxy-tls
+          secret:
+            secretName: {{ .Release.Name }}-proxy-tls
+        - name: proxy-session
+          secret:
+            secretName: {{ .Release.Name }}-proxy-session
+        {{- end }}
       containers:
         - name: agentit
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -89,6 +97,12 @@ spec:
                   name: github-webhook-secret
                   key: secret
                   optional: true
+            - name: AGENTIT_INTERNAL_WEBHOOK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agentit-internal-webhook-token
+                  key: token
+                  optional: true
           volumeMounts:
             - name: data
               mountPath: /data
@@ -119,3 +133,47 @@ spec:
             capabilities:
               drop:
                 - ALL
+        {{- if .Values.auth.enabled }}
+        # Standard OpenShift oauth-proxy sidecar: terminates the cluster OAuth
+        # login flow, then proxies authenticated requests to the app's real
+        # port on localhost. It's in the same pod as `agentit` above, so this
+        # reaches it over loopback -- no NetworkPolicy rule is needed (or
+        # possible) to express "only the proxy can reach it" for that hop.
+        # What NetworkPolicy *does* still need to restrict is anyone else in
+        # the cluster reaching port 8080 directly instead of going through
+        # this proxy on the Route's external path -- see networkpolicy.yaml.
+        - name: oauth-proxy
+          image: "{{ .Values.auth.image }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8443
+              name: proxy-https
+              protocol: TCP
+          args:
+            - --https-address=:8443
+            - --provider=openshift
+            - --openshift-service-account={{ .Values.auth.serviceAccount | default .Release.Name }}
+            - --upstream=http://localhost:8080
+            - --tls-cert=/etc/tls/private/tls.crt
+            - --tls-key=/etc/tls/private/tls.key
+            - --cookie-secret-file=/etc/proxy/secrets/session_secret
+            - --cookie-secure=true
+            - --pass-user-headers=true
+            - --openshift-sar={"resource":"namespaces","verb":"get","resourceName":"{{ .Release.Namespace }}","namespace":"{{ .Release.Namespace }}"}
+            - --skip-provider-button=true
+          volumeMounts:
+            - name: proxy-tls
+              mountPath: /etc/tls/private
+              readOnly: true
+            - name: proxy-session
+              mountPath: /etc/proxy/secrets
+              readOnly: true
+          resources:
+            {{- toYaml .Values.auth.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+        {{- end }}

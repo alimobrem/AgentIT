@@ -5,6 +5,13 @@ metadata:
   labels:
     app.kubernetes.io/name: agentit
     app.kubernetes.io/instance: {{ .Release.Name }}
+  {{- if .Values.auth.enabled }}
+  annotations:
+    # Asks the OpenShift service-ca operator to mint a serving cert/key pair
+    # into the `{{ .Release.Name }}-proxy-tls` Secret (mounted by the
+    # oauth-proxy sidecar in deployment.yaml) and keep it rotated.
+    service.beta.openshift.io/serving-cert-secret-name: {{ .Release.Name }}-proxy-tls
+  {{- end }}
 spec:
   type: ClusterIP
   ports:
@@ -12,6 +19,12 @@ spec:
       port: {{ .Values.service.port }}
       targetPort: 8080
       protocol: TCP
+    {{- if .Values.auth.enabled }}
+    - name: proxy-https
+      port: 8443
+      targetPort: 8443
+      protocol: TCP
+    {{- end }}
   selector:
     app.kubernetes.io/name: agentit
     app.kubernetes.io/instance: {{ .Release.Name }}

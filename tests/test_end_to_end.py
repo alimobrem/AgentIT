@@ -18,7 +18,7 @@ from agentit.models import (
     StackInfo,
 )
 from agentit.portal.app import app, get_store
-from conftest import make_store
+from conftest import make_store, prime_csrf
 
 
 def _poll_assess_progress(client, job_id: str, max_wait: float = 5.0) -> str:
@@ -127,7 +127,9 @@ def _override_store():
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    c = TestClient(app)
+    prime_csrf(c)
+    return c
 
 
 # ------------------------------------------------------------------

@@ -93,6 +93,22 @@ def make_report(
     )
 
 
+def prime_csrf(client) -> None:
+    """Fetch the CSRF cookie (set on every response by csrf_middleware) and
+    attach it as the X-CSRF-Token header on the client itself, so every
+    subsequent request made through this TestClient instance automatically
+    satisfies the double-submit-cookie check (see csrf.py) -- without having
+    to pass a token through each individual `client.post(...)` call.
+
+    This mirrors exactly what base.html's htmx:configRequest handler does in
+    a real browser: read the cookie, echo it back as a header.
+    """
+    resp = client.get("/healthz")
+    token = resp.cookies.get("csrf_token") or client.cookies.get("csrf_token")
+    if token:
+        client.headers["X-CSRF-Token"] = token
+
+
 @pytest.fixture
 def create_mock_repo(tmp_path: Path):
     """Create a mock repo directory with specified files and contents."""
@@ -140,4 +156,5 @@ def portal_client():
          patch("agentit.portal.routes.health._get_cluster_health", return_value=fake_health), \
          patch("agentit.portal.routes.schedules.get_store", return_value=store):
         client = TestClient(app)
+        prime_csrf(client)
         yield client, store, assessment_id

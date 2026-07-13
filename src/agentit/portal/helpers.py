@@ -113,6 +113,24 @@ def safe_url(value: str) -> str:
     return value
 
 
+def get_current_user(request) -> str:
+    """Resolve the identity of the browser user making this request.
+
+    When `auth.enabled` (chart/templates/deployment.yaml), the oauth-proxy
+    sidecar authenticates the user against the cluster's OAuth server and
+    forwards their username via `X-Forwarded-User` -- the app trusts this
+    header as-is rather than re-verifying it, since the proxy is a sidecar in
+    the same pod (reached over loopback), not a separate network hop an
+    external attacker could spoof; NetworkPolicy still restricts who can
+    reach the app's real port directly (see networkpolicy.yaml).
+
+    Falls back to "portal-user" when the header is absent -- the default in
+    local dev, tests, and any deployment with `auth.enabled=false`, so this
+    never breaks environments without the proxy in front of them.
+    """
+    return request.headers.get("X-Forwarded-User") or "portal-user"
+
+
 DIMENSION_LABELS: dict[str, str] = {
     "ha_dr": "HA/DR",
     "cicd": "CI/CD",

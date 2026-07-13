@@ -337,6 +337,10 @@ graph LR
     Chart --> VulnWatcher & SloTracker & DriftDetector & SkillLearner
 ```
 
+### Authentication (`auth.enabled`)
+
+Optional `oauth-proxy` sidecar in the `agentit` Deployment/Rollout pod, fronting the portal's real port for browser traffic via the Route. Disabled by default. See [docs/deployment.md#authentication](deployment.md#authentication) for the full picture, including CSRF protection on browser form POSTs and the separate shared-secret token that authenticates the Argo Events Sensors calling `/api/webhook/*` (which bypass both the Route and the proxy, going straight to the in-cluster Service).
+
 ## The agent fleet
 
 Every agent shares the same contract (`agents/base.py`): `Agent(report, output_dir).run() -> Result` where `Result.files` is a `list[GeneratedFile]`. The `FleetOrchestrator` runs **skills first** as the primary generation path, then Python agents supplement for findings that no skill covers.

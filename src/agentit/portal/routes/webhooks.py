@@ -8,7 +8,7 @@ import json
 import logging
 import os
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from agentit.portal.helpers import (
@@ -37,10 +37,39 @@ def _verify_github_signature(request: Request, body_bytes: bytes) -> bool:
     expected = hmac.new(secret.encode(), body_bytes, hashlib.sha256).hexdigest()
     return hmac.compare_digest(sig_header[7:], expected)
 
+
+INTERNAL_TOKEN_HEADER = "X-Internal-Webhook-Token"
+
+
+def verify_internal_token(request: Request) -> None:
+    """Shared-secret auth for the in-cluster-only webhook routes below.
+
+    These are called by Argo Events Sensors (chart/templates/argo-events/
+    sensor-*.yaml) hitting the Service directly (`http://agentit.agentit.svc:
+    8080/...`), never by a browser -- so the oauth-proxy sidecar (auth.enabled,
+    app.py) doesn't protect them regardless of whether it's on. The Sensors'
+    HTTP triggers attach the same secret as a `secureHeaders` entry sourced
+    from the `agentit-internal-webhook-token` Secret at trigger-fire time.
+
+    Skips the check (fails open) if AGENTIT_INTERNAL_WEBHOOK_TOKEN isn't set
+    in this process's env -- matching the existing _verify_github_signature
+    convention above -- so local dev/tests that never configure this secret
+    keep working. In a real deployment the Secret is always templated (see
+    chart/templates/internal-webhook-token-secret.yaml), so that fail-open
+    path should never actually be exercised in production.
+    """
+    secret = os.environ.get("AGENTIT_INTERNAL_WEBHOOK_TOKEN")
+    if not secret:
+        return
+    token = request.headers.get(INTERNAL_TOKEN_HEADER, "")
+    if not token or not hmac.compare_digest(token, secret):
+        raise HTTPException(401, "Missing or invalid internal webhook token")
+
+
 router = APIRouter()
 
 
-@router.post("/api/webhook/assess")
+@router.post("/api/webhook/assess", dependencies=[Depends(verify_internal_token)])
 async def webhook_assess(request: Request):
     """Trigger an assessment via webhook. Accepts JSON body: {repo_url, criticality}"""
     body = await request.json()
@@ -194,7 +223,7 @@ async def webhook_github_push(request: Request):
         return JSONResponse({"status": "error", "reason": str(exc)[:200]}, status_code=500)
 
 
-@router.post("/api/webhook/onboard")
+@router.post("/api/webhook/onboard", dependencies=[Depends(verify_internal_token)])
 async def webhook_onboard(request: Request):
     """Trigger onboarding via webhook (called by Argo Events Sensor for low-score assessments)."""
     body = await request.json()
@@ -255,7 +284,7 @@ async def webhook_onboard(request: Request):
     })
 
 
-@router.post("/api/webhook/auto-apply")
+@router.post("/api/webhook/auto-apply", dependencies=[Depends(verify_internal_token)])
 async def webhook_auto_apply(request: Request):
     """Auto-apply manifests if auto-mode is on and LLM classifies as safe."""
     body = await request.json()
@@ -289,7 +318,7 @@ async def webhook_auto_apply(request: Request):
     return JSONResponse(result, status_code=status_code)
 
 
-@router.post("/api/webhook/finding")
+@router.post("/api/webhook/finding", dependencies=[Depends(verify_internal_token)])
 async def webhook_finding(request: Request):
     """Generic finding remediation -- routes to the right agent generator via the dispatcher.
 
@@ -370,7 +399,7 @@ async def webhook_finding(request: Request):
     return JSONResponse({"status": "accepted", "action": "alert-only"})
 
 
-@router.post("/api/webhook/remediate")
+@router.post("/api/webhook/remediate", dependencies=[Depends(verify_internal_token)])
 async def webhook_remediate(request: Request):
     """Trigger the full remediation loop asynchronously.
 
