@@ -116,11 +116,11 @@ spec:
                 cpu: 50m
             script: |
               set -euo pipefail
-              TAG_INDEX=$(oc -n openshift-gitops get application agentit \
+              TAG_INDEX=$(oc -n openshift-gitops get applications.argoproj.io agentit \
                 -o jsonpath='{range .spec.source.helm.parameters[*]}{.name}{"\n"}{end}' | \
                 grep -n '^image.tag$' | cut -d: -f1)
               TAG_INDEX=$((TAG_INDEX - 1))
-              oc -n openshift-gitops patch application agentit --type=json \
+              oc -n openshift-gitops patch applications.argoproj.io agentit --type=json \
                 -p "[{\"op\":\"replace\",\"path\":\"/spec/source/helm/parameters/${TAG_INDEX}/value\",\"value\":\"${REVISION}\"}]"
               echo "Updated Application image.tag to ${REVISION}"
       params:
