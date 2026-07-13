@@ -1,0 +1,70 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: agentit
+  labels:
+    app.kubernetes.io/name: agentit
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  rollbackWindow:
+    revisions: 2
+  selector:
+    matchLabels:
+      app: agentit
+  strategy:
+    canary:
+      steps:
+      - setWeight: 5
+      - pause:
+          duration: 2m
+      - analysis:
+          templates:
+          - templateName: agentit-success-rate
+      - setWeight: 25
+      - pause:
+          duration: 2m
+      - analysis:
+          templates:
+          - templateName: agentit-success-rate
+      - setWeight: 50
+      - pause:
+          duration: 3m
+      - analysis:
+          templates:
+          - templateName: agentit-success-rate
+      - setWeight: 100
+      canaryService: agentit-canary
+      stableService: agentit
+      autoPromotionEnabled: false
+      abortScaleDownDelaySeconds: 30
+  template:
+    metadata:
+      labels:
+        app: agentit
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: agentit
+        image: image-registry.openshift-image-registry.svc:5000/agentit/agentit:latest
+        ports:
+        - containerPort: 8080
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL

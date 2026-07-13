@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: agentit-success-rate
+  labels:
+    app.kubernetes.io/name: agentit
+spec:
+  metrics:
+  - name: success-rate
+    interval: 30s
+    count: 5
+    failureLimit: 2
+    provider:
+      prometheus:
+        address: http://prometheus-operated.openshift-monitoring.svc:9090
+        query: sum(rate(http_requests_total{app="agentit",status=~"2.."}[5m])) / sum(rate(http_requests_total{app="agentit"}[5m]))
+    successCondition: result[0] >= 0.95
+  - name: error-rate
+    interval: 30s
+    count: 5
+    failureLimit: 2
+    provider:
+      prometheus:
+        address: http://prometheus-operated.openshift-monitoring.svc:9090
+        query: sum(rate(http_requests_total{app="agentit",status=~"5.."}[5m])) / sum(rate(http_requests_total{app="agentit"}[5m]))
+    successCondition: result[0] <= 0.05

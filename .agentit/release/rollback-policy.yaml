@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentit-rollback-policy
+  labels:
+    app.kubernetes.io/name: agentit
+data:
+  auto-rollback: 'true'
+  error-budget-threshold: 0.1%
+  rollback-window-revisions: '2'
+  abort-command: kubectl argo rollouts abort agentit
+  undo-command: kubectl argo rollouts undo agentit
+  retry-command: kubectl argo rollouts retry rollout agentit
