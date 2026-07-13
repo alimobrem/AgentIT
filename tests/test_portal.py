@@ -81,12 +81,22 @@ def _make_report(repo_name: str = "test-repo") -> AssessmentReport:
 
 @pytest.fixture(autouse=True)
 def _override_store():
-    """Patch get_store so every test gets a fresh in-memory DB."""
+    """Patch get_store so every test gets a fresh in-memory DB.
+
+    Also patches image_builder.build_app_image: onboarding a report whose
+    findings include a missing Containerfile causes HardeningAgent to
+    generate one, which flips `has_containerfile` in app.py and triggers a
+    REAL `oc apply` PipelineRun via subprocess — against whatever cluster
+    the local kubeconfig happens to point to. Without this patch, running
+    this suite with an active `oc login` silently floods a real cluster.
+    """
     test_store = make_store()
     with patch("agentit.portal.app.get_store", return_value=test_store), \
          patch("agentit.portal.routes.webhooks.get_store", return_value=test_store), \
          patch("agentit.portal.routes.health.get_store", return_value=test_store), \
-         patch("agentit.portal.routes.schedules.get_store", return_value=test_store):
+         patch("agentit.portal.routes.schedules.get_store", return_value=test_store), \
+         patch("agentit.image_builder.build_app_image",
+               return_value={"image_ref": "test/image:test", "run_name": "test-run", "status": "skipped-in-tests"}):
         yield test_store
 
 

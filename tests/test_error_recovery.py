@@ -109,11 +109,16 @@ def _make_report_with_findings(repo_name: str = "error-repo") -> AssessmentRepor
 
 @pytest.fixture(autouse=True)
 def _override_store():
+    """Patch get_store, and image_builder.build_app_image (see test_portal.py's
+    identical fixture for why: onboarding here would otherwise shell out to a
+    real `oc apply` against whatever cluster the local kubeconfig points to)."""
     test_store = make_store()
     with patch("agentit.portal.app.get_store", return_value=test_store), \
          patch("agentit.portal.routes.webhooks.get_store", return_value=test_store), \
          patch("agentit.portal.routes.health.get_store", return_value=test_store), \
-         patch("agentit.portal.routes.schedules.get_store", return_value=test_store):
+         patch("agentit.portal.routes.schedules.get_store", return_value=test_store), \
+         patch("agentit.image_builder.build_app_image",
+               return_value={"image_ref": "test/image:test", "run_name": "test-run", "status": "skipped-in-tests"}):
         yield test_store
 
 
