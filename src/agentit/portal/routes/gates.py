@@ -88,6 +88,13 @@ async def resolve_gate(request: Request, gate_id: str):
                 )
             await s.resolve_gate(gate_id, status, resolved_by)
             await s.save_apply_results(assessment_id, results, namespace, False)
+
+            from agentit.skill_engine import record_skill_outcomes
+            await record_skill_outcomes(
+                s, report.repo_name, files, set(results["applied"]), "approved",
+                f"gate {gate_id} approved by {resolved_by}",
+            )
+
             applied = len(results["applied"])
             return RedirectResponse(
                 url=f"/assessments/{assessment_id}/onboard-results?applied={applied}&gate_approved=true",
@@ -97,13 +104,30 @@ async def resolve_gate(request: Request, gate_id: str):
     await s.resolve_gate(gate_id, status, resolved_by)
 
     if status == "rejected":
+        reject_reason = str(form.get("reason", ""))
         await s.record_feedback(
             app_name=gate.get("target_app", ""),
             agent_name=gate.get("agent_name", "gate"),
             finding_category=gate.get("gate_type", ""),
             action="rejected",
-            human_reason=str(form.get("reason", "")),
+            human_reason=reject_reason,
         )
+
+        # Also record a per-skill outcome for every skill-generated file this
+        # gate covered -- the agent_feedback write above is generic
+        # (agent_name/gate_type), not attributed to the specific skill(s)
+        # that produced the rejected manifests, so skill_effectiveness never
+        # saw a negative signal from a gate rejection until now.
+        reject_assessment_id = gate.get("assessment_id")
+        if reject_assessment_id:
+            reject_files = await s.get_onboarding(reject_assessment_id)
+            reject_report = await s.get(reject_assessment_id)
+            if reject_files and reject_report:
+                from agentit.skill_engine import record_skill_outcomes
+                await record_skill_outcomes(
+                    s, reject_report.repo_name, reject_files, None, "rejected",
+                    reject_reason,
+                )
 
     return RedirectResponse(url="/gates", status_code=303)
 

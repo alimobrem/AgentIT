@@ -11,6 +11,25 @@ from agentit.models import AssessmentReport, Severity
 logger = logging.getLogger(__name__)
 
 
+def _recency_weight(created_at_iso: str, now: datetime, half_life_days: float) -> float:
+    """Exponential recency weight for a ``skill_effectiveness`` row: 1.0 for
+    an outcome recorded right now, 0.5 at ``half_life_days`` old, 0.25 at
+    twice that, etc. Malformed/missing timestamps fall back to full weight
+    (1.0) rather than dropping the row -- an outcome with an unparsable
+    timestamp is still a real outcome, just one this can't age-discount.
+    """
+    try:
+        recorded_at = datetime.fromisoformat(created_at_iso)
+    except (TypeError, ValueError):
+        return 1.0
+    if recorded_at.tzinfo is None:
+        recorded_at = recorded_at.replace(tzinfo=timezone.utc)
+    age_days = max((now - recorded_at).total_seconds() / 86400.0, 0.0)
+    if half_life_days <= 0:
+        return 1.0
+    return 0.5 ** (age_days / half_life_days)
+
+
 class AssessmentStore:
     def __init__(self, db_path: str | None = None) -> None:
         import os
@@ -1517,32 +1536,76 @@ class AssessmentStore:
         )
         self._conn.commit()
 
-    def get_skill_effectiveness(self, skill_name: str = '', min_count: int = 5) -> dict:
+    def get_skill_effectiveness(
+        self, skill_name: str = '', min_count: int = 5, half_life_days: float = 90.0,
+    ) -> dict:
+        """Per-skill outcome tallies, plus a recency-weighted approval rate.
+
+        ``approved``/``rejected``/``total`` stay plain all-time counts (used
+        as-is by ``capabilities.html``'s own rate math) -- ``weighted_rate``
+        is the new, additional field: an exponentially recency-weighted
+        approval rate (half-life ``half_life_days``, default ~3 months) so a
+        skill that was bad a while ago and has since improved isn't held
+        down forever by outcomes that no longer reflect its current
+        behavior. This needs each row's timestamp, not just a `GROUP BY`
+        count, so every matching row is fetched (still just one column more
+        than before) and weighted in Python rather than in SQL, to keep the
+        same logic identical across both the sqlite and Postgres backends.
+        """
         if skill_name:
             rows = self._conn.execute(
-                'SELECT skill_name, outcome, COUNT(*) as cnt FROM skill_effectiveness WHERE skill_name = ? GROUP BY skill_name, outcome',
+                'SELECT skill_name, outcome, created_at FROM skill_effectiveness WHERE skill_name = ?',
                 (skill_name,),
             ).fetchall()
         else:
             rows = self._conn.execute(
-                'SELECT skill_name, outcome, COUNT(*) as cnt FROM skill_effectiveness GROUP BY skill_name, outcome',
+                'SELECT skill_name, outcome, created_at FROM skill_effectiveness',
             ).fetchall()
+
+        now = datetime.now(timezone.utc)
         stats: dict[str, dict] = {}
         for r in rows:
             name = r['skill_name']
             if name not in stats:
-                stats[name] = {'approved': 0, 'rejected': 0, 'total': 0}
-            stats[name][r['outcome']] = r['cnt']
-            stats[name]['total'] += r['cnt']
-        return {k: v for k, v in stats.items() if v['total'] >= min_count}
+                stats[name] = {'approved': 0, 'rejected': 0, 'total': 0,
+                                '_weighted_approved': 0.0, '_weighted_total': 0.0}
+            outcome = r['outcome']
+            stats[name][outcome] = stats[name].get(outcome, 0) + 1
+            stats[name]['total'] += 1
+
+            weight = _recency_weight(r['created_at'], now, half_life_days)
+            stats[name]['_weighted_total'] += weight
+            if outcome == 'approved':
+                stats[name]['_weighted_approved'] += weight
+
+        result: dict[str, dict] = {}
+        for name, s in stats.items():
+            if s['total'] < min_count:
+                continue
+            weighted_total = s.pop('_weighted_total')
+            weighted_approved = s.pop('_weighted_approved')
+            s['weighted_rate'] = weighted_approved / weighted_total if weighted_total > 0 else 0.0
+            result[name] = s
+        return result
 
     def get_low_effectiveness_skills(self, min_count: int = 5, max_rate: float = 0.3) -> list[dict]:
+        """Skills flagged for review by their recency-weighted approval rate
+        (see ``get_skill_effectiveness``) -- a skill rejected heavily months
+        ago but approved consistently since can recover out of this list,
+        rather than being stuck flagged by outcomes that no longer reflect
+        its current behavior."""
         stats = self.get_skill_effectiveness(min_count=min_count)
         low: list[dict] = []
         for name, s in stats.items():
-            rate = s['approved'] / s['total'] if s['total'] > 0 else 0
+            rate = s['weighted_rate']
             if rate < max_rate:
-                low.append({'skill': name, 'approval_rate': round(rate, 2), 'total': s['total']})
+                raw_rate = s['approved'] / s['total'] if s['total'] > 0 else 0
+                low.append({
+                    'skill': name,
+                    'approval_rate': round(rate, 2),
+                    'raw_approval_rate': round(raw_rate, 2),
+                    'total': s['total'],
+                })
         return low
 
     def get_recent_skill_activity(self, limit: int = 20) -> list[dict]:
@@ -1552,6 +1615,73 @@ class AssessmentStore:
             (limit,),
         )
         return [dict(row) for row in cursor.fetchall()]
+
+    def get_loop_health(self, window_days: int = 30) -> dict:
+        """Self-improvement loop health: of the skills currently flagged as
+        low-effectiveness, what fraction have had an improvement actually
+        drafted for them recently (within ``window_days``)?
+
+        Uses the ``skill-improvement-drafted`` events
+        ``watchers/skill_learner.py``/``routes/capabilities.py`` now log
+        when the learning agent researches a replacement for a flagged
+        skill (Bucket 1/3's wiring) -- before that wiring existed, this
+        would always have been zero, since nothing closed the loop from
+        "flagged" to "acted on". Doesn't track *historically* when a skill
+        first became flagged (that's not persisted anywhere), so this is a
+        live snapshot: "of the skills flagged right now, how many have seen
+        a recent improvement attempt" -- not a true time-to-fix metric, but
+        a real, honest signal that the loop is (or isn't) actually turning.
+        """
+        flagged = self.get_low_effectiveness_skills()
+        if not flagged:
+            return {"flagged_count": 0, "with_recent_improvement": 0,
+                    "pct_with_improvement": None, "window_days": window_days}
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
+        with_improvement = 0
+        for entry in flagged:
+            row = self._conn.execute(
+                "SELECT 1 FROM events WHERE action = 'skill-improvement-drafted' "
+                "AND summary LIKE ? AND timestamp >= ? LIMIT 1",
+                (f"%{entry['skill']}%", cutoff),
+            ).fetchone()
+            if row is not None:
+                with_improvement += 1
+
+        return {
+            "flagged_count": len(flagged),
+            "with_recent_improvement": with_improvement,
+            "pct_with_improvement": round(with_improvement / len(flagged) * 100, 1),
+            "window_days": window_days,
+        }
+
+    def get_skill_history(self, skill_name: str, limit: int = 50) -> dict:
+        """Per-skill lifecycle view: every recorded outcome (its
+        effectiveness trend over time) plus every lifecycle event that
+        mentions this skill by name (added/activated/deprecated/removed,
+        skipped-for-rejection, improvement-drafted).
+
+        Lifecycle events are found the same way ``get_assessment_timeline``
+        already finds assessment-scoped events -- a ``summary LIKE`` match
+        -- since skill lifecycle events (``skill_inventory.py``,
+        ``drift_detector.py``, ``capabilities.py``, ``skill_engine.py``)
+        aren't tagged with a structured skill-name column today, only a
+        human-readable summary that happens to include the skill's name.
+        """
+        outcomes = self._conn.execute(
+            "SELECT app_name, outcome, reason, created_at FROM skill_effectiveness "
+            "WHERE skill_name = ? ORDER BY created_at DESC LIMIT ?",
+            (skill_name, limit),
+        ).fetchall()
+        events = self._conn.execute(
+            "SELECT timestamp, agent_id, action, severity, summary FROM events "
+            "WHERE summary LIKE ? ORDER BY timestamp DESC LIMIT ?",
+            (f"%{skill_name}%", limit),
+        ).fetchall()
+        return {
+            "outcomes": [dict(r) for r in outcomes],
+            "events": [dict(r) for r in events],
+        }
 
     # ── Check Suppression ───────────────────────────────────────────
 

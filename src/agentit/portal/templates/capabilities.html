@@ -89,7 +89,7 @@
   <tbody>
     {% for skill in domain_skills %}
     <tr>
-      <td class="text-bold">{{ skill.name }}</td>
+      <td class="text-bold"><a href="/capabilities/skills/{{ skill.name }}/history">{{ skill.name }}</a></td>
       <td>
         {% if skill.status == "active" %}
           <span class="badge badge-success">active</span>
@@ -111,11 +111,12 @@
         {% set eff = effectiveness.get(skill.name) %}
         {% if eff %}
           {% set rate = ((eff.approved / eff.total) * 100)|round|int if eff.total > 0 else 0 %}
-          <div class="agent-rate-bar">
+          {% set weighted_rate = (eff.weighted_rate * 100)|round|int %}
+          <div class="agent-rate-bar" title="Recency-weighted: {{ weighted_rate }}% (recent outcomes count more)">
             <div class="score-bar-bg">
               <div class="score-bar-fill {% if rate >= 70 %}score-green{% elif rate >= 40 %}score-yellow{% else %}score-red{% endif %}" style="--pct: {{ rate }}%;"></div>
             </div>
-            <span class="text-sm">{{ rate }}%</span>
+            <span class="text-sm">{{ rate }}% <span class="text-muted">(recent: {{ weighted_rate }}%)</span></span>
           </div>
         {% else %}
           <span class="text-muted text-sm">—</span>

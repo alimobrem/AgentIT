@@ -70,6 +70,70 @@ def test_research_once_no_research_results():
     publisher.publish.assert_not_called()
 
 
+def test_research_once_prioritizes_flagged_skill_over_cve_sweep(tmp_path):
+    """Regression: the research cycle must check get_low_effectiveness_skills()
+    first and research a replacement for the flagged skill instead of the
+    generic CVE sweep -- this is the wiring that closes the self-improvement
+    loop end to end."""
+    from conftest import make_store
+
+    skills_dir = tmp_path / "skills"
+    (skills_dir / "security").mkdir(parents=True)
+    (skills_dir / "security" / "network-policy.md").write_text(
+        "---\nname: network-policy\ndomain: security\nversion: 1\n"
+        "triggers: [network]\noutputs: [NetworkPolicy]\nstatus: active\n---\nbody\n",
+        encoding="utf-8",
+    )
+
+    store = make_store()
+    for _ in range(4):
+        store.record_skill_outcome("network-policy", "app-a", "rejected", "wrong")
+    store.record_skill_outcome("network-policy", "app-b", "rejected", "wrong")
+
+    learner, publisher = _learner(store=store, skills_dir=skills_dir)
+
+    with patch("agentit.llm.LLMClient", return_value=object()), \
+         patch("agentit.learning_agent.research_cves") as mock_cves, \
+         patch("agentit.learning_agent.research_skill_improvement",
+               return_value={"title": "network-policy-v2", "description": "better"}) as mock_improve, \
+         patch("agentit.learning_agent.generate_skill_from_research",
+               return_value="---\nname: network-policy-v2\n---\nbody"), \
+         patch("agentit.learning_agent.save_skill",
+               return_value=Path("/tmp/fake-skills/security/network-policy-v2.md")):
+        saved, skipped = learner.research_once()
+
+    mock_improve.assert_called_once()
+    args, _ = mock_improve.call_args
+    assert args[1] == "network-policy"
+    assert args[2] == "security"
+    mock_cves.assert_not_called()
+    assert saved == ["network-policy-v2"]
+    assert skipped == []
+
+
+def test_research_once_falls_back_to_cve_sweep_when_nothing_flagged():
+    """No low-effectiveness skills -> the existing CVE-sweep behavior runs
+    exactly as before."""
+    from conftest import make_store
+
+    store = make_store()
+    learner, publisher = _learner(store=store)
+
+    with patch("agentit.llm.LLMClient", return_value=object()), \
+         patch("agentit.learning_agent.research_cves", return_value=[{"id": "CVE-2099-00009"}]) as mock_cves, \
+         patch("agentit.learning_agent.research_skill_improvement") as mock_improve, \
+         patch("agentit.learning_agent.check_skill_exists", return_value=False), \
+         patch("agentit.learning_agent.generate_skill_from_research",
+               return_value="---\nname: cve-2099-00009\n---\nbody"), \
+         patch("agentit.learning_agent.save_skill",
+               return_value=Path("/tmp/fake-skills/security/cve-2099-00009.md")):
+        saved, skipped = learner.research_once()
+
+    mock_improve.assert_not_called()
+    mock_cves.assert_called_once()
+    assert saved == ["cve-2099-00009"]
+
+
 def test_learn_watch_cli_options_registered():
     runner = CliRunner()
     result = runner.invoke(main, ["learn-watch", "--help"])

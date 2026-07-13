@@ -310,9 +310,10 @@ def test_onboard_results_page(client, _override_store):
     client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
     resp = client.get(f"/assessments/{aid}/onboard-results")
     assert resp.status_code == 200
-    assert "security" in resp.text
-    assert "observability" in resp.text
-    assert "compliance" in resp.text
+    # security/observability/compliance are now skill-only domains (see
+    # docs/agent-removal-readiness.md) -- generated manifests are grouped
+    # under the shared "skills" category instead of one per domain.
+    assert "skills" in resp.text
     assert "Download" in resp.text
     assert "Create PR" in resp.text
     assert "Apply to Cluster" in resp.text
@@ -330,10 +331,10 @@ def test_api_manifests(client, _override_store):
     data = resp.json()
     assert isinstance(data, list)
     assert len(data) > 0
+    # security/observability/compliance are now skill-only domains (see
+    # docs/agent-removal-readiness.md) -- grouped under "skills" instead.
     categories = {f["category"] for f in data}
-    assert "security" in categories
-    assert "observability" in categories
-    assert "compliance" in categories
+    assert "skills" in categories
 
 
 def test_api_manifests_not_found(client):
@@ -451,11 +452,11 @@ def test_download_manifests_zip(client, _override_store):
     names = zf.namelist()
     assert len(names) > 0
 
-    # Every entry should be under a known category directory
+    # Every entry should be under a known category directory.
+    # security/observability/compliance are now skill-only domains (see
+    # docs/agent-removal-readiness.md) -- grouped under "skills" instead.
     categories = {n.split("/")[0] for n in names}
-    assert "security" in categories
-    assert "observability" in categories
-    assert "compliance" in categories
+    assert "skills" in categories
 
     # Verify files are readable and non-empty
     for name in names:
@@ -1703,6 +1704,10 @@ def test_capabilities_learn_no_research_results(client):
 
 
 def _make_draft_skill(tmp_path, name="cve-2099-00003", domain="security") -> Path:
+    """A draft skill that actually generates valid output -- since
+    activate_skill_route now runs verify_skill() (functional generation
+    smoke test) before flipping status, a body with no usable template
+    would legitimately fail activation."""
     skills_dir = tmp_path / "skills" / domain
     skills_dir.mkdir(parents=True)
     skill_file = skills_dir / f"{name}.md"
@@ -1715,7 +1720,19 @@ def _make_draft_skill(tmp_path, name="cve-2099-00003", domain="security") -> Pat
         f"outputs: [NetworkPolicy]\n"
         f"status: draft\n"
         f"---\n"
-        f"body\n",
+        "## Property\nEnsures network isolation.\n\n"
+        "## Constraints\nMust apply to all pods.\n\n"
+        "## Verification\nCheck that a NetworkPolicy restricting Ingress exists.\n\n"
+        "```yaml\n"
+        "apiVersion: networking.k8s.io/v1\n"
+        "kind: NetworkPolicy\n"
+        "metadata:\n"
+        "  name: {{app_name}}-netpol\n"
+        "spec:\n"
+        "  podSelector: {}\n"
+        "  policyTypes:\n"
+        "    - Ingress\n"
+        "```\n",
         encoding="utf-8",
     )
     return skill_file
@@ -1782,6 +1799,69 @@ def test_activate_skill_missing_file_shows_error(client, tmp_path, monkeypatch):
     )
     assert resp.status_code == 303
     assert "error=" in resp.headers["location"]
+
+
+def test_activate_skill_blocked_when_generation_fails(client, tmp_path, monkeypatch):
+    """A draft skill with no usable template and no LLM fails verify_skill()'s
+    functional check -- activation must be blocked, not silently allowed."""
+    skills_dir = tmp_path / "skills" / "security"
+    skills_dir.mkdir(parents=True)
+    skill_file = skills_dir / "nonfunctional.md"
+    skill_file.write_text(
+        "---\nname: nonfunctional\ndomain: security\nversion: 1\n"
+        "triggers: [test]\noutputs: [NetworkPolicy]\nstatus: draft\n---\nno template here\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    resp = client.post(
+        "/capabilities/skills/activate",
+        data={"skill_path": str(skill_file)},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "error=" in resp.headers["location"]
+    assert "status: draft" in skill_file.read_text()
+
+
+# ── Capabilities: per-skill lifecycle view ──────────────────────────────
+
+
+def test_skill_history_page_renders_for_unknown_skill(client):
+    """A skill with no recorded outcomes/events still renders a valid page
+    (not a 404/500) -- most skills won't have effectiveness data yet."""
+    resp = client.get("/capabilities/skills/some-skill-with-no-history/history")
+    assert resp.status_code == 200
+    assert "some-skill-with-no-history" in resp.text
+    assert "No recorded outcomes" in resp.text
+
+
+def test_skill_history_page_shows_outcomes_and_events(client, _override_store):
+    store = _override_store
+    store.record_skill_outcome("network-policy", "app-a", "approved", "looks fine")
+    store.record_skill_outcome("network-policy", "app-b", "rejected", "wrong port")
+    store.log_event("skill-inventory", "skill-added", None, "info", "New skill added: security/network-policy")
+
+    resp = client.get("/capabilities/skills/network-policy/history")
+    assert resp.status_code == 200
+    assert "app-a" in resp.text
+    assert "app-b" in resp.text
+    assert "looks fine" in resp.text
+    assert "New skill added: security/network-policy" in resp.text
+
+
+def test_get_skill_history_store_method():
+    from conftest import make_store
+    store = make_store()
+    store.record_skill_outcome("rbac", "app-a", "approved", "fine")
+    store.log_event("drift-detector", "skill-deprecated", "cluster", "warning",
+                     "Auto-deprecated skill rbac: RoleBinding API removed")
+
+    history = store.get_skill_history("rbac")
+    assert len(history["outcomes"]) == 1
+    assert history["outcomes"][0]["app_name"] == "app-a"
+    assert len(history["events"]) == 1
+    assert "Auto-deprecated skill rbac" in history["events"][0]["summary"]
 
 
 # ── Capabilities: catalog change tracking (skill_inventory) ────────────
@@ -1852,6 +1932,46 @@ def test_background_skill_inventory_diff_surfaces_on_events_page(client, _overri
     caps_resp = client.get("/capabilities")
     assert caps_resp.status_code == 200
     assert "cve-2099-1" in caps_resp.text
+
+
+# ── Loop health meta-metric ──────────────────────────────────────────────
+
+
+def test_get_loop_health_no_flagged_skills():
+    from conftest import make_store
+    store = make_store()
+    health = store.get_loop_health()
+    assert health["flagged_count"] == 0
+    assert health["pct_with_improvement"] is None
+
+
+def test_get_loop_health_counts_recent_improvement_drafts():
+    from conftest import make_store
+    store = make_store()
+    for _ in range(5):
+        store.record_skill_outcome("network-policy", "app-a", "rejected", "wrong")
+    for _ in range(5):
+        store.record_skill_outcome("containerfile", "app-a", "rejected", "wrong")
+
+    # Only network-policy got a follow-up improvement draft.
+    store.log_event("skill-learner", "skill-improvement-drafted", None, "info",
+                     "Drafted network-policy-v2.md to improve low-effectiveness skill "
+                     "'network-policy' (0% approval)")
+
+    health = store.get_loop_health()
+    assert health["flagged_count"] == 2
+    assert health["with_recent_improvement"] == 1
+    assert health["pct_with_improvement"] == 50.0
+
+
+def test_insights_page_shows_loop_health(client, _override_store):
+    store = _override_store
+    for _ in range(5):
+        store.record_skill_outcome("network-policy", "app-a", "rejected", "wrong")
+
+    resp = client.get("/insights")
+    assert resp.status_code == 200
+    assert "Loop Health" in resp.text
 
 
 # ── LLM Decisions audit page ─────────────────────────────────────────────

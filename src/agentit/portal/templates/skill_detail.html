@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}{{ skill_name }} - Skill Detail - AgentIT{% endblock %}
+{% block content %}
+<h1>{{ skill_name }}</h1>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-label">Status</div>
+    <div class="stat-value">
+      {% if skill and skill.status == "active" %}
+        <span class="text-success">Active</span>
+      {% elif skill and skill.status == "deprecated" %}
+        <span class="text-warning">Deprecated</span>
+      {% elif skill %}
+        <span class="text-muted">{{ skill.status }}</span>
+      {% else %}
+        <span class="text-muted">Unknown (skill file not found on disk)</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Approval Rate (recency-weighted)</div>
+    <div class="stat-value">
+      {% if effectiveness %}
+        {% set rate = (effectiveness.weighted_rate * 100)|round|int %}
+        <span class="{% if rate >= 70 %}text-success{% elif rate >= 40 %}text-warning{% else %}text-danger{% endif %}">{{ rate }}%</span>
+        <span class="text-muted text-sm"> ({{ effectiveness.total }} outcome(s))</span>
+      {% else %}
+        <span class="text-muted">— (fewer than 5 recorded outcomes)</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Domain</div>
+    <div class="stat-value text-sm">{{ skill.domain if skill else "—" }}</div>
+  </div>
+</div>
+
+<div class="action-bar mb-2">
+  <a href="/capabilities" class="btn btn-outline btn-sm">&larr; All Capabilities</a>
+</div>
+
+{% if outcomes %}
+<h2 class="section-title">Effectiveness Trend</h2>
+<p class="text-muted">Every recorded outcome for this skill, most recent first — the recency-weighted rate above discounts older rows so a skill that's since improved can recover its score.</p>
+<table>
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>App</th>
+      <th>Outcome</th>
+      <th>Reason</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for o in outcomes %}
+    <tr class="{% if o.outcome == 'approved' %}row-border-green{% else %}row-border-red{% endif %}">
+      <td class="text-sm"><span data-timestamp="{{ o.created_at }}">{{ o.created_at[:19] }}</span></td>
+      <td>{{ o.app_name }}</td>
+      <td>
+        {% if o.outcome == "approved" %}
+          <span class="badge badge-low">approved</span>
+        {% else %}
+          <span class="badge badge-critical">{{ o.outcome }}</span>
+        {% endif %}
+      </td>
+      <td class="text-sm text-muted">{{ o.reason or "—" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<h2 class="section-title">Effectiveness Trend</h2>
+<p class="text-muted">No recorded outcomes for this skill yet — outcomes are recorded when a skill-generated manifest is applied to the cluster, approved/rejected at a gate, or auto-applied by auto-mode.</p>
+{% endif %}
+
+{% if lifecycle_events %}
+<h2 class="section-title">Activation / Deprecation History</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>Source</th>
+      <th>Action</th>
+      <th>Severity</th>
+      <th>Summary</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for e in lifecycle_events %}
+    <tr>
+      <td class="text-sm"><span data-timestamp="{{ e.timestamp }}">{{ e.timestamp[:19] }}</span></td>
+      <td class="text-bold">{{ e.agent_id }}</td>
+      <td>{{ e.action }}</td>
+      <td>
+        {% if e.severity == "critical" %}
+          <span class="badge badge-critical">critical</span>
+        {% elif e.severity == "warning" %}
+          <span class="badge badge-high">warning</span>
+        {% else %}
+          <span class="badge badge-info">{{ e.severity }}</span>
+        {% endif %}
+      </td>
+      <td class="text-sm">{{ e.summary }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<h2 class="section-title">Activation / Deprecation History</h2>
+<p class="text-muted">No lifecycle events recorded for this skill yet.</p>
+{% endif %}
+{% endblock %}

@@ -137,6 +137,62 @@ def research_for_app(llm_client: object, report: object, limit: int = 5) -> list
         return []
 
 
+def research_skill_improvement(llm_client: object, skill_name: str, domain: str, stats: dict) -> dict:
+    """Ask the LLM to propose a specific fix/replacement for an underperforming skill.
+
+    ``stats`` is one entry from ``AssessmentStore.get_low_effectiveness_skills()``
+    (``{"skill", "approval_rate", "raw_approval_rate", "total"}`` -- the
+    recency-weighted rate that got it flagged in the first place). Returns a
+    dict shaped like ``research_cves()``/``research_best_practices()`` items
+    (``title``/``description``/``category``/``priority``/``fix_approach``)
+    so it can be fed straight into ``generate_skill_from_research()``, or
+    ``{}`` if the LLM returned nothing usable.
+
+    This is what closes the self-improvement loop: until this existed, the
+    learning agent only ever researched CVEs/best-practices on its own
+    schedule, blind to which of its *own* already-shipped skills humans keep
+    rejecting.
+    """
+    system = (
+        "You are a Kubernetes platform engineer improving an underperforming "
+        "AgentIT skill. Return a single JSON object (not an array) with: "
+        '"title" (short name for the improved replacement), '
+        '"description" (2-3 sentences on what was likely wrong and how the '
+        "replacement should behave differently), "
+        '"category" (security/observability/reliability/compliance/cicd/infrastructure), '
+        '"priority" (critical/high/medium), '
+        '"fix_approach" (concrete guidance for generating the replacement). '
+        "JSON object only, no markdown fences."
+    )
+    user = (
+        f"Skill '{skill_name}' (domain: {domain}) has a low human approval rate: "
+        f"{stats.get('approval_rate', 0):.0%} recency-weighted "
+        f"({stats.get('raw_approval_rate', stats.get('approval_rate', 0)):.0%} all-time) "
+        f"over {stats.get('total', 0)} recorded outcome(s). Humans keep rejecting or "
+        "modifying what this skill generates. Propose a specific, improved replacement "
+        "approach for this skill's property -- what likely causes the low approval, and "
+        "how a better version should behave. Be concrete, not generic."
+    )
+
+    raw = llm_client._chat(system, user)
+    if raw is None:
+        logger.warning("LLM returned no skill-improvement data for %s", skill_name)
+        return {}
+
+    cleaned = re.sub(r"^```(?:json)?\n?", "", raw.strip())
+    cleaned = re.sub(r"\n?```$", "", cleaned)
+
+    try:
+        parsed = json.loads(cleaned)
+        if not isinstance(parsed, dict):
+            logger.warning("LLM skill-improvement response for %s is not an object", skill_name)
+            return {}
+        return parsed
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.warning("Failed to parse skill-improvement response for %s: %s", skill_name, exc)
+        return {}
+
+
 def generate_skill_from_research(
     llm_client: object,
     research_item: dict,

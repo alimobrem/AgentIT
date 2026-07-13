@@ -47,11 +47,16 @@ class AsyncSQLiteStore:
       event loop.
 
     ``.raw`` exposes the underlying synchronous ``AssessmentStore`` instance
-    for the call sites this pass deliberately does *not* touch (e.g.
-    ``FleetOrchestrator``, ``AutoMode``, ``RemediationDispatcher`` --
-    see docs/postgres-migration-plan.md's Phase 3 progress notes for exactly
-    which ones and why) -- they keep receiving a plain synchronous store, so
-    their behavior is unaffected by this change. There is deliberately no
+    for the call sites that remain genuinely synchronous -- background
+    assessment threads (``app.py``'s ``assess_submit``), ``EventConsumer``,
+    each watcher's own tick body (which now internally re-wraps ``.raw``
+    with ``AsyncSQLiteStore.wrap()`` before constructing the now-async
+    ``AutoMode``/``RemediationLoop``, per watchers/vuln_watcher.py and
+    watchers/drift_detector.py), and metrics/inventory-diff/cluster-health
+    helpers that run via ``asyncio.to_thread`` (see docs/postgres-migration-
+    plan.md §"Progress update: sync→async conversion of FleetOrchestrator/
+    AutoMode/RemediationDispatcher/RemediationLoop complete" for the full
+    list of what *no longer* needs ``.raw``). There is deliberately no
     Postgres equivalent of ``.raw``: handing a not-yet-converted synchronous
     consumer a Postgres-backed store would be exactly the kind of partial,
     uncoordinated cutover the plan's §7 warns against, so that combination

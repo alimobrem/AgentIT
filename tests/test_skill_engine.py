@@ -150,3 +150,94 @@ class TestLLMPassthrough:
 
         assert len(fake_llm.calls) == 1
         assert len(files) == 1
+
+
+class TestRunAllStoreWiring:
+    """run_all()'s `store` param was accepted but ignored (per the earlier
+    self-improvement-loop audit) -- it must now gate generation via
+    get_rejection_count() and inform it via get_human_override(), mirroring
+    the pattern webhooks.py already uses for auto-fix-after-3-rejections."""
+
+    def _report_and_skill(self):
+        skill = _make_skill("network-policy", outputs=["NetworkPolicy"], triggers=["network", "isolation"])
+        report = make_report(repo_name="my-app")
+        report.scores[0].findings[0].description = "Missing network isolation between pods"
+        return report, skill
+
+    def test_skill_skipped_after_3_rejections_for_this_app_domain(self, tmp_path: Path) -> None:
+        from conftest import make_store
+        from agentit.portal.store_factory import AsyncSQLiteStore
+
+        engine = SkillEngine(tmp_path, platform=offline_context())
+        report, skill = self._report_and_skill()
+        engine.skills = [skill]
+
+        raw_store = make_store()
+        for _ in range(3):
+            raw_store.record_feedback(
+                app_name="my-app", agent_name="skill-engine",
+                finding_category=skill.domain, action="rejected",
+            )
+        store = AsyncSQLiteStore.wrap(raw_store)
+
+        fake_llm = _FakeLLMClient("apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: x\nspec:\n  podSelector: {}\n")
+        files = engine.run_all(report, store=store, llm_client=fake_llm)
+
+        assert files == []
+        assert len(fake_llm.calls) == 0
+        events = raw_store.list_events_by_agent("skill-engine")
+        assert any(e["action"] == "skipped-rejected" for e in events)
+
+    def test_skill_not_skipped_below_rejection_threshold(self, tmp_path: Path) -> None:
+        from conftest import make_store
+        from agentit.portal.store_factory import AsyncSQLiteStore
+
+        engine = SkillEngine(tmp_path, platform=offline_context())
+        report, skill = self._report_and_skill()
+        engine.skills = [skill]
+
+        raw_store = make_store()
+        for _ in range(2):  # below the 3+ threshold
+            raw_store.record_feedback(
+                app_name="my-app", agent_name="skill-engine",
+                finding_category=skill.domain, action="rejected",
+            )
+        store = AsyncSQLiteStore.wrap(raw_store)
+
+        fake_llm = _FakeLLMClient("apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: x\nspec:\n  podSelector: {}\n")
+        files = engine.run_all(report, store=store, llm_client=fake_llm)
+
+        assert len(files) == 1
+
+    def test_human_override_passed_to_llm_prompt(self, tmp_path: Path) -> None:
+        from conftest import make_store
+        from agentit.portal.store_factory import AsyncSQLiteStore
+
+        engine = SkillEngine(tmp_path, platform=offline_context())
+        report, skill = self._report_and_skill()
+        engine.skills = [skill]
+
+        raw_store = make_store()
+        raw_store.record_feedback(
+            app_name="my-app", agent_name="skill-engine",
+            finding_category=skill.domain, action="modified",
+            original_value="old-policy", human_value="a stricter deny-all default policy",
+        )
+        store = AsyncSQLiteStore.wrap(raw_store)
+
+        fake_llm = _FakeLLMClient("apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: x\nspec:\n  podSelector: {}\n")
+        files = engine.run_all(report, store=store, llm_client=fake_llm)
+
+        assert len(files) == 1
+        _, user_prompt = fake_llm.calls[0]
+        assert "a stricter deny-all default policy" in user_prompt
+
+    def test_no_store_behaves_exactly_as_before(self, tmp_path: Path) -> None:
+        engine = SkillEngine(tmp_path, platform=offline_context())
+        report, skill = self._report_and_skill()
+        engine.skills = [skill]
+
+        fake_llm = _FakeLLMClient("apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: x\nspec:\n  podSelector: {}\n")
+        files = engine.run_all(report, store=None, llm_client=fake_llm)
+
+        assert len(files) == 1

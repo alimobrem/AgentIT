@@ -315,87 +315,107 @@ class TestSlosTable:
 
 
 class TestOrchestratorStoreWiring:
-    def test_remediations_recorded_on_onboard(self):
-        """Orchestrator records remediations in the store when assessment_id is provided."""
+    async def test_remediations_recorded_on_onboard(self):
+        """Orchestrator records remediations in the store when assessment_id is provided.
+
+        criticality="high" so dependency/cost/codechange are actually
+        planned -- security/observability/cicd/compliance are now
+        skill-only domains (see docs/agent-removal-readiness.md) and skill-
+        generated files aren't recorded as remediations (only Python-agent
+        output is, via FleetOrchestrator._record_remediations()).
+        """
         from agentit.agents.orchestrator import FleetOrchestrator
+        from agentit.portal.store_factory import AsyncSQLiteStore
         import tempfile
         from pathlib import Path
 
         store = make_store()
-        report = make_report()
+        async_store = AsyncSQLiteStore.wrap(store)
+        report = make_report(criticality="high")
         aid = store.save(report)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             orch = FleetOrchestrator(
                 report=report, output_dir=Path(tmpdir),
-                store=store, assessment_id=aid,
+                store=async_store, assessment_id=aid,
             )
-            result = orch.run()
+            result = await orch.run()
 
         rems = store.list_remediations(aid)
         assert len(rems) > 0
         agent_names_in_rems = {r["agent_name"] for r in rems}
-        assert "security" in agent_names_in_rems
+        assert agent_names_in_rems & {"cost", "dependency", "codechange"}
 
-    def test_agents_registered_on_run(self):
-        """Orchestrator registers available agents in the store."""
+    async def test_agents_registered_on_run(self):
+        """Orchestrator registers available Python agents in the store.
+
+        security/observability/cicd/compliance were removed once skills
+        covered their domains (see docs/agent-removal-readiness.md) --
+        cost/dependency/codechange are the ones left to register.
+        """
         from agentit.agents.orchestrator import FleetOrchestrator
+        from agentit.portal.store_factory import AsyncSQLiteStore
         import tempfile
         from pathlib import Path
 
         store = make_store()
+        async_store = AsyncSQLiteStore.wrap(store)
         report = make_report()
         aid = store.save(report)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             orch = FleetOrchestrator(
                 report=report, output_dir=Path(tmpdir),
-                store=store, assessment_id=aid,
+                store=async_store, assessment_id=aid,
             )
-            orch.run()
+            await orch.run()
 
         agents = store.list_agents()
         agent_names = {a["agent_name"] for a in agents}
-        for core in ("security", "observability", "cicd", "compliance"):
+        for core in ("cost", "dependency", "codechange"):
             assert core in agent_names, f"{core} not registered"
 
-    def test_no_remediations_without_assessment_id(self):
+    async def test_no_remediations_without_assessment_id(self):
         """Orchestrator skips remediation recording when assessment_id is None."""
         from agentit.agents.orchestrator import FleetOrchestrator
+        from agentit.portal.store_factory import AsyncSQLiteStore
         import tempfile
         from pathlib import Path
 
         store = make_store()
+        async_store = AsyncSQLiteStore.wrap(store)
         report = make_report()
         store.save(report)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             orch = FleetOrchestrator(
                 report=report, output_dir=Path(tmpdir),
-                store=store,
+                store=async_store,
             )
-            orch.run()
+            await orch.run()
 
         # No assessment_id means no remediations saved — but we can't
         # query without an assessment_id. Just verify no crash.
         assert True
 
-    def test_slos_created_on_onboard(self):
+    async def test_slos_created_on_onboard(self):
         """Orchestrator creates default SLOs after release agent runs."""
         from agentit.agents.orchestrator import FleetOrchestrator
+        from agentit.portal.store_factory import AsyncSQLiteStore
         import tempfile
         from pathlib import Path
 
         store = make_store()
+        async_store = AsyncSQLiteStore.wrap(store)
         report = make_report()
         aid = store.save(report)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             orch = FleetOrchestrator(
                 report=report, output_dir=Path(tmpdir),
-                store=store, assessment_id=aid,
+                store=async_store, assessment_id=aid,
             )
-            orch.run()
+            await orch.run()
 
         slos = store.list_slos(aid)
         assert len(slos) == 3

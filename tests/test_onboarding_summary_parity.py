@@ -10,27 +10,28 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agentit.portal.helpers import run_onboarding
-from conftest import make_report, make_store
+from agentit.portal.store_factory import AsyncSQLiteStore
+from conftest import make_async_store, make_report, make_store
 
 
 @contextmanager
-def _isolated_helpers_store(store):
+def _isolated_helpers_store(async_store):
     """run_onboarding() resolves its store via helpers.get_store(), backed by
     a module-level singleton -- redirect that to an isolated test store (like
     conftest's portal_client fixture does) so tests never touch/lock the real
     on-disk DB."""
-    with patch("agentit.portal.helpers.get_store", return_value=store), \
-         patch("agentit.portal.helpers._store", store):
+    with patch("agentit.portal.helpers.get_store", return_value=async_store), \
+         patch("agentit.portal.helpers._store", async_store):
         yield
 
 
-def test_run_onboarding_summary_includes_auto_approve_and_gates(tmp_path: Path):
-    store = make_store()
+async def test_run_onboarding_summary_includes_auto_approve_and_gates(tmp_path: Path):
+    async_store, store = make_async_store()
     report = make_report(criticality="low")  # low criticality -> orchestrator can auto-approve
     aid = store.save(report)
 
-    with _isolated_helpers_store(store):
-        files, orch_summary = run_onboarding(report, assessment_id=aid)
+    with _isolated_helpers_store(async_store):
+        files, orch_summary = await run_onboarding(report, assessment_id=aid)
 
     assert "auto_approve" in orch_summary
     assert isinstance(orch_summary["auto_approve"], bool)
@@ -44,54 +45,53 @@ def test_run_onboarding_summary_includes_auto_approve_and_gates(tmp_path: Path):
         assert "files_count" in agent_entry
 
 
-def test_app_py_delegates_to_shared_run_onboarding():
+async def test_app_py_delegates_to_shared_run_onboarding():
     """routes/assessments.py's _run_onboarding must be the same shared
     implementation used by the webhook path, so the two can never drift on
     which summary fields get stored (the original bug: the inline portal
     path included auto_approve/gates, helpers.py silently omitted them)."""
     from agentit.portal.routes import assessments as assessments_module
 
-    store = make_store()
+    async_store, store = make_async_store()
     report = make_report(criticality="low")
     aid = store.save(report)
 
-    # routes/assessments.py's _run_onboarding runs inside asyncio.to_thread
-    # (Phase 3 of docs/postgres-migration-plan.md), so its route caller
-    # resolves the (now-async) get_store() itself and passes the sync store
-    # handle in explicitly -- verify _run_onboarding forwards that handle
-    # unchanged.
-    files, orch_summary = assessments_module._run_onboarding(report, aid, store)
+    # routes/assessments.py's _run_onboarding is now genuinely async
+    # (FleetOrchestrator is async throughout) -- its route caller resolves
+    # the async get_store() itself and passes that store in explicitly --
+    # verify _run_onboarding forwards it unchanged.
+    files, orch_summary = await assessments_module._run_onboarding(report, aid, async_store)
 
     assert "auto_approve" in orch_summary
     assert "gates" in orch_summary
 
 
-def test_run_onboarding_uses_explicitly_passed_store_not_the_singleton():
+async def test_run_onboarding_uses_explicitly_passed_store_not_the_singleton():
     """Regression: run_onboarding(store=...) must use the store it's given,
     not silently fall back to the module singleton -- this is exactly what
     broke test isolation for app.py's onboarding route after the fields
     were unified into one shared helper (events must land in the isolated
     test store, never the real on-disk agentit.db)."""
-    store = make_store()
+    async_store, store = make_async_store()
     report = make_report(criticality="low")
     aid = store.save(report)
 
-    run_onboarding(report, assessment_id=aid, store=store)
+    await run_onboarding(report, assessment_id=aid, store=async_store)
 
     events = store.list_events()
     assert len(events) > 0  # orchestrator agents logged events into OUR store
 
 
-def test_webhook_auto_apply_sees_real_auto_approve_value():
+async def test_webhook_auto_apply_sees_real_auto_approve_value():
     """End-to-end regression for the original bug: webhook_auto_apply must
     read the SAME auto_approve value the orchestrator computed, not a
     hardcoded False because the summary omitted the field."""
-    store = make_store()
+    async_store, store = make_async_store()
     report = make_report(criticality="low")
     aid = store.save(report)
 
-    with _isolated_helpers_store(store):
-        files, orch_summary = run_onboarding(report, assessment_id=aid)
+    with _isolated_helpers_store(async_store):
+        files, orch_summary = await run_onboarding(report, assessment_id=aid)
     store.save_onboarding(aid, files, orchestration=orch_summary)
 
     stored_orch = store.get_orchestration(aid)

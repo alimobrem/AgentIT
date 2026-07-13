@@ -24,6 +24,11 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       volumes:
+        {{- if .Values.agents.skillLearner.persistence.enabled }}
+        - name: skill-learner-data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-skill-learner-data
+        {{- end }}
         {{- if .Values.gcp.credentialsSecret }}
         - name: gcp-credentials
           secret:
@@ -40,6 +45,17 @@ spec:
             - --limit
             - "{{ .Values.agents.skillLearner.limit }}"
           env:
+            {{- if .Values.agents.skillLearner.persistence.enabled }}
+            # Draft skills this watcher generates land here instead of the
+            # image's own (per-pod, ephemeral) `skills/` tree -- survives
+            # THIS pod's own restarts. Does not, by itself, make them visible
+            # to the portal's Capabilities page (that needs shared/RWX
+            # storage or a git write-back pipeline -- see README's
+            # Self-improvement loop section); watchers/skill_learner.py logs
+            # a startup warning about this either way.
+            - name: AGENTIT_SKILLS_DIR
+              value: /data/skills
+            {{- end }}
             {{- if .Values.kafka.enabled }}
             - name: AGENTIT_KAFKA_BOOTSTRAP
               value: {{ .Values.kafka.bootstrapServers }}
@@ -53,6 +69,10 @@ spec:
               value: /var/secrets/gcp/credentials.json
             {{- end }}
           volumeMounts:
+            {{- if .Values.agents.skillLearner.persistence.enabled }}
+            - name: skill-learner-data
+              mountPath: /data/skills
+            {{- end }}
             {{- if .Values.gcp.credentialsSecret }}
             - name: gcp-credentials
               mountPath: /var/secrets/gcp

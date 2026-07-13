@@ -22,12 +22,14 @@ async def insights_page(request: Request) -> HTMLResponse:
     feedback = await s.get_all_feedback(limit=10) if hasattr(s, 'get_all_feedback') else []
     low_skills = await s.get_low_effectiveness_skills() if hasattr(s, 'get_low_effectiveness_skills') else []
     check_compliance = await s.get_check_compliance() if hasattr(s, 'get_check_compliance') else []
+    loop_health = await s.get_loop_health() if hasattr(s, 'get_loop_health') else None
     return get_templates().TemplateResponse(request, "insights.html", {
         "insights": fleet_insights,
         "agent_stats": agent_stats,
         "recent_feedback": feedback,
         "low_skills": low_skills,
         "check_compliance": check_compliance,
+        "loop_health": loop_health,
     })
 
 

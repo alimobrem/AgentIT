@@ -29,6 +29,20 @@
     <div class="stat-label">Events Logged</div>
     <div class="stat-value">{{ insights.total_events }}</div>
   </div>
+  {% if loop_health and loop_health.flagged_count > 0 %}
+  <div class="stat-card">
+    <div class="stat-label">Loop Health: Flagged Skills Improved (last {{ loop_health.window_days }}d)</div>
+    <div class="stat-value {% if loop_health.pct_with_improvement >= 70 %}text-success{% elif loop_health.pct_with_improvement >= 30 %}text-warning{% else %}text-danger{% endif %}">
+      {{ loop_health.pct_with_improvement }}%
+    </div>
+    <div class="text-muted text-sm">{{ loop_health.with_recent_improvement }} of {{ loop_health.flagged_count }} currently-flagged skill(s) have a recent improvement draft</div>
+  </div>
+  {% elif loop_health is not none %}
+  <div class="stat-card">
+    <div class="stat-label">Loop Health: Flagged Skills Improved</div>
+    <div class="stat-value text-success">No skills flagged</div>
+  </div>
+  {% endif %}
 </div>
 
 <h2>Agent Performance</h2>
@@ -74,14 +88,15 @@
 
 {% if low_skills %}
 <h2>Skills Needing Review</h2>
-<p class="text-muted">Skills with approval rate below 30% after 5+ generations. Consider updating or deprecating.</p>
+<p class="text-muted">Skills with a recency-weighted approval rate below 30% after 5+ generations (recent outcomes count more than old ones, so a skill that's since improved can recover off this list). Consider updating or deprecating.</p>
 <table>
-  <thead><tr><th>Skill</th><th>Approval Rate</th><th>Total Runs</th></tr></thead>
+  <thead><tr><th>Skill</th><th>Approval Rate (recency-weighted)</th><th>All-Time Rate</th><th>Total Runs</th></tr></thead>
   <tbody>
   {% for ls in low_skills %}
   <tr>
     <td>{{ ls.skill }}</td>
     <td class="text-danger">{{ (ls.approval_rate * 100)|round }}%</td>
+    <td class="text-muted">{{ (ls.raw_approval_rate * 100)|round }}%</td>
     <td>{{ ls.total }}</td>
   </tr>
   {% endfor %}

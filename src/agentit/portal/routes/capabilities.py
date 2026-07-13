@@ -190,11 +190,15 @@ async def capabilities_page(request: Request) -> HTMLResponse:
 
 @router.post("/capabilities/learn", response_model=None)
 async def capabilities_learn_route(request: Request):
-    """Research CVEs via LLM and generate new skills.
+    """Research low-effectiveness skills first via LLM, falling back to a
+    generic CVE sweep when nothing's flagged, and generate new/improved
+    skills.
 
     Portal entry point for what was previously only reachable via the CLI's
     ``agentit learn`` command — the research/skill-generation loop had no UI
-    trigger at all before this.
+    trigger at all before this. Mirrors the same prioritization the
+    ``skill-learner`` watcher now does (``watchers/skill_learner.py``'s
+    ``research_once()``) so both entry points behave consistently.
     """
     llm_client = get_llm_client()
     if llm_client is None:
@@ -203,17 +207,56 @@ async def capabilities_learn_route(request: Request):
             status_code=303,
         )
 
+    s = await get_store()
+    flagged: list[dict] = []
+    if hasattr(s, "get_low_effectiveness_skills"):
+        try:
+            flagged = await s.get_low_effectiveness_skills()
+        except Exception:
+            log.warning("Failed to fetch low-effectiveness skills", exc_info=True)
+
     from agentit.learning_agent import (
         check_skill_exists,
         generate_skill_from_research,
         research_cves,
+        research_skill_improvement,
         save_skill,
     )
+    from agentit.skill_engine import load_all_skills
 
-    def _run() -> tuple[list[str], list[str]]:
+    def _run() -> tuple[list[str], list[str], bool]:
+        """Returns (saved, skipped, improved) -- ``improved`` distinguishes a
+        skill-improvement pass from the generic CVE sweep for the success
+        message below."""
         saved: list[str] = []
         skipped: list[str] = []
         skills_dir = Path("skills")
+
+        if flagged:
+            by_name = {sk.name: sk for sk in load_all_skills(skills_dir)}
+            for entry in flagged[:3]:
+                skill_name = entry["skill"]
+                skill = by_name.get(skill_name)
+                if skill is None:
+                    skipped.append(skill_name)
+                    continue
+                item = research_skill_improvement(llm_client, skill.name, skill.domain, entry)
+                if not item:
+                    skipped.append(skill_name)
+                    continue
+                content = generate_skill_from_research(llm_client, item, domain=skill.domain)
+                if not content:
+                    skipped.append(skill_name)
+                    continue
+                # Deliberately no check_skill_exists() -- an improvement is
+                # expected to match the existing (underperforming) skill's
+                # name/domain, that's not a duplicate to reject.
+                path = save_skill(content, skills_dir, domain=skill.domain)
+                if path:
+                    saved.append(path.stem)
+            if saved or skipped:
+                return saved, skipped, True
+
         for item in research_cves(llm_client, limit=3):
             item_name = item.get("id") or item.get("title") or item.get("name", "")
             if item_name and check_skill_exists(skills_dir, item_name, "security"):
@@ -225,10 +268,10 @@ async def capabilities_learn_route(request: Request):
             path = save_skill(content, skills_dir, domain="security")
             if path:
                 saved.append(path.stem)
-        return saved, skipped
+        return saved, skipped, False
 
     try:
-        saved, skipped = await with_timeout(asyncio.to_thread(_run), timeout=180)
+        saved, skipped, improved = await with_timeout(asyncio.to_thread(_run), timeout=180)
     except Exception as exc:
         log.exception("Skill research failed")
         return RedirectResponse(
@@ -236,19 +279,45 @@ async def capabilities_learn_route(request: Request):
             status_code=303,
         )
 
-    s = await get_store()
     if saved:
         _skills_cache["data"] = None  # bust the 60s cache so new skills show immediately
+        kind = "improvement" if improved else "new skill"
         await s.log_event("learning-agent", "skills-generated", None, "info",
-                           f"Generated {len(saved)} new skill(s): {', '.join(saved)}")
-        msg = f"Generated {len(saved)} new skill(s): {', '.join(saved)}"
+                           f"Generated {len(saved)} {kind}(s): {', '.join(saved)}")
+        msg = f"Generated {len(saved)} {kind}(s): {', '.join(saved)}"
         if skipped:
-            msg += f" ({len(skipped)} already existed)"
+            msg += f" ({len(skipped)} skipped)"
     elif skipped:
-        msg = f"No new skills — {len(skipped)} researched CVE(s) already have matching skills."
+        msg = (f"No new skills — {len(skipped)} flagged low-effectiveness skill(s) couldn't be improved this time."
+               if improved else
+               f"No new skills — {len(skipped)} researched CVE(s) already have matching skills.")
     else:
         msg = "No new skills generated — research returned nothing usable this time."
     return RedirectResponse(url=f"/capabilities?success={quote(msg)}", status_code=303)
+
+
+@router.get("/capabilities/skills/{skill_name}/history", response_class=HTMLResponse)
+async def skill_history(request: Request, skill_name: str) -> HTMLResponse:
+    """Per-skill lifecycle view: effectiveness trend over time plus
+    activation/deprecation history -- the loop-visibility half of the
+    self-improvement loop (see README's Self-improvement loop section)."""
+    s = await get_store()
+    history = await s.get_skill_history(skill_name) if hasattr(s, "get_skill_history") else {"outcomes": [], "events": []}
+
+    skill = next((sk for sk in _cached_skills() if sk.name == skill_name), None)
+
+    effectiveness = None
+    if hasattr(s, "get_skill_effectiveness"):
+        eff_all = await s.get_skill_effectiveness(skill_name=skill_name, min_count=1)
+        effectiveness = eff_all.get(skill_name)
+
+    return get_templates().TemplateResponse(request, "skill_detail.html", {
+        "skill_name": skill_name,
+        "skill": skill,
+        "effectiveness": effectiveness,
+        "outcomes": history.get("outcomes", []),
+        "lifecycle_events": history.get("events", []),
+    })
 
 
 @router.post("/capabilities/skills/activate", response_model=None)
@@ -280,8 +349,34 @@ async def activate_skill_route(request: Request):
             url=f"/capabilities?error={quote('Skill is not in draft status')}", status_code=303,
         )
 
+    from agentit.skill_engine import load_skill, verify_skill
+    skill = load_skill(target)
+    if skill is None:
+        return RedirectResponse(
+            url=f"/capabilities?error={quote('Could not parse skill file — activation blocked')}",
+            status_code=303,
+        )
+
+    passed, issues, verify_warnings = await asyncio.to_thread(
+        verify_skill, skill, llm_client=get_llm_client(),
+    )
+    s = await get_store()
+    if not passed:
+        issues_str = "; ".join(issues)
+        await s.log_event(
+            "portal", "skill-activation-blocked", None, "warning",
+            f"Activation blocked for {target.stem}: {issues_str}",
+        )
+        return RedirectResponse(
+            url=f"/capabilities?error={quote(f'Activation blocked — skill failed verification: {issues_str}')}",
+            status_code=303,
+        )
+
     target.write_text(content.replace("status: draft", "status: active", 1), encoding="utf-8")
     _skills_cache["data"] = None
-    s = await get_store()
-    await s.log_event("portal", "skill-activated", None, "info", f"Activated skill: {target.stem}")
-    return RedirectResponse(url=f"/capabilities?success={quote(f'Activated: {target.stem}')}", status_code=303)
+    success_msg = f"Activated: {target.stem}"
+    if verify_warnings:
+        success_msg += f" (note: {'; '.join(verify_warnings)})"
+    await s.log_event("portal", "skill-activated", None, "info",
+                       f"Activated skill: {target.stem}" + (f" ({'; '.join(verify_warnings)})" if verify_warnings else ""))
+    return RedirectResponse(url=f"/capabilities?success={quote(success_msg)}", status_code=303)
