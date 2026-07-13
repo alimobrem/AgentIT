@@ -53,6 +53,32 @@ kafka:
   enabled: false
   bootstrapServers: agentit-kafka-kafka-bootstrap.agentit.svc:9092
 
+# HA Postgres via the CloudNativePG operator (assumed pre-installed via OLM,
+# same convention as Kafka/Strimzi above — see docs/deployment.md). Disabled
+# by default: store.py is still SQLite today, this just prepares the cluster.
+postgres:
+  enabled: false
+  instances: 3
+  storageSize: 10Gi
+  # storageClassName: gp3-csi
+  # imageName: ""   # override CNPG's default PostgreSQL image if needed
+  credentials:
+    secretName: agentit-postgres-app
+    username: agentit
+    database: agentit
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  backup:
+    enabled: false
+    # destinationPath: s3://my-bucket/agentit-postgres
+    # credentialsSecretName: agentit-postgres-backup
+    retentionPolicy: "30d"
+
 argoEvents:
   enabled: false
 

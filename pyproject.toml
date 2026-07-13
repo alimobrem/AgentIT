@@ -20,6 +20,9 @@ dependencies = [
     "python-multipart>=0.0.9",
     "kafka-python>=2.0",
     "kubernetes>=31.0",
+    # Async Postgres driver for the planned store.py migration off SQLite —
+    # see docs/postgres-migration-plan.md. Not wired into any code yet.
+    "asyncpg>=0.29",
     "prometheus-fastapi-instrumentator>=7.0",
     "python-json-logger>=3.0",
 ]

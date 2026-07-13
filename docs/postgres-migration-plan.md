@@ -1,0 +1,167 @@
+# Postgres Migration Plan (deferred work)
+
+**Status: planning only.** Nothing in this document has been implemented yet. Tonight's prep work was strictly HA Postgres chart plumbing (`chart/templates/postgres/`), the `asyncpg` dependency addition, and this plan — `store.py` and every one of its callers are untouched and unaffected. This doc exists so the actual rewrite (a separate, later effort) has an accurate map instead of starting from a cold read of a 1,400-line file.
+
+## Why now, and why not tonight
+
+`src/agentit/portal/store.py` (`AssessmentStore`) and its callers were being actively edited by multiple other parallel workstreams at the time this plan was written (unrelated bug fixes touching `store.py` itself, plus edits in `app.py`, `helpers.py`, `webhooks.py`, and `watchers/*.py`). Rewriting the store or any call site tonight would have guaranteed merge conflicts with that in-flight work. Everything below is read-only investigation (grep/inspection) plus independent, additive infrastructure (Helm chart, one `pyproject.toml` dependency line, this doc).
+
+## 1. Call-site inventory
+
+**Source of truth:** `AssessmentStore` is instantiated once as a module-level singleton in `src/agentit/portal/helpers.py` (`_store = AssessmentStore()`, exposed via `get_store()`), and every consumer either calls `get_store()` or receives a `store`/`self._store` reference passed into its constructor.
+
+### Application code (`src/`) — 12 files
+
+| File | How it touches the store | Approx. call count |
+|---|---|---|
+| `portal/store.py` | **Definition itself** — this is the file being rewritten | n/a (1,405 lines, 16 tables, ~90 public methods) |
+| `portal/helpers.py` | Owns the singleton (`_store = AssessmentStore()`, `get_store()`); several direct `_store.*` calls | ~15 |
+| `portal/app.py` | `get_store()` via FastAPI `Depends`, dozens of route handlers | largest single caller — dozens of routes |
+| `portal/routes/webhooks.py` | `get_store()` via `Depends` in webhook handlers | several |
+| `portal/routes/health.py` | `get_store()` for health/status endpoints | several |
+| `portal/routes/schedules.py` | `get_store()` for CRUD on `scheduled_operations` | several |
+| `cli.py` | Direct `AssessmentStore(db_path=...)` construction for CLI commands | 4 constructions + calls |
+| `watchers/vuln_watcher.py` | `store: AssessmentStore` constructor param, calls `get_fleet_data()` etc. | ~5 |
+| `watchers/slo_tracker.py` | Same pattern, SLO-table calls | ~5 |
+| `watchers/drift_detector.py` | Same pattern, event/gate calls | ~5 |
+| `watchers/skill_learner.py` | Imports store types for skill inventory snapshotting | few |
+| `remediation_loop.py` | `store: AssessmentStore` param, gate/remediation calls | ~3 |
+| `remediation/dispatcher.py` | `store: AssessmentStore` param | ~2 |
+
+Grep totals (`rg`, repo root):
+
+- `get_store()` call sites in `src/`: **84**
+- Direct `AssessmentStore(` construction in `src/`: **9** (mostly `cli.py` and module-level singletons)
+- Files under `src/` that import or reference `AssessmentStore` at all: **12** (11 callers + `store.py` itself)
+
+### Tests (`tests/`) — 21 files
+
+- `tests/conftest.py` defines the two central fixtures everything else builds on: `make_store()` → `AssessmentStore(db_path=":memory:")`, and `portal_client()`, which builds a `TestClient` and patches `get_store` to return that in-memory store across `app.py`, `helpers.py`, `routes/webhooks.py`, `routes/health.py`, `routes/schedules.py`.
+- 20 test files import `AssessmentStore` directly or use `make_store()`/`get_store()`: `test_automode.py`, `test_automode_extended.py`, `test_browser.py`, `test_comprehensive.py`, `test_cve_autofix.py`, `test_dispatcher.py`, `test_durability.py`, `test_end_to_end.py`, `test_error_recovery.py`, `test_live_cluster_e2e.py`, `test_multi_app_fleet.py`, `test_onboarding_summary_parity.py`, `test_portal.py`, `test_remediation_loop.py`, `test_skill_inventory.py`, `test_slo_tracker.py`, `test_store_extended.py`, `test_watch.py`, `test_workflows.py`, plus `conftest.py` itself.
+- Those 20 files contain **376 `def test_...` functions** (out of 937 total across the whole 80-file suite — see [Testing strategy](#testing-strategy) for what that number actually implies).
+- `test_portal.py` alone accounts for 120 of those — but most exercise the store indirectly through the `portal_client` fixture's `TestClient` (HTTP-level), not direct `store.*` calls, which changes the shape of the required rewrite there (see below).
+
+**Bottom line: ~12 application files + ~21 test files (33 total) reference `AssessmentStore` in some form.** That is the accurate scope for "the deferred rewrite," and it is why this is being sequenced as a separate, dedicated effort rather than squeezed in alongside tonight's parallel bug-fix batch.
+
+## 2. HA Postgres deployment approach: CloudNativePG
+
+**Chosen: [CloudNativePG](https://cloudnative-pg.github.io/) (CNPG), installed via OLM `Subscription`, chart ships only the `Cluster` CR.**
+
+This follows the exact convention this chart already uses for Kafka: Strimzi is assumed pre-installed cluster-wide via OLM (see `docs/deployment.md`), and `chart/templates/kafka/kafka-cluster.yaml` only renders the `Kafka`/`KafkaNodePool` custom resources, gated behind `.Values.kafka.enabled`. `chart/templates/postgres/` (added tonight) mirrors this exactly: `.Values.postgres.enabled` (default `false`) gates a 3-instance CNPG `Cluster` CR plus an app-credentials `Secret`.
+
+Why CNPG over the alternatives considered:
+
+| Option | Verdict |
+|---|---|
+| **CloudNativePG** (chosen) | CNCF project, Kubernetes-native failover (uses the K8s API itself for leader election — no separate DCS process like Patroni/etcd to operate), Red Hat-certified on OpenShift OperatorHub (`cloud-native-postgresql` package), increasingly the default recommendation industry-wide as of 2026. Declarative CRDs for cluster, backup, and scaling match this repo's existing "everything is a CR the chart renders" style. |
+| Crunchy PGO | Also Red Hat-certified on OpenShift OperatorHub, mature and widely deployed, but runs Patroni (etcd/DCS) + pgBouncer as extra moving parts inside the architecture, and Crunchy's certified-operator channel requires a registration token for upgrades — an extra operational dependency this project doesn't need. Reasonable choice if commercial support were a hard requirement; it isn't stated as one here. |
+| Bitnami Postgres-HA Helm chart | No operator/OLM dependency, fully self-contained — but that's also the downside: no OLM-managed lifecycle, and *we* would own StatefulSet + Patroni + Pgpool failover logic directly in this chart, which is strictly more code and more to operate than a CR gated behind `enabled: false`. Breaks the "operator via OLM" convention this project already established for Kafka for no clear benefit given OpenShift's OLM is already a first-class part of this platform. |
+
+Chart changes made tonight (already implemented, verified with `helm lint` and `helm template`, covered by `tests/test_helm_templates.py`):
+
+- `chart/templates/postgres/postgres-cluster.yaml` — CNPG `Cluster`, `instances: 3` (1 primary + 2 replicas), pod anti-affinity across nodes, per-instance PVC sized by `.Values.postgres.storageSize`, optional `barmanObjectStore` backup block gated on `.Values.postgres.backup.enabled`.
+- `chart/templates/postgres/postgres-secret.yaml` — app-user credentials `Secret` (`kubernetes.io/basic-auth`), using Helm's `lookup` to preserve an already-generated password across re-renders (avoids Argo CD seeing a spurious diff / rotating live credentials on every sync).
+- `chart/values.yaml` — new `postgres.*` block: `enabled` (default `false`), `instances`, `storageSize`, `storageClassName`, `credentials.{secretName,username,database}`, `resources`, `backup.{enabled,destinationPath,credentialsSecretName,retentionPolicy}`.
+- `docs/deployment.md` — new "Operator prerequisites" section documenting the CNPG `Subscription` the same way Strimzi is documented for Kafka.
+- `tests/test_helm_templates.py` — `TestPostgresCluster` / `TestPostgresSecret` classes.
+
+None of this is wired to the application yet — `postgres.enabled` defaults to `false`, and `store.py` still talks to SQLite.
+
+## 3. Async Python library: `asyncpg`
+
+**Chosen: [`asyncpg`](https://github.com/MagicStack/asyncpg)**, added to `pyproject.toml` tonight (dependency only, not imported anywhere yet).
+
+`store.py` is deliberately raw-SQL, not an ORM, across all 16 tables — every method hand-writes its own `SELECT`/`INSERT`/`UPDATE` with `?`-style placeholders and manual `dict(row)`/`json.loads()` marshaling. Given that existing style:
+
+- **`asyncpg`** — closest drop-in replacement for this style. Fast (binary protocol, no text parsing), no ORM/query-builder layer to learn or fight, connection pooling built in (`asyncpg.create_pool()`), and `$1`/`$2` positional placeholders are a mechanical find-replace from SQLite's `?`. **Chosen.**
+- `psycopg` v3 async + `psycopg_pool` — DB-API-familiar (`?`→`%s`-ish semantics are closer to the existing sqlite3 calls in spirit), solid type handling, would also work fine. Passed over only because `asyncpg` has slightly less migration friction for this specific codebase's placeholder style and is the more common choice for greenfield async-only code paths (no need for psycopg's sync/async dual-mode support, since this app has no sync DB call sites once the migration completes).
+- SQLAlchemy 2.0 async + `asyncpg`/`psycopg` driver — rejected. Adds an ORM/Core query-builder layer that raw-SQL-style code like `store.py` doesn't need; every one of its ~90 methods would need translating into Core `select()`/`insert()` constructs (or raw `text()` escapes, at which point SQLAlchemy is providing no value) for no functional gain. More churn than justified.
+
+## 4. Schema translation notes (SQLite → Postgres)
+
+### Type mapping
+
+| SQLite type/pattern (as used in `store.py`) | Postgres equivalent | Notes |
+|---|---|---|
+| `TEXT` (all `id`/uuid columns, e.g. `id TEXT PRIMARY KEY`) | `TEXT` | No change — `uuid.uuid4().hex` strings work as-is. Could tighten to `UUID` type later; not required for a 1:1 port. |
+| `TEXT NOT NULL` for ISO-8601 timestamp columns (`assessed_at`, `created_at`, `updated_at`, `timestamp`, `resolved_at`, `completed_at`, `last_heartbeat`, `registered_at`, `processed_at`) | `TIMESTAMPTZ` | Every timestamp in the codebase is written via `datetime.now(timezone.utc).isoformat()` — a `TIMESTAMPTZ` column accepts that string directly on insert and gives proper indexed date comparisons instead of ISO-string `<`/`>` comparisons (which happen to work in SQLite by lexicographic luck, but shouldn't be relied on in Postgres). |
+| `TEXT` columns holding JSON blobs (`report_json`, `files_json`, `orchestration_json`, `applied_json`, `skipped_json`, `errors_json`, `repo_files_json`, `capabilities`, `details_json`, `snapshot_json`, `steps_completed`) | `JSONB` | `JSONB` gets indexing/querying for free and avoids the app doing `json.loads()`/`json.dumps()` on every read/write if any future query wants to filter inside the blob. At minimum, even keeping app-side (de)serialization, `JSONB` catches malformed JSON at write time that `TEXT` silently allows. |
+| `REAL` (`overall_score`, `target_value`, `current_value`) | `DOUBLE PRECISION` | Direct equivalent. |
+| `INTEGER` used as boolean (`dry_run`, `enabled`) | `BOOLEAN` | SQLite has no native boolean; the code does `int(dry_run)`/`bool(row["dry_run"])` round-trips. Postgres `BOOLEAN` removes that translation layer — the store's `save_apply_results`/`get_apply_results` and `toggle_schedule` methods can pass Python `bool` straight through. |
+| `INTEGER PRIMARY KEY AUTOINCREMENT` (`apply_results.id`, `skill_inventory_snapshots.id`) | `GENERATED ALWAYS AS IDENTITY` (or `BIGINT GENERATED ALWAYS AS IDENTITY` if row counts could ever be large) | Postgres has no `AUTOINCREMENT` keyword; `IDENTITY` columns are the modern equivalent (`SERIAL` also works but is legacy-flavored). |
+| Composite `PRIMARY KEY (skill_name, app_name, created_at)` (`skill_effectiveness`) | Same, unchanged | Postgres supports composite PKs identically. Worth noting `created_at` in a PK is fragile (two inserts in the same microsecond could theoretically collide) — consider adding a surrogate `id` in the rewrite, but that's a schema improvement, not a required translation. |
+| `FOREIGN KEY (assessment_id) REFERENCES assessments(id)` (`onboarding_results`, `gates`, `remediations`, `slos`, `apply_results`) | Same, unchanged | Direct port. SQLite requires `PRAGMA foreign_keys = ON` to actually enforce these (see below); Postgres enforces FKs unconditionally, which will surface any FK-violating data that SQLite was silently allowing before the `PRAGMA` was set (or before it existed, for tables created before that line was added — check for orphaned rows before cutover if you *do* migrate the data, see §Data migration). |
+
+### SQLite-specific syntax with a different Postgres equivalent
+
+| SQLite (as found in `store.py`, with line refs at time of writing) | Postgres equivalent |
+|---|---|
+| `PRAGMA journal_mode=WAL` / `PRAGMA busy_timeout=5000` / `PRAGMA foreign_keys = ON` (lines 18-20) | No equivalent needed — these exist to work around SQLite's single-writer-file model (WAL for concurrent readers, busy_timeout for write-lock contention, foreign_keys because it's off by default). Postgres's MVCC engine and default FK enforcement make all three moot; just delete them in the rewrite. |
+| `INSERT OR REPLACE INTO settings ...` (line 267), `INSERT OR REPLACE INTO agent_registry ...` (line 809), `INSERT OR REPLACE INTO suppressed_checks ...` (line 1278) | `INSERT INTO ... ON CONFLICT (key_columns) DO UPDATE SET ...`. Each call site needs its actual conflict target identified: `settings` conflicts on `key`, `agent_registry` conflicts on `agent_name` (has a `UNIQUE` constraint), `suppressed_checks` conflicts on its synthetic `id` (`f"{app_name}:{check_source}"`) or, better, on the real `UNIQUE(app_name, check_source)` constraint already declared on that table. |
+| `INSERT OR IGNORE INTO processed_webhooks ...` (line 1040) | `INSERT INTO processed_webhooks ... ON CONFLICT (delivery_id) DO NOTHING`. |
+| `ALTER TABLE ... ADD COLUMN ...` wrapped in `try/except sqlite3.OperationalError` for idempotent migrations (lines 48-59, 152-158) | Postgres supports `ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...` natively — the try/except dance becomes unnecessary. More broadly, the rewrite should move these ad-hoc inline migrations to a real migration tool (see [Suggested phased execution order](#suggested-phased-execution-order)) rather than porting the "run ALTER on every connect and swallow the error" pattern as-is. |
+| `AUTOINCREMENT` | See type mapping above (`GENERATED ALWAYS AS IDENTITY`). |
+| `strftime` / other SQLite date functions | **Not used anywhere in `store.py`** — confirmed by grep. All date logic is done in Python (`datetime.now(timezone.utc)`, `timedelta`, `.isoformat()`) before values ever reach SQL, and comparisons in SQL are plain string `<`/`>` against ISO-8601 text (e.g. `purge_old_data`'s `WHERE {col} < ?` with a computed cutoff string). This actually ports cleanly once those columns become `TIMESTAMPTZ` — just pass the same Python `datetime` objects (or their `.isoformat()` strings; `asyncpg` accepts both) instead of pre-formatted text. |
+| `sqlite3.Row` row factory + `dict(row)` | `asyncpg` returns `asyncpg.Record` objects; `dict(record)` works the same way, so every `[dict(r) for r in rows]` list-comprehension idiom in `store.py` ports unchanged. |
+
+### Full table list (16 tables)
+
+`assessments`, `onboarding_results`, `events`, `gates`, `remediations`, `agent_registry`, `slos`, `apply_results`, `settings`, `remediation_jobs`, `scheduled_operations`, `processed_webhooks`, `agent_feedback`, `skill_effectiveness`, `suppressed_checks`, `skill_inventory_snapshots`.
+
+(This list is directly confirmed by `AssessmentStore.export_all()`, which already enumerates all 16 for disaster-recovery export — that method doubles as a built-in schema inventory and is worth reusing as the seed list for whatever migration/dump tooling gets built.)
+
+## 5. Connection/pooling strategy
+
+Five long-running processes will each need their own `asyncpg` pool, sized for very different concurrency profiles:
+
+| Component | Deployment | Concurrency profile | Suggested pool size | Notes |
+|---|---|---|---|---|
+| Portal | `agentit` (2 replicas) | FastAPI, naturally async-compatible already (`uvicorn` + `async def` routes exist in `app.py`) — handles concurrent HTTP requests | `min_size=5, max_size=20` per pod (so 10-40 connections across 2 replicas) | The portal is the only component that's already async end-to-end at the framework level; wiring `asyncpg.create_pool()` into its FastAPI lifespan (`@app.on_event("startup")`/lifespan context manager) is the smallest lift of the five. |
+| `vuln-watcher` | separate Deployment, 1 replica | Single background loop, one fleet scan per tick | `min_size=1, max_size=3` | Needs `def run(self)` → `async def run(self)`, `time.sleep(interval)` → `await asyncio.sleep(interval)`, and the whole thing launched via `asyncio.run(watcher.run())` at the CLI entry point. |
+| `slo-tracker` | separate Deployment, 1 replica | Same shape as vuln-watcher, tighter interval (5m default) | `min_size=1, max_size=3` | Same async conversion as vuln-watcher. |
+| `drift-detector` | separate Deployment, 1 replica | Same shape, also talks to the cluster API (`PlatformContext`) each tick | `min_size=1, max_size=3` | Same async conversion; the Kubernetes client calls it makes are independent of the DB pool sizing. |
+| `skill-learner` | separate Deployment, 1 replica | Least frequent tick (24h default), does LLM calls | `min_size=1, max_size=2` | Same async conversion. **Also noted as a pre-existing gap independent of Postgres**: `chart/templates/agents/skill-learner.yaml` currently does not mount the shared data PVC or set `AGENTIT_DB_PATH`, so today it actually runs against its own ephemeral, isolated SQLite file rather than the shared one the other 4 components use. Worth flagging explicitly during cutover planning — the Postgres migration will implicitly "fix" this (every component will point at the same connection string/secret) but that behavior change should be called out, not just silently inherited. |
+
+General guidance: each watcher's `def run(self)` synchronous tick loop becomes `async def run(self)`, with `time.sleep(self._interval)` replaced by `await asyncio.sleep(self._interval)`, and the process entry point (currently a plain function call from `cli.py`'s Click command) wrapped in `asyncio.run(...)`. The pool itself should be created once at process startup (not per-tick) and passed into the watcher's constructor alongside (or instead of) today's `store: AssessmentStore` parameter.
+
+## 6. Data migration approach
+
+**Recommendation: clean cutover, no automated data migration script.**
+
+Rationale: this is pre-production/demo data (fleet assessments, onboarding results, event history) with no external customers depending on historical continuity. A one-time dump-and-load script is possible (SQLite → CSV/JSON export per table via the already-existing `export_all()` method → `COPY`/bulk `INSERT` into Postgres) but the engineering cost of writing and testing a correct, FK-order-aware loader for 16 tables is not justified by data that can simply be regenerated by re-running assessments against the fleet.
+
+If a specific need to preserve some data emerges later (e.g. a demo that must show historical trend charts), `export_all()` already produces the exact JSON shape needed as a starting point for a small ad-hoc script — but treat that as a "build it if and when needed" task, not a Phase 1 blocker.
+
+## 7. Backward-compat / rollout strategy
+
+**This cannot be a gradual/canary rollout at the data layer.** The portal (2 replicas) and all 4 watchers read and write the same logical state. If some pods are on SQLite (reading/writing `/data/agentit.db` on the shared RWO PVC) while others are on Postgres, they will silently diverge — writes to one backend are invisible to the other, and there is no dual-write or replication bridge planned or justified for demo-scale data.
+
+**Required approach: a single coordinated cutover, all 5 Deployments updated in the same Argo CD sync.**
+
+Practical implications for whoever executes this phase:
+
+- The `postgres.enabled` chart flag existing today is *not* a safe "flip it on gradually" mechanism by itself — it controls whether the `Cluster` CR exists, not which backend the app code talks to. The actual backend switch happens in `store.py` and needs a single `AGENTIT_DB_BACKEND=postgres` (or equivalent) cutover across every Deployment simultaneously, not a per-Deployment rollout.
+- Argo CD's canary `Rollout` strategy on the portal Deployment (`chart/templates/deployment.yaml`, `rollout.enabled: true`) is currently used for *code* rollouts (new image, gradual traffic shift) — it is not a safe mechanism for a *storage backend* change, since old and new portal pods would both be live simultaneously talking to different databases. **Recommendation: disable/bypass the canary steps specifically for the PR that flips the storage backend** (e.g. a temporary `rollout.steps` override to go straight to 100%, or coordinate a maintenance window), then re-enable normal canary behavior for the next ordinary code change.
+- Because the watchers aren't behind Argo Rollouts (plain `Deployment`s, 1 replica each), a normal `kubectl`/Argo CD rolling update on those recreates the single pod — brief downtime per watcher during cutover is expected and acceptable (these are background jobs, not user-facing).
+- **Flag this explicitly as the single biggest deployment risk of this whole migration**: an accidental partial rollout (e.g. Argo CD syncing the portal but a watcher's sync failing/lagging) would produce silent data divergence with no error surfaced anywhere. Whoever executes Phase 3 (below) should plan a smoke test immediately after cutover that confirms all 5 components are pointed at Postgres (e.g. a shared `/readyz`-style check that reports which backend it's connected to) before considering the sync "done."
+
+## 8. Testing strategy
+
+Current state: `tests/conftest.py`'s `make_store()` creates a synchronous in-memory SQLite store (`AssessmentStore(db_path=":memory:")`), and everything downstream — 376 test functions across 20 files plus `conftest.py`'s two central fixtures — calls store methods synchronously.
+
+Once `store.py` is `async def` throughout:
+
+- **A real Postgres instance is required for tests** — there is no async in-memory Postgres equivalent (unlike SQLite's `:memory:`). Two realistic options:
+  - **`testcontainers-python`** (`testcontainers[postgres]`) — spins up a real Postgres container per test session via Docker/Podman. Best fidelity, but requires a container runtime in CI and adds real per-test latency (container startup).
+  - **A Postgres service container in CI** (e.g. a GitHub Actions `services:` block or equivalent), with tests connecting to a fixed `localhost` port. Faster (one shared instance for the whole run) but requires CI config changes and loses the "fully isolated per-test DB" property unless combined with per-test schema/transaction rollback.
+  - Recommendation: start with a **session-scoped `testcontainers` Postgres fixture + per-test transaction rollback** (wrap each test in a transaction that's rolled back at teardown, rather than recreating the whole schema per test) — this keeps test isolation close to what `:memory:` SQLite gave for free, without needing a new CI service definition on day one. Migrate to a CI-native Postgres service later if `testcontainers` startup overhead becomes a real bottleneck.
+- **Mechanical scope of the test rewrite**: `make_store()` becomes `async def make_make_store()` (or an async fixture), every one of the 376 test functions in the 20 files listed in §1 that call store methods directly needs to become `async def test_...` with `await` added to each store call. This is large but *mechanical* — it is a systematic find/replace-shaped change, not a logic rewrite, and should be scripted (e.g. a codemod pass) rather than done by hand file-by-file.
+- **`test_portal.py` (120 tests) is a special case**: most of its tests go through the `portal_client` fixture's `TestClient`, i.e. they call HTTP endpoints, not `store.*` directly. FastAPI's `TestClient` already handles async route handlers transparently, so most of those 120 tests likely **do not** need to become `async def` themselves — only the *fixture setup* in `conftest.py` (`store = make_store(); store.save(report); ...`) needs to become async (and the fixture itself needs `pytest-asyncio` or equivalent to bridge into the sync `TestClient` call). This meaningfully reduces the "must become async" count below the full 376 — worth re-auditing file-by-file during Phase 3 rather than assuming every one of the 376 needs a signature change.
+- Add `pytest-asyncio` (or use `anyio`, which `httpx`/`starlette` already depend on) to `pyproject.toml`'s dev dependencies when this phase starts.
+
+## 9. Suggested phased execution order
+
+1. **Phase 1 — Stand up Postgres HA + migrate schema.** Set `postgres.enabled: true`, verify the CNPG `Cluster` reaches `Cluster Ready` status on the target OpenShift cluster. Write the Postgres DDL (using the type mapping in §4) as a proper migration (e.g. `alembic` for offline SQL migrations, or a hand-rolled idempotent `CREATE TABLE IF NOT EXISTS` script mirroring today's inline pattern, run once at Postgres cluster creation). No application code changes yet.
+2. **Phase 2 — Rewrite `store.py` to async/`asyncpg`, same public method signatures.** Every method becomes `async def`, gains `await` on the pool call, `?` placeholders become `$1`/`$2`/…, `INSERT OR REPLACE`/`INSERT OR IGNORE` become `ON CONFLICT` (per §4's table). Keep method names and parameter/return shapes identical wherever possible so Phase 3's call-site edits are `def` → `async def` + `await` mechanical changes, not logic rewrites. `AssessmentStore.__init__` becomes an async factory (e.g. `await AssessmentStore.create(dsn)`) since pool creation is itself async.
+3. **Phase 3 — Migrate callers file-by-file, tests passing at each step.** Suggested order, roughly matching the call-site inventory in §1 from smallest/simplest to largest/riskiest: `cli.py` → `remediation/dispatcher.py` → `remediation_loop.py` → each of the 4 watchers (`vuln_watcher.py`, `slo_tracker.py`, `drift_detector.py`, `skill_learner.py`, each including its `asyncio.run()`/pool-sizing wrapper from §5) → `portal/helpers.py` → `portal/routes/*.py` → `portal/app.py` last (largest surface area, most routes). Convert each file's corresponding tests in lockstep, per the mechanical `async def`/`await` pattern in §8 — do not let test conversion lag behind app-code conversion by more than one file, or the suite will be red for an extended period.
+4. **Phase 4 — Remove SQLite entirely.** Delete the `sqlite3` import and any leftover SQLite-specific code paths from `store.py`, remove `AGENTIT_DB_PATH` env var wiring from all 5 Deployments in the chart, and re-evaluate the shared `/data` RWO PVC (`chart/templates/pvc.yaml`) — keep it only if something else still needs `/data` (currently nothing does, once the DB is the only consumer of that mount), otherwise remove the PVC and its backup CronJob (`chart/templates/pvc-backup.yaml`, `chart/templates/workflows/db-backup-cronjob.yaml`) since CNPG's own `barmanObjectStore` backup mechanism (already plumbed in tonight's `postgres.enabled` chart work, gated behind `postgres.backup.enabled`) supersedes the SQLite-file `sqlite3 .backup` CronJob.
