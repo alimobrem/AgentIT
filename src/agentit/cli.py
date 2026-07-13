@@ -77,6 +77,7 @@ def main() -> None:
       vuln-watch     Start vulnerability watcher
       slo-track      Start SLO tracker
       drift-detect   Start drift detector
+      learn-watch    Start skill learner (periodic CVE research)
       orchestrate    Run full orchestration (low-level)
     """
     from agentit.logging_config import configure_logging
@@ -388,6 +389,19 @@ def drift_detect(interval: int) -> None:
 
     detector = DriftDetector(publisher=get_publisher(), interval=interval)
     detector.run()
+
+
+@main.command("learn-watch")
+@click.option("--interval", default=86400, type=int, help="Research interval in seconds (default: 24 hours).")
+@click.option("--limit", default=3, type=int, help="Max CVEs to research per cycle.")
+@click.option("--llm-model", default=None, help="Claude model to use.")
+def learn_watch(interval: int, limit: int, llm_model: str | None) -> None:
+    """Long-lived skill learner — periodically researches CVEs and drafts new skills."""
+    from agentit.events import get_publisher
+    from agentit.watchers.skill_learner import SkillLearner
+
+    learner = SkillLearner(publisher=get_publisher(), llm_model=llm_model, interval=interval, limit=limit)
+    learner.run()
 
 
 @main.command("run-agent")

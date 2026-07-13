@@ -1,0 +1,78 @@
+{{- if .Values.agents.skillLearner.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-skill-learner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-skill-learner
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-skill-learner
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-skill-learner
+        app.kubernetes.io/component: agent
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        {{- if .Values.gcp.credentialsSecret }}
+        - name: gcp-credentials
+          secret:
+            secretName: {{ .Values.gcp.credentialsSecret }}
+        {{- end }}
+      containers:
+        - name: skill-learner
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [python, -m, agentit, learn-watch]
+          args:
+            - --interval
+            - "{{ .Values.agents.skillLearner.interval }}"
+            - --limit
+            - "{{ .Values.agents.skillLearner.limit }}"
+          env:
+            {{- if .Values.kafka.enabled }}
+            - name: AGENTIT_KAFKA_BOOTSTRAP
+              value: {{ .Values.kafka.bootstrapServers }}
+            {{- end }}
+            - name: ANTHROPIC_VERTEX_PROJECT_ID
+              value: {{ .Values.env.ANTHROPIC_VERTEX_PROJECT_ID | default "" | quote }}
+            - name: CLOUD_ML_REGION
+              value: {{ .Values.env.CLOUD_ML_REGION | default "" | quote }}
+            {{- if .Values.gcp.credentialsSecret }}
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /var/secrets/gcp/credentials.json
+            {{- end }}
+          volumeMounts:
+            {{- if .Values.gcp.credentialsSecret }}
+            - name: gcp-credentials
+              mountPath: /var/secrets/gcp
+              readOnly: true
+            {{- end }}
+          livenessProbe:
+            exec:
+              command: [sh, -c, "test -f /tmp/heartbeat && test $(($(date +%s) - $(stat -c %Y /tmp/heartbeat 2>/dev/null || echo 0))) -lt 172800"]
+            initialDelaySeconds: 60
+            periodSeconds: 300
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+{{- end }}

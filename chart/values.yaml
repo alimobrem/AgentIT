@@ -69,6 +69,10 @@ agents:
   driftDetector:
     enabled: false
     interval: 600     # 10 minutes
+  skillLearner:
+    enabled: false
+    interval: 86400   # 24 hours
+    limit: 3          # max CVEs researched per cycle
 
 backup:
   enabled: false

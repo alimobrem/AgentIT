@@ -21,6 +21,7 @@ AGENT_CAPABILITIES: dict[str, str] = {
     "vuln-watcher": "Monitors fleet for CVEs, triggers remediation when auto-mode on",
     "slo-tracker": "Checks SLO status, publishes breach alerts, recommends rollbacks",
     "drift-detector": "Queries Argo CD for OutOfSync apps, optionally auto-syncs",
+    "skill-learner": "Researches CVEs via LLM, drafts new skills for human review",
 }
 
 RESOURCE_TIERS: dict[str, dict[str, str]] = {
@@ -62,6 +63,7 @@ WATCHER_AGENTS: list[dict[str, str]] = [
     {"name": "vuln-watcher", "mode": "Kafka consumer + polling", "interval": "6 hours", "description": "Monitors fleet for critical/high findings, triggers remediation loop when auto-mode is on"},
     {"name": "slo-tracker", "mode": "Polling", "interval": "5 minutes", "description": "Checks SLO status across all assessments, publishes breach alerts, recommends rollbacks"},
     {"name": "drift-detector", "mode": "Argo CD polling", "interval": "10 minutes", "description": "Queries Argo CD apps for OutOfSync state, optionally auto-syncs when auto-mode is on"},
+    {"name": "skill-learner", "mode": "LLM polling", "interval": "24 hours", "description": "Researches recent CVEs via LLM and drafts new skills (status: draft) for human review — requires an LLM connection"},
 ]
 
 

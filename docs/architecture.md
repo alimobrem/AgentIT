@@ -169,7 +169,7 @@ Skills query this before generating. The `skill_effectiveness` table tracks appr
 
 ### Tier 2: Learning agent (`learning_agent.py`)
 
-Triggered on first assessment of a new app, or manually via `agentit learn` / `agentit learn-for`:
+Three ways to trigger it: automatically every 24h via the `skill-learner` watcher (`watchers/skill_learner.py`, disabled by default), on demand from the Capabilities page's "Research CVEs & Generate Skills" button, or manually via `agentit learn` / `agentit learn-for`. All three call the same functions below:
 
 1. `research_for_app()` — targeted research based on the app's detected stack
 2. `research_cves()` — generic CVE research for K8s/container workloads
@@ -303,6 +303,7 @@ graph LR
         VulnWatcher["vuln-watcher"]
         SloTracker["slo-tracker"]
         DriftDetector["drift-detector"]
+        SkillLearner["skill-learner"]
     end
 
     AppYaml -->|"watched by"| ArgoCD
@@ -311,7 +312,7 @@ graph LR
     Chart --> NetPol & Quota & LimitRange & PDB
     Chart --> KafkaCluster & EventSource & SensorOnboard
     Chart --> Pipeline & BackupCron
-    Chart --> VulnWatcher & SloTracker & DriftDetector
+    Chart --> VulnWatcher & SloTracker & DriftDetector & SkillLearner
 ```
 
 ## The agent fleet
@@ -347,6 +348,7 @@ Three long-lived watcher agents run as separate Deployments:
 | **vuln-watcher** | 6h | Fleet CVE monitoring, triggers RemediationLoop |
 | **slo-tracker** | 5m | SLO polling, breach alerts, rollback gates |
 | **drift-detector** | 10m | Argo CD sync + API drift detection, auto-deprecation |
+| **skill-learner** | 24h | Researches CVEs via LLM, drafts new skills for human review (disabled by default, needs an LLM connection) |
 
 ## Assessment dimensions
 
