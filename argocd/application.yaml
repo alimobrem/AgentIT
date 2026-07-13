@@ -13,6 +13,10 @@ spec:
       parameters:
         - name: image.repository
           value: image-registry.openshift-image-registry.svc:5000/agentit/agentit
+        # NOTE: the CI pipeline's notify-argocd step overwrites this value directly on the
+        # live Application object after every successful build (oc patch ... image.tag).
+        # This committed value is a bootstrap/disaster-recovery default only — it does NOT
+        # reflect what's currently deployed. Check the live Application or Rollout for that.
         - name: image.tag
           value: latest
         - name: image.pullPolicy
@@ -46,16 +50,12 @@ spec:
         - /spec/ipFamilies
         - /spec/ipFamilyPolicy
         - /spec/selector
-    - group: tekton.dev
-      kind: Pipeline
-      managedFieldsManagers:
-        - argocd-server
-        - argocd-controller
+    # Only ignore the controller-populated status (address/conditions) so that
+    # committed spec changes (e.g. trigger/interceptor config) still sync normally.
     - group: triggers.tekton.dev
       kind: EventListener
-      jqPathExpressions:
-        - .spec
-        - .status
+      jsonPointers:
+        - /status
   destination:
     server: https://kubernetes.default.svc
     namespace: agentit

@@ -27,12 +27,21 @@ spec:
               args:
                 - |
                   set -eu
-                  echo "Cleaning completed/failed pods..."
+                  echo "Cleaning succeeded pods..."
                   POD_DELETED=0
-                  for phase in Succeeded Failed; do
-                    for pod in $(oc get pods -n {{ .Release.Namespace }} --field-selector=status.phase=$phase -o name 2>/dev/null); do
-                      oc delete "$pod" -n {{ .Release.Namespace }} --wait=false 2>/dev/null && POD_DELETED=$((POD_DELETED+1))
-                    done
+                  for pod in $(oc get pods -n {{ .Release.Namespace }} --field-selector=status.phase=Succeeded -o name 2>/dev/null); do
+                    oc delete "$pod" -n {{ .Release.Namespace }} --wait=false 2>/dev/null && POD_DELETED=$((POD_DELETED+1))
+                  done
+
+                  echo "Cleaning failed pods older than 1 hour (keeps recent failures inspectable)..."
+                  FAILED_CUTOFF=$(date -u -d '1 hour ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-1H '+%Y-%m-%dT%H:%M:%SZ')
+                  for pod in $(oc get pods -n {{ .Release.Namespace }} --field-selector=status.phase=Failed -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.startTime}{"\n"}{end}' 2>/dev/null); do
+                    NAME=$(echo "$pod" | awk '{print $1}')
+                    STARTED=$(echo "$pod" | awk '{print $2}')
+                    if [ -z "$NAME" ] || [ -z "$STARTED" ]; then continue; fi
+                    if [ "$STARTED" \< "$FAILED_CUTOFF" ]; then
+                      oc delete pod "$NAME" -n {{ .Release.Namespace }} --wait=false 2>/dev/null && POD_DELETED=$((POD_DELETED+1))
+                    fi
                   done
                   echo "Deleted $POD_DELETED completed/failed pods"
 

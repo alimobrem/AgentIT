@@ -5,15 +5,45 @@ metadata:
   name: pipeline
   namespace: {{ .Release.Namespace }}
 ---
+{{- /*
+Minimal namespaced permissions for the "pipeline" SA. Of everything that runs as this SA
+(CI tasks, the tekton-cleanup CronJob, and the cve-scan/compliance-rescan/dependency-update/
+cost-report rescan CronJobs), only tekton-cleanup calls the Kubernetes API — the CI tasks
+(git-clone, tests, buildah) and the rescan CronJobs run local repo/DB commands only. The
+separate agentit-ci-argocd-patch Role below (in openshift-gitops) covers the notify-argocd
+step. Do not widen this back to ClusterRole "edit" without confirming a task actually needs it.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentit-ci-cleanup
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: ["tekton.dev"]
+    resources: ["pipelineruns"]
+    verbs: ["get", "list", "delete"]
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: pipeline-edit
+  name: agentit-ci-cleanup
   namespace: {{ .Release.Namespace }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: edit
+  kind: Role
+  name: agentit-ci-cleanup
 subjects:
   - kind: ServiceAccount
     name: pipeline

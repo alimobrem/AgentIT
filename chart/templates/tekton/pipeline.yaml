@@ -73,7 +73,7 @@ spec:
     - name: build-image
       retries: 1
       timeout: "15m"
-      runAfter: [git-clone]
+      runAfter: [run-tests]
       taskRef:
         resolver: cluster
         params:

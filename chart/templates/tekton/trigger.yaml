@@ -1,4 +1,10 @@
 {{- if .Values.tektonCI.enabled }}
+{{- /*
+Requires a Secret named "github-webhook-secret" (key: "secret") in this release's namespace, e.g.:
+  oc create secret generic github-webhook-secret --from-literal=secret=<random-value> -n <namespace>
+The same value must be configured as the webhook secret on the GitHub repo
+(Settings > Webhooks > agentit-ci-webhook Route URL > Secret).
+*/}}
 apiVersion: triggers.tekton.dev/v1beta1
 kind: TriggerTemplate
 metadata:
@@ -40,10 +46,19 @@ spec:
     - name: github-push
       interceptors:
         - ref:
+            name: "github"
+          params:
+            - name: "secretRef"
+              value:
+                secretName: github-webhook-secret
+                secretKey: secret
+            - name: "eventTypes"
+              value: ["push"]
+        - ref:
             name: "cel"
           params:
             - name: "filter"
-              value: "header.match('X-GitHub-Event', 'push') && body.ref == 'refs/heads/main'"
+              value: "body.ref == 'refs/heads/main'"
       bindings:
         - name: revision
           value: $(body.after)
