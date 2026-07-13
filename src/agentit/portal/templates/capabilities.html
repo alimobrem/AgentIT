@@ -22,7 +22,11 @@
     {% else %}
       No skills are currently flagged as low-effectiveness — will research recent Kubernetes CVEs and draft new skills for any that aren't covered yet.
     {% endif %}
-    Requires an LLM connection — see Settings.
+    {% if llm_available %}
+      <span class="text-success">LLM connected — ready to run.</span>
+    {% else %}
+      <strong class="text-warning">No LLM connection configured</strong> — set an API key in Settings before this will work.
+    {% endif %}
   </span>
 </div>
 <p class="text-muted text-sm mb-2">

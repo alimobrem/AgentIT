@@ -241,6 +241,7 @@ async def capabilities_page(request: Request) -> HTMLResponse:
             log.warning("Failed to fetch low-effectiveness skills for learn-button preview", exc_info=True)
     learning_runs = await _get_learning_run_history(s)
     skill_learner_status = await _get_skill_learner_status(s)
+    llm_available = get_llm_client() is not None
 
     # Group skills by domain
     skills_by_domain: dict[str, list] = {}
@@ -283,6 +284,7 @@ async def capabilities_page(request: Request) -> HTMLResponse:
         "flagged_skills": flagged_skills,
         "learning_runs": learning_runs,
         "skill_learner_status": skill_learner_status,
+        "llm_available": llm_available,
     })
 
 
