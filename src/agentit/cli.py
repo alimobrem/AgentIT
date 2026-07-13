@@ -88,7 +88,7 @@ def main() -> None:
 @click.option("--criticality", type=click.Choice(["low", "medium", "high", "critical"]), default="medium")
 @click.option("--format", "output_format", type=click.Choice(["json", "terminal"]), default="json")
 @click.option("--output", "output_file", type=click.Path(), default=None)
-@click.option("--llm", "use_llm", is_flag=True, default=None, help="Enable Claude LLM (auto-detects credentials if omitted).")
+@click.option("--llm/--no-llm", "use_llm", default=None, help="Enable/disable Claude LLM (auto-detects credentials if omitted).")
 @click.option("--llm-model", default=None, help="Claude model to use (default: env AGENTIT_LLM_MODEL).")
 def assess(repo_url: str, criticality: str, output_format: str, output_file: str | None, use_llm: bool, llm_model: str | None) -> None:
     """Assess enterprise readiness of a Git repository."""
@@ -98,6 +98,12 @@ def assess(repo_url: str, criticality: str, output_format: str, output_file: str
             if output_file:
                 Path(output_file).write_text(output, encoding="utf-8")
                 click.echo(f"Report written to {output_file}", err=True)
+            elif output_format == "json":
+                # Delimit the payload so warning/info logs merged onto the same
+                # stream (e.g. by CliRunner, or `2>&1`) can't corrupt JSON parsing.
+                click.echo("--- AGENTIT_RESULT_BEGIN ---")
+                click.echo(output)
+                click.echo("--- AGENTIT_RESULT_END ---")
             else:
                 click.echo(output)
     except CloneError as exc:

@@ -60,7 +60,7 @@
         {% if a.overall_score > 70 %} score-green
         {% elif a.overall_score >= 40 %} score-yellow
         {% else %} score-red{% endif %}"
-        style="width:{{ a.overall_score }}%"></div>
+        style="--pct:{{ a.overall_score }}%"></div>
     </div>
     <div class="card-meta"><span data-timestamp="{{ a.assessed_at }}">{{ a.assessed_at[:10] }}</span></div>
     </a>

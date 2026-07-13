@@ -5,3 +5,13 @@
   {% endfor %}
 </div>
 {% endmacro %}
+
+{% macro client_tab_nav(tabs) %}
+{# Alpine-driven, single-page tabs. Caller must wrap this in an element with
+   x-data="{ tab: '<default-key>' }" so the tab click handlers have scope. #}
+<div class="tab-nav">
+  {% for t in tabs %}
+  <a href="#" class="tab-link" :class="{ 'tab-active': tab === '{{ t.key }}' }" @click.prevent="tab = '{{ t.key }}'">{{ t.label }}</a>
+  {% endfor %}
+</div>
+{% endmacro %}

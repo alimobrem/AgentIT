@@ -54,7 +54,7 @@
       <td>
         <div class="score-bar-bg">
           <div class="score-bar-fill {% if pct >= 95 %}score-green{% elif pct >= 80 %}score-yellow{% else %}score-red{% endif %}"
-               style="width: {{ [pct, 100] | min }}%"></div>
+               style="--pct: {{ [pct, 100] | min }}%"></div>
         </div>
       </td>
       <td class="text-sm"><span data-timestamp="{{ sl.created_at }}">{{ sl.created_at[:19] }}</span></td>

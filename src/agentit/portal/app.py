@@ -1344,6 +1344,69 @@ async def capabilities_page(request: Request) -> HTMLResponse:
     })
 
 
+@app.post("/capabilities/learn", response_model=None)
+async def capabilities_learn_route(request: Request):
+    """Research CVEs via LLM and generate new skills.
+
+    Portal entry point for what was previously only reachable via the CLI's
+    ``agentit learn`` command — the research/skill-generation loop had no UI
+    trigger at all before this.
+    """
+    llm_client = _get_llm_client()
+    if llm_client is None:
+        return RedirectResponse(
+            url=f"/capabilities?error={quote('LLM unavailable — set ANTHROPIC_API_KEY or ANTHROPIC_VERTEX_PROJECT_ID to enable skill research.')}",
+            status_code=303,
+        )
+
+    from agentit.learning_agent import (
+        check_skill_exists,
+        generate_skill_from_research,
+        research_cves,
+        save_skill,
+    )
+
+    def _run() -> tuple[list[str], list[str]]:
+        saved: list[str] = []
+        skipped: list[str] = []
+        skills_dir = Path("skills")
+        for item in research_cves(llm_client, limit=3):
+            item_name = item.get("id") or item.get("title") or item.get("name", "")
+            if item_name and check_skill_exists(skills_dir, item_name, "security"):
+                skipped.append(item_name)
+                continue
+            content = generate_skill_from_research(llm_client, item, domain="security")
+            if not content:
+                continue
+            path = save_skill(content, skills_dir, domain="security")
+            if path:
+                saved.append(path.stem)
+        return saved, skipped
+
+    try:
+        saved, skipped = await _with_timeout(asyncio.to_thread(_run), timeout=180)
+    except Exception as exc:
+        log.exception("Skill research failed")
+        return RedirectResponse(
+            url=f"/capabilities?error={quote(f'Skill research failed: {exc}'[:200])}",
+            status_code=303,
+        )
+
+    s = get_store()
+    if saved:
+        _skills_cache["data"] = None  # bust the 60s cache so new skills show immediately
+        s.log_event("learning-agent", "skills-generated", None, "info",
+                     f"Generated {len(saved)} new skill(s): {', '.join(saved)}")
+        msg = f"Generated {len(saved)} new skill(s): {', '.join(saved)}"
+        if skipped:
+            msg += f" ({len(skipped)} already existed)"
+    elif skipped:
+        msg = f"No new skills — {len(skipped)} researched CVE(s) already have matching skills."
+    else:
+        msg = "No new skills generated — research returned nothing usable this time."
+    return RedirectResponse(url=f"/capabilities?success={quote(msg)}", status_code=303)
+
+
 # ── Remediations ──────────────────────────────────────────────────────
 
 

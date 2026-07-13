@@ -56,7 +56,7 @@
       <td>
         <div class="agent-rate-bar">
           <div class="score-bar-bg">
-            <div class="score-bar-fill {% if a.success_rate >= 90 %}score-green{% elif a.success_rate >= 70 %}score-yellow{% else %}score-red{% endif %}" style="width: {{ a.success_rate }}%;"></div>
+            <div class="score-bar-fill {% if a.success_rate >= 90 %}score-green{% elif a.success_rate >= 70 %}score-yellow{% else %}score-red{% endif %}" style="--pct: {{ a.success_rate }}%;"></div>
           </div>
           <span class="text-sm">{{ a.success_rate }}%</span>
         </div>

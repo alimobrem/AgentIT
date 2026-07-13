@@ -13,7 +13,14 @@ import pytest
 
 HAS_LLM = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID"))
 
-pytestmark = pytest.mark.skipif(not HAS_LLM, reason="LLM credentials not set")
+# Two independent gates: conftest.py's --run-llm-evals flag keeps these from
+# running by default even if credentials happen to be present in the
+# environment; the skipif below still gives a clear reason if someone opts
+# in via the flag without actually having credentials configured.
+pytestmark = [
+    pytest.mark.llm_eval,
+    pytest.mark.skipif(not HAS_LLM, reason="LLM credentials not set"),
+]
 
 
 @pytest.fixture(scope="module")

@@ -189,6 +189,40 @@ class TestTimestamps:
         )
 
 
+class TestNoInlineCSS:
+    """No inline `style="..."` attributes except CSS custom-property hooks.
+
+    Setting a `--custom-prop` for a per-instance dynamic value (e.g. a score
+    bar's fill width) is allowed — the actual visual rule lives in base.html
+    and reads the variable. Inlining real style rules (width, color, display,
+    etc.) directly is not.
+    """
+
+    STYLE_ATTR = re.compile(r'style="([^"]*)"')
+    CUSTOM_PROP_ONLY = re.compile(r"^\s*(--[\w-]+\s*:\s*[^;]+;?\s*)+$")
+
+    @pytest.mark.parametrize("template_name", [
+        f.name for f in TEMPLATES_DIR.glob("*.html") if f.name != "base.html"
+    ])
+    def test_no_inline_style_rules(self, template_name):
+        """style= attributes may only set CSS custom properties, not rules."""
+        path = TEMPLATES_DIR / template_name
+        html = path.read_text(encoding="utf-8")
+
+        violations = []
+        for i, line in enumerate(html.splitlines(), 1):
+            for m in self.STYLE_ATTR.finditer(line):
+                declarations = m.group(1)
+                if not self.CUSTOM_PROP_ONLY.match(declarations):
+                    violations.append(f"  line {i}: style=\"{declarations}\"")
+
+        assert not violations, (
+            f"{template_name} has inline CSS rules (only --custom-props "
+            f"are allowed inline; add real rules to base.html):\n"
+            + "\n".join(violations)
+        )
+
+
 class TestHTMXErrorHandling:
     """Verify the portal has error handling for htmx requests."""
 

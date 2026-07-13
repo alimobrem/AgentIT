@@ -671,7 +671,7 @@ def test_no_inline_styles_dashboard(client, _override_store):
     html = resp.text
     lines = html.split("\n")
     for i, line in enumerate(lines, 1):
-        if "style=" in line.lower() and 'style="width:' not in line:
+        if "style=" in line.lower() and 'style="--pct' not in line:
             assert False, f"Inline style found on line {i}: {line.strip()}"
 
 
@@ -682,7 +682,7 @@ def test_no_inline_styles_fleet(client, _override_store):
     html = resp.text
     lines = html.split("\n")
     for i, line in enumerate(lines, 1):
-        if "style=" in line.lower() and 'style="width:' not in line:
+        if "style=" in line.lower() and 'style="--pct' not in line:
             assert False, f"Inline style found on line {i}: {line.strip()}"
 
 
@@ -690,7 +690,7 @@ def test_no_inline_styles_assess_form(client):
     resp = client.get("/assess")
     html = resp.text
     for line in html.split("\n"):
-        if "style=" in line.lower() and 'style="width:' not in line:
+        if "style=" in line.lower() and 'style="--pct' not in line:
             assert False, f"Inline style found: {line.strip()}"
 
 
@@ -701,7 +701,7 @@ def test_no_inline_styles_assessment_detail(client, _override_store):
     resp = client.get(f"/assessments/{aid}")
     html = resp.text
     for line in html.split("\n"):
-        if "style=" in line.lower() and 'style="width:' not in line:
+        if "style=" in line.lower() and 'style="--pct' not in line:
             assert False, f"Inline style found: {line.strip()}"
 
 
@@ -709,7 +709,7 @@ def test_no_inline_styles_events(client):
     resp = client.get("/events")
     html = resp.text
     for line in html.split("\n"):
-        if "style=" in line.lower() and 'style="width:' not in line:
+        if "style=" in line.lower() and 'style="--pct' not in line:
             assert False, f"Inline style found: {line.strip()}"
 
 
@@ -721,7 +721,7 @@ def test_no_inline_styles_gates(client, _override_store):
     resp = client.get("/gates")
     html = resp.text
     for line in html.split("\n"):
-        if "style=" in line.lower() and 'style="width:' not in line:
+        if "style=" in line.lower() and 'style="--pct' not in line:
             assert False, f"Inline style found: {line.strip()}"
 
 
@@ -733,7 +733,7 @@ def test_no_inline_styles_onboard_results(client, _override_store):
     resp = client.get(f"/assessments/{aid}/onboard-results")
     html = resp.text
     for line in html.split("\n"):
-        if "style=" in line.lower() and 'style="width:' not in line:
+        if "style=" in line.lower() and 'style="--pct' not in line:
             assert False, f"Inline style found: {line.strip()}"
 
 
@@ -1277,3 +1277,55 @@ def test_cancel_gate_route(client, _override_store):
     resp = client.post(f"/gates/{gid}/cancel", follow_redirects=False)
     assert resp.status_code == 303
     assert len(store.list_gates("pending")) == 0
+
+
+# ── Capabilities: learn (research CVEs & generate skills) ──────────────
+
+
+def test_capabilities_page_has_learn_button(client):
+    resp = client.get("/capabilities")
+    assert resp.status_code == 200
+    assert '/capabilities/learn' in resp.text
+    assert "Research CVEs" in resp.text
+
+
+def test_capabilities_learn_without_llm_shows_error(client):
+    with patch("agentit.portal.app._get_llm_client", return_value=None):
+        resp = client.post("/capabilities/learn", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "error=" in resp.headers["location"]
+    assert "LLM" in resp.headers["location"]
+
+
+def test_capabilities_learn_generates_new_skill(client, _override_store):
+    with patch("agentit.portal.app._get_llm_client", return_value=object()), \
+         patch("agentit.learning_agent.research_cves", return_value=[{"id": "CVE-2099-00001"}]), \
+         patch("agentit.learning_agent.check_skill_exists", return_value=False), \
+         patch("agentit.learning_agent.generate_skill_from_research",
+               return_value="---\nname: cve-2099-00001\n---\nbody"), \
+         patch("agentit.learning_agent.save_skill",
+               return_value=Path("/tmp/fake-skills/security/cve-2099-00001.md")):
+        resp = client.post("/capabilities/learn", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "success=" in resp.headers["location"]
+    events = _override_store.list_events_by_agent("learning-agent", limit=5)
+    assert any(e["action"] == "skills-generated" for e in events)
+
+
+def test_capabilities_learn_skips_existing_skill(client, _override_store):
+    with patch("agentit.portal.app._get_llm_client", return_value=object()), \
+         patch("agentit.learning_agent.research_cves", return_value=[{"id": "CVE-2099-00002"}]), \
+         patch("agentit.learning_agent.check_skill_exists", return_value=True):
+        resp = client.post("/capabilities/learn", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "success=" in resp.headers["location"]
+    events = _override_store.list_events_by_agent("learning-agent", limit=5)
+    assert not any(e["action"] == "skills-generated" for e in events)
+
+
+def test_capabilities_learn_no_research_results(client):
+    with patch("agentit.portal.app._get_llm_client", return_value=object()), \
+         patch("agentit.learning_agent.research_cves", return_value=[]):
+        resp = client.post("/capabilities/learn", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "success=" in resp.headers["location"]

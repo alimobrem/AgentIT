@@ -21,6 +21,7 @@ from agentit.portal.store import AssessmentStore
 def pytest_addoption(parser):
     parser.addoption("--run-real-repos", action="store_true", default=False, help="Run tests against real repos")
     parser.addoption("--live-cluster", action="store_true", default=False, help="Run e2e tests against a live OpenShift cluster")
+    parser.addoption("--run-llm-evals", action="store_true", default=False, help="Run tests requiring real LLM credentials")
 
 
 def pytest_collection_modifyitems(config, items):
@@ -33,6 +34,14 @@ def pytest_collection_modifyitems(config, items):
         skip = pytest.mark.skip(reason="needs --live-cluster flag and active oc login")
         for item in items:
             if "live_cluster" in item.keywords:
+                item.add_marker(skip)
+    if not config.getoption("--run-llm-evals"):
+        # Gate on the explicit flag, not just credential *presence* — an
+        # ambient ANTHROPIC_API_KEY with no working network/quota would
+        # otherwise make these run (and fail) instead of skip.
+        skip = pytest.mark.skip(reason="needs --run-llm-evals flag (and real LLM credentials)")
+        for item in items:
+            if "llm_eval" in item.keywords:
                 item.add_marker(skip)
 
 

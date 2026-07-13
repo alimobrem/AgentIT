@@ -56,12 +56,13 @@
   </form>
 </div>
 
+{% from "_macros.html" import client_tab_nav %}
 <div x-data="{ tab: 'overview' }">
-<div class="tab-nav">
-  <a href="#" class="tab-link" :class="{ 'tab-active': tab === 'overview' }" @click.prevent="tab = 'overview'">Overview</a>
-  <a href="#" class="tab-link" :class="{ 'tab-active': tab === 'findings' }" @click.prevent="tab = 'findings'">Findings{% if urgent_findings %} ({{ urgent_findings|length }}){% endif %}</a>
-  <a href="#" class="tab-link" :class="{ 'tab-active': tab === 'timeline' }" @click.prevent="tab = 'timeline'">Timeline</a>
-</div>
+{{ client_tab_nav([
+  {"key": "overview", "label": "Overview"},
+  {"key": "findings", "label": "Findings" ~ (" (" ~ urgent_findings|length ~ ")" if urgent_findings else "")},
+  {"key": "timeline", "label": "Timeline"},
+]) }}
 
 <div x-show="tab === 'overview'">
   {% for s in scores_sorted %}
@@ -73,7 +74,7 @@
           {% if s.score > 70 %} score-green
           {% elif s.score >= 40 %} score-yellow
           {% else %} score-red{% endif %}"
-          style="width:{{ s.score }}%"></div>
+          style="--pct:{{ s.score }}%"></div>
       </div>
     </div>
     <div class="dimension-value">{{ s.score }}</div>

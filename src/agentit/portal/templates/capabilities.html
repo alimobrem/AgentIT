@@ -4,6 +4,16 @@
 <h1>Capabilities &amp; Workflows</h1>
 <p class="text-muted">Skills, checks, agents, and automation — everything AgentIT can do.</p>
 
+<div class="action-bar mb-2">
+  <form method="post" action="/capabilities/learn" class="inline-form">
+    <button type="submit" class="btn btn-outline btn-sm">
+      <span class="btn-label">Research CVEs &amp; Generate Skills</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Researching&hellip;</span>
+    </button>
+  </form>
+  <span class="text-muted text-sm">Asks the LLM for recent Kubernetes CVEs and drafts new skills for any that aren't covered yet. Requires an LLM connection — see Settings.</span>
+</div>
+
 <div class="stat-grid">
   <div class="stat-card">
     <div class="stat-label">Total Skills</div>
@@ -60,7 +70,7 @@
           {% set rate = ((eff.approved / eff.total) * 100)|round|int if eff.total > 0 else 0 %}
           <div class="agent-rate-bar">
             <div class="score-bar-bg">
-              <div class="score-bar-fill {% if rate >= 70 %}score-green{% elif rate >= 40 %}score-yellow{% else %}score-red{% endif %}" style="width: {{ rate }}%;"></div>
+              <div class="score-bar-fill {% if rate >= 70 %}score-green{% elif rate >= 40 %}score-yellow{% else %}score-red{% endif %}" style="--pct: {{ rate }}%;"></div>
             </div>
             <span class="text-sm">{{ rate }}%</span>
           </div>
