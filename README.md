@@ -262,7 +262,7 @@ All configuration is via environment variables (no config file). Nothing here be
 
 AgentIT deploys itself the same way it onboards other apps — via the Helm chart in `chart/` and the Argo CD `Application` in `argocd/application.yaml`. **Argo CD is the sole deployer**; see [`docs/deployment.md`](docs/deployment.md) for the full operational runbook.
 
-- Change behavior: edit `argocd/application.yaml` Helm parameters, commit, push. Argo CD auto-syncs.
+- Change behavior: edit `argocd/application.yaml` Helm parameters, commit, push. The CI pipeline's `notify-argocd` task re-applies this file to the live `Application` object on every run (before re-pinning `image.tag`), so the parameter list stays in sync automatically — no manual `oc apply` needed. See [`docs/deployment.md`](docs/deployment.md) for the details and why this exists.
 - Change a secret: `oc create secret` on-cluster, then reference it via a Helm parameter. Never in Git.
 - Never `helm upgrade` manually or `oc edit` the `Rollout`.
 

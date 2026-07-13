@@ -17,17 +17,29 @@ HELM_VARS = {
     "{{ .Release.Name }}": "agentit",
     "{{ .Release.Service }}": "Helm",
     "{{ .Chart.Name }}": "agentit",
+    "{{ .Values.postgres.instances }}": "3",
+    "{{ .Values.postgres.credentials.secretName }}": "agentit-postgres-app",
 }
 
 
 def _render(template_path: Path) -> str:
     """Read a template file and do basic Helm variable substitution."""
     raw = template_path.read_text()
-    # Strip {{- if ... }} and {{- end }} conditionals
-    raw = re.sub(r"\{\{-?\s*if\s+.*?\}\}\n?", "", raw)
-    raw = re.sub(r"\{\{-?\s*end\s*\}\}\n?", "", raw)
+    # Strip {{- if ... }}, {{- else }} and {{- end }} conditionals. This keeps
+    # both branches' literal content, which is fine for our purposes here:
+    # tests target one branch's keys and tolerate the other branch's lines
+    # being present too (yaml.safe_load just lets the later duplicate key win).
+    raw = re.sub(r"[ \t]*\{\{-?\s*if\s+.*?\}\}\n?", "", raw)
+    raw = re.sub(r"[ \t]*\{\{-?\s*else\s*\}\}\n?", "", raw)
+    raw = re.sub(r"[ \t]*\{\{-?\s*end\s*\}\}\n?", "", raw)
+    # Strip {{- $var := ... }} variable assignments (no rendered output)
+    raw = re.sub(r"[ \t]*\{\{-?\s*\$\w+\s*:=.*?-?\}\}\n?", "", raw)
     for var, val in HELM_VARS.items():
         raw = raw.replace(var, val)
+    # Any remaining "key: {{ some expression }}" (e.g. `index $x.data "y"`)
+    # we can't literally substitute — collapse to a null value so the line
+    # still parses; tests only need the *key* to be present, not the value.
+    raw = re.sub(r"^(\s*[\w-]+):\s*\{\{.*?\}\}\s*$", r"\1:", raw, flags=re.MULTILINE)
     return raw
 
 
@@ -159,9 +171,32 @@ class TestTektonPipeline:
         """Verify notify-argocd patches the Application's image.tag param."""
         doc = _load(self.TEMPLATE)
         tasks = {t["name"]: t for t in doc["spec"]["tasks"]}
-        script = tasks["notify-argocd"]["taskSpec"]["steps"][0]["script"]
+        steps = {s["name"]: s for s in tasks["notify-argocd"]["taskSpec"]["steps"]}
+        script = steps["update-image-tag"]["script"]
         assert "patch application" in script
         assert "image.tag" in script
+
+    def test_notify_argocd_syncs_application_spec_before_patching_tag(self):
+        """Regression for the incident where a new Helm parameter committed to
+        argocd/application.yaml required a manual `oc apply` to take effect, and
+        that manual apply also clobbered the live-patched image.tag. notify-argocd
+        must re-apply argocd/application.yaml (so any new/changed parameter list
+        syncs automatically on every deploy) BEFORE re-pinning image.tag (so the
+        apply can never leave the live tag on the git placeholder value)."""
+        doc = _load(self.TEMPLATE)
+        tasks = {t["name"]: t for t in doc["spec"]["tasks"]}
+        task = tasks["notify-argocd"]
+        step_names = [s["name"] for s in task["taskSpec"]["steps"]]
+        assert step_names.index("sync-application-spec") < step_names.index(
+            "update-image-tag"
+        ), "argocd/application.yaml must be re-applied before the image.tag patch"
+        steps = {s["name"]: s for s in task["taskSpec"]["steps"]}
+        assert "oc apply -f argocd/application.yaml" in steps["sync-application-spec"]["script"]
+        # The step needs the cloned repo to read argocd/application.yaml from.
+        ws_names = {w["name"] for w in task["taskSpec"]["workspaces"]}
+        assert "source" in ws_names
+        task_ws_names = {w["name"] for w in task["workspaces"]}
+        assert "source" in task_ws_names
 
     def test_pipeline_has_timeouts(self):
         doc = _load(self.TEMPLATE)
@@ -249,6 +284,48 @@ class TestTektonCleanup:
         doc = _load(self.TEMPLATE)
         sa = doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]["serviceAccountName"]
         assert sa == "pipeline"
+
+
+# ---------------------------------------------------------------------------
+# Postgres (CloudNativePG): postgres/postgres-cluster.yaml, postgres-secret.yaml
+# ---------------------------------------------------------------------------
+
+class TestPostgresCluster:
+    TEMPLATE = CHART_DIR / "postgres" / "postgres-cluster.yaml"
+
+    def test_parseable(self):
+        doc = _load(self.TEMPLATE)
+        assert doc["kind"] == "Cluster"
+        assert doc["apiVersion"] == "postgresql.cnpg.io/v1"
+
+    def test_ha_instance_count_at_least_three(self):
+        """HA requires >=3 instances (1 primary + 2 replicas) for quorum-safe failover."""
+        doc = _load(self.TEMPLATE)
+        assert doc["spec"]["instances"] >= 3
+
+    def test_bootstrap_references_credentials_secret(self):
+        doc = _load(self.TEMPLATE)
+        secret = doc["spec"]["bootstrap"]["initdb"]["secret"]
+        assert secret["name"] == "agentit-postgres-app"
+
+    def test_has_pod_anti_affinity(self):
+        """Replicas must spread across nodes, or a single node loss could take down quorum."""
+        doc = _load(self.TEMPLATE)
+        assert doc["spec"]["affinity"]["topologyKey"] == "kubernetes.io/hostname"
+
+
+class TestPostgresSecret:
+    TEMPLATE = CHART_DIR / "postgres" / "postgres-secret.yaml"
+
+    def test_parseable(self):
+        doc = _load(self.TEMPLATE)
+        assert doc["kind"] == "Secret"
+        assert doc["type"] == "kubernetes.io/basic-auth"
+
+    def test_has_username_and_password_keys(self):
+        doc = _load(self.TEMPLATE)
+        assert "username" in doc["data"]
+        assert "password" in doc["data"]
 
 
 # ---------------------------------------------------------------------------
