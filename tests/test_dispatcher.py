@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from agentit.agents.hardening import patch_base_image
 from agentit.portal.app import app, get_store
+from agentit.portal.store_factory import AsyncSQLiteStore
 from agentit.remediation.dispatcher import RemediationDispatcher
 from agentit.remediation.registry import lookup
 from conftest import make_report, make_store
@@ -133,10 +134,11 @@ class TestDispatcher:
 @pytest.fixture
 def _override_store():
     test_store = make_store()
-    with patch("agentit.portal.app.get_store", return_value=test_store), \
-         patch("agentit.portal.routes.webhooks.get_store", return_value=test_store), \
-         patch("agentit.portal.routes.health.get_store", return_value=test_store), \
-         patch("agentit.portal.routes.schedules.get_store", return_value=test_store):
+    async_store = AsyncSQLiteStore.wrap(test_store)
+    with patch("agentit.portal.app.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.webhooks.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.health.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.schedules.get_store", return_value=async_store):
         yield test_store
 
 

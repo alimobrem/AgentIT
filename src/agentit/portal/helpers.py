@@ -258,8 +258,11 @@ def run_onboarding(report, assessment_id: str | None = None, store: object | Non
     from agentit.agents.orchestrator import FleetOrchestrator
 
     if store is None:
-        if _store is not None and hasattr(_store, "raw"):
-            store = _store.raw
+        if _store is not None:
+            # Unwrap the async facade if that's what the singleton (or a
+            # test's patch of it) currently holds; a plain sync store
+            # (e.g. a test patching `_store` directly with one) is used as-is.
+            store = _store.raw if hasattr(_store, "raw") else _store
         else:
             from agentit.portal.store import AssessmentStore
             store = AssessmentStore()

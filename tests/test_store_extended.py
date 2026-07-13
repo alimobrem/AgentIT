@@ -206,6 +206,21 @@ class TestRemediationsTable:
         store.complete_remediation(rid)
         assert store.complete_remediation(rid) is False
 
+    def test_delete(self):
+        store = make_store()
+        aid = store.save(make_report())
+        rid = store.save_remediation(aid, "security", "Fix RBAC")
+        assert store.delete_remediation(rid, aid) is True
+        assert store.list_remediations(aid) == []
+
+    def test_delete_wrong_assessment_returns_false(self):
+        store = make_store()
+        aid = store.save(make_report())
+        other_aid = store.save(make_report(repo_name="other-app"))
+        rid = store.save_remediation(aid, "security", "Fix RBAC")
+        assert store.delete_remediation(rid, other_aid) is False
+        assert len(store.list_remediations(aid)) == 1
+
 
 # ── Agent Registry ─────────────────────────────────────────────────────
 
@@ -279,6 +294,21 @@ class TestSlosTable:
         store.save_slo(aid, "error_rate", 0.1)
         slos = store.list_slos(aid)
         assert len(slos) == 3
+
+    def test_delete(self):
+        store = make_store()
+        aid = store.save(make_report())
+        sid = store.save_slo(aid, "availability", 99.9)
+        assert store.delete_slo(sid, aid) is True
+        assert store.list_slos(aid) == []
+
+    def test_delete_wrong_assessment_returns_false(self):
+        store = make_store()
+        aid = store.save(make_report())
+        other_aid = store.save(make_report(repo_name="other-app"))
+        sid = store.save_slo(aid, "availability", 99.9)
+        assert store.delete_slo(sid, other_aid) is False
+        assert len(store.list_slos(aid)) == 1
 
 
 # ── Orchestrator wiring ────────────────────────────────────────────────

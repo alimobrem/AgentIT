@@ -55,12 +55,11 @@ def test_app_py_delegates_to_shared_run_onboarding():
     report = make_report(criticality="low")
     aid = store.save(report)
 
-    # app.py's _run_onboarding resolves its store via app.py's OWN
-    # get_store() (passed explicitly into helpers.run_onboarding) so that
-    # `patch("agentit.portal.app.get_store", ...)` overrides -- as used by
-    # test_portal.py's _override_store fixture -- keep working correctly.
-    with patch("agentit.portal.app.get_store", return_value=store):
-        files, orch_summary = app_module._run_onboarding(report, aid)
+    # app.py's _run_onboarding runs inside asyncio.to_thread (Phase 3 of
+    # docs/postgres-migration-plan.md), so its route caller resolves the
+    # (now-async) get_store() itself and passes the sync store handle in
+    # explicitly -- verify _run_onboarding forwards that handle unchanged.
+    files, orch_summary = app_module._run_onboarding(report, aid, store)
 
     assert "auto_approve" in orch_summary
     assert "gates" in orch_summary

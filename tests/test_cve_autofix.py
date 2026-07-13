@@ -13,6 +13,7 @@ from agentit.agents.hardening import HardeningAgent
 from agentit.analyzers.security import SecurityAnalyzer
 from agentit.models import DimensionScore, Finding, Language, Severity
 from agentit.portal.app import app, get_store
+from agentit.portal.store_factory import AsyncSQLiteStore
 from conftest import make_report, make_store
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -160,10 +161,11 @@ class TestCVEWebhook:
     @pytest.fixture(autouse=True)
     def _override_store(self):
         test_store = make_store()
-        with patch("agentit.portal.app.get_store", return_value=test_store), \
-             patch("agentit.portal.routes.webhooks.get_store", return_value=test_store), \
-             patch("agentit.portal.routes.health.get_store", return_value=test_store), \
-             patch("agentit.portal.routes.schedules.get_store", return_value=test_store):
+        async_store = AsyncSQLiteStore.wrap(test_store)
+        with patch("agentit.portal.app.get_store", return_value=async_store), \
+             patch("agentit.portal.routes.webhooks.get_store", return_value=async_store), \
+             patch("agentit.portal.routes.health.get_store", return_value=async_store), \
+             patch("agentit.portal.routes.schedules.get_store", return_value=async_store):
             yield test_store
 
     @pytest.fixture()

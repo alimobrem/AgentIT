@@ -10,14 +10,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agentit.portal.app import app
+from agentit.portal.store_factory import AsyncSQLiteStore
 from conftest import make_store
 
 
 @pytest.fixture(autouse=True)
 def _override_store():
     test_store = make_store()
-    with patch("agentit.portal.app.get_store", return_value=test_store), \
-         patch("agentit.portal.routes.schedules.get_store", return_value=test_store):
+    async_store = AsyncSQLiteStore.wrap(test_store)
+    with patch("agentit.portal.app.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.schedules.get_store", return_value=async_store):
         yield test_store
 
 

@@ -5,11 +5,13 @@ import pytest
 from conftest import make_report, make_store
 from fastapi.testclient import TestClient
 from agentit.portal.app import app
+from agentit.portal.store_factory import AsyncSQLiteStore
 
 
 @pytest.fixture()
 def fleet_client():
     store = make_store()
+    async_store = AsyncSQLiteStore.wrap(store)
     ids = []
     for name, url in [("frontend", "https://github.com/org/frontend"),
                        ("backend", "https://github.com/org/backend"),
@@ -19,12 +21,12 @@ def fleet_client():
         report.repo_name = name
         ids.append(store.save(report))
 
-    with patch("agentit.portal.app.get_store", return_value=store), \
-         patch("agentit.portal.helpers.get_store", return_value=store), \
-         patch("agentit.portal.helpers._store", store), \
-         patch("agentit.portal.routes.webhooks.get_store", return_value=store), \
-         patch("agentit.portal.routes.health.get_store", return_value=store), \
-         patch("agentit.portal.routes.schedules.get_store", return_value=store):
+    with patch("agentit.portal.app.get_store", return_value=async_store), \
+         patch("agentit.portal.helpers.get_store", return_value=async_store), \
+         patch("agentit.portal.helpers._store", async_store), \
+         patch("agentit.portal.routes.webhooks.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.health.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.schedules.get_store", return_value=async_store):
         yield TestClient(app), store, ids
 
 

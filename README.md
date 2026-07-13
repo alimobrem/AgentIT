@@ -253,7 +253,7 @@ uv run agentit portal --port 8080
 # open http://localhost:8080
 ```
 
-The portal uses a local SQLite file (`agentit.db` by default) — no external database required for local use. A migration to an HA Postgres backend (async, via `asyncpg`) is in progress: `portal/store_pg.py` is a full async counterpart to `store.py`, schema and all, verified against a real Postgres instance, but nothing in the app imports it yet — see [`docs/postgres-migration-plan.md`](docs/postgres-migration-plan.md) for exactly what's done vs. remaining, and the `postgres.enabled` chart flag below for the (currently unused) CloudNativePG cluster prep.
+The portal uses a local SQLite file (`agentit.db` by default) — **still no external database required for local use; this remains the default and only active backend today.** A migration to an HA Postgres backend (async, via `asyncpg`) is in progress: `portal/store_pg.py` is a full async counterpart to `store.py`, schema and all, verified against a real Postgres instance, and every store caller in the codebase (CLI, watchers, and the portal — `app.py`, `routes/*.py`, `helpers.py`) has been converted to the `store_factory.create_store()` async access pattern, selectable via `AGENTIT_DB_BACKEND` (`sqlite` default, `postgres` opt-in) — but that env var is intentionally unset everywhere today, and `FleetOrchestrator`/`AutoMode`/`RemediationDispatcher`/`RemediationLoop` remain permanently synchronous internally (handed a raw sync store handle, run via `asyncio.to_thread`), which is the one remaining structural blocker to a real cutover. See [`docs/postgres-migration-plan.md`](docs/postgres-migration-plan.md) for exactly what's done vs. remaining, and the `postgres.enabled` chart flag below for the (currently unused) CloudNativePG cluster prep.
 
 ## Configuration
 
@@ -381,8 +381,12 @@ AgentIT/
 │       │                           #   SLOs, remediations, skill_effectiveness, agent_feedback,
 │       │                           #   processed_webhooks)
 │       ├── store_pg.py             # Async Postgres counterpart to store.py (asyncpg) — schema +
-│       │                           #   all methods ported and tested; not wired into the app yet
-│       ├── helpers.py              # CircuitBreaker, clone_assess_cleanup, safe_url
+│       │                           #   all methods ported and tested; selectable but not the
+│       │                           #   active backend (AGENTIT_DB_BACKEND unset everywhere)
+│       ├── store_factory.py        # create_store(): async store access for every caller (CLI,
+│       │                           #   watchers, portal) — sqlite (default) or postgres, per
+│       │                           #   AGENTIT_DB_BACKEND
+│       ├── helpers.py              # CircuitBreaker, clone_assess_cleanup, safe_url, async get_store()
 │       ├── cluster_apply.py        # oc/kubectl apply with pre-flight checks
 │       ├── github_pr.py            # GitHub REST API integration
 │       └── templates/              # 25 Jinja2 templates (htmx + Alpine.js)

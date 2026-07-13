@@ -1870,10 +1870,10 @@ async def api_slos(assessment_id: str):
 
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request) -> HTMLResponse:
-    s = get_store()
-    auto_mode = s.get_setting("auto_mode") in ("true", "1", "on")
+    s = await get_store()
+    auto_mode = (await s.get_setting("auto_mode")) in ("true", "1", "on")
     llm_available = _get_llm_client() is not None
-    recent_actions = s.list_events_by_agent("auto-mode", limit=20)
+    recent_actions = await s.list_events_by_agent("auto-mode", limit=20)
     retention_days = get_retention_days()
     purge_result = request.query_params.get("purged")
     return templates.TemplateResponse(request, "settings.html", {
@@ -1888,8 +1888,8 @@ async def settings_page(request: Request) -> HTMLResponse:
 @app.post("/settings/purge", response_model=None)
 async def purge_old_data(request: Request):
     retention = get_retention_days()
-    s = get_store()
-    counts = s.purge_old_data(retention_days=retention)
+    s = await get_store()
+    counts = await s.purge_old_data(retention_days=retention)
     total = sum(counts.values())
     audit_log(actor="portal-user", action="purge", resource="store",
               details={"retention_days": retention, "rows_deleted": total, "by_table": counts})
@@ -1900,9 +1900,9 @@ async def purge_old_data(request: Request):
 async def toggle_auto_mode(request: Request):
     form = await request.form()
     value = str(form.get("value", "false")).lower()
-    s = get_store()
-    s.set_setting("auto_mode", value)
-    s.log_event(
+    s = await get_store()
+    await s.set_setting("auto_mode", value)
+    await s.log_event(
         "portal", "auto-mode-toggled", None,
         "info", f"Auto-mode {'enabled' if value == 'true' else 'disabled'}",
     )
@@ -1913,18 +1913,21 @@ async def toggle_auto_mode(request: Request):
 
 @app.get("/api/settings")
 async def api_settings():
-    return JSONResponse(get_store().list_settings())
+    s = await get_store()
+    return JSONResponse(await s.list_settings())
 
 
 @app.get("/api/export")
 async def export_data():
     """Export all data as JSON for backup/migration."""
-    return get_store().export_all()
+    s = await get_store()
+    return await s.export_all()
 
 
 @app.get("/api/settings/{key}")
 async def api_get_setting(key: str):
-    val = get_store().get_setting(key)
+    s = await get_store()
+    val = await s.get_setting(key)
     if val is None:
         raise HTTPException(404, f"Setting '{key}' not found")
     return JSONResponse({"key": key, "value": val})
@@ -1936,5 +1939,6 @@ async def api_set_setting(request: Request, key: str):
     value = body.get("value")
     if value is None:
         raise HTTPException(400, "value required")
-    get_store().set_setting(key, str(value))
+    s = await get_store()
+    await s.set_setting(key, str(value))
     return JSONResponse({"key": key, "value": str(value)})

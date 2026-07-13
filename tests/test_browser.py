@@ -22,9 +22,11 @@ def app_url(tmp_path_factory):
     import uvicorn
     from agentit.portal.app import app
     from agentit.portal.store import AssessmentStore
+    from agentit.portal.store_factory import AsyncSQLiteStore
     from conftest import make_report
 
     store = AssessmentStore(":memory:")
+    async_store = AsyncSQLiteStore.wrap(store)
     report = make_report()
     aid = store.save(report)
     store.save_onboarding(aid, [
@@ -35,12 +37,12 @@ def app_url(tmp_path_factory):
     store.log_event("test-agent", "completed", report.repo_name, "info", "test event")
     store.create_gate(aid, "deploy-approval", "Test gate for approval")
 
-    with patch("agentit.portal.app.get_store", return_value=store), \
-         patch("agentit.portal.helpers.get_store", return_value=store), \
-         patch("agentit.portal.helpers._store", store), \
-         patch("agentit.portal.routes.webhooks.get_store", return_value=store), \
-         patch("agentit.portal.routes.health.get_store", return_value=store), \
-         patch("agentit.portal.routes.schedules.get_store", return_value=store):
+    with patch("agentit.portal.app.get_store", return_value=async_store), \
+         patch("agentit.portal.helpers.get_store", return_value=async_store), \
+         patch("agentit.portal.helpers._store", async_store), \
+         patch("agentit.portal.routes.webhooks.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.health.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.schedules.get_store", return_value=async_store):
 
         server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=9998, log_level="error"))
         thread = threading.Thread(target=server.run, daemon=True)

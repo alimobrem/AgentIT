@@ -125,11 +125,28 @@ def create_mock_repo(tmp_path: Path):
 
 @pytest.fixture()
 def portal_client():
-    """TestClient with all store locations patched and seeded with test data."""
+    """TestClient with all store locations patched and seeded with test data.
+
+    ``store`` (the fixture's 2nd yielded value, and what every test body
+    calls directly, e.g. ``store.log_event(...)``) stays the plain
+    *synchronous* ``AssessmentStore`` -- unchanged from before Phase 3 of
+    docs/postgres-migration-plan.md, so none of test_portal.py's 120 tests
+    need to become ``async def`` just to keep making direct store calls.
+
+    What *does* change: the app itself now calls `get_store()` as an
+    ``async def`` (Phase 3) -- ``AsyncSQLiteStore.wrap(store)`` gives every
+    patched location an async-compatible facade over the exact same
+    underlying in-memory sqlite connection (constructing a second, separate
+    ``AsyncSQLiteStore(":memory:")`` would silently point at a different,
+    empty database), so `await get_store()` inside the app sees the same
+    data `store.*` calls made directly in a test body already wrote.
+    """
     from fastapi.testclient import TestClient
     from agentit.portal.app import app
+    from agentit.portal.store_factory import AsyncSQLiteStore
 
     store = make_store()
+    async_store = AsyncSQLiteStore.wrap(store)
     report = make_report()
     assessment_id = store.save(report)
     store.save_onboarding(assessment_id, [
@@ -148,13 +165,13 @@ def portal_client():
         "kafka_stats": {"available": False, "topics": {}, "consumer_groups": []},
     }
 
-    with patch("agentit.portal.app.get_store", return_value=store), \
-         patch("agentit.portal.helpers.get_store", return_value=store), \
-         patch("agentit.portal.helpers._store", store), \
-         patch("agentit.portal.routes.webhooks.get_store", return_value=store), \
-         patch("agentit.portal.routes.health.get_store", return_value=store), \
+    with patch("agentit.portal.app.get_store", return_value=async_store), \
+         patch("agentit.portal.helpers.get_store", return_value=async_store), \
+         patch("agentit.portal.helpers._store", async_store), \
+         patch("agentit.portal.routes.webhooks.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.health.get_store", return_value=async_store), \
          patch("agentit.portal.routes.health._get_cluster_health", return_value=fake_health), \
-         patch("agentit.portal.routes.schedules.get_store", return_value=store):
+         patch("agentit.portal.routes.schedules.get_store", return_value=async_store):
         client = TestClient(app)
         prime_csrf(client)
         yield client, store, assessment_id

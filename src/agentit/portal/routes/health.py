@@ -81,7 +81,10 @@ def _get_custom_resource_safe(group: str, version: str, plural: str, name: str, 
         return None
 
 
-def _get_cluster_health() -> dict:
+def _get_cluster_health(store=None) -> dict:
+    """Runs off the event loop via ``asyncio.to_thread`` at every call site,
+    so ``store`` must already be a synchronous handle (``(await
+    get_store()).raw``), not the async facade itself."""
     from agentit import kube
 
     import os
@@ -96,9 +99,9 @@ def _get_cluster_health() -> dict:
 
     managed_names = {"agentit"}
     try:
-        _s = get_store()
-        for app_data in _s.get_fleet_data():
-            managed_names.add(app_data["repo_name"].lower().replace("_", "-").replace(".", "-"))
+        if store is not None:
+            for app_data in store.get_fleet_data():
+                managed_names.add(app_data["repo_name"].lower().replace("_", "-").replace(".", "-"))
     except Exception:
         log.debug("Failed to load fleet for health check", exc_info=True)
 
@@ -240,9 +243,19 @@ def _get_cluster_health() -> dict:
 # ── Routes ────────────────────────────────────────────────────────────
 
 
+async def _sync_store_handle():
+    """Resolve the async store singleton, returning its synchronous handle
+    for use inside ``asyncio.to_thread`` workers (see module docstring on
+    ``_get_cluster_health``). Returns ``None`` for the postgres backend
+    (no ``.raw`` yet) rather than guessing."""
+    s = await get_store()
+    return s.raw if hasattr(s, "raw") else None
+
+
 @router.get("/health", response_class=HTMLResponse)
 async def health_page(request: Request) -> HTMLResponse:
-    data = await asyncio.to_thread(_get_cluster_health)
+    store = await _sync_store_handle()
+    data = await asyncio.to_thread(_get_cluster_health, store)
     return get_templates().TemplateResponse(request, "health.html", data)
 
 
@@ -334,7 +347,11 @@ async def pipeline_detail_page(request: Request, pipeline_name: str) -> HTMLResp
 @router.get("/healthz")
 async def healthz():
     try:
-        get_store()._conn.execute("SELECT 1")
+        s = await get_store()
+        if hasattr(s, "get_setting"):
+            await s.get_setting("__healthz_probe__")
+        else:
+            s._conn.execute("SELECT 1")
     except Exception as exc:
         return JSONResponse({"status": "unhealthy", "error": str(exc)}, status_code=503)
     return {"status": "ok"}
@@ -344,8 +361,11 @@ async def healthz():
 async def readyz():
     import os
     try:
-        s = get_store()
-        s._conn.execute("SELECT 1")
+        s = await get_store()
+        if hasattr(s, "get_setting"):
+            await s.get_setting("__readyz_probe__")
+        else:
+            s._conn.execute("SELECT 1")
     except Exception as exc:
         return JSONResponse({"status": "not ready", "error": str(exc)}, status_code=503)
     if os.environ.get("AGENTIT_KAFKA_BOOTSTRAP"):
@@ -359,7 +379,8 @@ async def readyz():
 @router.get("/api/health")
 async def api_health():
     import os
-    data = await asyncio.to_thread(_get_cluster_health)
+    store = await _sync_store_handle()
+    data = await asyncio.to_thread(_get_cluster_health, store)
     body = {
         "argo_synced": data["argo_synced"],
         "pods_running": data["pods_running"],

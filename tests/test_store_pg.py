@@ -226,6 +226,51 @@ class TestGates:
         assert await store.resolve_gate(gate_id, "rejected", "bob") is False
 
 
+class TestSlos:
+    async def test_save_list_update_delete(self, store):
+        assessment_id = await store.save(_make_report())
+        slo_id = await store.save_slo(assessment_id, "availability", 99.9)
+        slos = await store.list_slos(assessment_id)
+        assert len(slos) == 1
+        assert slos[0]["id"] == slo_id
+
+        assert await store.update_slo(slo_id, 99.95, "met") is True
+        slos = await store.list_slos(assessment_id)
+        assert slos[0]["status"] == "met"
+
+        assert await store.delete_slo(slo_id, assessment_id) is True
+        assert await store.list_slos(assessment_id) == []
+
+    async def test_delete_slo_wrong_assessment_returns_false(self, store):
+        assessment_id = await store.save(_make_report())
+        other_id = await store.save(_make_report("other-app"))
+        slo_id = await store.save_slo(assessment_id, "availability", 99.9)
+        assert await store.delete_slo(slo_id, other_id) is False
+
+
+class TestRemediations:
+    async def test_save_list_complete_delete(self, store):
+        assessment_id = await store.save(_make_report())
+        await store.save_remediation(assessment_id, "hardening", "Add NetworkPolicy")
+        remediations = await store.list_remediations(assessment_id)
+        assert len(remediations) == 1
+        rem_id = remediations[0]["id"]
+
+        assert await store.complete_remediation(rem_id) is True
+        remediations = await store.list_remediations(assessment_id)
+        assert remediations[0]["status"] == "completed"
+
+        assert await store.delete_remediation(rem_id, assessment_id) is True
+        assert await store.list_remediations(assessment_id) == []
+
+    async def test_delete_remediation_wrong_assessment_returns_false(self, store):
+        assessment_id = await store.save(_make_report())
+        other_id = await store.save(_make_report("other-app"))
+        await store.save_remediation(assessment_id, "hardening", "Add NetworkPolicy")
+        rem_id = (await store.list_remediations(assessment_id))[0]["id"]
+        assert await store.delete_remediation(rem_id, other_id) is False
+
+
 class TestAgentRegistry:
     async def test_register_agent_is_idempotent_on_name(self, store):
         await store.register_agent("scanner", "security", capabilities='["scan"]')

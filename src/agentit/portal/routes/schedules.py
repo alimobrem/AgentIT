@@ -58,13 +58,13 @@ def _get_watcher_deploy_status() -> dict[str, str]:
 async def schedules_page(request: Request) -> HTMLResponse:
     import yaml as _yaml
 
-    s = get_store()
-    fleet = s.get_fleet_data()
+    s = await get_store()
+    fleet = await s.get_fleet_data()
     schedules: list[dict] = []
 
     for app_data in fleet:
         aid = app_data["id"]
-        files = s.get_onboarding(aid)
+        files = await s.get_onboarding(aid)
         if not files:
             continue
         for f in files:
@@ -80,11 +80,11 @@ async def schedules_page(request: Request) -> HTMLResponse:
                 cron = "unknown"
                 concurrency = "unknown"
             override_key = f"schedule:{app_data['repo_name']}:{agent}"
-            override = s.get_setting(override_key)
+            override = await s.get_setting(override_key)
             if override:
                 cron = override
             enabled_key = f"schedule:{app_data['repo_name']}:{agent}:enabled"
-            enabled_val = s.get_setting(enabled_key)
+            enabled_val = await s.get_setting(enabled_key)
             enabled = enabled_val != "false"
 
             schedules.append({
@@ -98,7 +98,7 @@ async def schedules_page(request: Request) -> HTMLResponse:
             })
 
     # Merge manually created schedules from the store
-    manual_schedules = s.list_schedules()
+    manual_schedules = await s.list_schedules()
     for ms in manual_schedules:
         schedules.append({
             "id": ms["id"],
@@ -117,7 +117,7 @@ async def schedules_page(request: Request) -> HTMLResponse:
         if "source" not in sched:
             sched["source"] = "onboarding"
 
-    agents = s.list_agents()
+    agents = await s.list_agents()
     deploy_status = await asyncio.to_thread(_get_watcher_deploy_status)
     watchers = []
     for w in _WATCHER_AGENTS:
@@ -148,8 +148,9 @@ async def update_schedule(request: Request):
         return RedirectResponse(url="/schedules?error=Missing+required+fields", status_code=303)
     if len(schedule.split()) != 5:
         return RedirectResponse(url="/schedules?error=Invalid+cron+expression", status_code=303)
-    get_store().set_setting(f"schedule:{app_name}:{job_key}", schedule)
-    get_store().log_event(
+    s = await get_store()
+    await s.set_setting(f"schedule:{app_name}:{job_key}", schedule)
+    await s.log_event(
         "portal", "schedule-updated", app_name, "info",
         f"Schedule for {job_key} updated to: {schedule}",
     )
@@ -164,9 +165,10 @@ async def toggle_schedule(request: Request):
     enabled = str(form.get("enabled", "true"))
     if not (app_name and job_key):
         return RedirectResponse(url="/schedules?error=Missing+required+fields", status_code=303)
-    get_store().set_setting(f"schedule:{app_name}:{job_key}:enabled", enabled)
+    s = await get_store()
+    await s.set_setting(f"schedule:{app_name}:{job_key}:enabled", enabled)
     action = "enabled" if enabled == "true" else "disabled"
-    get_store().log_event(
+    await s.log_event(
         "portal", f"schedule-{action}", app_name, "info",
         f"Schedule {job_key} {action} for {app_name}",
     )
@@ -187,9 +189,9 @@ async def create_schedule(request: Request):
     if len(schedule.split()) != 5:
         raise HTTPException(400, "Invalid cron expression: must have exactly 5 fields")
 
-    s = get_store()
-    s.create_schedule(app_name, job_name, agent, schedule, command)
-    s.log_event(
+    s = await get_store()
+    await s.create_schedule(app_name, job_name, agent, schedule, command)
+    await s.log_event(
         "portal", "schedule-created", app_name, "info",
         f"Manual schedule created: {job_name} ({schedule})",
     )
@@ -203,8 +205,8 @@ async def delete_schedule_route(request: Request):
     if not schedule_id:
         raise HTTPException(400, "schedule_id required")
 
-    s = get_store()
-    if not s.delete_schedule(schedule_id):
+    s = await get_store()
+    if not await s.delete_schedule(schedule_id):
         raise HTTPException(404, "Schedule not found")
-    s.log_event("portal", "schedule-deleted", None, "info", f"Deleted manual schedule {schedule_id}")
+    await s.log_event("portal", "schedule-deleted", None, "info", f"Deleted manual schedule {schedule_id}")
     return RedirectResponse(url="/schedules?deleted=true", status_code=303)

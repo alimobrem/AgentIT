@@ -75,8 +75,8 @@ async def webhook_assess(request: Request):
     body = await request.json()
 
     delivery_id = _get_delivery_id(request, body)
-    s = get_store()
-    if s.webhook_already_processed(delivery_id):
+    s = await get_store()
+    if await s.webhook_already_processed(delivery_id):
         return JSONResponse({"status": "duplicate", "delivery_id": delivery_id})
 
     repo_url = body.get("repo_url")
@@ -94,15 +94,15 @@ async def webhook_assess(request: Request):
         raise
     from agentit.portal.metrics import assessments_total as _at
     _at.labels(criticality=criticality, status="success").inc()
-    assessment_id = s.save(report)
-    s.save_check_results(assessment_id, check_results)
+    assessment_id = await s.save(report)
+    await s.save_check_results(assessment_id, check_results)
     from agentit.events import TOPIC_ASSESSMENTS
     publish_event("assessment-complete", report.repo_name,
                   f"Assessment complete: {report.overall_score:.0f}/100",
                   {"assessment_id": assessment_id, "score": report.overall_score},
                   correlation_id=assessment_id,
                   extra_topic=TOPIC_ASSESSMENTS)
-    s.mark_webhook_processed(delivery_id)
+    await s.mark_webhook_processed(delivery_id)
     return JSONResponse({"assessment_id": assessment_id, "overall_score": report.overall_score})
 
 
@@ -122,8 +122,8 @@ async def webhook_github_push(request: Request):
     body = json.loads(body_bytes)
 
     delivery_id = _get_delivery_id(request, body)
-    s_dedup = get_store()
-    if s_dedup.webhook_already_processed(delivery_id):
+    s_dedup = await get_store()
+    if await s_dedup.webhook_already_processed(delivery_id):
         return JSONResponse({"status": "duplicate", "delivery_id": delivery_id})
 
     ref = body.get("ref", "")
@@ -136,8 +136,8 @@ async def webhook_github_push(request: Request):
     if not repo_url:
         raise HTTPException(400, "No repository URL in push payload")
 
-    s = get_store()
-    fleet = s.get_fleet_data()
+    s = s_dedup
+    fleet = await s.get_fleet_data()
     managed = next(
         (app for app in fleet if app["repo_url"].rstrip("/").lower() == repo_url.rstrip("/").lower()),
         None,
@@ -150,8 +150,8 @@ async def webhook_github_push(request: Request):
     log.info("GitHub push on managed repo %s by %s (commit %s) -- triggering re-assessment",
              managed["repo_name"], pusher, commit_sha)
 
-    s.log_event("github-webhook", "push-received", managed["repo_name"],
-                "info", f"Push by {pusher} (commit {commit_sha}) -- re-assessing")
+    await s.log_event("github-webhook", "push-received", managed["repo_name"],
+                       "info", f"Push by {pusher} (commit {commit_sha}) -- re-assessing")
 
     criticality = managed.get("criticality", "medium")
     check_results: list[dict] = []
@@ -159,10 +159,10 @@ async def webhook_github_push(request: Request):
         report = await with_timeout(
             asyncio.to_thread(clone_assess_cleanup, repo_url, criticality, check_results_out=check_results)
         )
-        assessment_id = s.save(report)
-        s.save_check_results(assessment_id, check_results)
-        s.log_event("github-webhook", "reassessment-complete", managed["repo_name"],
-                    "info", f"Re-assessment complete: {report.overall_score:.0f}/100 (was {managed.get('latest_score', '?')})")
+        assessment_id = await s.save(report)
+        await s.save_check_results(assessment_id, check_results)
+        await s.log_event("github-webhook", "reassessment-complete", managed["repo_name"],
+                           "info", f"Re-assessment complete: {report.overall_score:.0f}/100 (was {managed.get('latest_score', '?')})")
         from agentit.events import TOPIC_ASSESSMENTS as _TOPIC_ASSESSMENTS
         publish_event("assessment-complete", managed["repo_name"],
                       f"Re-assessment: {report.overall_score:.0f}/100",
@@ -184,31 +184,41 @@ async def webhook_github_push(request: Request):
         impact = analyze_changes(changed_files, added_files)
 
         # Diff against previous assessment
-        prev_history = s.list_history(repo_url)
+        prev_history = await s.list_history(repo_url)
         if len(prev_history) >= 2:
-            prev_report = s.get(prev_history[-2]["id"])
+            prev_report = await s.get(prev_history[-2]["id"])
             if prev_report:
                 from agentit.assessment_diff import diff_assessments
                 diff = diff_assessments(prev_report, report)
-                s.log_event("reassessment", "score-diff", managed["repo_name"],
-                            "warning" if diff.degraded else "info",
-                            diff.summary())
+                await s.log_event("reassessment", "score-diff", managed["repo_name"],
+                                   "warning" if diff.degraded else "info",
+                                   diff.summary())
 
-                # Auto-fix new findings that are auto-fixable
-                if diff.auto_fixable and s.get_setting("auto_mode") == "true":
-                    from agentit.remediation.dispatcher import RemediationDispatcher
-                    dispatcher = RemediationDispatcher(s)
-                    for finding in diff.auto_fixable:
-                        if s.get_rejection_count(managed["repo_name"], finding.category) >= 3:
-                            s.log_event("learning", "skipped-rejected", managed["repo_name"],
-                                        "info", f"Skipping {finding.category} -- rejected 3+ times")
-                            continue
-                        dispatcher.dispatch(assessment_id, finding.category, managed["repo_name"])
+                # Auto-fix new findings that are auto-fixable. RemediationDispatcher
+                # is deliberately still fully synchronous (see
+                # docs/postgres-migration-plan.md's Phase 3 notes), so it needs the
+                # raw sync store handle, run off the event loop via to_thread.
+                if diff.auto_fixable and (await s.get_setting("auto_mode")) == "true":
+                    raw = s.raw if hasattr(s, "raw") else None
+                    if raw is None:
+                        log.warning("Skipping auto-fix for %s: postgres backend has no synchronous "
+                                    "store handle yet -- see docs/postgres-migration-plan.md", managed["repo_name"])
+                    else:
+                        from agentit.remediation.dispatcher import RemediationDispatcher
+                        dispatcher = RemediationDispatcher(raw)
+                        for finding in diff.auto_fixable:
+                            if await s.get_rejection_count(managed["repo_name"], finding.category) >= 3:
+                                await s.log_event("learning", "skipped-rejected", managed["repo_name"],
+                                                   "info", f"Skipping {finding.category} -- rejected 3+ times")
+                                continue
+                            await asyncio.to_thread(
+                                dispatcher.dispatch, assessment_id, finding.category, managed["repo_name"],
+                            )
 
-        s.log_event("change-analysis", "impact-analyzed", managed["repo_name"],
-                    "info", impact.summary())
+        await s.log_event("change-analysis", "impact-analyzed", managed["repo_name"],
+                           "info", impact.summary())
 
-        s_dedup.mark_webhook_processed(delivery_id)
+        await s_dedup.mark_webhook_processed(delivery_id)
         return JSONResponse({
             "status": "assessed",
             "repo": managed["repo_name"],
@@ -224,8 +234,8 @@ async def webhook_github_push(request: Request):
         })
     except Exception as exc:
         log.exception("Re-assessment failed for %s", managed["repo_name"])
-        s.log_event("github-webhook", "reassessment-failed", managed["repo_name"],
-                    "warning", f"Re-assessment failed: {str(exc)[:200]}")
+        await s.log_event("github-webhook", "reassessment-failed", managed["repo_name"],
+                           "warning", f"Re-assessment failed: {str(exc)[:200]}")
         return JSONResponse({"status": "error", "reason": str(exc)[:200]}, status_code=500)
 
 
@@ -235,8 +245,8 @@ async def webhook_onboard(request: Request):
     body = await request.json()
 
     delivery_id = _get_delivery_id(request, body)
-    s = get_store()
-    if s.webhook_already_processed(delivery_id):
+    s = await get_store()
+    if await s.webhook_already_processed(delivery_id):
         return JSONResponse({"status": "duplicate", "delivery_id": delivery_id})
 
     log.info("webhook_onboard received event: %s", body.get("eventId", "unknown"))
@@ -249,12 +259,19 @@ async def webhook_onboard(request: Request):
     if not assessment_id:
         raise HTTPException(400, "assessment_id not found in event body")
 
-    report = s.get(assessment_id)
+    report = await s.get(assessment_id)
     if report is None:
         raise HTTPException(404, f"Assessment {assessment_id} not found")
 
+    # run_onboarding constructs FleetOrchestrator, deliberately still fully
+    # synchronous (see docs/postgres-migration-plan.md's Phase 3 notes) --
+    # it needs the raw sync store handle, run off the event loop via to_thread.
+    raw = s.raw if hasattr(s, "raw") else None
+    if raw is None:
+        raise HTTPException(500, "Onboarding requires the sqlite backend's synchronous handle "
+                                  "(store_pg.AssessmentStore has none yet) -- see docs/postgres-migration-plan.md")
     try:
-        files, orch_summary = await with_timeout(asyncio.to_thread(run_onboarding, report, assessment_id))
+        files, orch_summary = await with_timeout(asyncio.to_thread(run_onboarding, report, assessment_id, raw))
     except HTTPException:
         raise
     except Exception as exc:
@@ -264,7 +281,7 @@ async def webhook_onboard(request: Request):
             status_code=500,
         )
 
-    s.save_onboarding(assessment_id, files, orchestration=orch_summary)
+    await s.save_onboarding(assessment_id, files, orchestration=orch_summary)
 
     has_containerfile = any(
         f["path"].lower() in ("containerfile", "dockerfile") for f in files
@@ -276,11 +293,11 @@ async def webhook_onboard(request: Request):
         build_result = await asyncio.to_thread(build_app_image, report.repo_url, report.repo_name)
         build_status = build_result.get("image_ref", build_result.get("error", "unknown"))
         if "error" not in build_result:
-            s.log_event("image-builder", "build-triggered", report.repo_name, "info",
-                        f"Building image: {build_result['image_ref']}")
+            await s.log_event("image-builder", "build-triggered", report.repo_name, "info",
+                               f"Building image: {build_result['image_ref']}")
 
     log.info("webhook_onboard completed for %s: %d files, build=%s", assessment_id, len(files), build_status)
-    s.mark_webhook_processed(delivery_id)
+    await s.mark_webhook_processed(delivery_id)
     return JSONResponse({
         "assessment_id": assessment_id,
         "repo_url": report.repo_url,
@@ -299,20 +316,28 @@ async def webhook_auto_apply(request: Request):
     if not assessment_id:
         raise HTTPException(400, "assessment_id required")
 
-    s = get_store()
-    report = s.get(assessment_id)
+    s = await get_store()
+    report = await s.get(assessment_id)
     if report is None:
         raise HTTPException(404, "Assessment not found")
 
-    files = s.get_onboarding(assessment_id)
+    files = await s.get_onboarding(assessment_id)
     if files is None:
         raise HTTPException(404, "Onboarding not found -- run onboarding first")
 
-    orch = s.get_orchestration(assessment_id) or {}
+    orch = await s.get_orchestration(assessment_id) or {}
     auto_approve = orch.get("auto_approve", False)
 
+    # AutoMode is deliberately still fully synchronous (see
+    # docs/postgres-migration-plan.md's Phase 3 notes) -- it needs the raw
+    # sync store handle, run off the event loop via to_thread.
+    raw = s.raw if hasattr(s, "raw") else None
+    if raw is None:
+        raise HTTPException(500, "Auto-apply requires the sqlite backend's synchronous handle "
+                                  "(store_pg.AssessmentStore has none yet) -- see docs/postgres-migration-plan.md")
+
     from agentit.automode import AutoMode
-    engine = AutoMode(store=s, publisher=None, llm_client=get_llm_client())
+    engine = AutoMode(store=raw, publisher=None, llm_client=get_llm_client())
 
     result = await asyncio.to_thread(
         engine.execute, assessment_id, files, namespace,
@@ -333,8 +358,8 @@ async def webhook_finding(request: Request):
     body = await request.json()
 
     delivery_id = _get_delivery_id(request, body)
-    s = get_store()
-    if s.webhook_already_processed(delivery_id):
+    s = await get_store()
+    if await s.webhook_already_processed(delivery_id):
         return JSONResponse({"status": "duplicate", "delivery_id": delivery_id})
 
     app_name = body.get("app_name", "unknown")
@@ -345,27 +370,38 @@ async def webhook_finding(request: Request):
 
     if not category:
         raise HTTPException(400, "category required")
-    s.log_event(source, "finding-received", app_name, severity, f"{category}: {description}")
+    await s.log_event(source, "finding-received", app_name, severity, f"{category}: {description}")
     publish_event("finding-received", app_name, f"{category}: {description}", agent_id=source)
 
-    fleet = s.get_fleet_data()
+    fleet = await s.get_fleet_data()
     app = next((a for a in fleet if a["repo_name"] == app_name), None)
     if not app:
-        s.mark_webhook_processed(delivery_id)
+        await s.mark_webhook_processed(delivery_id)
         return JSONResponse({"status": "accepted", "action": "alert-only", "reason": f"app '{app_name}' not in fleet"})
 
+    # RemediationDispatcher/AutoMode are deliberately still fully synchronous
+    # (see docs/postgres-migration-plan.md's Phase 3 notes) -- they need the
+    # raw sync store handle, run off the event loop via to_thread.
+    raw = s.raw if hasattr(s, "raw") else None
+    if raw is None:
+        await s.log_event("dispatcher", "no-fix-available", app_name, "warning",
+                           "postgres backend has no synchronous store handle yet")
+        await s.mark_webhook_processed(delivery_id)
+        return JSONResponse({"status": "accepted", "action": "alert-only",
+                              "reason": "postgres backend not yet supported for dispatch"})
+
     from agentit.remediation.dispatcher import RemediationDispatcher
-    dispatcher = RemediationDispatcher(s)
-    result = dispatcher.dispatch(app["id"], category, app_name)
+    dispatcher = RemediationDispatcher(raw)
+    result = await asyncio.to_thread(dispatcher.dispatch, app["id"], category, app_name)
 
     if result.get("error") and not result["files"]:
-        s.log_event("dispatcher", "no-fix-available", app_name, "warning", result["error"])
-        s.mark_webhook_processed(delivery_id)
+        await s.log_event("dispatcher", "no-fix-available", app_name, "warning", result["error"])
+        await s.mark_webhook_processed(delivery_id)
         return JSONResponse({"status": "accepted", "action": "alert-only", "reason": result["error"]})
 
     from agentit.automode import AutoMode
     from agentit.events import get_publisher as _gp
-    auto = AutoMode(store=s, publisher=_gp(), llm_client=get_llm_client())
+    auto = AutoMode(store=raw, publisher=_gp(), llm_client=get_llm_client())
 
     if auto.enabled and result["files"]:
         namespace = app.get("deploy_namespace", app_name)
@@ -374,9 +410,9 @@ async def webhook_finding(request: Request):
             app.get("criticality", "medium"), False, app_name,
             result["agent"],
         )
-        s.log_event("dispatcher", auto_result["action"], app_name, "info",
-                    f"Auto-mode {auto_result['action']} for {category}: {auto_result['reason']}")
-        s.mark_webhook_processed(delivery_id)
+        await s.log_event("dispatcher", auto_result["action"], app_name, "info",
+                           f"Auto-mode {auto_result['action']} for {category}: {auto_result['reason']}")
+        await s.mark_webhook_processed(delivery_id)
         return JSONResponse({
             "status": "accepted",
             "action": auto_result["action"],
@@ -386,13 +422,13 @@ async def webhook_finding(request: Request):
         })
 
     if result["files"]:
-        gate_id = s.create_gate(
+        gate_id = await s.create_gate(
             app["id"], f"finding-{category}",
             f"Dispatcher generated {len(result['files'])} fix(es) for '{category}' -- review and approve",
         )
-        s.log_event("dispatcher", "gated", app_name, "info",
-                    f"Fix for {category} gated for review (gate {gate_id})")
-        s.mark_webhook_processed(delivery_id)
+        await s.log_event("dispatcher", "gated", app_name, "info",
+                           f"Fix for {category} gated for review (gate {gate_id})")
+        await s.mark_webhook_processed(delivery_id)
         return JSONResponse({
             "status": "accepted",
             "action": "gated",
@@ -401,7 +437,7 @@ async def webhook_finding(request: Request):
             "agent": result["agent"],
         })
 
-    s.mark_webhook_processed(delivery_id)
+    await s.mark_webhook_processed(delivery_id)
     return JSONResponse({"status": "accepted", "action": "alert-only"})
 
 
@@ -423,10 +459,20 @@ async def webhook_remediate(request: Request):
     from agentit.remediation_loop import RemediationLoop
     from agentit.events import get_publisher
 
-    s = get_store()
-    loop = RemediationLoop(store=s, publisher=get_publisher())
+    # RemediationLoop's background-thread job pipeline is deliberately still
+    # fully synchronous (see docs/postgres-migration-plan.md's Phase 3
+    # notes) -- it needs the raw sync store handle.
+    s = await get_store()
+    raw = s.raw if hasattr(s, "raw") else None
+    if raw is None:
+        return JSONResponse(
+            {"outcome": "failed", "error": "postgres backend has no synchronous store handle yet "
+                                            "-- see docs/postgres-migration-plan.md"},
+            status_code=500,
+        )
+    loop = RemediationLoop(store=raw, publisher=get_publisher())
     try:
-        job_id = loop.start(repo_url, app_name, criticality, reason, store=s)
+        job_id = loop.start(repo_url, app_name, criticality, reason, store=raw)
     except Exception as exc:
         log.exception("Failed to start remediation loop for %s", app_name)
         return JSONResponse({"outcome": "failed", "error": str(exc)}, status_code=500)
@@ -437,7 +483,8 @@ async def webhook_remediate(request: Request):
 @router.get("/api/remediation-jobs/{job_id}")
 async def get_remediation_job(job_id: str):
     """Return the status of a single remediation job."""
-    job = get_store().get_remediation_job(job_id)
+    s = await get_store()
+    job = await s.get_remediation_job(job_id)
     if job is None:
         raise HTTPException(404, "Remediation job not found")
     return JSONResponse(job)
@@ -446,4 +493,5 @@ async def get_remediation_job(job_id: str):
 @router.get("/api/remediation-jobs")
 async def list_remediation_jobs(assessment_id: str | None = None):
     """List remediation jobs, optionally filtered by assessment_id."""
-    return JSONResponse(get_store().list_remediation_jobs(assessment_id))
+    s = await get_store()
+    return JSONResponse(await s.list_remediation_jobs(assessment_id))
