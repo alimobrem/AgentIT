@@ -29,5 +29,9 @@ def test_onboard_creates_output(tmp_path: Path):
 
     assert output_dir.exists()
     assert (output_dir / "assessment.json").exists()
-    for subdir in ("security", "observability", "cicd", "compliance"):
-        assert (output_dir / subdir).is_dir(), f"Missing subdirectory: {subdir}"
+    # security/observability/cicd/compliance are now skill-only domains
+    # (see docs/agent-removal-readiness.md) -- skills write into a single
+    # shared "skills" subdirectory rather than one per domain.
+    skills_dir = output_dir / "skills"
+    assert skills_dir.is_dir(), "Missing skills output directory"
+    assert any(skills_dir.iterdir()), "Skills should generate at least one manifest"

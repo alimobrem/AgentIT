@@ -68,7 +68,13 @@ async def schedules_page(request: Request) -> HTMLResponse:
         if not files:
             continue
         for f in files:
-            sched_info = _SCHEDULE_FILES.get(f["path"])
+            # Skill-generated cronjob files are named "{app_name}-{skill}.yaml"
+            # (see skill_engine.py) rather than the bare filenames the removed
+            # Python agents wrote -- match by suffix instead of exact name.
+            sched_info = next(
+                (info for suffix, info in _SCHEDULE_FILES.items() if f["path"].endswith(suffix)),
+                None,
+            )
             if sched_info is None:
                 continue
             agent, desc = sched_info

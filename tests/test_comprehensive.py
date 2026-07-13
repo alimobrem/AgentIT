@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from agentit.agents.hardening import HardeningAgent, _sanitize_name
+from agentit.agents.base import _sanitize_name
 from agentit.analyzers.base import iter_text_files
 from agentit.analyzers.security import SecurityAnalyzer, _is_secret_scan_excluded
 from agentit.cloner import CloneError, _validate_repo_url
@@ -406,11 +406,11 @@ class TestPortalStore:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Hardening Agent
+# Sanitize name (shared agents/base.py helper)
 # ═══════════════════════════════════════════════════════════════════════
 
 
-class TestHardeningAgent:
+class TestSanitizeName:
     def test_sanitize_name_strips_hyphens(self):
         assert _sanitize_name("---") == "app"
 
@@ -421,30 +421,6 @@ class TestHardeningAgent:
 
     def test_sanitize_name_dots_and_underscores(self):
         assert _sanitize_name("my.app_name") == "my-app-name"
-
-    def test_hardening_python_containerfile_uses_ubi(self, tmp_path: Path):
-        report = make_report(
-            languages=[Language(name="python", file_count=10, percentage=100.0)],
-            scores=[
-                DimensionScore(
-                    dimension="security",
-                    score=30,
-                    max_score=100,
-                    findings=[
-                        Finding(
-                            category="container",
-                            severity=Severity.high,
-                            description="No Dockerfile found",
-                            recommendation="Add Containerfile",
-                        )
-                    ],
-                )
-            ],
-        )
-        result = HardeningAgent(report, tmp_path / "out").run()
-        cf = [f for f in result.files if f.path == "Containerfile"]
-        assert len(cf) == 1
-        assert "registry.access.redhat.com" in cf[0].content
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -499,33 +475,27 @@ class TestIntegration:
         restored = AssessmentReport.model_validate_json(json_str)
         assert restored.repo_name == report.repo_name
 
-        # 2. Run hardening agent
-        from agentit.agents.hardening import HardeningAgent
-        from agentit.agents.observability import ObservabilityAgent
-        from agentit.agents.cicd import CICDAgent
-        from agentit.agents.compliance import ComplianceAgent
+        # 2. Run the skill engine against the same findings. security/
+        # observability/cicd/compliance are now skill-only domains (see
+        # docs/agent-removal-readiness.md) -- the Python agents this test
+        # used to instantiate directly (HardeningAgent, ObservabilityAgent,
+        # CICDAgent, ComplianceAgent) were removed once skills covered them.
+        from agentit.skill_engine import SkillEngine
 
-        out = tmp_path / "onboard_output"
-        agents = [
-            ("security", HardeningAgent),
-            ("observability", ObservabilityAgent),
-            ("cicd", CICDAgent),
-            ("compliance", ComplianceAgent),
-        ]
+        skills_dir = Path(__file__).resolve().parent.parent / "skills"
+        engine = SkillEngine(skills_dir, platform=None)
+        generated = engine.run_all(report)
+        assert generated, "Skills should generate at least one manifest for this report's findings"
 
+        out = tmp_path / "onboard_output" / "skills"
+        out.mkdir(parents=True, exist_ok=True)
         all_output_files: list[str] = []
-        for subdir, agent_cls in agents:
-            sub_path = out / subdir
-            result = agent_cls(report=report, output_dir=sub_path).run()
-            assert sub_path.exists(), f"{subdir} output dir not created"
-            for gf in result.files:
-                full_path = sub_path / gf.path
-                assert full_path.exists(), f"Expected file {full_path} not found"
-                all_output_files.append(gf.path)
+        for gf in generated:
+            full_path = out / gf.path
+            full_path.write_text(gf.content, encoding="utf-8")
+            assert full_path.exists(), f"Expected file {full_path} not found"
+            all_output_files.append(gf.path)
 
-        # Hardening should produce at least rbac.yaml and security-context.yaml
-        assert "rbac.yaml" in all_output_files
-        assert "security-context.yaml" in all_output_files
-
-        # Should have generated a Containerfile (original Dockerfile lacks USER)
-        assert "Containerfile" in all_output_files
+        # Security domain coverage: a Containerfile-equivalent skill fires
+        # (original Dockerfile lacks USER).
+        assert any("containerfile" in f.lower() for f in all_output_files)

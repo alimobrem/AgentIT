@@ -14,6 +14,13 @@ class GeneratedFile(BaseModel):
     content: str
     description: str
     finding_addressed: str = ""
+    # Set by SkillEngine.generate() to the exact skill.name that produced
+    # this file -- lets callers (e.g. cli.py's self-fix) record skill
+    # effectiveness precisely instead of re-deriving a skill name from the
+    # file path (which is ambiguous once app_name/skill.name both contain
+    # hyphens). Left "" for files a Python agent generated -- they carry no
+    # skill attribution.
+    skill_name: str = ""
 
 
 def _sanitize_name(name: str) -> str:

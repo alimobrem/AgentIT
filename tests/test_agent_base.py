@@ -19,26 +19,18 @@ class TestGeneratedFile:
         assert gf.finding_addressed == "fix it"
 
     def test_all_agents_use_shared_generated_file(self) -> None:
-        from agentit.agents.hardening import HardeningAgent
-        from agentit.agents.observability import ObservabilityAgent
-        from agentit.agents.cicd import CICDAgent
-        from agentit.agents.compliance import ComplianceAgent
+        # security/observability/cicd/compliance/infrastructure/incident/
+        # release/retirement/chaos were removed once skills covered their
+        # domains (see docs/agent-removal-readiness.md) -- only these 3
+        # Python agents remain.
         from agentit.agents.cost import CostOptimizationAgent
-        from agentit.agents.chaos import ChaosAgent
         from agentit.agents.dependency import DependencyAgent
-        from agentit.agents.incident import IncidentAgent
-        from agentit.agents.retirement import RetirementAgent
+        from agentit.agents.codechange import CodeChangeAgent
 
-        # All 9 modules are importable — no import errors
-        assert HardeningAgent is not None
-        assert ObservabilityAgent is not None
-        assert CICDAgent is not None
-        assert ComplianceAgent is not None
+        # All 3 modules are importable — no import errors
         assert CostOptimizationAgent is not None
-        assert ChaosAgent is not None
         assert DependencyAgent is not None
-        assert IncidentAgent is not None
-        assert RetirementAgent is not None
+        assert CodeChangeAgent is not None
 
 
 class TestSanitizeName:

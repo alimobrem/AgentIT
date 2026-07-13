@@ -5,19 +5,24 @@ Used by the orchestrator (for agent registration) and the portal
 """
 from __future__ import annotations
 
+# security, observability, cicd, compliance, infrastructure, incident,
+# release, retirement, and chaos are now skill-only domains -- their
+# Python agents (agents/hardening.py, cicd.py, compliance.py,
+# infrastructure.py, incident.py, release.py, retirement.py,
+# observability.py, chaos.py) were removed once skills gained full
+# template-fallback parity for every artifact they used to generate. See
+# docs/agent-removal-readiness.md for the domain-by-domain readiness
+# audit. `dependency` and `cost` keep their Python agents specifically for
+# the narrative dependency-report.md/cost-report.md outputs, which depend
+# on runtime-computed data (detected ecosystems/CVEs, computed cost tier)
+# that a static skill template has no access to -- see that same doc's
+# recommendation and this repo's "no mock data" rule. `codechange` is kept
+# because it patches the application's own source repo, not a K8s
+# manifest -- a fundamentally different capability skills don't model.
 AGENT_CAPABILITIES: dict[str, str] = {
-    "security": "NetworkPolicy, Containerfile, RBAC, SCCs, resource limits, image scan task",
-    "observability": "ServiceMonitor, Grafana dashboard, alerting rules, OTel collector",
-    "cicd": "Tekton Pipeline (scan + SBOM), Argo CD Application, Argo Rollout, Containerfile",
-    "compliance": "Namespaced Kyverno Policy, SBOM task, audit policy, compliance evidence",
-    "infrastructure": "HPA, PDB, ResourceQuota, LimitRange, Namespace",
     "cost": "VPA, cost labels, cost report",
     "dependency": "Dependency report, Renovate/Dependabot config",
-    "incident": "Runbook, PagerDuty config, Alertmanager config",
-    "release": "AnalysisTemplate, Rollout patch, rollback policy",
     "codechange": ".gitignore, OTel instrumentation, structured logging",
-    "retirement": "Decommission plan, cleanup task, data archive job",
-    "chaos": "LitmusChaos pod-delete/network-latency/CPU-stress experiments, chaos schedule",
     # Long-lived watcher agents
     "vuln-watcher": "Monitors fleet for CVEs, triggers remediation when auto-mode on",
     "slo-tracker": "Checks SLO status, publishes breach alerts, recommends rollbacks",
@@ -32,34 +37,16 @@ RESOURCE_TIERS: dict[str, dict[str, str]] = {
 }
 
 AGENT_CLASSES: dict[str, tuple[str, str, str, str]] = {
-    "security": ("security", "agentit.agents.hardening", "HardeningAgent", "standard"),
-    "observability": ("observability", "agentit.agents.observability", "ObservabilityAgent", "small"),
-    "cicd": ("cicd", "agentit.agents.cicd", "CICDAgent", "standard"),
-    "compliance": ("compliance", "agentit.agents.compliance", "ComplianceAgent", "small"),
-    "infrastructure": ("infrastructure", "agentit.agents.infrastructure", "InfrastructureAgent", "small"),
     "cost": ("cost", "agentit.agents.cost", "CostOptimizationAgent", "small"),
     "dependency": ("dependency", "agentit.agents.dependency", "DependencyAgent", "small"),
-    "incident": ("incident", "agentit.agents.incident", "IncidentAgent", "small"),
-    "release": ("release", "agentit.agents.release", "ReleaseCoordinatorAgent", "small"),
-    "retirement": ("retirement", "agentit.agents.retirement", "RetirementAgent", "small"),
     "codechange": ("codechange", "agentit.agents.codechange", "CodeChangeAgent", "large"),
-    "chaos": ("chaos", "agentit.agents.chaos", "ChaosAgent", "small"),
 }
 
 
 AGENT_DISPLAY_NAMES: dict[str, str] = {
-    "security": "Security Hardening",
-    "observability": "Observability",
-    "cicd": "CI/CD & GitOps",
-    "compliance": "Compliance",
-    "infrastructure": "Infrastructure",
     "cost": "Cost Optimization",
     "dependency": "Dependency",
-    "incident": "Incident Response",
-    "release": "Release Coordinator",
     "codechange": "Code Change",
-    "retirement": "Retirement",
-    "chaos": "Chaos Engineering",
 }
 
 WATCHER_AGENTS: list[dict[str, str]] = [

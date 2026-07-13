@@ -9,7 +9,6 @@ from agentit.cli import main
 
 _COMMANDS = [
     ("assess", "Assess enterprise readiness"),
-    ("harden", "hardening manifests"),
     ("portal", "Launch"),
     ("watch", "Continuously"),
     ("orchestrate", "Fleet Orchestrator"),
@@ -33,7 +32,6 @@ def test_command_help(cmd, expected):
 
 _FLAG_CHECKS = [
     ("assess", ["--criticality", "--format", "--output"]),
-    ("harden", ["--output-dir"]),
     ("onboard", ["--output-dir", "--criticality"]),
     ("watch", ["--interval", "--webhook"]),
 ]

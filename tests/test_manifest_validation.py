@@ -72,53 +72,19 @@ def _validate_agent_yaml(agent_cls: type, report: AssessmentReport, tmp_path: Pa
 
 
 class TestAgentYamlValidity:
-    def test_hardening_agent(self, tmp_path: Path) -> None:
-        from agentit.agents.hardening import HardeningAgent
-        errors = _validate_agent_yaml(HardeningAgent, _make_full_report(), tmp_path)
-        assert errors == [], f"Hardening agent produced invalid YAML: {errors}"
-
-    def test_observability_agent(self, tmp_path: Path) -> None:
-        from agentit.agents.observability import ObservabilityAgent
-        errors = _validate_agent_yaml(ObservabilityAgent, _make_full_report(), tmp_path)
-        assert errors == [], f"Observability agent produced invalid YAML: {errors}"
-
-    def test_cicd_agent(self, tmp_path: Path) -> None:
-        from agentit.agents.cicd import CICDAgent
-        errors = _validate_agent_yaml(CICDAgent, _make_full_report(), tmp_path)
-        assert errors == [], f"CICD agent produced invalid YAML: {errors}"
-
-    def test_compliance_agent(self, tmp_path: Path) -> None:
-        from agentit.agents.compliance import ComplianceAgent
-        errors = _validate_agent_yaml(ComplianceAgent, _make_full_report(), tmp_path)
-        assert errors == [], f"Compliance agent produced invalid YAML: {errors}"
+    # security/observability/cicd/compliance/chaos/incident/retirement/
+    # release agents were removed once skills covered their domains (see
+    # docs/agent-removal-readiness.md) -- equivalent YAML-validity coverage
+    # for their skill replacements lives in tests/test_skill_agent_parity.py.
+    # cost/dependency keep their Python agents (narrative report gap, see
+    # that same doc) and are still validated here.
 
     def test_cost_agent(self, tmp_path: Path) -> None:
         from agentit.agents.cost import CostOptimizationAgent
         errors = _validate_agent_yaml(CostOptimizationAgent, _make_full_report(), tmp_path)
         assert errors == [], f"Cost agent produced invalid YAML: {errors}"
 
-    def test_chaos_agent(self, tmp_path: Path) -> None:
-        from agentit.agents.chaos import ChaosAgent
-        errors = _validate_agent_yaml(ChaosAgent, _make_full_report(), tmp_path)
-        assert errors == [], f"Chaos agent produced invalid YAML: {errors}"
-
     def test_dependency_agent(self, tmp_path: Path) -> None:
         from agentit.agents.dependency import DependencyAgent
         errors = _validate_agent_yaml(DependencyAgent, _make_full_report(), tmp_path)
         assert errors == [], f"Dependency agent produced invalid YAML: {errors}"
-
-    def test_incident_agent(self, tmp_path: Path) -> None:
-        from agentit.agents.incident import IncidentAgent
-        errors = _validate_agent_yaml(IncidentAgent, _make_full_report(), tmp_path)
-        assert errors == [], f"Incident agent produced invalid YAML: {errors}"
-
-    def test_retirement_agent(self, tmp_path: Path) -> None:
-        from agentit.agents.retirement import RetirementAgent
-        report = _make_full_report(score=10)
-        errors = _validate_agent_yaml(RetirementAgent, report, tmp_path)
-        assert errors == [], f"Retirement agent produced invalid YAML: {errors}"
-
-    def test_release_agent(self, tmp_path: Path) -> None:
-        from agentit.agents.release import ReleaseCoordinatorAgent
-        errors = _validate_agent_yaml(ReleaseCoordinatorAgent, _make_full_report(), tmp_path)
-        assert errors == [], f"Release agent produced invalid YAML: {errors}"
