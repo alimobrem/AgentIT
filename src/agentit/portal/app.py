@@ -698,7 +698,10 @@ def _run_onboarding(
     which summary fields get stored (e.g. auto_approve/gates).
     """
     from agentit.portal.helpers import run_onboarding as _shared_run_onboarding
-    return _shared_run_onboarding(report, assessment_id)
+    # Pass this module's own get_store() explicitly (rather than letting
+    # helpers.run_onboarding resolve its own default) so store overrides
+    # applied via `patch("agentit.portal.app.get_store", ...)` still apply.
+    return _shared_run_onboarding(report, assessment_id, store=get_store())
 
 
 @app.get("/assessments/{assessment_id}/onboarding-history", response_class=HTMLResponse)

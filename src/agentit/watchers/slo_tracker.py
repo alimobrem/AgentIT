@@ -11,6 +11,7 @@ import click
 from agentit.consumer import EventConsumer
 from agentit.events import EventPublisher, TOPIC_ALERTS
 from agentit.portal.store import AssessmentStore
+from agentit.slo_collector import collect_slo, is_breached
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class SloTracker:
 
         for a in assessments:
             slos = self._store.list_slos(a["id"])
+            self._collect_fresh_values(a, slos)
             app_breaches = [s for s in slos if s["status"] == "breached"]
 
             for slo in app_breaches:
@@ -66,6 +68,27 @@ class SloTracker:
             err=True,
         )
         return breached_apps
+
+    def _collect_fresh_values(self, assessment: dict, slos: list[dict]) -> None:
+        """Collect a fresh metric value for each SLO and update its status in-place.
+
+        SLOs whose metric type has no cluster-side collector (e.g.
+        latency_p99_ms) are logged and left with their prior status rather
+        than silently skipped.
+        """
+        namespace = assessment["repo_name"]
+        for slo in slos:
+            value = collect_slo(slo["metric_name"], namespace)
+            if value is None:
+                logger.debug(
+                    "[slo-track] Could not collect %r for %s -- leaving prior status",
+                    slo["metric_name"], namespace,
+                )
+                continue
+            status = "breached" if is_breached(slo["metric_name"], value, slo["target_value"]) else "met"
+            self._store.update_slo(slo["id"], value, status)
+            slo["current_value"] = value
+            slo["status"] = status
 
     def _recommend_rollback(self, assessment: dict, breaches: list[dict]) -> None:
         """If a recent apply exists for this assessment, create a rollback gate."""

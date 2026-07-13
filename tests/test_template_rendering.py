@@ -304,6 +304,30 @@ class TestTemplateRendering:
         client, _, aid = portal_client
         assert client.get(f"/assessments/{aid}/slos").status_code == 200
 
+    def test_slos_progress_bar_direction_for_lower_is_better_metrics(self, portal_client):
+        """Regression: for lower-is-better metrics (error_rate, latency),
+        the progress bar previously used current/target directly, so a
+        HEALTHY (low) current_value rendered as a near-empty RED bar and a
+        BREACHED (high) current_value rendered as a full GREEN bar --
+        exactly backwards."""
+        client, store, aid = portal_client
+        healthy_sid = store.save_slo(aid, "error_rate", 0.5)
+        store.update_slo(healthy_sid, 0.05, "met")  # well under target -> healthy
+        breached_sid = store.save_slo(aid, "error_rate", 0.5)
+        store.update_slo(breached_sid, 5.0, "breached")  # well over target -> breached
+
+        resp = client.get(f"/assessments/{aid}/slos")
+        assert resp.status_code == 200
+        rows = re.findall(r"<tr[^>]*>.*?</tr>", resp.text, re.DOTALL)
+
+        healthy_row = next(r for r in rows if "0.05" in r)
+        assert "score-green" in healthy_row, healthy_row
+        assert "score-red" not in healthy_row
+
+        breached_row = next(r for r in rows if "5.00" in r)
+        assert "score-red" in breached_row, breached_row
+        assert "score-green" not in breached_row
+
     def test_404_page(self, portal_client):
         client, _, _ = portal_client
         assert client.get("/nonexistent-xyz").status_code == 404

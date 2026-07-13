@@ -258,7 +258,7 @@ class RemediationLoop:
         if self._store is None:
             return {"healthy": True, "reason": "No store -- skipping SLO check"}
 
-        from agentit.slo_collector import collect_slo
+        from agentit.slo_collector import collect_slo, is_breached
 
         for _ in range(VERIFY_MAX_POLLS):
             slos = self._store.list_slos(assessment_id)
@@ -270,7 +270,7 @@ class RemediationLoop:
             for s in slos:
                 value = collect_slo(s["metric_name"], app_name)
                 if value is not None:
-                    status = "breached" if value > s["target_value"] else "met"
+                    status = "breached" if is_breached(s["metric_name"], value, s["target_value"]) else "met"
                     self._store.update_slo(s["id"], value, status)
                     if status == "breached":
                         breached.append(s["metric_name"])

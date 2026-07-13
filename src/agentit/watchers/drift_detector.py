@@ -100,8 +100,8 @@ class DriftDetector:
                 except Exception as exc:
                     logger.debug('Skill deprecation failed: %s', exc)
 
-            if api_drift.has_warnings:
-                click.echo(f"[drift-detect] WARNING: {len(api_drift.deprecated_apis)} deprecated API(s)", err=True)
+            if ctx.deprecated_apis:
+                click.echo(f"[drift-detect] WARNING: {len(ctx.deprecated_apis)} deprecated API(s) still in use", err=True)
             if api_drift.new_apis:
                 click.echo(f"[drift-detect] INFO: {len(api_drift.new_apis)} new API(s) available", err=True)
         except Exception as exc:

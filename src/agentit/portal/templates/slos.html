@@ -36,8 +36,16 @@
     </tr>
   </thead>
   <tbody>
+    {% set lower_is_better = ['error_rate', 'latency_p99_ms'] %}
     {% for sl in slos %}
-    {% set pct = ((sl.current_value or 0) / sl.target_value * 100) if sl.target_value > 0 else 0 %}
+    {% if sl.metric_name in lower_is_better %}
+      {# Lower-is-better: current below target is healthy, so invert the ratio
+         (target/current) rather than current/target -- otherwise a low
+         (good) current_value would render as a near-empty, red bar. #}
+      {% set pct = (sl.target_value / sl.current_value * 100) if (sl.current_value and sl.current_value > 0) else 100 %}
+    {% else %}
+      {% set pct = ((sl.current_value or 0) / sl.target_value * 100) if sl.target_value > 0 else 0 %}
+    {% endif %}
     <tr class="{% if sl.status == 'met' %}row-border-green{% elif sl.status == 'breached' %}row-border-red{% endif %}">
       <td class="text-bold">{{ sl.metric_name }}</td>
       <td>{{ "%.2f"|format(sl.target_value) }}</td>

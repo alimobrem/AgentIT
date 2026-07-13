@@ -163,14 +163,46 @@ def apply_yaml(content: str, namespace: str) -> dict:
         os.unlink(tmp.name)
 
 
-def rollout_undo(deployment: str, namespace: str) -> dict:
-    """Restart a deployment to trigger a new rollout.
+def _get_argo_rollout(name: str, namespace: str) -> dict | None:
+    """Return the Argo Rollout custom resource with this name, or None if it
+    doesn't exist (or the Rollout CRD isn't installed on this cluster)."""
+    try:
+        return custom_objects().get_namespaced_custom_object(
+            "argoproj.io", "v1alpha1", namespace, "rollouts", name, _request_timeout=10,
+        )
+    except Exception:
+        return None
 
-    Note: apps/v1 does not support spec.rollbackTo (that was extensions/v1beta1).
-    This triggers a restart by annotating the pod template, equivalent to
-    ``kubectl rollout restart``. For a true rollback to a previous ReplicaSet
-    revision, use ``kubectl rollout undo`` directly.
+
+def rollout_undo(deployment: str, namespace: str) -> dict:
+    """Roll back a deployment to its previous stable state.
+
+    For Argo Rollouts-managed apps (kind ``Rollout``, group ``argoproj.io``),
+    this patches the Rollout's ``status`` subresource with ``{"abort": true}``
+    -- the same mechanism ``kubectl argo rollouts abort`` uses -- which halts
+    the canary and reverts traffic to the previous stable ReplicaSet.
+
+    For plain Deployments (no matching Rollout found), apps/v1 does not
+    support ``spec.rollbackTo`` (that was extensions/v1beta1), so this falls
+    back to a restart via a pod-template annotation, equivalent to
+    ``kubectl rollout restart``. That is NOT a true rollback -- it re-deploys
+    the current spec rather than reverting to a previous ReplicaSet -- but is
+    the best available fallback for non-Rollout resources.
     """
+    if _get_argo_rollout(deployment, namespace) is not None:
+        try:
+            custom_objects().patch_namespaced_custom_object_status(
+                "argoproj.io", "v1alpha1", namespace, "rollouts", deployment,
+                body={"status": {"abort": True}}, _request_timeout=15,
+            )
+            return {
+                "success": True,
+                "message": f"Argo Rollout '{deployment}' aborted -- reverted to previous stable ReplicaSet",
+            }
+        except Exception as exc:
+            logger.warning("Rollout abort failed for %s/%s: %s", namespace, deployment, exc)
+            return {"success": False, "message": str(exc)}
+
     from datetime import datetime, timezone
 
     try:
@@ -186,18 +218,57 @@ def rollout_undo(deployment: str, namespace: str) -> dict:
             }
         }
         apps_v1().patch_namespaced_deployment(deployment, namespace, body, _request_timeout=15)
-        return {"success": True, "message": f"Rollout restart initiated for {deployment}"}
+        return {
+            "success": True,
+            "message": f"Rollout restart initiated for {deployment} "
+                        "(no Argo Rollout found -- restarted the Deployment instead of a true rollback)",
+        }
     except Exception as exc:
         logger.warning("Rollout restart failed for %s/%s: %s", namespace, deployment, exc)
         return {"success": False, "message": str(exc)}
 
 
 def get_api_resources() -> set[str]:
-    """Get available API resource kinds on the cluster."""
+    """Get available API resource kinds across ALL API groups on the cluster.
+
+    Queries the core v1 group (Pods, Services, ConfigMaps, ...) plus every
+    named API group (apps, networking.k8s.io, autoscaling, batch, policy,
+    ...) via the discovery API, so ``PlatformContext.has_api()`` correctly
+    reports availability for Deployments, Ingresses, HPAs, NetworkPolicies,
+    etc. -- not just core resources.
+    """
+    import json
+
     try:
         resources = set()
+        api_client = get_client().ApiClient()
+
         for api in core_v1().get_api_resources(_request_timeout=10).resources:
             resources.add(api.kind.lower())
+
+        groups = get_client().ApisApi(api_client).get_api_versions(_request_timeout=10)
+        for group in groups.groups:
+            version = None
+            if group.preferred_version is not None:
+                version = group.preferred_version.version
+            elif group.versions:
+                version = group.versions[0].version
+            if not version:
+                continue
+            try:
+                resp = api_client.call_api(
+                    f"/apis/{group.name}/{version}", "GET",
+                    _return_http_data_only=True, _preload_content=False,
+                    _request_timeout=10,
+                )
+                data = json.loads(resp.read())
+                for res in data.get("resources", []):
+                    kind = res.get("kind")
+                    if kind:
+                        resources.add(kind.lower())
+            except Exception as exc:
+                logger.debug("Failed to list resources for group %s/%s: %s", group.name, version, exc)
+
         return resources
     except Exception as exc:
         raise KubeError(f"Failed to get API resources: {exc}") from exc

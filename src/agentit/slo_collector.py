@@ -9,11 +9,35 @@ from agentit.kube import KubeError
 
 logger = logging.getLogger(__name__)
 
+# Whether a *higher* current value is considered healthy for a given metric.
+# availability: higher is better (more uptime). error_rate/latency: lower is
+# better (fewer errors, faster responses). Unknown metrics default to
+# "lower is better" to match the historical breach comparison.
+HIGHER_IS_BETTER: dict[str, bool] = {
+    "availability": True,
+    "error_rate": False,
+    "latency_p99_ms": False,
+}
+
+
+def is_breached(metric_name: str, current_value: float, target_value: float) -> bool:
+    """Determine SLO breach status using the correct direction for the metric.
+
+    For higher-is-better metrics (e.g. availability), a breach is a value
+    *below* target. For lower-is-better metrics (e.g. error_rate,
+    latency_p99_ms), a breach is a value *above* target.
+    """
+    if HIGHER_IS_BETTER.get(metric_name, False):
+        return current_value < target_value
+    return current_value > target_value
+
 
 def collect_slo(metric_name: str, namespace: str) -> float | None:
     """Collect a single SLO metric value from the cluster.
 
-    Returns the metric value as a float, or None if collection fails.
+    Returns the metric value as a float, or None if collection fails or if
+    there is no collector implemented for this metric type (e.g.
+    latency_p99_ms currently has no cluster-side collector).
     """
     collectors = {
         "error_rate": _collect_error_rate,
@@ -21,7 +45,10 @@ def collect_slo(metric_name: str, namespace: str) -> float | None:
     }
     fn = collectors.get(metric_name)
     if fn is None:
-        logger.debug("No collector for metric %r, skipping", metric_name)
+        logger.warning(
+            "No collector implemented for metric %r (namespace=%s) — skipping collection",
+            metric_name, namespace,
+        )
         return None
     return fn(namespace)
 

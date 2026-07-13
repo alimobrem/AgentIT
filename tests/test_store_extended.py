@@ -367,6 +367,88 @@ class TestOrchestratorStoreWiring:
 # ── Onboarding history ────────────────────────────────────────────────
 
 
+# ── Apply results (repo_files_json migration) ──────────────────────────
+
+
+class TestApplyResultsTable:
+    def test_save_and_get_apply_results_fresh_db(self):
+        """Regression: a brand-new DB must create apply_results with
+        repo_files_json already in the CREATE TABLE statement, so
+        save_apply_results (which always writes that column) doesn't fail
+        with 'table apply_results has no column named repo_files_json'."""
+        store = make_store()
+        aid = store.save(make_report())
+        store.save_apply_results(
+            aid,
+            {"applied": ["a.yaml"], "skipped": [], "errors": [], "repo_files": ["a.yaml"]},
+            namespace="test-ns",
+            dry_run=False,
+        )
+        result = store.get_apply_results(aid)
+        assert result is not None
+        assert result["applied"] == ["a.yaml"]
+        assert result["repo_files"] == ["a.yaml"]
+        assert result["namespace"] == "test-ns"
+
+    def test_migration_idempotent_on_existing_db(self, tmp_path):
+        """Regression: re-opening a DB that already has repo_files_json
+        (e.g. a second AssessmentStore() in the same process, or a pod
+        restart) must not raise -- the ALTER TABLE must tolerate the
+        column already existing."""
+        db_path = str(tmp_path / "test.db")
+        from agentit.portal.store import AssessmentStore as Store
+
+        store1 = Store(db_path=db_path)
+        aid = store1.save(make_report())
+        store1.save_apply_results(
+            aid, {"applied": [], "skipped": [], "errors": [], "repo_files": []},
+            namespace="ns", dry_run=True,
+        )
+
+        # Re-opening simulates a restart against the same on-disk DB --
+        # must not raise "duplicate column name: repo_files_json".
+        store2 = Store(db_path=db_path)
+        result = store2.get_apply_results(aid)
+        assert result is not None
+
+    def test_migration_adds_column_to_legacy_schema(self, tmp_path):
+        """Regression: a genuinely pre-existing DB whose apply_results table
+        predates repo_files_json (old CREATE TABLE, no ALTER yet applied)
+        must be migrated in-place when AssessmentStore opens it."""
+        import sqlite3
+
+        db_path = str(tmp_path / "legacy.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            CREATE TABLE apply_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                assessment_id TEXT NOT NULL,
+                namespace TEXT NOT NULL,
+                dry_run INTEGER NOT NULL DEFAULT 0,
+                applied_json TEXT NOT NULL DEFAULT '[]',
+                skipped_json TEXT NOT NULL DEFAULT '[]',
+                errors_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        from agentit.portal.store import AssessmentStore as Store
+
+        store = Store(db_path=db_path)
+        aid = store.save(make_report())
+        store.save_apply_results(
+            aid, {"applied": ["x.yaml"], "skipped": [], "errors": [], "repo_files": ["x.yaml"]},
+            namespace="ns", dry_run=False,
+        )
+        result = store.get_apply_results(aid)
+        assert result is not None
+        assert result["repo_files"] == ["x.yaml"]
+
+
 class TestOnboardingHistory:
     def test_list_onboardings(self):
         store = make_store()

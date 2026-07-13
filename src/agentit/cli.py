@@ -84,15 +84,83 @@ def main() -> None:
     configure_logging()
 
 
+def _rescan_fleet(
+    dimension: str | None,
+    use_llm: bool | None = None,
+    llm_model: str | None = None,
+) -> list[dict]:
+    """Re-assess every currently-tracked fleet app once and persist the results.
+
+    Used by ``watch --rescan`` / ``assess --rescan``, which are invoked from
+    K8s CronJobs that already control periodicity via their own schedule --
+    this performs exactly one pass over the fleet (tracked via the shared
+    store) rather than looping. If ``dimension`` is given, only findings for
+    that dimension (e.g. ``compliance``, ``security``, ``ha_dr``) are counted
+    in the per-app summary line.
+    """
+    from agentit.portal.store import AssessmentStore
+
+    store = AssessmentStore()
+    fleet = store.get_fleet_data()
+    if not fleet:
+        click.echo("[rescan] No tracked apps in the fleet -- nothing to do.", err=True)
+        return []
+
+    click.echo(f"[rescan] Re-assessing {len(fleet)} fleet app(s)"
+               + (f" (dimension={dimension})" if dimension else "") + "...", err=True)
+
+    results: list[dict] = []
+    for app in fleet:
+        repo_url = app["repo_url"]
+        try:
+            with _resolve_and_assess(repo_url, app["criticality"], use_llm, llm_model) as report:
+                store.save(report)
+                findings = [
+                    f for s in report.scores for f in s.findings
+                    if dimension is None or s.dimension == dimension
+                ]
+                delta = report.overall_score - (app["latest_score"] or report.overall_score)
+                click.echo(
+                    f"[rescan] {report.repo_name}: {report.overall_score:.0f}/100 "
+                    f"({'+' if delta >= 0 else ''}{delta:.0f}) {len(findings)} finding(s)",
+                    err=True,
+                )
+                results.append({
+                    "repo_url": repo_url,
+                    "repo_name": report.repo_name,
+                    "score": report.overall_score,
+                    "delta": delta,
+                    "findings_count": len(findings),
+                })
+        except CloneError as exc:
+            click.echo(f"[rescan] {repo_url}: error -- {exc}", err=True)
+
+    click.echo(f"[rescan] Done. Re-assessed {len(results)}/{len(fleet)} app(s).", err=True)
+    return results
+
+
 @main.command()
-@click.argument("repo_url")
+@click.argument("repo_url", required=False, default=None)
 @click.option("--criticality", type=click.Choice(["low", "medium", "high", "critical"]), default="medium")
 @click.option("--format", "output_format", type=click.Choice(["json", "terminal"]), default="json")
 @click.option("--output", "output_file", type=click.Path(), default=None)
 @click.option("--llm/--no-llm", "use_llm", default=None, help="Enable/disable Claude LLM (auto-detects credentials if omitted).")
 @click.option("--llm-model", default=None, help="Claude model to use (default: env AGENTIT_LLM_MODEL).")
-def assess(repo_url: str, criticality: str, output_format: str, output_file: str | None, use_llm: bool, llm_model: str | None) -> None:
+@click.option("--rescan", is_flag=True, default=False,
+              help="Re-assess every currently-tracked fleet app once and exit, instead of assessing a single REPO_URL.")
+@click.option("--dimension", default=None,
+              help="With --rescan, only count/report findings for this dimension (e.g. compliance, security, ha_dr).")
+def assess(
+    repo_url: str | None, criticality: str, output_format: str, output_file: str | None,
+    use_llm: bool, llm_model: str | None, rescan: bool, dimension: str | None,
+) -> None:
     """Assess enterprise readiness of a Git repository."""
+    if rescan:
+        _rescan_fleet(dimension, use_llm, llm_model)
+        return
+    if not repo_url:
+        click.echo("Error: REPO_URL is required unless --rescan is set.", err=True)
+        sys.exit(1)
     try:
         with _resolve_and_assess(repo_url, criticality, use_llm, llm_model) as report:
             output = render_json_report(report) if output_format == "json" else render_terminal_report(report)
@@ -148,17 +216,31 @@ def portal(host: str, port: int) -> None:
 
 
 @main.command()
-@click.argument("repo_url")
+@click.argument("repo_url", required=False, default=None)
 @click.option("--interval", default=3600, type=int, help="Re-assessment interval in seconds (default: 1 hour).")
 @click.option("--criticality", type=click.Choice(["low", "medium", "high", "critical"]), default="medium")
 @click.option("--llm", "use_llm", is_flag=True, default=None)
 @click.option("--llm-model", default=None)
 @click.option("--webhook", default=None, help="Webhook URL to POST results to.")
-def watch(repo_url: str, interval: int, criticality: str, use_llm: bool | None, llm_model: str | None, webhook: str | None) -> None:
-    """Continuously re-assess a repository on a schedule."""
+@click.option("--rescan", is_flag=True, default=False,
+              help="Re-assess every currently-tracked fleet app once and exit, instead of continuously watching a single REPO_URL.")
+@click.option("--dimension", default=None,
+              help="With --rescan, only count/report findings for this dimension (e.g. compliance, security, ha_dr).")
+def watch(
+    repo_url: str | None, interval: int, criticality: str, use_llm: bool | None, llm_model: str | None,
+    webhook: str | None, rescan: bool, dimension: str | None,
+) -> None:
+    """Continuously re-assess a repository on a schedule, or with --rescan, re-assess the whole tracked fleet once."""
     import time
     import json
     import httpx
+
+    if rescan:
+        _rescan_fleet(dimension, use_llm, llm_model)
+        return
+    if not repo_url:
+        click.echo("Error: REPO_URL is required unless --rescan is set.", err=True)
+        sys.exit(1)
 
     click.echo(f"Watching {repo_url} every {interval}s...", err=True)
     previous_score: float | None = None

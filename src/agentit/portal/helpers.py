@@ -178,17 +178,32 @@ def clone_assess_cleanup(repo_url: str, criticality: str, infra_repo_url: str | 
 # ── Run onboarding ───────────────────────────────────────────────────
 
 
-def run_onboarding(report, assessment_id: str | None = None):
-    """Run orchestrated onboarding. Returns (files, orchestration_summary)."""
+def run_onboarding(report, assessment_id: str | None = None, store: AssessmentStore | None = None):
+    """Run orchestrated onboarding. Returns (files, orchestration_summary).
+
+    This is the single shared implementation used by both the inline portal
+    route (app.py) and the webhook-triggered path (routes/webhooks.py) — keep
+    the orchestration summary fields in sync between callers since
+    `auto_approve`/`gates` are read downstream (e.g. webhook_auto_apply).
+
+    ``store`` defaults to this module's ``get_store()`` singleton, but callers
+    (namely app.py's `_run_onboarding`) should pass their own `get_store()`
+    result explicitly so store overrides applied via that caller's module
+    (e.g. `patch("agentit.portal.app.get_store", ...)` in tests) still take
+    effect here.
+    """
     import tempfile
     from pathlib import Path
     from agentit.agents.orchestrator import FleetOrchestrator
+
+    if store is None:
+        store = get_store()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         base = Path(tmpdir)
         orch = FleetOrchestrator(
             report=report, output_dir=base,
-            store=get_store(), assessment_id=assessment_id,
+            store=store, assessment_id=assessment_id,
         )
         result = orch.run()
 
@@ -209,13 +224,19 @@ def run_onboarding(report, assessment_id: str | None = None):
 
         orch_summary = {
             "agents": [
-                {"name": ar.agent_name, "category": ar.category,
-                 "success": ar.success, "files": ar.files_generated,
-                 "error": ar.error}
+                {
+                    "name": ar.agent_name,
+                    "category": ar.category,
+                    "success": ar.success,
+                    "files_count": len(ar.files_generated),
+                    "error": ar.error,
+                }
                 for ar in result.agent_results
             ],
             "conflicts": result.conflicts,
             "recommendation": result.recommendation,
+            "auto_approve": result.plan.auto_approve,
+            "gates": result.gates_created,
         }
 
         return all_files, orch_summary
