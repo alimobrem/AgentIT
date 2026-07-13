@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -19,7 +20,33 @@ class EventConsumer:
     Uses manual offset commits so events are only marked consumed after
     successful processing.  Failed messages are retried up to
     ``max_retries`` times before being published to a dead-letter topic.
+
+    ``consume()`` is a genuinely synchronous, blocking loop -- ``kafka-
+    python`` has no async client, so ``for msg in self._consumer`` blocks
+    the calling thread for as long as the loop runs (per
+    docs/postgres-migration-plan.md, this is one of the few call sites
+    that stays synchronous by design, not an oversight). ``store``,
+    however, is now the async-compatible store (``AsyncSQLiteStore`` or
+    ``store_pg.AssessmentStore`` -- never the raw sync store) that every
+    other caller in this codebase uses. To let ``_dead_letter`` genuinely
+    `await` that store's methods from inside a synchronous call stack,
+    ``EventConsumer`` captures the event loop that constructed it (via
+    ``asyncio.get_running_loop()``) and schedules the store write back
+    onto that *same* loop with ``asyncio.run_coroutine_threadsafe`` --
+    this is the narrow bridge, not a whole-class wrapper, and it's the
+    only safe way to reach an ``asyncpg``-backed store (whose connection
+    pool is bound to the loop that created it and must not be driven from
+    a second event loop) from a worker thread. Callers that run
+    ``consume()`` itself must do so via ``asyncio.to_thread(...)`` (see
+    ``cli.py``'s ``consume`` command) so the loop this bridge schedules
+    onto is free to actually process the scheduled callback while the
+    Kafka loop blocks a different thread.
     """
+
+    #: Overridden per-instance in ``__init__``; kept as a class default so
+    #: instances built via ``EventConsumer.__new__(EventConsumer)`` in
+    #: tests (bypassing ``__init__``) still behave correctly.
+    _loop: "asyncio.AbstractEventLoop | None" = None
 
     def __init__(
         self,
@@ -37,10 +64,15 @@ class EventConsumer:
             "AGENTIT_KAFKA_BOOTSTRAP", ""
         )
         self._consumer = None
-        # Optional SQLite store — when provided, dead-lettered messages are
-        # also persisted to the `events` table (action='dead-letter') so the
-        # portal's /events/dlq page actually shows them, not just Kafka.
+        # Optional async-compatible store — when provided, dead-lettered
+        # messages are also persisted to the `events` table
+        # (action='dead-letter') so the portal's /events/dlq page actually
+        # shows them, not just Kafka.
         self._store = store
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
 
         if not self._bootstrap:
             logger.warning("No Kafka bootstrap servers — consumer will run in polling-only mode")
@@ -90,16 +122,36 @@ class EventConsumer:
 
         if self._store is not None:
             try:
-                self._store.log_event(
-                    "event-consumer",
-                    "dead-letter",
-                    message.get("targetApp"),
-                    "error",
-                    f"Dead-lettered from {topic}: {error}",
-                    details=details,
-                )
+                self._persist_dead_letter(topic, message, error, details)
             except Exception:
                 logger.exception("Failed to persist dead-letter event to store")
+
+    def _persist_dead_letter(self, topic: str, message: dict, error: Exception, details: dict) -> None:
+        """Write the dead-letter event to ``self._store``, sync or async.
+
+        Sync stores (e.g. a plain ``MagicMock`` in tests, or a future
+        genuinely-sync consumer) get a direct call. Async stores are
+        scheduled back onto the loop that constructed this consumer via
+        ``run_coroutine_threadsafe`` and awaited to completion here, since
+        this method itself runs synchronously inside ``consume()``'s
+        blocking loop -- see the class docstring for why that loop must
+        run off the main event loop's thread for this to work.
+        """
+        log_event = self._store.log_event
+        args = (
+            "event-consumer", "dead-letter", message.get("targetApp"), "error",
+            f"Dead-lettered from {topic}: {error}",
+        )
+        if not asyncio.iscoroutinefunction(log_event):
+            log_event(*args, details=details)
+            return
+        if self._loop is None:
+            logger.warning(
+                "Async store but no event loop captured — dropping dead-letter persistence"
+            )
+            return
+        future = asyncio.run_coroutine_threadsafe(log_event(*args, details=details), self._loop)
+        future.result(timeout=10)
 
     def poll_once(self) -> list[dict]:
         """Poll for available events. Returns list of event dicts."""

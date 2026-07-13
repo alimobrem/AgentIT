@@ -382,10 +382,15 @@ async def consume(topics: str, group_id: str) -> None:
 
     topic_list = [t.strip() for t in topics.split(",") if t.strip()]
     store = await create_store()
-    # EventConsumer.consume() is a synchronous blocking loop (unconverted,
-    # out of scope this pass) -- it calls store methods directly without
-    # `await`, so it needs the raw synchronous store, not the async facade.
-    consumer = EventConsumer(topics=topic_list, group_id=group_id, store=store.raw)
+    # EventConsumer accepts the async store directly -- its constructor
+    # captures the current running loop (this coroutine's) so its
+    # dead-letter persistence can schedule store writes back onto it via
+    # `run_coroutine_threadsafe`, safe even for an asyncpg-backed store.
+    # `consume()` itself is a genuinely synchronous, blocking Kafka loop
+    # (kafka-python has no async client), so it's dispatched to a worker
+    # thread below -- narrow `to_thread` at this one blocking call site,
+    # not a bridge on the store.
+    consumer = EventConsumer(topics=topic_list, group_id=group_id, store=store)
 
     if not consumer.connected:
         click.echo("Kafka unavailable — cannot start consumer.", err=True)
@@ -412,7 +417,7 @@ async def consume(topics: str, group_id: str) -> None:
             click.echo(f"[consume] SLO breach for {target}", err=True)
 
     click.echo(f"Consuming topics={topic_list} group={group_id}...", err=True)
-    consumer.consume(handler)
+    await asyncio.to_thread(consumer.consume, handler)
 
 
 @main.command("vuln-watch")
@@ -425,15 +430,17 @@ async def vuln_watch(interval: int) -> None:
     from agentit.watchers.vuln_watcher import VulnWatcher
 
     store = await create_store()
-    # EventConsumer.consume() (used by `consume`, not this watcher's own
-    # run() loop) is unconverted synchronous code -- pass the raw store.
-    # check_fleet() itself now wraps self._store in an async facade
-    # internally before constructing AutoMode/RemediationLoop (both
-    # genuinely async now) -- see watchers/vuln_watcher.py.
-    consumer = EventConsumer(topics=["agentit-events"], group_id="agentit-vuln-watcher", store=store.raw)
+    # EventConsumer's `poll_once()` (the only method this watcher's run()
+    # loop calls) never touches its `store` param at all -- only
+    # `consume()` (used by the standalone `consume` command, not here)
+    # does. Passed through here purely for API-shape consistency; the
+    # async store is safe to hand it regardless. VulnWatcher itself
+    # genuinely supports the async store directly now -- see
+    # watchers/vuln_watcher.py's check_fleet().
+    consumer = EventConsumer(topics=["agentit-events"], group_id="agentit-vuln-watcher", store=store)
     watcher = VulnWatcher(
         publisher=get_publisher(),
-        store=store.raw,
+        store=store,
         consumer=consumer,
         interval=interval,
     )
@@ -450,10 +457,10 @@ async def slo_track(interval: int) -> None:
     from agentit.watchers.slo_tracker import SloTracker
 
     store = await create_store()
-    consumer = EventConsumer(topics=["agentit-events"], group_id="agentit-slo-tracker", store=store.raw)
+    consumer = EventConsumer(topics=["agentit-events"], group_id="agentit-slo-tracker", store=store)
     tracker = SloTracker(
         publisher=get_publisher(),
-        store=store.raw,
+        store=store,
         consumer=consumer,
         interval=interval,
     )
@@ -469,7 +476,7 @@ async def drift_detect(interval: int) -> None:
     from agentit.watchers.drift_detector import DriftDetector
 
     store = await create_store()
-    detector = DriftDetector(publisher=get_publisher(), interval=interval, store=store.raw)
+    detector = DriftDetector(publisher=get_publisher(), interval=interval, store=store)
     await detector.run()
 
 
@@ -493,7 +500,7 @@ async def learn_watch(interval: int, limit: int, llm_model: str | None) -> None:
     skills_dir_env = os.environ.get("AGENTIT_SKILLS_DIR")
     learner = SkillLearner(
         publisher=get_publisher(), llm_model=llm_model, interval=interval, limit=limit,
-        store=store.raw,
+        store=store,
         skills_dir=Path(skills_dir_env) if skills_dir_env else None,
     )
     await learner.run()

@@ -11,8 +11,13 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def record_tick(store: object | None, watcher_name: str, success: bool, error: str | None = None) -> None:
+async def record_tick(store: object | None, watcher_name: str, success: bool, error: str | None = None) -> None:
     """Record one watcher loop iteration: a tick-complete/tick-failed event plus a heartbeat.
+
+    ``store`` is the async-compatible store handed to the watcher's
+    constructor (``AsyncSQLiteStore`` or ``store_pg.AssessmentStore`` --
+    never the raw sync ``AssessmentStore``, see docs/postgres-migration-
+    plan.md), so both calls below are `await`ed.
 
     Best-effort — a store failure must never crash a watcher's main loop, so
     every exception here is caught and logged rather than propagated.
@@ -29,15 +34,15 @@ def record_tick(store: object | None, watcher_name: str, success: bool, error: s
         return
     try:
         if success:
-            store.log_event(
+            await store.log_event(
                 watcher_name, "tick-complete", None, "info",
                 f"{watcher_name} tick completed successfully",
             )
         else:
-            store.log_event(
+            await store.log_event(
                 watcher_name, "tick-failed", None, "error",
                 f"{watcher_name} tick failed: {error}",
             )
-        store.agent_heartbeat(watcher_name)
+        await store.agent_heartbeat(watcher_name)
     except Exception:
         logger.warning("Failed to record tick telemetry for %s", watcher_name, exc_info=True)

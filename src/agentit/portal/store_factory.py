@@ -48,20 +48,21 @@ class AsyncSQLiteStore:
 
     ``.raw`` exposes the underlying synchronous ``AssessmentStore`` instance
     for the call sites that remain genuinely synchronous -- background
-    assessment threads (``app.py``'s ``assess_submit``), ``EventConsumer``,
-    each watcher's own tick body (which now internally re-wraps ``.raw``
-    with ``AsyncSQLiteStore.wrap()`` before constructing the now-async
-    ``AutoMode``/``RemediationLoop``, per watchers/vuln_watcher.py and
-    watchers/drift_detector.py), and metrics/inventory-diff/cluster-health
-    helpers that run via ``asyncio.to_thread`` (see docs/postgres-migration-
-    plan.md §"Progress update: sync→async conversion of FleetOrchestrator/
-    AutoMode/RemediationDispatcher/RemediationLoop complete" for the full
-    list of what *no longer* needs ``.raw``). There is deliberately no
-    Postgres equivalent of ``.raw``: handing a not-yet-converted synchronous
-    consumer a Postgres-backed store would be exactly the kind of partial,
-    uncoordinated cutover the plan's §7 warns against, so that combination
-    fails loudly (``AttributeError``, since ``store_pg.AssessmentStore`` has
-    no ``.raw``) instead of silently diverging.
+    assessment threads (``app.py``'s ``assess_submit``) and metrics/
+    inventory-diff/cluster-health helpers that run via ``asyncio.to_thread``.
+    **The 4 watcher classes and their `EventConsumer` dependency no longer
+    need `.raw`** -- their constructors and tick bodies (``check_fleet``/
+    ``check_once``/``detect_once``/``research_once``) now genuinely `await`
+    the async store directly (see docs/postgres-migration-plan.md's
+    "watcher CLI entry points" blocker-resolution section, and
+    watchers/*.py), the same design already used by ``FleetOrchestrator``/
+    ``AutoMode``/``RemediationDispatcher``/``RemediationLoop``. There is
+    deliberately no Postgres equivalent of ``.raw``: handing a
+    not-yet-converted synchronous consumer a Postgres-backed store would be
+    exactly the kind of partial, uncoordinated cutover the plan's §7 warns
+    against, so that combination fails loudly (``AttributeError``, since
+    ``store_pg.AssessmentStore`` has no ``.raw``) instead of silently
+    diverging.
     """
 
     def __init__(self, db_path: str | None = None) -> None:

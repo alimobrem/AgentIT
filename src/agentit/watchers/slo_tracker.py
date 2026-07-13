@@ -10,7 +10,6 @@ import click
 
 from agentit.consumer import EventConsumer
 from agentit.events import EventPublisher, TOPIC_ALERTS
-from agentit.portal.store import AssessmentStore
 from agentit.slo_collector import collect_slo, is_breached
 from agentit.watchers import record_tick
 
@@ -25,7 +24,7 @@ class SloTracker:
     def __init__(
         self,
         publisher: EventPublisher,
-        store: AssessmentStore,
+        store: object,
         consumer: EventConsumer,
         interval: int = 300,
     ) -> None:
@@ -34,17 +33,24 @@ class SloTracker:
         self._consumer = consumer
         self._interval = interval
 
-    def check_once(self) -> int:
+    async def check_once(self) -> int:
         """Check all assessments for SLO breaches.
+
+        ``self._store`` is the async-compatible store handed in by
+        ``cli.py``'s ``slo_track`` command -- every store call below is
+        `await`ed directly. The one genuinely blocking call this tick makes
+        (``collect_slo``, synchronous ``kubernetes``-client I/O) is
+        narrowly wrapped in ``asyncio.to_thread`` at its call site in
+        ``_collect_fresh_values``, not the whole method.
 
         Returns the number of apps with at least one breached SLO.
         """
-        assessments = self._store.list_all()
+        assessments = await self._store.list_all()
         breached_apps = 0
 
         for a in assessments:
-            slos = self._store.list_slos(a["id"])
-            self._collect_fresh_values(a, slos)
+            slos = await self._store.list_slos(a["id"])
+            await self._collect_fresh_values(a, slos)
             app_breaches = [s for s in slos if s["status"] == "breached"]
 
             for slo in app_breaches:
@@ -62,7 +68,7 @@ class SloTracker:
 
             if app_breaches:
                 breached_apps += 1
-                self._recommend_rollback(a, app_breaches)
+                await self._recommend_rollback(a, app_breaches)
 
         click.echo(
             f"[slo-track] Checked {len(assessments)} apps, {breached_apps} with breaches",
@@ -70,7 +76,7 @@ class SloTracker:
         )
         return breached_apps
 
-    def _collect_fresh_values(self, assessment: dict, slos: list[dict]) -> None:
+    async def _collect_fresh_values(self, assessment: dict, slos: list[dict]) -> None:
         """Collect a fresh metric value for each SLO and update its status in-place.
 
         SLOs whose metric type has no cluster-side collector (e.g.
@@ -79,7 +85,7 @@ class SloTracker:
         """
         namespace = assessment["repo_name"]
         for slo in slos:
-            value = collect_slo(slo["metric_name"], namespace)
+            value = await asyncio.to_thread(collect_slo, slo["metric_name"], namespace)
             if value is None:
                 logger.debug(
                     "[slo-track] Could not collect %r for %s -- leaving prior status",
@@ -87,13 +93,13 @@ class SloTracker:
                 )
                 continue
             status = "breached" if is_breached(slo["metric_name"], value, slo["target_value"]) else "met"
-            self._store.update_slo(slo["id"], value, status)
+            await self._store.update_slo(slo["id"], value, status)
             slo["current_value"] = value
             slo["status"] = status
 
-    def _recommend_rollback(self, assessment: dict, breaches: list[dict]) -> None:
+    async def _recommend_rollback(self, assessment: dict, breaches: list[dict]) -> None:
         """If a recent apply exists for this assessment, create a rollback gate."""
-        apply_result = self._store.get_apply_results(assessment["id"])
+        apply_result = await self._store.get_apply_results(assessment["id"])
         if not (apply_result and apply_result.get("applied")):
             return
 
@@ -111,7 +117,7 @@ class SloTracker:
                 f"kubectl argo rollouts undo {repo_name}"
             ),
         )
-        self._store.create_gate(
+        await self._store.create_gate(
             assessment["id"],
             "rollback-review",
             f"SLO breach detected for {repo_name} after recent apply. "
@@ -123,25 +129,26 @@ class SloTracker:
     async def run(self) -> None:
         """Main loop: drain events, check SLOs, sleep.
 
-        ``check_once`` is unconverted synchronous code this pass (see
-        docs/postgres-migration-plan.md's Phase 3 progress notes), so
-        it's dispatched via ``asyncio.to_thread`` to avoid blocking the
-        event loop for the tick's full duration.
+        ``check_once`` is now a genuine coroutine -- it's `await`ed
+        directly rather than dispatched via ``asyncio.to_thread`` (which
+        would just add a redundant thread hop), since its one truly
+        blocking call (``collect_slo``) is already narrowly wrapped in
+        ``asyncio.to_thread`` internally, in ``_collect_fresh_values``.
         """
         click.echo(f"Starting SLO tracker (interval={self._interval}s)...", err=True)
         while True:
             try:
                 self._consumer.poll_once()
-                await asyncio.to_thread(self.check_once)
+                await self.check_once()
                 Path("/tmp/heartbeat").touch()
-                record_tick(self._store, "slo-tracker", success=True)
+                await record_tick(self._store, "slo-tracker", success=True)
             except KeyboardInterrupt:
                 click.echo("SLO tracker stopped.", err=True)
                 break
             except Exception as exc:
                 logger.exception("slo-track tick failed")
                 click.echo(f"[slo-track] Error: {exc}", err=True)
-                record_tick(self._store, "slo-tracker", success=False, error=str(exc))
+                await record_tick(self._store, "slo-tracker", success=False, error=str(exc))
 
             try:
                 await asyncio.sleep(self._interval)

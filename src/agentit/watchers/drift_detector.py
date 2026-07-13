@@ -124,13 +124,18 @@ class DriftDetector:
         return {"items": items}
 
     async def _maybe_auto_sync(self, app_name: str) -> None:
-        """If auto-mode is enabled, patch the Application to trigger a sync."""
+        """If auto-mode is enabled, patch the Application to trigger a sync.
+
+        ``self._store`` is the async-compatible store handed in by
+        ``cli.py``'s ``drift_detect`` command (or ``None`` when this
+        detector was constructed without one, e.g. some tests) -- no
+        bridging facade needed since ``AutoMode`` is genuinely async too.
+        """
         from agentit.automode import AutoMode
-        from agentit.portal.store import AssessmentStore
         from agentit.portal.store_factory import AsyncSQLiteStore
 
-        store = self._store or AssessmentStore()
-        auto = AutoMode(store=AsyncSQLiteStore.wrap(store), publisher=self._publisher)
+        store = self._store if self._store is not None else AsyncSQLiteStore()
+        auto = AutoMode(store=store, publisher=self._publisher)
         if not await auto.is_enabled():
             return
 
@@ -163,14 +168,14 @@ class DriftDetector:
             try:
                 await self.detect_once()
                 Path("/tmp/heartbeat").touch()
-                record_tick(self._store, "drift-detector", success=True)
+                await record_tick(self._store, "drift-detector", success=True)
             except KeyboardInterrupt:
                 click.echo("Drift detector stopped.", err=True)
                 break
             except Exception as exc:
                 logger.exception("drift-detect tick failed")
                 click.echo(f"[drift-detect] Error: {exc}", err=True)
-                record_tick(self._store, "drift-detector", success=False, error=str(exc))
+                await record_tick(self._store, "drift-detector", success=False, error=str(exc))
 
             try:
                 await asyncio.sleep(self._interval)

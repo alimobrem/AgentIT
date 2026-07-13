@@ -63,7 +63,7 @@ class SkillLearner:
         self._skills_dir = skills_dir or Path("skills")
         self._store = store
 
-    def research_once(self) -> tuple[list[str], list[str]]:
+    async def research_once(self) -> tuple[list[str], list[str]]:
         """Research low-effectiveness skills first, falling back to a generic
         CVE sweep when nothing's flagged. Returns (saved, skipped).
 
@@ -76,12 +76,21 @@ class SkillLearner:
         and this repo's README for the full loop). A skill flagged low this
         cycle is prioritized; CVE research only runs when there's nothing to
         improve.
+
+        ``self._store`` is the async-compatible store handed in by
+        ``cli.py``'s ``learn_watch`` command -- every store call is
+        `await`ed directly. The LLM/file-system calls (synchronous by
+        design, per docs/postgres-migration-plan.md's narrow-``to_thread``
+        convention -- ``llm.py`` itself is deliberately not converted, see
+        that doc's "sync→async conversion ... complete" section) are each
+        wrapped in ``asyncio.to_thread`` at their own call site.
         """
         try:
             from agentit.llm import LLMClient
-            llm_client = LLMClient(model=self._llm_model)
+            llm_client = await asyncio.to_thread(LLMClient, model=self._llm_model)
         except Exception as exc:
             click.echo(f"[skill-learn] LLM unavailable this cycle: {exc}", err=True)
+            await self._log_run(mode=None, saved=[], skipped=[], error=str(exc))
             return [], []
 
         from agentit.learning_agent import (
@@ -95,12 +104,13 @@ class SkillLearner:
         saved: list[str] = []
         skipped: list[str] = []
 
-        flagged = self._get_flagged_skills()
+        flagged = await self._get_flagged_skills()
         if flagged:
             click.echo(f"[skill-learn] {len(flagged)} low-effectiveness skill(s) flagged -- "
                        "prioritizing improvement research over the generic CVE sweep this cycle.", err=True)
             from agentit.skill_engine import load_all_skills
-            by_name = {s.name: s for s in load_all_skills(self._skills_dir)}
+            all_skills = await asyncio.to_thread(load_all_skills, self._skills_dir)
+            by_name = {s.name: s for s in all_skills}
 
             for entry in flagged[: self._limit]:
                 skill_name = entry["skill"]
@@ -110,11 +120,11 @@ class SkillLearner:
                                f"'{skill_name}' -- skill no longer found on disk", err=True)
                     skipped.append(skill_name)
                     continue
-                item = research_skill_improvement(llm_client, skill.name, skill.domain, entry)
+                item = await asyncio.to_thread(research_skill_improvement, llm_client, skill.name, skill.domain, entry)
                 if not item:
                     skipped.append(skill_name)
                     continue
-                content = generate_skill_from_research(llm_client, item, domain=skill.domain)
+                content = await asyncio.to_thread(generate_skill_from_research, llm_client, item, domain=skill.domain)
                 if not content:
                     skipped.append(skill_name)
                     continue
@@ -122,13 +132,13 @@ class SkillLearner:
                 # is a replacement for an existing (underperforming) skill,
                 # so a name/domain match against that same skill is
                 # expected, not a duplicate to reject.
-                path = save_skill(content, self._skills_dir, domain=skill.domain)
+                path = await asyncio.to_thread(save_skill, content, self._skills_dir, domain=skill.domain)
                 if path:
                     saved.append(path.stem)
                     click.echo(f"[skill-learn] Drafted improvement for '{skill_name}': {path}", err=True)
                     if self._store is not None:
                         try:
-                            self._store.log_event(
+                            await self._store.log_event(
                                 "skill-learner", "skill-improvement-drafted", None, "info",
                                 f"Drafted {path.stem} to improve low-effectiveness skill "
                                 f"'{skill_name}' ({entry.get('approval_rate', 0):.0%} approval)",
@@ -148,20 +158,21 @@ class SkillLearner:
                     )
                 else:
                     click.echo("[skill-learn] No usable improvement drafts this cycle", err=True)
+                await self._log_run(mode="skill-improvement", saved=saved, skipped=skipped)
                 return saved, skipped
 
-        items = research_cves(llm_client, limit=self._limit)
+        items = await asyncio.to_thread(research_cves, llm_client, limit=self._limit)
         click.echo(f"[skill-learn] Researched {len(items)} CVE(s)", err=True)
 
         for item in items:
             item_name = item.get("id") or item.get("title") or item.get("name", "")
-            if item_name and check_skill_exists(self._skills_dir, item_name, "security"):
+            if item_name and await asyncio.to_thread(check_skill_exists, self._skills_dir, item_name, "security"):
                 skipped.append(item_name)
                 continue
-            content = generate_skill_from_research(llm_client, item, domain="security")
+            content = await asyncio.to_thread(generate_skill_from_research, llm_client, item, domain="security")
             if not content:
                 continue
-            path = save_skill(content, self._skills_dir, domain="security")
+            path = await asyncio.to_thread(save_skill, content, self._skills_dir, domain="security")
             if path:
                 saved.append(path.stem)
                 click.echo(f"[skill-learn] Drafted new skill: {path}", err=True)
@@ -178,9 +189,31 @@ class SkillLearner:
         else:
             click.echo("[skill-learn] No new skills this cycle", err=True)
 
+        await self._log_run(mode="cve-sweep", saved=saved, skipped=skipped)
         return saved, skipped
 
-    def _get_flagged_skills(self) -> list[dict]:
+    async def _log_run(
+        self, mode: str | None, saved: list[str], skipped: list[str], error: str | None = None,
+    ) -> None:
+        """Durable, queryable trace of this tick's outcome -- see
+        ``learning_agent.describe_learning_run``'s docstring for why this
+        exists (every run, not just ones that generated a skill, must leave
+        a trace). Best-effort: a store failure must never crash the watcher's
+        main loop, same convention as ``watchers/__init__.py::record_tick``.
+        """
+        if self._store is None:
+            return
+        from agentit.learning_agent import LEARNING_RUN_ACTION, describe_learning_run
+
+        severity, summary, details = describe_learning_run("watcher", mode, saved, skipped, error)
+        try:
+            await self._store.log_event(
+                "skill-learner", LEARNING_RUN_ACTION, None, severity, summary, details=details,
+            )
+        except Exception:
+            logger.warning("Failed to log learning-run event", exc_info=True)
+
+    async def _get_flagged_skills(self) -> list[dict]:
         """Low-effectiveness skills from the store, or ``[]`` if there's no
         store (e.g. ``agentit learn`` CLI invocations without a DB path) or
         the lookup fails -- never lets this new prioritization block the
@@ -188,7 +221,7 @@ class SkillLearner:
         if self._store is None or not hasattr(self._store, "get_low_effectiveness_skills"):
             return []
         try:
-            return self._store.get_low_effectiveness_skills()
+            return await self._store.get_low_effectiveness_skills()
         except Exception:
             logger.warning("Failed to fetch low-effectiveness skills", exc_info=True)
             return []
@@ -196,10 +229,11 @@ class SkillLearner:
     async def run(self) -> None:
         """Main loop: research, sleep.
 
-        ``research_once`` is unconverted synchronous code this pass (see
-        docs/postgres-migration-plan.md's Phase 3 progress notes), so
-        it's dispatched via ``asyncio.to_thread`` to avoid blocking the
-        event loop for the tick's full duration.
+        ``research_once`` is now a genuine coroutine -- it's `await`ed
+        directly rather than dispatched via ``asyncio.to_thread`` (which
+        would just add a redundant thread hop), since its own blocking
+        LLM/file-system calls are already narrowly wrapped in
+        ``asyncio.to_thread`` internally.
         """
         click.echo(f"Starting skill learner (interval={self._interval}s)...", err=True)
         click.echo(
@@ -218,16 +252,16 @@ class SkillLearner:
         )
         while True:
             try:
-                await asyncio.to_thread(self.research_once)
+                await self.research_once()
                 Path("/tmp/heartbeat").touch()
-                record_tick(self._store, "skill-learner", success=True)
+                await record_tick(self._store, "skill-learner", success=True)
             except KeyboardInterrupt:
                 click.echo("Skill learner stopped.", err=True)
                 break
             except Exception as exc:
                 logger.exception("skill-learn tick failed")
                 click.echo(f"[skill-learn] Error: {exc}", err=True)
-                record_tick(self._store, "skill-learner", success=False, error=str(exc))
+                await record_tick(self._store, "skill-learner", success=False, error=str(exc))
 
             try:
                 await asyncio.sleep(self._interval)

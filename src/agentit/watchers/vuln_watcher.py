@@ -10,7 +10,6 @@ import click
 
 from agentit.consumer import EventConsumer
 from agentit.events import EventPublisher, TOPIC_ALERTS, TOPIC_EVENTS
-from agentit.portal.store import AssessmentStore
 from agentit.watchers import record_tick
 
 logger = logging.getLogger(__name__)
@@ -24,7 +23,7 @@ class VulnWatcher:
     def __init__(
         self,
         publisher: EventPublisher,
-        store: AssessmentStore,
+        store: object,
         consumer: EventConsumer,
         interval: int = 21600,
     ) -> None:
@@ -50,23 +49,22 @@ class VulnWatcher:
     async def check_fleet(self) -> None:
         """Scan the fleet for apps with critical/high findings and alert or remediate.
 
-        ``self._store`` is still the raw synchronous store handle (per
-        cli.py's ``vuln_watch`` command) -- that bridge is a separate,
-        deferred concern (see docs/postgres-migration-plan.md), so
-        ``get_fleet_data()`` here stays a direct, unawaited sync call.
-        ``AutoMode``/``RemediationLoop`` are now genuinely async, so they're
-        constructed with an async-compatible facade over that same store.
+        ``self._store`` is the async-compatible store handed in by
+        ``cli.py``'s ``vuln_watch`` command (``AsyncSQLiteStore`` or
+        ``store_pg.AssessmentStore`` -- never the raw sync store, see
+        docs/postgres-migration-plan.md), so every store call here is
+        `await`ed directly. ``AutoMode``/``RemediationLoop`` are also
+        genuinely async, so they're constructed with that same store
+        object -- no bridging facade needed.
         """
-        fleet = self._store.get_fleet_data()
+        fleet = await self._store.get_fleet_data()
         click.echo(f"[vuln-watch] Monitoring {len(fleet)} apps", err=True)
 
         from agentit.automode import AutoMode
-        from agentit.portal.store_factory import AsyncSQLiteStore
         from agentit.remediation_loop import RemediationLoop
 
-        async_store = AsyncSQLiteStore.wrap(self._store)
-        auto = AutoMode(store=async_store, publisher=self._publisher, llm_client=None)
-        loop = RemediationLoop(store=async_store, publisher=self._publisher)
+        auto = AutoMode(store=self._store, publisher=self._publisher, llm_client=None)
+        loop = RemediationLoop(store=self._store, publisher=self._publisher)
 
         for app_data in fleet:
             if app_data.get("critical_count", 0) > 0:
@@ -122,14 +120,14 @@ class VulnWatcher:
                     self._handle_event(event)
                 await self.check_fleet()
                 Path("/tmp/heartbeat").touch()
-                record_tick(self._store, "vuln-watcher", success=True)
+                await record_tick(self._store, "vuln-watcher", success=True)
             except KeyboardInterrupt:
                 click.echo("Vulnerability watcher stopped.", err=True)
                 break
             except Exception as exc:
                 logger.exception("vuln-watch tick failed")
                 click.echo(f"[vuln-watch] Error: {exc}", err=True)
-                record_tick(self._store, "vuln-watcher", success=False, error=str(exc))
+                await record_tick(self._store, "vuln-watcher", success=False, error=str(exc))
 
             try:
                 await asyncio.sleep(self._interval)
