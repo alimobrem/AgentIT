@@ -67,7 +67,10 @@ spec:
     # canary, since old/new portal pods would otherwise talk to two different
     # databases simultaneously). Revert to the chart default (10/50/100 with
     # pauses) once this sync is confirmed healthy.
-    values: |
+    # NOTE: this cluster's Argo CD install silently drops the raw-string
+    # `helm.values` field (confirmed empirically during this cutover) --
+    # `valuesObject` (structured) is required here instead.
+    valuesObject:
       rollout:
         steps:
           - setWeight: 100
