@@ -1,6 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Capabilities - AgentIT{% endblock %}
 {% block content %}
+{% from "_macros.html" import tab_nav %}
+{{ tab_nav([
+  {"href": "/capabilities", "label": "Catalog"},
+  {"href": "/agents", "label": "Registry", "prefix": "/agents"},
+], request) }}
 <h1>Capabilities &amp; Workflows</h1>
 <p class="text-muted">Skills, checks, agents, and automation — everything AgentIT can do.</p>
 

@@ -155,13 +155,11 @@ Key pages:
 | **Assessment Detail** | 7-dimension scores, lifecycle stepper, score trend, timeline, remediation items |
 | **Gates** | Human approval queue with LLM reasoning, confirm/reject with reason |
 | **Insights** | Fleet stats, agent performance, low-effectiveness skills, learning feedback |
-| **Capabilities** | Skills/checks catalog, onboarding agents, watchers, and the "Research CVEs & Generate Skills" trigger |
+| **Capabilities** | Skills/checks catalog, onboarding agents, watchers, and the "Research CVEs & Generate Skills" trigger. Tabbed with **Agents** (live registry of who's actually run, and their success rate) |
 | **Events** | Activity feed with DLQ for failed events |
-| **Agents** | Agent registry with capabilities and performance stats |
 | **Health** | Rollout/pod/pipeline status |
 | **SLOs** | SLO definitions and error budgets |
-| **Schedules** | Watcher agent status |
-| **Settings** | Auto-mode toggle, configuration |
+| **Settings** | Auto-mode toggle, decision matrix, configuration. Tabbed with **Schedules** (watcher status, cron jobs) |
 
 Webhook endpoints power the event-driven loop: `/api/webhook/assess`, `/api/webhook/github-push`, `/api/webhook/onboard`, `/api/webhook/auto-apply`, `/api/webhook/remediate`.
 

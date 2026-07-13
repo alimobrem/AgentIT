@@ -852,6 +852,17 @@ def test_agents_page_with_data(client, _override_store):
     assert "hardening" in resp.text
 
 
+def test_agents_and_capabilities_are_tabs_of_each_other(client, _override_store):
+    """Agents/Capabilities were split top-level nav items; now share one nav
+    entry with a tab strip cross-linking Registry (agents) and Catalog
+    (capabilities)."""
+    agents_resp = client.get("/agents")
+    assert 'href="/capabilities"' in agents_resp.text
+
+    capabilities_resp = client.get("/capabilities")
+    assert 'href="/agents"' in capabilities_resp.text
+
+
 def test_api_agents(client, _override_store):
     store = _override_store
     store.register_agent("cicd", "deployment")
@@ -967,9 +978,14 @@ def test_api_slos(client, _override_store):
 
 
 def test_nav_includes_agents_link(client):
+    """/agents is no longer a top-level nav item — it's reachable via the
+    Capabilities tab strip. The umbrella "Capabilities" link still appears
+    globally, and /agents itself links back to /capabilities."""
     resp = client.get("/")
-    assert 'href="/agents"' in resp.text
-    assert "Agents" in resp.text
+    assert 'href="/capabilities"' in resp.text
+
+    agents_resp = client.get("/agents")
+    assert 'href="/capabilities"' in agents_resp.text
 
 
 # ── Assessment detail shows remediation/SLO buttons ────────────────────
@@ -1096,6 +1112,17 @@ def test_settings_nav_link(client):
     assert 'href="/settings"' in resp.text
 
 
+def test_settings_and_schedules_are_tabs_of_each_other(client, _override_store):
+    """Settings/Schedules were split top-level nav items; now share one nav
+    entry with a tab strip cross-linking the two pages."""
+    settings_resp = client.get("/settings")
+    assert '/settings"' in settings_resp.text
+    assert 'href="/schedules"' in settings_resp.text
+
+    schedules_resp = client.get("/schedules")
+    assert 'href="/settings"' in schedules_resp.text
+
+
 # ── Schedules page ─────────────────────────────────────────────────────
 
 
@@ -1114,8 +1141,10 @@ def test_schedules_page_shows_watchers(client, _override_store):
 
 
 def test_schedules_nav_link(client):
+    """/schedules is no longer a top-level nav item — it's reachable via the
+    Settings tab strip. The umbrella "Settings" link still appears globally."""
     resp = client.get("/")
-    assert 'href="/schedules"' in resp.text
+    assert 'href="/settings"' in resp.text
 
 
 def test_update_schedule(client, _override_store):

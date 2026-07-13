@@ -1,6 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Settings - AgentIT{% endblock %}
 {% block content %}
+{% from "_macros.html" import tab_nav %}
+{{ tab_nav([
+  {"href": "/settings", "label": "Settings"},
+  {"href": "/schedules", "label": "Schedules"},
+], request) }}
 <h1>Settings</h1>
 
 <div class="stat-grid">
