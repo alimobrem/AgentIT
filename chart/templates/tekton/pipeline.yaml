@@ -133,64 +133,78 @@ spec:
       timeout: "2m"
       runAfter: [run-tests, tag-latest]
       taskSpec:
+        params:
+          - name: revision
+            type: string
         steps:
-          - name: refresh
+          - name: update-image-tag
             image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
-            computeResources:
-              requests:
-                memory: 64Mi
-                cpu: 50m
-            script: |
-              set -uo pipefail
-              TIMESTAMP=$(date +%s)
-              ROLLOUT_OK=0
-              ARGOCD_OK=0
-              oc -n {{ .Release.Namespace }} patch rollout agentit --type=merge \
-                -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"agentit.io/restart\":\"${TIMESTAMP}\"}}}}}" \
-                && echo "Rollout restart triggered (${TIMESTAMP})" \
-                || { echo "Rollout restart failed"; ROLLOUT_OK=1; }
-              oc -n openshift-gitops patch applications.argoproj.io agentit \
-                --type=merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}' \
-                && echo "Argo CD refresh triggered" \
-                || { echo "Argo CD refresh failed"; ARGOCD_OK=1; }
-              if [ "$ROLLOUT_OK" -ne 0 ] && [ "$ARGOCD_OK" -ne 0 ]; then
-                echo "ERROR: Both rollout restart and Argo CD refresh failed"
-                exit 1
-              fi
-
-    - name: verify-deploy
-      retries: 2
-      timeout: "3m"
-      runAfter: [notify-argocd]
-      taskSpec:
-        steps:
-          - name: verify
-            image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+            env:
+              - name: REVISION
+                value: $(params.revision)
             computeResources:
               requests:
                 memory: 64Mi
                 cpu: 50m
             script: |
               set -euo pipefail
-              EXPECTED_DIGEST=$(oc get istag -n {{ .Release.Namespace }} agentit:latest \
-                -o jsonpath='{.image.metadata.name}')
-              echo "Expected digest: ${EXPECTED_DIGEST}"
+              TAG_INDEX=$(oc -n openshift-gitops get application agentit \
+                -o jsonpath='{range .spec.source.helm.parameters[*]}{.name}{"\n"}{end}' | \
+                grep -n '^image.tag$' | cut -d: -f1)
+              TAG_INDEX=$((TAG_INDEX - 1))
+              oc -n openshift-gitops patch application agentit --type=json \
+                -p "[{\"op\":\"replace\",\"path\":\"/spec/source/helm/parameters/${TAG_INDEX}/value\",\"value\":\"${REVISION}\"}]"
+              echo "Updated Application image.tag to ${REVISION}"
+      params:
+        - name: revision
+          value: $(params.revision)
+
+    - name: verify-deploy
+      retries: 2
+      timeout: "3m"
+      runAfter: [notify-argocd]
+      taskSpec:
+        params:
+          - name: image-ref
+            type: string
+          - name: revision
+            type: string
+        steps:
+          - name: verify
+            image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+            env:
+              - name: REVISION
+                value: $(params.revision)
+              - name: IMAGE_REF
+                value: $(params.image-ref)
+            computeResources:
+              requests:
+                memory: 64Mi
+                cpu: 50m
+            script: |
+              set -euo pipefail
+              EXPECTED="${IMAGE_REF}:${REVISION}"
+              echo "Expected image: ${EXPECTED}"
 
               echo "Waiting for rollout..."
               for i in $(seq 1 12); do
-                RUNNING_DIGEST=$(oc get pods -n {{ .Release.Namespace }} \
+                RUNNING=$(oc get pods -n {{ .Release.Namespace }} \
                   -l app.kubernetes.io/name=agentit \
-                  -o jsonpath='{.items[0].status.containerStatuses[0].imageID}' 2>/dev/null \
-                  | sed 's|.*@||')
-                if [ "${RUNNING_DIGEST}" = "${EXPECTED_DIGEST}" ]; then
-                  echo "Verified: running image matches :latest (${EXPECTED_DIGEST:0:20}...)"
+                  -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null)
+                if [ "${RUNNING}" = "${EXPECTED}" ]; then
+                  echo "Verified: running image matches ${REVISION}"
                   exit 0
                 fi
-                echo "Attempt $i: running=${RUNNING_DIGEST:0:20}... expected=${EXPECTED_DIGEST:0:20}..."
+                echo "Attempt $i: running=${RUNNING} expected=${EXPECTED}"
                 sleep 10
               done
-              echo "WARN: image mismatch after 2m — pod may need manual restart"
+              echo "WARN: image tag mismatch after 2m"
               exit 1
+      params:
+        - name: image-ref
+          value: $(params.image-ref)
+        - name: revision
+          value: $(params.revision)
 
   finally:
     - name: self-assess

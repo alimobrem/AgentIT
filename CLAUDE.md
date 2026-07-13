@@ -4,7 +4,7 @@
 
 - **Never run `helm upgrade` manually** — Argo CD is the sole deployer. Manual helm commands conflict with Argo CD's server-side apply and the Rollouts controller, causing ownership fights on Services and pod specs.
 - **To change config:** Edit `argocd/application.yaml` params, commit, push. Argo CD auto-syncs.
-- **To update the running image:** Build and push to the OCP registry, then `oc delete pod` to force pull. Or push a new tag and update the Argo CD param.
+- **To update the running image:** The CI pipeline builds with the commit SHA as the image tag, then patches the ArgoCD Application's `image.tag` param. ArgoCD auto-syncs the new tag, triggering the Argo Rollout. For manual updates: push a new tag to the registry, then `oc -n openshift-gitops patch application agentit --type=json -p '[{"op":"replace","path":"/spec/source/helm/parameters/1/value","value":"<tag>"}]'`.
 - **Never put secrets in values.yaml or any committed file** — the repo is public. Use `oc create secret` on-cluster and reference via Helm params.
 
 ## Code

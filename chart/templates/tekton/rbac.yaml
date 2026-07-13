@@ -18,4 +18,29 @@ subjects:
   - kind: ServiceAccount
     name: pipeline
     namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentit-ci-argocd-patch
+  namespace: openshift-gitops
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    resourceNames: ["agentit"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentit-ci-argocd-patch
+  namespace: openshift-gitops
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentit-ci-argocd-patch
+subjects:
+  - kind: ServiceAccount
+    name: pipeline
+    namespace: {{ .Release.Namespace }}
 {{- end }}
