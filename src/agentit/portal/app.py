@@ -5,7 +5,6 @@ import io
 import json
 import logging
 import shutil
-import tempfile
 import time as _time
 import zipfile
 from pathlib import Path
@@ -36,6 +35,7 @@ from agentit.portal.helpers import (
 )
 from agentit.agents.capabilities import AGENT_CAPABILITIES, WATCHER_AGENTS as _WATCHER_AGENTS
 from agentit.runner import run_assessment
+from agentit.skill_inventory import diff_and_log_inventory_changes
 
 log = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ _maintenance_task = None
 
 
 async def _background_maintenance() -> None:
-    """Hourly: expire stale gates. Daily: purge old data."""
+    """Hourly: expire stale gates, diff the skill/check inventory. Daily: purge old data."""
     tick = 0
     while True:
         await asyncio.sleep(3600)
@@ -102,6 +102,11 @@ async def _background_maintenance() -> None:
                     log.info("Background: purged %d old rows (retention=%dd)", total, retention)
         except Exception:
             log.debug("Background maintenance failed", exc_info=True)
+
+        try:
+            diff_and_log_inventory_changes(get_store())
+        except Exception:
+            log.debug("Background skill inventory diff failed", exc_info=True)
 
 
 @app.on_event("startup")
@@ -686,51 +691,14 @@ async def cancel_gate(gate_id: str):
 def _run_onboarding(
     report: AssessmentReport, assessment_id: str | None = None,
 ) -> tuple[list[dict], dict]:
-    """Run orchestrated onboarding. Returns (files, orchestration_summary)."""
-    from agentit.agents.orchestrator import FleetOrchestrator
+    """Run orchestrated onboarding. Returns (files, orchestration_summary).
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        base = Path(tmpdir)
-        orch = FleetOrchestrator(
-            report=report, output_dir=base,
-            store=get_store(), assessment_id=assessment_id,
-        )
-        result = orch.run()
-
-        all_files: list[dict] = []
-        for ar in result.agent_results:
-            if not ar.success:
-                continue
-            category_dir = base / ar.category
-            for rel_path in ar.files_generated:
-                file_path = category_dir / rel_path
-                if file_path.is_file():
-                    all_files.append(
-                        {
-                            "category": ar.category,
-                            "path": rel_path,
-                            "description": rel_path,
-                            "content": file_path.read_text(encoding="utf-8"),
-                        }
-                    )
-
-        orch_summary = {
-            "agents": [
-                {
-                    "name": ar.agent_name,
-                    "category": ar.category,
-                    "success": ar.success,
-                    "files_count": len(ar.files_generated),
-                    "error": ar.error,
-                }
-                for ar in result.agent_results
-            ],
-            "conflicts": result.conflicts,
-            "recommendation": result.recommendation,
-            "auto_approve": result.plan.auto_approve,
-            "gates": result.gates_created,
-        }
-        return all_files, orch_summary
+    Delegates to the shared implementation in helpers.py so this route and
+    the webhook-triggered path (routes/webhooks.py) can never drift apart on
+    which summary fields get stored (e.g. auto_approve/gates).
+    """
+    from agentit.portal.helpers import run_onboarding as _shared_run_onboarding
+    return _shared_run_onboarding(report, assessment_id)
 
 
 @app.get("/assessments/{assessment_id}/onboarding-history", response_class=HTMLResponse)
@@ -1303,6 +1271,7 @@ async def capabilities_page(request: Request) -> HTMLResponse:
     s = get_store()
     effectiveness = s.get_skill_effectiveness()
     recent_activity = s.get_recent_skill_activity(limit=20)
+    catalog_changes = s.list_events_by_agent("skill-inventory", limit=10)
 
     # Group skills by domain
     skills_by_domain: dict[str, list] = {}
@@ -1333,6 +1302,7 @@ async def capabilities_page(request: Request) -> HTMLResponse:
         "checks_by_dimension": checks_by_dimension,
         "effectiveness": effectiveness,
         "recent_activity": recent_activity,
+        "catalog_changes": catalog_changes,
         "total_skills": total_skills,
         "active_skills": active_skills,
         "deprecated_skills": deprecated_skills,
@@ -1552,13 +1522,31 @@ async def dependency_status(assessment_id: str):
 
 @app.get("/api/assessments/{assessment_id}/verify")
 async def verify_properties(assessment_id: str):
-    """Verify enterprise properties hold on the cluster for this app."""
+    """Verify enterprise properties hold against this assessment's generated manifests.
+
+    NOTE: this is a standalone API endpoint, not (yet) wired into the
+    automatic onboarding/apply path -- verification only runs when this
+    endpoint is called explicitly.
+    """
     s = get_store()
     report = s.get(assessment_id)
     if not report:
         raise HTTPException(404, "Assessment not found")
+    files_data = s.get_onboarding(assessment_id)
+    if files_data is None:
+        raise HTTPException(404, "Onboarding not found")
+
+    from agentit.agents.base import GeneratedFile
     from agentit.property_verifier import verify_all_properties
-    results = verify_all_properties(report.repo_name, report.repo_name)
+    files = [
+        GeneratedFile(
+            path=f["path"],
+            content=f["content"],
+            description=f.get("description", f["path"]),
+        )
+        for f in files_data
+    ]
+    results = verify_all_properties(files)
     return {
         "app": report.repo_name,
         "results": [{"property": r.property_name, "passed": r.passed,

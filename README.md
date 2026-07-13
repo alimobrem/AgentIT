@@ -72,7 +72,7 @@ AgentIT uses two complementary systems for assessment and remediation:
 
 ### Property-based skills (40 skills across 11 domains)
 
-Skills are Markdown files with YAML frontmatter that define **what must be true** (properties), not how to generate manifests. The skill engine matches skills to assessment findings; the LLM generates tailored fixes using the skill's constraints and the app's platform context.
+Skills are Markdown files with YAML frontmatter that define **what must be true** (properties), not how to generate manifests. The skill engine matches skills to assessment findings; the LLM generates tailored fixes using the skill's constraints and the app's platform context. `FleetOrchestrator` builds and passes an LLM client into the skill engine on every run (CLI, portal, and webhook onboarding alike) whenever `ANTHROPIC_API_KEY`/`ANTHROPIC_VERTEX_PROJECT_ID` is configured, so LLM-only skills (no template block — e.g. `network-policy`, `containerfile`, `tekton-pipeline`) actually produce tailored output in production, not just template substitution.
 
 ```
 skills/
@@ -106,9 +106,15 @@ checks/
 └── data_governance/  # backup-config, retention-policy
 ```
 
+### Catalog change tracking
+
+Additions and removals to the `skills/`/`checks/` catalog are no longer only visible via `git log` — `skill_inventory.py` snapshots the catalog (by `(domain, name)` / `(dimension, name)` identity, so status-only transitions like `active → deprecated` aren't double-counted alongside the existing `skill-activated` event) and diffs it against the last saved snapshot once an hour from the portal's background maintenance loop. Every skill/check added or removed is logged as a `skill-added` / `skill-removed` / `check-added` / `check-removed` event, which shows up automatically on the **Events** feed (`/events`) and in a "Recent Catalog Changes" section on the **Capabilities** page.
+
 ## The agent fleet
 
 11 one-shot onboarding agents and 3 long-lived watchers. Skills run **first** as the primary generation path; Python agents supplement for findings that no skill covers.
+
+Conflict detection only flags *real* collisions between agent outputs — a known-conflicting resource-kind pair actually being generated for the same workload (e.g. an actively-resizing VPA alongside an HPA), or two agents writing a file at the same output path — not merely "both agents succeeded". `plan.auto_approve` (computed from score/criticality at plan time) is downgraded to `False` if a real conflict is found during the actual run, so it can be trusted end-to-end.
 
 | Agent | Category | Always runs? | Generates |
 |---|---|---|---|
@@ -312,6 +318,7 @@ AgentIT/
 │   ├── runner.py                   # run_assessment(): stack detection + analyzers + check engine
 │   ├── skill_engine.py             # Property-based skill matching, lifecycle, LLM generation
 │   ├── check_engine.py             # Data-driven YAML check loader and runner
+│   ├── skill_inventory.py          # Snapshot/diff skills+checks catalog, log added/removed events
 │   ├── learning_agent.py           # CVE/best-practice research, skill generation
 │   ├── platform_context.py         # Cluster API discovery (K8s version, CRDs, operators)
 │   ├── api_drift_detector.py       # Snapshot-based API surface comparison

@@ -5,7 +5,7 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -382,6 +382,51 @@ def test_download_manifests_no_onboarding(client, _override_store):
 
     resp = client.get(f"/api/assessments/{aid}/manifests/download")
     assert resp.status_code == 404
+
+
+def test_verify_properties_not_found(client):
+    resp = client.get("/api/assessments/nonexistent/verify")
+    assert resp.status_code == 404
+
+
+def test_verify_properties_no_onboarding(client, _override_store):
+    store = _override_store
+    report = _make_report()
+    aid = store.save(report)
+
+    resp = client.get(f"/api/assessments/{aid}/verify")
+    assert resp.status_code == 404
+
+
+def test_verify_properties_runs_against_generated_files(client, _override_store):
+    """Regression: this endpoint used to call verify_all_properties(repo_name,
+    repo_name) -- two strings -- while verify_all_properties() expects a
+    list[GeneratedFile]. Any real call would raise a TypeError."""
+    store = _override_store
+    report = _make_report_with_findings()
+    aid = store.save(report)
+
+    store.save_onboarding(aid, [
+        {
+            "category": "security",
+            "path": "netpol.yaml",
+            "description": "netpol.yaml",
+            "content": (
+                "apiVersion: networking.k8s.io/v1\n"
+                "kind: NetworkPolicy\n"
+                "metadata:\n  name: x\n"
+                "spec:\n  podSelector: {}\n  policyTypes:\n    - Ingress\n"
+            ),
+        },
+    ])
+
+    resp = client.get(f"/api/assessments/{aid}/verify")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["app"] == report.repo_name
+    assert "results" in body
+    properties = {r["property"] for r in body["results"]}
+    assert "Network Isolation" in properties
 
 
 def test_assessment_detail_has_onboard_button(client, _override_store):
@@ -1216,13 +1261,101 @@ def test_health_nav_link(client):
 
 
 def test_pod_detail_404(client):
-    resp = client.get("/health/pods/nonexistent-pod-xyz")
+    """Mock the kube client so this test is hermetic (no live-cluster round trip)."""
+    with patch("agentit.portal.routes.health.kube") as mock_kube:
+        mock_kube.core_v1.return_value.read_namespaced_pod.side_effect = Exception("not found")
+        resp = client.get("/health/pods/nonexistent-pod-xyz")
     assert resp.status_code == 404
 
 
 def test_pipeline_detail_404(client):
-    resp = client.get("/health/pipelines/nonexistent-run-xyz")
+    """Mock the kube client so this test is hermetic (no live-cluster round trip)."""
+    with patch("agentit.portal.routes.health.kube") as mock_kube:
+        mock_kube.get_custom_resource.return_value = None
+        resp = client.get("/health/pipelines/nonexistent-run-xyz")
     assert resp.status_code == 404
+
+
+def test_pod_detail_success(client):
+    """Pod detail is served from the kube API client — no `oc` subprocess involved."""
+    mock_pod = MagicMock()
+    mock_pod.status.phase = "Running"
+    mock_pod.metadata.creation_timestamp = None
+    cs = MagicMock(name="app", image="quay.io/example/app:latest", ready=True, restart_count=2)
+    cs.name = "app"
+    mock_pod.status.container_statuses = [cs]
+
+    mock_event = MagicMock()
+    mock_event.last_timestamp = None
+    mock_event.type = "Warning"
+    mock_event.reason = "BackOff"
+    mock_event.message = "container restarting"
+
+    with patch("agentit.portal.routes.health.kube") as mock_kube:
+        mock_kube.core_v1.return_value.read_namespaced_pod.return_value = mock_pod
+        mock_kube.core_v1.return_value.read_namespaced_pod_log.return_value = "log line 1\n"
+        mock_kube.core_v1.return_value.list_namespaced_event.return_value.items = [mock_event]
+
+        resp = client.get("/health/pods/my-pod")
+
+    assert resp.status_code == 200
+    assert "Running" in resp.text
+    assert "log line 1" in resp.text
+    assert "BackOff" in resp.text
+    mock_kube.core_v1.return_value.read_namespaced_pod.assert_called_with(
+        "my-pod", "agentit", _request_timeout=10,
+    )
+
+
+def test_pipeline_detail_success(client):
+    """Pipeline detail is served from the kube custom-objects API — no `oc` subprocess."""
+    pipelinerun = {
+        "status": {
+            "conditions": [{"reason": "Succeeded"}],
+            "startTime": "2026-01-01T00:00:00Z",
+            "completionTime": "2026-01-01T00:05:00Z",
+            "childReferences": [
+                {"pipelineTaskName": "git-clone", "conditions": [{"reason": "Succeeded"}], "name": "run-git-clone-pod"},
+            ],
+        },
+    }
+
+    with patch("agentit.portal.routes.health.kube") as mock_kube:
+        mock_kube.get_custom_resource.return_value = pipelinerun
+        mock_kube.core_v1.return_value.read_namespaced_pod.return_value.spec.containers = []
+
+        resp = client.get("/health/pipelines/build-my-app-123")
+
+    assert resp.status_code == 200
+    assert "Succeeded" in resp.text
+    assert "git-clone" in resp.text
+    mock_kube.get_custom_resource.assert_called_with(
+        "tekton.dev", "v1", "pipelineruns", "build-my-app-123", namespace="agentit",
+    )
+
+
+def test_operator_status_installed(client):
+    with patch("agentit.portal.routes.health.kube") as mock_kube:
+        mock_kube.list_custom_resources.return_value = [
+            {"spec": {"displayName": "my-operator"}, "status": {"phase": "Succeeded"}},
+        ]
+        resp = client.get("/api/operator-status?package=my-operator")
+
+    assert resp.status_code == 200
+    assert "Installed" in resp.text
+    mock_kube.list_custom_resources.assert_called_with(
+        "operators.coreos.com", "v1alpha1", "clusterserviceversions", "openshift-my-operator",
+    )
+
+
+def test_operator_status_still_installing(client):
+    with patch("agentit.portal.routes.health.kube") as mock_kube:
+        mock_kube.list_custom_resources.return_value = []
+        mock_kube.get_custom_resource.return_value = {"status": {"state": "AtLatestKnown"}}
+        resp = client.get("/api/operator-status?package=my-operator")
+
+    assert resp.status_code == 200
+    assert "AtLatestKnown" in resp.text
 
 
 # ── Gate deduplication and expiry ──────────────────────────────────────
@@ -1453,3 +1586,73 @@ def test_activate_skill_missing_file_shows_error(client, tmp_path, monkeypatch):
     )
     assert resp.status_code == 303
     assert "error=" in resp.headers["location"]
+
+
+# ── Capabilities: catalog change tracking (skill_inventory) ────────────
+
+
+def test_capabilities_page_renders_catalog_changes_section(client):
+    """The 'Recent Catalog Changes' section should always render, even empty."""
+    resp = client.get("/capabilities")
+    assert resp.status_code == 200
+    assert "Recent Catalog Changes" in resp.text
+
+
+def test_capabilities_page_shows_catalog_change_events(client, _override_store):
+    store = _override_store
+    store.log_event("skill-inventory", "skill-added", None, "info",
+                     "New skill added: security/cve-2099-1")
+    store.log_event("skill-inventory", "check-removed", None, "warning",
+                     "Check removed: reliability/has-readiness-probe")
+
+    resp = client.get("/capabilities")
+    assert resp.status_code == 200
+    assert "New skill added: security/cve-2099-1" in resp.text
+    assert "Check removed: reliability/has-readiness-probe" in resp.text
+    assert "badge-success" in resp.text
+    assert "badge-warning" in resp.text
+
+
+def test_background_skill_inventory_diff_surfaces_on_events_page(client, _override_store, tmp_path, monkeypatch):
+    """Simulates a tick of `_background_maintenance()`'s inventory-diff step
+    without waiting for the real hourly loop, then confirms the resulting
+    events show up on /events (and thus on the Capabilities page too)."""
+    from agentit.skill_inventory import diff_and_log_inventory_changes
+
+    skills_dir = tmp_path / "skills"
+    checks_dir = tmp_path / "checks"
+    security_dir = skills_dir / "security"
+    security_dir.mkdir(parents=True)
+    (security_dir / "netpol-basic.md").write_text(
+        "---\nname: netpol-basic\ndomain: security\nversion: 1\n"
+        "triggers: [test]\noutputs: [NetworkPolicy]\n---\nbody\n",
+        encoding="utf-8",
+    )
+
+    store = _override_store
+    # First tick: no prior snapshot -> seeds baseline, no events yet.
+    diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
+    assert store.list_events_by_agent("skill-inventory") == []
+
+    # A new skill lands on disk (as if a PR merged to skills/).
+    (security_dir / "cve-2099-1.md").write_text(
+        "---\nname: cve-2099-1\ndomain: security\nversion: 1\n"
+        "triggers: [test]\noutputs: [NetworkPolicy]\n---\nbody\n",
+        encoding="utf-8",
+    )
+
+    # Second tick: diff finds the addition and logs an event.
+    diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
+
+    events = store.list_events_by_agent("skill-inventory")
+    assert len(events) == 1
+    assert events[0]["action"] == "skill-added"
+
+    resp = client.get("/events")
+    assert resp.status_code == 200
+    assert "skill-added" in resp.text
+    assert "cve-2099-1" in resp.text
+
+    caps_resp = client.get("/capabilities")
+    assert caps_resp.status_code == 200
+    assert "cve-2099-1" in caps_resp.text

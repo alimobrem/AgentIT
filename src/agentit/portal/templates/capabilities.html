@@ -38,6 +38,40 @@
   </div>
 </div>
 
+<h2 class="section-title">Recent Catalog Changes</h2>
+<p class="text-muted mb-1">Skills and checks added to or removed from the catalog, detected automatically every hour. Full history on the <a href="/events">Events</a> page.</p>
+
+{% if catalog_changes %}
+<table>
+  <thead>
+    <tr>
+      <th>Timestamp</th>
+      <th>Change</th>
+      <th>Details</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for change in catalog_changes %}
+    <tr>
+      <td class="text-sm"><span data-timestamp="{{ change.timestamp }}">{{ change.timestamp[:16] if change.timestamp else '—' }}</span></td>
+      <td>
+        {% if change.action in ('skill-added', 'check-added') %}
+          <span class="badge badge-success">{{ change.action }}</span>
+        {% else %}
+          <span class="badge badge-warning">{{ change.action }}</span>
+        {% endif %}
+      </td>
+      <td class="text-sm text-muted">{{ change.summary }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty-state">
+  <p>No catalog changes detected yet. Checked hourly against the last saved snapshot of <code>skills/</code> and <code>checks/</code>.</p>
+</div>
+{% endif %}
+
 <h2>Skills by Domain</h2>
 
 {% for domain, domain_skills in skills_by_domain.items()|sort %}

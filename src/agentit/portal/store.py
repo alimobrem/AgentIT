@@ -57,12 +57,6 @@ class AssessmentStore:
             )
         except sqlite3.OperationalError:
             pass
-        try:
-            self._conn.execute(
-                "ALTER TABLE apply_results ADD COLUMN repo_files_json TEXT DEFAULT '[]'"
-            )
-        except sqlite3.OperationalError:
-            pass
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS events (
@@ -145,11 +139,23 @@ class AssessmentStore:
                 applied_json TEXT NOT NULL DEFAULT '[]',
                 skipped_json TEXT NOT NULL DEFAULT '[]',
                 errors_json TEXT NOT NULL DEFAULT '[]',
+                repo_files_json TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (assessment_id) REFERENCES assessments(id)
             )
             """
         )
+        # Migration: add repo_files_json to apply_results tables created before
+        # this column existed. Must run after CREATE TABLE IF NOT EXISTS above,
+        # since on a fresh DB that statement already creates the column and this
+        # ALTER would otherwise be a no-op against the wrong table shape.
+        try:
+            self._conn.execute(
+                "ALTER TABLE apply_results ADD COLUMN repo_files_json TEXT DEFAULT '[]'"
+            )
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS settings (
@@ -233,6 +239,15 @@ class AssessmentStore:
                 suppressed_by TEXT DEFAULT 'user',
                 created_at TEXT NOT NULL,
                 UNIQUE(app_name, check_source)
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS skill_inventory_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
             )
             """
         )
@@ -1295,7 +1310,7 @@ class AssessmentStore:
                   "remediations", "agent_registry", "slos", "apply_results",
                   "settings", "remediation_jobs", "scheduled_operations",
                   "processed_webhooks", "agent_feedback", "skill_effectiveness",
-                  "suppressed_checks"]
+                  "suppressed_checks", "skill_inventory_snapshots"]
         result = {}
         for table in tables:
             try:
@@ -1359,3 +1374,32 @@ class AssessmentStore:
                 + ", ".join(f"{t}={c}" for t, c in counts.items() if c > 0),
             )
         return counts
+
+    # ── Skill/Check Inventory Snapshots ─────────────────────────────────
+    #
+    # Tracks additions/removals to the skills/checks catalog over time so
+    # the "did anything change?" question has an in-app answer beyond
+    # `git log skills/ checks/`. See agentit.skill_inventory for the
+    # snapshot/diff logic that produces the JSON blob stored here.
+
+    def save_skill_inventory_snapshot(self, snapshot_json: dict) -> str:
+        """Persist a skill/check inventory snapshot (as a JSON-serializable dict)."""
+        self._conn.execute(
+            "INSERT INTO skill_inventory_snapshots (snapshot_json, created_at) VALUES (?, ?)",
+            (json.dumps(snapshot_json), datetime.now(timezone.utc).isoformat()),
+        )
+        self._conn.commit()
+        row = self._conn.execute("SELECT last_insert_rowid() AS id").fetchone()
+        return str(row["id"])
+
+    def get_last_skill_inventory_snapshot(self) -> dict | None:
+        """Return the most recently saved snapshot dict, or ``None`` if none exists yet."""
+        row = self._conn.execute(
+            "SELECT snapshot_json, created_at FROM skill_inventory_snapshots "
+            "ORDER BY id DESC LIMIT 1",
+        ).fetchone()
+        if row is None:
+            return None
+        data = json.loads(row["snapshot_json"])
+        data["created_at"] = row["created_at"]
+        return data
