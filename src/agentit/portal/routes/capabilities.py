@@ -7,8 +7,10 @@ catalog / learning-agent routes here rather than in their own module.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time as _time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
@@ -134,6 +136,90 @@ async def workflows_redirect():
 
 # ── Capabilities ─────────────────────────────────────────────────────
 
+_LEARNING_RUN_MODE_LABELS = {
+    "skill-improvement": "Flagged skill improvement",
+    "cve-sweep": "CVE sweep",
+}
+
+# Matches the AgentITWatcherStale Prometheus alert's own convention (2x a
+# watcher's expected interval) -- skill-learner's default/live interval is
+# 24h, so a heartbeat older than this means the watcher is very likely
+# disabled or stalled, not "just about to tick".
+_SKILL_LEARNER_STALE_SECONDS = 2 * 86400
+
+
+async def _get_learning_run_history(s, limit: int = 15) -> list[dict]:
+    """Durable run history for the learning agent -- every manual button
+    click AND every skill-learner watcher tick that reached a real outcome
+    (success, no-op skip, or failure), not just the ones that generated a
+    skill. Both entry points log the same ``learning-run`` action (see
+    ``learning_agent.describe_learning_run``), so this single query covers
+    both without needing to know which one fired.
+    """
+    if not hasattr(s, "list_events_by_action"):
+        return []
+    try:
+        raw_events = await s.list_events_by_action("learning-run", limit=limit)
+    except Exception:
+        log.warning("Failed to fetch learning-run history", exc_info=True)
+        return []
+
+    runs = []
+    for ev in raw_events:
+        try:
+            details = json.loads(ev.get("details_json") or "{}")
+        except (TypeError, ValueError):
+            details = {}
+        mode = details.get("mode")
+        runs.append({
+            "timestamp": ev.get("timestamp"),
+            "trigger": "Automatic (24h watcher)" if ev.get("agent_id") == "skill-learner" else "Manual",
+            "researched": _LEARNING_RUN_MODE_LABELS.get(mode, "—"),
+            "severity": ev.get("severity", "info"),
+            "summary": ev.get("summary", ""),
+        })
+    return runs
+
+
+async def _get_skill_learner_status(s) -> dict:
+    """Real status of the skill-learner watcher, derived from its own tick
+    heartbeat (``agent_heartbeat("skill-learner")``, written by
+    ``watchers/__init__.py::record_tick`` after every loop iteration) --
+    not from ``chart/values.yaml``'s ``agents.skillLearner.enabled`` default,
+    which the portal process has no reliable way to read at runtime (the
+    live deployment overrides that default via ``argocd/application.yaml``,
+    so the chart default alone would be actively misleading here). No
+    heartbeat ever recorded means either the watcher has never ticked yet
+    or it's disabled -- this is genuinely ambiguous from the portal's own
+    data, so the returned dict says exactly that rather than guessing.
+    """
+    if not hasattr(s, "list_agents"):
+        return {"has_run": False, "last_heartbeat": None, "stale": None}
+    try:
+        agents = await s.list_agents()
+    except Exception:
+        log.warning("Failed to fetch agent registry for skill-learner status", exc_info=True)
+        return {"has_run": False, "last_heartbeat": None, "stale": None}
+
+    agent = next((a for a in agents if a.get("agent_name") == "skill-learner"), None)
+    last_heartbeat = agent.get("last_heartbeat") if agent else None
+    if not last_heartbeat:
+        return {"has_run": False, "last_heartbeat": None, "stale": None}
+
+    try:
+        last = datetime.fromisoformat(last_heartbeat)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        age_seconds = (datetime.now(timezone.utc) - last).total_seconds()
+    except ValueError:
+        return {"has_run": False, "last_heartbeat": None, "stale": None}
+
+    return {
+        "has_run": True,
+        "last_heartbeat": last_heartbeat,
+        "stale": age_seconds > _SKILL_LEARNER_STALE_SECONDS,
+    }
+
 
 @router.get("/capabilities", response_class=HTMLResponse)
 async def capabilities_page(request: Request) -> HTMLResponse:
@@ -146,6 +232,15 @@ async def capabilities_page(request: Request) -> HTMLResponse:
     effectiveness = await s.get_skill_effectiveness()
     recent_activity = await s.get_recent_skill_activity(limit=20)
     catalog_changes = await s.list_events_by_agent("skill-inventory", limit=10)
+
+    flagged_skills: list[dict] = []
+    if hasattr(s, "get_low_effectiveness_skills"):
+        try:
+            flagged_skills = await s.get_low_effectiveness_skills()
+        except Exception:
+            log.warning("Failed to fetch low-effectiveness skills for learn-button preview", exc_info=True)
+    learning_runs = await _get_learning_run_history(s)
+    skill_learner_status = await _get_skill_learner_status(s)
 
     # Group skills by domain
     skills_by_domain: dict[str, list] = {}
@@ -185,6 +280,9 @@ async def capabilities_page(request: Request) -> HTMLResponse:
         "watchers": watchers,
         "fix_categories": fix_categories,
         "retention_days": retention_days,
+        "flagged_skills": flagged_skills,
+        "learning_runs": learning_runs,
+        "skill_learner_status": skill_learner_status,
     })
 
 
@@ -200,14 +298,19 @@ async def capabilities_learn_route(request: Request):
     ``skill-learner`` watcher now does (``watchers/skill_learner.py``'s
     ``research_once()``) so both entry points behave consistently.
     """
+    from agentit.learning_agent import LEARNING_RUN_ACTION, describe_learning_run
+
+    s = await get_store()
     llm_client = get_llm_client()
     if llm_client is None:
+        error_msg = "LLM unavailable — set ANTHROPIC_API_KEY or ANTHROPIC_VERTEX_PROJECT_ID to enable skill research."
+        severity, summary, details = describe_learning_run("manual", None, [], [], error=error_msg)
+        await s.log_event("learning-agent", LEARNING_RUN_ACTION, None, severity, summary, details=details)
         return RedirectResponse(
-            url=f"/capabilities?error={quote('LLM unavailable — set ANTHROPIC_API_KEY or ANTHROPIC_VERTEX_PROJECT_ID to enable skill research.')}",
+            url=f"/capabilities?error={quote(error_msg)}",
             status_code=303,
         )
 
-    s = await get_store()
     flagged: list[dict] = []
     if hasattr(s, "get_low_effectiveness_skills"):
         try:
@@ -274,26 +377,30 @@ async def capabilities_learn_route(request: Request):
         saved, skipped, improved = await with_timeout(asyncio.to_thread(_run), timeout=180)
     except Exception as exc:
         log.exception("Skill research failed")
+        mode = "skill-improvement" if flagged else "cve-sweep"
+        severity, summary, details = describe_learning_run("manual", mode, [], [], error=str(exc)[:200])
+        await s.log_event("learning-agent", LEARNING_RUN_ACTION, None, severity, summary, details=details)
         return RedirectResponse(
             url=f"/capabilities?error={quote(f'Skill research failed: {exc}'[:200])}",
             status_code=303,
         )
 
+    mode = "skill-improvement" if improved else "cve-sweep"
+    severity, summary, details = describe_learning_run("manual", mode, saved, skipped)
+    await s.log_event("learning-agent", LEARNING_RUN_ACTION, None, severity, summary, details=details)
+
     if saved:
         _skills_cache["data"] = None  # bust the 60s cache so new skills show immediately
-        kind = "improvement" if improved else "new skill"
-        await s.log_event("learning-agent", "skills-generated", None, "info",
-                           f"Generated {len(saved)} {kind}(s): {', '.join(saved)}")
-        msg = f"Generated {len(saved)} {kind}(s): {', '.join(saved)}"
-        if skipped:
-            msg += f" ({len(skipped)} skipped)"
-    elif skipped:
-        msg = (f"No new skills — {len(skipped)} flagged low-effectiveness skill(s) couldn't be improved this time."
-               if improved else
-               f"No new skills — {len(skipped)} researched CVE(s) already have matching skills.")
-    else:
-        msg = "No new skills generated — research returned nothing usable this time."
-    return RedirectResponse(url=f"/capabilities?success={quote(msg)}", status_code=303)
+        # Kept alongside the LEARNING_RUN_ACTION event above for backward
+        # compatibility -- existing consumers (tests, the toast) key off
+        # "skills-generated" specifically to know a skill was actually written.
+        await s.log_event("learning-agent", "skills-generated", None, "info", summary)
+        return RedirectResponse(url=f"/capabilities?success={quote(summary)}", status_code=303)
+
+    # Nothing generated (all skipped, or research returned nothing usable) --
+    # still a real outcome worth surfacing, but not the same as "it worked",
+    # so this uses the warning toast rather than a misleadingly green success one.
+    return RedirectResponse(url=f"/capabilities?warning={quote(summary)}", status_code=303)
 
 
 @router.get("/capabilities/skills/{skill_name}/history", response_class=HTMLResponse)

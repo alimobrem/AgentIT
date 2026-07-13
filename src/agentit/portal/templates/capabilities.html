@@ -9,15 +9,31 @@
 <h1>Capabilities &amp; Workflows</h1>
 <p class="text-muted">Skills, checks, agents, and automation — everything AgentIT can do.</p>
 
-<div class="action-bar mb-2">
+<div class="action-bar mb-1">
   <form method="post" action="/capabilities/learn" class="inline-form">
     <button type="submit" class="btn btn-outline btn-sm">
       <span class="btn-label">Research CVEs &amp; Generate Skills</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Researching&hellip;</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Researching &amp; drafting skills&hellip; (can take up to 3 minutes, please don't close this tab)</span>
     </button>
   </form>
-  <span class="text-muted text-sm">Asks the LLM for recent Kubernetes CVEs and drafts new skills for any that aren't covered yet. Requires an LLM connection — see Settings. Runs automatically every 24h if the skill-learner watcher is enabled.</span>
+  <span class="text-muted text-sm">
+    {% if flagged_skills %}
+      Will attempt to <strong>improve {{ flagged_skills|length if flagged_skills|length <= 3 else 3 }} flagged low-effectiveness skill(s)</strong>: {{ flagged_skills[:3]|map(attribute='skill')|join(', ') }}{% if flagged_skills|length > 3 %} (+{{ flagged_skills|length - 3 }} more currently flagged){% endif %}.
+    {% else %}
+      No skills are currently flagged as low-effectiveness — will research recent Kubernetes CVEs and draft new skills for any that aren't covered yet.
+    {% endif %}
+    Requires an LLM connection — see Settings.
+  </span>
 </div>
+<p class="text-muted text-sm mb-2">
+  {% if skill_learner_status.has_run and not skill_learner_status.stale %}
+    Automatic research (skill-learner watcher) is running — last tick <span data-timestamp="{{ skill_learner_status.last_heartbeat }}">{{ skill_learner_status.last_heartbeat[:16] }}</span>, ticks every ~24h.
+  {% elif skill_learner_status.has_run and skill_learner_status.stale %}
+    Automatic research last ticked <span data-timestamp="{{ skill_learner_status.last_heartbeat }}">{{ skill_learner_status.last_heartbeat[:16] }}</span> — more than 48h ago, so the skill-learner watcher may be disabled or stalled. This button is the only guaranteed way to trigger research right now.
+  {% else %}
+    Automatic research has never ticked on this deployment — the skill-learner watcher is likely disabled. This button is the only way to trigger research right now.
+  {% endif %}
+</p>
 
 <div class="stat-grid">
   <div class="stat-card">
@@ -69,6 +85,46 @@
 {% else %}
 <div class="empty-state">
   <p>No catalog changes detected yet. Checked hourly against the last saved snapshot of <code>skills/</code> and <code>checks/</code>.</p>
+</div>
+{% endif %}
+
+<h2 class="section-title">Learning Agent Runs</h2>
+<p class="text-muted mb-1">Every research run — the button above, or the skill-learner watcher's 24h tick — leaves a record here, whether or not it generated a skill. Full history on the <a href="/events">Events</a> page.</p>
+
+{% if learning_runs %}
+<table>
+  <thead>
+    <tr>
+      <th>Timestamp</th>
+      <th>Trigger</th>
+      <th>Researched</th>
+      <th>Outcome</th>
+      <th>Details</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for run in learning_runs %}
+    <tr>
+      <td class="text-sm"><span data-timestamp="{{ run.timestamp }}">{{ run.timestamp[:16] if run.timestamp else '—' }}</span></td>
+      <td><span class="badge badge-info">{{ run.trigger }}</span></td>
+      <td class="text-sm">{{ run.researched }}</td>
+      <td>
+        {% if run.severity == "info" %}
+          <span class="badge badge-success">generated</span>
+        {% elif run.severity == "error" %}
+          <span class="badge badge-danger">failed</span>
+        {% else %}
+          <span class="badge badge-warning">no-op</span>
+        {% endif %}
+      </td>
+      <td class="text-sm text-muted">{{ run.summary }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty-state">
+  <p>No learning agent runs recorded yet. Click "Research CVEs &amp; Generate Skills" above, or wait for the skill-learner watcher's next tick.</p>
 </div>
 {% endif %}
 

@@ -279,3 +279,55 @@ def save_skill(content: str, skills_dir: Path, domain: str = "security", name: s
     except OSError as exc:
         logger.warning("Failed to save skill to %s: %s", target_path, exc)
         return None
+
+
+LEARNING_RUN_ACTION = "learning-run"
+
+
+def describe_learning_run(
+    trigger: str,
+    mode: str | None,
+    saved: list[str],
+    skipped: list[str],
+    error: str | None = None,
+) -> tuple[str, str, dict]:
+    """Build the ``(severity, summary, details)`` for a durable, queryable
+    record of one research run -- a manual "Research CVEs & Generate Skills"
+    button click, or one of the ``skill-learner`` watcher's 24h ticks.
+
+    Before this helper existed, a run only left a trace in the ``events``
+    table when it actually generated a skill (``skills-generated``) -- a
+    run that found nothing to improve, skipped everything as already
+    covered, or couldn't even reach the LLM vanished the moment its toast
+    disappeared. Callers ``await store.log_event("learning-agent" or
+    "skill-learner", LEARNING_RUN_ACTION, None, severity, summary,
+    details=details)`` with the return value of this function so EVERY run
+    -- success, no-op, or failure -- is queryable via
+    ``list_events_by_action(LEARNING_RUN_ACTION)`` regardless of which of
+    the two entry points triggered it.
+
+    ``trigger`` is ``"manual"`` (portal button) or ``"watcher"`` (the
+    skill-learner watcher's own tick). ``mode`` is ``"skill-improvement"``
+    (a flagged low-effectiveness skill was targeted first, per
+    ``get_low_effectiveness_skills()``), ``"cve-sweep"`` (the generic
+    fallback), or ``None`` when the run never got far enough to pick a mode
+    (e.g. the LLM was unavailable).
+    """
+    details: dict = {"trigger": trigger, "mode": mode, "saved": list(saved), "skipped": list(skipped)}
+    if error:
+        details["error"] = error
+        return "error", f"Learning run failed: {error}", details
+    if saved:
+        kind = "improvement" if mode == "skill-improvement" else "new skill"
+        summary = f"Generated {len(saved)} {kind}(s): {', '.join(saved)}"
+        if skipped:
+            summary += f" ({len(skipped)} skipped)"
+        return "info", summary, details
+    if skipped:
+        summary = (
+            f"No new skills — {len(skipped)} flagged low-effectiveness skill(s) couldn't be improved this time."
+            if mode == "skill-improvement"
+            else f"No new skills — {len(skipped)} researched CVE(s) already have matching skills."
+        )
+        return "warning", summary, details
+    return "warning", "No new skills generated — research returned nothing usable this time.", details

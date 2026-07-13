@@ -1676,12 +1676,20 @@ def test_capabilities_page_has_learn_button(client):
     assert "Research CVEs" in resp.text
 
 
-def test_capabilities_learn_without_llm_shows_error(client):
+def test_capabilities_learn_without_llm_shows_error(client, _override_store):
     with patch("agentit.portal.routes.capabilities.get_llm_client", return_value=None):
         resp = client.post("/capabilities/learn", follow_redirects=False)
     assert resp.status_code == 303
     assert "error=" in resp.headers["location"]
     assert "LLM" in resp.headers["location"]
+    # Even a run that never reaches the LLM must leave a durable trace --
+    # that's the whole point of the "learning-run" action (Bucket 1 of the
+    # learn-button transparency work: every attempt is queryable later, not
+    # just the ones that generated a skill).
+    events = _override_store.list_events_by_action("learning-run", limit=5)
+    assert len(events) == 1
+    assert events[0]["severity"] == "error"
+    assert events[0]["agent_id"] == "learning-agent"
 
 
 def test_capabilities_learn_generates_new_skill(client, _override_store):
@@ -1697,6 +1705,10 @@ def test_capabilities_learn_generates_new_skill(client, _override_store):
     assert "success=" in resp.headers["location"]
     events = _override_store.list_events_by_agent("learning-agent", limit=5)
     assert any(e["action"] == "skills-generated" for e in events)
+    run_events = _override_store.list_events_by_action("learning-run", limit=5)
+    assert len(run_events) == 1
+    assert run_events[0]["severity"] == "info"
+    assert "cve-2099-00001" in run_events[0]["summary"]
 
 
 def test_capabilities_learn_skips_existing_skill(client, _override_store):
@@ -1705,17 +1717,92 @@ def test_capabilities_learn_skips_existing_skill(client, _override_store):
          patch("agentit.learning_agent.check_skill_exists", return_value=True):
         resp = client.post("/capabilities/learn", follow_redirects=False)
     assert resp.status_code == 303
-    assert "success=" in resp.headers["location"]
+    # A no-op run isn't the same as success -- it gets its own (non-error)
+    # "warning" toast so it isn't mistaken for "a skill was generated".
+    assert "warning=" in resp.headers["location"]
     events = _override_store.list_events_by_agent("learning-agent", limit=5)
     assert not any(e["action"] == "skills-generated" for e in events)
+    run_events = _override_store.list_events_by_action("learning-run", limit=5)
+    assert len(run_events) == 1
+    assert run_events[0]["severity"] == "warning"
 
 
-def test_capabilities_learn_no_research_results(client):
+def test_capabilities_learn_no_research_results(client, _override_store):
     with patch("agentit.portal.routes.capabilities.get_llm_client", return_value=object()), \
          patch("agentit.learning_agent.research_cves", return_value=[]):
         resp = client.post("/capabilities/learn", follow_redirects=False)
     assert resp.status_code == 303
-    assert "success=" in resp.headers["location"]
+    assert "warning=" in resp.headers["location"]
+    run_events = _override_store.list_events_by_action("learning-run", limit=5)
+    assert len(run_events) == 1
+    assert run_events[0]["severity"] == "warning"
+
+
+def test_capabilities_learn_research_failure_logs_error_event(client, _override_store):
+    """The exception path must also leave a durable trace, not just a
+    transient toast -- this is the "not just successful ones" half of the
+    every-run-leaves-a-trace requirement."""
+    with patch("agentit.portal.routes.capabilities.get_llm_client", return_value=object()), \
+         patch("agentit.learning_agent.research_cves", side_effect=RuntimeError("LLM timed out")):
+        resp = client.post("/capabilities/learn", follow_redirects=False)
+    assert resp.status_code == 303
+    assert "error=" in resp.headers["location"]
+    run_events = _override_store.list_events_by_action("learning-run", limit=5)
+    assert len(run_events) == 1
+    assert run_events[0]["severity"] == "error"
+    assert "LLM timed out" in run_events[0]["summary"]
+
+
+def test_capabilities_page_shows_flagged_skill_preview(client, _override_store):
+    """Item 4: the button's description should say what it's about to do,
+    not just what it already did -- if a skill is flagged low-effectiveness,
+    the preview must name it instead of the generic CVE-sweep description."""
+    for _ in range(6):
+        _override_store.record_skill_outcome("network-policy", "app-a", "rejected", "wrong")
+    resp = client.get("/capabilities")
+    assert resp.status_code == 200
+    assert "improve" in resp.text
+    assert "network-policy" in resp.text
+
+
+def test_capabilities_page_shows_cve_sweep_preview_when_nothing_flagged(client):
+    resp = client.get("/capabilities")
+    assert resp.status_code == 200
+    assert "No skills are currently flagged as low-effectiveness" in resp.text
+
+
+def test_capabilities_page_shows_learning_run_history(client, _override_store):
+    """Item 1: a past run (of either trigger source) must show up in a
+    visible history table on the page, not just in the ephemeral toast."""
+    _override_store.log_event(
+        "learning-agent", "learning-run", None, "warning",
+        "No new skills — 1 researched CVE(s) already have matching skills.",
+        details={"trigger": "manual", "mode": "cve-sweep", "saved": [], "skipped": ["CVE-2099-00099"]},
+    )
+    _override_store.log_event(
+        "skill-learner", "learning-run", None, "info",
+        "Generated 1 improvement(s): network-policy-v2",
+        details={"trigger": "watcher", "mode": "skill-improvement", "saved": ["network-policy-v2"], "skipped": []},
+    )
+    resp = client.get("/capabilities")
+    assert resp.status_code == 200
+    assert "Learning Agent Runs" in resp.text
+    assert "already have matching skills" in resp.text
+    assert "Automatic (24h watcher)" in resp.text
+    assert "Manual" in resp.text
+
+
+def test_capabilities_page_shows_skill_learner_never_ticked(client):
+    resp = client.get("/capabilities")
+    assert resp.status_code == 200
+    assert "never ticked on this deployment" in resp.text
+
+
+def test_capabilities_page_shows_skill_learner_recent_heartbeat(client, _override_store):
+    _override_store.agent_heartbeat("skill-learner")
+    resp = client.get("/capabilities")
+    assert resp.status_code == 200
+    assert "is running" in resp.text
 
 
 # ── Capabilities: activate a draft skill ────────────────────────────────

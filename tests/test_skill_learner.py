@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from agentit.cli import main
 from agentit.watchers.skill_learner import SkillLearner
+from conftest import make_async_store
 
 
 def _learner(**kwargs) -> tuple[SkillLearner, MagicMock]:
@@ -18,7 +19,7 @@ def _learner(**kwargs) -> tuple[SkillLearner, MagicMock]:
     return learner, publisher
 
 
-def test_research_once_generates_new_skill():
+async def test_research_once_generates_new_skill():
     learner, publisher = _learner()
     with patch("agentit.llm.LLMClient", return_value=object()), \
          patch("agentit.learning_agent.research_cves", return_value=[{"id": "CVE-2099-00001"}]), \
@@ -27,7 +28,7 @@ def test_research_once_generates_new_skill():
                return_value="---\nname: cve-2099-00001\n---\nbody"), \
          patch("agentit.learning_agent.save_skill",
                return_value=Path("/tmp/fake-skills/security/cve-2099-00001.md")):
-        saved, skipped = learner.research_once()
+        saved, skipped = await learner.research_once()
 
     assert saved == ["cve-2099-00001"]
     assert skipped == []
@@ -37,46 +38,60 @@ def test_research_once_generates_new_skill():
     assert "cve-2099-00001" in kwargs["summary"]
 
 
-def test_research_once_skips_existing_skill():
+async def test_research_once_skips_existing_skill():
     learner, publisher = _learner()
     with patch("agentit.llm.LLMClient", return_value=object()), \
          patch("agentit.learning_agent.research_cves", return_value=[{"id": "CVE-2099-00002"}]), \
          patch("agentit.learning_agent.check_skill_exists", return_value=True):
-        saved, skipped = learner.research_once()
+        saved, skipped = await learner.research_once()
 
     assert saved == []
     assert skipped == ["CVE-2099-00002"]
     publisher.publish.assert_not_called()
 
 
-def test_research_once_no_llm_returns_empty_without_raising():
+async def test_research_once_no_llm_returns_empty_without_raising():
     learner, publisher = _learner()
     with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")):
-        saved, skipped = learner.research_once()
+        saved, skipped = await learner.research_once()
 
     assert saved == []
     assert skipped == []
     publisher.publish.assert_not_called()
 
 
-def test_research_once_no_research_results():
+async def test_research_once_no_llm_logs_learning_run_event_when_store_present():
+    """Every tick must leave a durable trace -- including the LLM-unavailable
+    case, which previously logged nothing to the store at all (only a
+    stderr echo, invisible once the pod's logs roll over)."""
+    async_store, store = make_async_store()
+    learner, _ = _learner(store=async_store)
+    with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")):
+        await learner.research_once()
+
+    events = store.list_events_by_action("learning-run")
+    assert len(events) == 1
+    assert events[0]["agent_id"] == "skill-learner"
+    assert events[0]["severity"] == "error"
+    assert "no credentials" in events[0]["summary"]
+
+
+async def test_research_once_no_research_results():
     learner, publisher = _learner()
     with patch("agentit.llm.LLMClient", return_value=object()), \
          patch("agentit.learning_agent.research_cves", return_value=[]):
-        saved, skipped = learner.research_once()
+        saved, skipped = await learner.research_once()
 
     assert saved == []
     assert skipped == []
     publisher.publish.assert_not_called()
 
 
-def test_research_once_prioritizes_flagged_skill_over_cve_sweep(tmp_path):
+async def test_research_once_prioritizes_flagged_skill_over_cve_sweep(tmp_path):
     """Regression: the research cycle must check get_low_effectiveness_skills()
     first and research a replacement for the flagged skill instead of the
     generic CVE sweep -- this is the wiring that closes the self-improvement
     loop end to end."""
-    from conftest import make_store
-
     skills_dir = tmp_path / "skills"
     (skills_dir / "security").mkdir(parents=True)
     (skills_dir / "security" / "network-policy.md").write_text(
@@ -85,12 +100,12 @@ def test_research_once_prioritizes_flagged_skill_over_cve_sweep(tmp_path):
         encoding="utf-8",
     )
 
-    store = make_store()
+    async_store, store = make_async_store()
     for _ in range(4):
         store.record_skill_outcome("network-policy", "app-a", "rejected", "wrong")
     store.record_skill_outcome("network-policy", "app-b", "rejected", "wrong")
 
-    learner, publisher = _learner(store=store, skills_dir=skills_dir)
+    learner, publisher = _learner(store=async_store, skills_dir=skills_dir)
 
     with patch("agentit.llm.LLMClient", return_value=object()), \
          patch("agentit.learning_agent.research_cves") as mock_cves, \
@@ -100,7 +115,7 @@ def test_research_once_prioritizes_flagged_skill_over_cve_sweep(tmp_path):
                return_value="---\nname: network-policy-v2\n---\nbody"), \
          patch("agentit.learning_agent.save_skill",
                return_value=Path("/tmp/fake-skills/security/network-policy-v2.md")):
-        saved, skipped = learner.research_once()
+        saved, skipped = await learner.research_once()
 
     mock_improve.assert_called_once()
     args, _ = mock_improve.call_args
@@ -110,14 +125,18 @@ def test_research_once_prioritizes_flagged_skill_over_cve_sweep(tmp_path):
     assert saved == ["network-policy-v2"]
     assert skipped == []
 
+    events = store.list_events()
+    assert any(e["action"] == "skill-improvement-drafted" for e in events)
+    learning_runs = store.list_events_by_action("learning-run")
+    assert len(learning_runs) == 1
+    assert learning_runs[0]["severity"] == "info"
 
-def test_research_once_falls_back_to_cve_sweep_when_nothing_flagged():
+
+async def test_research_once_falls_back_to_cve_sweep_when_nothing_flagged():
     """No low-effectiveness skills -> the existing CVE-sweep behavior runs
     exactly as before."""
-    from conftest import make_store
-
-    store = make_store()
-    learner, publisher = _learner(store=store)
+    async_store, store = make_async_store()
+    learner, publisher = _learner(store=async_store)
 
     with patch("agentit.llm.LLMClient", return_value=object()), \
          patch("agentit.learning_agent.research_cves", return_value=[{"id": "CVE-2099-00009"}]) as mock_cves, \
@@ -127,11 +146,17 @@ def test_research_once_falls_back_to_cve_sweep_when_nothing_flagged():
                return_value="---\nname: cve-2099-00009\n---\nbody"), \
          patch("agentit.learning_agent.save_skill",
                return_value=Path("/tmp/fake-skills/security/cve-2099-00009.md")):
-        saved, skipped = learner.research_once()
+        saved, skipped = await learner.research_once()
 
     mock_improve.assert_not_called()
     mock_cves.assert_called_once()
     assert saved == ["cve-2099-00009"]
+
+    learning_runs = store.list_events_by_action("learning-run")
+    assert len(learning_runs) == 1
+    assert learning_runs[0]["agent_id"] == "skill-learner"
+    assert learning_runs[0]["severity"] == "info"
+    assert "cve-2099-00009" in learning_runs[0]["summary"]
 
 
 def test_learn_watch_cli_options_registered():
@@ -143,10 +168,9 @@ def test_learn_watch_cli_options_registered():
 
 
 def test_accepts_optional_store_for_tick_telemetry():
-    from conftest import make_store
-    store = make_store()
-    learner, _ = _learner(store=store)
-    assert learner._store is store
+    async_store, _raw = make_async_store()
+    learner, _ = _learner(store=async_store)
+    assert learner._store is async_store
 
 
 def test_defaults_to_none_store_when_omitted():
@@ -170,23 +194,54 @@ class TestAsyncRunLoop:
         mock_sleep.assert_called_once_with(86400)
 
 
-class TestTickRunsOffEventLoop:
-    """research_once must be dispatched via asyncio.to_thread so it doesn't
-    block the event loop for the tick's full duration, and record_tick
-    telemetry must still fire afterwards."""
+class TestTickRunsOnEventLoop:
+    """``research_once`` is now a genuine coroutine -- ``run()`` awaits it
+    directly rather than dispatching the whole tick to a worker thread. Its
+    own blocking LLM/file-system calls are each narrowly wrapped in
+    ``asyncio.to_thread`` internally, and record_tick telemetry must still
+    fire afterwards."""
 
     @patch("agentit.watchers.skill_learner.asyncio.sleep", side_effect=KeyboardInterrupt)
-    async def test_research_once_dispatched_via_to_thread_and_telemetry_records(self, mock_sleep):
-        from conftest import make_store
-        store = make_store()
-        learner, _ = _learner(store=store)
+    async def test_research_once_awaited_directly_and_telemetry_records(self, mock_sleep):
+        async_store, store = make_async_store()
+        learner, _ = _learner(store=async_store)
+
+        with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")), \
+             patch.object(learner, "research_once", wraps=learner.research_once) as mock_research_once:
+            await learner.run()
+
+        mock_research_once.assert_called_once_with()
+        events = store.list_events()
+        assert any(e["action"] == "tick-complete" for e in events)
+
+    async def test_llm_client_init_dispatched_via_to_thread(self):
+        """The narrow-to_thread call site: LLMClient() construction (a
+        synchronous LLM SDK call) must not run directly on the event loop."""
+        learner, _ = _learner()
 
         with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")), \
              patch(
                  "agentit.watchers.skill_learner.asyncio.to_thread", wraps=asyncio.to_thread
              ) as mock_to_thread:
-            await learner.run()
+            await learner.research_once()
 
-        mock_to_thread.assert_called_once_with(learner.research_once)
-        events = store.list_events()
-        assert any(e["action"] == "tick-complete" for e in events)
+        assert mock_to_thread.call_count >= 1
+
+
+class TestConstructionAcceptsAsyncStoreDirectly:
+    """The real bug fixed here: cli.py used to hand SkillLearner
+    `store.raw` because `research_once` called every store method
+    unawaited. Now the store is genuinely awaited throughout, so a store
+    constructed via `create_store()`'s own facade must work end to end."""
+
+    async def test_research_once_works_against_create_store_facade(self, tmp_path):
+        from agentit.portal.store_factory import create_store
+
+        store = await create_store(":memory:")
+        learner, _ = _learner(store=store, skills_dir=tmp_path / "skills")
+
+        with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")):
+            saved, skipped = await learner.research_once()  # must not raise AttributeError/TypeError
+
+        assert saved == []
+        assert skipped == []
