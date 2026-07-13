@@ -571,5 +571,24 @@ class TestWatcherNetworkPolicies:
                 (rule.get("ports", [{}])[0].get("protocol"), rule.get("ports", [{}])[0].get("port"))
                 for rule in policy["spec"]["egress"]
             }
-            assert ("TCP", 53) in egress_ports or ("UDP", 53) in egress_ports, name
             assert ("TCP", 6443) in egress_ports, name
+
+    def test_dns_rule_has_no_ports_restriction(self):
+        """Regression test for the live DNS-blocking incident documented in
+        docs/postgres-migration-plan.md: on this cluster's OVN-Kubernetes, a
+        namespaceSelector peer combined with a `ports` restriction never
+        matches traffic to the DNS ClusterIP Service (dns-default), for
+        either port 53 (the Service port) or port 5353 (the actual CoreDNS
+        container port). The DNS egress rule must have a namespaceSelector
+        peer scoped to openshift-dns and NO `ports` key at all."""
+        for name, policy in self._by_name().items():
+            dns_rules = [
+                rule
+                for rule in policy["spec"]["egress"]
+                if rule.get("to", [{}])[0].get("namespaceSelector", {}).get("matchLabels", {}).get(
+                    "kubernetes.io/metadata.name"
+                )
+                == "openshift-dns"
+            ]
+            assert len(dns_rules) == 1, name
+            assert "ports" not in dns_rules[0], name

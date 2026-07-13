@@ -1,6 +1,6 @@
 # Postgres Migration Plan
 
-**Status: the Postgres instance is decided and real. AgentIT deploys and maintains its own bundled, non-operator Postgres (§2 below) — this is not a proposal or a pivot under consideration, it is the plan. The earlier CloudNativePG-operator path (§2, "Historical note") was tried and abandoned (blocked on paid EDB/Red Hat Marketplace entitlements that were never provisioned) and has been fully removed from the chart, the repo, and the live cluster — see "Progress update: CNPG path abandoned and removed" below for exactly what that removal covered. Phase 1 (schema) and Phase 2 (async store rewrite) are done and verified against a real Postgres. Phase 3 is complete, including the piece previously deferred: `FleetOrchestrator`, `AutoMode`, `RemediationDispatcher`, and `RemediationLoop` are now genuinely `async def` throughout (see "Progress update: sync→async conversion of FleetOrchestrator/AutoMode/RemediationDispatcher/RemediationLoop complete" below) — this was the single remaining structural blocker to Phase 4. `store_pg.py` briefly drifted out of parity with `store.py`'s self-observability additions (`agent_runs`/`check_results` tables, `events.correlation_id`, upsert-shaped `agent_heartbeat`, DLQ republish, etc.) — that gap is now closed (see "Progress update: `store_pg.py` parity restored" below) and guarded by a standing `tests/test_store_parity.py` regression test so it can't silently drift again. **Phase 4 (drop SQLite) was attempted for real and rolled back — see "Progress update: real cutover attempted and rolled back" below, the most current section.** The chart now actually threads `AGENTIT_DB_BACKEND`/`AGENTIT_DB_DSN` into all 5 Deployments (previously missing entirely, a gap this attempt found and fixed), but the attempt surfaced a genuine, previously-undiscovered code-level blocker in the 4 watcher CLI entry points (not a chart/config issue) plus a real, independently-serious Secret-drift bug in the bundled Postgres chart. `AGENTIT_DB_BACKEND` is back to unset/`sqlite` everywhere, confirmed healthy. Both blockers must be fixed before the next cutover attempt.
+**Status: the Postgres instance is decided and real. AgentIT deploys and maintains its own bundled, non-operator Postgres (§2 below) — this is not a proposal or a pivot under consideration, it is the plan. The earlier CloudNativePG-operator path (§2, "Historical note") was tried and abandoned (blocked on paid EDB/Red Hat Marketplace entitlements that were never provisioned) and has been fully removed from the chart, the repo, and the live cluster — see "Progress update: CNPG path abandoned and removed" below for exactly what that removal covered. Phase 1 (schema) and Phase 2 (async store rewrite) are done and verified against a real Postgres. Phase 3 is complete, including the piece previously deferred: `FleetOrchestrator`, `AutoMode`, `RemediationDispatcher`, and `RemediationLoop` are now genuinely `async def` throughout (see "Progress update: sync→async conversion of FleetOrchestrator/AutoMode/RemediationDispatcher/RemediationLoop complete" below) — this was the single remaining structural blocker to Phase 4. `store_pg.py` briefly drifted out of parity with `store.py`'s self-observability additions (`agent_runs`/`check_results` tables, `events.correlation_id`, upsert-shaped `agent_heartbeat`, DLQ republish, etc.) — that gap is now closed (see "Progress update: `store_pg.py` parity restored" below) and guarded by a standing `tests/test_store_parity.py` regression test so it can't silently drift again. **Phase 4 (drop SQLite) was attempted for real and rolled back — see "Progress update: real cutover attempted and rolled back" below, the most current section.** The chart now actually threads `AGENTIT_DB_BACKEND`/`AGENTIT_DB_DSN` into all 5 Deployments (previously missing entirely, a gap this attempt found and fixed), but the attempt surfaced a genuine, previously-undiscovered code-level blocker in the 4 watcher CLI entry points (not a chart/config issue) plus a real, independently-serious Secret-drift bug in the bundled Postgres chart. `AGENTIT_DB_BACKEND` is back to unset/`sqlite` everywhere, confirmed healthy. **Update: a third, independent bug — the 4 watchers' NetworkPolicies silently blocking DNS resolution to the cluster's own DNS Service — has been root-caused and fixed for real (chart + live); see "Progress update: watcher NetworkPolicies were silently blocking DNS (root cause found)" below.** Bug #1 (Secret drift) and bug #2 (`store.raw` incompatibility) remain open and must still be fixed before the next full cutover attempt succeeds end-to-end.
 
 Tonight's original prep work was strictly HA Postgres chart plumbing (`chart/templates/postgres/`), the `asyncpg` dependency addition, and this plan — `store.py` and every one of its callers are untouched and unaffected. This doc exists so the actual rewrite (a separate, later effort) has an accurate map instead of starting from a cold read of a 1,400-line file.
 
@@ -458,8 +458,70 @@ Reverted `postgres.backend` to `"sqlite"` and removed the temporary `rollout.ste
 
 1. Fix bug #1 (Secret/database password drift) durably — not just re-synced live again.
 2. Fix bug #2 (the 4 watcher CLI entry points' `store.raw` incompatibility with `store_pg.AssessmentStore`) — a real code change with its own tests, per the design options above.
-3. Re-run this same pre-flight (parity + postgres tests + full suite) since bug #2's fix will touch `cli.py` and likely `store_factory.py`.
-4. Only then re-attempt §7's coordinated cutover. The chart-level wiring this pass added (`postgres.backend`, the 5 templates' env vars, `/readyz`'s backend field) is already in place and does not need to be redone.
+3. ~~Fix bug #3 (the 4 watcher NetworkPolicies silently blocking DNS)~~ — **fixed, see below.**
+4. Re-run this same pre-flight (parity + postgres tests + full suite) since bug #2's fix will touch `cli.py` and likely `store_factory.py`.
+5. Only then re-attempt §7's coordinated cutover. The chart-level wiring this pass added (`postgres.backend`, the 5 templates' env vars, `/readyz`'s backend field) is already in place and does not need to be redone.
+
+## Progress update: watcher NetworkPolicies were silently blocking DNS (root cause found)
+
+The previous section's parenthetical aside ("CoreDNS showed pre-existing, ongoing health-check timeouts... this made the *first* symptom look like a DNS problem... but it was not the actual blocker here") undersold this — DNS resolution from the 4 watcher pods was **not** flaky/CoreDNS-related, it was a real, 100%-reproducible NetworkPolicy bug, independently confirmed by a separate, dedicated investigation pass. It just happened to be masked in the previous pass because bug #2 (`store.raw`) is a *separate*, also-real blocker one layer further in — see "How this reconciles with bug #2" below for why both write-ups are correct about their own layer.
+
+### Root cause (confirmed with repeated, controlled tests — not theory)
+
+**On this cluster's OVN-Kubernetes, a NetworkPolicy egress rule that combines a `ports` restriction with a `namespaceSelector`/`podSelector` peer never matches traffic sent to a ClusterIP-backed Service whose Service port differs from — or even matches — the backing pod's actual container port, when other peer-restricted egress rules coexist in the same policy.** Concretely for DNS: the `dns-default` Service in `openshift-dns` exposes port **53**, but its real endpoints (the CoreDNS pods) listen on container port **5353** (`oc get endpoints dns-default -n openshift-dns` shows `5353`, not `53` — a well-known OpenShift-specific detail). Every one of the 4 watcher NetworkPolicies had a DNS egress rule shaped like:
+
+```yaml
+- to:
+    - namespaceSelector: {}
+  ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+```
+
+This looks correct per the Kubernetes NetworkPolicy spec (`namespaceSelector: {}` = match all namespaces, which includes `openshift-dns`) and was the exact rule already in the chart before this pass. It does not work on this cluster, and — critically — **the specific port number is not the reason**: this was tested exhaustively, not assumed.
+
+**Test matrix (fresh `ubi9/ubi-minimal` debug pod, `--labels="app=agentit-vuln-watcher"`, `getent hosts agentit-postgres-bundled.agentit.svc` against each live-patched NetworkPolicy egress list, re-tested from scratch after every single change):**
+
+| # | DNS egress rule shape | Other rules present | Result |
+|---|---|---|---|
+| 1 | `to: [{namespaceSelector: {}}]`, ports 53 UDP+TCP (original chart rule) | 4 other podSelector-restricted rules | **Blocked** (timeout) |
+| 2 | No `to` at all, ports 53 UDP+TCP | same 4 | **Blocked** |
+| 3 | `{}` (fully open, no ports/peer) as the *only* rule | none | Works |
+| 4 | `{}` (fully open) + 1 podSelector rule | 1 (postgres) | Works |
+| 5 | No `to`, ports 53 UDP+TCP | 1 (postgres) | **Blocked** |
+| 6 | `to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: openshift-dns}}}]` (real, non-empty selector), ports 53 UDP+TCP | same 4 (incl. a working port-6443-no-`to` rule in the *same* policy) | **Blocked** (port 6443 rule unaffected) |
+| 7 | No DNS rule at all | same 4 | **Blocked** (no implicit DNS allow exists) |
+| 8 | Ports 53→UDP-only, no `to` (mirrors the working port-6443 rule's exact shape) | same 4 | **Blocked** |
+| 9 | `namespaceSelector` **and** `podSelector` in the same peer object (AND semantics, targeting the real `dns-default` pods by their actual `dns.operator.openshift.io/daemonset-dns: default` label) | same 4 | **Blocked** |
+| 10 | Same as #6 but port **5353** (the real CoreDNS container port) instead of 53 | same 4 | **Blocked** — ruling out "wrong port number" as the fix |
+| 11 | `to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: openshift-dns}}}]`, **no `ports` field at all** | same 4 | **Works** — clean, ~1s resolution, correct IP every time |
+
+The pattern across all 11 tests is unambiguous: **the only structures that ever worked were the ones with no `ports` restriction on the DNS-serving peer at all** (#3, #4, #11). Every attempt to pair a `ports: [{port: 53 or 5353, ...}]` restriction with *any* peer selector shape (empty, real namespaceSelector, no peer, AND-combined namespaceSelector+podSelector) failed — including when the exact same "port-restricted, no-peer" rule shape demonstrably worked fine for a different port (6443, k8s API) in the very same policy object (test #6/#8). This rules out "wrong port number" (53 vs. 5353) and "peer selector syntax" as the root cause on their own; the actual trigger is specifically a `ports` restriction on the DNS-Service-destined rule, full stop, in the presence of the policy's other peer-restricted rules. The most likely underlying mechanism (not independently proven at the OVN internals level, but consistent with every observed data point): this cluster's OVN-Kubernetes ACL compiler does not correctly resolve "traffic to a Service ClusterIP whose backend matches address-set X" when the ACL also carries a port restriction — the address-set-based peer match for a Service's backend pods and the port match don't compose correctly, while a peer-only (any-port) ACL bypasses whatever that composition bug is entirely.
+
+### The fix (verified working, then applied to the chart)
+
+Each of the 4 watchers' DNS egress rule is now:
+
+```yaml
+- to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: openshift-dns
+```
+
+No `ports` key. This is **not** a blanket allow-all (verified with a negative control: from the same debug pod, egress to an unrelated in-cluster Service (`openshift-gitops`) and to a random external IP (`8.8.8.8:80`) both remained blocked, confirming the policy is still meaningfully restrictive) — it only widens the DNS rule from "port 53/5353 to any namespace" (which never worked) to "any port to the `openshift-dns` namespace specifically" (which does). Applied identically to `chart/templates/networkpolicy-agents.yaml` for all 4 watchers (`vuln-watcher`, `slo-tracker`, `drift-detector`, `skill-learner`) and re-verified live, post-fix, with one more fresh debug pod per watcher's exact `app` label — all 4 resolved `agentit-postgres-bundled.agentit.svc` correctly and quickly (~1s).
+
+`tests/test_helm_templates.py::TestWatcherNetworkPolicies` gained `test_dns_rule_has_no_ports_restriction`, asserting the DNS rule has a `namespaceSelector` peer matching `openshift-dns` and no `ports` key, for all 4 rendered policies — a standing regression guard so this can't silently regress back to the broken shape.
+
+### How this reconciles with bug #2 (`store.raw`)
+
+Both write-ups are correct about their own layer, and this explains the apparent contradiction between "DNS was the blocker" (this investigation's starting brief) and "DNS was a red herring, `store.raw` was the real blocker" (the previous pass's finding): **`asyncpg.create_pool()` must resolve the DNS name before it can even attempt to connect.** With the NetworkPolicy bug unfixed, DNS resolution for the hostname in `AGENTIT_DB_DSN` fails deterministically (`socket.gaierror`) and the watcher crashes *before* ever reaching the `store.raw` line. The previous pass's own live testing window must have caught a moment where the NetworkPolicy's OVN state happened to be in a transient working configuration (this cluster's live NetworkPolicy objects were repeatedly, automatically reverted mid-investigation by Argo CD's `selfHeal` racing against live-only test patches — see the note on this in this section's own investigation process below) long enough for `create_pool()` to succeed at least once, at which point `store.raw`'s `AttributeError` became the next and now-real blocker. **Both bugs are real, both must be fixed, and fixing only one is not sufficient for the watchers to reach a stable `Running` + ticking state against Postgres** — confirmed directly: after applying this DNS fix and re-flipping `postgres.backend` to `postgres` for verification, the `socket.gaierror` was gone, but all 4 watchers now fail immediately afterward with the exact `AttributeError: 'AssessmentStore' object has no attribute 'raw'` bug #2 already documented — see that section above for the fix this still needs. `postgres.backend` was reverted back to `sqlite` (matching what's committed) once this was confirmed, so the live cluster is left healthy.
+
+### A process note for whoever runs the next live investigation on this Application
+
+This `Application`'s `syncPolicy.automated.selfHeal: true` reverts any live-only `oc patch`/`oc apply` drift (including exploratory NetworkPolicy test patches) back to whatever is currently committed in git, usually within single-digit minutes — this is *why* an earlier exploratory patch mentioned in this investigation's own brief ("adds an explicit `openshift-dns` namespaceSelector peer, still live on the cluster") was actually already gone by the time this pass started (self-heal had quietly reverted it). To iterate quickly on live NetworkPolicy structure tests without fighting self-heal, temporarily null out `spec.syncPolicy.automated` (`oc patch application.argoproj.io agentit -n openshift-gitops --type=merge -p '{"spec":{"syncPolicy":{"automated":null}}}'`), do the test cycle, then restore it (`{"automated":{"prune":true,"selfHeal":true}}`) once the real fix is committed and synced for real — don't leave it disabled.
 
 ## 7. Backward-compat / rollout strategy
 

@@ -30,13 +30,20 @@ spec:
     - Egress
   ingress: []
   egress:
+    # NOTE: this rule intentionally has NO `ports` restriction. Empirically
+    # confirmed on this cluster (OVN-Kubernetes): a namespaceSelector peer
+    # combined with a `ports` restriction never matches traffic to the DNS
+    # ClusterIP Service (dns-default) -- true for both port 53 (the Service
+    # port) and port 5353 (the actual CoreDNS container port the Service
+    # forwards to). A peer selector with no `ports` field (allow-all-ports to
+    # the peer) is the only structure that demonstrably worked in testing; see
+    # docs/postgres-migration-plan.md for the full investigation. Scoping the
+    # peer to the openshift-dns namespace (instead of an unrestricted `{}`,
+    # which matches every namespace) keeps this from being a blanket allow-all.
     - to:
-        - namespaceSelector: {}
-      ports:
-        - protocol: UDP
-          port: 53
-        - protocol: TCP
-          port: 53
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
     - ports:
         - protocol: TCP
           port: 6443
@@ -86,13 +93,20 @@ spec:
     - Egress
   ingress: []
   egress:
+    # NOTE: this rule intentionally has NO `ports` restriction. Empirically
+    # confirmed on this cluster (OVN-Kubernetes): a namespaceSelector peer
+    # combined with a `ports` restriction never matches traffic to the DNS
+    # ClusterIP Service (dns-default) -- true for both port 53 (the Service
+    # port) and port 5353 (the actual CoreDNS container port the Service
+    # forwards to). A peer selector with no `ports` field (allow-all-ports to
+    # the peer) is the only structure that demonstrably worked in testing; see
+    # docs/postgres-migration-plan.md for the full investigation. Scoping the
+    # peer to the openshift-dns namespace (instead of an unrestricted `{}`,
+    # which matches every namespace) keeps this from being a blanket allow-all.
     - to:
-        - namespaceSelector: {}
-      ports:
-        - protocol: UDP
-          port: 53
-        - protocol: TCP
-          port: 53
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
     - ports:
         - protocol: TCP
           port: 6443
@@ -142,13 +156,20 @@ spec:
     - Egress
   ingress: []
   egress:
+    # NOTE: this rule intentionally has NO `ports` restriction. Empirically
+    # confirmed on this cluster (OVN-Kubernetes): a namespaceSelector peer
+    # combined with a `ports` restriction never matches traffic to the DNS
+    # ClusterIP Service (dns-default) -- true for both port 53 (the Service
+    # port) and port 5353 (the actual CoreDNS container port the Service
+    # forwards to). A peer selector with no `ports` field (allow-all-ports to
+    # the peer) is the only structure that demonstrably worked in testing; see
+    # docs/postgres-migration-plan.md for the full investigation. Scoping the
+    # peer to the openshift-dns namespace (instead of an unrestricted `{}`,
+    # which matches every namespace) keeps this from being a blanket allow-all.
     - to:
-        - namespaceSelector: {}
-      ports:
-        - protocol: UDP
-          port: 53
-        - protocol: TCP
-          port: 53
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
     - ports:
         - protocol: TCP
           port: 6443
@@ -198,13 +219,20 @@ spec:
     - Egress
   ingress: []
   egress:
+    # NOTE: this rule intentionally has NO `ports` restriction. Empirically
+    # confirmed on this cluster (OVN-Kubernetes): a namespaceSelector peer
+    # combined with a `ports` restriction never matches traffic to the DNS
+    # ClusterIP Service (dns-default) -- true for both port 53 (the Service
+    # port) and port 5353 (the actual CoreDNS container port the Service
+    # forwards to). A peer selector with no `ports` field (allow-all-ports to
+    # the peer) is the only structure that demonstrably worked in testing; see
+    # docs/postgres-migration-plan.md for the full investigation. Scoping the
+    # peer to the openshift-dns namespace (instead of an unrestricted `{}`,
+    # which matches every namespace) keeps this from being a blanket allow-all.
     - to:
-        - namespaceSelector: {}
-      ports:
-        - protocol: UDP
-          port: 53
-        - protocol: TCP
-          port: 53
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
     - ports:
         - protocol: TCP
           port: 6443
