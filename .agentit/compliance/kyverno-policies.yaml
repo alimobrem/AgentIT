@@ -1,0 +1,84 @@
+apiVersion: kyverno.io/v1
+kind: Policy
+metadata:
+  name: require-labels
+spec:
+  validationFailureAction: Enforce
+  rules:
+  - name: check-required-labels
+    match:
+      any:
+      - resources:
+          kinds:
+          - Pod
+    validate:
+      message: Labels 'app.kubernetes.io/name' and 'app.kubernetes.io/version' are
+        required.
+      pattern:
+        metadata:
+          labels:
+            app.kubernetes.io/name: ?*
+            app.kubernetes.io/version: ?*
+---
+apiVersion: kyverno.io/v1
+kind: Policy
+metadata:
+  name: require-resource-limits
+spec:
+  validationFailureAction: Enforce
+  rules:
+  - name: check-resource-limits
+    match:
+      any:
+      - resources:
+          kinds:
+          - Pod
+    validate:
+      message: All containers must have resource limits defined.
+      pattern:
+        spec:
+          containers:
+          - resources:
+              limits:
+                cpu: ?*
+                memory: ?*
+---
+apiVersion: kyverno.io/v1
+kind: Policy
+metadata:
+  name: restrict-image-registries
+spec:
+  validationFailureAction: Enforce
+  rules:
+  - name: validate-registries
+    match:
+      any:
+      - resources:
+          kinds:
+          - Pod
+    validate:
+      message: Images must come from registry.access.redhat.com or quay.io.
+      pattern:
+        spec:
+          containers:
+          - image: registry.access.redhat.com/* | quay.io/*
+---
+apiVersion: kyverno.io/v1
+kind: Policy
+metadata:
+  name: disallow-latest-tag
+spec:
+  validationFailureAction: Enforce
+  rules:
+  - name: validate-image-tag
+    match:
+      any:
+      - resources:
+          kinds:
+          - Pod
+    validate:
+      message: Using the 'latest' tag is not allowed.
+      pattern:
+        spec:
+          containers:
+          - image: '!*:latest'
