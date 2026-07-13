@@ -184,8 +184,11 @@ class TestConflicts:
         assert len(blockers) == 1
         assert blockers[0]["winner"] == "security"
 
-    def test_priority_matrix_resolves_security_over_cicd(self, tmp_path: Path) -> None:
-        """When both security and cicd succeed, priority matrix picks security."""
+    def test_no_false_conflict_when_agents_just_both_succeed(self, tmp_path: Path) -> None:
+        """Regression: two agents both succeeding with unrelated, non-colliding
+        output is NOT a conflict. Before the fix, PRIORITY_MATRIX pairs like
+        (security, cicd) were flagged as 'priority' conflicts merely because
+        both agents succeeded, making warnings non-empty on almost every run."""
         report = make_report(criticality="medium")
         orch = FleetOrchestrator(report, tmp_path / "out")
 
@@ -194,13 +197,14 @@ class TestConflicts:
                         files_generated=["rbac.yaml"], success=True, findings_count=1),
             AgentResult(agent_name="cicd", category="cicd",
                         files_generated=["pipeline.yaml"], success=True, findings_count=1),
+            AgentResult(agent_name="observability", category="observability",
+                        files_generated=["dashboards.json"], success=True, findings_count=1),
+            AgentResult(agent_name="compliance", category="compliance",
+                        files_generated=["audit-policy.yaml"], success=True, findings_count=1),
         ]
         conflicts = orch._detect_conflicts(results)
         priority = [c for c in conflicts if c["type"] == "priority"]
-        assert len(priority) >= 1
-        sec_cicd = [c for c in priority if set(c["agents"]) == {"security", "cicd"}]
-        assert len(sec_cicd) == 1
-        assert sec_cicd[0]["winner"] == "security"
+        assert priority == [], f"Unexpected false-positive conflicts: {priority}"
 
     def test_priority_matrix_not_applied_when_agent_failed(self, tmp_path: Path) -> None:
         """Priority conflicts only fire for agents that both succeeded."""
@@ -216,6 +220,140 @@ class TestConflicts:
         conflicts = orch._detect_conflicts(results)
         priority = [c for c in conflicts if c["type"] == "priority"]
         assert priority == []
+
+    def test_path_collision_is_a_real_conflict(self, tmp_path: Path) -> None:
+        """Two agents writing a file at the same output path IS a real conflict."""
+        report = make_report(criticality="medium")
+        orch = FleetOrchestrator(report, tmp_path / "out")
+
+        results = [
+            AgentResult(agent_name="security", category="security",
+                        files_generated=["policy.yaml"], success=True, findings_count=1),
+            AgentResult(agent_name="cicd", category="cicd",
+                        files_generated=["policy.yaml"], success=True, findings_count=1),
+        ]
+        conflicts = orch._detect_conflicts(results)
+        priority = [c for c in conflicts if c["type"] == "priority"]
+        assert len(priority) == 1
+        assert set(priority[0]["agents"]) == {"security", "cicd"}
+        assert priority[0]["winner"] == "security"
+
+    def test_vpa_auto_mode_conflicts_with_hpa(self, tmp_path: Path) -> None:
+        """A VPA actively resizing (updateMode != Off) alongside an HPA for
+        the same workload IS a real conflict."""
+        report = make_report(criticality="medium")
+        orch = FleetOrchestrator(report, tmp_path / "out")
+
+        cost_dir = tmp_path / "out" / "cost"
+        cost_dir.mkdir(parents=True)
+        (cost_dir / "resource-recommendations.yaml").write_text(
+            "apiVersion: autoscaling.k8s.io/v1\n"
+            "kind: VerticalPodAutoscaler\n"
+            "metadata:\n  name: test-app-vpa\n"
+            "spec:\n  updatePolicy:\n    updateMode: Auto\n"
+        )
+        infra_dir = tmp_path / "out" / "infrastructure"
+        infra_dir.mkdir(parents=True)
+        (infra_dir / "hpa.yaml").write_text(
+            "apiVersion: autoscaling/v2\n"
+            "kind: HorizontalPodAutoscaler\n"
+            "metadata:\n  name: test-app-hpa\n"
+            "spec: {}\n"
+        )
+
+        results = [
+            AgentResult(agent_name="cost", category="cost",
+                        files_generated=["resource-recommendations.yaml"], success=True, findings_count=1),
+            AgentResult(agent_name="infrastructure", category="infrastructure",
+                        files_generated=["hpa.yaml"], success=True, findings_count=1),
+        ]
+        conflicts = orch._detect_conflicts(results)
+        priority = [c for c in conflicts if c["type"] == "priority"]
+        assert len(priority) == 1
+        assert set(priority[0]["agents"]) == {"cost", "infrastructure"}
+
+    def test_vpa_off_mode_does_not_conflict_with_hpa(self, tmp_path: Path) -> None:
+        """A VPA in 'Off' (recommendation-only) mode does not actually fight
+        the HPA for control, so it must not be flagged as a real conflict.
+        This matches production behavior: CostOptimizationAgent always sets
+        updateMode='Off' for high/critical apps, which is exactly when the
+        infrastructure agent's HPA also runs."""
+        report = make_report(criticality="medium")
+        orch = FleetOrchestrator(report, tmp_path / "out")
+
+        cost_dir = tmp_path / "out" / "cost"
+        cost_dir.mkdir(parents=True)
+        (cost_dir / "resource-recommendations.yaml").write_text(
+            "apiVersion: autoscaling.k8s.io/v1\n"
+            "kind: VerticalPodAutoscaler\n"
+            "metadata:\n  name: test-app-vpa\n"
+            "spec:\n  updatePolicy:\n    updateMode: 'Off'\n"
+        )
+        infra_dir = tmp_path / "out" / "infrastructure"
+        infra_dir.mkdir(parents=True)
+        (infra_dir / "hpa.yaml").write_text(
+            "apiVersion: autoscaling/v2\n"
+            "kind: HorizontalPodAutoscaler\n"
+            "metadata:\n  name: test-app-hpa\n"
+            "spec: {}\n"
+        )
+
+        results = [
+            AgentResult(agent_name="cost", category="cost",
+                        files_generated=["resource-recommendations.yaml"], success=True, findings_count=1),
+            AgentResult(agent_name="infrastructure", category="infrastructure",
+                        files_generated=["hpa.yaml"], success=True, findings_count=1),
+        ]
+        conflicts = orch._detect_conflicts(results)
+        priority = [c for c in conflicts if c["type"] == "priority"]
+        assert priority == []
+
+    def test_full_run_with_standard_profile_has_no_false_conflicts(self, tmp_path: Path) -> None:
+        """Realistic multi-agent successful run (standard profile, 6 agents)
+        must not produce any priority conflict warnings."""
+        report = make_report(criticality="medium")
+        orch = FleetOrchestrator(report, tmp_path / "out")
+        result = orch.run()
+
+        successful = [r for r in result.agent_results if r.success]
+        assert len(successful) >= 4
+
+        priority = [c for c in result.conflicts if c["type"] == "priority"]
+        assert priority == [], f"Unexpected false-positive conflicts: {priority}"
+
+    def test_auto_approve_downgraded_by_real_conflict(self, tmp_path: Path) -> None:
+        """plan.auto_approve is computed from score/criticality alone at plan()
+        time -- but a real conflict found during this actual run must still
+        force auto_approve to False in the returned OrchestrationResult."""
+        report = make_report(criticality="low")
+        report.overall_score = 90.0
+        orch = FleetOrchestrator(report, tmp_path / "out")
+
+        # Sanity check: score/criticality alone would auto-approve.
+        assert orch.plan().auto_approve is True
+
+        sec_dir = tmp_path / "out" / "security"
+        sec_dir.mkdir(parents=True)
+        (sec_dir / "shared.yaml").write_text(
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: shared\n"
+        )
+        cicd_dir = tmp_path / "out" / "cicd"
+        cicd_dir.mkdir(parents=True)
+        (cicd_dir / "shared.yaml").write_text(
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: shared\n"
+        )
+        colliding_results = [
+            AgentResult(agent_name="security", category="security",
+                        files_generated=["shared.yaml"], success=True, findings_count=1),
+            AgentResult(agent_name="cicd", category="cicd",
+                        files_generated=["shared.yaml"], success=True, findings_count=1),
+        ]
+
+        with patch.object(orch, "_run_agents_local", return_value=colliding_results):
+            result = orch.run()
+
+        assert any(c["type"] == "priority" for c in result.conflicts)
+        assert result.plan.auto_approve is False
 
 
 class TestRecommendation:
@@ -377,3 +515,56 @@ class TestPostHardeningValidation:
 
         validation_conflicts = [c for c in result.conflicts if c["type"] == "validation"]
         assert validation_conflicts == [], f"Unexpected validation failures: {validation_conflicts}"
+
+
+class TestSkillsFirstLLMPassthrough:
+    """Regression: the orchestrator constructed SkillEngine/run_all() without
+    ever passing an LLM client, even when credentials were configured -- so
+    LLM-only skills (mode: llm, no template block) silently produced nothing
+    in every portal/webhook onboarding flow. This test uses a report whose
+    finding actually matches a real skill's triggers (unlike the other tests
+    in this file, which use category="test" and never match any skill)."""
+
+    def test_run_constructs_and_forwards_llm_client_to_skill_engine(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+
+        report = make_report(criticality="medium")
+        report.scores[0].findings[0].category = "network"
+        report.scores[0].findings[0].description = "Missing network isolation between pods"
+
+        fake_llm = MagicMock()
+        fake_llm._chat.return_value = (
+            "apiVersion: networking.k8s.io/v1\n"
+            "kind: NetworkPolicy\n"
+            "metadata:\n  name: test-app-netpol\n"
+            "spec:\n  podSelector: {}\n  policyTypes:\n    - Ingress\n    - Egress\n"
+        )
+
+        with patch("agentit.llm.LLMClient", return_value=fake_llm) as mock_llm_cls, \
+             patch("agentit.platform_context.discover_platform", side_effect=RuntimeError("no cluster in tests")):
+            orch = FleetOrchestrator(report, tmp_path / "out")
+            result = orch.run()
+
+        mock_llm_cls.assert_called_once()
+        assert fake_llm._chat.called, "SkillEngine never used the LLM client the orchestrator built"
+
+        skills_result = [r for r in result.agent_results if r.agent_name == "skills"]
+        assert len(skills_result) == 1
+        assert any("network-policy" in f for f in skills_result[0].files_generated)
+
+    def test_run_falls_back_gracefully_when_llm_init_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """LLM construction failures must never break skills-first generation
+        or the orchestration run as a whole."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+
+        report = make_report(criticality="medium")
+
+        with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")):
+            orch = FleetOrchestrator(report, tmp_path / "out")
+            result = orch.run()  # must not raise
+
+        assert result.agent_results  # run still completed

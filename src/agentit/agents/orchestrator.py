@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
+import yaml
+
 from agentit.models import AssessmentReport, Severity
 from agentit.portal.metrics import agent_runs_total, agent_run_duration_seconds
 
@@ -20,7 +22,11 @@ def _safe_path(base: Path, relative: str) -> Path:
 
 AGENT_MODE = os.environ.get("AGENTIT_AGENT_MODE", "local")
 
-# Priority matrix from the spec (Section 4)
+# Priority matrix from the spec (Section 4). This only supplies the
+# "winner" label used to describe how a *real* conflict (see
+# KNOWN_KIND_CONFLICTS / path collisions in _detect_conflicts) should be
+# resolved -- it is not itself a conflict trigger. Two agents both
+# succeeding is normal and expected, not a conflict.
 PRIORITY_MATRIX = {
     ("security", "cicd"): "security",
     ("security", "observability"): "security",
@@ -30,6 +36,14 @@ PRIORITY_MATRIX = {
     ("cicd", "release"): "release",
     ("infrastructure", "security"): "security",
     ("infrastructure", "compliance"): "compliance",
+}
+
+# Known agent-pair / resource-kind combinations that genuinely conflict
+# when both are actually present for the same workload -- e.g. a VPA in
+# "Auto" mode fights an HPA for control over replica/resource sizing.
+# See the TODO(orchestrator) markers in agents/cost.py / agents/infrastructure.py.
+KNOWN_KIND_CONFLICTS: dict[tuple[str, str], tuple[str, str]] = {
+    ("cost", "infrastructure"): ("VerticalPodAutoscaler", "HorizontalPodAutoscaler"),
 }
 
 
@@ -149,8 +163,19 @@ class FleetOrchestrator:
                 from agentit.platform_context import offline_context
                 platform = offline_context()
 
+            # Match cli.py's _resolve_and_assess: build an LLM client whenever
+            # credentials are configured, but never let LLM init failures
+            # block skills-first generation (falls back to template mode).
+            llm_client = None
+            if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID"):
+                try:
+                    from agentit.llm import LLMClient
+                    llm_client = LLMClient()
+                except Exception as exc:
+                    logger.debug("LLM init failed for skills generation (continuing without): %s", exc)
+
             engine = SkillEngine(skills_dir, platform=platform)
-            skill_files = engine.run_all(self.report, store=self._store)
+            skill_files = engine.run_all(self.report, store=self._store, llm_client=llm_client)
             skill_covered_domains = engine.covered_domains(skill_files)
 
             if skill_files:
@@ -211,6 +236,14 @@ class FleetOrchestrator:
                 "resolution": f"{len(validation_issues)} manifest(s) failed validation — review before deploying",
                 "winner": "validation",
             })
+
+        # plan.auto_approve was computed from score/criticality alone at
+        # plan() time, before agents ran. A genuine conflict found for THIS
+        # actual run must override that and force auto_approve to False --
+        # it must never be trusted to auto-deploy when real conflicts exist.
+        non_blocker_conflicts = [c for c in conflicts if c["type"] != "blocker"]
+        if non_blocker_conflicts:
+            plan.auto_approve = False
 
         # Determine recommendation
         recommendation = self._generate_recommendation(plan, results, conflicts)
@@ -469,12 +502,39 @@ class FleetOrchestrator:
 
         return False
 
+    def _manifest_kinds(self, result: AgentResult) -> dict[str, dict]:
+        """Best-effort: parse `kind` -> manifest dict for every YAML file an agent generated."""
+        kinds: dict[str, dict] = {}
+        for fpath in result.files_generated:
+            if not fpath.endswith((".yaml", ".yml")):
+                continue
+            full = self.output_dir / result.category / fpath
+            try:
+                for doc in yaml.safe_load_all(full.read_text(encoding="utf-8")):
+                    if isinstance(doc, dict) and doc.get("kind"):
+                        kinds[doc["kind"]] = doc
+            except (OSError, yaml.YAMLError):
+                continue
+        return kinds
+
+    def _priority_winner(self, a: str, b: str) -> tuple[str, str]:
+        """Look up (winner, loser) for a pair from PRIORITY_MATRIX, defaulting to `a`."""
+        winner = PRIORITY_MATRIX.get((a, b)) or PRIORITY_MATRIX.get((b, a)) or a
+        loser = b if winner == a else a
+        return winner, loser
+
     def _detect_conflicts(self, results: list[AgentResult]) -> list[dict]:
-        """Detect conflicts between agent outputs using the priority matrix."""
+        """Detect REAL conflicts between agent outputs.
+
+        Two agents both succeeding is normal, not a conflict -- a conflict
+        must be an actual collision: either a known-conflicting resource
+        kind pair (e.g. VPA in Auto mode vs. HPA) both being produced for
+        this run, or two agents writing a file at the same output path.
+        """
         conflicts: list[dict] = []
 
         failed = {r.agent_name: r for r in results if not r.success}
-        succeeded = {r.agent_name for r in results if r.success}
+        succeeded = {r.agent_name: r for r in results if r.success}
 
         # Security blocker: if security agent failed, block everything
         if "security" in failed:
@@ -485,16 +545,61 @@ class FleetOrchestrator:
                 "winner": "security",
             })
 
-        # Apply priority matrix for overlapping successful agents
-        for (a, b), winner in PRIORITY_MATRIX.items():
-            if a in succeeded and b in succeeded:
-                loser = b if winner == a else a
+        flagged_pairs: set[tuple[str, str]] = set()
+
+        # Known resource-kind conflicts (e.g. VPA vs HPA on the same workload)
+        for (a, b), (kind_a, kind_b) in KNOWN_KIND_CONFLICTS.items():
+            if a not in succeeded or b not in succeeded:
+                continue
+            manifests_a = self._manifest_kinds(succeeded[a])
+            manifests_b = self._manifest_kinds(succeeded[b])
+            if kind_a not in manifests_a or kind_b not in manifests_b:
+                continue
+            # A VPA in "Off" mode only issues recommendations -- it doesn't
+            # actually fight the HPA for control, so it's not a real conflict.
+            doc_a = manifests_a[kind_a]
+            update_mode = doc_a.get("spec", {}).get("updatePolicy", {}).get("updateMode")
+            if kind_a == "VerticalPodAutoscaler" and update_mode == "Off":
+                continue
+            winner, loser = self._priority_winner(a, b)
+            conflicts.append({
+                "type": "priority",
+                "agents": [a, b],
+                "resolution": (
+                    f"{a} generated {kind_a} and {b} generated {kind_b} for the same "
+                    f"workload -- {winner} output takes precedence over {loser}"
+                ),
+                "winner": winner,
+            })
+            flagged_pairs.add((a, b))
+
+        # Generic collision: two agents writing a file at the exact same
+        # output-relative path is a real conflict regardless of category.
+        owner_of: dict[str, str] = {}
+        for r in results:
+            if not r.success:
+                continue
+            for fpath in r.files_generated:
+                prior_owner = owner_of.get(fpath)
+                if prior_owner is None:
+                    owner_of[fpath] = r.agent_name
+                    continue
+                if prior_owner == r.agent_name:
+                    continue
+                pair = (prior_owner, r.agent_name) if prior_owner < r.agent_name else (r.agent_name, prior_owner)
+                if pair in flagged_pairs:
+                    continue
+                winner, loser = self._priority_winner(prior_owner, r.agent_name)
                 conflicts.append({
                     "type": "priority",
-                    "agents": [a, b],
-                    "resolution": f"{winner} output takes precedence over {loser} for overlapping concerns",
+                    "agents": [prior_owner, r.agent_name],
+                    "resolution": (
+                        f"Both {prior_owner} and {r.agent_name} generated a file at '{fpath}' -- "
+                        f"{winner} output takes precedence over {loser}"
+                    ),
                     "winner": winner,
                 })
+                flagged_pairs.add(pair)
 
         return conflicts
 

@@ -97,11 +97,11 @@ flowchart TD
 
     F --> H["FleetOrchestrator.plan()"]
     H --> I{"Select agents by\ncriticality + score"}
-    I --> J["Skills run FIRST\n(property-based, LLM-tailored)"]
+    I --> J["Skills run FIRST\n(property-based, LLM-tailored\nwhen ANTHROPIC_API_KEY/\nANTHROPIC_VERTEX_PROJECT_ID configured)"]
     J --> K["Python agents supplement\n(uncovered findings only)"]
     J & K --> L["validate_manifest()\non every output"]
-    L --> M["_detect_conflicts()\npriority matrix"]
-    M --> N{"_can_auto_approve()?\nnot high/critical\nno critical findings\nscore >= 70"}
+    L --> M["_detect_conflicts()\nreal collisions only:\nknown kind conflicts (VPA vs HPA)\nor output-path collisions"]
+    M --> N{"plan.auto_approve?\nnot high/critical + no critical findings\n+ score >= 70 + no real conflicts this run"}
     N -->|"yes"| O["AUTO-APPROVED"]
     N -->|"no"| P["Gates created:\nsecurity-review\ndeploy-approval\nfinal-approval"]
     O & P --> Q["orchestration-summary.md"]
@@ -115,7 +115,7 @@ flowchart TD
 
 ### Skill engine (`skill_engine.py`)
 
-Skills are Markdown files with YAML frontmatter. They define properties (what must be true), not templates (how to generate). The LLM generates tailored manifests using:
+Skills are Markdown files with YAML frontmatter. They define properties (what must be true), not templates (how to generate). `FleetOrchestrator.run()` builds an `LLMClient` (same pattern as `cli.py`'s `_resolve_and_assess`, gracefully falling back to `None` if credentials aren't configured or init fails) and passes it into `SkillEngine.run_all()` for every onboarding run — CLI, portal, and webhook paths all get LLM-tailored generation, not just template substitution, whenever `ANTHROPIC_API_KEY`/`ANTHROPIC_VERTEX_PROJECT_ID` is configured. The LLM generates tailored manifests using:
 
 - The skill's property, constraints, and key decisions
 - The assessment report (stack, findings, criticality)
