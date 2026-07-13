@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: agentit-quota
+  labels:
+    app.kubernetes.io/name: agentit
+spec:
+  hard:
+    limits.cpu: '16'
+    limits.memory: 32Gi
+    pods: '50'

@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentit
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/managed-by: agentit
+    agentit/criticality: high
