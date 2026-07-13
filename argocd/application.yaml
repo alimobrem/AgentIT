@@ -51,13 +51,28 @@ spec:
           value: "true"
         # Stands up AgentIT's own bundled, non-operator Postgres instance
         # (Deployment+PVC+Service+Secret) live in the agentit namespace.
-        # Deliberately NOT paired with AGENTIT_DB_BACKEND=postgres here — the
-        # instance existing is safe to roll out independently; flipping the
-        # app's actual data backend is a separate, coordinated cutover across
-        # all 5 Deployments (see docs/postgres-migration-plan.md §7) and
-        # requires its own explicit go-ahead.
         - name: postgres.bundled.enabled
           value: "true"
+        # Coordinated cutover (docs/postgres-migration-plan.md section 7,
+        # explicitly approved): flips AGENTIT_DB_BACKEND=postgres (plus the
+        # AGENTIT_DB_DSN built from the bundled Secret) across all 5
+        # Deployments in this single sync. Revert this one parameter to
+        # "sqlite" to roll back every component at once -- the SQLite file
+        # itself is never touched, so that revert is non-destructive.
+        - name: postgres.backend
+          value: "postgres"
+      # Temporary, scoped to this one cutover sync only: bypasses the
+      # portal's normal canary steps so old (SQLite) and new (Postgres)
+      # portal pods are never live at the same time serving traffic against
+      # different backends, per section 7's explicit warning against a
+      # gradual rollout for a storage-backend change. Must be reverted
+      # (this whole `values` block removed) once the cutover is confirmed
+      # healthy, restoring normal canary behavior for the next ordinary
+      # code change.
+      values: |
+        rollout:
+          steps:
+            - setWeight: 100
   ignoreDifferences:
     - group: ""
       kind: Service
