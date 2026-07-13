@@ -47,6 +47,20 @@ class CircuitBreaker:
 llm_breaker = CircuitBreaker("llm", threshold=3, reset_after=30)
 kube_breaker = CircuitBreaker("kube", threshold=5, reset_after=60)
 
+_ALL_BREAKERS: dict[str, CircuitBreaker] = {"llm": llm_breaker, "kube": kube_breaker}
+
+
+def get_circuit_breaker_states() -> dict[str, dict[str, object]]:
+    """Expose current open/closed state for every registered circuit breaker.
+
+    Used by `/health`, the Prometheus `agentit_circuit_breaker_open` gauge,
+    and the Health page — a single accessor so all three stay in sync.
+    """
+    return {
+        name: {"open": breaker.is_open, "failures": breaker._failures}
+        for name, breaker in _ALL_BREAKERS.items()
+    }
+
 
 # ── Store singleton ───────────────────────────────────────────────────
 
