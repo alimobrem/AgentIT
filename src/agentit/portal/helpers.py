@@ -264,7 +264,7 @@ def clone_assess_cleanup(
 # ── Run onboarding ───────────────────────────────────────────────────
 
 
-def run_onboarding(report, assessment_id: str | None = None, store: object | None = None):
+async def run_onboarding(report, assessment_id: str | None = None, store: object | None = None):
     """Run orchestrated onboarding. Returns (files, orchestration_summary).
 
     This is the single shared implementation used by both the inline portal
@@ -272,30 +272,20 @@ def run_onboarding(report, assessment_id: str | None = None, store: object | Non
     the orchestration summary fields in sync between callers since
     `auto_approve`/`gates` are read downstream (e.g. webhook_auto_apply).
 
-    ``store`` must be a *synchronous* store (e.g. ``(await get_store()).raw``)
-    -- ``FleetOrchestrator`` (used below) is deliberately still fully
-    synchronous (see docs/postgres-migration-plan.md's Phase 3 progress
-    notes), and every real call site already runs this function inside a
-    worker thread via ``asyncio.to_thread``, so it cannot itself ``await``
-    the async store singleton. Callers (namely app.py's `_run_onboarding`
-    and webhooks.py's `webhook_onboard`) should resolve `get_store()` in
-    their own async context first and pass `.raw` explicitly. Falls back to
-    this module's own singleton's `.raw` (or a fresh sync store) only if a
-    caller omits `store` entirely.
+    ``store`` must be an async-compatible store (e.g. what ``await
+    get_store()`` returns) -- ``FleetOrchestrator`` is now genuinely
+    ``async def`` throughout, so this function is itself a coroutine,
+    `await`ed directly by its callers with no more ``asyncio.to_thread``
+    bridge needed for this specific call path. Falls back to this module's
+    own singleton (``await get_store()``) only if a caller omits `store`
+    entirely.
     """
     import tempfile
     from pathlib import Path
     from agentit.agents.orchestrator import FleetOrchestrator
 
     if store is None:
-        if _store is not None:
-            # Unwrap the async facade if that's what the singleton (or a
-            # test's patch of it) currently holds; a plain sync store
-            # (e.g. a test patching `_store` directly with one) is used as-is.
-            store = _store.raw if hasattr(_store, "raw") else _store
-        else:
-            from agentit.portal.store import AssessmentStore
-            store = AssessmentStore()
+        store = await get_store()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         base = Path(tmpdir)
@@ -303,7 +293,7 @@ def run_onboarding(report, assessment_id: str | None = None, store: object | Non
             report=report, output_dir=base,
             store=store, assessment_id=assessment_id,
         )
-        result = orch.run()
+        result = await orch.run()
 
         all_files: list[dict] = []
         for ar in result.agent_results:

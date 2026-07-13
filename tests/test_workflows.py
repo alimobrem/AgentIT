@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from conftest import make_store, make_report
+from conftest import make_async_store, make_store, make_report
 
 from agentit.models import DimensionScore, Finding, Severity
 
@@ -24,95 +24,99 @@ class TestAssessOnboardFlow:
         assert report.overall_score >= 0
         assert len(report.scores) == 7
 
-    def test_onboard_generates_manifests(self, tmp_path):
+    async def test_onboard_generates_manifests(self, tmp_path):
         from agentit.agents.orchestrator import FleetOrchestrator
 
         report = make_report(criticality="high")
-        store = make_store()
-        aid = store.save(report)
+        store, raw = make_async_store()
+        aid = raw.save(report)
 
         orch = FleetOrchestrator(report=report, output_dir=tmp_path / "out",
                                  store=store, assessment_id=aid)
-        result = orch.run()
+        result = await orch.run()
 
         assert any(r.success for r in result.agent_results)
-        assert len(store.list_remediations(aid)) > 0
-        assert len(store.list_slos(aid)) > 0
+        assert len(raw.list_remediations(aid)) > 0
+        assert len(raw.list_slos(aid)) > 0
 
-    def test_orchestrator_registers_agents(self, tmp_path):
+    async def test_orchestrator_registers_agents(self, tmp_path):
+        """security/observability/cicd/compliance/infrastructure/incident/
+        release/retirement/chaos were removed once skills covered their
+        domains (see docs/agent-removal-readiness.md) -- only 3 Python
+        agents are left to register."""
         from agentit.agents.orchestrator import FleetOrchestrator
 
-        store = make_store()
+        store, raw = make_async_store()
         report = make_report()
-        aid = store.save(report)
+        aid = raw.save(report)
 
         orch = FleetOrchestrator(report=report, output_dir=tmp_path / "out",
                                  store=store, assessment_id=aid)
-        orch.run()
+        await orch.run()
 
-        agents = store.list_agents()
-        assert len(agents) >= 5
+        agents = raw.list_agents()
+        assert len(agents) >= 3
 
 
 class TestAutoModeFlow:
     """Auto-mode: should_auto_apply decision matrix."""
 
-    def test_disabled_always_gates(self):
+    async def test_disabled_always_gates(self):
         from agentit.automode import AutoMode
-        store = make_store()
+        store, _raw = make_async_store()
         auto = AutoMode(store=store)
-        ok, _ = auto.should_auto_apply(True, ["x"], "low", "app")
+        ok, _ = await auto.should_auto_apply(True, ["x"], "low", "app")
         assert ok is False
 
-    def test_enabled_no_llm_gates(self):
+    async def test_enabled_no_llm_gates(self):
         from agentit.automode import AutoMode
-        store = make_store()
-        store.set_setting("auto_mode", "true")
+        store, raw = make_async_store()
+        raw.set_setting("auto_mode", "true")
         auto = AutoMode(store=store, llm_client=None)
-        ok, _ = auto.should_auto_apply(True, ["x"], "low", "app")
+        ok, _ = await auto.should_auto_apply(True, ["x"], "low", "app")
         assert ok is False
 
-    def test_enabled_llm_safe_approves(self):
+    async def test_enabled_llm_safe_approves(self):
         from agentit.automode import AutoMode
-        store = make_store()
-        store.set_setting("auto_mode", "true")
+        store, raw = make_async_store()
+        raw.set_setting("auto_mode", "true")
         llm = MagicMock()
         llm.classify_action.return_value = {"is_destructive": False, "confidence": 0.95, "reason": "safe"}
         auto = AutoMode(store=store, llm_client=llm)
-        ok, _ = auto.should_auto_apply(True, ["x"], "low", "app")
+        ok, _ = await auto.should_auto_apply(True, ["x"], "low", "app")
         assert ok is True
 
-    def test_enabled_llm_destructive_gates(self):
+    async def test_enabled_llm_destructive_gates(self):
         from agentit.automode import AutoMode
-        store = make_store()
-        store.set_setting("auto_mode", "true")
+        store, raw = make_async_store()
+        raw.set_setting("auto_mode", "true")
         llm = MagicMock()
         llm.classify_action.return_value = {"is_destructive": True, "confidence": 0.9, "reason": "deletes"}
         auto = AutoMode(store=store, llm_client=llm)
-        ok, _ = auto.should_auto_apply(True, ["x"], "low", "app")
+        ok, _ = await auto.should_auto_apply(True, ["x"], "low", "app")
         assert ok is False
 
 
 class TestRemediationLoopFlow:
     """Remediation loop: assess failure doesn't crash."""
 
-    def test_loop_handles_assess_failure(self):
+    async def test_loop_handles_assess_failure(self):
         from agentit.remediation_loop import RemediationLoop
-        store = make_store()
+        store, _raw = make_async_store()
         loop = RemediationLoop(portal_url="http://bad-host:9999", store=store, timeout=2)
-        result = loop.trigger("https://github.com/org/app", "app", reason="test")
+        result = await loop.trigger("https://github.com/org/app", "app", reason="test")
         assert result["outcome"] == "failed"
         assert result["step"] == "assess"
-        loop.close()
+        await loop.close()
 
-    def test_loop_logs_events(self):
+    async def test_loop_logs_events(self):
         from agentit.remediation_loop import RemediationLoop
-        store = make_store()
+        store, raw = make_async_store()
         loop = RemediationLoop(portal_url="http://bad-host:9999", store=store, timeout=2)
-        loop.trigger("https://github.com/org/app", "test-app", reason="test")
-        events = store.list_events()
+        await loop.trigger("https://github.com/org/app", "test-app", reason="test")
+        events = raw.list_events()
         assert any(e["action"] == "loop-started" for e in events)
-        loop.close()
+        await loop.close()
 
 
 class TestInfraRepoFlow:

@@ -6,15 +6,15 @@ from unittest.mock import MagicMock, patch
 
 from agentit.automode import AutoMode
 from agentit.llm import LLMClient
-from conftest import make_store, make_report
+from conftest import make_async_store, make_report
 
 
 class TestExecuteAutoApply:
-    def test_auto_apply_with_safe_llm(self):
-        s = make_store()
-        s.set_setting("auto_mode", "true")
+    async def test_auto_apply_with_safe_llm(self):
+        s, raw = make_async_store()
+        raw.set_setting("auto_mode", "true")
         report = make_report(criticality="low", summary="test")
-        aid = s.save(report)
+        aid = raw.save(report)
 
         llm = MagicMock()
         llm.classify_action.return_value = {
@@ -32,16 +32,16 @@ class TestExecuteAutoApply:
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": ["labels.yaml"], "skipped": [], "errors": []}
             engine = AutoMode(store=s, llm_client=llm)
-            result = engine.execute(aid, files, "default", "low", True, "test-app")
+            result = await engine.execute(aid, files, "default", "low", True, "test-app")
 
         assert result["action"] == "applied"
         assert "safe" in result["reason"]
 
-    def test_dry_run_failure_gates(self):
-        s = make_store()
-        s.set_setting("auto_mode", "true")
+    async def test_dry_run_failure_gates(self):
+        s, raw = make_async_store()
+        raw.set_setting("auto_mode", "true")
         report = make_report(criticality="low", summary="test")
-        aid = s.save(report)
+        aid = raw.save(report)
 
         llm = MagicMock()
         llm.classify_action.return_value = {
@@ -57,17 +57,17 @@ class TestExecuteAutoApply:
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": [], "skipped": [], "errors": ["forbidden"]}
             engine = AutoMode(store=s, llm_client=llm)
-            result = engine.execute(aid, files, "default", "low", True, "test-app")
+            result = await engine.execute(aid, files, "default", "low", True, "test-app")
 
         assert result["action"] == "gated"
         assert "dry-run" in result["reason"]
 
-    def test_marks_remediations_complete_on_apply(self):
-        s = make_store()
-        s.set_setting("auto_mode", "true")
+    async def test_marks_remediations_complete_on_apply(self):
+        s, raw = make_async_store()
+        raw.set_setting("auto_mode", "true")
         report = make_report(criticality="low", summary="test")
-        aid = s.save(report)
-        rid = s.save_remediation(aid, "security", "Add NetworkPolicy")
+        aid = raw.save(report)
+        raw.save_remediation(aid, "security", "Add NetworkPolicy")
 
         llm = MagicMock()
         llm.classify_action.return_value = {
@@ -77,23 +77,23 @@ class TestExecuteAutoApply:
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": ["np.yaml"], "skipped": [], "errors": []}
             engine = AutoMode(store=s, llm_client=llm)
-            engine.execute(aid, [{"path": "np.yaml", "content": "x", "category": "sec", "description": "np"}],
-                           "default", "low", True, "test-app")
+            await engine.execute(aid, [{"path": "np.yaml", "content": "x", "category": "sec", "description": "np"}],
+                                  "default", "low", True, "test-app")
 
-        rems = s.list_remediations(aid)
+        rems = raw.list_remediations(aid)
         assert rems[0]["status"] == "completed"
 
 
 class TestExecuteWithPublisher:
-    def test_publishes_events(self):
-        s = make_store()
-        s.set_setting("auto_mode", "true")
+    async def test_publishes_events(self):
+        s, raw = make_async_store()
+        raw.set_setting("auto_mode", "true")
         report = make_report(criticality="low", summary="test")
-        aid = s.save(report)
+        aid = raw.save(report)
 
         publisher = MagicMock()
         engine = AutoMode(store=s, publisher=publisher, llm_client=None)
-        engine.execute(aid, [], "default", "high", False, "test-app")
+        await engine.execute(aid, [], "default", "high", False, "test-app")
 
         assert publisher.publish.called
         call_args = publisher.publish.call_args

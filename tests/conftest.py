@@ -51,9 +51,72 @@ def pytest_collection_modifyitems(config, items):
                 item.add_marker(skip)
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_llm_env(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip ambient LLM credentials from every test's environment by default.
+
+    Root cause of the "test_llm.py flaky under full-suite ordering" issue:
+    a dev/CI environment can have real ``ANTHROPIC_API_KEY``/
+    ``ANTHROPIC_VERTEX_PROJECT_ID``/``CLOUD_ML_REGION``/
+    ``GOOGLE_APPLICATION_CREDENTIALS`` set ambiently (e.g. for an agent
+    session that itself runs on Vertex). Several unrelated code paths
+    auto-detect LLM availability straight from these env vars --
+    ``FleetOrchestrator.run()``'s skill-engine LLM client construction,
+    ``portal/helpers.py::get_llm_client()``, ``cli.py``'s
+    ``_resolve_and_assess`` -- so any test that exercises one of those
+    paths (e.g. any ``FleetOrchestrator(...).run()`` whose report matches
+    an LLM-only skill) ends up constructing a *real* ``LLMClient`` and
+    attempting a *real* network call. In a sandboxed test process with no
+    working credentials, that call fails and increments the shared,
+    process-global ``llm_breaker`` circuit breaker
+    (``portal/helpers.py::llm_breaker``) via ``LLMClient._chat()``'s
+    ``except Exception: llm_breaker.record_failure()`` -- with no matching
+    ``record_success()`` to offset it. Three or more such incidental
+    failures, scattered harmlessly across otherwise-unrelated test files,
+    are enough to trip the breaker (``threshold=3``), which then makes
+    ``tests/test_llm.py``'s otherwise-deterministic assertions fail purely
+    based on what happened to run before them and how much wall-clock time
+    has passed (``reset_after=30s``) -- exactly the "known-flaky under
+    full-suite ordering" symptom.
+
+    ``tests/conftest.py``'s own ``pytest_collection_modifyitems`` already
+    applies this same "ambient credentials shouldn't make LLM-eval tests
+    silently run" philosophy to ``llm_eval``-marked tests specifically;
+    this fixture extends it session-wide by default, and steps aside
+    (returns immediately) when ``--run-llm-evals`` is passed so those
+    tests still see real credentials when explicitly opted in. Any test
+    that wants real (fake-but-present) credentials for its own scenario
+    can still set them itself via ``monkeypatch.setenv(...)`` in its own
+    body -- that happens after this fixture runs and is unaffected by it.
+    """
+    if request.config.getoption("--run-llm-evals"):
+        return
+    for var in (
+        "ANTHROPIC_API_KEY", "ANTHROPIC_VERTEX_PROJECT_ID",
+        "CLOUD_ML_REGION", "GOOGLE_APPLICATION_CREDENTIALS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
 def make_store() -> AssessmentStore:
     """Create an in-memory assessment store."""
     return AssessmentStore(db_path=":memory:")
+
+
+def make_async_store():
+    """Create an in-memory store plus an async facade over that *same*
+    connection (``AsyncSQLiteStore.wrap``, not a second ``:memory:`` store --
+    those are separate, isolated databases).
+
+    Returns ``(async_store, raw_store)``. ``async_store`` is what gets handed
+    to the now-async ``FleetOrchestrator``/``AutoMode``/``RemediationDispatcher``/
+    ``RemediationLoop``; ``raw_store`` is the plain synchronous store for
+    direct, non-async test assertions (``raw_store.list_remediations(...)``).
+    """
+    from agentit.portal.store_factory import AsyncSQLiteStore
+
+    raw_store = make_store()
+    return AsyncSQLiteStore.wrap(raw_store), raw_store
 
 
 def make_report(

@@ -145,13 +145,19 @@ def client():
 
 
 def test_onboard_agent_crash_returns_partial(client, _override_store):
-    """When one agent (HardeningAgent) raises, others still produce files."""
+    """When one agent (CostOptimizationAgent) raises, others still produce files.
+
+    HardeningAgent (and security/observability/cicd/compliance generally)
+    were removed once skills covered their domains (see
+    docs/agent-removal-readiness.md) -- "cost" is one of the three Python
+    agents left, so it's the one this regression guard crashes now.
+    """
     store = _override_store
     report = _make_report_with_findings()
     aid = store.save(report)
 
     with patch(
-        "agentit.agents.hardening.HardeningAgent.run",
+        "agentit.agents.cost.CostOptimizationAgent.run",
         side_effect=RuntimeError("simulated crash"),
     ):
         resp = client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
@@ -161,12 +167,12 @@ def test_onboard_agent_crash_returns_partial(client, _override_store):
 
     files = store.get_onboarding(aid)
     assert files is not None
-    assert len(files) > 0, "Other agents should still produce files despite hardening crash"
+    assert len(files) > 0, "Other agents/skills should still produce files despite cost agent crash"
 
     categories = {f["category"] for f in files}
-    assert "security" not in categories, "Crashed agent should not produce output"
-    # At least one non-security agent succeeded
-    assert categories & {"observability", "cicd", "compliance"}
+    assert "cost" not in categories, "Crashed agent should not produce output"
+    # At least one other source (skills, or a surviving Python agent) succeeded
+    assert categories & {"skills", "dependency", "codechange"}
 
 
 # ------------------------------------------------------------------

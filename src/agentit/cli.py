@@ -16,13 +16,6 @@ from agentit.portal.store_factory import create_store
 from agentit.reporter import render_json_report, render_terminal_report
 from agentit.runner import run_assessment
 
-# Agent imports used by the ``onboard`` command (lazy-imported inline for other
-# commands, but we keep them at module level for ``onboard`` readability).
-from agentit.agents.hardening import HardeningAgent
-from agentit.agents.observability import ObservabilityAgent
-from agentit.agents.cicd import CICDAgent
-from agentit.agents.compliance import ComplianceAgent
-
 
 def _run_async(coro_func: Callable[..., Coroutine]) -> Callable[..., None]:
     """Let a Click command's callback be ``async def`` while Click itself
@@ -84,7 +77,6 @@ def main() -> None:
     User commands:
       assess       Score a repo across 7 enterprise dimensions
       onboard      Assess + generate hardening manifests
-      harden       Generate security manifests only
       watch        Continuously re-assess on a schedule
       portal       Launch the web UI
       self-assess  AgentIT assesses itself
@@ -198,29 +190,6 @@ def assess(
 
 
 @main.command()
-@click.argument("repo_url")
-@click.option("--output-dir", default="./hardening-output", type=click.Path())
-@click.option("--criticality", type=click.Choice(["low", "medium", "high", "critical"]), default="medium")
-@click.option("--llm", "use_llm", is_flag=True, default=None, help="Enable Claude LLM (auto-detects credentials if omitted).")
-@click.option("--llm-model", default=None, help="Claude model to use.")
-def harden(repo_url: str, output_dir: str, criticality: str, use_llm: bool, llm_model: str | None) -> None:
-    """Generate enterprise hardening manifests for a repository."""
-    from agentit.agents.hardening import HardeningAgent
-
-    try:
-        with _resolve_and_assess(repo_url, criticality, use_llm, llm_model) as report:
-            click.echo("Generating hardening manifests...", err=True)
-            agent = HardeningAgent(report=report, output_dir=Path(output_dir))
-            result = agent.run()
-            click.echo(result.summary, err=True)
-            for gf in result.files:
-                click.echo(f"  {gf.path}: {gf.description}", err=True)
-    except CloneError as exc:
-        click.echo(f"Error: {exc}", err=True)
-        sys.exit(1)
-
-
-@main.command()
 @click.option("--host", default="0.0.0.0")
 @click.option("--port", default=8080, type=int)
 def portal(host: str, port: int) -> None:
@@ -310,7 +279,8 @@ def watch(
 @click.option("--criticality", type=click.Choice(["low", "medium", "high", "critical"]), default="medium")
 @click.option("--llm", "use_llm", is_flag=True, default=None, help="Enable Claude LLM (auto-detects credentials if omitted).")
 @click.option("--llm-model", default=None, help="Claude model to use.")
-def orchestrate(repo_url: str, output_dir: str, criticality: str, use_llm: bool, llm_model: str | None) -> None:
+@_run_async
+async def orchestrate(repo_url: str, output_dir: str, criticality: str, use_llm: bool, llm_model: str | None) -> None:
     """Run full orchestrated onboarding with Fleet Orchestrator."""
     from agentit.agents.orchestrator import FleetOrchestrator
 
@@ -318,7 +288,7 @@ def orchestrate(repo_url: str, output_dir: str, criticality: str, use_llm: bool,
         with _resolve_and_assess(repo_url, criticality, use_llm, llm_model) as report:
             click.echo("Running Fleet Orchestrator...", err=True)
             orch = FleetOrchestrator(report=report, output_dir=Path(output_dir))
-            result = orch.run()
+            result = await orch.run()
 
             # Print plan
             plan = result.plan
@@ -360,8 +330,9 @@ def orchestrate(repo_url: str, output_dir: str, criticality: str, use_llm: bool,
 @click.option("--profile", type=click.Choice(["lightweight", "standard", "full"]), default="standard",
               help="Agent profile: lightweight (security+cicd), standard (core 6), full (all agents).")
 @click.option("--agents", default=None, help="Comma-separated agent list (overrides --profile).")
-def onboard(repo_url: str, output_dir: str, criticality: str, use_llm: bool, llm_model: str | None,
-            profile: str, agents: str | None) -> None:
+@_run_async
+async def onboard(repo_url: str, output_dir: str, criticality: str, use_llm: bool, llm_model: str | None,
+                   profile: str, agents: str | None) -> None:
     """Run enterprise onboarding: assess + generate hardening manifests."""
     import json
 
@@ -381,7 +352,7 @@ def onboard(repo_url: str, output_dir: str, criticality: str, use_llm: bool, llm
             click.echo(f"Running Fleet Orchestrator (profile={profile})...", err=True)
             orch = FleetOrchestrator(report=report, output_dir=out,
                                     profile=profile, agent_filter=agent_filter)
-            result = orch.run()
+            result = await orch.run()
 
             # Summary
             click.echo(f"\nAssessment score: {report.overall_score:.1f}", err=True)
@@ -454,9 +425,11 @@ async def vuln_watch(interval: int) -> None:
     from agentit.watchers.vuln_watcher import VulnWatcher
 
     store = await create_store()
-    # VulnWatcher's tick body (check_fleet -> AutoMode/RemediationLoop) is
-    # unconverted synchronous code this pass -- pass the raw store so its
-    # behavior is unaffected; only watcher.run()'s outer loop is async now.
+    # EventConsumer.consume() (used by `consume`, not this watcher's own
+    # run() loop) is unconverted synchronous code -- pass the raw store.
+    # check_fleet() itself now wraps self._store in an async facade
+    # internally before constructing AutoMode/RemediationLoop (both
+    # genuinely async now) -- see watchers/vuln_watcher.py.
     consumer = EventConsumer(topics=["agentit-events"], group_id="agentit-vuln-watcher", store=store.raw)
     watcher = VulnWatcher(
         publisher=get_publisher(),
@@ -507,13 +480,21 @@ async def drift_detect(interval: int) -> None:
 @_run_async
 async def learn_watch(interval: int, limit: int, llm_model: str | None) -> None:
     """Long-lived skill learner — periodically researches CVEs and drafts new skills."""
+    import os
+
     from agentit.events import get_publisher
     from agentit.watchers.skill_learner import SkillLearner
 
     store = await create_store()
+    # AGENTIT_SKILLS_DIR, when set (chart/templates/agents/skill-learner.yaml
+    # sets it to a dedicated mounted PVC), points drafts at persistent
+    # storage instead of this pod's own ephemeral `skills/` tree -- see
+    # SkillLearner's docstring for what this does and doesn't fix.
+    skills_dir_env = os.environ.get("AGENTIT_SKILLS_DIR")
     learner = SkillLearner(
         publisher=get_publisher(), llm_model=llm_model, interval=interval, limit=limit,
         store=store.raw,
+        skills_dir=Path(skills_dir_env) if skills_dir_env else None,
     )
     await learner.run()
 
@@ -570,14 +551,13 @@ async def self_assess(repo_url: str, criticality: str, auto_apply: bool, use_llm
             out.mkdir(parents=True, exist_ok=True)
 
             click.echo("Running Fleet Orchestrator on AgentIT...", err=True)
-            # FleetOrchestrator is unconverted, synchronous code this pass --
-            # pass the raw store so its internal `self._store.*` calls (no
-            # `await`) keep behaving exactly as before.
+            # FleetOrchestrator is now genuinely async -- hand it the
+            # async store directly and await it.
             orch = FleetOrchestrator(
                 report=report, output_dir=out,
-                store=store.raw, assessment_id=assessment_id,
+                store=store, assessment_id=assessment_id,
             )
-            result = orch.run()
+            result = await orch.run()
 
             for ar in result.agent_results:
                 status = "PASS" if ar.success else "FAIL"
@@ -609,8 +589,8 @@ async def self_assess(repo_url: str, criticality: str, auto_apply: bool, use_llm
                                 "description": fpath,
                             })
 
-                engine = AutoMode(store=store.raw, llm_client=llm_client)
-                apply_result = engine.execute(
+                engine = AutoMode(store=store, llm_client=llm_client)
+                apply_result = await engine.execute(
                     assessment_id, files, "agentit",
                     criticality, result.plan.auto_approve, "agentit",
                 )
@@ -683,12 +663,9 @@ async def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bo
             except Exception:
                 click.echo("  LLM unavailable — using template fallback.", err=True)
 
-            # RemediationDispatcher.dispatch() is unconverted, synchronous
-            # code this pass (see docs/postgres-migration-plan.md's Phase 3
-            # progress notes for why) -- it's also called synchronously,
-            # without `await`, from portal/app.py and portal/routes/webhooks.py,
-            # which are out of scope here, so pass the raw store.
-            dispatcher = RemediationDispatcher(store.raw)
+            # RemediationDispatcher is now genuinely async -- hand it the
+            # async store directly and await dispatch() below.
+            dispatcher = RemediationDispatcher(store)
             generated = []
 
             for finding in fixable:
@@ -704,7 +681,7 @@ async def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bo
                     continue
 
                 # Fall back to dispatcher (Python agent templates)
-                result = dispatcher.dispatch(assessment_id, finding.category, report.repo_name)
+                result = await dispatcher.dispatch(assessment_id, finding.category, report.repo_name)
                 if result.get("files"):
                     from agentit.agents.base import GeneratedFile
                     for ff_raw in result["files"]:
@@ -775,8 +752,16 @@ async def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bo
                 eff_store = await create_store(db_path)
                 for finding, fix_file in generated:
                     outcome = 'approved' if fix_file in approved_files else 'rejected'
-                    skill_name = fix_file.path.replace('.yaml', '')
-                    if fix_file.description and "'" in fix_file.description:
+                    # Prefer the exact skill name SkillEngine.generate() sets
+                    # (fix_file.skill_name) -- deriving it from the path
+                    # (stripping just ".yaml") was wrong for skill-generated
+                    # files, since the path is "{app_name}-{skill.name}.yaml"
+                    # and this recorded "app_name-skill_name" as the skill
+                    # name, never aggregating across apps. Only Python-agent
+                    # (dispatcher) files fall back to the old heuristics --
+                    # they carry no skill_name.
+                    skill_name = fix_file.skill_name or fix_file.path.replace('.yaml', '')
+                    if not fix_file.skill_name and fix_file.description and "'" in fix_file.description:
                         parts = fix_file.description.split("'")
                         if len(parts) >= 2:
                             skill_name = parts[1]

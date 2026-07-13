@@ -1,32 +1,59 @@
-"""Generic remediation dispatcher — routes findings to the right agent generator."""
+"""Generic remediation dispatcher — routes findings to the skill engine.
+
+Historically this instantiated a Python agent (hardening/compliance/cicd/
+observability) and called a specific generator method on it. Those agents
+were removed once skills gained full template-fallback parity for their
+domains (see docs/agent-removal-readiness.md) -- this now resolves the
+matching skill by name and renders it with ``SkillEngine.generate()``
+(template mode, no LLM, to keep this path deterministic like the agent
+methods it replaces). ``base_image`` is the one category that isn't
+skill-shaped (it patches an *existing* file rather than generating a new
+one) and is special-cased to ``remediation.base_image.patch_base_image``.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
-import tempfile
 from pathlib import Path
 
-from agentit.agents.base import GeneratedFile
-from agentit.portal.store import AssessmentStore
-from agentit.remediation.registry import FIX_REGISTRY, get_agent_class, lookup
+from agentit.remediation.registry import lookup
+from agentit.skill_engine import SkillEngine
 
 logger = logging.getLogger(__name__)
 
 
+def _default_skills_dir() -> Path:
+    """Return the ``skills/`` directory at the project root."""
+    here = Path(__file__).resolve()
+    candidate = here.parent.parent.parent.parent / "skills"
+    return candidate if candidate.exists() else Path("skills")
+
+
 class RemediationDispatcher:
-    def __init__(self, store: AssessmentStore) -> None:
+    """``store`` must be an async-compatible store (``AsyncSQLiteStore`` or
+    ``store_pg.AssessmentStore``) -- every store call below is ``await``ed.
+    ``lookup()`` (registry.py) and the skill engine's template-mode
+    ``generate()`` are pure/CPU-bound with no I/O, so they stay plain sync
+    calls made directly from these async methods -- there's no blocking
+    call here that would justify a ``to_thread`` wrap.
+    """
+
+    def __init__(self, store: object) -> None:
         self._store = store
 
-    def dispatch(
+    async def dispatch(
         self,
         assessment_id: str,
         finding_category: str,
         app_name: str = "",
     ) -> dict:
-        """Route a finding to the right agent generator and produce a fix.
+        """Route a finding to the matching skill and produce a fix.
 
         Returns {"files": list[dict], "agent": str, "method": str, "error": str | None}
+        (``agent``/``method`` are kept for backward-compat with callers that
+        attribute/log by these field names; ``agent`` now holds the skill
+        domain and ``method`` the skill name.)
         """
         match = lookup(finding_category)
         if match is None:
@@ -37,91 +64,83 @@ class RemediationDispatcher:
                 "error": f"No fix registered for category '{finding_category}'",
             }
 
-        agent_key, method_name = match
+        domain, skill_name = match
 
-        report = self._store.get(assessment_id)
+        report = await self._store.get(assessment_id)
         if report is None:
             return {
                 "files": [],
-                "agent": agent_key,
-                "method": method_name,
+                "agent": domain,
+                "method": skill_name,
                 "error": f"Assessment {assessment_id} not found",
             }
 
-        if method_name == "patch_base_image":
-            return self._dispatch_patch(assessment_id, agent_key, report, app_name)
+        if skill_name == "patch_base_image":
+            return await self._dispatch_patch(assessment_id, domain, report, app_name)
 
-        return self._dispatch_generate(assessment_id, agent_key, method_name, report)
+        return self._dispatch_generate(domain, skill_name, report)
 
     def _dispatch_generate(
         self,
-        assessment_id: str,
-        agent_key: str,
-        method_name: str,
+        domain: str,
+        skill_name: str,
         report: object,
     ) -> dict:
-        """Run a standard agent generator method."""
-        agent_cls = get_agent_class(agent_key)
+        """Render the matching skill in template mode (no LLM -- deterministic,
+        matching the fully-offline behavior the Python agent methods had)."""
+        engine = SkillEngine(_default_skills_dir(), platform=None)
+        skill = next((s for s in engine.skills if s.name == skill_name), None)
+        if skill is None:
+            return {
+                "files": [],
+                "agent": domain,
+                "method": skill_name,
+                "error": f"Skill '{skill_name}' not found for domain '{domain}'",
+            }
 
-        with tempfile.TemporaryDirectory(prefix="agentit-fix-") as tmpdir:
-            agent = agent_cls(report, Path(tmpdir))
-            method = getattr(agent, method_name, None)
-            if method is None:
-                return {
-                    "files": [],
-                    "agent": agent_key,
-                    "method": method_name,
-                    "error": f"Method {method_name} not found on {agent_key} agent",
-                }
+        try:
+            result = engine.generate(skill, report, llm_client=None)
+        except Exception as exc:
+            logger.exception("Skill generator %s/%s failed", domain, skill_name)
+            return {
+                "files": [],
+                "agent": domain,
+                "method": skill_name,
+                "error": str(exc),
+            }
 
-            try:
-                result = method()
-            except Exception as exc:
-                logger.exception("Fix generator %s.%s failed", agent_key, method_name)
-                return {
-                    "files": [],
-                    "agent": agent_key,
-                    "method": method_name,
-                    "error": str(exc),
-                }
-
-            if isinstance(result, GeneratedFile):
-                result = [result]
-            elif result is None:
-                result = []
-
-            files = [
-                {
-                    "category": agent_key,
-                    "path": f.path,
-                    "content": f.content,
-                    "description": f.description,
-                }
-                for f in result
-            ]
+        files = [
+            {
+                "category": domain,
+                "path": f.path,
+                "content": f.content,
+                "description": f.description,
+            }
+            for f in result
+        ]
 
         return {
             "files": files,
-            "agent": agent_key,
-            "method": method_name,
+            "agent": domain,
+            "method": skill_name,
             "error": None,
         }
 
-    def _dispatch_patch(
+    async def _dispatch_patch(
         self,
         assessment_id: str,
-        agent_key: str,
+        domain: str,
         report: object,
         app_name: str,
     ) -> dict:
         """Special case: patch an existing file rather than generating a new one."""
-        from agentit.agents.hardening import patch_base_image
+        from agentit.remediation.base_image import patch_base_image
 
-        onboarding = self._store.get_latest_onboarding(assessment_id)
+        onboarding = await self._store.get_latest_onboarding(assessment_id)
         if onboarding is None:
             return {
                 "files": [],
-                "agent": agent_key,
+                "agent": domain,
                 "method": "patch_base_image",
                 "error": "No onboarding results to patch",
             }
@@ -139,7 +158,7 @@ class RemediationDispatcher:
                 result = patch_base_image(f["content"], lang)
                 if result:
                     patched_files.append({
-                        "category": "hardening",
+                        "category": domain,
                         "path": f["path"],
                         "content": result,
                         "description": f"Patched base image to UBI ({lang})",
@@ -147,7 +166,7 @@ class RemediationDispatcher:
 
         return {
             "files": patched_files,
-            "agent": agent_key,
+            "agent": domain,
             "method": "patch_base_image",
             "error": None if patched_files else "No patchable Containerfile found",
         }

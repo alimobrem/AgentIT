@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -91,11 +92,24 @@ class FleetOrchestrator:
     - Resolve conflicts between agent recommendations
     - Decide auto-approve vs. human gate based on risk
     - Track overall onboarding status
+
+    ``store`` must be an async-compatible store (``store_factory.AsyncSQLiteStore``
+    or ``store_pg.AssessmentStore``) -- every store call is ``await``ed. The
+    3 surviving Python agents' ``.run()`` methods stay synchronous (per
+    ``agents/base.py``'s existing contract) and are invoked via
+    ``asyncio.to_thread`` at their one call site in ``_run_agents_local``;
+    K8s Job dispatch (``kube.py``, sync ``kubernetes`` client) is likewise
+    wrapped narrowly at each blocking call site in ``_run_agents_as_jobs``
+    rather than the whole method running in a worker thread.
     """
 
+    # security, observability, cicd, compliance, infrastructure, and release
+    # are now skill-only domains (see docs/agent-removal-readiness.md) --
+    # skills run unconditionally in Step 1 of run(), independent of this
+    # profile list, so there's no Python agent left to plan for them here.
     PROFILES = {
-        "lightweight": ["security", "cicd"],
-        "standard": ["security", "observability", "cicd", "compliance", "infrastructure", "release"],
+        "lightweight": [],
+        "standard": [],
         "full": None,  # None = all available agents
     }
 
@@ -117,7 +131,9 @@ class FleetOrchestrator:
         self._agent_filter = agent_filter
 
     def plan(self) -> OrchestrationPlan:
-        """Analyze the assessment and create an orchestration plan."""
+        """Analyze the assessment and create an orchestration plan.
+
+        Pure computation, no I/O -- stays synchronous."""
         agents = self._select_agents()
         gates = self._determine_gates()
         auto = self._can_auto_approve()
@@ -131,7 +147,7 @@ class FleetOrchestrator:
             auto_approve=auto,
         )
 
-    def run(self) -> OrchestrationResult:
+    async def run(self) -> OrchestrationResult:
         """Execute the full orchestration: plan -> run agents -> resolve conflicts -> create gates."""
         plan = self.plan()
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -150,7 +166,7 @@ class FleetOrchestrator:
             for name, (cat, _cls) in agent_map.items():
                 try:
                     caps = AGENT_CAPABILITIES.get(name, "")
-                    self._store.register_agent(name, cat, capabilities=caps)
+                    await self._store.register_agent(name, cat, capabilities=caps)
                 except Exception as exc:
                     logger.warning("Failed to register agent '%s': %s", name, exc)
 
@@ -165,7 +181,32 @@ class FleetOrchestrator:
 
             try:
                 from agentit.platform_context import discover_platform
-                platform = discover_platform(os.environ.get("AGENTIT_NAMESPACE", "default"))
+                # Blocking, synchronous kubernetes-client discovery calls --
+                # narrowly wrapped in to_thread rather than the whole run()
+                # fighting a sync K8s client.
+                platform = await asyncio.to_thread(
+                    discover_platform, os.environ.get("AGENTIT_NAMESPACE", "default"),
+                )
+                # discover_platform() degrades gracefully by design -- every
+                # sub-probe (version, API groups, kinds, CRDs) catches its
+                # own exceptions, so it never actually raises when the
+                # cluster is unreachable; it just returns a context with
+                # nothing discovered. Now that the removed Python agents
+                # (security/observability/cicd/compliance/etc. -- see
+                # docs/agent-removal-readiness.md) no longer provide a
+                # platform-independent fallback, that "discovered nothing"
+                # case must not silently gate every skill's has_api() check
+                # to False. A real cluster always resolves a k8s_version and
+                # at least the built-in core kinds, so both being empty is a
+                # reliable signal that discovery never actually connected --
+                # treat it like a discovery failure and skip the API-
+                # availability gate entirely (platform=None), matching the
+                # removed agents' own platform-independent behavior.
+                if platform.k8s_version == "unknown" and not platform.available_kinds:
+                    logger.warning(
+                        "Platform discovery found no reachable cluster -- generating "
+                        "skills without API-availability gating")
+                    platform = None
             except Exception as exc:
                 logger.warning("Platform discovery failed, falling back to offline context: %s", exc)
                 from agentit.platform_context import offline_context
@@ -183,11 +224,17 @@ class FleetOrchestrator:
                     logger.debug("LLM init failed for skills generation (continuing without): %s", exc)
 
             engine = SkillEngine(skills_dir, platform=platform)
-            skill_files = engine.run_all(self.report, store=self._store, llm_client=llm_client)
+            # run_all() is a synchronous, potentially slow call (it may make
+            # several sequential LLM requests, one per matched skill) --
+            # narrowly wrapped in to_thread so it doesn't block the event
+            # loop for however long that takes.
+            skill_files = await asyncio.to_thread(
+                engine.run_all, self.report, store=self._store, llm_client=llm_client,
+            )
             skill_covered_domains = engine.covered_domains(skill_files)
 
             if skill_files:
-                self._log_event("skills", "completed",
+                await self._log_event("skills", "completed",
                                 f"Skills generated {len(skill_files)} files covering domains: "
                                 f"{', '.join(sorted(skill_covered_domains)) or 'none'}")
                 skill_dir = self.output_dir / "skills"
@@ -199,9 +246,23 @@ class FleetOrchestrator:
             logger.debug("Skill engine failed (non-fatal): %s", exc)
 
         # --- Step 2: Determine which agents to skip (covered by skills) ---
+        # cost/dependency are the two exceptions kept per
+        # docs/agent-removal-readiness.md specifically for their narrative
+        # report generation (cost-report.md/dependency-report.md), which
+        # depends on runtime-computed data (detected ecosystems/CVEs,
+        # computed cost tier) that no skill template has access to. Their
+        # *manifest* outputs (vpa/cost-labels/cost-cronjob,
+        # renovate/dependabot/dependency-cronjob) are also covered by
+        # skills, so this domain-level skip would otherwise skip the whole
+        # agent -- narrative report included -- the moment any one of
+        # those manifest skills matches, making "kept in place" a no-op in
+        # practice. Never skip these two specifically for that reason.
+        _NEVER_SKIP = {"cost", "dependency"}
         skip_agents: set[str] = set()
         if skill_covered_domains:
             for agent_name in plan.agents_to_run:
+                if agent_name in _NEVER_SKIP:
+                    continue
                 agent_category = agent_map.get(agent_name, (agent_name,))[0]
                 if agent_category in skill_covered_domains:
                     skip_agents.add(agent_name)
@@ -212,9 +273,9 @@ class FleetOrchestrator:
 
         # --- Step 3: Run Python agents only for uncovered domains (fallback) ---
         if AGENT_MODE == "kubernetes":
-            results = self._run_agents_as_jobs(plan, agent_map, skip_agents=skip_agents)
+            results = await self._run_agents_as_jobs(plan, agent_map, skip_agents=skip_agents)
         else:
-            results = self._run_agents_local(plan, agent_map, skip_agents=skip_agents)
+            results = await self._run_agents_local(plan, agent_map, skip_agents=skip_agents)
 
         # --- Step 4: Add skill results to the result list ---
         if skill_files:
@@ -226,12 +287,19 @@ class FleetOrchestrator:
                 findings_count=len(skill_files),
             ))
 
+        # Default SLOs are based on the report's own criticality, not on
+        # which mechanism (Python agent vs. skill) produced release-domain
+        # manifests -- release is now a skill-only domain (see
+        # docs/agent-removal-readiness.md), so this used to be tied to
+        # ReleaseCoordinatorAgent's agent_name and is now unconditional.
+        await self._create_default_slos()
+
         # Validate generated output
         validation_issues = self._post_hardening_validation(results)
         if validation_issues:
             for issue in validation_issues:
                 logger.warning("Post-hardening validation: %s", issue)
-            self._log_event("orchestrator", "validation-issues",
+            await self._log_event("orchestrator", "validation-issues",
                             f"{len(validation_issues)} manifest validation issue(s) found")
 
         # Resolve conflicts
@@ -267,7 +335,7 @@ class FleetOrchestrator:
             recommendation=recommendation,
         )
 
-    def _run_agents_local(
+    async def _run_agents_local(
         self,
         plan: OrchestrationPlan,
         agent_map: dict[str, tuple[str, type]],
@@ -300,11 +368,15 @@ class FleetOrchestrator:
             t0 = time.monotonic()
             try:
                 agent_instance = agent_cls(report=self.report, output_dir=sub_dir)
-                result = agent_instance.run()
+                # Agent.run() is synchronous per agents/base.py's existing
+                # contract -- narrowly wrapped in to_thread right at this
+                # one call site rather than making the Agent contract
+                # itself async (a much broader ripple than this task needs).
+                result = await asyncio.to_thread(agent_instance.run)
                 elapsed = time.monotonic() - t0
                 agent_run_duration_seconds.labels(agent=agent_name, mode="local").observe(elapsed)
                 agent_runs_total.labels(agent=agent_name, mode="local", status="success").inc()
-                self._save_agent_run(agent_name, "local", "success", elapsed, resource_tier)
+                await self._save_agent_run(agent_name, "local", "success", elapsed, resource_tier)
                 results.append(AgentResult(
                     agent_name=agent_name,
                     category=category,
@@ -312,15 +384,13 @@ class FleetOrchestrator:
                     success=True,
                     findings_count=len(result.files),
                 ))
-                self._log_event(agent_name, "completed", f"Generated {len(result.files)} files")
-                self._record_remediations(agent_name, result.files)
-                if agent_name == "release":
-                    self._create_default_slos()
+                await self._log_event(agent_name, "completed", f"Generated {len(result.files)} files")
+                await self._record_remediations(agent_name, result.files)
             except Exception as exc:
                 elapsed = time.monotonic() - t0
                 agent_run_duration_seconds.labels(agent=agent_name, mode="local").observe(elapsed)
                 agent_runs_total.labels(agent=agent_name, mode="local", status="error").inc()
-                self._save_agent_run(agent_name, "local", "error", elapsed, resource_tier, error=str(exc))
+                await self._save_agent_run(agent_name, "local", "error", elapsed, resource_tier, error=str(exc))
                 logger.warning("Agent %s failed: %s", agent_name, exc)
                 results.append(AgentResult(
                     agent_name=agent_name,
@@ -329,11 +399,11 @@ class FleetOrchestrator:
                     success=False,
                     error=str(exc),
                 ))
-                self._log_event(agent_name, "failed", str(exc))
+                await self._log_event(agent_name, "failed", str(exc))
 
         return results
 
-    def _save_agent_run(
+    async def _save_agent_run(
         self,
         agent_name: str,
         mode: str,
@@ -346,7 +416,7 @@ class FleetOrchestrator:
         if self._store is None:
             return
         try:
-            self._store.save_agent_run(
+            await self._store.save_agent_run(
                 agent_name, mode, status,
                 assessment_id=self._assessment_id,
                 duration_ms=int(elapsed_seconds * 1000),
@@ -367,26 +437,38 @@ class FleetOrchestrator:
             return log_output[b + len(begin):e].strip()
         return log_output.strip()
 
-    def _run_agents_as_jobs(
+    async def _run_agents_as_jobs(
         self,
         plan: OrchestrationPlan,
         agent_map: dict[str, tuple[str, type]],
         *,
         skip_agents: set[str] | None = None,
     ) -> list[AgentResult]:
-        """Run agents as K8s Jobs in parallel."""
+        """Run agents as K8s Jobs in parallel.
+
+        ``kube.py``'s ``kubernetes`` client calls are all synchronous --
+        each one is wrapped individually in ``asyncio.to_thread`` right at
+        its call site below, rather than dispatching this whole method (or
+        the whole class) to a worker thread. The polling loop's
+        ``time.sleep(5)`` becomes ``await asyncio.sleep(5)`` so it no longer
+        blocks the event loop while waiting for Jobs to finish.
+        """
         from agentit import kube
         from agentit.agents.capabilities import AGENT_CLASSES, RESOURCE_TIERS
 
         namespace = os.environ.get("AGENTIT_NAMESPACE", "agentit")
-        image = os.environ.get("AGENTIT_IMAGE") or kube.get_current_pod_image() or "quay.io/amobrem/agentit:latest"
+        pod_image = await asyncio.to_thread(kube.get_current_pod_image)
+        image = os.environ.get("AGENTIT_IMAGE") or pod_image or "quay.io/amobrem/agentit:latest"
 
         # Serialize report to ConfigMap
         report_json = self.report.model_dump_json()
         cm_name = f"agentit-report-{self._assessment_id or 'manual'}"[:63]
-        if not kube.create_config_map(cm_name, namespace, {"report.json": report_json}):
+        cm_created = await asyncio.to_thread(
+            kube.create_config_map, cm_name, namespace, {"report.json": report_json},
+        )
+        if not cm_created:
             logger.warning("Failed to create report ConfigMap, falling back to local mode")
-            return self._run_agents_local(plan, agent_map, skip_agents=skip_agents)
+            return await self._run_agents_local(plan, agent_map, skip_agents=skip_agents)
 
         # Launch all Jobs
         job_names: dict[str, str] = {}
@@ -405,16 +487,18 @@ class FleetOrchestrator:
             ]
             tier_name = AGENT_CLASSES.get(agent_name, ("", "", "", "standard"))[3]
             tier = RESOURCE_TIERS.get(tier_name, RESOURCE_TIERS["standard"])
-            if kube.create_job(
+            job_created = await asyncio.to_thread(
+                kube.create_job,
                 job_name, namespace, image, command,
                 config_map_name=cm_name,
                 labels={"agentit/agent": agent_name, "agentit/managed-by": "orchestrator"},
                 resources=tier,
-            ):
+            )
+            if job_created:
                 job_names[agent_name] = job_name
                 job_started_at[agent_name] = time.monotonic()
                 job_tiers[agent_name] = tier_name
-                self._log_event(agent_name, "job-created", f"K8s Job {job_name} created")
+                await self._log_event(agent_name, "job-created", f"K8s Job {job_name} created")
 
         # Poll until all complete (timeout 5 min)
         results: list[AgentResult] = []
@@ -423,12 +507,12 @@ class FleetOrchestrator:
 
         while pending and time.monotonic() < deadline:
             for agent_name in list(pending):
-                status = kube.get_job_status(job_names[agent_name], namespace)
+                status = await asyncio.to_thread(kube.get_job_status, job_names[agent_name], namespace)
                 elapsed = time.monotonic() - job_started_at.get(agent_name, time.monotonic())
                 tier = job_tiers.get(agent_name, "standard")
                 if status == "succeeded":
                     pending.discard(agent_name)
-                    log_output = kube.get_job_pod_log(job_names[agent_name], namespace)
+                    log_output = await asyncio.to_thread(kube.get_job_pod_log, job_names[agent_name], namespace)
                     category = agent_map[agent_name][0]
                     try:
                         from agentit.agents.base import GeneratedFile
@@ -436,14 +520,14 @@ class FleetOrchestrator:
                         files_data = json.loads(result_json)
                         files = [GeneratedFile(**f) for f in files_data]
                         agent_runs_total.labels(agent=agent_name, mode="kubernetes", status="success").inc()
-                        self._save_agent_run(agent_name, "kubernetes", "success", elapsed, tier)
+                        await self._save_agent_run(agent_name, "kubernetes", "success", elapsed, tier)
                         results.append(AgentResult(
                             agent_name=agent_name, category=category,
                             files_generated=[f.path for f in files],
                             success=True, findings_count=len(files),
                         ))
-                        self._log_event(agent_name, "completed", f"Generated {len(files)} files (K8s Job)")
-                        self._record_remediations(agent_name, files)
+                        await self._log_event(agent_name, "completed", f"Generated {len(files)} files (K8s Job)")
+                        await self._record_remediations(agent_name, files)
                         # Write files to output_dir for downstream consumption
                         sub_dir = self.output_dir / category
                         sub_dir.mkdir(parents=True, exist_ok=True)
@@ -453,7 +537,7 @@ class FleetOrchestrator:
                     except Exception as exc:
                         logger.warning("Failed to parse Job output for %s: %s", agent_name, exc)
                         agent_runs_total.labels(agent=agent_name, mode="kubernetes", status="error").inc()
-                        self._save_agent_run(agent_name, "kubernetes", "error", elapsed, tier, error=str(exc))
+                        await self._save_agent_run(agent_name, "kubernetes", "error", elapsed, tier, error=str(exc))
                         results.append(AgentResult(
                             agent_name=agent_name, category=category,
                             files_generated=[], success=False,
@@ -462,25 +546,25 @@ class FleetOrchestrator:
                 elif status == "failed":
                     pending.discard(agent_name)
                     category = agent_map[agent_name][0]
-                    log_output = kube.get_job_pod_log(job_names[agent_name], namespace)
+                    log_output = await asyncio.to_thread(kube.get_job_pod_log, job_names[agent_name], namespace)
                     agent_runs_total.labels(agent=agent_name, mode="kubernetes", status="error").inc()
-                    self._save_agent_run(agent_name, "kubernetes", "error", elapsed, tier,
+                    await self._save_agent_run(agent_name, "kubernetes", "error", elapsed, tier,
                                          error=f"K8s Job failed: {log_output[:200]}")
                     results.append(AgentResult(
                         agent_name=agent_name, category=category,
                         files_generated=[], success=False,
                         error=f"K8s Job failed: {log_output[:200]}",
                     ))
-                    self._log_event(agent_name, "failed", "K8s Job failed")
+                    await self._log_event(agent_name, "failed", "K8s Job failed")
             if pending:
-                time.sleep(5)
+                await asyncio.sleep(5)
 
         # Handle timed-out agents
         for agent_name in pending:
             category = agent_map[agent_name][0]
             elapsed = time.monotonic() - job_started_at.get(agent_name, time.monotonic())
             agent_runs_total.labels(agent=agent_name, mode="kubernetes", status="timeout").inc()
-            self._save_agent_run(
+            await self._save_agent_run(
                 agent_name, "kubernetes", "timeout", elapsed,
                 job_tiers.get(agent_name, "standard"), error="K8s Job timed out",
             )
@@ -488,12 +572,12 @@ class FleetOrchestrator:
                 agent_name=agent_name, category=category,
                 files_generated=[], success=False, error="K8s Job timed out",
             ))
-            self._log_event(agent_name, "timeout", "K8s Job timed out after 5 minutes")
+            await self._log_event(agent_name, "timeout", "K8s Job timed out after 5 minutes")
 
         # Cleanup
         for job_name in job_names.values():
-            kube.delete_job(job_name, namespace)
-        kube.delete_config_map(cm_name, namespace)
+            await asyncio.to_thread(kube.delete_job, job_name, namespace)
+        await asyncio.to_thread(kube.delete_config_map, cm_name, namespace)
 
         return results
 
@@ -506,13 +590,11 @@ class FleetOrchestrator:
         if profile_agents is not None:
             agents = list(profile_agents)
         else:
-            agents = ["security", "observability", "cicd", "compliance", "infrastructure", "release"]
+            agents = []
 
         if self._profile in ("standard", "full") or profile_agents is None:
             if self.report.criticality in ("high", "critical"):
-                agents.extend(["dependency", "incident", "cost"])
-            if self.report.overall_score < 30:
-                agents.append("retirement")
+                agents.extend(["dependency", "cost"])
             if self.report.criticality in ("high", "critical") or self.report.overall_score < 50:
                 agents.append("codechange")
 
@@ -720,26 +802,26 @@ class FleetOrchestrator:
         ],
     }
 
-    def _create_default_slos(self) -> None:
+    async def _create_default_slos(self) -> None:
         """Create default SLOs based on app criticality after release agent runs."""
         if self._store is None or self._assessment_id is None:
             return
         slo_set = self._SLO_DEFAULTS.get(self.report.criticality, self._SLO_DEFAULTS["medium"])
         for metric, target in slo_set:
             try:
-                self._store.save_slo(self._assessment_id, metric, target)
+                await self._store.save_slo(self._assessment_id, metric, target)
             except Exception as exc:
                 logger.warning("Failed to create SLO %s: %s", metric, exc)
-        self._log_event("release", "slos-created",
+        await self._log_event("release", "slos-created",
                         f"Created {len(slo_set)} default SLOs for {self.report.criticality} criticality")
 
-    def _record_remediations(self, agent_name: str, files: list) -> None:
+    async def _record_remediations(self, agent_name: str, files: list) -> None:
         """Record each generated file as a remediation in the store."""
         if self._store is None or self._assessment_id is None:
             return
         for f in files:
             try:
-                self._store.save_remediation(
+                await self._store.save_remediation(
                     self._assessment_id,
                     agent_name,
                     f.description,
@@ -748,14 +830,14 @@ class FleetOrchestrator:
                 logger.warning("Failed to record remediation for %s/%s: %s",
                                agent_name, f.path, exc)
 
-    def _log_event(self, agent_name: str, action: str, summary: str) -> None:
+    async def _log_event(self, agent_name: str, action: str, summary: str) -> None:
         self._events.append({
             "agent": agent_name,
             "action": action,
             "summary": summary,
         })
         if self._store is not None:
-            self._store.log_event(
+            await self._store.log_event(
                 agent_name,
                 action,
                 self.report.repo_name,

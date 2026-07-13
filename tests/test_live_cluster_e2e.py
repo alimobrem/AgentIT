@@ -19,13 +19,10 @@ from pathlib import Path
 import pytest
 
 from agentit.agents.base import validate_manifest
-from agentit.agents.cicd import CICDAgent
-from agentit.agents.compliance import ComplianceAgent
-from agentit.agents.hardening import HardeningAgent
-from agentit.agents.observability import ObservabilityAgent
 from agentit.agents.orchestrator import FleetOrchestrator
 from agentit.portal.cluster_apply import apply_manifests_to_cluster
 from agentit.portal.store import AssessmentStore
+from agentit.portal.store_factory import AsyncSQLiteStore
 from agentit.runner import run_assessment
 
 logger = logging.getLogger(__name__)
@@ -100,181 +97,18 @@ class TestAssessment:
         assert assessment_report.overall_score < 60
 
 
-# ── Phase 2: Onboarding (manifest generation) ──────────────────────
-
-
-@pytest.mark.live_cluster
-class TestOnboarding:
-    @pytest.fixture(autouse=True)
-    def _setup(self, assessment_report, tmp_path):
-        self.report = assessment_report
-        self.output_dir = tmp_path / "onboard-output"
-        self.output_dir.mkdir()
-
-    def test_hardening_generates_manifests(self):
-        result = HardeningAgent(self.report, self.output_dir / "security").run()
-        assert len(result.files) > 0
-        for f in result.files:
-            if f.path.endswith(".yaml"):
-                errors = validate_manifest(f.content)
-                assert not errors, f"{f.path}: {errors}"
-
-    def test_observability_generates_manifests(self):
-        result = ObservabilityAgent(self.report, self.output_dir / "observability").run()
-        assert len(result.files) > 0
-        for f in result.files:
-            if f.path.endswith(".yaml"):
-                errors = validate_manifest(f.content)
-                assert not errors, f"{f.path}: {errors}"
-
-    def test_cicd_generates_pipeline(self):
-        result = CICDAgent(self.report, self.output_dir / "cicd").run()
-        pipeline_files = [f for f in result.files if "pipeline" in f.path.lower()]
-        assert len(pipeline_files) > 0
-
-    def test_pipeline_includes_scan_and_sbom_steps(self):
-        result = CICDAgent(self.report, self.output_dir / "cicd").run()
-        pipeline_file = next((f for f in result.files if f.path.endswith("pipeline.yaml")), None)
-        assert pipeline_file is not None
-        assert "image-scan" in pipeline_file.content
-        assert "sbom-generate" in pipeline_file.content
-
-    def test_compliance_generates_sbom_task(self):
-        result = ComplianceAgent(self.report, self.output_dir / "compliance").run()
-        sbom_tasks = [f for f in result.files if "sbom" in f.path]
-        assert len(sbom_tasks) > 0
-        assert sbom_tasks[0].path.endswith(".yaml")
-        assert "kind: Task" in sbom_tasks[0].content
-
-    def test_hardening_generates_scan_task(self):
-        result = HardeningAgent(self.report, self.output_dir / "security").run()
-        scan_tasks = [f for f in result.files if "scan" in f.path]
-        assert len(scan_tasks) > 0
-        assert "kind: Task" in scan_tasks[0].content
-
-    def test_observability_generates_grafana_configmap(self):
-        result = ObservabilityAgent(self.report, self.output_dir / "observability").run()
-        cm_files = [f for f in result.files if "grafana" in f.path and f.path.endswith(".yaml")]
-        assert len(cm_files) > 0
-        assert "kind: ConfigMap" in cm_files[0].content
-        assert "grafana_dashboard" in cm_files[0].content
-
-
-# ── Phase 2b: Pipeline Wiring Verification ─────────────────────────
-
-
-@pytest.mark.live_cluster
-class TestPipelineWiring:
-    """Verify that generated Tekton Tasks are actually referenced by the pipeline.
-
-    This catches the 'dead file' problem: an agent generates a Task YAML but
-    the CI/CD pipeline never calls it, so it sits unused in the repo.
-    """
-
-    @pytest.fixture(autouse=True)
-    def _run_agents(self, assessment_report, tmp_path):
-        self.report = assessment_report
-        out = tmp_path / "wiring-test"
-        self.hardening = HardeningAgent(self.report, out / "security").run()
-        self.compliance = ComplianceAgent(self.report, out / "compliance").run()
-        self.cicd = CICDAgent(self.report, out / "cicd").run()
-        self.observability = ObservabilityAgent(self.report, out / "observability").run()
-
-    def test_pipeline_references_image_scan_task(self):
-        """The pipeline must include an image-scan step that refs the Task the hardening agent generates."""
-        scan_tasks = [f for f in self.hardening.files if "scan" in f.path and f.path.endswith(".yaml")]
-        if not scan_tasks:
-            pytest.skip("Hardening agent didn't generate scan task (no scanning findings)")
-
-        import yaml
-        scan_task_name = yaml.safe_load(scan_tasks[0].content)["metadata"]["name"]
-
-        pipeline_file = next((f for f in self.cicd.files if "pipeline.yaml" in f.path), None)
-        assert pipeline_file is not None, "CI/CD agent didn't generate a pipeline"
-
-        import yaml
-        docs = list(yaml.safe_load_all(pipeline_file.content))
-        pipeline = next((d for d in docs if d.get("kind") == "Pipeline"), None)
-        assert pipeline is not None, "No Pipeline document in pipeline.yaml"
-        task_refs = [t.get("taskRef", {}).get("name") for t in pipeline["spec"]["tasks"]]
-        assert scan_task_name in task_refs, (
-            f"Pipeline does not reference scan task '{scan_task_name}'. "
-            f"Pipeline taskRefs: {task_refs}"
-        )
-
-    def test_pipeline_references_sbom_task(self):
-        """The pipeline must include an sbom-generate step that refs the Task the compliance agent generates."""
-        sbom_tasks = [f for f in self.compliance.files if "sbom" in f.path and f.path.endswith(".yaml")]
-        if not sbom_tasks:
-            pytest.skip("Compliance agent didn't generate SBOM task (no SBOM findings)")
-
-        import yaml
-        sbom_task_name = yaml.safe_load(sbom_tasks[0].content)["metadata"]["name"]
-
-        pipeline_file = next((f for f in self.cicd.files if "pipeline.yaml" in f.path), None)
-        assert pipeline_file is not None
-
-        docs = list(yaml.safe_load_all(pipeline_file.content))
-        pipeline = next((d for d in docs if d.get("kind") == "Pipeline"), None)
-        assert pipeline is not None
-        task_refs = [t.get("taskRef", {}).get("name") for t in pipeline["spec"]["tasks"]]
-        assert sbom_task_name in task_refs, (
-            f"Pipeline does not reference SBOM task '{sbom_task_name}'. "
-            f"Pipeline taskRefs: {task_refs}"
-        )
-
-    def test_deploy_runs_after_scan_and_sbom(self):
-        """Deploy step must depend on both scan and SBOM (runAfter)."""
-        pipeline_file = next((f for f in self.cicd.files if "pipeline.yaml" in f.path), None)
-        assert pipeline_file is not None
-
-        import yaml
-        docs = list(yaml.safe_load_all(pipeline_file.content))
-        pipeline = next((d for d in docs if d.get("kind") == "Pipeline"), None)
-        assert pipeline is not None
-        deploy_task = next((t for t in pipeline["spec"]["tasks"] if t["name"] == "deploy"), None)
-        assert deploy_task is not None, "No deploy task in pipeline"
-
-        run_after = deploy_task.get("runAfter", [])
-        assert "image-scan" in run_after, f"Deploy doesn't wait for image-scan: runAfter={run_after}"
-        assert "sbom-generate" in run_after, f"Deploy doesn't wait for sbom-generate: runAfter={run_after}"
-
-    def test_grafana_dashboard_is_configmap_not_raw_json(self):
-        """Dashboard must be a ConfigMap (auto-imported by Grafana sidecar), not a raw JSON file."""
-        grafana_files = [f for f in self.observability.files if "grafana" in f.path]
-        assert len(grafana_files) > 0
-
-        for gf in grafana_files:
-            assert gf.path.endswith(".yaml"), f"Grafana file '{gf.path}' should be YAML ConfigMap, not raw JSON"
-            assert "kind: ConfigMap" in gf.content, f"Grafana file '{gf.path}' should be a ConfigMap"
-            assert "grafana_dashboard" in gf.content, f"Grafana ConfigMap missing grafana_dashboard label"
-
-    def test_no_shell_scripts_in_generated_files(self):
-        """No agent should generate .sh files — use Tekton Tasks instead."""
-        all_files = (
-            list(self.hardening.files) +
-            list(self.compliance.files) +
-            list(self.cicd.files) +
-            list(self.observability.files)
-        )
-        shell_scripts = [f for f in all_files if f.path.endswith(".sh")]
-        assert len(shell_scripts) == 0, (
-            f"Found shell scripts that should be Tekton Tasks: "
-            f"{[f.path for f in shell_scripts]}"
-        )
-
-    def test_all_yaml_files_are_valid_manifests(self):
-        """Every .yaml file should pass manifest validation (audit-policy excluded — no metadata by design)."""
-        all_files = (
-            list(self.hardening.files) +
-            list(self.compliance.files) +
-            list(self.cicd.files) +
-            list(self.observability.files)
-        )
-        for f in all_files:
-            if f.path.endswith((".yaml", ".yml")) and "audit-policy" not in f.path:
-                errors = validate_manifest(f.content)
-                assert not errors, f"{f.path} failed validation: {errors}"
+# ── Phase 2: Onboarding (manifest generation via skills) ───────────
+#
+# HardeningAgent/ObservabilityAgent/CICDAgent/ComplianceAgent were removed
+# once skills gained full template-fallback parity for their domains (see
+# docs/agent-removal-readiness.md) -- the equivalent live-cluster-flavored
+# coverage (real manifests, valid YAML, Tekton pipeline wiring) for their
+# skill replacements is exercised hermetically in
+# tests/test_skill_agent_parity.py rather than re-added here; porting the
+# specific pipeline-wiring assertions below (image-scan/sbom task cross-
+# references between independently-matched skills) would need real design
+# work the skill engine doesn't support today (skills don't know about each
+# other's output), so it's left as a documented gap rather than force-fit.
 
 
 # ── Phase 3: Orchestrator ──────────────────────────────────────────
@@ -282,41 +116,41 @@ class TestPipelineWiring:
 
 @pytest.mark.live_cluster
 class TestOrchestrator:
-    def test_orchestrator_runs_all_agents(self, assessment_report, store, tmp_path):
+    async def test_orchestrator_runs_all_agents(self, assessment_report, store, tmp_path):
         aid = store.save(assessment_report)
         orch = FleetOrchestrator(
             report=assessment_report,
             output_dir=tmp_path / "orch-output",
-            store=store,
+            store=AsyncSQLiteStore.wrap(store),
             assessment_id=aid,
         )
-        result = orch.run()
+        result = await orch.run()
         agent_names = {a.agent_name for a in result.agent_results}
-        assert "security" in agent_names
-        assert "observability" in agent_names
-        assert "cicd" in agent_names
-        assert "compliance" in agent_names
+        # security/observability/cicd/compliance are now skill-only domains
+        # (see docs/agent-removal-readiness.md) -- skills run
+        # unconditionally and report under the shared "skills" name.
+        assert "skills" in agent_names
 
-    def test_orchestrator_produces_recommendation(self, assessment_report, store, tmp_path):
+    async def test_orchestrator_produces_recommendation(self, assessment_report, store, tmp_path):
         aid = store.save(assessment_report)
         orch = FleetOrchestrator(
             report=assessment_report,
             output_dir=tmp_path / "orch-output2",
-            store=store,
+            store=AsyncSQLiteStore.wrap(store),
             assessment_id=aid,
         )
-        result = orch.run()
+        result = await orch.run()
         assert result.recommendation
 
-    def test_all_manifests_validate(self, assessment_report, store, tmp_path):
+    async def test_all_manifests_validate(self, assessment_report, store, tmp_path):
         aid = store.save(assessment_report)
         orch = FleetOrchestrator(
             report=assessment_report,
             output_dir=tmp_path / "orch-output3",
-            store=store,
+            store=AsyncSQLiteStore.wrap(store),
             assessment_id=aid,
         )
-        result = orch.run()
+        result = await orch.run()
         for ar in result.agent_results:
             for f in ar.files_generated:
                 full = tmp_path / "orch-output3" / ar.category / f
@@ -331,15 +165,15 @@ class TestOrchestrator:
 
 @pytest.mark.live_cluster
 class TestClusterApply:
-    def test_dry_run_applies_without_errors(self, assessment_report, store, tmp_path, test_namespace):
+    async def test_dry_run_applies_without_errors(self, assessment_report, store, tmp_path, test_namespace):
         aid = store.save(assessment_report)
         orch = FleetOrchestrator(
             report=assessment_report,
             output_dir=tmp_path / "apply-output",
-            store=store,
+            store=AsyncSQLiteStore.wrap(store),
             assessment_id=aid,
         )
-        result = orch.run()
+        result = await orch.run()
 
         files = []
         for ar in result.agent_results:
@@ -384,15 +218,15 @@ class TestStoreIntegration:
         assert retrieved.repo_name == assessment_report.repo_name
         assert retrieved.overall_score == assessment_report.overall_score
 
-    def test_onboarding_creates_files(self, assessment_report, store, tmp_path):
+    async def test_onboarding_creates_files(self, assessment_report, store, tmp_path):
         aid = store.save(assessment_report)
         orch = FleetOrchestrator(
             report=assessment_report,
             output_dir=tmp_path / "store-test",
-            store=store,
+            store=AsyncSQLiteStore.wrap(store),
             assessment_id=aid,
         )
-        result = orch.run()
+        result = await orch.run()
         total_files = sum(len(ar.files_generated) for ar in result.agent_results)
         assert total_files > 0
 
@@ -410,7 +244,7 @@ class TestStoreIntegration:
 class TestFullPipeline:
     """Runs the full assess → onboard → dry-run apply pipeline end-to-end."""
 
-    def test_full_pipeline(self, tmp_path, test_namespace):
+    async def test_full_pipeline(self, tmp_path, test_namespace):
         store = AssessmentStore(db_path=str(tmp_path / "e2e.db"))
 
         report = run_assessment(FIXTURE_DIR, repo_url="file://" + str(FIXTURE_DIR), criticality="high")
@@ -420,10 +254,10 @@ class TestFullPipeline:
         orch = FleetOrchestrator(
             report=report,
             output_dir=tmp_path / "full-pipeline",
-            store=store,
+            store=AsyncSQLiteStore.wrap(store),
             assessment_id=aid,
         )
-        result = orch.run()
+        result = await orch.run()
         assert any(ar.success for ar in result.agent_results)
 
         files = []

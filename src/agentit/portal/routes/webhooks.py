@@ -195,25 +195,17 @@ async def webhook_github_push(request: Request):
                                    diff.summary())
 
                 # Auto-fix new findings that are auto-fixable. RemediationDispatcher
-                # is deliberately still fully synchronous (see
-                # docs/postgres-migration-plan.md's Phase 3 notes), so it needs the
-                # raw sync store handle, run off the event loop via to_thread.
+                # is now genuinely async -- await it directly, no more
+                # .raw/to_thread bridge needed for this call path.
                 if diff.auto_fixable and (await s.get_setting("auto_mode")) == "true":
-                    raw = s.raw if hasattr(s, "raw") else None
-                    if raw is None:
-                        log.warning("Skipping auto-fix for %s: postgres backend has no synchronous "
-                                    "store handle yet -- see docs/postgres-migration-plan.md", managed["repo_name"])
-                    else:
-                        from agentit.remediation.dispatcher import RemediationDispatcher
-                        dispatcher = RemediationDispatcher(raw)
-                        for finding in diff.auto_fixable:
-                            if await s.get_rejection_count(managed["repo_name"], finding.category) >= 3:
-                                await s.log_event("learning", "skipped-rejected", managed["repo_name"],
-                                                   "info", f"Skipping {finding.category} -- rejected 3+ times")
-                                continue
-                            await asyncio.to_thread(
-                                dispatcher.dispatch, assessment_id, finding.category, managed["repo_name"],
-                            )
+                    from agentit.remediation.dispatcher import RemediationDispatcher
+                    dispatcher = RemediationDispatcher(s)
+                    for finding in diff.auto_fixable:
+                        if await s.get_rejection_count(managed["repo_name"], finding.category) >= 3:
+                            await s.log_event("learning", "skipped-rejected", managed["repo_name"],
+                                               "info", f"Skipping {finding.category} -- rejected 3+ times")
+                            continue
+                        await dispatcher.dispatch(assessment_id, finding.category, managed["repo_name"])
 
         await s.log_event("change-analysis", "impact-analyzed", managed["repo_name"],
                            "info", impact.summary())
@@ -263,15 +255,11 @@ async def webhook_onboard(request: Request):
     if report is None:
         raise HTTPException(404, f"Assessment {assessment_id} not found")
 
-    # run_onboarding constructs FleetOrchestrator, deliberately still fully
-    # synchronous (see docs/postgres-migration-plan.md's Phase 3 notes) --
-    # it needs the raw sync store handle, run off the event loop via to_thread.
-    raw = s.raw if hasattr(s, "raw") else None
-    if raw is None:
-        raise HTTPException(500, "Onboarding requires the sqlite backend's synchronous handle "
-                                  "(store_pg.AssessmentStore has none yet) -- see docs/postgres-migration-plan.md")
+    # run_onboarding constructs FleetOrchestrator, which is now genuinely
+    # async -- await it directly, no more .raw/to_thread bridge needed for
+    # this call path.
     try:
-        files, orch_summary = await with_timeout(asyncio.to_thread(run_onboarding, report, assessment_id, raw))
+        files, orch_summary = await with_timeout(run_onboarding(report, assessment_id, s))
     except HTTPException:
         raise
     except Exception as exc:
@@ -328,19 +316,13 @@ async def webhook_auto_apply(request: Request):
     orch = await s.get_orchestration(assessment_id) or {}
     auto_approve = orch.get("auto_approve", False)
 
-    # AutoMode is deliberately still fully synchronous (see
-    # docs/postgres-migration-plan.md's Phase 3 notes) -- it needs the raw
-    # sync store handle, run off the event loop via to_thread.
-    raw = s.raw if hasattr(s, "raw") else None
-    if raw is None:
-        raise HTTPException(500, "Auto-apply requires the sqlite backend's synchronous handle "
-                                  "(store_pg.AssessmentStore has none yet) -- see docs/postgres-migration-plan.md")
-
+    # AutoMode is now genuinely async -- await it directly, no more
+    # .raw/to_thread bridge needed for this call path.
     from agentit.automode import AutoMode
-    engine = AutoMode(store=raw, publisher=None, llm_client=get_llm_client())
+    engine = AutoMode(store=s, publisher=None, llm_client=get_llm_client())
 
-    result = await asyncio.to_thread(
-        engine.execute, assessment_id, files, namespace,
+    result = await engine.execute(
+        assessment_id, files, namespace,
         report.criticality, auto_approve, report.repo_name,
     )
 
@@ -379,20 +361,11 @@ async def webhook_finding(request: Request):
         await s.mark_webhook_processed(delivery_id)
         return JSONResponse({"status": "accepted", "action": "alert-only", "reason": f"app '{app_name}' not in fleet"})
 
-    # RemediationDispatcher/AutoMode are deliberately still fully synchronous
-    # (see docs/postgres-migration-plan.md's Phase 3 notes) -- they need the
-    # raw sync store handle, run off the event loop via to_thread.
-    raw = s.raw if hasattr(s, "raw") else None
-    if raw is None:
-        await s.log_event("dispatcher", "no-fix-available", app_name, "warning",
-                           "postgres backend has no synchronous store handle yet")
-        await s.mark_webhook_processed(delivery_id)
-        return JSONResponse({"status": "accepted", "action": "alert-only",
-                              "reason": "postgres backend not yet supported for dispatch"})
-
+    # RemediationDispatcher/AutoMode are now genuinely async -- await them
+    # directly, no more .raw/to_thread bridge needed for this call path.
     from agentit.remediation.dispatcher import RemediationDispatcher
-    dispatcher = RemediationDispatcher(raw)
-    result = await asyncio.to_thread(dispatcher.dispatch, app["id"], category, app_name)
+    dispatcher = RemediationDispatcher(s)
+    result = await dispatcher.dispatch(app["id"], category, app_name)
 
     if result.get("error") and not result["files"]:
         await s.log_event("dispatcher", "no-fix-available", app_name, "warning", result["error"])
@@ -401,12 +374,12 @@ async def webhook_finding(request: Request):
 
     from agentit.automode import AutoMode
     from agentit.events import get_publisher as _gp
-    auto = AutoMode(store=raw, publisher=_gp(), llm_client=get_llm_client())
+    auto = AutoMode(store=s, publisher=_gp(), llm_client=get_llm_client())
 
-    if auto.enabled and result["files"]:
+    if await auto.is_enabled() and result["files"]:
         namespace = app.get("deploy_namespace", app_name)
-        auto_result = await asyncio.to_thread(
-            auto.execute, app["id"], result["files"], namespace,
+        auto_result = await auto.execute(
+            app["id"], result["files"], namespace,
             app.get("criticality", "medium"), False, app_name,
             result["agent"],
         )
@@ -459,20 +432,13 @@ async def webhook_remediate(request: Request):
     from agentit.remediation_loop import RemediationLoop
     from agentit.events import get_publisher
 
-    # RemediationLoop's background-thread job pipeline is deliberately still
-    # fully synchronous (see docs/postgres-migration-plan.md's Phase 3
-    # notes) -- it needs the raw sync store handle.
+    # RemediationLoop is now genuinely async -- await it directly. start()
+    # itself schedules the actual pipeline as a background asyncio Task
+    # (see remediation_loop.py) so this route still returns immediately.
     s = await get_store()
-    raw = s.raw if hasattr(s, "raw") else None
-    if raw is None:
-        return JSONResponse(
-            {"outcome": "failed", "error": "postgres backend has no synchronous store handle yet "
-                                            "-- see docs/postgres-migration-plan.md"},
-            status_code=500,
-        )
-    loop = RemediationLoop(store=raw, publisher=get_publisher())
+    loop = RemediationLoop(store=s, publisher=get_publisher())
     try:
-        job_id = loop.start(repo_url, app_name, criticality, reason, store=raw)
+        job_id = await loop.start(repo_url, app_name, criticality, reason, store=s)
     except Exception as exc:
         log.exception("Failed to start remediation loop for %s", app_name)
         return JSONResponse({"outcome": "failed", "error": str(exc)}, status_code=500)

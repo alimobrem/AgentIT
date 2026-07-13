@@ -174,8 +174,10 @@ def test_assess_onboard_flow(client, _override_store):
     # Step 3: view results — manifests are shown
     resp = client.get(f"/assessments/{assessment_id}/onboard-results")
     assert resp.status_code == 200
-    assert "security" in resp.text
-    assert "observability" in resp.text
+    # security/observability are now skill-only domains (see
+    # docs/agent-removal-readiness.md) -- generated manifests are grouped
+    # under the "skills" category instead of one category per domain.
+    assert "skills" in resp.text
 
 
 # ------------------------------------------------------------------
@@ -194,11 +196,16 @@ def test_onboard_generates_files_for_all_dimensions(client, _override_store):
     resp = client.get(f"/api/assessments/{aid}/manifests")
     assert resp.status_code == 200
     data = resp.json()
+    # security/observability/cicd/compliance are now skill-only domains
+    # (see docs/agent-removal-readiness.md) -- all four still produce
+    # output, but grouped under the shared "skills" category.
     categories = {f["category"] for f in data}
-    assert "security" in categories
-    assert "observability" in categories
-    assert "cicd" in categories
-    assert "compliance" in categories
+    assert "skills" in categories
+    paths = {f["path"] for f in data}
+    assert any("network-policy" in p for p in paths), paths
+    assert any("service-monitor" in p for p in paths), paths
+    assert any("tekton-pipeline" in p for p in paths), paths
+    assert any("kyverno" in p for p in paths), paths
 
 
 # ------------------------------------------------------------------

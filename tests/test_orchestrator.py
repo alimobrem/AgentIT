@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 
@@ -17,44 +17,32 @@ from agentit.models import (
     Finding,
     Severity,
 )
-from conftest import make_report, make_store
+from conftest import make_async_store, make_report, make_store
 
 
 class TestPlanSelectsAgents:
-    def test_plan_selects_core_agents(self, tmp_path: Path) -> None:
-        """Medium criticality -> 5 core agents."""
-        report = make_report(criticality="medium")
-        orch = FleetOrchestrator(report, tmp_path / "out")
-        plan = orch.plan()
-
-        for agent in ("security", "observability", "cicd", "compliance", "release"):
-            assert agent in plan.agents_to_run
-
-    def test_release_agent_always_selected(self, tmp_path: Path) -> None:
-        """Release coordinator is selected for all criticality levels."""
+    def test_plan_has_no_skill_only_domains(self, tmp_path: Path) -> None:
+        """security/observability/cicd/compliance/infrastructure/release/
+        incident/retirement/chaos are now skill-only domains (see
+        docs/agent-removal-readiness.md) -- their Python agents were
+        removed, so they must never appear in plan.agents_to_run (skills
+        still cover them, unconditionally, in Step 1 of run())."""
         for crit in ("low", "medium", "high", "critical"):
             report = make_report(criticality=crit)
             orch = FleetOrchestrator(report, tmp_path / f"out-{crit}")
             plan = orch.plan()
-            assert "release" in plan.agents_to_run, f"release not selected for {crit}"
+            for agent in ("security", "observability", "cicd", "compliance",
+                          "infrastructure", "release", "incident", "retirement", "chaos"):
+                assert agent not in plan.agents_to_run, f"{agent} unexpectedly planned for {crit}"
 
     def test_plan_adds_extra_agents_for_high_criticality(self, tmp_path: Path) -> None:
-        """High criticality -> adds dependency, incident, cost."""
+        """High criticality -> adds dependency, cost."""
         report = make_report(criticality="high")
         orch = FleetOrchestrator(report, tmp_path / "out")
         plan = orch.plan()
 
-        for agent in ("dependency", "incident", "cost"):
+        for agent in ("dependency", "cost"):
             assert agent in plan.agents_to_run
-
-    def test_plan_adds_retirement_for_low_score(self, tmp_path: Path) -> None:
-        """Score < 30 -> retirement agent included."""
-        report = make_report()
-        report.overall_score = 20.0
-        orch = FleetOrchestrator(report, tmp_path / "out")
-        plan = orch.plan()
-
-        assert "retirement" in plan.agents_to_run
 
     def test_plan_adds_codechange_for_high_criticality(self, tmp_path: Path) -> None:
         """High criticality -> codechange agent included."""
@@ -131,24 +119,29 @@ class TestAutoApprove:
 
 
 class TestRun:
-    def test_run_executes_agents(self, tmp_path: Path) -> None:
-        """Run with a real report -> results have success=True for available agents."""
+    async def test_run_executes_agents(self, tmp_path: Path) -> None:
+        """Run with a real report -> results have success=True for available agents.
+
+        security/observability/cicd/compliance are now skill-only domains
+        (see docs/agent-removal-readiness.md) -- with criticality="medium"
+        and this report's generic finding, there are no Python agents left
+        to plan at all, so this just guards that run() completes cleanly
+        and doesn't resurrect a removed domain as a Python agent result.
+        """
         report = make_report(criticality="medium")
         orch = FleetOrchestrator(report, tmp_path / "out")
-        result = orch.run()
+        result = await orch.run()
 
-        successful = [r for r in result.agent_results if r.success]
-        assert len(successful) >= 4  # At least the 4 core agents
+        assert all(r.success for r in result.agent_results)
+        agent_names = {r.agent_name for r in result.agent_results}
+        for removed in ("security", "observability", "cicd", "compliance"):
+            assert removed not in agent_names
 
-        agent_names = {r.agent_name for r in successful}
-        for core in ("security", "observability", "cicd", "compliance"):
-            assert core in agent_names
-
-    def test_run_writes_summary(self, tmp_path: Path) -> None:
+    async def test_run_writes_summary(self, tmp_path: Path) -> None:
         """Verify orchestration-summary.md exists after run."""
         report = make_report(criticality="medium")
         orch = FleetOrchestrator(report, tmp_path / "out")
-        orch.run()
+        await orch.run()
 
         summary_path = tmp_path / "out" / "orchestration-summary.md"
         assert summary_path.exists()
@@ -156,27 +149,30 @@ class TestRun:
         assert "Orchestration Summary" in content
         assert "test-app" in content
 
-    def test_run_records_structured_agent_runs(self, tmp_path: Path) -> None:
+    async def test_run_records_structured_agent_runs(self, tmp_path: Path) -> None:
         """Every local agent execution must write a real agent_runs row so
         get_agent_stats()/list_agent_runs() reflect actual history, not a
         LIKE-matched heuristic over unrelated events."""
-        store = make_store()
+        # "cost" instead of the old "security" -- security is now a
+        # skill-only domain with no Python agent left to run (see
+        # docs/agent-removal-readiness.md).
+        store, raw = make_async_store()
         report = make_report(criticality="medium")
-        aid = store.save(report)
+        aid = raw.save(report)
         orch = FleetOrchestrator(
             report, tmp_path / "out", store=store, assessment_id=aid,
-            agent_filter=["security"],
+            agent_filter=["cost"],
         )
-        orch.run()
+        await orch.run()
 
-        runs = store.list_agent_runs("security")
+        runs = raw.list_agent_runs("cost")
         assert len(runs) == 1
         assert runs[0]["status"] == "success"
         assert runs[0]["mode"] == "local"
         assert runs[0]["assessment_id"] == aid
         assert runs[0]["duration_ms"] is not None
 
-        stats = store.get_agent_stats("security")
+        stats = raw.get_agent_stats("cost")
         assert stats[0]["successes"] == 1
 
 
@@ -331,20 +327,24 @@ class TestConflicts:
         priority = [c for c in conflicts if c["type"] == "priority"]
         assert priority == []
 
-    def test_full_run_with_standard_profile_has_no_false_conflicts(self, tmp_path: Path) -> None:
-        """Realistic multi-agent successful run (standard profile, 6 agents)
-        must not produce any priority conflict warnings."""
-        report = make_report(criticality="medium")
+    async def test_full_run_with_standard_profile_has_no_false_conflicts(self, tmp_path: Path) -> None:
+        """Realistic multi-agent successful run must not produce any
+        priority conflict warnings. criticality="high" so dependency/cost/
+        codechange are actually planned -- security/observability/cicd/
+        compliance/infrastructure/release are now skill-only domains and no
+        longer appear in plan.agents_to_run (see
+        docs/agent-removal-readiness.md)."""
+        report = make_report(criticality="high")
         orch = FleetOrchestrator(report, tmp_path / "out")
-        result = orch.run()
+        result = await orch.run()
 
         successful = [r for r in result.agent_results if r.success]
-        assert len(successful) >= 4
+        assert len(successful) >= 3
 
         priority = [c for c in result.conflicts if c["type"] == "priority"]
         assert priority == [], f"Unexpected false-positive conflicts: {priority}"
 
-    def test_auto_approve_downgraded_by_real_conflict(self, tmp_path: Path) -> None:
+    async def test_auto_approve_downgraded_by_real_conflict(self, tmp_path: Path) -> None:
         """plan.auto_approve is computed from score/criticality alone at plan()
         time -- but a real conflict found during this actual run must still
         force auto_approve to False in the returned OrchestrationResult."""
@@ -372,8 +372,8 @@ class TestConflicts:
                         files_generated=["shared.yaml"], success=True, findings_count=1),
         ]
 
-        with patch.object(orch, "_run_agents_local", return_value=colliding_results):
-            result = orch.run()
+        with patch.object(orch, "_run_agents_local", AsyncMock(return_value=colliding_results)):
+            result = await orch.run()
 
         assert any(c["type"] == "priority" for c in result.conflicts)
         assert result.plan.auto_approve is False
@@ -445,10 +445,10 @@ class TestRecommendation:
 class TestCostAgentRegistration:
     """Regression: CostAgent import was broken (wrong class name). Must never regress."""
 
-    def test_cost_agent_runs_for_high_criticality(self, tmp_path: Path) -> None:
+    async def test_cost_agent_runs_for_high_criticality(self, tmp_path: Path) -> None:
         report = make_report(criticality="high")
         orch = FleetOrchestrator(report, tmp_path / "out")
-        result = orch.run()
+        result = await orch.run()
 
         agent_names = {r.agent_name for r in result.agent_results}
         assert "cost" in agent_names
@@ -458,28 +458,36 @@ class TestCostAgentRegistration:
         assert cost_result.files_generated
 
     def test_all_optional_agents_importable(self) -> None:
-        """Every optional agent module imports — catches class name mismatches."""
+        """Every optional agent module imports — catches class name mismatches.
+
+        incident/chaos/retirement were removed once skills covered their
+        domains (see docs/agent-removal-readiness.md) -- dependency/cost/
+        codechange are the ones left.
+        """
         from agentit.agents.dependency import DependencyAgent
-        from agentit.agents.incident import IncidentAgent
         from agentit.agents.cost import CostOptimizationAgent
-        from agentit.agents.chaos import ChaosAgent
-        from agentit.agents.retirement import RetirementAgent
-        assert all([DependencyAgent, IncidentAgent, CostOptimizationAgent, ChaosAgent, RetirementAgent])
+        from agentit.agents.codechange import CodeChangeAgent
+        assert all([DependencyAgent, CostOptimizationAgent, CodeChangeAgent])
 
 
 class TestNoSilentSwallowing:
     """Regression: orchestrator must never silently skip agents."""
 
-    def test_planned_agents_all_appear_in_results(self, tmp_path: Path) -> None:
+    async def test_planned_agents_all_appear_in_results(self, tmp_path: Path) -> None:
         report = make_report(criticality="high")
         orch = FleetOrchestrator(report, tmp_path / "out")
-        result = orch.run()
+        result = await orch.run()
 
         planned = set(result.plan.agents_to_run)
         reported = {r.agent_name for r in result.agent_results}
+        # "skills" is an extra, always-possible result on top of whatever
+        # Python agents were planned -- it isn't itself a planned agent (see
+        # FleetOrchestrator.run() Step 1, which runs skills unconditionally
+        # before Step 2 plans/skips Python agents).
+        reported.discard("skills")
         assert planned == reported, f"Planned {planned} but only got results for {reported}"
 
-    def test_missing_agent_logged_as_failure(self, tmp_path: Path, caplog) -> None:
+    async def test_missing_agent_logged_as_failure(self, tmp_path: Path, caplog) -> None:
         """If an agent is planned but not in agent_map, it shows as failure + log."""
         report = make_report(criticality="medium")
         orch = FleetOrchestrator(report, tmp_path / "out")
@@ -493,7 +501,7 @@ class TestNoSilentSwallowing:
         orch._select_agents = _patched_select
 
         with caplog.at_level(logging.WARNING):
-            result = orch.run()
+            result = await orch.run()
 
         nonexistent = [r for r in result.agent_results if r.agent_name == "nonexistent_agent"]
         assert len(nonexistent) == 1
@@ -530,11 +538,11 @@ class TestPostHardeningValidation:
         issues = orch._post_hardening_validation(results)
         assert len(issues) >= 1
 
-    def test_validation_adds_conflict(self, tmp_path: Path) -> None:
+    async def test_validation_adds_conflict(self, tmp_path: Path) -> None:
         """Full run with all valid agents should not produce validation conflicts."""
         report = make_report(criticality="medium")
         orch = FleetOrchestrator(report, tmp_path / "out")
-        result = orch.run()
+        result = await orch.run()
 
         validation_conflicts = [c for c in result.conflicts if c["type"] == "validation"]
         assert validation_conflicts == [], f"Unexpected validation failures: {validation_conflicts}"
@@ -548,7 +556,7 @@ class TestSkillsFirstLLMPassthrough:
     finding actually matches a real skill's triggers (unlike the other tests
     in this file, which use category="test" and never match any skill)."""
 
-    def test_run_constructs_and_forwards_llm_client_to_skill_engine(
+    async def test_run_constructs_and_forwards_llm_client_to_skill_engine(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
@@ -568,7 +576,7 @@ class TestSkillsFirstLLMPassthrough:
         with patch("agentit.llm.LLMClient", return_value=fake_llm) as mock_llm_cls, \
              patch("agentit.platform_context.discover_platform", side_effect=RuntimeError("no cluster in tests")):
             orch = FleetOrchestrator(report, tmp_path / "out")
-            result = orch.run()
+            result = await orch.run()
 
         mock_llm_cls.assert_called_once()
         assert fake_llm._chat.called, "SkillEngine never used the LLM client the orchestrator built"
@@ -577,17 +585,21 @@ class TestSkillsFirstLLMPassthrough:
         assert len(skills_result) == 1
         assert any("network-policy" in f for f in skills_result[0].files_generated)
 
-    def test_run_falls_back_gracefully_when_llm_init_fails(
+    async def test_run_falls_back_gracefully_when_llm_init_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """LLM construction failures must never break skills-first generation
-        or the orchestration run as a whole."""
+        or the orchestration run as a whole. criticality="high" so
+        dependency/cost/codechange actually run -- with "medium" (and this
+        report's generic finding), there would be no Python agents left to
+        plan at all (see docs/agent-removal-readiness.md), which would make
+        this assertion vacuous rather than a real regression guard."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
 
-        report = make_report(criticality="medium")
+        report = make_report(criticality="high")
 
         with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")):
             orch = FleetOrchestrator(report, tmp_path / "out")
-            result = orch.run()  # must not raise
+            result = await orch.run()  # must not raise
 
         assert result.agent_results  # run still completed

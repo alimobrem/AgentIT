@@ -8,12 +8,12 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from agentit.agents.hardening import patch_base_image
 from agentit.portal.app import app, get_store
 from agentit.portal.store_factory import AsyncSQLiteStore
+from agentit.remediation.base_image import patch_base_image
 from agentit.remediation.dispatcher import RemediationDispatcher
 from agentit.remediation.registry import lookup
-from conftest import make_report, make_store
+from conftest import make_async_store, make_report, make_store
 
 
 # ── Registry Lookup ─────────────────────────────────────────────────
@@ -21,10 +21,10 @@ from conftest import make_report, make_store
 
 class TestRegistryLookup:
     def test_exact_match(self):
-        assert lookup("container") == ("hardening", "_generate_containerfile")
+        assert lookup("container") == ("security", "containerfile")
 
     def test_substring_match(self):
-        assert lookup("container security") == ("hardening", "_generate_containerfile")
+        assert lookup("container security") == ("security", "containerfile")
 
     def test_unknown_category_returns_none(self):
         assert lookup("banana") is None
@@ -83,46 +83,50 @@ class TestPatchBaseImage:
 class TestDispatcher:
     @pytest.fixture
     def store(self):
-        return make_store()
+        return make_async_store()
 
-    def test_dispatch_unknown_category(self, store):
-        dispatcher = RemediationDispatcher(store)
-        result = dispatcher.dispatch("fake-id", "banana")
+    async def test_dispatch_unknown_category(self, store):
+        async_store, _raw = store
+        dispatcher = RemediationDispatcher(async_store)
+        result = await dispatcher.dispatch("fake-id", "banana")
         assert result["error"]
         assert result["files"] == []
 
-    def test_dispatch_missing_assessment(self, store):
-        dispatcher = RemediationDispatcher(store)
-        result = dispatcher.dispatch("nonexistent", "network")
+    async def test_dispatch_missing_assessment(self, store):
+        async_store, _raw = store
+        dispatcher = RemediationDispatcher(async_store)
+        result = await dispatcher.dispatch("nonexistent", "network")
         assert "not found" in result["error"]
 
-    def test_dispatch_network_generates_policy(self, store, tmp_path):
+    async def test_dispatch_network_generates_policy(self, store, tmp_path):
         from agentit.models import DimensionScore, Finding, Severity
+        async_store, raw = store
         report = make_report(scores=[
             DimensionScore(dimension="security", score=30, max_score=100, findings=[
                 Finding(category="network", severity=Severity.high,
                         description="No NetworkPolicy", recommendation="Add one"),
             ]),
         ])
-        aid = store.save(report)
-        dispatcher = RemediationDispatcher(store)
-        result = dispatcher.dispatch(aid, "network")
+        aid = raw.save(report)
+        dispatcher = RemediationDispatcher(async_store)
+        result = await dispatcher.dispatch(aid, "network")
         assert result["error"] is None
-        assert result["agent"] == "hardening"
+        assert result["agent"] == "security"
         assert len(result["files"]) > 0
         assert any("network" in f["path"].lower() for f in result["files"])
 
-    def test_dispatch_sbom_generates_task(self, store):
+    async def test_dispatch_sbom_generates_task(self, store):
         from agentit.models import DimensionScore, Finding, Severity
+        async_store, raw = store
         report = make_report(scores=[
             DimensionScore(dimension="compliance", score=30, max_score=100, findings=[
                 Finding(category="sbom supply chain", severity=Severity.medium,
                         description="No SBOM", recommendation="Add SBOM"),
             ]),
         ])
-        aid = store.save(report)
-        dispatcher = RemediationDispatcher(store)
-        result = dispatcher.dispatch(aid, "sbom")
+        aid = raw.save(report)
+        dispatcher = RemediationDispatcher(async_store)
+        result = await dispatcher.dispatch(aid, "sbom")
         assert result["error"] is None
         assert result["agent"] == "compliance"
         assert any("sbom" in f["path"].lower() for f in result["files"])

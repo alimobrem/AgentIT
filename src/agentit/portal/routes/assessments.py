@@ -108,11 +108,13 @@ async def assess_submit(
     infra = infra_repo_url.strip() or None
     s = await get_store()
     job_id = await s.create_assessment_job(repo_url)
-    # The work below runs in a background thread (long clone+assess pipeline),
-    # so it needs a synchronous store handle -- see helpers.run_onboarding's
-    # docstring / docs/postgres-migration-plan.md for why this is the
-    # established pattern for background-thread store access rather than
-    # awaiting the async facade from inside a non-async thread.
+    # The work below runs in a background thread (long clone+assess pipeline)
+    # via a plain `threading.Thread`, not `asyncio.to_thread` -- it needs a
+    # synchronous store handle since a non-event-loop OS thread can't
+    # `await` the async store facade. See docs/postgres-migration-plan.md
+    # for why this specific background-thread pattern (distinct from
+    # FleetOrchestrator/AutoMode/RemediationDispatcher/RemediationLoop,
+    # which are now genuinely async and no longer need this bridge) stays.
     raw = s.raw if hasattr(s, "raw") else None
     if raw is None:
         raise HTTPException(500, "Background assessment jobs require the sqlite backend's synchronous handle "
@@ -293,17 +295,11 @@ async def fix_finding(request: Request, assessment_id: str):
     if report is None:
         raise HTTPException(404, "Assessment not found")
 
-    # RemediationDispatcher is deliberately still fully synchronous (see
-    # docs/postgres-migration-plan.md's Phase 3 progress notes), so it needs
-    # the raw sync store handle, run off the event loop via to_thread.
-    raw = s.raw if hasattr(s, "raw") else None
-    if raw is None:
-        raise HTTPException(500, "Fix dispatch requires the sqlite backend's synchronous handle "
-                                  "(store_pg.AssessmentStore has none yet) -- see docs/postgres-migration-plan.md")
-
+    # RemediationDispatcher is now genuinely async -- await it directly,
+    # no more .raw/to_thread bridge needed for this call path.
     from agentit.remediation.dispatcher import RemediationDispatcher
-    dispatcher = RemediationDispatcher(raw)
-    result = await asyncio.to_thread(dispatcher.dispatch, assessment_id, category, report.repo_name)
+    dispatcher = RemediationDispatcher(s)
+    result = await dispatcher.dispatch(assessment_id, category, report.repo_name)
 
     from agentit.portal.metrics import remediations_total as _rt
     _status = "success" if result["files"] else ("error" if result.get("error") else "empty")
@@ -367,8 +363,8 @@ async def delete_assessment(assessment_id: str):
     return RedirectResponse(url="/", status_code=303)
 
 
-def _run_onboarding(
-    report: AssessmentReport, assessment_id: str | None = None, raw_store: object | None = None,
+async def _run_onboarding(
+    report: AssessmentReport, assessment_id: str | None = None, store: object | None = None,
 ) -> tuple[list[dict], dict]:
     """Run orchestrated onboarding. Returns (files, orchestration_summary).
 
@@ -376,14 +372,13 @@ def _run_onboarding(
     the webhook-triggered path (routes/webhooks.py) can never drift apart on
     which summary fields get stored (e.g. auto_approve/gates).
 
-    Runs inside a worker thread via ``asyncio.to_thread`` (see the caller
-    below) -- ``raw_store`` must therefore already be the *synchronous*
-    store handle (``FleetOrchestrator`` is deliberately still fully
-    synchronous; see docs/postgres-migration-plan.md's Phase 3 notes), not
-    the async facade `get_store()` now returns.
+    ``FleetOrchestrator`` is now genuinely async, so this is a plain
+    coroutine `await`ed directly by the caller below -- ``store`` should be
+    whatever `get_store()` returned (async-compatible), no more `.raw`/
+    `asyncio.to_thread` bridge needed for this call path.
     """
     from agentit.portal.helpers import run_onboarding as _shared_run_onboarding
-    return _shared_run_onboarding(report, assessment_id, store=raw_store)
+    return await _shared_run_onboarding(report, assessment_id, store=store)
 
 
 @router.get("/assessments/{assessment_id}/onboarding-history", response_class=HTMLResponse)
@@ -417,12 +412,8 @@ async def onboard_submit(request: Request, assessment_id: str):
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
 
-    raw = s.raw if hasattr(s, "raw") else None
-    if raw is None:
-        raise HTTPException(500, "Onboarding requires the sqlite backend's synchronous handle "
-                                  "(store_pg.AssessmentStore has none yet) -- see docs/postgres-migration-plan.md")
     try:
-        files, orch_summary = await with_timeout(asyncio.to_thread(_run_onboarding, report, assessment_id, raw))
+        files, orch_summary = await with_timeout(_run_onboarding(report, assessment_id, s))
     except HTTPException:
         raise
     except Exception:
@@ -596,6 +587,13 @@ async def apply_to_cluster(request: Request, assessment_id: str):
         )
 
     await s.save_apply_results(assessment_id, results, namespace, dry_run)
+
+    if not dry_run:
+        from agentit.skill_engine import record_skill_outcomes
+        await record_skill_outcomes(
+            s, report.repo_name, files, set(results["applied"]), "approved",
+            "applied to cluster",
+        )
 
     applied = len(results["applied"])
     skipped = len(results["skipped"])

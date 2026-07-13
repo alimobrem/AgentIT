@@ -47,16 +47,26 @@ class VulnWatcher:
                 summary=f"CVE check triggered by assessment of {target}",
             )
 
-    def check_fleet(self) -> None:
-        """Scan the fleet for apps with critical/high findings and alert or remediate."""
+    async def check_fleet(self) -> None:
+        """Scan the fleet for apps with critical/high findings and alert or remediate.
+
+        ``self._store`` is still the raw synchronous store handle (per
+        cli.py's ``vuln_watch`` command) -- that bridge is a separate,
+        deferred concern (see docs/postgres-migration-plan.md), so
+        ``get_fleet_data()`` here stays a direct, unawaited sync call.
+        ``AutoMode``/``RemediationLoop`` are now genuinely async, so they're
+        constructed with an async-compatible facade over that same store.
+        """
         fleet = self._store.get_fleet_data()
         click.echo(f"[vuln-watch] Monitoring {len(fleet)} apps", err=True)
 
         from agentit.automode import AutoMode
+        from agentit.portal.store_factory import AsyncSQLiteStore
         from agentit.remediation_loop import RemediationLoop
 
-        auto = AutoMode(store=self._store, publisher=self._publisher, llm_client=None)
-        loop = RemediationLoop(store=self._store, publisher=self._publisher)
+        async_store = AsyncSQLiteStore.wrap(self._store)
+        auto = AutoMode(store=async_store, publisher=self._publisher, llm_client=None)
+        loop = RemediationLoop(store=async_store, publisher=self._publisher)
 
         for app_data in fleet:
             if app_data.get("critical_count", 0) > 0:
@@ -68,13 +78,13 @@ class VulnWatcher:
                     severity="warning",
                     summary=f"{app_data['critical_count']} critical/high findings in {app_data['repo_name']}",
                 )
-                if auto.enabled:
+                if await auto.is_enabled():
                     click.echo(
                         f"[vuln-watch] Auto-mode: running remediation loop for {app_data['repo_name']}...",
                         err=True,
                     )
                     try:
-                        result = loop.trigger(
+                        result = await loop.trigger(
                             repo_url=app_data["repo_url"],
                             app_name=app_data["repo_name"],
                             criticality=app_data.get("criticality", "medium"),
@@ -98,11 +108,11 @@ class VulnWatcher:
     async def run(self) -> None:
         """Main loop: poll events, check fleet, sleep.
 
-        ``check_fleet`` (and everything it calls -- ``AutoMode``,
-        ``RemediationLoop``) is unconverted synchronous code this pass
-        (see docs/postgres-migration-plan.md's Phase 3 progress notes),
-        so it's dispatched via ``asyncio.to_thread`` to avoid blocking
-        the event loop for the tick's full duration.
+        ``check_fleet`` is now a genuine coroutine (``AutoMode``/
+        ``RemediationLoop`` are natively async) -- it's `await`ed directly
+        here instead of being dispatched via ``asyncio.to_thread``, since
+        wrapping an async function in `to_thread` would just add a
+        redundant thread hop for no benefit.
         """
         click.echo(f"Starting vulnerability watcher (interval={self._interval}s)...", err=True)
         while True:
@@ -110,7 +120,7 @@ class VulnWatcher:
                 events = self._consumer.poll_once()
                 for event in events:
                     self._handle_event(event)
-                await asyncio.to_thread(self.check_fleet)
+                await self.check_fleet()
                 Path("/tmp/heartbeat").touch()
                 record_tick(self._store, "vuln-watcher", success=True)
             except KeyboardInterrupt:

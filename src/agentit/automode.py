@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
@@ -19,6 +20,14 @@ class AutoMode:
       auto_mode ON + orchestrator auto_approve + LLM says destructive → gate + alert
       auto_mode ON + orchestrator says no auto_approve → gate
       auto_mode ON + LLM unavailable → gate (fail-closed)
+
+    ``store`` must be an async-compatible store (``store_factory.AsyncSQLiteStore``
+    or ``store_pg.AssessmentStore``) — every store call below is ``await``ed.
+    ``llm_client`` (``agentit.llm.LLMClient``) stays a synchronous object;
+    its one blocking network call (``classify_action``) is dispatched via
+    ``asyncio.to_thread`` at the call site in ``should_auto_apply`` rather
+    than requiring an async LLM client, since this is the only one of
+    llm.py's four methods called from an already-converted async class.
     """
 
     def __init__(self, store: object, publisher: object | None = None, llm_client: object | None = None):
@@ -26,19 +35,25 @@ class AutoMode:
         self._publisher = publisher
         self._llm = llm_client
 
-    @property
-    def enabled(self) -> bool:
+    async def is_enabled(self) -> bool:
+        """Whether auto-mode is currently enabled (env var, then store setting).
+
+        Was a synchronous ``enabled`` property; converted to an async method
+        because the store-setting fallback now requires an ``await``. Every
+        caller (``should_auto_apply`` below, watchers, webhook routes) has
+        been updated to ``await auto.is_enabled()``.
+        """
         env = os.environ.get("AGENTIT_AUTO_MODE", "").lower()
         if env in ("1", "true", "on"):
             return True
         try:
-            val = self._store.get_setting("auto_mode")
+            val = await self._store.get_setting("auto_mode")
             return val in ("1", "true", "on")
         except Exception as exc:
             logger.warning("Failed to read auto_mode setting from store, defaulting to disabled: %s", exc)
             return False
 
-    def should_auto_apply(
+    async def should_auto_apply(
         self,
         auto_approve: bool,
         manifests: list[str],
@@ -46,7 +61,7 @@ class AutoMode:
         app_name: str,
     ) -> tuple[bool, str]:
         """Returns (can_auto_apply, reason)."""
-        if not self.enabled:
+        if not await self.is_enabled():
             return False, "auto-mode is disabled"
 
         if not auto_approve:
@@ -55,11 +70,16 @@ class AutoMode:
         if self._llm is None:
             return False, "LLM unavailable — fail-closed, requiring human approval"
 
-        classification = self._llm.classify_action(
-            action_type="apply",
-            manifests=manifests,
-            context=f"App: {app_name}, Criticality: {criticality}",
-        )
+        try:
+            classification = await asyncio.to_thread(
+                self._llm.classify_action,
+                action_type="apply",
+                manifests=manifests,
+                context=f"App: {app_name}, Criticality: {criticality}",
+            )
+        except Exception as exc:
+            logger.warning("LLM classify_action call failed: %s", exc)
+            return False, "LLM classification failed — fail-closed, requiring human approval"
 
         if classification is None:
             return False, "LLM classification failed — fail-closed, requiring human approval"
@@ -72,7 +92,7 @@ class AutoMode:
 
         return True, f"LLM classified as safe ({classification['confidence']:.2f}): {classification['reason']}"
 
-    def execute(
+    async def execute(
         self,
         assessment_id: str,
         files: list[dict],
@@ -97,9 +117,9 @@ class AutoMode:
 
         manifests = [f["content"] for f in files if f["path"].endswith((".yaml", ".yml"))]
 
-        can_apply, reason = self.should_auto_apply(auto_approve, manifests, criticality, app_name)
+        can_apply, reason = await self.should_auto_apply(auto_approve, manifests, criticality, app_name)
 
-        self._log_event(
+        await self._log_event(
             agent_name or "auto-mode",
             "decision",
             app_name,
@@ -108,30 +128,31 @@ class AutoMode:
         )
 
         if not can_apply:
-            gate_id = self._store.create_gate(
+            gate_id = await self._store.create_gate(
                 assessment_id, "auto-mode-review",
                 f"Auto-mode gated: {reason}",
             )
             return {"action": "gated", "reason": reason, "details": {"gate_id": gate_id}}
 
-        # Step 1: dry-run
-        dry_result = apply_manifests_to_cluster(files, namespace, dry_run=True)
+        # Step 1: dry-run (kube/oc apply is a blocking, synchronous call --
+        # narrowly wrapped in to_thread right here, not the whole method).
+        dry_result = await asyncio.to_thread(apply_manifests_to_cluster, files, namespace, dry_run=True)
         if dry_result["errors"]:
-            self._log_event(
+            await self._log_event(
                 "auto-mode", "dry-run-failed", app_name, "warning",
                 f"Dry-run failed with {len(dry_result['errors'])} error(s)",
             )
-            gate_id = self._store.create_gate(
+            gate_id = await self._store.create_gate(
                 assessment_id, "dry-run-failed",
                 f"Dry-run failed: {'; '.join(dry_result['errors'][:3])}",
             )
             return {"action": "gated", "reason": "dry-run failed", "details": dry_result}
 
         # Step 2: apply for real
-        result = apply_manifests_to_cluster(files, namespace, dry_run=False)
+        result = await asyncio.to_thread(apply_manifests_to_cluster, files, namespace, dry_run=False)
 
         if result["errors"]:
-            self._log_event(
+            await self._log_event(
                 "auto-mode", "partial-failure", app_name, "warning",
                 f"Applied {len(result['applied'])} but {len(result['errors'])} error(s) in {namespace}",
             )
@@ -141,15 +162,28 @@ class AutoMode:
                 "details": result,
             }
 
-        self._log_event(
+        await self._log_event(
             "auto-mode", "auto-applied", app_name, "info",
             f"Applied {len(result['applied'])} manifests to {namespace}",
         )
 
-        remediations = self._store.list_remediations(assessment_id)
+        # Per-skill outcome, in addition to the generic event above -- lets
+        # skill_effectiveness see auto-mode's real-world successes, not just
+        # self-fix's. Deliberately only recorded for a genuine successful
+        # apply: "gated" is a deferral to a human, not a verdict on the
+        # skill, and is intentionally left unrecorded here (the human's
+        # eventual decision at /gates is what records approved/rejected for
+        # a gated candidate).
+        from agentit.skill_engine import record_skill_outcomes
+        await record_skill_outcomes(
+            self._store, app_name, files, set(result["applied"]), "approved",
+            reason,
+        )
+
+        remediations = await self._store.list_remediations(assessment_id)
         for rem in remediations:
             if rem["status"] != "completed":
-                self._store.complete_remediation(rem["id"])
+                await self._store.complete_remediation(rem["id"])
 
         return {
             "action": "applied",
@@ -157,9 +191,9 @@ class AutoMode:
             "details": result,
         }
 
-    def _log_event(self, agent_id: str, action: str, target: str, severity: str, summary: str) -> None:
+    async def _log_event(self, agent_id: str, action: str, target: str, severity: str, summary: str) -> None:
         try:
-            self._store.log_event(agent_id, action, target, severity, summary)
+            await self._store.log_event(agent_id, action, target, severity, summary)
         except Exception as exc:
             logger.warning("Failed to log auto-mode event: %s", exc)
 

@@ -30,12 +30,12 @@ class DriftDetector:
         self._interval = interval
         self._store = store
 
-    def detect_once(self) -> list[dict]:
+    async def detect_once(self) -> list[dict]:
         """Query Argo CD applications and return any that are OutOfSync.
 
         Returns a list of dicts with keys: app, sync_status, health_status.
         """
-        app_list = self._fetch_argo_apps()
+        app_list = await asyncio.to_thread(self._fetch_argo_apps)
         if app_list is None:
             click.echo("[drift-detect] No Argo CD access -- skipping", err=True)
             return []
@@ -60,7 +60,7 @@ class DriftDetector:
                 )
                 click.echo(f"[drift-detect] DRIFT: {name} is OutOfSync", err=True)
                 drifted.append({"app": name, "sync_status": sync_status, "health_status": health})
-                self._maybe_auto_sync(name)
+                await self._maybe_auto_sync(name)
 
         click.echo(f"[drift-detect] Checked {len(items)} Argo CD apps", err=True)
 
@@ -69,7 +69,7 @@ class DriftDetector:
             from agentit.platform_context import discover_platform
             from agentit.api_drift_detector import detect_drift
 
-            ctx = discover_platform()
+            ctx = await asyncio.to_thread(discover_platform)
             api_drift = detect_drift(ctx.available_kinds, ctx.installed_operators)
             if api_drift.has_breaking_changes:
                 for removed in api_drift.removed_apis:
@@ -123,19 +123,21 @@ class DriftDetector:
             return None
         return {"items": items}
 
-    def _maybe_auto_sync(self, app_name: str) -> None:
+    async def _maybe_auto_sync(self, app_name: str) -> None:
         """If auto-mode is enabled, patch the Application to trigger a sync."""
         from agentit.automode import AutoMode
         from agentit.portal.store import AssessmentStore
+        from agentit.portal.store_factory import AsyncSQLiteStore
 
         store = self._store or AssessmentStore()
-        auto = AutoMode(store=store, publisher=self._publisher)
-        if not auto.enabled:
+        auto = AutoMode(store=AsyncSQLiteStore.wrap(store), publisher=self._publisher)
+        if not await auto.is_enabled():
             return
 
         click.echo(f"[drift-detect] Auto-syncing {app_name}...", err=True)
         try:
-            kube.custom_objects().patch_namespaced_custom_object(
+            await asyncio.to_thread(
+                kube.custom_objects().patch_namespaced_custom_object,
                 group="argoproj.io",
                 version="v1alpha1",
                 namespace="openshift-gitops",
@@ -151,16 +153,15 @@ class DriftDetector:
     async def run(self) -> None:
         """Main loop: detect drift, sleep.
 
-        ``detect_once`` (and ``_maybe_auto_sync``'s ``AutoMode`` call) is
-        unconverted synchronous code this pass (see
-        docs/postgres-migration-plan.md's Phase 3 progress notes), so
-        it's dispatched via ``asyncio.to_thread`` to avoid blocking the
-        event loop for the tick's full duration.
+        ``detect_once`` is now a genuine coroutine -- it `await`s its own
+        blocking kube/platform-discovery calls narrowly (via
+        ``asyncio.to_thread`` at each specific call site) rather than the
+        whole tick being dispatched to a worker thread.
         """
         click.echo(f"Starting drift detector (interval={self._interval}s)...", err=True)
         while True:
             try:
-                await asyncio.to_thread(self.detect_once)
+                await self.detect_once()
                 Path("/tmp/heartbeat").touch()
                 record_tick(self._store, "drift-detector", success=True)
             except KeyboardInterrupt:

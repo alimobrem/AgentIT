@@ -20,9 +20,9 @@ def _watcher(store=None, consumer=None) -> VulnWatcher:
     )
 
 
-def test_check_fleet_with_empty_fleet_is_a_noop():
+async def test_check_fleet_with_empty_fleet_is_a_noop():
     watcher = _watcher()
-    watcher.check_fleet()  # must not raise, even with no tracked apps
+    await watcher.check_fleet()  # must not raise, even with no tracked apps
 
 
 class TestAsyncRunLoop:
@@ -42,23 +42,26 @@ class TestAsyncRunLoop:
         mock_sleep.assert_called_once_with(1)
 
 
-class TestTickRunsOffEventLoop:
-    """check_fleet must be dispatched via asyncio.to_thread so it doesn't
-    block the event loop for the tick's full duration, and record_tick
-    telemetry must still fire afterwards."""
+class TestTickRunsOnEventLoop:
+    """``check_fleet`` is now a genuine coroutine (this pass's
+    FleetOrchestrator/AutoMode/RemediationDispatcher/RemediationLoop async
+    rewrite made VulnWatcher's own AutoMode/RemediationLoop call sites
+    async too) -- ``run()`` `await`s it directly rather than dispatching
+    the whole tick to a worker thread via ``asyncio.to_thread``, and
+    record_tick telemetry must still fire afterwards."""
 
     @patch("agentit.watchers.vuln_watcher.asyncio.sleep", side_effect=KeyboardInterrupt)
-    async def test_check_fleet_dispatched_via_to_thread_and_telemetry_records(self, mock_sleep):
+    async def test_check_fleet_awaited_directly_and_telemetry_records(self, mock_sleep):
         store = make_store()
         consumer = MagicMock()
         consumer.poll_once.return_value = []
         watcher = _watcher(store=store, consumer=consumer)
 
-        with patch(
-            "agentit.watchers.vuln_watcher.asyncio.to_thread", wraps=asyncio.to_thread
-        ) as mock_to_thread:
+        with patch.object(
+            watcher, "check_fleet", wraps=watcher.check_fleet,
+        ) as mock_check_fleet:
             await watcher.run()
 
-        mock_to_thread.assert_called_once_with(watcher.check_fleet)
+        mock_check_fleet.assert_called_once_with()
         events = store.list_events()
         assert any(e["action"] == "tick-complete" for e in events)

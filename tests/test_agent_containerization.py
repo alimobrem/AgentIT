@@ -38,12 +38,15 @@ class TestRunAgentCLI:
         Path(path).write_text(report.model_dump_json(), encoding="utf-8")
         return path
 
-    def test_run_security_agent(self, tmp_path: Path):
+    def test_run_cost_agent(self, tmp_path: Path):
+        # security is now a skill-only domain (see
+        # docs/agent-removal-readiness.md); "cost" is one of the three
+        # Python agents still registered.
         report = make_report()
         path = self._write_report(report)
         try:
             runner = CliRunner()
-            result = runner.invoke(main, ["run-agent", "security", "--report", path])
+            result = runner.invoke(main, ["run-agent", "cost", "--report", path])
             assert result.exit_code == 0, f"exit {result.exit_code}: {result.output}"
             payload = _extract_result(result.output)
             files = json.loads(payload)
@@ -53,12 +56,15 @@ class TestRunAgentCLI:
         finally:
             Path(path).unlink(missing_ok=True)
 
-    def test_run_observability_agent(self):
+    def test_run_dependency_agent(self):
+        # observability is now a skill-only domain (see
+        # docs/agent-removal-readiness.md); "dependency" is one of the
+        # three Python agents still registered.
         report = make_report()
         path = self._write_report(report)
         try:
             runner = CliRunner()
-            result = runner.invoke(main, ["run-agent", "observability", "--report", path])
+            result = runner.invoke(main, ["run-agent", "dependency", "--report", path])
             assert result.exit_code == 0, f"exit {result.exit_code}: {result.output}"
             payload = _extract_result(result.output)
             files = json.loads(payload)
@@ -106,14 +112,18 @@ class TestRunAgentCLI:
 class TestOrchestratorK8sMode:
     """Orchestrator local vs kubernetes agent execution modes."""
 
-    def test_local_mode_default(self):
+    async def test_local_mode_default(self):
         """Default mode is local (in-process) — no K8s Jobs created."""
         from agentit.agents.orchestrator import FleetOrchestrator
 
-        report = make_report()
+        # criticality="high" so dependency/cost/codechange are planned --
+        # security/observability/etc. are now skill-only domains and no
+        # longer show up in plan.agents_to_run at all (see
+        # docs/agent-removal-readiness.md).
+        report = make_report(criticality="high")
         with tempfile.TemporaryDirectory() as tmpdir:
             orch = FleetOrchestrator(report=report, output_dir=Path(tmpdir))
-            result = orch.run()
+            result = await orch.run()
             assert len(result.agent_results) > 0
             assert all(ar.success for ar in result.agent_results)
 
@@ -127,16 +137,16 @@ class TestOrchestratorK8sMode:
     ]) + "\n--- AGENTIT_RESULT_END ---")
     @patch("agentit.kube.delete_job")
     @patch("agentit.kube.delete_config_map")
-    def test_kubernetes_mode_creates_jobs(
+    async def test_kubernetes_mode_creates_jobs(
         self, mock_del_cm, mock_del_job, mock_log, mock_status, mock_job, mock_cm
     ):
         """Kubernetes mode creates Jobs and reads results."""
         from agentit.agents.orchestrator import FleetOrchestrator
 
-        report = make_report()
+        report = make_report(criticality="high")
         with tempfile.TemporaryDirectory() as tmpdir:
             orch = FleetOrchestrator(report=report, output_dir=Path(tmpdir))
-            result = orch.run()
+            result = await orch.run()
             assert mock_cm.called, "create_config_map not called"
             assert mock_job.called, "create_job not called"
             assert mock_del_job.called, "delete_job not called (cleanup)"
@@ -145,14 +155,14 @@ class TestOrchestratorK8sMode:
     @patch.dict("os.environ", {"AGENTIT_AGENT_MODE": "kubernetes"})
     @patch("agentit.agents.orchestrator.AGENT_MODE", "kubernetes")
     @patch("agentit.kube.create_config_map", return_value=False)
-    def test_kubernetes_mode_fallback_on_configmap_failure(self, mock_cm):
+    async def test_kubernetes_mode_fallback_on_configmap_failure(self, mock_cm):
         """Falls back to local mode if ConfigMap creation fails."""
         from agentit.agents.orchestrator import FleetOrchestrator
 
-        report = make_report()
+        report = make_report(criticality="high")
         with tempfile.TemporaryDirectory() as tmpdir:
             orch = FleetOrchestrator(report=report, output_dir=Path(tmpdir))
-            result = orch.run()
+            result = await orch.run()
             # Should still produce results (fell back to local)
             assert len(result.agent_results) > 0
 

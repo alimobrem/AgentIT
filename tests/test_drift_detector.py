@@ -24,7 +24,7 @@ _SYNCED_ARGO_APP = {
 
 class TestApiDriftWarnings:
     @patch("agentit.watchers.drift_detector.kube.list_custom_resources")
-    def test_detect_once_does_not_crash_with_deprecated_apis(self, mock_list):
+    async def test_detect_once_does_not_crash_with_deprecated_apis(self, mock_list):
         """Regression: previously raised AttributeError every tick because
         DriftResult has no has_warnings/deprecated_apis attributes. Requires
         Argo CD access to be reachable so the code actually gets to the API
@@ -40,12 +40,12 @@ class TestApiDriftWarnings:
         with patch("agentit.platform_context.discover_platform", return_value=ctx), \
              patch("agentit.api_drift_detector.detect_drift", return_value=DriftResult()):
             # Must not raise.
-            result = detector.detect_once()
+            result = await detector.detect_once()
 
         assert result == []
 
     @patch("agentit.watchers.drift_detector.kube.list_custom_resources")
-    def test_detect_once_reports_deprecated_apis_from_platform_context(self, mock_list, capsys):
+    async def test_detect_once_reports_deprecated_apis_from_platform_context(self, mock_list, capsys):
         """ctx.deprecated_apis (the real field) should drive the WARNING
         message, not the nonexistent api_drift.deprecated_apis."""
         mock_list.return_value = [_SYNCED_ARGO_APP]
@@ -61,7 +61,7 @@ class TestApiDriftWarnings:
         )
         with patch("agentit.platform_context.discover_platform", return_value=ctx), \
              patch("agentit.api_drift_detector.detect_drift", return_value=DriftResult()):
-            detector.detect_once()
+            await detector.detect_once()
 
         captured = capsys.readouterr()
         assert "2 deprecated API(s)" in captured.err
@@ -85,7 +85,7 @@ class TestDriftDetectorTickTelemetry:
         assert detector._store is None
 
     @patch("agentit.watchers.drift_detector.kube.list_custom_resources")
-    def test_maybe_auto_sync_reuses_injected_store(self, mock_list):
+    async def test_maybe_auto_sync_reuses_injected_store(self, mock_list):
         """_maybe_auto_sync previously always created a brand-new AssessmentStore()
         even when the detector already had one -- it should reuse the injected
         store when present."""
@@ -93,7 +93,7 @@ class TestDriftDetectorTickTelemetry:
         store = make_store()
         store.set_setting("auto_mode", "false")
         detector = DriftDetector(publisher=MagicMock(), interval=1, store=store)
-        detector._maybe_auto_sync("some-app")  # auto-mode off -> returns early, no crash
+        await detector._maybe_auto_sync("some-app")  # auto-mode off -> returns early, no crash
 
 
 class TestAsyncRunLoop:
@@ -113,13 +113,19 @@ class TestAsyncRunLoop:
 
 
 class TestTickRunsOffEventLoop:
-    """detect_once must be dispatched via asyncio.to_thread so it doesn't
-    block the event loop for the tick's full duration, and record_tick
-    telemetry must still fire afterwards."""
+    """``detect_once`` is now a genuine coroutine (part of this pass's
+    FleetOrchestrator/AutoMode/RemediationDispatcher/RemediationLoop async
+    rewrite, which forced DriftDetector's own AutoMode call site to become
+    async too) -- ``run()`` awaits it directly rather than dispatching the
+    whole tick to a worker thread. The specific blocking kube call inside
+    ``detect_once`` (``_fetch_argo_apps``, which wraps
+    ``kube.list_custom_resources``) is still narrowly wrapped in
+    ``asyncio.to_thread`` so it doesn't block the event loop, and
+    record_tick telemetry must still fire afterwards."""
 
     @patch("agentit.watchers.drift_detector.asyncio.sleep", side_effect=KeyboardInterrupt)
     @patch("agentit.watchers.drift_detector.kube.list_custom_resources", return_value=None)
-    async def test_detect_once_dispatched_via_to_thread_and_telemetry_records(self, mock_list, mock_sleep):
+    async def test_detect_once_narrowly_wraps_blocking_kube_call_and_telemetry_records(self, mock_list, mock_sleep):
         from conftest import make_store
         store = make_store()
         detector = DriftDetector(publisher=MagicMock(), interval=1, store=store)
@@ -129,6 +135,6 @@ class TestTickRunsOffEventLoop:
         ) as mock_to_thread:
             await detector.run()
 
-        mock_to_thread.assert_called_once_with(detector.detect_once)
+        mock_to_thread.assert_any_call(detector._fetch_argo_apps)
         events = store.list_events()
         assert any(e["action"] == "tick-complete" for e in events)
