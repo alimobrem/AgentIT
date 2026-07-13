@@ -1407,6 +1407,42 @@ async def capabilities_learn_route(request: Request):
     return RedirectResponse(url=f"/capabilities?success={quote(msg)}", status_code=303)
 
 
+@app.post("/capabilities/skills/activate", response_model=None)
+async def activate_skill_route(request: Request):
+    """Promote a draft skill to active. Portal equivalent of `agentit activate-skill`.
+
+    Draft skills are only ever written by the learning agent (research
+    button, skill-learner watcher, or CLI) — this is the human-review step
+    that lets the skill engine actually start matching them.
+    """
+    form = await request.form()
+    skill_path_raw = str(form.get("skill_path", ""))
+
+    skills_root = Path("skills").resolve()
+    try:
+        target = Path(skill_path_raw).resolve()
+        target.relative_to(skills_root)
+    except (ValueError, OSError):
+        return RedirectResponse(
+            url=f"/capabilities?error={quote('Invalid skill path')}", status_code=303,
+        )
+
+    if not target.is_file():
+        return RedirectResponse(url=f"/capabilities?error={quote('Skill file not found')}", status_code=303)
+
+    content = target.read_text(encoding="utf-8")
+    if "status: draft" not in content:
+        return RedirectResponse(
+            url=f"/capabilities?error={quote('Skill is not in draft status')}", status_code=303,
+        )
+
+    target.write_text(content.replace("status: draft", "status: active", 1), encoding="utf-8")
+    _skills_cache["data"] = None
+    s = get_store()
+    s.log_event("portal", "skill-activated", None, "info", f"Activated skill: {target.stem}")
+    return RedirectResponse(url=f"/capabilities?success={quote(f'Activated: {target.stem}')}", status_code=303)
+
+
 # ── Remediations ──────────────────────────────────────────────────────
 
 

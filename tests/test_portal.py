@@ -1339,3 +1339,88 @@ def test_capabilities_learn_no_research_results(client):
         resp = client.post("/capabilities/learn", follow_redirects=False)
     assert resp.status_code == 303
     assert "success=" in resp.headers["location"]
+
+
+# ── Capabilities: activate a draft skill ────────────────────────────────
+
+
+def _make_draft_skill(tmp_path, name="cve-2099-00003", domain="security") -> Path:
+    skills_dir = tmp_path / "skills" / domain
+    skills_dir.mkdir(parents=True)
+    skill_file = skills_dir / f"{name}.md"
+    skill_file.write_text(
+        f"---\n"
+        f"name: {name}\n"
+        f"domain: {domain}\n"
+        f"version: 1\n"
+        f"triggers: [test]\n"
+        f"outputs: [NetworkPolicy]\n"
+        f"status: draft\n"
+        f"---\n"
+        f"body\n",
+        encoding="utf-8",
+    )
+    return skill_file
+
+
+def test_activate_skill_promotes_draft_to_active(client, tmp_path, monkeypatch):
+    skill_file = _make_draft_skill(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    resp = client.post(
+        "/capabilities/skills/activate",
+        data={"skill_path": str(skill_file)},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "success=" in resp.headers["location"]
+    assert "status: active" in skill_file.read_text()
+
+
+def test_activate_skill_already_active_shows_error(client, tmp_path, monkeypatch):
+    skills_dir = tmp_path / "skills" / "security"
+    skills_dir.mkdir(parents=True)
+    skill_file = skills_dir / "already-active.md"
+    skill_file.write_text(
+        "---\nname: already-active\ndomain: security\nversion: 1\n"
+        "triggers: [test]\noutputs: [NetworkPolicy]\nstatus: active\n---\nbody\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    resp = client.post(
+        "/capabilities/skills/activate",
+        data={"skill_path": str(skill_file)},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "error=" in resp.headers["location"]
+
+
+def test_activate_skill_rejects_path_outside_skills_dir(client, tmp_path, monkeypatch):
+    outside_file = tmp_path / "not-a-skill.md"
+    outside_file.write_text("status: draft", encoding="utf-8")
+    (tmp_path / "skills").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    resp = client.post(
+        "/capabilities/skills/activate",
+        data={"skill_path": str(outside_file)},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "error=" in resp.headers["location"]
+    assert outside_file.read_text() == "status: draft"
+
+
+def test_activate_skill_missing_file_shows_error(client, tmp_path, monkeypatch):
+    (tmp_path / "skills").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    resp = client.post(
+        "/capabilities/skills/activate",
+        data={"skill_path": str(tmp_path / "skills" / "nope.md")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "error=" in resp.headers["location"]

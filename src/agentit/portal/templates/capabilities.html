@@ -58,6 +58,10 @@
           <span class="badge badge-warning">deprecated</span>
         {% elif skill.status == "draft" %}
           <span class="badge badge-info">draft</span>
+          <form method="post" action="/capabilities/skills/activate" class="inline-form">
+            <input type="hidden" name="skill_path" value="{{ skill.file_path }}">
+            <button type="submit" class="btn btn-sm btn-outline">Activate</button>
+          </form>
         {% else %}
           <span class="badge badge-muted">{{ skill.status }}</span>
         {% endif %}
