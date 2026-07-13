@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentit
+  namespace: default
+  labels:
+    app.kubernetes.io/name: agentit
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentit
+  namespace: default
+  labels:
+    app.kubernetes.io/name: agentit
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - configmaps
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentit
+  namespace: default
+  labels:
+    app.kubernetes.io/name: agentit
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentit
+subjects:
+- kind: ServiceAccount
+  name: agentit
+  namespace: default
