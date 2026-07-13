@@ -144,14 +144,15 @@ async def update_schedule(request: Request):
     app_name = str(form.get("app_name", ""))
     job_key = str(form.get("job_key", ""))
     schedule = str(form.get("schedule", "")).strip()
-    if app_name and job_key and schedule:
-        if len(schedule.split()) != 5:
-            raise HTTPException(400, "Invalid cron expression: must have exactly 5 fields")
-        get_store().set_setting(f"schedule:{app_name}:{job_key}", schedule)
-        get_store().log_event(
-            "portal", "schedule-updated", app_name, "info",
-            f"Schedule for {job_key} updated to: {schedule}",
-        )
+    if not (app_name and job_key and schedule):
+        return RedirectResponse(url="/schedules?error=Missing+required+fields", status_code=303)
+    if len(schedule.split()) != 5:
+        return RedirectResponse(url="/schedules?error=Invalid+cron+expression", status_code=303)
+    get_store().set_setting(f"schedule:{app_name}:{job_key}", schedule)
+    get_store().log_event(
+        "portal", "schedule-updated", app_name, "info",
+        f"Schedule for {job_key} updated to: {schedule}",
+    )
     return RedirectResponse(url="/schedules", status_code=303)
 
 
@@ -161,13 +162,14 @@ async def toggle_schedule(request: Request):
     app_name = str(form.get("app_name", ""))
     job_key = str(form.get("job_key", ""))
     enabled = str(form.get("enabled", "true"))
-    if app_name and job_key:
-        get_store().set_setting(f"schedule:{app_name}:{job_key}:enabled", enabled)
-        action = "enabled" if enabled == "true" else "disabled"
-        get_store().log_event(
-            "portal", f"schedule-{action}", app_name, "info",
-            f"Schedule {job_key} {action} for {app_name}",
-        )
+    if not (app_name and job_key):
+        return RedirectResponse(url="/schedules?error=Missing+required+fields", status_code=303)
+    get_store().set_setting(f"schedule:{app_name}:{job_key}:enabled", enabled)
+    action = "enabled" if enabled == "true" else "disabled"
+    get_store().log_event(
+        "portal", f"schedule-{action}", app_name, "info",
+        f"Schedule {job_key} {action} for {app_name}",
+    )
     return RedirectResponse(url="/schedules", status_code=303)
 
 

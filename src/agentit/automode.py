@@ -121,16 +121,26 @@ class AutoMode:
         # Step 2: apply for real
         result = apply_manifests_to_cluster(files, namespace, dry_run=False)
 
+        if result["errors"]:
+            self._log_event(
+                "auto-mode", "partial-failure", app_name, "warning",
+                f"Applied {len(result['applied'])} but {len(result['errors'])} error(s) in {namespace}",
+            )
+            return {
+                "action": "partial_failure",
+                "reason": f"partial failure: {len(result['errors'])} error(s)",
+                "details": result,
+            }
+
         self._log_event(
             "auto-mode", "auto-applied", app_name, "info",
             f"Applied {len(result['applied'])} manifests to {namespace}",
         )
 
-        if not result.get("errors"):
-            remediations = self._store.list_remediations(assessment_id)
-            for rem in remediations:
-                if rem["status"] != "completed":
-                    self._store.complete_remediation(rem["id"])
+        remediations = self._store.list_remediations(assessment_id)
+        for rem in remediations:
+            if rem["status"] != "completed":
+                self._store.complete_remediation(rem["id"])
 
         return {
             "action": "applied",

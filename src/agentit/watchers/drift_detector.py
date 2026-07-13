@@ -111,7 +111,11 @@ class DriftDetector:
 
     def _fetch_argo_apps(self) -> dict | None:
         """List Argo CD Application resources via the kubernetes client."""
-        items = kube.list_custom_resources("argoproj.io", "v1alpha1", "applications")
+        try:
+            items = kube.list_custom_resources("argoproj.io", "v1alpha1", "applications")
+        except kube.KubeError as exc:
+            logger.warning("Failed to fetch Argo apps: %s", exc)
+            return None
         if not items:
             return None
         return {"items": items}
@@ -147,6 +151,7 @@ class DriftDetector:
         while True:
             try:
                 self.detect_once()
+                Path("/tmp/heartbeat").touch()
             except KeyboardInterrupt:
                 click.echo("Drift detector stopped.", err=True)
                 break

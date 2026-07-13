@@ -60,9 +60,10 @@ def _get_cluster_health() -> dict:
             sync = a.get("status", {}).get("sync", {}).get("status", "Unknown")
             health = a.get("status", {}).get("health", {}).get("status", "Unknown")
             result["argo_apps"].append({"name": name, "sync": sync, "health": health})
-        result["argo_synced"] = all(a["sync"] == "Synced" for a in result["argo_apps"]) if result["argo_apps"] else True
+        result["argo_synced"] = all(a["sync"] == "Synced" for a in result["argo_apps"]) if result["argo_apps"] else None
     except Exception:
         log.warning("Failed to fetch Argo CD apps", exc_info=True)
+        result["argo_synced"] = None
 
     # Pods
     try:
@@ -285,28 +286,48 @@ async def pipeline_detail_page(request: Request, pipeline_name: str) -> HTMLResp
 
 @router.get("/healthz")
 async def healthz():
+    try:
+        get_store()._conn.execute("SELECT 1")
+    except Exception as exc:
+        return JSONResponse({"status": "unhealthy", "error": str(exc)}, status_code=503)
     return {"status": "ok"}
 
 
 @router.get("/readyz")
 async def readyz():
+    import os
     try:
         s = get_store()
         s._conn.execute("SELECT 1")
-        return {"status": "ready"}
     except Exception as exc:
         return JSONResponse({"status": "not ready", "error": str(exc)}, status_code=503)
+    if os.environ.get("AGENTIT_KAFKA_BOOTSTRAP"):
+        from agentit.events import get_publisher
+        pub = get_publisher()
+        if not pub.kafka_enabled:
+            return JSONResponse({"status": "not ready", "error": "kafka publisher not connected"}, status_code=503)
+    return {"status": "ready"}
 
 
 @router.get("/api/health")
 async def api_health():
+    import os
     data = await asyncio.to_thread(_get_cluster_health)
-    return JSONResponse({
+    body = {
         "argo_synced": data["argo_synced"],
         "pods_running": data["pods_running"],
+        "pods_failed": data["pods_failed"],
         "pipeline_status": data["pipeline_status"],
         "kafka_ready": data["kafka_ready"],
-    })
+    }
+    degraded = False
+    if data["pods_failed"] > 0:
+        degraded = True
+    if os.environ.get("AGENTIT_KAFKA_BOOTSTRAP") and data["kafka_ready"] is False:
+        degraded = True
+    if data["argo_synced"] is False:
+        degraded = True
+    return JSONResponse(body, status_code=503 if degraded else 200)
 
 
 @router.get("/api/operator-status")

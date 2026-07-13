@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from agentit import kube
+from agentit.kube import KubeError
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,11 @@ def collect_slo(metric_name: str, namespace: str) -> float | None:
 
 def _collect_error_rate(namespace: str) -> float | None:
     """Error rate = non-ready pods / total pods (as percentage)."""
-    pods = kube.list_pods(namespace)
+    try:
+        pods = kube.list_pods(namespace)
+    except KubeError as exc:
+        logger.warning("Cannot collect error_rate: %s", exc)
+        return None
     if not pods:
         return 0.0
     non_ready = sum(1 for p in pods if not p["ready"])
@@ -36,7 +41,11 @@ def _collect_error_rate(namespace: str) -> float | None:
 
 def _collect_availability(namespace: str) -> float | None:
     """Availability = running pods / total pods (as percentage)."""
-    pods = kube.list_pods(namespace)
+    try:
+        pods = kube.list_pods(namespace)
+    except KubeError as exc:
+        logger.warning("Cannot collect availability: %s", exc)
+        return None
     if not pods:
         return 100.0
     running = sum(1 for p in pods if p["status"] == "Running")

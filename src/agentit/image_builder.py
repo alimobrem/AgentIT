@@ -60,7 +60,7 @@ elif [ -f requirements.txt ] || [ -f pyproject.toml ]; then
 FROM registry.access.redhat.com/ubi9/python-312:latest
 WORKDIR /app
 COPY . .
-RUN pip install --no-cache-dir -r requirements.txt 2>/dev/null || pip install --no-cache-dir . 2>/dev/null || true
+RUN pip install --no-cache-dir -r requirements.txt 2>/dev/null || pip install --no-cache-dir .
 USER 1001
 EXPOSE 8080
 CMD ["python", "app.py"]
@@ -70,7 +70,7 @@ elif [ -f pom.xml ]; then
 FROM registry.access.redhat.com/ubi9/openjdk-21:latest
 WORKDIR /app
 COPY . .
-RUN mvn package -DskipTests 2>/dev/null || true
+RUN mvn package -DskipTests
 USER 1001
 EXPOSE 8080
 CMD ["java", "-jar", "target/*.jar"]

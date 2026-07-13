@@ -43,6 +43,12 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+          livenessProbe:
+            exec:
+              command: [sh, -c, "test -f /tmp/heartbeat && test $(($(date +%s) - $(stat -c %Y /tmp/heartbeat 2>/dev/null || echo 0))) -lt 900"]
+            initialDelaySeconds: 60
+            periodSeconds: 120
+            failureThreshold: 3
           resources:
             requests:
               cpu: 50m

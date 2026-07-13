@@ -655,7 +655,7 @@ async def delete_remediation(assessment_id: str, rem_id: str):
 async def cancel_gate(gate_id: str):
     s = get_store()
     s.resolve_gate(gate_id, "cancelled", "portal-user")
-    return RedirectResponse(url="/gates", status_code=303)
+    return RedirectResponse(url="/gates?success=Gate+dismissed", status_code=303)
 
 
 def _run_onboarding(
@@ -1039,16 +1039,16 @@ async def resolve_gate(request: Request, gate_id: str):
 @app.post("/api/feedback")
 async def record_feedback_endpoint(request: Request):
     """Record human feedback on agent recommendations."""
-    body = await request.json()
+    form = await request.form()
     s = get_store()
     fid = s.record_feedback(
-        app_name=body.get("app_name", ""),
-        agent_name=body.get("agent_name", ""),
-        finding_category=body.get("finding_category", ""),
-        action=body.get("action", ""),
-        human_reason=body.get("reason", ""),
-        original_value=body.get("original_value", ""),
-        human_value=body.get("human_value", ""),
+        app_name=str(form.get("app_name", "")),
+        agent_name=str(form.get("agent_name", "")),
+        finding_category=str(form.get("finding_category", "")),
+        action=str(form.get("action", "")),
+        human_reason=str(form.get("reason", "")),
+        original_value=str(form.get("original_value", "")),
+        human_value=str(form.get("human_value", "")),
     )
     return {"status": "recorded", "feedback_id": fid}
 

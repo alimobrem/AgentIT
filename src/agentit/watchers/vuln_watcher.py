@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 
 import click
 
@@ -85,6 +86,13 @@ class VulnWatcher:
                     except Exception as exc:
                         logger.exception("Remediation loop failed for %s", app_data["repo_name"])
                         click.echo(f"[vuln-watch] Remediation loop failed: {exc}", err=True)
+                        if self._publisher:
+                            self._publisher.publish(
+                                "agentit-alerts", agent_id="vuln-watcher",
+                                action="remediation-failed", target_app=app_data.get("repo_name", ""),
+                                severity="critical",
+                                summary=f"Remediation loop failed: {exc}",
+                            )
 
     def run(self) -> None:
         """Main loop: poll events, check fleet, sleep."""
@@ -95,6 +103,7 @@ class VulnWatcher:
                 for event in events:
                     self._handle_event(event)
                 self.check_fleet()
+                Path("/tmp/heartbeat").touch()
             except KeyboardInterrupt:
                 click.echo("Vulnerability watcher stopped.", err=True)
                 break

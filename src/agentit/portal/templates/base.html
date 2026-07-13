@@ -884,8 +884,31 @@ document.body.addEventListener('htmx:afterSettle', function(e) {
     Alpine.initTree(e.detail.target);
   }
 });
-document.body.addEventListener('htmx:responseError', completeLoading);
-document.body.addEventListener('htmx:timeout', completeLoading);
+document.body.addEventListener('htmx:responseError', function(e) {
+  completeLoading();
+  var tm = document.getElementById('toasts');
+  if (tm && Alpine.$data(tm)) {
+    var status = e.detail.xhr ? e.detail.xhr.status : 'unknown';
+    Alpine.$data(tm).show('Request failed (HTTP ' + status + '). Please try again.', 'error');
+  }
+});
+document.body.addEventListener('htmx:timeout', function() {
+  completeLoading();
+  var tm = document.getElementById('toasts');
+  if (tm && Alpine.$data(tm)) {
+    Alpine.$data(tm).show('Request timed out. Please try again.', 'warning');
+  }
+});
+document.body.addEventListener('htmx:beforeSwap', function(e) {
+  if (e.detail.xhr.status >= 400 && e.detail.xhr.status < 500) {
+    e.detail.shouldSwap = false;
+    completeLoading();
+    var tm = document.getElementById('toasts');
+    if (tm && Alpine.$data(tm)) {
+      Alpine.$data(tm).show('Invalid request — please check your input.', 'error');
+    }
+  }
+});
 window.addEventListener('pageshow', completeLoading);
 // Dead-button detector: flag @click handlers outside Alpine x-data scope
 document.addEventListener('alpine:init', function() {

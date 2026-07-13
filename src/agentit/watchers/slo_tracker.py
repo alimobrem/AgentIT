@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 
 import click
 
@@ -102,6 +103,7 @@ class SloTracker:
             try:
                 self._consumer.poll_once()
                 self.check_once()
+                Path("/tmp/heartbeat").touch()
             except KeyboardInterrupt:
                 click.echo("SLO tracker stopped.", err=True)
                 break

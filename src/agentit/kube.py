@@ -5,6 +5,10 @@ import time as _time
 
 logger = logging.getLogger(__name__)
 
+
+class KubeError(Exception):
+    """Raised when a Kubernetes API call fails (not a missing-resource 404)."""
+
 _client_cache = None
 _client_cache_time: float = 0
 _CLIENT_TTL = 600  # 10 minutes
@@ -67,12 +71,11 @@ def list_pods(namespace: str, label_selector: str = "") -> list[dict]:
             for p in pods.items
         ]
     except Exception as exc:
-        logger.warning("Failed to list pods in %s: %s", namespace, exc)
-        return []
+        raise KubeError(f"Failed to list pods in {namespace}: {exc}") from exc
 
 
 def get_pod_count(namespace: str) -> tuple[int, int]:
-    """Returns (running_count, failed_count)."""
+    """Returns (running_count, failed_count). Raises KubeError on API failure."""
     pods = list_pods(namespace)
     running = sum(1 for p in pods if p["status"] == "Running")
     failed = sum(1 for p in pods if p["status"] == "Failed" or p.get("crash_looping", False))
@@ -88,37 +91,35 @@ def list_custom_resources(group: str, version: str, plural: str, namespace: str 
             result = custom_objects().list_cluster_custom_object(group, version, plural, _request_timeout=10)
         return result.get("items", [])
     except Exception as exc:
-        logger.warning("Failed to list %s/%s %s: %s", group, version, plural, exc)
-        return []
+        raise KubeError(f"Failed to list {group}/{version} {plural}: {exc}") from exc
 
 
 def apply_yaml(content: str, namespace: str) -> dict:
-    """Apply a YAML manifest using create_from_yaml. Returns {"applied": bool, "error": str|None}."""
-    import os
-    import tempfile
+    """Apply a YAML manifest with server-side-apply semantics.
 
-    import yaml
-    from kubernetes import client as k8s_client
-    from kubernetes.utils import create_from_yaml
+    Creates resources that don't exist, patches resources that already do.
+    Returns {"applied": bool, "error": str|None}.
+    """
+    import os
+    import subprocess
+    import tempfile
 
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
     try:
         tmp.write(content)
         tmp.close()
-        api_client = k8s_client.ApiClient()
-        try:
-            create_from_yaml(
-                api_client,
-                tmp.name,
-                namespace=namespace,
-                verbose=False,
-            )
+        result = subprocess.run(
+            ["oc", "apply", "--server-side", "--force-conflicts",
+             "-n", namespace, "-f", tmp.name],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
             return {"applied": True, "error": None}
-        except Exception as exc:
-            error_msg = str(exc)
-            if "already exists" in error_msg.lower():
-                return {"applied": True, "error": None}
-            return {"applied": False, "error": error_msg[:200]}
+        return {"applied": False, "error": result.stderr[:200]}
+    except FileNotFoundError:
+        return {"applied": False, "error": "oc CLI not found"}
+    except subprocess.TimeoutExpired:
+        return {"applied": False, "error": "oc apply timed out after 30s"}
     finally:
         os.unlink(tmp.name)
 
@@ -160,8 +161,7 @@ def get_api_resources() -> set[str]:
             resources.add(api.kind.lower())
         return resources
     except Exception as exc:
-        logger.warning("Failed to get API resources: %s", exc)
-        return set()
+        raise KubeError(f"Failed to get API resources: {exc}") from exc
 
 
 def create_config_map(name: str, namespace: str, data: dict[str, str]) -> bool:
@@ -334,8 +334,10 @@ def namespace_exists(namespace: str) -> bool:
     try:
         core_v1().read_namespace(namespace, _request_timeout=5)
         return True
-    except Exception:
-        return False
+    except Exception as exc:
+        if hasattr(exc, "status") and exc.status == 404:
+            return False
+        raise KubeError(f"Failed to check namespace {namespace}: {exc}") from exc
 
 
 def create_namespace(namespace: str) -> None:
@@ -344,4 +346,6 @@ def create_namespace(namespace: str) -> None:
     try:
         core_v1().create_namespace(V1Namespace(metadata=V1ObjectMeta(name=namespace)), _request_timeout=10)
     except Exception as exc:
-        logger.warning("Failed to create namespace %s: %s", namespace, exc)
+        if hasattr(exc, "status") and exc.status == 409:
+            return
+        raise KubeError(f"Failed to create namespace {namespace}: {exc}") from exc

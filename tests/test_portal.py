@@ -1165,7 +1165,7 @@ def test_health_page(client):
 
 def test_health_api(client):
     resp = client.get("/api/health")
-    assert resp.status_code == 200
+    assert resp.status_code in (200, 503)
     data = resp.json()
     assert "pods_running" in data
     assert "pipeline_status" in data

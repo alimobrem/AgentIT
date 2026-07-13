@@ -191,7 +191,7 @@ async def webhook_github_push(request: Request):
         log.exception("Re-assessment failed for %s", managed["repo_name"])
         s.log_event("github-webhook", "reassessment-failed", managed["repo_name"],
                     "warning", f"Re-assessment failed: {str(exc)[:200]}")
-        return JSONResponse({"status": "error", "reason": str(exc)[:200]})
+        return JSONResponse({"status": "error", "reason": str(exc)[:200]}, status_code=500)
 
 
 @router.post("/api/webhook/onboard")
@@ -285,7 +285,8 @@ async def webhook_auto_apply(request: Request):
     )
 
     log.info("auto-apply result for %s: %s -- %s", assessment_id, result["action"], result["reason"])
-    return JSONResponse(result)
+    status_code = 207 if result["action"] in ("partial_failure", "failed") else 200
+    return JSONResponse(result, status_code=status_code)
 
 
 @router.post("/api/webhook/finding")

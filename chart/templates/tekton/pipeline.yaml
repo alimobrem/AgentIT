@@ -99,7 +99,7 @@ spec:
     - name: tag-latest
       retries: 2
       timeout: "2m"
-      runAfter: [build-image]
+      runAfter: [build-image, run-tests]
       taskSpec:
         params:
           - name: image-ref
@@ -141,16 +141,22 @@ spec:
                 memory: 64Mi
                 cpu: 50m
             script: |
-              set -euo pipefail
+              set -uo pipefail
               TIMESTAMP=$(date +%s)
+              ROLLOUT_OK=0
+              ARGOCD_OK=0
               oc -n {{ .Release.Namespace }} patch rollout agentit --type=merge \
                 -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"agentit.io/restart\":\"${TIMESTAMP}\"}}}}}" \
                 && echo "Rollout restart triggered (${TIMESTAMP})" \
-                || echo "Rollout restart failed (non-fatal)"
+                || { echo "Rollout restart failed"; ROLLOUT_OK=1; }
               oc -n openshift-gitops patch applications.argoproj.io agentit \
                 --type=merge -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}' \
                 && echo "Argo CD refresh triggered" \
-                || echo "Argo CD refresh failed (non-fatal)"
+                || { echo "Argo CD refresh failed"; ARGOCD_OK=1; }
+              if [ "$ROLLOUT_OK" -ne 0 ] && [ "$ARGOCD_OK" -ne 0 ]; then
+                echo "ERROR: Both rollout restart and Argo CD refresh failed"
+                exit 1
+              fi
 
     - name: verify-deploy
       retries: 2
@@ -203,12 +209,16 @@ spec:
               limits:
                 memory: 1Gi
             script: |
-              set -uo pipefail
+              set -euo pipefail
               pip install --no-cache-dir --no-deps -e . 2>&1 | tail -1
               echo "Running self-assessment..."
-              RESULT=$(python -m agentit assess . --format json --criticality high 2>/dev/null || echo '{}')
-              SCORE=$(echo "$RESULT" | python3 -c "import sys,json; print(int(json.load(sys.stdin).get('overall_score',0)))" 2>/dev/null || echo 0)
-              echo "Self-assessment score: $SCORE/100"
+              if RESULT=$(python -m agentit assess . --format json --criticality high 2>&1); then
+                SCORE=$(echo "$RESULT" | python3 -c "import sys,json; print(int(json.load(sys.stdin).get('overall_score',0)))" 2>/dev/null || echo 0)
+                echo "Self-assessment score: $SCORE/100"
+              else
+                echo "TOOL_FAILED: self-assessment command exited non-zero"
+                echo "Output: $RESULT"
+              fi
       workspaces:
         - name: source
           workspace: source

@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,9 +21,12 @@ TOPIC_DLQ = "agentit-dlq"
 
 
 class EventPublisher:
+    _RECONNECT_COOLDOWN = 60
+
     def __init__(self, bootstrap_servers: str | None = None) -> None:
         self._bootstrap = bootstrap_servers or os.environ.get("AGENTIT_KAFKA_BOOTSTRAP")
         self._producer = None
+        self._last_reconnect: float = 0
         self._buffer_db = self._resolve_buffer_db()
         self._init_buffer_db()
         if self._bootstrap:
@@ -107,6 +111,16 @@ class EventPublisher:
         except Exception as exc:
             logger.error("Buffer drain failed: %s", exc)
 
+    def _try_reconnect(self) -> None:
+        if not self._bootstrap:
+            return
+        now = time.monotonic()
+        if now - self._last_reconnect < self._RECONNECT_COOLDOWN:
+            return
+        self._last_reconnect = now
+        logger.info("Attempting Kafka reconnect...")
+        self._connect()
+
     @property
     def kafka_enabled(self) -> bool:
         return self._producer is not None
@@ -136,6 +150,8 @@ class EventPublisher:
             },
             "correlationId": correlation_id,
         }
+        if self._producer is None:
+            self._try_reconnect()
         if self._producer is None:
             self._buffer_locally(topic, event)
             return event
