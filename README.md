@@ -234,7 +234,7 @@ uv run agentit portal --port 8080
 # open http://localhost:8080
 ```
 
-The portal uses a local SQLite file (`agentit.db` by default) — no external database required for local use.
+The portal uses a local SQLite file (`agentit.db` by default) — no external database required for local use. A migration to an HA Postgres backend (async, via `asyncpg`) is planned but not yet wired in — see [`docs/postgres-migration-plan.md`](docs/postgres-migration-plan.md) for the design and rollout plan, and the `postgres.enabled` chart flag below for the (currently unused) CloudNativePG cluster prep.
 
 ## Configuration
 
@@ -266,7 +266,7 @@ AgentIT deploys itself the same way it onboards other apps — via the Helm char
 - Change a secret: `oc create secret` on-cluster, then reference it via a Helm parameter. Never in Git.
 - Never `helm upgrade` manually or `oc edit` the `Rollout`.
 
-Key `chart/values.yaml` feature flags: `rollout.enabled` (canary via Argo Rollouts), `kafka.enabled` / `argoEvents.enabled` (event-driven loop), `tektonCI.enabled` (build pipeline), `cronJobs.cveScan.enabled`, and `agents.{vulnWatcher,sloTracker,driftDetector}.enabled`.
+Key `chart/values.yaml` feature flags: `rollout.enabled` (canary via Argo Rollouts), `kafka.enabled` / `argoEvents.enabled` (event-driven loop), `tektonCI.enabled` (build pipeline), `cronJobs.cveScan.enabled`, `agents.{vulnWatcher,sloTracker,driftDetector}.enabled`, and `postgres.enabled` (HA Postgres via CloudNativePG — chart-only prep, `store.py` doesn't use it yet).
 
 The chart includes: NetworkPolicy, ResourceQuota, LimitRange, PodDisruptionBudget, anti-affinity, backup CronJob, dedicated ServiceAccount (not `default`), and a self-assess step in the CI pipeline.
 
@@ -362,11 +362,13 @@ AgentIT/
 ├── checks/                         # 20 data-driven YAML check files (7 dimensions)
 ├── chart/                          # Helm chart (30+ templates: Rollout, Services, Route, RBAC,
 │                                   #   NetworkPolicy, ResourceQuota, LimitRange, PDB, Tekton,
-│                                   #   Kafka, Argo Events, watcher agents, backup CronJob)
+│                                   #   Kafka, Argo Events, watcher agents, backup CronJob,
+│                                   #   Postgres/CloudNativePG cluster prep)
 ├── argocd/application.yaml         # Argo CD Application for self-deployment
 ├── docs/
 │   ├── architecture.md             # System diagrams, pipeline, event loop, agent fleet
-│   └── deployment.md               # GitOps operational rules
+│   ├── deployment.md               # GitOps operational rules
+│   └── postgres-migration-plan.md  # Deferred SQLite → HA Postgres/asyncpg migration plan
 ├── Containerfile                   # UBI9 Python 3.12, HEALTHCHECK, non-root
 └── tests/                          # 787 tests across 65 files
 ```
