@@ -56,13 +56,21 @@ spec:
         # Coordinated cutover (docs/postgres-migration-plan.md section 7):
         # flips AGENTIT_DB_BACKEND=postgres (plus the AGENTIT_DB_DSN built
         # from the bundled Secret) across all 5 Deployments in a single
-        # sync. A real cutover attempt was made and rolled back -- see
-        # "Progress update: real cutover attempted and rolled back" in the
-        # plan doc for the two real blockers found (a Secret/password-drift
-        # chart bug and a store.raw code incompatibility in the 4 watcher
-        # CLI entry points). Left at "sqlite" until both are fixed.
+        # sync. All 3 blockers found in the first attempt (Secret password
+        # drift, watcher store.raw incompatibility, watcher NetworkPolicy
+        # DNS blocking) are fixed and verified -- see
+        # docs/postgres-migration-plan.md for the full history.
         - name: postgres.backend
-          value: "sqlite"
+          value: "postgres"
+    # TEMPORARY, for this one cutover deploy only (docs/postgres-migration-plan.md
+    # section 7's own guidance: a storage-backend flip must not be a gradual
+    # canary, since old/new portal pods would otherwise talk to two different
+    # databases simultaneously). Revert to the chart default (10/50/100 with
+    # pauses) once this sync is confirmed healthy.
+    values: |
+      rollout:
+        steps:
+          - setWeight: 100
   ignoreDifferences:
     - group: ""
       kind: Service
