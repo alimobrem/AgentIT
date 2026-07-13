@@ -280,6 +280,18 @@ class TestAgentRegistry:
         assert len(agents) == 1
         assert agents[0]["capabilities"] == '["scan", "fix"]'
 
+    async def test_register_agent_accepts_prose_capabilities(self, store):
+        """Regression guard for a real bug found during the live Postgres
+        cutover: AGENT_CAPABILITIES (agents/capabilities.py) passes a
+        human-readable prose description, never actual JSON -- e.g.
+        "VPA, cost labels, cost report" -- and the column must accept it
+        as plain TEXT (matching store.py), not reject it via a `::jsonb`
+        cast."""
+        await store.register_agent("cost", "cost", capabilities="VPA, cost labels, cost report")
+        agents = await store.list_agents()
+        agent = next(a for a in agents if a["agent_name"] == "cost")
+        assert agent["capabilities"] == "VPA, cost labels, cost report"
+
     async def test_agent_heartbeat(self, store):
         await store.register_agent("scanner", "security")
         assert await store.agent_heartbeat("scanner") is True

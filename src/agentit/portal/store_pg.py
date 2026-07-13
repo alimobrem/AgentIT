@@ -135,7 +135,15 @@ CREATE TABLE IF NOT EXISTS agent_registry (
     agent_name TEXT NOT NULL UNIQUE,
     category TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
-    capabilities JSONB NOT NULL DEFAULT '[]'::jsonb,
+    -- TEXT, not JSONB: despite the name, callers (AGENT_CAPABILITIES in
+    -- agents/capabilities.py) pass a human-readable prose description
+    -- ("VPA, cost labels, cost report"), never an actual JSON value, and
+    -- routes/capabilities.py reads it back as a plain string too. This is
+    -- a real §4 schema-translation bug found live: the generic "TEXT
+    -- holding JSON -> JSONB" mapping doesn't apply to this specific
+    -- column, and SQLite's untyped TEXT silently allowed it while
+    -- Postgres's JSONB cast rejected every non-JSON capabilities string.
+    capabilities TEXT NOT NULL DEFAULT '[]',
     last_heartbeat TIMESTAMPTZ,
     registered_at TIMESTAMPTZ NOT NULL
 );
@@ -271,6 +279,13 @@ CREATE INDEX IF NOT EXISTS idx_check_results_assessment ON check_results(assessm
 -- plan §4) this needs none of store.py's try/except OperationalError dance.
 ALTER TABLE events ADD COLUMN IF NOT EXISTS correlation_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_events_correlation_id ON events(correlation_id);
+
+-- Migration: agent_registry.capabilities was originally created as JSONB
+-- (a §4 mistranslation -- see the column comment above); convert any
+-- already-live table to TEXT. Safe/idempotent to re-run even once the
+-- column is already TEXT (USING ... ::text is a no-op cast in that case).
+ALTER TABLE agent_registry ALTER COLUMN capabilities TYPE TEXT USING capabilities::text;
+ALTER TABLE agent_registry ALTER COLUMN capabilities SET DEFAULT '[]';
 """
 
 _ALL_TABLES = [
@@ -926,7 +941,7 @@ class AssessmentStore:
             """
             INSERT INTO agent_registry
                 (id, agent_name, category, status, capabilities, last_heartbeat, registered_at)
-            VALUES ($1, $2, $3, 'active', $4::jsonb, $5, $6)
+            VALUES ($1, $2, $3, 'active', $4, $5, $6)
             ON CONFLICT (agent_name) DO UPDATE SET
                 category = EXCLUDED.category,
                 status = 'active',
@@ -958,7 +973,7 @@ class AssessmentStore:
             """
             INSERT INTO agent_registry
                 (id, agent_name, category, status, capabilities, last_heartbeat, registered_at)
-            VALUES ($1, $2, $3, 'active', '[]'::jsonb, $4, $4)
+            VALUES ($1, $2, $3, 'active', '[]', $4, $4)
             ON CONFLICT (agent_name) DO UPDATE SET last_heartbeat = EXCLUDED.last_heartbeat
             """,
             uuid.uuid4().hex, agent_name, category, now,
