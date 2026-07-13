@@ -34,6 +34,10 @@ _CRD_TO_OPERATOR: dict[str, dict] = {
         "channel": "stable",
         "source": "redhat-operators",
         "value": "Automatically right-sizes CPU and memory requests based on actual usage — reduces waste and prevents OOM kills.",
+        # Only supports the OwnNamespace install mode (verified against this
+        # cluster's packagemanifest) -- needs a dedicated namespace, can't join
+        # the shared openshift-operators AllNamespaces OperatorGroup.
+        "own_namespace": True,
     },
     "Pipeline": {
         "name": "OpenShift Pipelines",
@@ -104,6 +108,7 @@ _CRD_TO_OPERATOR: dict[str, dict] = {
         "channel": "stable-4.17",
         "source": "redhat-operators",
         "value": "Persistent storage, object storage, and backup infrastructure for stateful apps.",
+        "own_namespace": True,  # OwnNamespace-only; see VerticalPodAutoscaler note above.
     },
     "ACSSecuredCluster": {
         "name": "Advanced Cluster Security",
@@ -153,6 +158,7 @@ _CRD_TO_OPERATOR: dict[str, dict] = {
         "channel": "stable-v26",
         "source": "redhat-operators",
         "value": "SSO, OIDC, and SAML authentication — secure your app without building auth from scratch.",
+        "own_namespace": True,  # OwnNamespace-only; see VerticalPodAutoscaler note above.
     },
     # ── Built-in (no install needed) ──────────────────────────────
     "PrometheusRule": {
@@ -321,50 +327,94 @@ def apply_manifests_to_cluster(
     }
 
 
+# Packages whose CSV only supports the OwnNamespace install mode, so they must
+# land in a dedicated namespace with their own OperatorGroup rather than joining
+# the shared openshift-operators AllNamespaces OperatorGroup. Sourced from the
+# per-CRD "own_namespace" flags above (deduped by package, since several kinds
+# can map to the same operator).
+_OWN_NAMESPACE_PACKAGES: frozenset[str] = frozenset(
+    op["package"] for op in _CRD_TO_OPERATOR.values()
+    if op.get("package") and op.get("own_namespace")
+)
+
+_RBAC_HELP = (
+    "AgentIT's service account lacks the cluster permission this install needs. "
+    "Ask a cluster admin to enable `rbac.operatorInstall` in the Helm chart values "
+    "(grants the minimal OLM permissions for operator installs), or install "
+    "the operator manually via OperatorHub in the console."
+)
+
+
 def install_operator(package: str, channel: str, source: str) -> dict:
     """Install an OLM operator via Subscription CR.
 
-    Creates a dedicated namespace with a scoped OperatorGroup when the operator
-    doesn't support AllNamespaces mode (e.g. VPA). Falls back to openshift-operators
-    for operators that support it.
+    Creates a dedicated namespace with a scoped OperatorGroup for operators that
+    only support the OwnNamespace install mode (e.g. VPA, ODF, Keycloak/RHBK --
+    see ``_OWN_NAMESPACE_PACKAGES``). All other operators are installed as a
+    Subscription in the existing ``openshift-operators`` namespace, which already
+    has an AllNamespaces OperatorGroup -- no new namespace needed.
     """
     if source != "redhat-operators":
         return {"status": "error", "package": package,
                 "error": f"Only Red Hat operators are supported (source={source})"}
 
-    ns = f"openshift-{package.replace('_', '-')}"
+    own_namespace = package in _OWN_NAMESPACE_PACKAGES
 
-    docs = [
-        {
-            "apiVersion": "v1",
-            "kind": "Namespace",
-            "metadata": {"name": ns},
-        },
-        {
-            "apiVersion": "operators.coreos.com/v1",
-            "kind": "OperatorGroup",
-            "metadata": {"name": f"{package}-og", "namespace": ns},
-            "spec": {"targetNamespaces": [ns]},
-        },
-        {
-            "apiVersion": "operators.coreos.com/v1alpha1",
-            "kind": "Subscription",
-            "metadata": {"name": package, "namespace": ns},
-            "spec": {
-                "channel": channel,
-                "name": package,
-                "source": source,
-                "sourceNamespace": "openshift-marketplace",
-                "installPlanApproval": "Automatic",
+    if own_namespace:
+        ns = f"openshift-{package.replace('_', '-')}"
+        docs = [
+            {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {"name": ns},
             },
-        },
-    ]
+            {
+                "apiVersion": "operators.coreos.com/v1",
+                "kind": "OperatorGroup",
+                "metadata": {"name": f"{package}-og", "namespace": ns},
+                "spec": {"targetNamespaces": [ns]},
+            },
+            {
+                "apiVersion": "operators.coreos.com/v1alpha1",
+                "kind": "Subscription",
+                "metadata": {"name": package, "namespace": ns},
+                "spec": {
+                    "channel": channel,
+                    "name": package,
+                    "source": source,
+                    "sourceNamespace": "openshift-marketplace",
+                    "installPlanApproval": "Automatic",
+                },
+            },
+        ]
+    else:
+        ns = "openshift-operators"
+        docs = [
+            {
+                "apiVersion": "operators.coreos.com/v1alpha1",
+                "kind": "Subscription",
+                "metadata": {"name": package, "namespace": ns},
+                "spec": {
+                    "channel": channel,
+                    "name": package,
+                    "source": source,
+                    "sourceNamespace": "openshift-marketplace",
+                    "installPlanApproval": "Automatic",
+                },
+            },
+        ]
 
     content = yaml.dump_all(docs, default_flow_style=False)
     result = kube.apply_yaml(content, ns)
     if result["applied"]:
         logger.info("Operator %s install started in %s", package, ns)
         return {"status": "installing", "package": package, "namespace": ns}
-    else:
-        logger.error("Operator %s install failed: %s", package, result["error"])
-        return {"status": "error", "package": package, "error": result["error"] or "unknown"}
+
+    error = result["error"] or "unknown"
+    if "forbidden" in error.lower():
+        logger.error("Operator %s install forbidden in %s: %s", package, ns, error)
+        return {"status": "error", "package": package, "namespace": ns,
+                 "error": f"{_RBAC_HELP} (server said: {error})"}
+
+    logger.error("Operator %s install failed: %s", package, error)
+    return {"status": "error", "package": package, "namespace": ns, "error": error}

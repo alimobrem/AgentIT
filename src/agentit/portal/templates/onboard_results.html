@@ -45,7 +45,12 @@
 <div class="alert {% if install_status == 'error' %}alert-error{% else %}alert-success{% endif %}"
      {% if install_status == 'installing' %}hx-get="/api/operator-status?package={{ request.query_params.get('operator_installed') }}" hx-trigger="every 10s" hx-swap="innerHTML"{% endif %}>
   {% if install_status == 'error' %}
-    <strong>{{ request.query_params.get('operator_installed') }}</strong> installation failed. Check operator catalog and cluster permissions.
+    <strong>{{ request.query_params.get('operator_installed') }}</strong> installation failed.
+    {% if request.query_params.get('install_error') %}
+      {{ request.query_params.get('install_error') }}
+    {% else %}
+      Check operator catalog and cluster permissions.
+    {% endif %}
   {% else %}
     <strong>{{ request.query_params.get('operator_installed') }}</strong> installation started.
     <span class="text-sm">Checking status automatically — re-run Dry Run once ready.</span>
@@ -214,7 +219,7 @@
           <button type="button" class="btn btn-sm btn-green"
             @click="$dispatch('show-confirm', {
               title: 'Install Operator',
-              message: 'Install ' + {{ op.name | tojson | forceescape }} + '? This will create a Subscription in a dedicated namespace.',
+              message: 'Install ' + {{ op.name | tojson | forceescape }} + '? This will create an OLM Subscription on the cluster.',
               form: $refs.installOp{{ loop.index }},
               opts: { confirmText: 'Install', danger: false }
             })">Install</button>

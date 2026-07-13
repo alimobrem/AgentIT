@@ -23,23 +23,6 @@ subjects:
   - kind: ServiceAccount
     name: {{ .Release.Name }}
     namespace: {{ .Release.Namespace }}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: {{ .Release.Name }}-cross-namespace-apply
-  namespace: {{ .Release.Namespace }}
-  labels:
-    app.kubernetes.io/name: agentit
-    app.kubernetes.io/instance: {{ .Release.Name }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: edit
-subjects:
-  - kind: ServiceAccount
-    name: {{ .Release.Name }}
-    namespace: {{ .Release.Namespace }}
 {{- if .Values.rbac.clusterWideApply }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -53,6 +36,51 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: edit
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- if .Values.rbac.operatorInstall }}
+---
+# Minimal permissions for the "Install Operator" button (cluster_apply.install_operator):
+# creating a dedicated namespace + OperatorGroup for OwnNamespace-only operators (VPA,
+# ODF, RHBK/Keycloak), and a Subscription in the existing openshift-operators namespace
+# for AllNamespaces-capable ones. Namespace create is NOT covered by the "edit" ClusterRole
+# above even when clusterWideApply is on ("edit" only grants get/list/watch on namespaces),
+# so OwnNamespace installs still need this narrower, purpose-built grant either way.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-operator-installer
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/instance: {{ .Release.Name }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "create"]
+  - apiGroups: ["operators.coreos.com"]
+    resources: ["operatorgroups"]
+    verbs: ["get", "list", "create"]
+  - apiGroups: ["operators.coreos.com"]
+    resources: ["subscriptions"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: ["operators.coreos.com"]
+    resources: ["clusterserviceversions"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-operator-installer
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/instance: {{ .Release.Name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Name }}-operator-installer
 subjects:
   - kind: ServiceAccount
     name: {{ .Release.Name }}

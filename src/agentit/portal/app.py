@@ -937,8 +937,12 @@ async def install_operator_endpoint(request: Request):
     result = await asyncio.to_thread(install_operator, package, channel, source)
 
     if assessment_id:
+        error_param = f"&install_error={quote(result['error'][:400])}" if result.get("error") else ""
         return RedirectResponse(
-            url=f"/assessments/{assessment_id}/onboard-results?operator_installed={package}&install_status={result['status']}",
+            url=(
+                f"/assessments/{assessment_id}/onboard-results"
+                f"?operator_installed={package}&install_status={result['status']}{error_param}"
+            ),
             status_code=303,
         )
     return JSONResponse(result)

@@ -340,6 +340,11 @@ class TestRBAC:
         docs = list(yaml.safe_load_all(rendered))
         return {d["kind"]: d for d in docs if d}
 
+    def _all(self, kind: str) -> list[dict]:
+        rendered = _render(self.TEMPLATE)
+        docs = list(yaml.safe_load_all(rendered))
+        return [d for d in docs if d and d["kind"] == kind]
+
     def test_parseable(self):
         rendered = _render(self.TEMPLATE)
         docs = list(yaml.safe_load_all(rendered))
@@ -360,17 +365,111 @@ class TestRBAC:
         assert rb["roleRef"]["name"] == "edit"
         assert rb["subjects"][0]["name"] == "agentit"
 
+    def test_no_duplicate_edit_rolebinding(self):
+        """Regression test: rbac.yaml used to define two separate namespace-scoped
+        RoleBindings (`-edit` and `-cross-namespace-apply`) both granting the
+        identical ClusterRole `edit` to the same SA in the same namespace -- the
+        second one was pure duplication (a RoleBinding can never grant
+        cross-namespace access regardless of its name or roleRef kind)."""
+        rbs = self._all("RoleBinding")
+        edit_grants_to_agentit_sa = [
+            rb for rb in rbs
+            if rb["roleRef"]["name"] == "edit"
+            and rb["metadata"].get("namespace") == "test-ns"
+            and rb["subjects"][0]["name"] == "agentit"
+        ]
+        assert len(edit_grants_to_agentit_sa) == 1
+
     def test_has_cluster_rolebinding(self):
-        by_kind = self._by_kind()
-        crb = by_kind["ClusterRoleBinding"]
-        assert crb["roleRef"]["name"] == "edit"
+        # rbac.yaml renders two ClusterRoleBindings (clusterWideApply's "edit"
+        # grant, and operatorInstall's scoped "operator-installer" grant) --
+        # find the "edit" one specifically rather than assuming there's only one.
+        crbs = self._all("ClusterRoleBinding")
+        crb = next(c for c in crbs if c["roleRef"]["name"] == "edit")
         assert crb["subjects"][0]["name"] == "agentit"
         assert crb["subjects"][0]["namespace"] == "test-ns"
 
     def test_cluster_rolebinding_enables_cross_namespace(self):
         """ClusterRoleBinding (not RoleBinding) is required for cross-namespace apply."""
-        by_kind = self._by_kind()
-        crb = by_kind["ClusterRoleBinding"]
+        crbs = self._all("ClusterRoleBinding")
+        crb = next(c for c in crbs if c["roleRef"]["name"] == "edit")
         assert "namespace" not in crb["metadata"], (
             "ClusterRoleBinding must not have metadata.namespace"
         )
+
+    def test_operator_installer_rbac_is_scoped_not_edit(self):
+        """The Install Operator button's ClusterRole must stay minimal -- not the
+        broad "edit" role used by clusterWideApply -- since it's granted by default."""
+        cluster_roles = self._all("ClusterRole")
+        role = next(c for c in cluster_roles if c["metadata"]["name"] == "agentit-operator-installer")
+        resources = {
+            (group, res)
+            for r in role["rules"]
+            for group in r["apiGroups"]
+            for res in r["resources"]
+        }
+        assert resources == {
+            ("", "namespaces"),
+            ("operators.coreos.com", "operatorgroups"),
+            ("operators.coreos.com", "subscriptions"),
+            ("operators.coreos.com", "clusterserviceversions"),
+        }
+
+        crbs = self._all("ClusterRoleBinding")
+        crb = next(c for c in crbs if c["roleRef"]["name"] == "agentit-operator-installer")
+        assert crb["subjects"][0]["name"] == "agentit"
+        assert crb["subjects"][0]["namespace"] == "test-ns"
+
+
+# ---------------------------------------------------------------------------
+# Watcher NetworkPolicies (networkpolicy-agents.yaml)
+# ---------------------------------------------------------------------------
+
+class TestWatcherNetworkPolicies:
+    """Regression coverage for docs/code-review-2026-07-12.md item #5: the
+    watcher Deployments (vuln-watcher, slo-tracker, drift-detector,
+    skill-learner) previously had no NetworkPolicy at all."""
+
+    TEMPLATE = CHART_DIR / "networkpolicy-agents.yaml"
+
+    def _by_name(self) -> dict[str, dict]:
+        rendered = _render(self.TEMPLATE)
+        docs = list(yaml.safe_load_all(rendered))
+        return {d["metadata"]["name"]: d for d in docs if d}
+
+    def test_parseable_and_covers_all_four_watchers(self):
+        by_name = self._by_name()
+        assert set(by_name) == {
+            "agentit-vuln-watcher",
+            "agentit-slo-tracker",
+            "agentit-drift-detector",
+            "agentit-skill-learner",
+        }
+        for policy in by_name.values():
+            assert policy["kind"] == "NetworkPolicy"
+
+    def test_denies_all_ingress(self):
+        """These are background pollers, not servers -- nothing should reach them."""
+        for name, policy in self._by_name().items():
+            assert "Ingress" in policy["spec"]["policyTypes"], name
+            assert policy["spec"]["ingress"] == [], name
+
+    def test_podselector_matches_its_own_watcher_deployment(self):
+        expected = {
+            "agentit-vuln-watcher": "agentit-vuln-watcher",
+            "agentit-slo-tracker": "agentit-slo-tracker",
+            "agentit-drift-detector": "agentit-drift-detector",
+            "agentit-skill-learner": "agentit-skill-learner",
+        }
+        by_name = self._by_name()
+        for name, app_label in expected.items():
+            assert by_name[name]["spec"]["podSelector"]["matchLabels"]["app"] == app_label
+
+    def test_egress_allows_dns_and_api_server(self):
+        for name, policy in self._by_name().items():
+            egress_ports = {
+                (rule.get("ports", [{}])[0].get("protocol"), rule.get("ports", [{}])[0].get("port"))
+                for rule in policy["spec"]["egress"]
+            }
+            assert ("TCP", 53) in egress_ports or ("UDP", 53) in egress_ports, name
+            assert ("TCP", 6443) in egress_ports, name
