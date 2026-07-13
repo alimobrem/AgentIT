@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import tempfile
 import zipfile
 from datetime import datetime, timezone
@@ -20,7 +21,7 @@ from agentit.models import (
     Severity,
     StackInfo,
 )
-from agentit.portal.app import app, get_store
+from agentit.portal.app import app, get_store, _get_trusted_base_url
 from conftest import make_store
 
 
@@ -330,6 +331,85 @@ def test_api_manifests_not_found(client):
 def test_onboard_not_found(client):
     resp = client.post("/assessments/nonexistent/onboard", follow_redirects=False)
     assert resp.status_code == 404
+
+
+def test_trusted_base_url_ignores_forged_host_header(client, _override_store):
+    """A forged Host header must not affect the webhook URL registered with GitHub.
+
+    Regression test for the reflected-Host-header issue: with no
+    AGENTIT_EXTERNAL_URL override and no reachable cluster Route, the request's
+    Host header used to be trusted outright.
+    """
+    store = _override_store
+    report = _make_report()
+    aid = store.save(report)
+
+    fake_routes = [
+        {"metadata": {"labels": {"app.kubernetes.io/name": "agentit"}},
+         "spec": {"host": "agentit.apps.cluster.example.com"}},
+    ]
+    with patch("agentit.portal.app._run_onboarding", return_value=([], {})), \
+         patch("agentit.portal.github_pr.ensure_webhook") as mock_ensure_webhook, \
+         patch("agentit.kube.list_custom_resources", return_value=fake_routes), \
+         patch.dict(os.environ, {"KUBERNETES_SERVICE_HOST": "10.0.0.1"}):
+        mock_ensure_webhook.return_value = {"created": True}
+        client.post(
+            f"/assessments/{aid}/onboard",
+            follow_redirects=False,
+            headers={"Host": "evil.example.com"},
+        )
+        assert mock_ensure_webhook.called
+        registered_url = mock_ensure_webhook.call_args[0][1]
+        assert "evil.example.com" not in registered_url
+        assert registered_url.startswith("https://agentit.apps.cluster.example.com")
+
+
+def test_get_trusted_base_url_env_override():
+    """AGENTIT_EXTERNAL_URL, when set, wins over both the Route lookup and the request."""
+    request = MagicMock()
+    request.base_url = "http://untrusted.example.com/"
+    with patch.dict(os.environ, {"AGENTIT_EXTERNAL_URL": "https://agentit.apps.cluster.example.com/"}):
+        assert _get_trusted_base_url(request) == "https://agentit.apps.cluster.example.com"
+
+
+def test_get_trusted_base_url_uses_own_route():
+    """With no override, the app's own OpenShift Route host is used, not the request's Host."""
+    request = MagicMock()
+    request.base_url = "http://untrusted.example.com/"
+    fake_routes = [
+        {"metadata": {"labels": {"app.kubernetes.io/name": "agentit"}},
+         "spec": {"host": "agentit.apps.cluster.example.com"}},
+    ]
+    with patch.dict(os.environ, {"KUBERNETES_SERVICE_HOST": "10.0.0.1"}, clear=False), \
+         patch("agentit.kube.list_custom_resources", return_value=fake_routes):
+        os.environ.pop("AGENTIT_EXTERNAL_URL", None)
+        assert _get_trusted_base_url(request) == "https://agentit.apps.cluster.example.com"
+
+
+def test_get_trusted_base_url_falls_back_to_request_when_not_in_cluster():
+    """Outside a cluster (no KUBERNETES_SERVICE_HOST, e.g. local dev/tests), skip
+    the Route lookup entirely and fall back to the request -- this also avoids
+    every call attempting a real (possibly slow/unreachable) kubeconfig-based
+    connection from a developer's machine."""
+    request = MagicMock()
+    request.base_url = "http://localhost:8080/"
+    with patch.dict(os.environ, {}, clear=False), \
+         patch("agentit.kube.list_custom_resources") as mock_list:
+        os.environ.pop("AGENTIT_EXTERNAL_URL", None)
+        os.environ.pop("KUBERNETES_SERVICE_HOST", None)
+        assert _get_trusted_base_url(request) == "http://localhost:8080"
+        mock_list.assert_not_called()
+
+
+def test_get_trusted_base_url_falls_back_to_request_when_route_unresolvable():
+    """In-cluster but the Route lookup itself fails (RBAC, API error, etc) --
+    still fall back to the request rather than raising."""
+    request = MagicMock()
+    request.base_url = "http://localhost:8080/"
+    with patch.dict(os.environ, {"KUBERNETES_SERVICE_HOST": "10.0.0.1"}, clear=False), \
+         patch("agentit.kube.list_custom_resources", side_effect=Exception("no cluster")):
+        os.environ.pop("AGENTIT_EXTERNAL_URL", None)
+        assert _get_trusted_base_url(request) == "http://localhost:8080"
 
 
 def test_onboard_results_no_onboarding(client, _override_store):
@@ -1356,6 +1436,20 @@ def test_operator_status_still_installing(client):
 
     assert resp.status_code == 200
     assert "AtLatestKnown" in resp.text
+
+
+def test_operator_status_escapes_reflected_package_param(client):
+    """Regression test for docs/code-review-2026-07-12.md item #1: `package`
+    is a client-supplied query param interpolated into a raw HTMLResponse
+    (bypassing Jinja2 autoescaping), so an unescaped value is reflected XSS."""
+    payload = '<script>alert(1)</script>'
+    with patch("agentit.portal.routes.health.kube") as mock_kube:
+        mock_kube.list_custom_resources.side_effect = Exception("cluster unreachable")
+        resp = client.get(f"/api/operator-status?package={payload}")
+
+    assert resp.status_code == 200
+    assert "<script>" not in resp.text
+    assert "&lt;script&gt;" in resp.text
 
 
 # ── Gate deduplication and expiry ──────────────────────────────────────

@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import logging
+import os
 import shutil
 import time as _time
 import zipfile
@@ -69,6 +70,43 @@ async def _with_timeout(coro, timeout: int = OPERATION_TIMEOUT):
         return await asyncio.wait_for(coro, timeout=timeout)
     except asyncio.TimeoutError:
         raise HTTPException(504, f"Operation timed out after {timeout}s")
+
+
+def _get_trusted_base_url(request: Request) -> str:
+    """This app's own externally-reachable base URL, for building outbound URLs
+    (e.g. the GitHub webhook registration below) that we hand to third parties.
+
+    Deliberately does NOT use `request.base_url` as the primary source: that's
+    derived from the client-supplied Host header, so a forged Host would make
+    us register a webhook pointing at an attacker-controlled server. Prefer an
+    explicit trusted override, then our own OpenShift Route (a cluster-side,
+    not client-side, source of truth). Only falls back to the request's Host
+    header if neither is available (e.g. local dev with no Route).
+    """
+    override = os.environ.get("AGENTIT_EXTERNAL_URL")
+    if override:
+        return override.rstrip("/")
+    # Only attempt the Route lookup when actually running in-cluster (the
+    # standard KUBERNETES_SERVICE_HOST env var Kubernetes injects into every
+    # pod) -- otherwise this would fall through to a real, possibly slow or
+    # unreachable, kubeconfig-based cluster on the developer's machine (e.g.
+    # in local dev/tests) for every request, instead of a fast, correct
+    # no-op that lands on the same request.base_url fallback anyway.
+    if os.environ.get("KUBERNETES_SERVICE_HOST"):
+        try:
+            from agentit import kube
+            namespace = os.environ.get("AGENTIT_NAMESPACE", "agentit")
+            routes = kube.list_custom_resources("route.openshift.io", "v1", "routes", namespace)
+            for route in routes:
+                if route.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/name") == "agentit":
+                    host = route.get("spec", {}).get("host")
+                    if host:
+                        return f"https://{host}"
+        except Exception:
+            log.warning("Could not resolve own Route for trusted base URL; "
+                        "falling back to request Host header", exc_info=True)
+    return str(request.base_url).rstrip("/")
+
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -810,7 +848,7 @@ async def onboard_submit(request: Request, assessment_id: str):
                         f"Building image: {build_result.get('image_ref')}")
 
     from agentit.portal.github_pr import ensure_webhook
-    webhook_url = str(request.base_url).rstrip("/") + "/api/webhook/github-push"
+    webhook_url = _get_trusted_base_url(request) + "/api/webhook/github-push"
     hook_result = await asyncio.to_thread(ensure_webhook, report.repo_url, webhook_url)
     if "error" in hook_result:
         log.warning("Webhook registration failed for %s: %s", report.repo_name, hook_result["error"])

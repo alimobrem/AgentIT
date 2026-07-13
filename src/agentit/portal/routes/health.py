@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from agentit import kube
-from agentit.portal.helpers import get_store, get_templates
+from agentit.portal.helpers import get_circuit_breaker_states, get_store, get_templates
 
 log = logging.getLogger(__name__)
 
@@ -225,6 +226,14 @@ def _get_cluster_health() -> dict:
         log.debug("Failed to collect Kafka stats", exc_info=True)
         result["kafka_stats"] = {"available": False, "topics": {}, "consumer_groups": []}
 
+    try:
+        result["circuit_breakers"] = get_circuit_breaker_states()
+        from agentit.portal.metrics import refresh_circuit_breaker_gauge
+        refresh_circuit_breaker_gauge()
+    except Exception:
+        log.debug("Failed to collect circuit breaker states", exc_info=True)
+        result["circuit_breakers"] = {}
+
     return result
 
 
@@ -357,6 +366,7 @@ async def api_health():
         "pods_failed": data["pods_failed"],
         "pipeline_status": data["pipeline_status"],
         "kafka_ready": data["kafka_ready"],
+        "circuit_breakers": data.get("circuit_breakers", {}),
     }
     degraded = False
     if data["pods_failed"] > 0:
@@ -375,6 +385,11 @@ async def operator_status(request: Request):
     if not package:
         return HTMLResponse("<span>Missing package name</span>")
 
+    # `package` is client-supplied (htmx polling query param) and `phase`/`state`
+    # come from cluster objects — none of these are trusted, so every value that
+    # gets interpolated into the raw HTML strings below must be escaped to avoid
+    # reflected XSS (this response bypasses Jinja2 autoescaping entirely).
+    safe_package = html.escape(package)
     op_ns = f"openshift-{package.replace('_', '-')}"
     try:
         csvs = await asyncio.to_thread(
@@ -392,21 +407,21 @@ async def operator_status(request: Request):
             state = (sub or {}).get("status", {}).get("state", "")
             if state:
                 return HTMLResponse(
-                    f"<strong>{package}</strong> -- subscription {state}. Waiting for operator pod..."
+                    f"<strong>{safe_package}</strong> -- subscription {html.escape(state)}. Waiting for operator pod..."
                     '<span class="spinner"></span>'
                 )
             return HTMLResponse(
-                f"<strong>{package}</strong> -- installing..."
+                f"<strong>{safe_package}</strong> -- installing..."
                 '<span class="spinner"></span>'
             )
         if phase == "Succeeded":
             return HTMLResponse(
-                f'<strong>{package}</strong> -- <span class="badge badge-low">Installed</span>. '
+                f'<strong>{safe_package}</strong> -- <span class="badge badge-low">Installed</span>. '
                 "Re-run Dry Run to apply the previously skipped manifests."
             )
         return HTMLResponse(
-            f"<strong>{package}</strong> -- phase: {phase}"
+            f"<strong>{safe_package}</strong> -- phase: {html.escape(phase)}"
             '<span class="spinner"></span>'
         )
     except Exception:
-        return HTMLResponse(f"<strong>{package}</strong> -- checking..." '<span class="spinner"></span>')
+        return HTMLResponse(f"<strong>{safe_package}</strong> -- checking..." '<span class="spinner"></span>')

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from agentit.portal.github_pr import create_onboarding_pr, ensure_applicationset
+from agentit.portal.github_pr import create_onboarding_pr, ensure_applicationset, ensure_infra_repo
 
 
 SAMPLE_FILES = [
@@ -165,3 +165,58 @@ def test_ensure_applicationset_returns_false_on_api_error(mock_kube):
     result = ensure_applicationset("https://github.com/org/agentit-gitops.git")
 
     assert result is False
+
+
+# ── ensure_infra_repo ────────────────────────────────────────────────────
+#
+# Regression test for docs/code-review-2026-07-12.md item #8: the
+# auto-created GitOps infra repo was created public, committing cluster
+# manifests (namespace names, internal service names, schedule commands) to
+# a world-readable repo.
+
+
+@patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"})
+@patch("agentit.portal.github_pr.requests")
+def test_ensure_infra_repo_creates_private_user_repo(mock_requests):
+    get_resp = MagicMock()
+    get_resp.status_code = 404  # repo doesn't exist yet
+    mock_requests.get.return_value = get_resp
+
+    post_resp = MagicMock()
+    post_resp.status_code = 201
+    post_resp.json.return_value = {"html_url": "https://github.com/org/agentit-gitops"}
+    mock_requests.post.return_value = post_resp
+
+    result = ensure_infra_repo("org", "agentit-gitops")
+
+    assert result["created"] is True
+    create_call = next(c for c in mock_requests.post.call_args_list if "/user/repos" in str(c))
+    assert create_call.kwargs["json"]["private"] is True
+
+
+@patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"})
+@patch("agentit.portal.github_pr.requests")
+def test_ensure_infra_repo_creates_private_org_repo_on_fallback(mock_requests):
+    """When /user/repos 422s (creating under an org, not the token's own user),
+    the org fallback must also request a private repo."""
+    get_resp = MagicMock()
+    get_resp.status_code = 404
+    mock_requests.get.return_value = get_resp
+
+    user_post_resp = MagicMock()
+    user_post_resp.status_code = 422
+
+    org_post_resp = MagicMock()
+    org_post_resp.status_code = 201
+    org_post_resp.json.return_value = {"html_url": "https://github.com/myorg/agentit-gitops"}
+
+    def post_side_effect(url, **kwargs):
+        return org_post_resp if "/orgs/" in url else user_post_resp
+
+    mock_requests.post.side_effect = post_side_effect
+
+    result = ensure_infra_repo("myorg", "agentit-gitops")
+
+    assert result["created"] is True
+    org_call = next(c for c in mock_requests.post.call_args_list if "/orgs/" in str(c))
+    assert org_call.kwargs["json"]["private"] is True

@@ -546,13 +546,15 @@ def ensure_infra_repo(owner: str, repo_name: str = "agentit-gitops") -> dict:
         if resp.status_code == 200:
             return {"repo_url": repo_url, "created": False}
 
+        # Private: this repo holds cluster manifests (namespace names, internal
+        # service names, schedule commands) that shouldn't be world-readable.
         resp = requests.post(
             f"{_API}/user/repos",
             headers=hdrs, timeout=10,
             json={
                 "name": repo_name,
                 "description": "AgentIT GitOps infrastructure — managed by AgentIT agents",
-                "private": False,
+                "private": True,
                 "auto_init": True,
             },
         )
@@ -563,7 +565,7 @@ def ensure_infra_repo(owner: str, repo_name: str = "agentit-gitops") -> dict:
                 json={
                     "name": repo_name,
                     "description": "AgentIT GitOps infrastructure — managed by AgentIT agents",
-                    "private": False,
+                    "private": True,
                     "auto_init": True,
                 },
             )

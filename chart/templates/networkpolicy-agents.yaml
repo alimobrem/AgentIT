@@ -1,0 +1,223 @@
+# NetworkPolicies for the watcher Deployments (chart/templates/agents/*.yaml).
+#
+# These are background pollers, not servers — they expose no port and no other
+# workload is expected to talk to them, so ingress is denied outright. Egress
+# is scoped to exactly what each watcher needs: DNS, the Kubernetes API server
+# (patch/read via kube.py), the portal Service, and Kafka/Postgres when those
+# are enabled. This closes the gap flagged in docs/code-review-2026-07-12.md
+# (#5): unlike the main portal Deployment, these had no NetworkPolicy at all.
+#
+# The Kubernetes API server is typically reachable on node IPs outside the pod
+# network rather than via a selectable Pod/Service, so — per the standard
+# NetworkPolicy pattern for this case — that egress rule has no `to` selector
+# and is scoped only by port.
+
+{{- if .Values.agents.vulnWatcher.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-vuln-watcher
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-vuln-watcher
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ .Release.Name }}-vuln-watcher
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 6443
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}
+      ports:
+        - protocol: TCP
+          port: 8080
+    {{- if .Values.kafka.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              strimzi.io/cluster: agentit-kafka
+      ports:
+        - protocol: TCP
+          port: 9092
+    {{- end }}
+    {{- if .Values.postgres.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: {{ .Release.Name }}-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- end }}
+{{- end }}
+---
+{{- if .Values.agents.sloTracker.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-slo-tracker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-slo-tracker
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ .Release.Name }}-slo-tracker
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 6443
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}
+      ports:
+        - protocol: TCP
+          port: 8080
+    {{- if .Values.kafka.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              strimzi.io/cluster: agentit-kafka
+      ports:
+        - protocol: TCP
+          port: 9092
+    {{- end }}
+    {{- if .Values.postgres.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: {{ .Release.Name }}-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- end }}
+{{- end }}
+---
+{{- if .Values.agents.driftDetector.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-drift-detector
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-drift-detector
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ .Release.Name }}-drift-detector
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 6443
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}
+      ports:
+        - protocol: TCP
+          port: 8080
+    {{- if .Values.kafka.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              strimzi.io/cluster: agentit-kafka
+      ports:
+        - protocol: TCP
+          port: 9092
+    {{- end }}
+    {{- if .Values.postgres.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: {{ .Release.Name }}-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- end }}
+{{- end }}
+---
+{{- if .Values.agents.skillLearner.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-skill-learner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-skill-learner
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ .Release.Name }}-skill-learner
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 6443
+    # research_cves() calls the LLM (Anthropic direct API or Vertex AI), both
+    # reachable only over the public internet — not selectable via
+    # podSelector/namespaceSelector, so this is scoped by port only.
+    - ports:
+        - protocol: TCP
+          port: 443
+    {{- if .Values.kafka.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              strimzi.io/cluster: agentit-kafka
+      ports:
+        - protocol: TCP
+          port: 9092
+    {{- end }}
+{{- end }}
