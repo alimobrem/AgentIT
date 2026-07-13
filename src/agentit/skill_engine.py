@@ -14,6 +14,22 @@ from agentit.platform_context import PlatformContext
 
 logger = logging.getLogger(__name__)
 
+# Irregular plurals for K8s kinds used in skills/*/outputs that a naive
+# "+s" suffix gets wrong (e.g. "networkpolicys", "ingresss"). Kubernetes
+# API resource lists use the correct English plural, so has_api() lookups
+# must match it. Anything not listed here falls back to naive "+s".
+_IRREGULAR_KIND_PLURALS: dict[str, str] = {
+    "policy": "policies",
+    "networkpolicy": "networkpolicies",
+    "ingress": "ingresses",
+}
+
+
+def _pluralize_kind(kind: str) -> str:
+    """Return the correct lowercase plural API resource name for a K8s kind."""
+    lower = kind.lower()
+    return _IRREGULAR_KIND_PLURALS.get(lower, lower + "s")
+
 
 @dataclass
 class Skill:
@@ -186,7 +202,7 @@ class SkillEngine:
         # Check if the output kind is available on the platform
         if self.platform:
             for output_kind in skill.outputs:
-                if not self.platform.has_api(output_kind.lower() + "s") and not self.platform.has_api(output_kind.lower()):
+                if not self.platform.has_api(_pluralize_kind(output_kind)) and not self.platform.has_api(output_kind.lower()):
                     logger.debug("Skipping skill %s: %s not available", skill.name, output_kind)
                     return []
 

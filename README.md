@@ -135,8 +135,8 @@ Long-lived watchers (deployed as separate pods):
 | Watcher | Loop | Role |
 |---|---|---|
 | **vuln-watcher** | 6h | Fleet CVE monitoring, triggers remediation |
-| **slo-tracker** | 5m | SLO polling, breach alerts, rollback gates |
-| **drift-detector** | 10m | Argo CD sync monitoring, API drift detection, auto-deprecation of affected skills |
+| **slo-tracker** | 5m | Collects fresh `availability`/`error_rate` metrics from the cluster (via `slo_collector`; `latency_p99_ms` has no collector yet and is skipped/logged, not silently ignored) for every tracked SLO, checks breaches with the correct per-metric direction (`availability` = higher is better; `error_rate`/`latency_p99_ms` = lower is better), publishes breach alerts, and opens rollback gates |
+| **drift-detector** | 10m | Argo CD sync monitoring, API drift detection, auto-deprecation of affected skills, reports still-in-use deprecated APIs (`PlatformContext.deprecated_apis`) |
 | **skill-learner** | 24h | Researches CVEs via LLM, drafts new skills for human review — opt-in via `agents.skillLearner.enabled` (chart default: disabled; enabled on the live deployment via `argocd/application.yaml`), requires an LLM connection |
 
 ## Self-improvement loop
@@ -196,6 +196,13 @@ uv run agentit onboard https://github.com/some-org/some-app --output-dir ./out
 
 # Continuously re-assess on an interval
 uv run agentit watch https://github.com/some-org/some-app --interval 3600
+
+# Re-assess every currently-tracked fleet app once and exit (for CronJobs --
+# the CronJob's own schedule controls periodicity, not an internal loop).
+# Works on both `watch` and `assess`; `--dimension` optionally scopes the
+# per-app finding count reported (e.g. only compliance findings).
+uv run agentit watch --rescan
+uv run agentit assess --rescan --dimension compliance
 
 # Dogfood: assess AgentIT's own repo
 uv run agentit self-assess
