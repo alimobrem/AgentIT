@@ -112,23 +112,15 @@ Additions and removals to the `skills/`/`checks/` catalog are no longer only vis
 
 ## The agent fleet
 
-12 one-shot onboarding agents and 3 long-lived watchers. Skills run **first** as the primary generation path; Python agents supplement for findings that no skill covers.
+**3 one-shot onboarding agents and 3 long-lived watchers.** Skills run **first**, unconditionally, as the primary generation path for every domain; the 3 remaining Python agents supplement for capabilities skills can't (or don't yet fully) replace. This is a smaller fleet than earlier versions of this doc described — `security`, `observability`, `cicd`, `compliance`, `infrastructure`, `incident`, `release`, `retirement`, and `chaos` used to each have a dedicated hardcoded Python agent; all nine were removed once skills (`skills/**/*.md`, template-fallback verified with no LLM required) reached full parity for every artifact those agents used to generate. See [`docs/agent-removal-readiness.md`](docs/agent-removal-readiness.md) for the domain-by-domain readiness audit this removal was executed against.
+
+| Agent | Category | Always runs? | Generates | Why it's still a Python agent |
+|---|---|---|---|---|
+| **DependencyAgent** | `dependency` | high/critical | Renovate/Dependabot config, CVE-scan CronWorkflow, **plus** a narrative `dependency-report.md` | Its *manifest* outputs are also skill-covered, but `dependency-report.md` needs real runtime-computed data (detected ecosystems, CVE package matches against `report.architecture.external_dependencies`) that a static skill template has no access to — faking it would violate this project's "no mock data" rule. `FleetOrchestrator` never skips this agent for skill coverage of its manifest outputs, specifically so the report keeps generating. |
+| **CostOptimizationAgent** | `cost` | high/critical | VPA, cost labels, cost CronWorkflow, **plus** a narrative `cost-report.md` | Same reasoning as `dependency` — `cost-report.md` needs a computed deployment tier (`_tier()`, from service/language count) and cost-lookup-table result a template can't produce. |
+| **CodeChangeAgent** | `codechange` | high/critical or score < 50 | `.gitignore`, health endpoints, OTel/structured-logging instrumentation — as source patches to the **app's own repo** | Fundamentally not skill-shaped: skills generate K8s manifests to apply to a cluster; they have no concept of "the application's source tree" and no PR/patch-application machinery. |
 
 Conflict detection only flags *real* collisions between agent outputs — a known-conflicting resource-kind pair actually being generated for the same workload (e.g. an actively-resizing VPA alongside an HPA), or two agents writing a file at the same output path — not merely "both agents succeeded". `plan.auto_approve` (computed from score/criticality at plan time) is downgraded to `False` if a real conflict is found during the actual run, so it can be trusted end-to-end.
-
-| Agent | Category | Always runs? | Generates |
-|---|---|---|---|
-| **HardeningAgent** | `security` | Yes | NetworkPolicy, Containerfile, RBAC, SecurityContext |
-| **ObservabilityAgent** | `observability` | Yes | ServiceMonitor, Grafana dashboard, alerting rules, OTel config |
-| **CICDAgent** | `cicd` | Yes | Tekton Pipeline, Argo CD Application, Argo Rollout |
-| **ComplianceAgent** | `compliance` | Yes | Namespaced Kyverno Policy, SBOM task, compliance evidence |
-| **InfrastructureAgent** | `infrastructure` | Yes | HPA, PDB, ResourceQuota, LimitRange, Namespace |
-| **ReleaseCoordinatorAgent** | `release` | Yes | AnalysisTemplate, rollout patch, rollback policy |
-| **DependencyAgent** | `dependency` | high/critical | Dependency report, Renovate config, CVE-scan CronWorkflow |
-| **IncidentAgent** | `incident` | high/critical | Incident runbook, PagerDuty config, Alertmanager routing |
-| **CostOptimizationAgent** | `cost` | high/critical | Cost report, right-sizing, cost labels |
-| **ChaosAgent** | `chaos` | not critical | LitmusChaos experiments |
-| **RetirementAgent** | `retirement` | score < 30 | Decommission plan, cleanup, data archive |
 
 Long-lived watchers (deployed as separate pods):
 
@@ -143,13 +135,18 @@ Every watcher records real tick telemetry after each loop iteration — a `tick-
 
 ## Self-improvement loop
 
-AgentIT improves itself through three tiers of learning:
+AgentIT improves itself through three tiers of learning. The loop is now closed end-to-end — `record_skill_outcome()` fires from every real production path, not just the CLI `self-fix` command, and the learning agent actually reads that data back before deciding what to research next:
 
-1. **Feedback loop** — tracks human decisions (approve/reject/modify) on generated fixes. Skills with < 30% approval rate are flagged for review on the Insights page, though a human still decides whether to act on that flag. Agents query the feedback store before generating to avoid repeating rejected patterns.
+1. **Feedback loop, wired into every real apply path.** `record_skill_outcome()` — previously only called from `self-fix` — now fires from onboarding apply (`routes/assessments.py::apply_to_cluster`), gate resolve (`routes/gates.py::resolve_gate`, both approve and reject), and auto-mode's successful auto-apply (`automode.py::AutoMode.execute`), via the shared `skill_engine.record_skill_outcomes()` helper. Each generated file's producing skill is recovered from `SkillEngine.generate()`'s `{app_name}-{skill.name}.yaml` naming convention (`skill_engine.skill_name_from_path()`) since neither `AgentResult` nor `onboarding_results.files_json` carry a structured skill-name field; `GeneratedFile.skill_name` (set directly by `SkillEngine.generate()`) gives the CLI's `self-fix` path exact attribution instead of the previous "app-name-skill-name" bug. Effectiveness is a **recency-weighted** rate (`AssessmentStore.get_skill_effectiveness()`/`get_low_effectiveness_skills()`, half-life ~90 days) so a skill that was bad months ago and has since improved can recover off the "Skills Needing Review" list on Insights, rather than being stuck flagged forever by outcomes that no longer reflect its current behavior. `SkillEngine.run_all()` now actually uses its `store` parameter: a skill whose domain has been rejected 3+ times for an app is skipped outright (mirroring the same threshold `webhooks.py` already used for auto-fix), and a human's most recent correction for that app+domain is passed to LLM generation as extra guidance (`get_human_override()`). Skill activation (`capabilities.py`'s "Activate" button) now runs a real functional check (`skill_engine.verify_skill()` — frontmatter completeness plus an actual generation smoke test against a synthetic fixture, validated with `agents/base.py::validate_manifest()`) before flipping `status: draft` → `active`, instead of a blind string replace; a skill that can't produce valid output is blocked, not silently activated.
+   - **Known gap:** the portal has no edit-before-apply flow (manifests are approve-as-is or reject-and-regenerate only), so there's no "diff between generated and applied content" to capture yet — that's a prerequisite gap, not something this pass could wire in without building a materially bigger editing feature.
 
-2. **Learning agent** — researches CVEs and best practices via LLM and generates draft skills that go through human review before activation. Runs automatically every 24h via the `skill-learner` watcher (chart default: disabled — enable with `agents.skillLearner.enabled=true`; currently enabled on the live deployment via `argocd/application.yaml`), and can also be triggered on demand from the Capabilities page ("Research CVEs & Generate Skills") or via `agentit learn` / `agentit learn-for` on the CLI. Draft skills get an "Activate" button right next to them on the Capabilities page — the full research → draft → human-review → active loop runs end-to-end in the portal, no CLI required.
+2. **Learning agent, now reading its own effectiveness data.** The research cycle (`SkillLearner.research_once()`, and the portal's "Research CVEs & Generate Skills" button) checks `get_low_effectiveness_skills()` **first**: if any skill is flagged, the LLM is asked specifically to propose a replacement (`learning_agent.research_skill_improvement()`) for each flagged skill (up to the configured limit), and only falls back to the generic CVE sweep when nothing's flagged. This is the wiring that actually closes the loop — before it, the learning agent was blind to which of its own already-shipped skills humans kept rejecting. Runs automatically every 24h via the `skill-learner` watcher (chart default: disabled — enable with `agents.skillLearner.enabled=true`; currently enabled on the live deployment via `argocd/application.yaml`), and can also be triggered on demand from the Capabilities page or via `agentit learn` / `agentit learn-for` on the CLI. Draft skills get an "Activate" button right next to them on the Capabilities page — the full research → draft → human-review → active loop runs end-to-end in the portal, no CLI required.
+   - **Persistence:** the `skill-learner` watcher runs in its own pod, so drafts it writes previously vanished on every restart *and* were never visible to the portal's Capabilities page at all (different pod, different filesystem). A dedicated, single-consumer PVC (`agents.skillLearner.persistence`, default on, mounted at `/data/skills` via `AGENTIT_SKILLS_DIR`) now makes drafts survive **that pod's own** restarts. It does *not* make them visible to the portal — that needs shared/RWX storage across two Deployments (risky with this chart's default `ReadWriteOnce` storage class) or a git write-back pipeline, neither of which shipped here; `SkillLearner.run()` logs a loud warning every cycle so this remains visible rather than a silent gap. Until one of those lands, prefer the portal's own "Research CVEs & Generate Skills" button or `agentit learn`/`learn-for` run against the portal's own data volume — both run in-process, so drafts are immediately visible and persisted.
+   - **Documented future idea (not built):** auto-triggering `agentit learn-for` when a new/uncommon stack pattern is detected 3+ times across onboardings would need new cross-onboarding stack-signature detection logic — flagged here as a real idea, deliberately not built under this pass's time constraints rather than shipped as a rushed heuristic.
 
 3. **Platform awareness** — `PlatformContext` discovers the cluster's K8s version, available APIs, CRDs, and operators. Every skill generation includes this context. The API drift detector auto-deprecates a skill specifically when the API kind it generates has been removed from the cluster (a narrower guarantee than the effectiveness-based flagging in tier 1).
+
+**Loop visibility.** The Capabilities page's skill table links each skill to a per-skill lifecycle page (`/capabilities/skills/{name}/history`) showing its full effectiveness trend (every recorded outcome, most recent first) and its activation/deprecation history (matched from the `events` table by skill name — `skill-added`/`skill-removed`/`skill-activated`/`skill-deprecated`/`skipped-rejected`/`skill-improvement-drafted`). The Insights page adds one loop-health meta-metric: of the skills currently flagged low-effectiveness, what percentage have had an improvement actually drafted for them in the last 30 days (`AssessmentStore.get_loop_health()`) — a live snapshot of whether the loop is actually turning, not just theoretically closed, using data that's only non-trivially populated now that tier 1's wiring exists.
 
 **Auditing LLM decisions.** Two places the LLM's output directly gates an outcome (not just generates content) persist a real, attributed record today, surfaced on the **Decisions** page: `self-fix`'s Step 3 first-approver gate (`LLMClient.review_fix`) — attributed by real skill name via `skill_effectiveness` — and auto-mode's safety classification (`LLMClient.classify_action`, `AutoMode.execute`) — attributed by the real originating agent when the caller knows it (e.g. the dispatcher's `result["agent"]`), otherwise the generic `auto-mode` component name, which is still the common case since most callers apply a whole bundle of manifests spanning several agents at once. A third real decision point — the security analyzer's LLM-based secret false-positive filter (`classify_secret`) — decides per match whether to keep or drop a finding but persists nothing today; see `llm_decisions.py`'s module docstring.
 
@@ -204,9 +201,6 @@ uv sync --extra dev
 # Score a repo across all 7 dimensions
 uv run agentit assess https://github.com/some-org/some-app --format terminal
 
-# Generate hardening manifests
-uv run agentit harden https://github.com/some-org/some-app --output-dir ./out
-
 # Full pipeline: assess + plan + run agents + skills + validate + summarize
 uv run agentit orchestrate https://github.com/some-org/some-app --output-dir ./out
 
@@ -253,7 +247,7 @@ uv run agentit portal --port 8080
 # open http://localhost:8080
 ```
 
-The portal uses a local SQLite file (`agentit.db` by default) — **still no external database required for local use; this remains the default and only active backend today.** A migration to an HA Postgres backend (async, via `asyncpg`) is in progress: `portal/store_pg.py` is a full async counterpart to `store.py`, schema and all, verified against a real Postgres instance, and every store caller in the codebase (CLI, watchers, and the portal — `app.py`, `routes/*.py`, `helpers.py`) has been converted to the `store_factory.create_store()` async access pattern, selectable via `AGENTIT_DB_BACKEND` (`sqlite` default, `postgres` opt-in) — but that env var is intentionally unset everywhere today, and `FleetOrchestrator`/`AutoMode`/`RemediationDispatcher`/`RemediationLoop` remain permanently synchronous internally (handed a raw sync store handle, run via `asyncio.to_thread`), which is the one remaining structural blocker to a real cutover. See [`docs/postgres-migration-plan.md`](docs/postgres-migration-plan.md) for exactly what's done vs. remaining, and the `postgres.enabled` chart flag below for the (currently unused) CloudNativePG cluster prep.
+The portal uses a local SQLite file (`agentit.db` by default) — **still no external database required for local use; this remains the default and only active backend today.** A migration to an HA Postgres backend (async, via `asyncpg`) is in progress: `portal/store_pg.py` is a full async counterpart to `store.py`, schema and all, verified against a real Postgres instance, and every store caller in the codebase (CLI, watchers, and the portal — `app.py`, `routes/*.py`, `helpers.py`, and now `FleetOrchestrator`/`AutoMode`/`RemediationDispatcher`/`RemediationLoop`, all genuinely `async def` throughout) has been converted to the `store_factory.create_store()` async access pattern, selectable via `AGENTIT_DB_BACKEND` (`sqlite` default, `postgres` opt-in) — but that env var is intentionally unset everywhere today. The structural blocker described in earlier revisions of this doc (those four classes staying permanently synchronous) is resolved; what's left is a real Postgres instance the cluster can reach plus the single coordinated cutover across all 5 Deployments, not any further code conversion. See [`docs/postgres-migration-plan.md`](docs/postgres-migration-plan.md) for exactly what's done vs. remaining, and the `postgres.bundled.enabled` chart flag below for the bundled-Postgres instance AgentIT deploys and maintains itself (no operator).
 
 ## Configuration
 
@@ -286,7 +280,7 @@ AgentIT deploys itself the same way it onboards other apps — via the Helm char
 - Change a secret: `oc create secret` on-cluster, then reference it via a Helm parameter. Never in Git.
 - Never `helm upgrade` manually or `oc edit` the `Rollout`.
 
-Key `chart/values.yaml` feature flags: `rollout.enabled` (canary via Argo Rollouts), `kafka.enabled` / `argoEvents.enabled` (event-driven loop), `tektonCI.enabled` (build pipeline), `cronJobs.cveScan.enabled`, `agents.{vulnWatcher,sloTracker,driftDetector}.enabled`, `monitoring.enabled` (ServiceMonitor + PrometheusRule + Grafana dashboard — chart default: disabled; **enabled on the live deployment via `argocd/application.yaml`**, so AgentIT scrapes and alerts on its own `/metrics`), `postgres.enabled` (HA Postgres via CloudNativePG — chart-only prep, `store.py` doesn't use it yet), and `auth.enabled` (OpenShift `oauth-proxy` sidecar in front of the portal — see [Security notes](#security-notes) and [`docs/deployment.md#authentication`](docs/deployment.md#authentication)).
+Key `chart/values.yaml` feature flags: `rollout.enabled` (canary via Argo Rollouts), `kafka.enabled` / `argoEvents.enabled` (event-driven loop), `tektonCI.enabled` (build pipeline), `cronJobs.cveScan.enabled`, `agents.{vulnWatcher,sloTracker,driftDetector}.enabled`, `monitoring.enabled` (ServiceMonitor + PrometheusRule + Grafana dashboard — chart default: disabled; **enabled on the live deployment via `argocd/application.yaml`**, so AgentIT scrapes and alerts on its own `/metrics`), `postgres.bundled.enabled` (AgentIT's own bundled, non-operator Postgres instance — chart-only prep until `AGENTIT_DB_BACKEND` is flipped, see [`docs/postgres-migration-plan.md`](docs/postgres-migration-plan.md)), and `auth.enabled` (OpenShift `oauth-proxy` sidecar in front of the portal — see [Security notes](#security-notes) and [`docs/deployment.md#authentication`](docs/deployment.md#authentication)).
 
 The chart includes: NetworkPolicy, ResourceQuota, LimitRange, PodDisruptionBudget, anti-affinity, backup CronJob, dedicated ServiceAccount (not `default`), and a self-assess step in the CI pipeline.
 
@@ -344,7 +338,7 @@ Additional test markers: `--run-real-repos` (clone live GitHub repos), `--live-c
 ```
 AgentIT/
 ├── src/agentit/                    # ~21K lines across 71 Python files
-│   ├── cli.py                      # click CLI: 15+ commands (assess, harden, onboard, orchestrate,
+│   ├── cli.py                      # click CLI: 15+ commands (assess, onboard, orchestrate,
 │   │                               #   watch, portal, self-assess, self-fix, learn, learn-for,
 │   │                               #   test-skill, activate-skill, run-agent, vuln-watch, slo-track,
 │   │                               #   drift-detect, consume)
@@ -370,7 +364,11 @@ AgentIT/
 │   │                               #   mockable interface for cluster ops (core/apps/batch/custom
 │   │                               #   objects); `apply_yaml` is the one remaining `oc` subprocess
 │   ├── analyzers/                  # 7 read-only analyzers + stack detector + shared base
-│   ├── agents/                     # 11 agents + orchestrator + capabilities registry
+│   ├── agents/                     # 3 agents (dependency, cost, codechange) +
+│   │                               #   orchestrator + capabilities registry --
+│   │                               #   security/observability/cicd/compliance/
+│   │                               #   infrastructure/incident/release/
+│   │                               #   retirement/chaos are skill-only domains now
 │   │   ├── orchestrator.py         # FleetOrchestrator: skills-first, agents supplement
 │   │   ├── capabilities.py         # Agent registry with resource tiers
 │   │   └── base.py                 # Shared contract: Agent(report, output_dir).run()
@@ -409,7 +407,7 @@ AgentIT/
 ├── chart/                          # Helm chart (30+ templates: Rollout, Services, Route, RBAC,
 │                                   #   NetworkPolicy, ResourceQuota, LimitRange, PDB, Tekton,
 │                                   #   Kafka, Argo Events, watcher agents, backup CronJob,
-│                                   #   Postgres/CloudNativePG cluster prep)
+│                                   #   bundled non-operator Postgres)
 ├── argocd/application.yaml         # Argo CD Application for self-deployment
 ├── docs/
 │   ├── architecture.md             # System diagrams, pipeline, event loop, agent fleet

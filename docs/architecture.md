@@ -33,7 +33,7 @@ graph TB
         CheckEngine["CheckEngine\n20 YAML checks"]
         SkillEngine["SkillEngine\n40 property-based skills"]
         Orchestrator["FleetOrchestrator\nskills-first, agents supplement"]
-        Agents["Agent Fleet\n(11 specialized agents)"]
+        Agents["Agent Fleet\n(3 specialized agents:\ndependency, cost, codechange)"]
         AutoMode["AutoMode\nLLM safety gate (fail-closed)"]
         RemLoop["remediation_loop.py\ndetect→fix→apply→verify"]
         LLM["LLM client\nClaude (Anthropic / Vertex)\ncircuit breaker"]
@@ -343,21 +343,15 @@ Optional `oauth-proxy` sidecar in the `agentit` Deployment/Rollout pod, fronting
 
 ## The agent fleet
 
-Every agent shares the same contract (`agents/base.py`): `Agent(report, output_dir).run() -> Result` where `Result.files` is a `list[GeneratedFile]`. The `FleetOrchestrator` runs **skills first** as the primary generation path, then Python agents supplement for findings that no skill covers.
+Every agent shares the same contract (`agents/base.py`): `Agent(report, output_dir).run() -> Result` where `Result.files` is a `list[GeneratedFile]`. The `FleetOrchestrator` runs **skills first, unconditionally**, as the primary generation path for every domain; only 3 Python agents remain to supplement it. `HardeningAgent`, `ObservabilityAgent`, `CICDAgent`, `ComplianceAgent`, `InfrastructureAgent`, `ReleaseCoordinatorAgent`, `IncidentAgent`, `RetirementAgent`, and `ChaosAgent` were removed once skills (`skills/**/*.md`) reached template-fallback parity (no LLM required) for every artifact they used to generate — see [`docs/agent-removal-readiness.md`](agent-removal-readiness.md) for the domain-by-domain readiness audit and [`docs/code-review-2026-07-12.md`](code-review-2026-07-12.md) for the review that first flagged several of them.
 
-| Agent | Category | Tier | Always runs? | Generates |
-|---|---|---|---|---|
-| **HardeningAgent** | `security` | standard | Yes | NetworkPolicy, Containerfile, RBAC, SecurityContext |
-| **ObservabilityAgent** | `observability` | small | Yes | ServiceMonitor, Grafana dashboard, alerting rules, OTel config |
-| **CICDAgent** | `cicd` | standard | Yes | Tekton Pipeline, Argo CD Application, Argo Rollout |
-| **ComplianceAgent** | `compliance` | small | Yes | Kyverno policies, SBOM task, audit policy, compliance evidence |
-| **InfrastructureAgent** | `infrastructure` | small | Yes | HPA, PDB, ResourceQuota, LimitRange, Namespace |
-| **ReleaseCoordinatorAgent** | `release` | small | Yes | AnalysisTemplate, rollout patch, rollback policy, release runbook |
-| **DependencyAgent** | `dependency` | small | high/critical | Dependency report, Renovate config, CVE-scan CronWorkflow |
-| **IncidentAgent** | `incident` | small | high/critical | Incident runbook, PagerDuty config, Alertmanager routing |
-| **CostOptimizationAgent** | `cost` | small | high/critical | Cost report, right-sizing, cost labels, cost CronWorkflow |
-| **ChaosAgent** | `chaos` | — | not critical | LitmusChaos experiments |
-| **RetirementAgent** | `retirement` | small | score < 30 | Decommission plan, cleanup, data archive Job |
+| Agent | Category | Tier | Always runs? | Generates | Why it's still a Python agent |
+|---|---|---|---|---|---|
+| **DependencyAgent** | `dependency` | small | high/critical | Renovate/Dependabot config, CVE-scan CronWorkflow, **plus** a narrative `dependency-report.md` | Its manifest outputs are also skill-covered, but the narrative report needs runtime-computed data (detected ecosystems, CVE package matches) a static skill template can't produce without fabricating values. |
+| **CostOptimizationAgent** | `cost` | small | high/critical | VPA, cost labels, cost CronWorkflow, **plus** a narrative `cost-report.md` | Same reasoning — the report needs a computed deployment tier and cost-lookup-table result. |
+| **CodeChangeAgent** | `codechange` | large | high/critical or score < 50 | Source-level patches to the app's own repo (`.gitignore`, health endpoints, OTel/logging instrumentation) | Skills only model K8s manifests applied to a cluster; there's no skill-side concept of "the application's source tree" or PR/patch machinery. |
+
+`FleetOrchestrator._select_agents()` never plans the 9 removed domains at all (they simply don't appear in `plan.agents_to_run`); it also never skips `dependency`/`cost` for skill coverage of their manifest outputs specifically so their narrative reports keep generating, even though skills also produce their VPA/Renovate/cronjob-equivalent manifests.
 
 Resource tiers control K8s Job resource requests/limits when agents run in containerized mode (`AGENTIT_AGENT_MODE=kubernetes` — falls back to the undocumented `AGENT_MODE` if unset, for backward-compat):
 
