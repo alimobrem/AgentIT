@@ -804,7 +804,11 @@
 <!-- Confirm Modal -->
 <div id="confirm-modal" x-data="confirmModal()" :class="{ 'open': open }"
      class="modal-overlay" @keydown.escape.window="cancel()" @show-confirm.window="show($event.detail.title, $event.detail.message, $event.detail.form, $event.detail.opts)" role="dialog" aria-modal="true">
-  <div class="modal" @click.outside="cancel()">
+  {# .capture ensures cancel() runs (as a no-op) during the capture phase, before the
+     triggering button's own @click bubbles here and sets open=true — without it, every
+     trigger button's click also counts as an "outside" click and instantly re-closes
+     the modal it just opened. #}
+  <div class="modal" @click.outside.capture="cancel()">
     <h3 x-text="title" class="modal-title"></h3>
     <p x-text="message" class="modal-message"></p>
     <div class="action-bar modal-actions">

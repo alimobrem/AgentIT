@@ -100,6 +100,64 @@ class TestAlpineScoping:
         )
 
 
+class TestConfirmModalOutsideClick:
+    """Regression: the shared confirm-modal's outside-click handler must use
+    the `capture` modifier.
+
+    Every "Apply to Cluster" / "Delete" / "Install Operator" / etc. button in
+    the app opens the shared #confirm-modal (base.html) via
+    `$dispatch('show-confirm', ...)` from a plain (non-capture) @click. Since
+    the trigger button lives outside `.modal`, the *same* click that opens
+    the modal also bubbles to document and satisfies `.modal`'s
+    `@click.outside="cancel()"` check — instantly closing the modal it just
+    opened, with no console error, no visible flash: the button appears to
+    do nothing. Registering the outside-click listener for the *capture*
+    phase (`@click.outside.capture`) makes it run before the triggering
+    click reaches the button (while the modal is still closed, a no-op), and
+    — because capture-only listeners never re-fire during bubble — it does
+    not fire again after the button's own handler opens the modal. Later,
+    genuinely separate clicks elsewhere still close it normally. Confirmed
+    live via Playwright against the deployed portal: a real click on Fleet's
+    "Delete" button (and onboard-results' "Apply to Cluster") opened then
+    closed #confirm-modal within under 1ms, before this fix.
+    """
+
+    def test_confirm_modal_uses_capture_outside_click(self):
+        html = (TEMPLATES_DIR / "base.html").read_text(encoding="utf-8")
+        assert "id=\"confirm-modal\"" in html, "base.html should define #confirm-modal"
+        # The bare (non-capture) form must not be present anywhere in base.html —
+        # that's exactly the self-closing bug this test guards against.
+        assert "@click.outside=\"cancel()\"" not in html, (
+            "base.html's #confirm-modal uses @click.outside without .capture — "
+            "this closes the modal on the SAME click that opens it (see class docstring)."
+        )
+        assert "@click.outside.capture=\"cancel()\"" in html, (
+            "base.html's #confirm-modal must use @click.outside.capture=\"cancel()\" "
+            "so the triggering click doesn't immediately re-close the modal it opened."
+        )
+
+    @pytest.mark.parametrize("template_name", [
+        f.name for f in TEMPLATES_DIR.glob("*.html") if f.name != "base.html"
+    ])
+    def test_show_confirm_triggers_are_plain_click(self, template_name):
+        """Every $dispatch('show-confirm', ...) trigger relies on the shared
+        modal's outside-click guard being capture-based (tested above), not
+        on any local workaround (e.g. @click.stop) — if a template starts
+        adding its own workaround, the shared base.html fix is either
+        missing or someone is band-aiding around it per-button. Either way,
+        surface it so it gets reconciled in one place."""
+        path = TEMPLATES_DIR / template_name
+        html = path.read_text(encoding="utf-8")
+        for i, line in enumerate(html.splitlines(), 1):
+            if "show-confirm" in line and "$dispatch" in line:
+                stripped = line.strip()
+                assert "@click.stop=" not in stripped and "@click.outside" not in stripped, (
+                    f"{template_name}:{i} has a local workaround around the "
+                    f"show-confirm dispatch — fix belongs in base.html's "
+                    f"#confirm-modal instead:\n  {stripped[:160]}"
+                )
+
+
 class TestFormActions:
     """Every form action URL should match a registered route."""
 
