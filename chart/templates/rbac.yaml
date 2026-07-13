@@ -59,10 +59,14 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["get", "create"]
+    # "patch" is required, not just "create": kube.apply_yaml() shells out to
+    # `oc apply --server-side`, which always issues a PATCH request (even for
+    # objects that don't exist yet) -- verified live, "create"+"get" alone
+    # still 403s with "cannot patch resource \"namespaces\"".
+    verbs: ["get", "create", "patch"]
   - apiGroups: ["operators.coreos.com"]
     resources: ["operatorgroups"]
-    verbs: ["get", "list", "create"]
+    verbs: ["get", "list", "create", "patch"]
   - apiGroups: ["operators.coreos.com"]
     resources: ["subscriptions"]
     verbs: ["get", "list", "create", "update", "patch"]

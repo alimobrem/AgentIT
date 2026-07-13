@@ -1415,9 +1415,19 @@ def test_pipeline_detail_success(client):
 
 
 def test_operator_status_installed(client):
+    """Regression test: CSV names are always "<package>.v<version>" (e.g.
+    "vertical-pod-autoscaler.v4.21.0-202606301919", verified live against a
+    real cluster) -- spec.displayName is a human-readable string ("My
+    Operator") that never equals the OLM package name, so matching on it
+    (the old behavior) always missed and this endpoint reported "installing"
+    forever even after the CSV had actually reached Succeeded."""
     with patch("agentit.portal.routes.health.kube") as mock_kube:
         mock_kube.list_custom_resources.return_value = [
-            {"spec": {"displayName": "my-operator"}, "status": {"phase": "Succeeded"}},
+            {
+                "metadata": {"name": "my-operator.v1.2.3"},
+                "spec": {"displayName": "My Operator"},
+                "status": {"phase": "Succeeded"},
+            },
         ]
         resp = client.get("/api/operator-status?package=my-operator")
 

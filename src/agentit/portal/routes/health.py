@@ -395,9 +395,16 @@ async def operator_status(request: Request):
         csvs = await asyncio.to_thread(
             kube.list_custom_resources, "operators.coreos.com", "v1alpha1", "clusterserviceversions", op_ns,
         )
+        # CSV names are always "<package>.v<version>" (e.g.
+        # "vertical-pod-autoscaler.v4.21.0-202606301919") -- match on that,
+        # not spec.displayName, which is a human-readable string ("Vertical
+        # Pod Autoscaler Operator") that never equals the OLM package name.
+        # The displayName comparison always missed, verified live: the phase
+        # was always "" and this endpoint reported "Waiting for operator
+        # pod..." forever even after the CSV had actually reached Succeeded.
         phase = next(
             (c.get("status", {}).get("phase", "") for c in csvs
-             if c.get("spec", {}).get("displayName") == package),
+             if c.get("metadata", {}).get("name", "").startswith(f"{package}.")),
             "",
         )
         if not phase:

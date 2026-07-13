@@ -415,6 +415,17 @@ class TestRBAC:
             ("operators.coreos.com", "clusterserviceversions"),
         }
 
+        # Regression guard: kube.apply_yaml() shells out to `oc apply
+        # --server-side`, which always issues a PATCH (even to create an
+        # object that doesn't exist yet) -- verified live against the real
+        # cluster, "create"+"get" alone still 403s with "cannot patch
+        # resource \"namespaces\"". Every resource this ClusterRole creates
+        # via that path needs "patch", not just "create".
+        namespaces_rule = next(r for r in role["rules"] if "namespaces" in r["resources"])
+        assert "patch" in namespaces_rule["verbs"]
+        operatorgroups_rule = next(r for r in role["rules"] if "operatorgroups" in r["resources"])
+        assert "patch" in operatorgroups_rule["verbs"]
+
         crbs = self._all("ClusterRoleBinding")
         crb = next(c for c in crbs if c["roleRef"]["name"] == "agentit-operator-installer")
         assert crb["subjects"][0]["name"] == "agentit"
