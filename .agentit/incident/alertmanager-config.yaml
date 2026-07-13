@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentit-alertmanager-routes
+  namespace: default
+  labels:
+    app.kubernetes.io/name: agentit
+data:
+  routes.yaml: "route:\n  receiver: default\n  group_by:\n  - alertname\n  - namespace\n\
+    \  group_wait: 30s\n  group_interval: 5m\n  repeat_interval: 4h\n  routes:\n \
+    \ - match:\n      app: agentit\n      severity: critical\n    receiver: pagerduty\n\
+    \  - match:\n      app: agentit\n      severity: high\n    receiver: slack\n \
+    \ - match:\n      app: agentit\n      severity: medium\n    receiver: email\n"

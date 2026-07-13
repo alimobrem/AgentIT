@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentit-pagerduty
+  namespace: default
+  labels:
+    app.kubernetes.io/name: agentit
+data:
+  service-name: agentit
+  urgency: high
+  escalation-timeout-seconds: '300'
+  integration-key: PLACEHOLDER
