@@ -21,10 +21,25 @@ _argo_cache: dict = {"data": {}, "ts": 0}
 _ARGO_CACHE_TTL = 60  # seconds
 
 
-def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None) -> list[dict]:
-    """Check cluster for each app's deployment status. Caches Argo CD data for 60s."""
+def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None) -> list[dict]:
+    """Check cluster for each app's deployment status. Caches Argo CD data for 60s.
+
+    Runs in a worker thread via `asyncio.to_thread` (see `home()` below), so
+    a Postgres-backed `_store`'s coroutine methods need bridging back onto
+    `_loop` (the event loop that constructed the store) via
+    `asyncio.run_coroutine_threadsafe` -- the same pattern
+    `EventConsumer._persist_dead_letter` established in commit 7533309. A
+    no-op passthrough against the sqlite backend's raw store, whose methods
+    return already-computed values, not coroutines.
+    """
+    import asyncio as _asyncio
     import time as _t
     from agentit import kube
+
+    def _bridge(result):
+        if not _asyncio.iscoroutine(result):
+            return result
+        return _asyncio.run_coroutine_threadsafe(result, _loop).result(timeout=30)
 
     now = _t.monotonic()
     if _argo_cache["data"] and (now - _argo_cache["ts"]) < _ARGO_CACHE_TTL:
@@ -54,7 +69,7 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None) -> list[di
         argo = argo_status.get(app_name)
         apply_results = None
         try:
-            apply_results = _store.get_apply_results(app_item["id"]) if _store else None
+            apply_results = _bridge(_store.get_apply_results(app_item["id"])) if _store else None
         except Exception:
             log.debug("Failed to get apply results for %s", app_item["id"], exc_info=True)
 
@@ -84,7 +99,9 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None) -> list[di
 async def home(request: Request) -> HTMLResponse:
     s = await get_store()
     fleet = await s.get_fleet_data()
-    fleet = await asyncio.to_thread(_enrich_fleet_with_cluster_status, fleet, s.raw if hasattr(s, "raw") else s)
+    loop = asyncio.get_running_loop()
+    store_arg = s.raw if hasattr(s, "raw") else s
+    fleet = await asyncio.to_thread(_enrich_fleet_with_cluster_status, fleet, store_arg, loop)
     total_apps = len(fleet)
     if total_apps == 0:
         return get_templates().TemplateResponse(request, "dashboard.html", {

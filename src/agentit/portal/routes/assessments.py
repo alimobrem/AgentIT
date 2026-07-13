@@ -109,32 +109,57 @@ async def assess_submit(
     s = await get_store()
     job_id = await s.create_assessment_job(repo_url)
     # The work below runs in a background thread (long clone+assess pipeline)
-    # via a plain `threading.Thread`, not `asyncio.to_thread` -- it needs a
-    # synchronous store handle since a non-event-loop OS thread can't
-    # `await` the async store facade. See docs/postgres-migration-plan.md
-    # for why this specific background-thread pattern (distinct from
-    # FleetOrchestrator/AutoMode/RemediationDispatcher/RemediationLoop,
-    # which are now genuinely async and no longer need this bridge) stays.
+    # via a plain `threading.Thread`, not `asyncio.to_thread` -- unlike
+    # `to_thread` (awaited by the caller before the request finishes), this
+    # thread keeps running after the redirect below is returned, so the
+    # request coroutine can't stick around to `await` anything on its
+    # behalf.
+    #
+    # Sqlite: `s.raw` hands back a genuinely synchronous, thread-safe store
+    # handle with no event-loop dependency at all -- every call in `_run()`
+    # below just calls straight through it, exactly as before this fix.
+    #
+    # Postgres: `store_pg.AssessmentStore` has no `.raw` on purpose (see
+    # docs/postgres-migration-plan.md §7 -- handing a synchronous-only
+    # consumer a Postgres-backed store is exactly the silent partial-cutover
+    # that must fail loudly instead). Its coroutine methods are bridged back
+    # onto *this* coroutine's event loop via `asyncio.run_coroutine_threadsafe`
+    # -- the exact pattern `EventConsumer._persist_dead_letter` established
+    # in commit 7533309 for the same underlying constraint: an `asyncpg`
+    # connection pool is bound to the event loop that created it and can't
+    # be driven from a different thread's loop. This only works as long as
+    # that loop stays alive for the duration of the background thread (true
+    # for the portal's real, persistent uvicorn event loop; a test harness
+    # that tears its loop down per-request must exercise this path with its
+    # own long-lived loop -- see tests/test_watcher_cli_postgres.py's pattern).
     raw = s.raw if hasattr(s, "raw") else None
-    if raw is None:
-        raise HTTPException(500, "Background assessment jobs require the sqlite backend's synchronous handle "
-                                  "(store_pg.AssessmentStore has none yet) -- see docs/postgres-migration-plan.md")
+    loop = asyncio.get_running_loop() if raw is None else None
+    store = raw if raw is not None else s
 
     import threading
 
+    def _bridge(result):
+        """Sqlite: `result` is already the real value (`store` is `raw`, a
+        plain sync call) -- passthrough. Postgres: `result` is the
+        coroutine `store.<method>(...)` constructed but not yet run --
+        schedule it onto `loop` and block this worker thread until done."""
+        if raw is not None or not asyncio.iscoroutine(result):
+            return result
+        return asyncio.run_coroutine_threadsafe(result, loop).result(timeout=60)
+
     def _run():
         try:
-            raw.update_assessment_job(job_id, "cloning", "Cloning repository...")
-            raw.update_assessment_job(job_id, "assessing", "Analyzing repository...")
+            _bridge(store.update_assessment_job(job_id, "cloning", "Cloning repository..."))
+            _bridge(store.update_assessment_job(job_id, "assessing", "Analyzing repository..."))
             check_results: list[dict] = []
             report = _assess_sync(repo_url, criticality, infra, check_results_out=check_results)
-            raw.update_assessment_job(job_id, "saving", "Saving results...")
+            _bridge(store.update_assessment_job(job_id, "saving", "Saving results..."))
             from agentit.portal.metrics import assessments_total as _at
             _at.labels(criticality=criticality, status="success").inc()
-            assessment_id = raw.save(report)
-            raw.save_check_results(assessment_id, check_results)
+            assessment_id = _bridge(store.save(report))
+            _bridge(store.save_check_results(assessment_id, check_results))
             # Publish event on first assessment for this repo
-            history = raw.list_history(report.repo_url)
+            history = _bridge(store.list_history(report.repo_url))
             if len(history) <= 1:
                 publish_event(
                     'first-assessment', report.repo_name,
@@ -142,7 +167,7 @@ async def assess_submit(
                     {'assessment_id': assessment_id, 'score': report.overall_score},
                     correlation_id=assessment_id,
                 )
-            raw.update_assessment_job(job_id, "completed", "Assessment complete", assessment_id=assessment_id)
+            _bridge(store.update_assessment_job(job_id, "completed", "Assessment complete", assessment_id=assessment_id))
         except Exception as exc:
             log.exception("Assessment failed for %s", repo_url)
             from agentit.portal.metrics import assessments_total as _at
@@ -152,7 +177,7 @@ async def assess_submit(
                 msg = f"Could not clone repository. Check the URL and permissions. ({msg[:100]})"
             elif "GITHUB_TOKEN" in msg:
                 msg = "GitHub integration is not configured. Contact your administrator."
-            raw.update_assessment_job(job_id, "failed", msg[:200])
+            _bridge(store.update_assessment_job(job_id, "failed", msg[:200]))
 
     threading.Thread(target=_run, daemon=True).start()
     return RedirectResponse(url=f"/assess/progress/{job_id}", status_code=303)

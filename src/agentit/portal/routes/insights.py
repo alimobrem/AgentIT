@@ -46,7 +46,14 @@ async def decisions_page(request: Request, decision_type: str = "", attribution:
     from agentit.llm_decisions import list_llm_decisions, summarize_by_attribution
 
     s = await get_store()
-    all_decisions = await asyncio.to_thread(list_llm_decisions, s.raw if hasattr(s, "raw") else s, 500)
+    # `list_llm_decisions` runs in a worker thread (`asyncio.to_thread`), so
+    # a Postgres-backed store's coroutine methods need bridging back onto
+    # *this* coroutine's event loop -- pass it the raw sync store directly
+    # when available (sqlite; no bridge needed) or `s` + this loop
+    # otherwise (postgres; see llm_decisions.py's `_bridge`).
+    loop = asyncio.get_running_loop()
+    store_arg = s.raw if hasattr(s, "raw") else s
+    all_decisions = await asyncio.to_thread(list_llm_decisions, store_arg, 500, loop=loop)
     decision_types = sorted({d["decision_type"] for d in all_decisions})
     attributions = sorted({d["attribution"] for d in all_decisions})
 

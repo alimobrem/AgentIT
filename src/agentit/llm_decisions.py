@@ -28,15 +28,35 @@ of being silently omitted.
 """
 from __future__ import annotations
 
+import asyncio
+
 DECISION_TYPE_FIX_REVIEW = "fix-review"
 DECISION_TYPE_AUTO_MODE = "auto-mode-classify"
 
 _AUTO_MODE_FALLBACK_AGENT = "auto-mode"
 
 
-def _fix_review_decisions(store, limit: int) -> list[dict]:
+def _bridge(result, loop):
+    """Run a store call's result to completion, sync or async.
+
+    This module is called from a worker thread via ``asyncio.to_thread``
+    (see ``routes/insights.py``), so a Postgres-backed store's coroutine
+    methods can't be `await`ed directly here -- they're scheduled back onto
+    the event loop that constructed the store via
+    ``asyncio.run_coroutine_threadsafe``, the same bridge
+    ``EventConsumer._persist_dead_letter`` established in commit 7533309
+    (an ``asyncpg`` pool is bound to its creating loop and can't be driven
+    from a different thread's loop). A no-op passthrough against the
+    sqlite backend, whose store methods return already-computed values.
+    """
+    if not asyncio.iscoroutine(result):
+        return result
+    return asyncio.run_coroutine_threadsafe(result, loop).result(timeout=30)
+
+
+def _fix_review_decisions(store, limit: int, loop=None) -> list[dict]:
     """`skill_effectiveness` rows → decisions attributed by real skill name."""
-    rows = store.get_recent_skill_activity(limit=limit)
+    rows = _bridge(store.get_recent_skill_activity(limit=limit), loop)
     return [
         {
             "timestamp": r["created_at"],
@@ -65,14 +85,14 @@ def _parse_auto_mode_summary(summary: str) -> tuple[str, str]:
     return outcome, reason
 
 
-def _auto_mode_decisions(store, limit: int) -> list[dict]:
+def _auto_mode_decisions(store, limit: int, loop=None) -> list[dict]:
     """`events` rows (action='decision') → decisions attributed by `agent_id`.
 
     `agent_id` is the real originating agent/skill when the caller passed one
     through to `AutoMode.execute(agent_name=...)`; otherwise it's the generic
     "auto-mode" component name (see module docstring).
     """
-    rows = store.list_events_by_action("decision", limit=limit)
+    rows = _bridge(store.list_events_by_action("decision", limit=limit), loop)
     decisions = []
     for r in rows:
         outcome, reason = _parse_auto_mode_summary(r["summary"])
@@ -94,13 +114,18 @@ def list_llm_decisions(
     limit: int = 200,
     decision_type: str = "",
     attribution: str = "",
+    loop=None,
 ) -> list[dict]:
     """All real LLM decisions, newest first, optionally filtered.
 
     Each decision dict has: timestamp, decision_type, attribution,
     attribution_kind ("skill" | "agent" | "component"), target_app, outcome, reason.
+
+    ``loop`` should be the event loop that constructed ``store`` (see
+    ``routes/insights.py``'s call site) -- only needed when ``store`` is the
+    Postgres-backed async store; ignored for the sqlite backend.
     """
-    decisions = _fix_review_decisions(store, limit) + _auto_mode_decisions(store, limit)
+    decisions = _fix_review_decisions(store, limit, loop) + _auto_mode_decisions(store, limit, loop)
     if decision_type:
         decisions = [d for d in decisions if d["decision_type"] == decision_type]
     if attribution:
