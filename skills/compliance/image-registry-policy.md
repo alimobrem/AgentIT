@@ -48,6 +48,35 @@ initially (warn, don't block) so teams can migrate gradually.
 - Include the OpenShift internal registry (apps built on-cluster use it)
 - Set `validationFailureAction: Audit` (not Enforce) by default
 
+## Template
+
+```yaml
+apiVersion: kyverno.io/v1
+kind: Policy
+metadata:
+  name: {{app_name}}-trusted-registries
+  labels:
+    app.kubernetes.io/name: {{app_name}}
+spec:
+  validationFailureAction: Audit
+  rules:
+    - name: validate-registries
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              selector:
+                matchLabels:
+                  app.kubernetes.io/name: {{app_name}}
+      validate:
+        message: "Images must come from a trusted registry: registry.access.redhat.com, registry.redhat.io, quay.io, or the OpenShift internal registry."
+        pattern:
+          spec:
+            containers:
+              - image: "registry.access.redhat.com/* | registry.redhat.io/* | quay.io/* | image-registry.openshift-image-registry.svc*/*"
+```
+
 ## Verification
 - Deploy a pod with `image: docker.io/nginx` → should trigger audit warning
 - Deploy a pod with `image: registry.access.redhat.com/ubi9/ubi-minimal` → should pass

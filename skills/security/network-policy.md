@@ -38,6 +38,62 @@ This is the zero-trust networking foundation.
 - Labels must include app.kubernetes.io/name
 - Namespace must not be hardcoded — use the deployment namespace
 
+## Template
+Deterministic baseline used when no LLM is available: deny-all ingress/egress
+plus an explicit allow policy for the app's own port and the common database
+ports called out above, and DNS so pods can still resolve names. The LLM
+enhancement replaces the hardcoded port list with ports actually detected in
+the assessment.
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{app_name}}-deny-all
+  labels:
+    app.kubernetes.io/name: {{app_name}}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{app_name}}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{app_name}}-allow-common
+  labels:
+    app.kubernetes.io/name: {{app_name}}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{app_name}}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 3306
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 27017
+```
+
 ## Verification
 - From another namespace: curl APP_IP:PORT → connection refused
 - From an allowed pod: curl APP_IP:PORT → 200 OK

@@ -44,6 +44,42 @@ All variants must:
 3. Expose the application port
 4. Include `HEALTHCHECK --interval=30s --timeout=3s CMD curl -f http://localhost:PORT/healthz || exit 1`
 
+## Template
+Deterministic baseline used when no LLM is available: a generic UBI-minimal
+single-stage build with a non-root user and a HEALTHCHECK, wrapped in an
+OpenShift `BuildConfig` so the inline Dockerfile is a real, applyable K8s
+manifest rather than a bare text file the engine has no way to emit. The LLM
+enhancement replaces the generic `dockerfile:` content with the multi-stage,
+language-specific variant described above (Go/Python/Java/Node) once the
+app's stack is known.
+
+```yaml
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: {{app_name}}
+  labels:
+    app.kubernetes.io/name: {{app_name}}
+spec:
+  source:
+    type: Dockerfile
+    dockerfile: |
+      FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+      WORKDIR /opt/app-root/src
+      COPY . .
+      RUN chown -R 1001:0 /opt/app-root/src
+      USER 1001
+      HEALTHCHECK --interval=30s --timeout=3s CMD curl -f http://localhost:8080/healthz || exit 1
+      ENTRYPOINT ["/bin/sh"]
+  strategy:
+    type: Docker
+    dockerStrategy: {}
+  output:
+    to:
+      kind: ImageStreamTag
+      name: {{app_name}}:latest
+```
+
 ## Verification
 - podman build -t test . — builds without errors
 - podman run --user 1001 test — starts successfully as non-root

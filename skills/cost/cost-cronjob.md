@@ -48,7 +48,7 @@ spec:
           serviceAccountName: {{app_name}}-cost-reporter
           containers:
             - name: cost-report
-              image: {{cost_report_image}}
+              image: "{{cost_report_image}}"
               resources:
                 requests:
                   cpu: 100m

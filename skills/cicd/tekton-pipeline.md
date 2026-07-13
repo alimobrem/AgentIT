@@ -54,6 +54,108 @@ PipelineRun must set:
 - `params` for git URL, revision, image name
 - `workspaces` bound to PVCs or VolumeClaimTemplates
 
+## Template
+Deterministic baseline used when no LLM is available: clone, build the image,
+scan it, generate an SBOM, and deploy — using `tekton.dev/v1` (not the
+deprecated `v1beta1`). Language-specific build/test steps are intentionally
+left out of the static baseline (there's no placeholder for "detected
+language" — only `{{app_name}}` is substituted); the LLM enhancement inserts
+a `build`/`test` task tailored to the app's stack ahead of `image-build`. The
+`image-scan` and `sbom-generate` task references match the names produced by
+the `image-scan-task` and `sbom-task` skills in this same assessment.
+
+```yaml
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: {{app_name}}-pipeline
+  labels:
+    app.kubernetes.io/name: {{app_name}}
+spec:
+  params:
+    - name: repo-url
+      type: string
+    - name: image-ref
+      type: string
+  workspaces:
+    - name: shared-workspace
+  tasks:
+    - name: git-clone
+      taskRef:
+        name: git-clone
+        kind: ClusterTask
+      params:
+        - name: url
+          value: $(params.repo-url)
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+    - name: image-build
+      taskRef:
+        name: buildah
+        kind: ClusterTask
+      runAfter:
+        - git-clone
+      params:
+        - name: IMAGE
+          value: $(params.image-ref)
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+    - name: image-scan
+      taskRef:
+        name: image-scan
+        kind: Task
+      runAfter:
+        - image-build
+      params:
+        - name: IMAGE
+          value: $(params.image-ref)
+    - name: sbom-generate
+      taskRef:
+        name: {{app_name}}-sbom
+        kind: Task
+      runAfter:
+        - image-build
+      params:
+        - name: IMAGE
+          value: $(params.image-ref)
+    - name: deploy
+      taskRef:
+        name: kubernetes-actions
+        kind: ClusterTask
+      runAfter:
+        - image-scan
+        - sbom-generate
+      params:
+        - name: script
+          value: kubectl rollout restart deployment/{{app_name}}
+---
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: {{app_name}}-pipeline-run-
+  labels:
+    app.kubernetes.io/name: {{app_name}}
+spec:
+  pipelineRef:
+    name: {{app_name}}-pipeline
+  params:
+    - name: repo-url
+      value: "{{repo_url}}"
+    - name: image-ref
+      value: "{{image_ref}}"
+  workspaces:
+    - name: shared-workspace
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
+```
+
 ## Verification
 - tkn pipeline describe APP — pipeline exists with all steps
 - tkn pipeline start APP — runs without errors on valid source

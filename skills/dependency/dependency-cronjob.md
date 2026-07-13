@@ -48,7 +48,7 @@ spec:
           serviceAccountName: {{app_name}}-scanner
           containers:
             - name: dependency-scan
-              image: {{scanner_image}}
+              image: "{{scanner_image}}"
               resources:
                 requests:
                   cpu: 200m

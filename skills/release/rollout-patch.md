@@ -51,7 +51,7 @@ spec:
     spec:
       containers:
         - name: {{app_name}}
-          image: {{image}}
+          image: "{{image}}"
           ports:
             - containerPort: 8080
           resources:

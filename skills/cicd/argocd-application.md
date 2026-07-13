@@ -45,12 +45,12 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: {{git_url}}
+    repoURL: "{{git_url}}"
     targetRevision: HEAD
     path: deploy/
   destination:
     server: https://kubernetes.default.svc
-    namespace: {{namespace}}
+    namespace: "{{namespace}}"
   syncPolicy:
     automated:
       prune: true

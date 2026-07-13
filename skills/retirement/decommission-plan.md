@@ -59,8 +59,72 @@ document must:
    - Post-decommission verification
 
 ## Constraints
-- Output is markdown, not YAML — this skill reasons about the app's
-  specific infrastructure rather than emitting a static template
+- The LLM-tailored output is markdown, not YAML — this skill reasons about
+  the app's specific infrastructure rather than emitting a static template
 - Reference only resources and services detected in the assessment
 - Do not assume data stores or integrations not present in the codebase
 - Flag compliance-sensitive data that may require extended retention
+
+## Template
+Deterministic baseline used when no LLM is available: a generic 30-day
+sunset checklist covering the same six sections listed above, without
+app-specific detail (no placeholder exists for "detected databases" —
+only `{{app_name}}` is substituted). Delivered as a ConfigMap so the skill
+engine — which only ever writes a single `.yaml` file per skill — produces a
+real, applyable K8s object instead of a bare markdown file. The LLM
+enhancement replaces the generic checklist with one referencing the app's
+actual detected data stores, consumers, and integrations.
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{app_name}}-decommission-plan
+  labels:
+    app.kubernetes.io/name: {{app_name}}
+    app.kubernetes.io/component: decommission-plan
+data:
+  decommission-plan.md: |
+    # Decommission Plan — {{app_name}}
+
+    **Sunset date:** TBD (set when retirement is approved)
+    **Owner:** TBD
+
+    ## 1. Stakeholder Notification
+    - [ ] 30-day notice sent to all known API/data consumers
+    - [ ] 14-day reminder sent
+    - [ ] 7-day final warning sent
+    - [ ] Announcement posted to the team's Slack channel(s)
+    - [ ] Service catalog / registry entry marked deprecated
+
+    ## 2. Data Archival
+    - [ ] Identify all persistent data stores (databases, PVCs, object storage)
+    - [ ] Export/backup data using the store's native tooling (pg_dump, mongodump, etc.)
+    - [ ] Verify backup integrity and record backup location plus retention period
+    - [ ] Flag any data subject to compliance retention requirements
+
+    ## 3. DNS and Routing Cleanup
+    - [ ] Remove OpenShift Routes / Ingress resources
+    - [ ] Delete Service entries
+    - [ ] Update or remove external DNS records
+    - [ ] Remove from service mesh / API gateway configuration
+
+    ## 4. Resource Reclamation Timeline (30-Day Sunset)
+    | Day | Action |
+    |-----|--------|
+    | 0   | Announce sunset, disable new user access |
+    | 7   | Scale to minimum replicas, enable read-only mode if applicable |
+    | 14  | Stop accepting traffic, begin data export |
+    | 21  | Archive data, remove external DNS |
+    | 30  | Delete all namespace resources, reclaim PVCs and quotas |
+
+    ## 5. Dependency Impact Assessment
+    - [ ] Identify downstream services calling this application
+    - [ ] Identify shared ConfigMaps/Secrets referenced by other namespaces
+    - [ ] Confirm no cross-namespace references remain before deletion
+
+    ## 6. Post-Decommission Verification
+    - [ ] `kubectl get all -l app.kubernetes.io/name={{app_name}}` returns no resources
+    - [ ] Confirm no active alerts or dashboards still reference {{app_name}}
+    - [ ] Confirm namespace/quota reclaimed
+```
