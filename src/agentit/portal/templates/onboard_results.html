@@ -110,7 +110,7 @@
     <button type="button" class="btn btn-green btn-lg"
       @click="$dispatch('show-confirm', {
         title: 'Apply to Cluster',
-        message: 'This will apply {{ files | length }} manifest(s) to the live cluster. This modifies production resources and cannot be undone.',
+        message: 'This will apply {{ total.count }} manifest(s) to the live cluster. This modifies production resources and cannot be undone.',
         form: $refs.applyForm,
         opts: { confirmText: 'Apply Now', danger: false }
       })">
@@ -214,7 +214,7 @@
           <button type="button" class="btn btn-sm btn-green"
             @click="$dispatch('show-confirm', {
               title: 'Install Operator',
-              message: 'Install {{ op.name }}? This will create a Subscription in a dedicated namespace.',
+              message: 'Install ' + {{ op.name | tojson }} + '? This will create a Subscription in a dedicated namespace.',
               form: $refs.installOp{{ loop.index }},
               opts: { confirmText: 'Install', danger: false }
             })">Install</button>

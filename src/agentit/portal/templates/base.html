@@ -942,7 +942,13 @@ function confirmModal() {
       this.open = true;
     },
     cancel() { this.open = false; this._form = null; },
-    proceed() { this.open = false; if (this._form) this._form.submit(); }
+    proceed() {
+      this.open = false;
+      // requestSubmit() (unlike submit()) fires a real 'submit' event, so htmx's
+      // submit interception still kicks in for hx-post/hx-get forms and does a
+      // smooth AJAX swap instead of falling through to a full page reload.
+      if (this._form) this._form.requestSubmit();
+    }
   };
 }
 // Toast notification manager

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import shutil
 import tempfile
@@ -9,6 +10,8 @@ import time as _time
 import zipfile
 from pathlib import Path
 from urllib.parse import quote, urlparse
+
+from markupsafe import Markup
 
 from agentit.logging_config import configure_logging
 
@@ -123,8 +126,30 @@ async def _shutdown() -> None:
         log.debug("Store close failed", exc_info=True)
 
 
+def _tojson_filter(value: object) -> "Markup":
+    """Safely embed a Python value as a JS literal inside an HTML attribute.
+
+    FastAPI's Jinja2Templates doesn't register Flask's `tojson` filter, which
+    templates need for values interpolated into inline Alpine expressions
+    (e.g. @click="... 'Delete ' + {{ name | tojson }} ..."). Without this,
+    raw string interpolation like {{ r.repo_name }} inside a JS string
+    literal lets a value containing a quote break out of the string and
+    inject arbitrary JS. json.dumps + escaping <, >, &, ' mirrors Flask's
+    implementation and makes the result safe to drop into an HTML attribute.
+    """
+    raw = json.dumps(value)
+    raw = (
+        raw.replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("'", "\\u0027")
+    )
+    return Markup(raw)
+
+
 templates.env.filters["safe_url"] = _safe_url
 templates.env.filters["dimension_label"] = _format_dimension
+templates.env.filters["tojson"] = _tojson_filter
 
 
 @app.exception_handler(404)
