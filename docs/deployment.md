@@ -51,6 +51,8 @@ Some optional chart features assume their operator is already installed cluster-
 
 Requires the **Strimzi** operator (`strimzi-kafka-operator`) installed via a `Subscription` in `openshift-operators` (or its own namespace). The chart renders `Kafka`/`KafkaNodePool` CRs (`chart/templates/kafka/`) that Strimzi reconciles.
 
+**Current state is single-broker, plaintext, no auth** — any pod in the namespace can produce/consume on any topic. See [`docs/kafka-hardening-plan.md`](kafka-hardening-plan.md) for the deferred plan to add TLS + SASL/SCRAM auth via Strimzi `KafkaUser` CRs and wire credentials into `events.py`/`consumer.py`.
+
 ### Postgres (`postgres.enabled: true`)
 
 Requires the **CloudNativePG** operator installed via a `Subscription` (Red Hat-certified, available on OperatorHub as `cloud-native-postgresql`):
