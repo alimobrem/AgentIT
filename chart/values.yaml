@@ -106,7 +106,22 @@ backup:
   # storageClassName: gp3-csi
 
 rbac:
-  clusterWideApply: false
+  # Cross-namespace apply is the core "Apply to Cluster" feature: onboarding a
+  # new app creates a namespace that doesn't exist yet (e.g. `pinky`), and the
+  # namespace-scoped -edit RoleBinding below can't grant a cluster-scoped check
+  # or create on an as-yet-nonexistent Namespace object. Without this, every
+  # apply against a brand-new namespace 403s in kube.namespace_exists() before
+  # it even reaches manifest application, surfacing as "Cluster apply failed —
+  # check server logs". Apply-into-an-existing-namespace (e.g. this app's own
+  # self-assessment) doesn't hit this, which is why that path partially works.
+  clusterWideApply: true
+  # Grants the minimal OLM permissions needed for the "Install Operator" button
+  # to actually succeed (create Namespace/OperatorGroup/Subscription — see
+  # chart/templates/rbac.yaml). Separate from clusterWideApply above: the
+  # default "edit" ClusterRole only grants get/list/watch on namespaces, not
+  # create, so even with clusterWideApply on, OwnNamespace operator installs
+  # (VPA, ODF, RHBK) would still 403 without this.
+  operatorInstall: true
 
 monitoring:
   enabled: false
