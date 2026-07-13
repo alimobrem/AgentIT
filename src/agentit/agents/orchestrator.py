@@ -190,21 +190,31 @@ class FleetOrchestrator:
                 # discover_platform() degrades gracefully by design -- every
                 # sub-probe (version, API groups, kinds, CRDs) catches its
                 # own exceptions, so it never actually raises when the
-                # cluster is unreachable; it just returns a context with
-                # nothing discovered. Now that the removed Python agents
-                # (security/observability/cicd/compliance/etc. -- see
-                # docs/agent-removal-readiness.md) no longer provide a
-                # platform-independent fallback, that "discovered nothing"
-                # case must not silently gate every skill's has_api() check
-                # to False. A real cluster always resolves a k8s_version and
-                # at least the built-in core kinds, so both being empty is a
-                # reliable signal that discovery never actually connected --
-                # treat it like a discovery failure and skip the API-
-                # availability gate entirely (platform=None), matching the
-                # removed agents' own platform-independent behavior.
-                if platform.k8s_version == "unknown" and not platform.available_kinds:
+                # cluster is unreachable or the caller's RBAC is
+                # restricted; it just returns a context with whatever it
+                # could see. `SkillEngine.generate()` gates every skill on
+                # `platform.has_api(...)` for that skill's output kind(s)
+                # -- if `available_kinds` is empty, that gate rejects
+                # *every* skill, unconditionally, regardless of
+                # `k8s_version`. `k8s_version` alone is not a reliable
+                # signal that discovery "really connected": K8s/OpenShift
+                # expose `/version` even to identities with no other RBAC
+                # (e.g. a least-privilege ServiceAccount that legitimately
+                # can't list API resources or CRDs cluster-wide), so
+                # `k8s_version` can resolve fine while `available_kinds`
+                # stays empty -- previously that combination bypassed this
+                # fallback entirely and silently collapsed every skill's
+                # output to zero files. `available_kinds` being empty is
+                # by itself both necessary and sufficient for the has_api()
+                # gate to reject everything, so that alone -- independent
+                # of k8s_version -- is what must trigger the fallback:
+                # skip the API-availability gate entirely (platform=None),
+                # matching the removed agents' own platform-independent
+                # behavior.
+                if not platform.available_kinds:
                     logger.warning(
-                        "Platform discovery found no reachable cluster -- generating "
+                        "Platform discovery found no available API kinds "
+                        "(unreachable cluster or restricted RBAC) -- generating "
                         "skills without API-availability gating")
                     platform = None
             except Exception as exc:

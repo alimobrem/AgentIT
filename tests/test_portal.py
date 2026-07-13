@@ -21,9 +21,17 @@ from agentit.models import (
     Severity,
     StackInfo,
 )
+from agentit.platform_context import PlatformContext
 from agentit.portal.app import app, get_store
 from agentit.portal.routes.assessments import _get_trusted_base_url
 from agentit.portal.store_factory import AsyncSQLiteStore
+
+# Empty PlatformContext is FleetOrchestrator.run()'s "discovery never
+# actually connected" signal, which skips the has_api() gate entirely
+# (platform=None) -- pinning to this keeps onboarding tests' skill
+# output independent of whatever cluster happens to be reachable when
+# the suite runs. See FleetOrchestrator.run() for the exact fallback.
+_NO_CLUSTER = PlatformContext()
 from conftest import make_store, prime_csrf
 
 
@@ -307,7 +315,11 @@ def test_onboard_results_page(client, _override_store):
     report = _make_report_with_findings()
     aid = store.save(report)
 
-    client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
+    # Pin platform discovery so skill generation doesn't depend on
+    # whatever cluster happens to be reachable at test time (see
+    # FleetOrchestrator.run()'s platform=None fallback).
+    with patch("agentit.platform_context.discover_platform", return_value=_NO_CLUSTER):
+        client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
     resp = client.get(f"/assessments/{aid}/onboard-results")
     assert resp.status_code == 200
     # security/observability/compliance are now skill-only domains (see
@@ -325,7 +337,9 @@ def test_api_manifests(client, _override_store):
     report = _make_report_with_findings()
     aid = store.save(report)
 
-    client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
+    # Pin platform discovery — see comment in test_onboard_results_page.
+    with patch("agentit.platform_context.discover_platform", return_value=_NO_CLUSTER):
+        client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
     resp = client.get(f"/api/assessments/{aid}/manifests")
     assert resp.status_code == 200
     data = resp.json()
@@ -440,8 +454,12 @@ def test_download_manifests_zip(client, _override_store):
     report = _make_report_with_findings()
     aid = store.save(report)
 
-    # Run onboarding to populate files
-    client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
+    # Run onboarding to populate files. Pin platform discovery so skill
+    # generation doesn't depend on whatever cluster happens to be
+    # reachable at test time (see FleetOrchestrator.run()'s platform=None
+    # fallback).
+    with patch("agentit.platform_context.discover_platform", return_value=_NO_CLUSTER):
+        client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
 
     resp = client.get(f"/api/assessments/{aid}/manifests/download")
     assert resp.status_code == 200

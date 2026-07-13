@@ -1,9 +1,11 @@
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 from click.testing import CliRunner
 
 from agentit.cli import main
+from agentit.platform_context import PlatformContext
 
 
 def _make_local_repo(tmp_path: Path) -> str:
@@ -24,7 +26,13 @@ def test_onboard_creates_output(tmp_path: Path):
     repo_url = _make_local_repo(tmp_path)
     output_dir = tmp_path / "onboard-out"
     runner = CliRunner()
-    result = runner.invoke(main, ["onboard", repo_url, "--output-dir", str(output_dir)])
+    # Pin platform discovery so skill generation doesn't depend on
+    # whatever cluster happens to be reachable at test time (an empty
+    # PlatformContext is FleetOrchestrator.run()'s "discovery never
+    # actually connected" signal, which skips the has_api() gate
+    # entirely -- see FleetOrchestrator.run() for the exact logic).
+    with patch("agentit.platform_context.discover_platform", return_value=PlatformContext()):
+        result = runner.invoke(main, ["onboard", repo_url, "--output-dir", str(output_dir)])
     assert result.exit_code == 0, result.output
 
     assert output_dir.exists()

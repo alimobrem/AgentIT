@@ -17,9 +17,19 @@ from agentit.models import (
     Severity,
     StackInfo,
 )
+from agentit.platform_context import PlatformContext
 from agentit.portal.app import app, get_store
 from agentit.portal.store_factory import AsyncSQLiteStore
 from conftest import make_store, prime_csrf
+
+# Discovery returning an empty context (no k8s_version, no available_kinds)
+# is FleetOrchestrator.run()'s "discovery never actually connected" signal,
+# which makes it skip the has_api() gate entirely (platform=None) --
+# matching the ungated generation these tests assert on, regardless of
+# whatever cluster happens to be reachable when the suite runs (e.g. a
+# real, RBAC-restricted in-cluster ServiceAccount in CI vs. no cluster at
+# all locally). See FleetOrchestrator.run() for the exact fallback logic.
+_NO_CLUSTER = PlatformContext()
 
 
 def _poll_assess_progress(client, job_id: str, max_wait: float = 5.0) -> str:
@@ -166,8 +176,11 @@ def test_assess_onboard_flow(client, _override_store):
         job_id = location.split("/assess/progress/")[1]
         assessment_id = _poll_assess_progress(client, job_id)
 
-    # Step 2: onboard
-    resp = client.post(f"/assessments/{assessment_id}/onboard", follow_redirects=False)
+    # Step 2: onboard — pin platform discovery so this test's outcome
+    # doesn't depend on whatever cluster happens to be reachable at test
+    # time (see FleetOrchestrator.run()'s platform=None fallback).
+    with patch("agentit.platform_context.discover_platform", return_value=_NO_CLUSTER):
+        resp = client.post(f"/assessments/{assessment_id}/onboard", follow_redirects=False)
     assert resp.status_code == 303
     assert f"/assessments/{assessment_id}/onboard-results" in resp.headers["location"]
 
@@ -191,7 +204,9 @@ def test_onboard_generates_files_for_all_dimensions(client, _override_store):
     report = _make_report_with_findings()
     aid = store.save(report)
 
-    client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
+    # Pin platform discovery — see comment in test_assess_onboard_flow.
+    with patch("agentit.platform_context.discover_platform", return_value=_NO_CLUSTER):
+        client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
 
     resp = client.get(f"/api/assessments/{aid}/manifests")
     assert resp.status_code == 200
