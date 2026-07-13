@@ -17,6 +17,7 @@ AGENT_CAPABILITIES: dict[str, str] = {
     "release": "AnalysisTemplate, Rollout patch, rollback policy",
     "codechange": ".gitignore, OTel instrumentation, structured logging",
     "retirement": "Decommission plan, cleanup task, data archive job",
+    "chaos": "LitmusChaos pod-delete/network-latency/CPU-stress experiments, chaos schedule",
     # Long-lived watcher agents
     "vuln-watcher": "Monitors fleet for CVEs, triggers remediation when auto-mode on",
     "slo-tracker": "Checks SLO status, publishes breach alerts, recommends rollbacks",
@@ -42,6 +43,7 @@ AGENT_CLASSES: dict[str, tuple[str, str, str, str]] = {
     "release": ("release", "agentit.agents.release", "ReleaseCoordinatorAgent", "small"),
     "retirement": ("retirement", "agentit.agents.retirement", "RetirementAgent", "small"),
     "codechange": ("codechange", "agentit.agents.codechange", "CodeChangeAgent", "large"),
+    "chaos": ("chaos", "agentit.agents.chaos", "ChaosAgent", "small"),
 }
 
 
@@ -57,6 +59,7 @@ AGENT_DISPLAY_NAMES: dict[str, str] = {
     "release": "Release Coordinator",
     "codechange": "Code Change",
     "retirement": "Retirement",
+    "chaos": "Chaos Engineering",
 }
 
 WATCHER_AGENTS: list[dict[str, str]] = [

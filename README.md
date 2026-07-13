@@ -112,7 +112,7 @@ Additions and removals to the `skills/`/`checks/` catalog are no longer only vis
 
 ## The agent fleet
 
-11 one-shot onboarding agents and 3 long-lived watchers. Skills run **first** as the primary generation path; Python agents supplement for findings that no skill covers.
+12 one-shot onboarding agents and 3 long-lived watchers. Skills run **first** as the primary generation path; Python agents supplement for findings that no skill covers.
 
 Conflict detection only flags *real* collisions between agent outputs — a known-conflicting resource-kind pair actually being generated for the same workload (e.g. an actively-resizing VPA alongside an HPA), or two agents writing a file at the same output path — not merely "both agents succeeded". `plan.auto_approve` (computed from score/criticality at plan time) is downgraded to `False` if a real conflict is found during the actual run, so it can be trusted end-to-end.
 
@@ -121,7 +121,7 @@ Conflict detection only flags *real* collisions between agent outputs — a know
 | **HardeningAgent** | `security` | Yes | NetworkPolicy, Containerfile, RBAC, SecurityContext |
 | **ObservabilityAgent** | `observability` | Yes | ServiceMonitor, Grafana dashboard, alerting rules, OTel config |
 | **CICDAgent** | `cicd` | Yes | Tekton Pipeline, Argo CD Application, Argo Rollout |
-| **ComplianceAgent** | `compliance` | Yes | Kyverno policies, SBOM task, compliance evidence |
+| **ComplianceAgent** | `compliance` | Yes | Namespaced Kyverno Policy, SBOM task, compliance evidence |
 | **InfrastructureAgent** | `infrastructure` | Yes | HPA, PDB, ResourceQuota, LimitRange, Namespace |
 | **ReleaseCoordinatorAgent** | `release` | Yes | AnalysisTemplate, rollout patch, rollback policy |
 | **DependencyAgent** | `dependency` | high/critical | Dependency report, Renovate config, CVE-scan CronWorkflow |

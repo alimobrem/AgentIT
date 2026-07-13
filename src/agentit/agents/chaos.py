@@ -5,8 +5,12 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel
 
-from agentit.agents.base import GeneratedFile, _sanitize_name
+import logging
+
+from agentit.agents.base import GeneratedFile, _sanitize_name, validate_manifest
 from agentit.models import AssessmentReport
+
+logger = logging.getLogger(__name__)
 
 
 class ChaosResult(BaseModel):
@@ -48,6 +52,11 @@ class ChaosAgent:
     def _write(self, filename: str, content: str) -> None:
         (self.output_dir / filename).write_text(content)
 
+    def _validate_and_warn(self, filename: str, content: str) -> None:
+        errors = validate_manifest(content)
+        for e in errors:
+            logger.warning("Manifest validation %s: %s", filename, e)
+
     # ------------------------------------------------------------------
     # generators
     # ------------------------------------------------------------------
@@ -58,7 +67,7 @@ class ChaosAgent:
             "apiVersion": "litmuschaos.io/v1alpha1",
             "kind": "ChaosEngine",
             "metadata": {
-                "name": f"{name}-pod-kill",
+                "name": f"{name}-pod-delete",
                 "namespace": "default",
                 "labels": {"app.kubernetes.io/name": name},
             },
@@ -72,13 +81,17 @@ class ChaosAgent:
                 "chaosServiceAccount": f"{name}-chaos-sa",
                 "experiments": [
                     {
-                        "name": "pod-kill",
+                        # "pod-delete" is the actual registered LitmusChaos
+                        # experiment name — "pod-kill" is not a valid CRD.
+                        "name": "pod-delete",
                         "spec": {
                             "components": {
                                 "env": [
                                     {"name": "TOTAL_CHAOS_DURATION", "value": "60"},
                                     {"name": "CHAOS_INTERVAL", "value": "10"},
-                                    {"name": "KILL_COUNT", "value": "1"},
+                                    # 0 (or unset) targets a minimum of 1 pod —
+                                    # KILL_COUNT is not a pod-delete env var.
+                                    {"name": "PODS_AFFECTED_PERC", "value": "0"},
                                 ],
                             },
                             "probe": [
@@ -92,7 +105,8 @@ class ChaosAgent:
                                             "version": "v1",
                                             "resource": "pods",
                                             "namespace": "default",
-                                            "fieldSelector": f"status.phase=Running,metadata.labels.app={name}",
+                                            "fieldSelector": "status.phase=Running",
+                                            "labelSelector": f"app={name}",
                                         },
                                     },
                                     "runProperties": {
@@ -109,12 +123,13 @@ class ChaosAgent:
         }
 
         content = yaml.dump(doc, default_flow_style=False, sort_keys=False)
-        self._write("chaos-pod-kill.yaml", content)
+        self._validate_and_warn("chaos-pod-delete.yaml", content)
+        self._write("chaos-pod-delete.yaml", content)
 
         return GeneratedFile(
-            path="chaos-pod-kill.yaml",
+            path="chaos-pod-delete.yaml",
             content=content,
-            description="LitmusChaos ChaosEngine: kill 1 pod, verify recovery within 60s.",
+            description="LitmusChaos ChaosEngine: delete 1 pod, verify recovery within 60s.",
         )
 
     def _generate_network_latency(self) -> GeneratedFile:
@@ -169,6 +184,7 @@ class ChaosAgent:
         }
 
         content = yaml.dump(doc, default_flow_style=False, sort_keys=False)
+        self._validate_and_warn("chaos-network-latency.yaml", content)
         self._write("chaos-network-latency.yaml", content)
 
         return GeneratedFile(
@@ -213,6 +229,7 @@ class ChaosAgent:
         }
 
         content = yaml.dump(doc, default_flow_style=False, sort_keys=False)
+        self._validate_and_warn("chaos-cpu-stress.yaml", content)
         self._write("chaos-cpu-stress.yaml", content)
 
         return GeneratedFile(
@@ -233,13 +250,14 @@ class ChaosAgent:
             "0 2 * * 3",
             [
                 "litmus-checker",
-                "--chaosengine", f"{name}-pod-kill",
+                "--chaosengine", f"{name}-pod-delete",
                 "--namespace", "default",
             ],
             image="litmuschaos/litmus-checker:latest",
         )
 
         content = yaml.dump(doc, default_flow_style=False, sort_keys=False)
+        self._validate_and_warn("chaos-schedule.yaml", content)
         self._write("chaos-schedule.yaml", content)
 
         return GeneratedFile(
