@@ -146,6 +146,36 @@ def get_current_user(request) -> str:
     return request.headers.get("X-Forwarded-User") or "portal-user"
 
 
+def is_authenticated(request) -> bool:
+    """True only when a real oauth-proxy sidecar sits in front of this
+    request (i.e. `X-Forwarded-User` is actually present) -- meaning there's
+    a real session to sign out of and a real identity to show, not just the
+    "portal-user" fallback.
+
+    Deliberately a runtime, per-request signal rather than a static
+    `auth.enabled` check baked into the template: the chart flag only
+    controls whether the oauth-proxy *container* exists in the Deployment --
+    the exact same rendered `base.html`/image is served whether it's true or
+    false, so the nav bar's Logout link / "Logged in as" text (base.html)
+    must key off something that's actually true of *this* request.
+    """
+    return bool(request.headers.get("X-Forwarded-User"))
+
+
+# openshift/oauth-proxy (the fork `ose-oauth-proxy` builds from -- see
+# https://github.com/openshift/oauth-proxy) exposes its sign-out endpoint at
+# `<proxy-prefix>/sign_out`, where `--proxy-prefix` defaults to "/oauth" when
+# not overridden. chart/templates/deployment.yaml's oauth-proxy args don't
+# set `--proxy-prefix`, so the default applies -- see this module's
+# test_helpers.py, which parses that file's args and fails loudly if someone
+# adds an override without updating this constant to match. Note this
+# specific fork's `/oauth/sign_out` handler ignores any `?rd=` query param
+# (that's an oauth2-proxy-only feature) and always redirects to `/` after
+# clearing the session cookie, which for this app is the Fleet page -- a
+# fine landing spot, so no redirect param is needed here.
+OAUTH_PROXY_SIGN_OUT_PATH = "/oauth/sign_out"
+
+
 DIMENSION_LABELS: dict[str, str] = {
     "ha_dr": "HA/DR",
     "cicd": "CI/CD",

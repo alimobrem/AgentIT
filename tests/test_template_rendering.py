@@ -397,3 +397,36 @@ class TestTemplateRendering:
             resp = client.get(page)
             assert resp.status_code == 200, f"{page} returned {resp.status_code}"
             assert "<style" in resp.text, f"{page} missing CSS"
+
+
+class TestAuthNav:
+    """Nav bar's Logout link / "Logged in as" text (base.html) must key off
+    the *request's* X-Forwarded-User header, not a static Helm value -- the
+    same rendered template/image is served whether auth.enabled is true or
+    false, so auth.enabled=false deployments (and every test in this file
+    that doesn't pass the header) must never show a Logout link to nothing.
+    """
+
+    def test_no_logout_link_without_forwarded_user_header(self, portal_client):
+        client, _, _ = portal_client
+        text = client.get("/").text
+        assert "Logout" not in text
+        assert "Logged in as" not in text
+
+    def test_logout_link_appears_with_forwarded_user_header(self, portal_client):
+        client, _, _ = portal_client
+        text = client.get("/", headers={"X-Forwarded-User": "alice@example.com"}).text
+        assert "Logged in as alice@example.com" in text
+        assert "Logout" in text
+
+    def test_logout_href_matches_oauth_proxy_sign_out_path(self, portal_client):
+        """The rendered Logout href must be the *real* oauth-proxy sign-out
+        path (from helpers.OAUTH_PROXY_SIGN_OUT_PATH, itself checked against
+        chart/templates/deployment.yaml in test_helpers.py) -- not a
+        separately hardcoded string in the template that could drift from
+        the actual deployed proxy configuration."""
+        from agentit.portal.helpers import OAUTH_PROXY_SIGN_OUT_PATH
+
+        client, _, _ = portal_client
+        text = client.get("/", headers={"X-Forwarded-User": "alice@example.com"}).text
+        assert f'href="{OAUTH_PROXY_SIGN_OUT_PATH}"' in text

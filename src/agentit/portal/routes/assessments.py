@@ -17,7 +17,7 @@ from agentit.cloner import clone_repo
 from agentit.models import AssessmentReport, Severity
 from agentit.portal.cluster_apply import apply_manifests_to_cluster, install_operator
 from agentit.portal.github_pr import create_onboarding_pr
-from agentit.portal.helpers import get_llm_client, get_store, get_templates, publish_event, with_timeout
+from agentit.portal.helpers import get_current_user, get_llm_client, get_store, get_templates, publish_event, with_timeout
 from agentit.runner import run_assessment
 
 log = logging.getLogger(__name__)
@@ -588,7 +588,7 @@ async def apply_to_cluster(request: Request, assessment_id: str):
         )
     except Exception:
         log.exception("Cluster apply failed for assessment %s", assessment_id)
-        audit_log(actor="portal-user", action="apply-to-cluster", resource=f"assessment:{assessment_id}",
+        audit_log(actor=get_current_user(request), action="apply-to-cluster", resource=f"assessment:{assessment_id}",
                   outcome="error", details={"namespace": namespace, "dry_run": dry_run})
         return RedirectResponse(
             url=f"/assessments/{assessment_id}/onboard-results?error={quote('Cluster apply failed — check server logs')}",
@@ -600,7 +600,7 @@ async def apply_to_cluster(request: Request, assessment_id: str):
     applied = len(results["applied"])
     skipped = len(results["skipped"])
     errs = len(results["errors"])
-    audit_log(actor="portal-user", action="apply-to-cluster", resource=f"assessment:{assessment_id}",
+    audit_log(actor=get_current_user(request), action="apply-to-cluster", resource=f"assessment:{assessment_id}",
               outcome="success" if not results["errors"] else "partial",
               details={"namespace": namespace, "dry_run": dry_run, "applied": applied, "errors": errs})
     return RedirectResponse(

@@ -19,6 +19,9 @@ from fastapi.templating import Jinja2Templates
 from agentit.portal.helpers import (
     get_store,
     get_retention_days,
+    get_current_user,
+    is_authenticated,
+    OAUTH_PROXY_SIGN_OUT_PATH,
     safe_url as _safe_url,
     format_dimension as _format_dimension,
 )
@@ -50,7 +53,24 @@ def _csrf_context_processor(request: Request) -> dict:
     return {"csrf_token": getattr(request.state, "csrf_token", "")}
 
 
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR), context_processors=[_csrf_context_processor])
+def _auth_context_processor(request: Request) -> dict:
+    """Exposes `{{ current_user }}` / `{{ is_authenticated }}` / `{{
+    oauth_sign_out_path }}` to every template -- base.html's nav bar uses
+    these to show a "Logged in as" identity and a Logout link, using the
+    exact same `get_current_user()` already attributed to `resolved_by` on
+    gate actions (see routes/gates.py), so the nav display and the audit
+    trail never disagree about who's making a request."""
+    return {
+        "current_user": get_current_user(request),
+        "is_authenticated": is_authenticated(request),
+        "oauth_sign_out_path": OAUTH_PROXY_SIGN_OUT_PATH,
+    }
+
+
+templates = Jinja2Templates(
+    directory=str(TEMPLATES_DIR),
+    context_processors=[_csrf_context_processor, _auth_context_processor],
+)
 
 
 @app.middleware("http")

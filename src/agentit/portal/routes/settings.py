@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from agentit.audit import audit_log
-from agentit.portal.helpers import get_llm_client, get_retention_days, get_store, get_templates
+from agentit.portal.helpers import get_current_user, get_llm_client, get_retention_days, get_store, get_templates
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ async def purge_old_data(request: Request):
     s = await get_store()
     counts = await s.purge_old_data(retention_days=retention)
     total = sum(counts.values())
-    audit_log(actor="portal-user", action="purge", resource="store",
+    audit_log(actor=get_current_user(request), action="purge", resource="store",
               details={"retention_days": retention, "rows_deleted": total, "by_table": counts})
     return RedirectResponse(url=f"/settings?purged={total}", status_code=303)
 
@@ -52,7 +52,7 @@ async def toggle_auto_mode(request: Request):
         "portal", "auto-mode-toggled", None,
         "info", f"Auto-mode {'enabled' if value == 'true' else 'disabled'}",
     )
-    audit_log(actor="portal-user", action="auto-mode-toggle", resource="settings:auto_mode",
+    audit_log(actor=get_current_user(request), action="auto-mode-toggle", resource="settings:auto_mode",
               details={"value": value})
     return RedirectResponse(url="/settings", status_code=303)
 
