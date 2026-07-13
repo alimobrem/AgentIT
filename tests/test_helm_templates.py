@@ -453,6 +453,135 @@ class TestPostgresBundledSecretInitJob:
 
 
 # ---------------------------------------------------------------------------
+# oauth-proxy-secret.yaml / internal-webhook-token-secret.yaml / secret-init-job.yaml
+#
+# Same latent bug as bug #1 (postgres-bundled-secret.yaml): both Secrets used
+# to generate their random value via a Helm `lookup`-guarded `randAlphaNum`,
+# which never worked under real Argo CD syncs (repo-server renders via `helm
+# template` with no destination-cluster credentials, so `lookup` always saw
+# nothing) -- silently regenerating the value on every sync. Fixed the same
+# way: the Secrets render no random field at all, and a shared PostSync hook
+# Job (secret-init-job.yaml) generates each one exactly once, only if missing.
+# ---------------------------------------------------------------------------
+
+class TestOauthProxySecret:
+    TEMPLATE = CHART_DIR / "oauth-proxy-secret.yaml"
+
+    def test_parseable(self):
+        doc = _load(self.TEMPLATE)
+        assert doc["kind"] == "Secret"
+        assert doc["type"] == "Opaque"
+
+    def test_renders_no_session_secret_key(self):
+        # `session_secret` is deliberately NOT rendered by Helm -- see
+        # secret-init-job.yaml, the only thing that ever writes it.
+        doc = _load(self.TEMPLATE)
+        assert "data" not in doc or "session_secret" not in (doc.get("data") or {})
+
+    def test_no_lookup_or_randalphanum(self):
+        """Regression guard: this template must never reintroduce the
+        lookup-guarded randAlphaNum pattern that silently regenerated the
+        cookie secret on every Argo CD sync."""
+        raw = self.TEMPLATE.read_text()
+        assert "lookup " not in raw
+        assert "randAlphaNum" not in raw
+
+
+class TestInternalWebhookTokenSecret:
+    TEMPLATE = CHART_DIR / "internal-webhook-token-secret.yaml"
+
+    def test_parseable(self):
+        doc = _load(self.TEMPLATE)
+        assert doc["kind"] == "Secret"
+        assert doc["type"] == "Opaque"
+        assert doc["metadata"]["name"] == "agentit-internal-webhook-token"
+
+    def test_renders_no_token_key(self):
+        # `token` is deliberately NOT rendered by Helm -- see
+        # secret-init-job.yaml, the only thing that ever writes it.
+        doc = _load(self.TEMPLATE)
+        assert "data" not in doc or "token" not in (doc.get("data") or {})
+
+    def test_no_lookup_or_randalphanum(self):
+        """Regression guard: this template must never reintroduce the
+        lookup-guarded randAlphaNum pattern that silently regenerated the
+        webhook token on every Argo CD sync (confirmed live via
+        managedFields -- argocd-controller owned data.token before this
+        fix)."""
+        raw = self.TEMPLATE.read_text()
+        assert "lookup " not in raw
+        assert "randAlphaNum" not in raw
+
+    def test_always_rendered_not_gated(self):
+        """This Secret must always template (no top-level `if`) -- the app's
+        fail-open path for a missing token is meant only for local dev/tests,
+        not a real cluster."""
+        raw = self.TEMPLATE.read_text()
+        assert not raw.lstrip().startswith("{{- if")
+
+
+class TestSecretInitJob:
+    TEMPLATE = CHART_DIR / "secret-init-job.yaml"
+
+    def _by_kind(self):
+        rendered = _render(self.TEMPLATE)
+        docs = list(yaml.safe_load_all(rendered))
+        return {d["kind"]: d for d in docs if d}
+
+    def test_parseable(self):
+        rendered = _render(self.TEMPLATE)
+        docs = list(yaml.safe_load_all(rendered))
+        assert len(docs) == 4
+
+    def test_job_is_a_postsync_hook(self):
+        by_kind = self._by_kind()
+        job = by_kind["Job"]
+        annotations = job["metadata"]["annotations"]
+        assert annotations["argocd.argoproj.io/hook"] == "PostSync"
+        assert annotations["argocd.argoproj.io/hook-delete-policy"] == "HookSucceeded"
+
+    def test_job_uses_dedicated_service_account(self):
+        by_kind = self._by_kind()
+        sa_name = by_kind["ServiceAccount"]["metadata"]["name"]
+        job_sa = by_kind["Job"]["spec"]["template"]["spec"]["serviceAccountName"]
+        assert job_sa == sa_name
+        assert by_kind["RoleBinding"]["subjects"][0]["name"] == sa_name
+
+    def test_role_scoped_to_only_the_named_secrets(self):
+        """Not a blanket grant -- resourceNames must list exactly the
+        Secrets this Job is allowed to touch, both branches present since
+        the test harness keeps both sides of the auth.enabled conditional."""
+        by_kind = self._by_kind()
+        rule = by_kind["Role"]["rules"][0]
+        assert rule["resources"] == ["secrets"]
+        assert set(rule["resourceNames"]) == {
+            "agentit-internal-webhook-token",
+            "agentit-proxy-session",
+        }
+        assert set(rule["verbs"]) == {"get", "patch"}
+
+    def test_script_bootstraps_webhook_token_and_proxy_session(self):
+        by_kind = self._by_kind()
+        args = "\n".join(by_kind["Job"]["spec"]["template"]["spec"]["containers"][0]["args"])
+        assert 'init_secret_key "agentit-internal-webhook-token" "token" 40' in args
+        assert 'init_secret_key "agentit-proxy-session" "session_secret" 24' in args
+
+    def test_script_only_patches_when_key_missing(self):
+        by_kind = self._by_kind()
+        args = "\n".join(by_kind["Job"]["spec"]["template"]["spec"]["containers"][0]["args"])
+        assert 'jsonpath="{.data.$key}"' in args
+        assert '-n "$existing"' in args
+        assert "oc patch secret" in args
+
+    def test_not_gated_behind_a_top_level_flag(self):
+        """The webhook token half must always run -- that Secret is always
+        templated, unlike the proxy-session half which is conditional
+        entirely within the Role's resourceNames and the script body."""
+        raw = self.TEMPLATE.read_text()
+        assert not raw.lstrip().startswith("{{- if")
+
+
+# ---------------------------------------------------------------------------
 # RBAC
 # ---------------------------------------------------------------------------
 
