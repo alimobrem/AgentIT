@@ -34,10 +34,23 @@ class InfrastructureResult(BaseModel):
 class InfrastructureAgent:
     """Generates infrastructure manifests (HPA, PDB, ResourceQuota, LimitRange, Namespace)."""
 
-    def __init__(self, report: AssessmentReport, output_dir: Path) -> None:
+    def __init__(
+        self,
+        report: AssessmentReport,
+        output_dir: Path,
+        *,
+        uses_argo_rollouts: bool = True,
+    ) -> None:
         self.report = report
         self.output_dir = Path(output_dir)
         self._name = _sanitize_name(report.repo_name)
+        # CICDAgent._generate_argo_rollout() unconditionally generates an Argo
+        # Rollout (never a plain Deployment) as the workload for every app in
+        # this codebase, so the HPA must target that kind to actually scale
+        # anything. Defaults to True to match current fleet-wide behavior;
+        # orchestrator.py can pass False here once it tracks per-app workload
+        # kind explicitly.
+        self._uses_argo_rollouts = uses_argo_rollouts
 
     def run(self) -> InfrastructureResult:
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -77,6 +90,12 @@ class InfrastructureAgent:
 
     def _generate_hpa(self) -> list[GeneratedFile]:
         name = self._name
+        # NOTE: conflicts with cost.py's VPA — HPA (replica-count scaling) and
+        # VPA (CPU/memory right-sizing) both managing the same target fight
+        # each other, a documented K8s anti-pattern. See orchestrator.py
+        # PRIORITY_MATRIX.
+        # TODO(orchestrator): register conflict between infrastructure/HPA
+        # and cost/VPA in PRIORITY_MATRIX.
         doc: dict = {
             "apiVersion": "autoscaling/v2",
             "kind": "HorizontalPodAutoscaler",
@@ -86,8 +105,8 @@ class InfrastructureAgent:
             },
             "spec": {
                 "scaleTargetRef": {
-                    "apiVersion": "apps/v1",
-                    "kind": "Deployment",
+                    "apiVersion": "argoproj.io/v1alpha1" if self._uses_argo_rollouts else "apps/v1",
+                    "kind": "Rollout" if self._uses_argo_rollouts else "Deployment",
                     "name": name,
                 },
                 "minReplicas": 2,

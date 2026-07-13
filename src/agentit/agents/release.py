@@ -160,7 +160,7 @@ class ReleaseCoordinatorAgent:
                 "revisionHistoryLimit": 5,
                 "rollbackWindow": {"revisions": 2},
                 "selector": {
-                    "matchLabels": {"app": name},
+                    "matchLabels": {"app.kubernetes.io/name": name},
                 },
                 "strategy": {
                     "canary": {
@@ -173,7 +173,7 @@ class ReleaseCoordinatorAgent:
                 },
                 "template": {
                     "metadata": {
-                        "labels": {"app": name},
+                        "labels": {"app.kubernetes.io/name": name},
                     },
                     "spec": {
                         "securityContext": {

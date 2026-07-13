@@ -127,7 +127,7 @@ class ObservabilityAgent:
                     "targets": [
                         {
                             "expr": (
-                                f'sum(rate(http_requests_total{{app="{name}",code=~"5.."}}[5m]))'
+                                f'sum(rate(http_requests_total{{app="{name}",status=~"5.."}}[5m]))'
                                 f" / sum(rate(http_requests_total{{app=\"{name}\"}}[5m])) * 100"
                             ),
                             "legendFormat": "error %",
@@ -152,7 +152,9 @@ class ObservabilityAgent:
                     "targets": [
                         {
                             "expr": f'sum(kube_pod_container_status_restarts_total{{pod=~"{name}-.*"}}) by (pod)',
-                            "legendFormat": "{{{{pod}}}}",
+                            # Not an f-string — {{pod}} is Grafana's own template
+                            # syntax and must reach the JSON verbatim, unescaped.
+                            "legendFormat": "{{pod}}",
                         },
                     ],
                 },
@@ -210,7 +212,7 @@ class ObservabilityAgent:
                             {
                                 "alert": "HighErrorRate",
                                 "expr": (
-                                    f'sum(rate(http_requests_total{{app="{name}",code=~"5.."}}[5m]))'
+                                    f'sum(rate(http_requests_total{{app="{name}",status=~"5.."}}[5m]))'
                                     f' / sum(rate(http_requests_total{{app="{name}"}}[5m])) > 0.05'
                                 ),
                                 "for": "5m",

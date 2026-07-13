@@ -158,6 +158,12 @@ class CostOptimizationAgent:
         profile = _RESOURCE_PROFILES[tier]
         update_mode = "Off" if self._is_critical else "Auto"
 
+        # NOTE: conflicts with infrastructure.py's HPA — VPA (CPU/memory
+        # right-sizing) and HPA (replica-count scaling) both managing the
+        # same target fight each other, a documented K8s anti-pattern.
+        # See orchestrator.py PRIORITY_MATRIX.
+        # TODO(orchestrator): register conflict between cost/VPA and
+        # infrastructure/HPA in PRIORITY_MATRIX.
         doc: dict = {
             "apiVersion": "autoscaling.k8s.io/v1",
             "kind": "VerticalPodAutoscaler",

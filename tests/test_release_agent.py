@@ -37,6 +37,17 @@ class TestAnalysisTemplate:
         assert doc["metadata"]["name"] == "test-app-success-rate"
         assert "test-app" in doc["spec"]["metrics"][0]["provider"]["prometheus"]["query"]
 
+    def test_error_rate_metric_label_matches_observability_agent(self, tmp_path: Path) -> None:
+        """Must use status=~"5.." — matching ObservabilityAgent's alerting
+        rules/dashboard for the same conceptual metric on the same app."""
+        agent = ReleaseCoordinatorAgent(make_report(), tmp_path / "out")
+        result = agent.run()
+        at_file = [f for f in result.files if f.path == "analysis-template.yaml"][0]
+        doc = yaml.safe_load(at_file.content)
+        error_metric = doc["spec"]["metrics"][1]
+        assert error_metric["name"] == "error-rate"
+        assert 'status=~"5.."' in error_metric["provider"]["prometheus"]["query"]
+
 
 class TestRolloutPatch:
     def test_generates_rollout_with_analysis(self, tmp_path: Path) -> None:
@@ -85,6 +96,17 @@ class TestRolloutPatch:
         rollout = [f for f in result.files if f.path == "rollout-patch.yaml"][0]
         doc = yaml.safe_load(rollout.content)
         assert doc["spec"]["rollbackWindow"]["revisions"] == 2
+
+    def test_rollout_uses_kubernetes_recommended_labels(self, tmp_path: Path) -> None:
+        """Must match CICDAgent's argo-rollout.yaml and InfrastructureAgent's
+        HPA/PDB matchLabels (app.kubernetes.io/name), not the legacy 'app'
+        label — otherwise the HPA/PDB generated for this app are inert."""
+        agent = ReleaseCoordinatorAgent(make_report(), tmp_path / "out")
+        result = agent.run()
+        rollout = [f for f in result.files if f.path == "rollout-patch.yaml"][0]
+        doc = yaml.safe_load(rollout.content)
+        assert doc["spec"]["selector"]["matchLabels"] == {"app.kubernetes.io/name": "test-app"}
+        assert doc["spec"]["template"]["metadata"]["labels"] == {"app.kubernetes.io/name": "test-app"}
 
 
 class TestRollbackPolicy:

@@ -71,12 +71,125 @@ class CICDAgent:
     # generators
     # ------------------------------------------------------------------
 
+    def _has_image_scan_task(self) -> bool:
+        """True iff HardeningAgent's gate would also generate {name}-image-scan.
+
+        Mirrors HardeningAgent._generate_image_scan_task()'s own findings
+        gate — kept in sync deliberately since there's no shared context
+        object between agents yet (see orchestrator.py TODO).
+        """
+        return bool(self._findings_for("scanning", "vulnerability", "cve"))
+
+    def _has_sbom_task(self) -> bool:
+        """True iff ComplianceAgent's gate would also generate {name}-sbom-generate."""
+        return bool(self._findings_for("sbom", "supply chain", "bom"))
+
     def _generate_tekton_pipeline(self) -> list[GeneratedFile]:
         hits = self._findings_for("pipeline", "ci/cd", "cicd")
         if not hits:
             return []
 
         name = self._name
+        has_scan = self._has_image_scan_task()
+        has_sbom = self._has_sbom_task()
+
+        tasks: list[dict] = [
+            {
+                "name": "git-clone",
+                "taskRef": {"name": "git-clone", "kind": "ClusterTask"},
+                "params": [
+                    {"name": "url", "value": "$(params.repo-url)"},
+                ],
+                "workspaces": [
+                    {"name": "output", "workspace": "shared-workspace"},
+                ],
+            },
+            {
+                "name": "build",
+                "taskRef": {"name": "maven" if self._primary_language() == "java" else "npm", "kind": "ClusterTask"},
+                "runAfter": ["git-clone"],
+                "workspaces": [
+                    {"name": "source", "workspace": "shared-workspace"},
+                ],
+            },
+            {
+                "name": "test",
+                "taskRef": {"name": "maven" if self._primary_language() == "java" else "npm", "kind": "ClusterTask"},
+                "runAfter": ["build"],
+                "workspaces": [
+                    {"name": "source", "workspace": "shared-workspace"},
+                ],
+            },
+            {
+                "name": "image-build",
+                "taskRef": {"name": "buildah", "kind": "ClusterTask"},
+                "runAfter": ["test"],
+                "params": [
+                    {"name": "IMAGE", "value": "$(params.image-ref)"},
+                ],
+                "workspaces": [
+                    {"name": "source", "workspace": "shared-workspace"},
+                ],
+            },
+            {
+                "name": "image-push",
+                "taskRef": {"name": "buildah", "kind": "ClusterTask"},
+                "runAfter": ["image-build"],
+                "params": [
+                    {"name": "IMAGE", "value": "$(params.image-ref)"},
+                    {"name": "PUSH_EXTRA_ARGS", "value": "--digestfile /tmp/digest"},
+                ],
+                "workspaces": [
+                    {"name": "source", "workspace": "shared-workspace"},
+                ],
+            },
+        ]
+
+        # Only reference these Tekton Tasks if HardeningAgent/ComplianceAgent
+        # would actually generate them for this report — otherwise the
+        # PipelineRun fails at runtime looking up a Task that doesn't exist.
+        # Deploy gates on whichever of scan/sbom actually run (both runAfter
+        # image-push already); falls back to image-push when neither exists.
+        deploy_run_after: list[str] = []
+
+        if has_scan:
+            tasks.append({
+                "name": "image-scan",
+                "taskRef": {"name": f"{name}-image-scan", "kind": "Task"},
+                "runAfter": ["image-push"],
+                "params": [
+                    {"name": "IMAGE", "value": "$(params.image-ref)"},
+                ],
+            })
+            deploy_run_after.append("image-scan")
+
+        if has_sbom:
+            tasks.append({
+                "name": "sbom-generate",
+                "taskRef": {"name": f"{name}-sbom-generate", "kind": "Task"},
+                "runAfter": ["image-push"],
+                "params": [
+                    {"name": "IMAGE", "value": "$(params.image-ref)"},
+                ],
+                "workspaces": [
+                    {"name": "source", "workspace": "shared-workspace"},
+                    {"name": "sbom-output", "workspace": "shared-workspace"},
+                ],
+            })
+            deploy_run_after.append("sbom-generate")
+
+        if not deploy_run_after:
+            deploy_run_after.append("image-push")
+
+        tasks.append({
+            "name": "deploy",
+            "taskRef": {"name": "kubernetes-actions", "kind": "ClusterTask"},
+            "runAfter": deploy_run_after,
+            "params": [
+                {"name": "script", "value": f"kubectl rollout restart deployment/{name}"},
+            ],
+        })
+
         pipeline: dict = {
             "apiVersion": "tekton.dev/v1beta1",
             "kind": "Pipeline",
@@ -92,85 +205,7 @@ class CICDAgent:
                 "workspaces": [
                     {"name": "shared-workspace"},
                 ],
-                "tasks": [
-                    {
-                        "name": "git-clone",
-                        "taskRef": {"name": "git-clone", "kind": "ClusterTask"},
-                        "params": [
-                            {"name": "url", "value": "$(params.repo-url)"},
-                        ],
-                        "workspaces": [
-                            {"name": "output", "workspace": "shared-workspace"},
-                        ],
-                    },
-                    {
-                        "name": "build",
-                        "taskRef": {"name": "maven" if self._primary_language() == "java" else "npm", "kind": "ClusterTask"},
-                        "runAfter": ["git-clone"],
-                        "workspaces": [
-                            {"name": "source", "workspace": "shared-workspace"},
-                        ],
-                    },
-                    {
-                        "name": "test",
-                        "taskRef": {"name": "maven" if self._primary_language() == "java" else "npm", "kind": "ClusterTask"},
-                        "runAfter": ["build"],
-                        "workspaces": [
-                            {"name": "source", "workspace": "shared-workspace"},
-                        ],
-                    },
-                    {
-                        "name": "image-build",
-                        "taskRef": {"name": "buildah", "kind": "ClusterTask"},
-                        "runAfter": ["test"],
-                        "params": [
-                            {"name": "IMAGE", "value": "$(params.image-ref)"},
-                        ],
-                        "workspaces": [
-                            {"name": "source", "workspace": "shared-workspace"},
-                        ],
-                    },
-                    {
-                        "name": "image-push",
-                        "taskRef": {"name": "buildah", "kind": "ClusterTask"},
-                        "runAfter": ["image-build"],
-                        "params": [
-                            {"name": "IMAGE", "value": "$(params.image-ref)"},
-                            {"name": "PUSH_EXTRA_ARGS", "value": "--digestfile /tmp/digest"},
-                        ],
-                        "workspaces": [
-                            {"name": "source", "workspace": "shared-workspace"},
-                        ],
-                    },
-                    {
-                        "name": "image-scan",
-                        "taskRef": {"name": f"{name}-image-scan", "kind": "Task"},
-                        "runAfter": ["image-push"],
-                        "params": [
-                            {"name": "IMAGE", "value": "$(params.image-ref)"},
-                        ],
-                    },
-                    {
-                        "name": "sbom-generate",
-                        "taskRef": {"name": f"{name}-sbom-generate", "kind": "Task"},
-                        "runAfter": ["image-push"],
-                        "params": [
-                            {"name": "IMAGE", "value": "$(params.image-ref)"},
-                        ],
-                        "workspaces": [
-                            {"name": "source", "workspace": "shared-workspace"},
-                            {"name": "sbom-output", "workspace": "shared-workspace"},
-                        ],
-                    },
-                    {
-                        "name": "deploy",
-                        "taskRef": {"name": "kubernetes-actions", "kind": "ClusterTask"},
-                        "runAfter": ["image-scan", "sbom-generate"],
-                        "params": [
-                            {"name": "script", "value": f"kubectl rollout restart deployment/{name}"},
-                        ],
-                    },
-                ],
+                "tasks": tasks,
             },
         }
 
@@ -352,7 +387,7 @@ class CICDAgent:
             "spec": {
                 "replicas": 2,
                 "selector": {
-                    "matchLabels": {"app": name},
+                    "matchLabels": {"app.kubernetes.io/name": name},
                 },
                 "strategy": {
                     "canary": {
@@ -371,7 +406,7 @@ class CICDAgent:
                 },
                 "template": {
                     "metadata": {
-                        "labels": {"app": name},
+                        "labels": {"app.kubernetes.io/name": name},
                     },
                     "spec": {
                         "securityContext": {
@@ -417,7 +452,7 @@ class CICDAgent:
             "spec": {
                 "type": "ClusterIP",
                 "ports": [{"port": port, "targetPort": port, "protocol": "TCP"}],
-                "selector": {"app": name},
+                "selector": {"app.kubernetes.io/name": name},
             },
         }
 
@@ -431,7 +466,7 @@ class CICDAgent:
             "spec": {
                 "type": "ClusterIP",
                 "ports": [{"port": port, "targetPort": port, "protocol": "TCP"}],
-                "selector": {"app": name},
+                "selector": {"app.kubernetes.io/name": name},
             },
         }
 

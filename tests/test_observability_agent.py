@@ -74,6 +74,21 @@ class TestGrafanaDashboard:
         assert "Error Rate %" in panel_titles
         assert (tmp_path / "out" / "grafana-dashboard-cm.yaml").exists()
 
+    def test_pod_restarts_panel_legend_uses_single_brace_pair(self, tmp_path: Path) -> None:
+        """legendFormat must reach Grafana as the literal template {{pod}}
+        (one brace pair each side) — not the doubled {{{{pod}}}} that results
+        from treating a plain (non f-)string as if it needed f-string brace
+        escaping."""
+        report = make_report(scores=[])
+        result = ObservabilityAgent(report, tmp_path / "out").run()
+
+        cm = yaml.safe_load(
+            [f for f in result.files if f.path == "grafana-dashboard-cm.yaml"][0].content
+        )
+        dashboard = json.loads(cm["data"]["test-app-dashboard.json"])
+        restarts_panel = next(p for p in dashboard["panels"] if p["title"] == "Pod Restarts")
+        assert restarts_panel["targets"][0]["legendFormat"] == "{{pod}}"
+
 
 class TestAlertingRules:
     def test_generates_alerting_rules(self, tmp_path: Path) -> None:
@@ -89,6 +104,26 @@ class TestAlertingRules:
         alert_names = {r["alert"] for r in rules}
         assert alert_names == {"HighErrorRate", "HighLatency", "PodCrashLooping"}
         assert (tmp_path / "out" / "alerting-rules.yaml").exists()
+
+    def test_error_rate_label_matches_release_agent_analysis_template(self, tmp_path: Path) -> None:
+        """The error-rate PromQL label must be the same in ObservabilityAgent's
+        dashboard/alert queries and ReleaseCoordinatorAgent's AnalysisTemplate
+        (status=~"5..") — otherwise the two agents disagree on how to measure
+        the same conceptual metric for the same app."""
+        report = make_report(scores=[])
+        result = ObservabilityAgent(report, tmp_path / "out").run()
+
+        rule = yaml.safe_load([f for f in result.files if f.path == "alerting-rules.yaml"][0].content)
+        error_rule = next(r for r in rule["spec"]["groups"][0]["rules"] if r["alert"] == "HighErrorRate")
+        assert 'status=~"5.."' in error_rule["expr"]
+        assert 'code=~"5.."' not in error_rule["expr"]
+
+        cm = yaml.safe_load(
+            [f for f in result.files if f.path == "grafana-dashboard-cm.yaml"][0].content
+        )
+        dashboard = json.loads(cm["data"]["test-app-dashboard.json"])
+        error_panel = next(p for p in dashboard["panels"] if p["title"] == "Error Rate %")
+        assert 'status=~"5.."' in error_panel["targets"][0]["expr"]
 
 
 class TestOtelCollector:
