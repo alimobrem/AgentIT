@@ -398,10 +398,58 @@ class TestPostgresBundledSecret:
         assert doc["kind"] == "Secret"
         assert doc["type"] == "kubernetes.io/basic-auth"
 
-    def test_has_username_and_password_keys(self):
+    def test_has_username_key_only(self):
+        # `password` is deliberately NOT rendered by Helm -- see
+        # postgres-bundled-secret-init-job.yaml, the only thing that writes
+        # it, and the header comment in this template for why (Argo CD's
+        # Helm rendering can't use `lookup` to preserve it across syncs, and
+        # neither `ignoreDifferences` nor `RespectIgnoreDifferences` reliably
+        # protected the field either -- confirmed live, twice).
         doc = _load(self.TEMPLATE)
         assert "username" in doc["data"]
-        assert "password" in doc["data"]
+        assert "password" not in doc["data"]
+
+
+class TestPostgresBundledSecretInitJob:
+    TEMPLATE = CHART_DIR / "postgres" / "postgres-bundled-secret-init-job.yaml"
+
+    def _by_kind(self):
+        rendered = _render(self.TEMPLATE)
+        docs = list(yaml.safe_load_all(rendered))
+        return {d["kind"]: d for d in docs if d}
+
+    def test_parseable(self):
+        rendered = _render(self.TEMPLATE)
+        docs = list(yaml.safe_load_all(rendered))
+        assert len(docs) == 4
+
+    def test_job_is_a_postsync_hook(self):
+        by_kind = self._by_kind()
+        job = by_kind["Job"]
+        annotations = job["metadata"]["annotations"]
+        assert annotations["argocd.argoproj.io/hook"] == "PostSync"
+        assert annotations["argocd.argoproj.io/hook-delete-policy"] == "HookSucceeded"
+
+    def test_job_uses_dedicated_service_account(self):
+        by_kind = self._by_kind()
+        sa_name = by_kind["ServiceAccount"]["metadata"]["name"]
+        job_sa = by_kind["Job"]["spec"]["template"]["spec"]["serviceAccountName"]
+        assert job_sa == sa_name
+        assert by_kind["RoleBinding"]["subjects"][0]["name"] == sa_name
+
+    def test_role_scoped_to_the_one_named_secret(self):
+        by_kind = self._by_kind()
+        rule = by_kind["Role"]["rules"][0]
+        assert rule["resources"] == ["secrets"]
+        assert rule["resourceNames"] == ["agentit-postgres-bundled-app"]
+        assert set(rule["verbs"]) == {"get", "patch"}
+
+    def test_script_only_patches_when_password_missing(self):
+        by_kind = self._by_kind()
+        args = "\n".join(by_kind["Job"]["spec"]["template"]["spec"]["containers"][0]["args"])
+        assert 'jsonpath=\'{.data.password}\'' in args
+        assert "-n \"$EXISTING\"" in args
+        assert "oc patch secret" in args
 
 
 # ---------------------------------------------------------------------------
