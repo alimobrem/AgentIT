@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import functools
 import shutil
 import sys
-from collections.abc import Generator
+from collections.abc import Callable, Coroutine, Generator
 from pathlib import Path
 
 import click
 
 from agentit.cloner import CloneError, clone_repo
 from agentit.models import AssessmentReport
+from agentit.portal.store_factory import create_store
 from agentit.reporter import render_json_report, render_terminal_report
 from agentit.runner import run_assessment
 
@@ -19,6 +22,22 @@ from agentit.agents.hardening import HardeningAgent
 from agentit.agents.observability import ObservabilityAgent
 from agentit.agents.cicd import CICDAgent
 from agentit.agents.compliance import ComplianceAgent
+
+
+def _run_async(coro_func: Callable[..., Coroutine]) -> Callable[..., None]:
+    """Let a Click command's callback be ``async def`` while Click itself
+    (which has no native async support) still calls it as a plain function.
+
+    Smallest, safest option per docs/postgres-migration-plan.md §9 Phase 3
+    (the alternative -- ``anyio``/``asyncclick`` -- would add a new
+    dependency for no behavior difference here). Must be the innermost
+    decorator, applied directly to the ``async def`` function, so that
+    ``@click.option``/``@main.command`` see a normal sync callable.
+    """
+    @functools.wraps(coro_func)
+    def wrapper(*args: object, **kwargs: object) -> None:
+        return asyncio.run(coro_func(*args, **kwargs))
+    return wrapper
 
 
 @contextlib.contextmanager
@@ -84,7 +103,7 @@ def main() -> None:
     configure_logging()
 
 
-def _rescan_fleet(
+async def _rescan_fleet(
     dimension: str | None,
     use_llm: bool | None = None,
     llm_model: str | None = None,
@@ -98,10 +117,8 @@ def _rescan_fleet(
     that dimension (e.g. ``compliance``, ``security``, ``ha_dr``) are counted
     in the per-app summary line.
     """
-    from agentit.portal.store import AssessmentStore
-
-    store = AssessmentStore()
-    fleet = store.get_fleet_data()
+    store = await create_store()
+    fleet = await store.get_fleet_data()
     if not fleet:
         click.echo("[rescan] No tracked apps in the fleet -- nothing to do.", err=True)
         return []
@@ -114,7 +131,7 @@ def _rescan_fleet(
         repo_url = app["repo_url"]
         try:
             with _resolve_and_assess(repo_url, app["criticality"], use_llm, llm_model) as report:
-                store.save(report)
+                await store.save(report)
                 findings = [
                     f for s in report.scores for f in s.findings
                     if dimension is None or s.dimension == dimension
@@ -156,7 +173,7 @@ def assess(
 ) -> None:
     """Assess enterprise readiness of a Git repository."""
     if rescan:
-        _rescan_fleet(dimension, use_llm, llm_model)
+        asyncio.run(_rescan_fleet(dimension, use_llm, llm_model))
         return
     if not repo_url:
         click.echo("Error: REPO_URL is required unless --rescan is set.", err=True)
@@ -236,7 +253,7 @@ def watch(
     import httpx
 
     if rescan:
-        _rescan_fleet(dimension, use_llm, llm_model)
+        asyncio.run(_rescan_fleet(dimension, use_llm, llm_model))
         return
     if not repo_url:
         click.echo("Error: REPO_URL is required unless --rescan is set.", err=True)
@@ -386,21 +403,24 @@ def onboard(repo_url: str, output_dir: str, criticality: str, use_llm: bool, llm
 @main.command()
 @click.option("--topics", default="agentit-events", help="Comma-separated Kafka topics.")
 @click.option("--group-id", default="agentit-consumers", help="Kafka consumer group ID.")
-def consume(topics: str, group_id: str) -> None:
+@_run_async
+async def consume(topics: str, group_id: str) -> None:
     """Start a blocking Kafka consumer that dispatches events to watchers."""
     from agentit.consumer import EventConsumer
     from agentit.events import get_publisher
-    from agentit.portal.store import AssessmentStore
 
     topic_list = [t.strip() for t in topics.split(",") if t.strip()]
-    consumer = EventConsumer(topics=topic_list, group_id=group_id)
+    store = await create_store()
+    # EventConsumer.consume() is a synchronous blocking loop (unconverted,
+    # out of scope this pass) -- it calls store methods directly without
+    # `await`, so it needs the raw synchronous store, not the async facade.
+    consumer = EventConsumer(topics=topic_list, group_id=group_id, store=store.raw)
 
     if not consumer.connected:
         click.echo("Kafka unavailable — cannot start consumer.", err=True)
         sys.exit(1)
 
     publisher = get_publisher()
-    store = AssessmentStore()
 
     def handler(event: dict) -> None:
         action = event.get("action", "")
@@ -426,64 +446,76 @@ def consume(topics: str, group_id: str) -> None:
 
 @main.command("vuln-watch")
 @click.option("--interval", default=21600, type=int, help="Scan interval in seconds (default: 6 hours).")
-def vuln_watch(interval: int) -> None:
+@_run_async
+async def vuln_watch(interval: int) -> None:
     """Long-lived vulnerability watcher — monitors for CVE events and rescans."""
     from agentit.consumer import EventConsumer
     from agentit.events import get_publisher
-    from agentit.portal.store import AssessmentStore
     from agentit.watchers.vuln_watcher import VulnWatcher
 
-    consumer = EventConsumer(topics=["agentit-events"], group_id="agentit-vuln-watcher")
+    store = await create_store()
+    # VulnWatcher's tick body (check_fleet -> AutoMode/RemediationLoop) is
+    # unconverted synchronous code this pass -- pass the raw store so its
+    # behavior is unaffected; only watcher.run()'s outer loop is async now.
+    consumer = EventConsumer(topics=["agentit-events"], group_id="agentit-vuln-watcher", store=store.raw)
     watcher = VulnWatcher(
         publisher=get_publisher(),
-        store=AssessmentStore(),
+        store=store.raw,
         consumer=consumer,
         interval=interval,
     )
-    watcher.run()
+    await watcher.run()
 
 
 @main.command("slo-track")
 @click.option("--interval", default=300, type=int, help="Update interval in seconds (default: 5 minutes).")
-def slo_track(interval: int) -> None:
+@_run_async
+async def slo_track(interval: int) -> None:
     """Long-lived SLO tracker — updates SLO current values and alerts on breaches."""
     from agentit.consumer import EventConsumer
     from agentit.events import get_publisher
-    from agentit.portal.store import AssessmentStore
     from agentit.watchers.slo_tracker import SloTracker
 
-    consumer = EventConsumer(topics=["agentit-events"], group_id="agentit-slo-tracker")
+    store = await create_store()
+    consumer = EventConsumer(topics=["agentit-events"], group_id="agentit-slo-tracker", store=store.raw)
     tracker = SloTracker(
         publisher=get_publisher(),
-        store=AssessmentStore(),
+        store=store.raw,
         consumer=consumer,
         interval=interval,
     )
-    tracker.run()
+    await tracker.run()
 
 
 @main.command("drift-detect")
 @click.option("--interval", default=600, type=int, help="Poll interval in seconds (default: 10 minutes).")
-def drift_detect(interval: int) -> None:
+@_run_async
+async def drift_detect(interval: int) -> None:
     """Long-lived drift detector — checks Argo CD apps for out-of-sync state."""
     from agentit.events import get_publisher
     from agentit.watchers.drift_detector import DriftDetector
 
-    detector = DriftDetector(publisher=get_publisher(), interval=interval)
-    detector.run()
+    store = await create_store()
+    detector = DriftDetector(publisher=get_publisher(), interval=interval, store=store.raw)
+    await detector.run()
 
 
 @main.command("learn-watch")
 @click.option("--interval", default=86400, type=int, help="Research interval in seconds (default: 24 hours).")
 @click.option("--limit", default=3, type=int, help="Max CVEs to research per cycle.")
 @click.option("--llm-model", default=None, help="Claude model to use.")
-def learn_watch(interval: int, limit: int, llm_model: str | None) -> None:
+@_run_async
+async def learn_watch(interval: int, limit: int, llm_model: str | None) -> None:
     """Long-lived skill learner — periodically researches CVEs and drafts new skills."""
     from agentit.events import get_publisher
     from agentit.watchers.skill_learner import SkillLearner
 
-    learner = SkillLearner(publisher=get_publisher(), llm_model=llm_model, interval=interval, limit=limit)
-    learner.run()
+    store = await create_store()
+    learner = SkillLearner(
+        publisher=get_publisher(), llm_model=llm_model, interval=interval, limit=limit,
+        store=store.raw,
+    )
+    await learner.run()
 
 
 @main.command("run-agent")
@@ -521,16 +553,16 @@ def run_agent(agent_name: str, report_path: str) -> None:
 @click.option("--auto-apply", is_flag=True, default=False, help="Run auto-mode pipeline after onboarding.")
 @click.option("--llm", "use_llm", is_flag=True, default=None)
 @click.option("--llm-model", default=None)
-def self_assess(repo_url: str, criticality: str, auto_apply: bool, use_llm: bool, llm_model: str | None) -> None:
+@_run_async
+async def self_assess(repo_url: str, criticality: str, auto_apply: bool, use_llm: bool, llm_model: str | None) -> None:
     """Assess AgentIT itself — dogfooding the platform on its own repo."""
     from agentit.agents.orchestrator import FleetOrchestrator
-    from agentit.portal.store import AssessmentStore
 
-    store = AssessmentStore()
+    store = await create_store()
 
     try:
         with _resolve_and_assess(repo_url, criticality, use_llm, llm_model) as report:
-            assessment_id = store.save(report)
+            assessment_id = await store.save(report)
             click.echo(f"Self-assessment score: {report.overall_score:.0f}/100", err=True)
             click.echo(f"Assessment ID: {assessment_id}", err=True)
 
@@ -538,9 +570,12 @@ def self_assess(repo_url: str, criticality: str, auto_apply: bool, use_llm: bool
             out.mkdir(parents=True, exist_ok=True)
 
             click.echo("Running Fleet Orchestrator on AgentIT...", err=True)
+            # FleetOrchestrator is unconverted, synchronous code this pass --
+            # pass the raw store so its internal `self._store.*` calls (no
+            # `await`) keep behaving exactly as before.
             orch = FleetOrchestrator(
                 report=report, output_dir=out,
-                store=store, assessment_id=assessment_id,
+                store=store.raw, assessment_id=assessment_id,
             )
             result = orch.run()
 
@@ -574,7 +609,7 @@ def self_assess(repo_url: str, criticality: str, auto_apply: bool, use_llm: bool
                                 "description": fpath,
                             })
 
-                engine = AutoMode(store=store, llm_client=llm_client)
+                engine = AutoMode(store=store.raw, llm_client=llm_client)
                 apply_result = engine.execute(
                     assessment_id, files, "agentit",
                     criticality, result.plan.auto_approve, "agentit",
@@ -593,22 +628,22 @@ def self_assess(repo_url: str, criticality: str, auto_apply: bool, use_llm: bool
 @click.option("--criticality", default="high")
 @click.option("--dry-run", is_flag=True, help="Show what would be fixed without applying.")
 @click.option("--create-pr", is_flag=True, help="Create a PR with the fixes.")
-def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bool) -> None:
+@_run_async
+async def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bool) -> None:
     """Autonomous self-healing: assess, fix findings, verify, commit.
 
     The closed loop: AgentIT finds its own problems and fixes them.
     """
     from agentit.remediation.dispatcher import RemediationDispatcher
     from agentit.remediation.registry import lookup
-    from agentit.portal.store import AssessmentStore
 
-    store = AssessmentStore(":memory:")
+    store = await create_store(":memory:")
 
     click.echo("Step 1: Assessing...", err=True)
     try:
         with _resolve_and_assess(repo_url, criticality) as report:
             before_score = report.overall_score
-            assessment_id = store.save(report)
+            assessment_id = await store.save(report)
 
             fixable = []
             for s in report.scores:
@@ -648,7 +683,12 @@ def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bool) ->
             except Exception:
                 click.echo("  LLM unavailable — using template fallback.", err=True)
 
-            dispatcher = RemediationDispatcher(store)
+            # RemediationDispatcher.dispatch() is unconverted, synchronous
+            # code this pass (see docs/postgres-migration-plan.md's Phase 3
+            # progress notes for why) -- it's also called synchronously,
+            # without `await`, from portal/app.py and portal/routes/webhooks.py,
+            # which are out of scope here, so pass the raw store.
+            dispatcher = RemediationDispatcher(store.raw)
             generated = []
 
             for finding in fixable:
@@ -732,7 +772,7 @@ def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bool) ->
             import os
             db_path = os.environ.get('AGENTIT_DB_PATH')
             if db_path:
-                eff_store = AssessmentStore(db_path)
+                eff_store = await create_store(db_path)
                 for finding, fix_file in generated:
                     outcome = 'approved' if fix_file in approved_files else 'rejected'
                     skill_name = fix_file.path.replace('.yaml', '')
@@ -741,8 +781,8 @@ def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bool) ->
                         if len(parts) >= 2:
                             skill_name = parts[1]
                     reason = review_reasons.get(id(fix_file), '')
-                    eff_store.record_skill_outcome(skill_name, report.repo_name, outcome, reason)
-                    eff_store.log_event(
+                    await eff_store.record_skill_outcome(skill_name, report.repo_name, outcome, reason)
+                    await eff_store.log_event(
                         skill_name, f"fix-{outcome}", report.repo_name,
                         "info" if outcome == "approved" else "warning",
                         reason or f"Fix {outcome} (no reason captured)",
