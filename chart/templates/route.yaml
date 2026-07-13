@@ -6,6 +6,11 @@ metadata:
   labels:
     app.kubernetes.io/name: agentit
     app.kubernetes.io/instance: {{ .Release.Name }}
+  annotations:
+    # /capabilities/learn runs synchronous CVE research (up to 180s server-side
+    # timeout) and was getting killed with a 504 at the router's default 30s
+    # timeout. Raise it above the backend's own timeout.
+    haproxy.router.openshift.io/timeout: 200s
 spec:
   to:
     kind: Service
