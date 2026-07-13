@@ -78,6 +78,30 @@ postgres:
     # destinationPath: s3://my-bucket/agentit-postgres
     # credentialsSecretName: agentit-postgres-backup
     retentionPolicy: "30d"
+  # Standalone (non-operator) Postgres — the pivot away from the CNPG
+  # certified operator above while it's blocked on paid EDB/Red Hat
+  # Marketplace entitlements (see docs/postgres-migration-plan.md). A single
+  # Deployment+PVC+Service+Secret using the RHEL9-based image OpenShift's own
+  # `postgresql` ImageStream ships (registry.redhat.io/rhel9/postgresql-15),
+  # already pullable via this cluster's global pull secret. Disabled by
+  # default and NOT wired into AGENTIT_DB_BACKEND/AGENTIT_PG_DSN yet — this
+  # only prepares the standalone component, same as the CNPG block above.
+  bundled:
+    enabled: false
+    image: registry.redhat.io/rhel9/postgresql-15@sha256:06aeada2ca417445bc4fb711729e65a02ee78421a09c862cbd136ebdd51d7cfa
+    storageSize: 10Gi
+    # storageClassName: gp3-csi
+    credentials:
+      secretName: agentit-postgres-bundled-app
+      username: agentit
+      database: agentit
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
 
 argoEvents:
   enabled: false

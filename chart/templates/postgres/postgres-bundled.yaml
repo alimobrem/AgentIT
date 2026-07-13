@@ -1,0 +1,134 @@
+{{- if .Values.postgres.bundled.enabled }}
+# Standalone (non-operator) Postgres — the pivot away from the CNPG certified
+# operator in postgres-cluster.yaml above, which is blocked on paid EDB/Red
+# Hat Marketplace entitlements (see docs/postgres-migration-plan.md). Uses
+# the same RHEL9-based image OpenShift's own `postgresql` ImageStream in the
+# `openshift` namespace ships (registry.redhat.io/rhel9/postgresql-15),
+# already pullable via this cluster's global pull secret — no new
+# entitlements needed. This is a single-instance, non-HA Deployment (not a
+# drop-in replacement for the CNPG Cluster above) so AgentIT has a real,
+# reachable Postgres to eventually point at once AGENTIT_DB_BACKEND is wired
+# up — see the CNPG postgres.* block above for the HA path once entitlements
+# are available.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-postgres-bundled-data
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: postgres-bundled
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.postgres.bundled.storageSize | quote }}
+  {{- if .Values.postgres.bundled.storageClassName }}
+  storageClassName: {{ .Values.postgres.bundled.storageClassName }}
+  {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-postgres-bundled
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: postgres-bundled
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: postgres-bundled
+  strategy:
+    # Single ReadWriteOnce PVC — the old pod must release the volume before
+    # the new one can mount it.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: postgres-bundled
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-postgres-bundled-data
+      containers:
+        - name: postgresql
+          image: {{ .Values.postgres.bundled.image | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRESQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.bundled.credentials.secretName }}
+                  key: username
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.bundled.credentials.secretName }}
+                  key: password
+            - name: POSTGRESQL_DATABASE
+              value: {{ .Values.postgres.bundled.credentials.database | quote }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/pgsql/data
+          readinessProbe:
+            exec:
+              command:
+                - /usr/bin/sh
+                - -c
+                - pg_isready -h 127.0.0.1 -p 5432 -U ${POSTGRESQL_USER}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.postgres.bundled.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-postgres-bundled
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: postgres-bundled
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: postgres-bundled
+{{- end }}
