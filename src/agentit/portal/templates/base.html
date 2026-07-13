@@ -996,8 +996,15 @@ function toastManager() {
     }
   };
 }
-// Auto-show toasts from URL params
-document.addEventListener('alpine:init', function() {
+// Auto-show toasts from URL params. Must wait for 'alpine:initialized' (fires
+// once ALL components on the page have been initialized), not 'alpine:init'
+// (fires *before* any x-data component is initialized -- that event exists
+// for registering custom directives/stores via Alpine.data()/Alpine.store(),
+// not for reading already-initialized component data via Alpine.$data()).
+// Using 'alpine:init' here meant Alpine.$data(tm) could intermittently be
+// undefined/not-yet-bound depending on init timing, causing
+// "Alpine.$data(...).show is not a function".
+document.addEventListener('alpine:initialized', function() {
   var params = new URLSearchParams(window.location.search);
   var tm = document.getElementById('toasts');
   if (params.get('error') && Alpine.$data(tm) && !document.querySelector('.alert-error')) Alpine.$data(tm).show(params.get('error'), 'error');
