@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}LLM Decisions - AgentIT{% endblock %}
+{% block content %}
+<h1>LLM Decisions</h1>
+<p class="text-muted mb-2">
+  Every place the LLM actually decides an outcome (approve/reject/auto-apply/gate) —
+  not just generates text — attributed by the agent or skill that triggered it.
+  Currently covers <strong>fix-review</strong> (self-fix's first-approver gate, attributed
+  by skill) and <strong>auto-mode classify</strong> (safety classification for auto-apply,
+  attributed by agent when the caller supplies one, otherwise the generic
+  <code>auto-mode</code> component name). A third decision point — the security
+  analyzer's secret false-positive filter — makes a real LLM decision per match but
+  persists nothing today, so it can't be shown here yet.
+</p>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-label">Total Decisions Logged</div>
+    <div class="stat-value">{{ total_decisions }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Decision Types</div>
+    <div class="stat-value">{{ decision_types|length }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Distinct Agents/Skills</div>
+    <div class="stat-value">{{ attributions|length }}</div>
+  </div>
+</div>
+
+<h2 class="section-title">By Agent / Skill</h2>
+<p class="text-muted mb-1">How often the LLM approves vs. rejects/gates each agent's or skill's output.</p>
+
+{% if summary %}
+<table>
+  <thead>
+    <tr>
+      <th>Decision Type</th>
+      <th>Attribution</th>
+      <th>Kind</th>
+      <th>Total</th>
+      <th>Outcomes</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for g in summary %}
+    <tr>
+      <td class="text-sm">{{ g.decision_type }}</td>
+      <td class="text-bold">{{ g.attribution }}</td>
+      <td>
+        {% if g.attribution_kind == 'skill' %}
+          <span class="badge badge-info">skill</span>
+        {% elif g.attribution_kind == 'agent' %}
+          <span class="badge badge-success">agent</span>
+        {% else %}
+          <span class="badge badge-muted">component</span>
+        {% endif %}
+      </td>
+      <td>{{ g.total }}</td>
+      <td class="text-sm">
+        {% for outcome, count in g.outcomes.items() %}
+        <span class="badge badge-{{ 'success' if outcome in ('approved', 'auto-applied') else 'warning' if outcome == 'gated' else 'danger' }}">{{ outcome }}: {{ count }}</span>
+        {% endfor %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty-state">
+  <p>No LLM decisions logged yet. Run self-fix or trigger an auto-mode decision to see data here.</p>
+</div>
+{% endif %}
+
+<h2 class="section-title">Decision Log</h2>
+<form method="get" action="/decisions" class="action-bar">
+  <select name="decision_type">
+    <option value="">All decision types</option>
+    {% for dt in decision_types %}
+    <option value="{{ dt }}" {{ 'selected' if decision_type_filter == dt }}>{{ dt }}</option>
+    {% endfor %}
+  </select>
+  <select name="attribution">
+    <option value="">All agents/skills</option>
+    {% for a in attributions %}
+    <option value="{{ a }}" {{ 'selected' if attribution_filter == a }}>{{ a }}</option>
+    {% endfor %}
+  </select>
+  <button type="submit" class="btn btn-sm btn-outline">Filter</button>
+  {% if decision_type_filter or attribution_filter %}<a href="/decisions" class="btn btn-sm btn-outline">Clear</a>{% endif %}
+</form>
+
+{% if decisions %}
+<table>
+  <thead>
+    <tr>
+      <th>Timestamp</th>
+      <th>Decision Type</th>
+      <th>Attribution</th>
+      <th>Target App</th>
+      <th>Outcome</th>
+      <th>Reasoning</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for d in decisions %}
+    <tr>
+      <td class="text-sm text-muted"><span data-timestamp="{{ d.timestamp }}">{{ d.timestamp[:16] if d.timestamp else '—' }}</span></td>
+      <td class="text-sm">{{ d.decision_type }}</td>
+      <td class="text-bold">{{ d.attribution }}</td>
+      <td>{{ d.target_app or "—" }}</td>
+      <td>
+        <span class="badge badge-{{ 'success' if d.outcome in ('approved', 'auto-applied') else 'warning' if d.outcome == 'gated' else 'danger' }}">{{ d.outcome }}</span>
+      </td>
+      <td class="text-sm text-muted">{{ d.reason or '—' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty-state">
+  <h3>No decisions match this filter</h3>
+  <p class="text-muted">Try clearing the filter above.</p>
+</div>
+{% endif %}
+{% endblock %}

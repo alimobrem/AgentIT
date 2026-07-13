@@ -79,8 +79,16 @@ class AutoMode:
         criticality: str,
         auto_approve: bool,
         app_name: str,
+        agent_name: str | None = None,
     ) -> dict:
         """Full auto-apply pipeline: dry-run → classify → apply or gate.
+
+        `agent_name` is the originating agent/skill that generated `files`, when the
+        caller knows it (e.g. the dispatcher's `result["agent"]`) — it's logged as the
+        decision event's `agent_id` so this decision can be attributed to a real agent/
+        skill instead of the generic "auto-mode" component name. Callers that don't
+        know the originating agent (e.g. onboarding, which spans many agents at once)
+        can omit it and the decision is logged under "auto-mode" as before.
 
         Returns {"action": "applied"|"gated"|"failed", "reason": str, "details": dict}
         """
@@ -91,7 +99,7 @@ class AutoMode:
         can_apply, reason = self.should_auto_apply(auto_approve, manifests, criticality, app_name)
 
         self._log_event(
-            "auto-mode",
+            agent_name or "auto-mode",
             "decision",
             app_name,
             "info" if can_apply else "warning",

@@ -1,0 +1,174 @@
+"""Tests for llm_decisions.py: merging fix-review and auto-mode decisions
+into one attributed view (by agent/skill, not by human user)."""
+
+from __future__ import annotations
+
+from agentit.llm_decisions import (
+    DECISION_TYPE_AUTO_MODE,
+    DECISION_TYPE_FIX_REVIEW,
+    list_llm_decisions,
+    summarize_by_attribution,
+)
+from conftest import make_store
+
+
+class TestFixReviewDecisions:
+    def test_skill_effectiveness_row_becomes_a_decision(self) -> None:
+        store = make_store()
+        store.record_skill_outcome("network-policy", "my-app", "approved", "Fix is correct and safe")
+
+        decisions = list_llm_decisions(store)
+        assert len(decisions) == 1
+        d = decisions[0]
+        assert d["decision_type"] == DECISION_TYPE_FIX_REVIEW
+        assert d["attribution"] == "network-policy"
+        assert d["attribution_kind"] == "skill"
+        assert d["target_app"] == "my-app"
+        assert d["outcome"] == "approved"
+        assert d["reason"] == "Fix is correct and safe"
+
+    def test_missing_reason_defaults_to_empty_string(self) -> None:
+        store = make_store()
+        store.record_skill_outcome("network-policy", "my-app", "rejected")
+
+        decisions = list_llm_decisions(store)
+        assert decisions[0]["reason"] == ""
+
+
+class TestListEventsByAction:
+    """store.list_events_by_action() — the primitive _auto_mode_decisions() relies on."""
+
+    def test_returns_only_events_with_matching_action(self) -> None:
+        store = make_store()
+        store.log_event("auto-mode", "decision", "app-a", "info", "AUTO-APPLY: safe")
+        store.log_event("dispatcher", "gated", "app-a", "info", "unrelated event")
+
+        events = store.list_events_by_action("decision")
+        assert len(events) == 1
+        assert events[0]["action"] == "decision"
+
+    def test_no_matches_returns_empty_list(self) -> None:
+        store = make_store()
+        assert store.list_events_by_action("decision") == []
+
+    def test_respects_limit(self) -> None:
+        store = make_store()
+        for i in range(5):
+            store.log_event("auto-mode", "decision", f"app-{i}", "info", "AUTO-APPLY: safe")
+        assert len(store.list_events_by_action("decision", limit=2)) == 2
+
+
+class TestAutoModeDecisions:
+    def test_auto_apply_event_becomes_a_decision(self) -> None:
+        store = make_store()
+        store.log_event("auto-mode", "decision", "my-app", "info",
+                         "AUTO-APPLY: LLM classified as safe (0.95): Adds a ConfigMap")
+
+        decisions = list_llm_decisions(store)
+        assert len(decisions) == 1
+        d = decisions[0]
+        assert d["decision_type"] == DECISION_TYPE_AUTO_MODE
+        assert d["attribution"] == "auto-mode"
+        assert d["attribution_kind"] == "component"
+        assert d["target_app"] == "my-app"
+        assert d["outcome"] == "auto-applied"
+        assert d["reason"] == "LLM classified as safe (0.95): Adds a ConfigMap"
+
+    def test_gate_event_becomes_a_decision(self) -> None:
+        store = make_store()
+        store.log_event("auto-mode", "decision", "my-app", "warning",
+                         "GATE: LLM flagged as destructive: Deletes a Deployment")
+
+        decisions = list_llm_decisions(store)
+        d = decisions[0]
+        assert d["outcome"] == "gated"
+        assert d["reason"] == "LLM flagged as destructive: Deletes a Deployment"
+
+    def test_real_agent_attribution_when_caller_supplied_one(self) -> None:
+        """When AutoMode.execute() is called with agent_name=..., the decision
+        event's agent_id is the real originating agent, not 'auto-mode'."""
+        store = make_store()
+        store.log_event("HardeningAgent", "decision", "my-app", "info",
+                         "AUTO-APPLY: LLM classified as safe (0.9): Adds NetworkPolicy")
+
+        decisions = list_llm_decisions(store)
+        d = decisions[0]
+        assert d["attribution"] == "HardeningAgent"
+        assert d["attribution_kind"] == "agent"
+
+    def test_other_events_with_different_action_are_not_included(self) -> None:
+        store = make_store()
+        store.log_event("auto-mode", "auto-applied", "my-app", "info", "Applied 2 manifests")
+        store.log_event("dispatcher", "gated", "my-app", "info", "Gated for review")
+
+        decisions = list_llm_decisions(store)
+        assert decisions == []
+
+
+class TestListLlmDecisionsMerging:
+    def test_merges_both_decision_types_sorted_newest_first(self) -> None:
+        store = make_store()
+        store.record_skill_outcome("network-policy", "app-a", "approved", "looks fine")
+        store.log_event("auto-mode", "decision", "app-b", "info", "AUTO-APPLY: safe: fine")
+
+        decisions = list_llm_decisions(store)
+        assert len(decisions) == 2
+        types = {d["decision_type"] for d in decisions}
+        assert types == {DECISION_TYPE_FIX_REVIEW, DECISION_TYPE_AUTO_MODE}
+
+    def test_filter_by_decision_type(self) -> None:
+        store = make_store()
+        store.record_skill_outcome("network-policy", "app-a", "approved", "looks fine")
+        store.log_event("auto-mode", "decision", "app-b", "info", "AUTO-APPLY: safe: fine")
+
+        decisions = list_llm_decisions(store, decision_type=DECISION_TYPE_FIX_REVIEW)
+        assert len(decisions) == 1
+        assert decisions[0]["decision_type"] == DECISION_TYPE_FIX_REVIEW
+
+    def test_filter_by_attribution(self) -> None:
+        store = make_store()
+        store.record_skill_outcome("network-policy", "app-a", "approved", "looks fine")
+        store.record_skill_outcome("containerfile", "app-a", "rejected", "wrong base image")
+
+        decisions = list_llm_decisions(store, attribution="containerfile")
+        assert len(decisions) == 1
+        assert decisions[0]["attribution"] == "containerfile"
+
+    def test_no_decisions_returns_empty_list(self) -> None:
+        store = make_store()
+        assert list_llm_decisions(store) == []
+
+
+class TestSummarizeByAttribution:
+    def test_groups_and_counts_outcomes_per_attribution(self) -> None:
+        store = make_store()
+        store.record_skill_outcome("network-policy", "app-a", "approved", "fine")
+        store.record_skill_outcome("network-policy", "app-b", "approved", "fine")
+        store.record_skill_outcome("network-policy", "app-c", "rejected", "wrong port")
+
+        decisions = list_llm_decisions(store)
+        summary = summarize_by_attribution(decisions)
+
+        assert len(summary) == 1
+        g = summary[0]
+        assert g["attribution"] == "network-policy"
+        assert g["decision_type"] == DECISION_TYPE_FIX_REVIEW
+        assert g["total"] == 3
+        assert g["outcomes"] == {"approved": 2, "rejected": 1}
+
+    def test_sorted_by_total_descending(self) -> None:
+        store = make_store()
+        store.record_skill_outcome("network-policy", "app-a", "approved", "fine")
+        store.record_skill_outcome("containerfile", "app-a", "approved", "fine")
+        store.record_skill_outcome("containerfile", "app-b", "rejected", "no")
+
+        decisions = list_llm_decisions(store)
+        summary = summarize_by_attribution(decisions)
+
+        assert summary[0]["attribution"] == "containerfile"
+        assert summary[0]["total"] == 2
+        assert summary[1]["attribution"] == "network-policy"
+        assert summary[1]["total"] == 1
+
+    def test_empty_decisions_produce_empty_summary(self) -> None:
+        assert summarize_by_attribution([]) == []

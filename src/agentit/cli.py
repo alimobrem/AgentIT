@@ -698,6 +698,10 @@ def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bool) ->
             app_summary = f"{report.repo_name} ({', '.join(l.name for l in report.stack.languages)}, score {before_score:.0f}/100)"
             approved_files = []
             rejected = []
+            # LLM reasoning per fix_file, keyed by identity — the review dict itself
+            # isn't otherwise retained past this loop, so without this the LLM's actual
+            # reasoning text is only ever shown here (click.echo) and lost afterward.
+            review_reasons: dict[int, str] = {}
 
             for finding, fix_file in generated:
                 if llm_client:
@@ -710,14 +714,18 @@ def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bool) ->
                     if review is None:
                         click.echo(f"  ⚠ {fix_file.path}: LLM unavailable — rejected (fail-closed)", err=True)
                         rejected.append(fix_file)
+                        review_reasons[id(fix_file)] = "LLM unavailable — rejected (fail-closed)"
                     elif review["approved"] and review["confidence"] >= 0.7:
                         click.echo(f"  ✓ {fix_file.path}: approved ({review['confidence']:.0%}) — {review['reason']}", err=True)
                         approved_files.append(fix_file)
+                        review_reasons[id(fix_file)] = review["reason"]
                     else:
                         click.echo(f"  ✗ {fix_file.path}: rejected ({review['confidence']:.0%}) — {review['reason']}", err=True)
                         rejected.append(fix_file)
+                        review_reasons[id(fix_file)] = review["reason"]
                 else:
                     approved_files.append(fix_file)
+                    review_reasons[id(fix_file)] = "LLM unavailable — auto-approved (no review performed)"
 
             click.echo(f"\n  Approved: {len(approved_files)}, Rejected: {len(rejected)}", err=True)
 
@@ -732,7 +740,13 @@ def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bool) ->
                         parts = fix_file.description.split("'")
                         if len(parts) >= 2:
                             skill_name = parts[1]
-                    eff_store.record_skill_outcome(skill_name, report.repo_name, outcome)
+                    reason = review_reasons.get(id(fix_file), '')
+                    eff_store.record_skill_outcome(skill_name, report.repo_name, outcome, reason)
+                    eff_store.log_event(
+                        skill_name, f"fix-{outcome}", report.repo_name,
+                        "info" if outcome == "approved" else "warning",
+                        reason or f"Fix {outcome} (no reason captured)",
+                    )
                 click.echo(f'  Effectiveness recorded to {db_path}', err=True)
 
             if not approved_files:

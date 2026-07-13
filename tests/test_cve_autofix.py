@@ -205,6 +205,42 @@ class TestCVEWebhook:
         data = resp.json()
         assert data["action"] == "alert-only"
 
+    def test_finding_webhook_auto_mode_decision_attributed_to_real_agent(
+        self, client: TestClient, _override_store,
+    ) -> None:
+        """webhook_finding already knows which agent (dispatcher's result["agent"])
+        generated the fix — the auto-mode decision it triggers should be logged
+        under that real agent name, not the generic 'auto-mode' component name."""
+        store = _override_store
+        report = make_report(
+            repo_name="netpol-app",
+            scores=[_score_with_finding("security", "network", "Missing NetworkPolicy")],
+        )
+        store.save(report)
+        store.set_setting("auto_mode", "true")
+
+        fake_llm = type("FakeLLM", (), {
+            "classify_action": staticmethod(lambda **kw: {
+                "is_destructive": False, "confidence": 0.95, "reason": "Adds NetworkPolicy",
+            }),
+        })()
+
+        with patch("agentit.portal.routes.webhooks.get_llm_client", return_value=fake_llm):
+            resp = client.post(
+                "/api/webhook/finding",
+                json={
+                    "app_name": "netpol-app",
+                    "category": "network",
+                    "description": "Missing NetworkPolicy",
+                    "severity": "high",
+                },
+            )
+        assert resp.status_code == 200
+
+        decision_events = store.list_events_by_action("decision")
+        assert len(decision_events) == 1
+        assert decision_events[0]["agent_id"] == "hardening"
+
 
 # ── TestFullCVELoop ──────────────────────────────────────────────────
 

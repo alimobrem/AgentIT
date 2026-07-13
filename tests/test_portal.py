@@ -1656,3 +1656,53 @@ def test_background_skill_inventory_diff_surfaces_on_events_page(client, _overri
     caps_resp = client.get("/capabilities")
     assert caps_resp.status_code == 200
     assert "cve-2099-1" in caps_resp.text
+
+
+# ── LLM Decisions audit page ─────────────────────────────────────────────
+
+
+def test_decisions_page_renders_empty_state(client):
+    resp = client.get("/decisions")
+    assert resp.status_code == 200
+    assert "LLM Decisions" in resp.text
+    assert "No LLM decisions logged yet" in resp.text
+
+
+def test_decisions_page_shows_fix_review_and_auto_mode_decisions(client, _override_store):
+    store = _override_store
+    store.record_skill_outcome("network-policy", "my-app", "approved", "Fix is correct and safe")
+    store.log_event("HardeningAgent", "decision", "other-app", "info",
+                     "AUTO-APPLY: LLM classified as safe (0.95): Adds a ConfigMap")
+
+    resp = client.get("/decisions")
+    assert resp.status_code == 200
+    assert "network-policy" in resp.text
+    assert "Fix is correct and safe" in resp.text
+    assert "HardeningAgent" in resp.text
+    assert "Adds a ConfigMap" in resp.text
+    assert "auto-applied" in resp.text
+
+
+def test_decisions_page_filters_by_attribution(client, _override_store):
+    store = _override_store
+    store.record_skill_outcome("network-policy", "app-a", "approved", "fine")
+    store.record_skill_outcome("containerfile", "app-a", "rejected", "wrong base image")
+
+    resp = client.get("/decisions?attribution=containerfile")
+    assert resp.status_code == 200
+    assert "wrong base image" in resp.text
+    # "fine" (network-policy's reason) shouldn't appear in the filtered decision
+    # log or summary — network-policy itself may still appear in the filter
+    # dropdown's <option> list, which is built from the unfiltered attribution set.
+    assert ">fine<" not in resp.text
+
+
+def test_decisions_page_filters_by_decision_type(client, _override_store):
+    store = _override_store
+    store.record_skill_outcome("network-policy", "app-a", "approved", "fine skill decision")
+    store.log_event("auto-mode", "decision", "app-b", "info", "AUTO-APPLY: safe: fine auto decision")
+
+    resp = client.get("/decisions?decision_type=fix-review")
+    assert resp.status_code == 200
+    assert "fine skill decision" in resp.text
+    assert "fine auto decision" not in resp.text

@@ -787,6 +787,7 @@
     <a href="/events" class="{{ 'nav-active' if request.url.path.startswith('/events') }}">Events</a>
     <a href="/health" class="{{ 'nav-active' if request.url.path.startswith('/health') }}">Health</a>
     <a href="/insights" class="{{ 'nav-active' if request.url.path == '/insights' }}">Insights</a>
+    <a href="/decisions" class="{{ 'nav-active' if request.url.path == '/decisions' }}">Decisions</a>
   </div>
   <button class="nav-toggle" @click="navOpen = !navOpen" aria-label="Toggle menu">
     <span x-show="!navOpen">&#9776;</span>

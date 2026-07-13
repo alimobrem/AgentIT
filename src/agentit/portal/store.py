@@ -524,6 +524,19 @@ class AssessmentStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_events_by_action(self, action: str, limit: int = 50) -> list[dict]:
+        """Look up events by `action` rather than `agent_id`.
+
+        Used for decision points (e.g. auto-mode's 'decision' action) whose
+        `agent_id` varies by caller — the action name is the stable identity,
+        not the agent_id, which may or may not carry real agent/skill attribution.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM events WHERE action = ? ORDER BY timestamp DESC LIMIT ?",
+            (action, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def list_dlq_messages(self, limit: int = 200) -> list[dict]:
         rows = self._conn.execute(
             "SELECT * FROM events WHERE action = 'dead-letter' ORDER BY timestamp DESC LIMIT ?",

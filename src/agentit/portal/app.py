@@ -342,6 +342,41 @@ async def insights_page(request: Request) -> HTMLResponse:
     })
 
 
+@app.get("/decisions", response_class=HTMLResponse)
+async def decisions_page(request: Request, decision_type: str = "", attribution: str = "") -> HTMLResponse:
+    """Audit every real LLM decision point, attributed by agent/skill.
+
+    Answers "how is agent/skill X actually performing" — how often the LLM
+    approves, rejects, or gates its output, and why — by merging the
+    fix-review (skill_effectiveness) and auto-mode classify (events) decision
+    records into one view. See agentit/llm_decisions.py for what's covered
+    and what isn't (classify_secret has no persisted decision to show yet).
+    """
+    from agentit.llm_decisions import list_llm_decisions, summarize_by_attribution
+
+    s = get_store()
+    all_decisions = list_llm_decisions(s, limit=500)
+    decision_types = sorted({d["decision_type"] for d in all_decisions})
+    attributions = sorted({d["attribution"] for d in all_decisions})
+
+    decisions = all_decisions
+    if decision_type:
+        decisions = [d for d in decisions if d["decision_type"] == decision_type]
+    if attribution:
+        decisions = [d for d in decisions if d["attribution"] == attribution]
+    summary = summarize_by_attribution(decisions)
+
+    return templates.TemplateResponse(request, "decisions.html", {
+        "decisions": decisions[:100],
+        "summary": summary,
+        "decision_type_filter": decision_type,
+        "attribution_filter": attribution,
+        "decision_types": decision_types,
+        "attributions": attributions,
+        "total_decisions": len(all_decisions),
+    })
+
+
 @app.get("/events", response_class=HTMLResponse)
 async def events_page(request: Request, page: int = 1, per_page: int = 25,
                       q: str = "", severity: str = "") -> HTMLResponse:

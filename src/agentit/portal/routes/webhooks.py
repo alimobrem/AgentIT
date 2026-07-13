@@ -337,6 +337,7 @@ async def webhook_finding(request: Request):
         auto_result = await asyncio.to_thread(
             auto.execute, app["id"], result["files"], namespace,
             app.get("criticality", "medium"), False, app_name,
+            result["agent"],
         )
         s.log_event("dispatcher", auto_result["action"], app_name, "info",
                     f"Auto-mode {auto_result['action']} for {category}: {auto_result['reason']}")

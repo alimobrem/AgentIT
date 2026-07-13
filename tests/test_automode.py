@@ -142,6 +142,38 @@ class TestExecute:
         )
         assert result["action"] == "gated"
 
+    def test_decision_event_logged_under_generic_auto_mode_by_default(self):
+        """Without an explicit agent_name, the decision event's agent_id stays
+        'auto-mode' — the historical/default behavior for callers that don't
+        know which agent/skill produced the manifests being classified."""
+        store = make_store()
+        store.set_setting("auto_mode", "true")
+        report = make_report(criticality="low", summary="test")
+        aid = store.save(report)
+
+        auto = AutoMode(store=store, llm_client=None)
+        auto.execute(aid, [], "default", "high", False, "app")
+
+        events = store.list_events_by_action("decision")
+        assert len(events) == 1
+        assert events[0]["agent_id"] == "auto-mode"
+
+    def test_decision_event_attributed_to_real_agent_when_supplied(self):
+        """When the caller knows the originating agent/skill (e.g. the
+        dispatcher's result["agent"]), the decision is logged under that real
+        name instead of the generic 'auto-mode' component name."""
+        store = make_store()
+        store.set_setting("auto_mode", "true")
+        report = make_report(criticality="low", summary="test")
+        aid = store.save(report)
+
+        auto = AutoMode(store=store, llm_client=None)
+        auto.execute(aid, [], "default", "high", False, "app", agent_name="HardeningAgent")
+
+        events = store.list_events_by_action("decision")
+        assert len(events) == 1
+        assert events[0]["agent_id"] == "HardeningAgent"
+
 
 class TestSettings:
     def test_get_set_setting(self):
