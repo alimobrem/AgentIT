@@ -27,6 +27,15 @@ Git push → Argo CD detects change → Renders Helm chart → Applies to cluste
    will not disturb `image.tag`, because CI's `update-image-tag` step always
    runs immediately after `sync-application-spec` on every pipeline run and
    re-pins it to the last successfully built commit SHA.
+5. **For a list-valued override (e.g. a temporary `rollout.steps` bypass)**,
+   `argocd/application.yaml`'s `spec.source.helm` needs `valuesObject` (a
+   structured map), not `values` (a raw YAML string) — confirmed empirically
+   during the real Postgres cutover (2026-07-13): this cluster's Argo CD
+   install silently drops the `values` field on apply (present in
+   `kubectl.kubernetes.io/last-applied-configuration` but absent from
+   `spec.source.helm` moments later), while `valuesObject` persists correctly.
+   `helm.parameters` (scalar name/value pairs) is unaffected and remains the
+   right choice for simple flags.
 
 ### Change a secret (never in Git)
 

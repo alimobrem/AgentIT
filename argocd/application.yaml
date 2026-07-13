@@ -62,18 +62,6 @@ spec:
         # docs/postgres-migration-plan.md for the full history.
         - name: postgres.backend
           value: "postgres"
-    # TEMPORARY, for this one cutover deploy only (docs/postgres-migration-plan.md
-    # section 7's own guidance: a storage-backend flip must not be a gradual
-    # canary, since old/new portal pods would otherwise talk to two different
-    # databases simultaneously). Revert to the chart default (10/50/100 with
-    # pauses) once this sync is confirmed healthy.
-    # NOTE: this cluster's Argo CD install silently drops the raw-string
-    # `helm.values` field (confirmed empirically during this cutover) --
-    # `valuesObject` (structured) is required here instead.
-    valuesObject:
-      rollout:
-        steps:
-          - setWeight: 100
   ignoreDifferences:
     - group: ""
       kind: Service

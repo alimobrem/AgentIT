@@ -249,7 +249,7 @@ uv run agentit portal --port 8080
 # open http://localhost:8080
 ```
 
-The portal uses a local SQLite file (`agentit.db` by default) — **still no external database required for local use; this remains the default and only active backend today.** A migration to an HA Postgres backend (async, via `asyncpg`) is in progress: `portal/store_pg.py` is a full async counterpart to `store.py`, schema and all, verified against a real Postgres instance, and every store caller in the codebase (CLI, watchers, and the portal — `app.py`, `routes/*.py`, `helpers.py`, and now `FleetOrchestrator`/`AutoMode`/`RemediationDispatcher`/`RemediationLoop`, all genuinely `async def` throughout) has been converted to the `store_factory.create_store()` async access pattern, selectable via `AGENTIT_DB_BACKEND` (`sqlite` default, `postgres` opt-in) — but that env var is intentionally unset everywhere today. The structural blocker described in earlier revisions of this doc (those four classes staying permanently synchronous) is resolved; what's left is a real Postgres instance the cluster can reach plus the single coordinated cutover across all 5 Deployments, not any further code conversion. See [`docs/postgres-migration-plan.md`](docs/postgres-migration-plan.md) for exactly what's done vs. remaining, and the `postgres.bundled.enabled` chart flag below for the bundled-Postgres instance AgentIT deploys and maintains itself (no operator).
+**For local use, the portal still defaults to a local SQLite file** (`agentit.db` by default) — no external database required to get started on a laptop. **On the live OpenShift deployment, Postgres is now the default, active backend**: `AGENTIT_DB_BACKEND=postgres` is set across all 5 Deployments (portal ×2, vuln-watcher, slo-tracker, drift-detector, skill-learner), talking to AgentIT's own bundled, non-operator Postgres instance (`postgres.bundled.enabled`, deployed in-namespace, no external dependency or entitlement). `portal/store_pg.py` is the full async `asyncpg` counterpart to `store.py`, schema and all, and every store caller in the codebase (CLI, watchers, and the portal — `app.py`, `routes/*.py`, `helpers.py`, `FleetOrchestrator`/`AutoMode`/`RemediationDispatcher`/`RemediationLoop`, all genuinely `async def` throughout) goes through the `store_factory.create_store()` async access pattern, selectable per-deployment via `AGENTIT_DB_BACKEND` (`sqlite` default for local/dev, `postgres` for the live cluster). See [`docs/postgres-migration-plan.md`](docs/postgres-migration-plan.md) for the full migration history — including the two real cutover attempts, the 5 bugs found and fixed along the way, and what's left for the (now purely infra-cleanup) SQLite-removal phase — and the `postgres.bundled.enabled` chart flag below for the bundled-Postgres instance AgentIT deploys and maintains itself (no operator).
 
 ## Configuration
 
@@ -282,7 +282,7 @@ AgentIT deploys itself the same way it onboards other apps — via the Helm char
 - Change a secret: `oc create secret` on-cluster, then reference it via a Helm parameter. Never in Git.
 - Never `helm upgrade` manually or `oc edit` the `Rollout`.
 
-Key `chart/values.yaml` feature flags: `rollout.enabled` (canary via Argo Rollouts), `kafka.enabled` / `argoEvents.enabled` (event-driven loop), `tektonCI.enabled` (build pipeline), `cronJobs.cveScan.enabled`, `agents.{vulnWatcher,sloTracker,driftDetector}.enabled`, `monitoring.enabled` (ServiceMonitor + PrometheusRule + Grafana dashboard — chart default: disabled; **enabled on the live deployment via `argocd/application.yaml`**, so AgentIT scrapes and alerts on its own `/metrics`), `postgres.bundled.enabled` (AgentIT's own bundled, non-operator Postgres instance — chart-only prep until `AGENTIT_DB_BACKEND` is flipped, see [`docs/postgres-migration-plan.md`](docs/postgres-migration-plan.md)), and `auth.enabled` (OpenShift `oauth-proxy` sidecar in front of the portal — see [Security notes](#security-notes) and [`docs/deployment.md#authentication`](docs/deployment.md#authentication)).
+Key `chart/values.yaml` feature flags: `rollout.enabled` (canary via Argo Rollouts), `kafka.enabled` / `argoEvents.enabled` (event-driven loop), `tektonCI.enabled` (build pipeline), `cronJobs.cveScan.enabled`, `agents.{vulnWatcher,sloTracker,driftDetector}.enabled`, `monitoring.enabled` (ServiceMonitor + PrometheusRule + Grafana dashboard — chart default: disabled; **enabled on the live deployment via `argocd/application.yaml`**, so AgentIT scrapes and alerts on its own `/metrics`), `postgres.bundled.enabled` (AgentIT's own bundled, non-operator Postgres instance backing the live default `postgres.backend`, see [`docs/postgres-migration-plan.md`](docs/postgres-migration-plan.md)), and `auth.enabled` (OpenShift `oauth-proxy` sidecar in front of the portal — see [Security notes](#security-notes) and [`docs/deployment.md#authentication`](docs/deployment.md#authentication)).
 
 The chart includes: NetworkPolicy, ResourceQuota, LimitRange, PodDisruptionBudget, anti-affinity, backup CronJob, dedicated ServiceAccount (not `default`), and a self-assess step in the CI pipeline.
 
@@ -395,11 +395,11 @@ AgentIT/
 │       │                           #   SLOs, remediations, skill_effectiveness, agent_feedback,
 │       │                           #   processed_webhooks)
 │       ├── store_pg.py             # Async Postgres counterpart to store.py (asyncpg) — schema +
-│       │                           #   all methods ported and tested; selectable but not the
-│       │                           #   active backend (AGENTIT_DB_BACKEND unset everywhere)
+│       │                           #   all methods ported and tested; the live/active backend on
+│       │                           #   the OpenShift deployment (AGENTIT_DB_BACKEND=postgres)
 │       ├── store_factory.py        # create_store(): async store access for every caller (CLI,
-│       │                           #   watchers, portal) — sqlite (default) or postgres, per
-│       │                           #   AGENTIT_DB_BACKEND
+│       │                           #   watchers, portal) — sqlite (local/dev default) or postgres
+│       │                           #   (live-cluster default), per AGENTIT_DB_BACKEND
 │       ├── helpers.py              # CircuitBreaker, clone_assess_cleanup, safe_url, async get_store()
 │       ├── cluster_apply.py        # oc/kubectl apply with pre-flight checks
 │       ├── github_pr.py            # GitHub REST API integration
@@ -414,7 +414,8 @@ AgentIT/
 ├── docs/
 │   ├── architecture.md             # System diagrams, pipeline, event loop, agent fleet
 │   ├── deployment.md               # GitOps operational rules
-│   └── postgres-migration-plan.md  # Deferred SQLite → HA Postgres/asyncpg migration plan
+│   └── postgres-migration-plan.md  # SQLite → Postgres/asyncpg migration history; Postgres is now
+│                                   #   the live default backend on the OpenShift deployment
 ├── Containerfile                   # UBI9 Python 3.12, HEALTHCHECK, non-root
 └── tests/                          # 787 tests across 65 files
 ```
