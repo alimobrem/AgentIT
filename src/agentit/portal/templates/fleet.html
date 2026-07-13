@@ -1,10 +1,11 @@
 {% extends "base.html" %}
 {% block title %}AgentIT{% endblock %}
 {% block content %}
+<div x-data="{ assessOpen: {{ 'true' if request.query_params.get('assess') else 'false' }} }" @keydown.escape.window="assessOpen = false">
 <h1>Enterprise Readiness</h1>
 
 <div class="action-bar">
-  <button class="btn" onclick="document.getElementById('assess-modal').classList.add('open')">Assess New Repo</button>
+  <button class="btn" @click="assessOpen = true">Assess New Repo</button>
   <form method="post" action="/self-assess" class="inline-form">
     <button type="submit" class="btn btn-outline btn-sm">
       <span class="btn-label">Self-Assess</span>
@@ -122,9 +123,9 @@
 {% endif %}
 
 <!-- Assess Modal -->
-<div id="assess-modal" class="modal-overlay {% if request.query_params.get('assess') %}open{% endif %}" onclick="if(event.target===this)this.classList.remove('open')">
+<div id="assess-modal" :class="{ 'open': assessOpen }" class="modal-overlay" @click.self="assessOpen = false">
   <div class="modal">
-    <button class="modal-close" onclick="this.closest('.modal-overlay').classList.remove('open')">&times;</button>
+    <button class="modal-close" @click="assessOpen = false">&times;</button>
     <h2>New Assessment</h2>
     <form method="post" action="/assess" class="form-narrow">
       <div class="form-group">
@@ -153,4 +154,5 @@
   </div>
 </div>
 
+</div>
 {% endblock %}

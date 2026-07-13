@@ -244,7 +244,8 @@ def test_webhook_onboard_full_flow(client, _override_store):
 def test_assess_error_shows_progress(client):
     """When run_assessment raises, the progress page shows the error."""
     with patch("agentit.portal.app.clone_repo", return_value=Path("/tmp/fake")), \
-         patch("agentit.portal.app.run_assessment", side_effect=RuntimeError("clone failed: repo not found")):
+         patch("agentit.portal.app.run_assessment", side_effect=RuntimeError("clone failed: repo not found")), \
+         patch("agentit.portal.app._auto_create_infra_repo", return_value=None):
         resp = client.post(
             "/assess",
             data={"repo_url": "https://github.com/org/bad-repo", "criticality": "medium"},
@@ -255,10 +256,10 @@ def test_assess_error_shows_progress(client):
         # Wait for background thread to fail
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
+            time.sleep(0.3)
             resp = client.get(f"/assess/progress/{job_id}")
-            if "failed" in resp.text.lower() or "clone failed" in resp.text.lower():
+            if "Could not clone" in resp.text or "clone failed" in resp.text:
                 break
-            time.sleep(0.1)
     assert "clone" in resp.text.lower()
 
 

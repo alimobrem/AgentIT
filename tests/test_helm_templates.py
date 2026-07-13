@@ -155,14 +155,13 @@ class TestTektonPipeline:
         assert "restart-rollout" not in task_names, "restart-rollout conflicts with Argo CD"
         assert "notify-argocd" in task_names, "Pipeline should notify Argo CD instead"
 
-    def test_notify_argocd_restarts_rollout(self):
-        """Verify notify-argocd patches Rollout to force restart + refreshes Argo CD."""
+    def test_notify_argocd_updates_image_tag(self):
+        """Verify notify-argocd patches the Application's image.tag param."""
         doc = _load(self.TEMPLATE)
         tasks = {t["name"]: t for t in doc["spec"]["tasks"]}
         script = tasks["notify-argocd"]["taskSpec"]["steps"][0]["script"]
-        assert "patch rollout" in script
-        assert "agentit.io/restart" in script
-        assert "oc delete pod" not in script
+        assert "patch application" in script
+        assert "image.tag" in script
 
     def test_pipeline_has_timeouts(self):
         doc = _load(self.TEMPLATE)
