@@ -1,6 +1,6 @@
 # Postgres Migration Plan (deferred work)
 
-**Status: Phase 1 (schema) and Phase 2 (async store rewrite) are done and verified against a real Postgres. Phase 3 (the ~15 callers) and Phase 4 (drop SQLite) are not started.** See [Progress update](#progress-update-phase-1--phase-2-complete) below for exactly what landed and how it was verified — the rest of this document is the original planning doc and is still accurate for the remaining phases.
+**Status: Phase 1 (schema) and Phase 2 (async store rewrite) are done and verified against a real Postgres. Phase 3 is partially done: `cli.py` and the 4 watchers are converted; `dispatcher.py`/`remediation_loop.py` are a documented blocker (see the "Progress update: Phase 3" section below); the portal (`app.py`/`routes/*.py`/`helpers.py`) and Phase 4 (drop SQLite) are not started.** See that section for exactly what landed, what's blocked and why, and what's left — the rest of this document is the original planning doc and is still accurate for the remaining phases.
 
 Tonight's original prep work was strictly HA Postgres chart plumbing (`chart/templates/postgres/`), the `asyncpg` dependency addition, and this plan — `store.py` and every one of its callers are untouched and unaffected. This doc exists so the actual rewrite (a separate, later effort) has an accurate map instead of starting from a cold read of a 1,400-line file.
 
@@ -18,6 +18,44 @@ Implemented in `src/agentit/portal/store_pg.py`, additively — **nothing in `sr
 - **Not done, and deliberately out of scope for this pass:** the session-scoped `testcontainers` + per-test-transaction-rollback approach §8 recommends as the long-term CI shape — the hand-rolled `podman`/`docker subprocess` fixture in `tests/test_store_pg.py` was faster to stand up and didn't need a new dependency, but should be revisited if `--run-postgres-tests` becomes a routine part of CI rather than an opt-in local check.
 - **Next step is Phase 3, exactly as scoped in §1/§9 below** — nothing about the call-site inventory, the suggested file order, or the "convert app + tests in lockstep" guidance has changed. Pool sizing per component should follow §5's table (the `create()` classmethod's `min_size=5, max_size=20` defaults match the Portal row specifically; each watcher's Phase 3 conversion should pass its own smaller `min_size`/`max_size` explicitly, not rely on the defaults).
 
+## Progress update: Phase 3 (partial) -- `cli.py` + the 4 watchers converted, `dispatcher.py`/`remediation_loop.py` blocked
+
+Converted, file-by-file with tests green at each step, per §9's suggested order -- with one addition not anticipated by the original plan (the async-SQLite shim, below) and one deliberate deviation from the suggested order (`dispatcher.py`/`remediation_loop.py` skipped, blocked -- see below), both explained here so the next implementer doesn't have to rediscover why.
+
+**The default backend has not changed.** `AGENTIT_DB_BACKEND` is unset in every Deployment; every one of the ~15 callers in §1 (converted or not) still ends up talking to the same SQLite file at `AGENTIT_DB_PATH`/`agentit.db`. Nothing in this update flips that switch -- see §7 for why that must stay a single, deliberate, coordinated step.
+
+### New enabling piece not in the original plan: `store_factory.py`
+
+The plan's §9 Phase 3 text assumed callers would just start `await`ing `store.py`'s methods once it (or its Postgres counterpart) was async. In practice, `store.py` itself is deliberately untouched this pass (Phase 2's rewrite lives entirely in the separate, unwired `store_pg.py`), so callers need something to `await` *today* that (a) is behaviorally identical to calling `store.py` directly, and (b) can later point at `store_pg.AssessmentStore` via one env var without every caller changing again. That's `src/agentit/portal/store_factory.py`:
+
+- `create_store(db_path=None, *, min_size=5, max_size=20)` -- the single factory function every converted caller now goes through. Backend selected by `AGENTIT_DB_BACKEND` (`"sqlite"` default, `"postgres"` opt-in via `store_pg.AssessmentStore.create()`).
+- `AsyncSQLiteStore` -- wraps `store.py`'s synchronous `AssessmentStore` and exposes every method as an `async def` proxy through `asyncio.to_thread`. While the backend stays "sqlite" (the only thing this pass ships), this is byte-for-byte the same sqlite3 I/O, just with a thread hop -- not a behavior change.
+- `.raw` -- the one piece that doesn't have a Postgres equivalent on purpose. It exposes the underlying synchronous `AssessmentStore` for the several call sites this pass explicitly does not convert (`FleetOrchestrator`, `AutoMode`, `RemediationDispatcher`, `EventConsumer`, and each watcher's own tick body -- see below). Handing one of those a Postgres-backed store instead would be exactly the silent partial-cutover §7 warns about, so `store_pg.AssessmentStore` has no `.raw` and that combination fails loudly (`AttributeError`) instead of guessing.
+- Tests: `tests/test_store_factory.py` -- sqlite-backend behavior-equivalence tests run unconditionally; one `@pytest.mark.postgres` test (reusing `test_store_pg.py`'s `postgres_dsn` fixture, per §8's guidance) confirms the backend switch actually returns a `store_pg.AssessmentStore` when asked.
+
+### `cli.py` -- converted
+
+`_rescan_fleet` (used by `assess --rescan`/`watch --rescan`) and the `consume`, `vuln-watch`, `slo-track`, `drift-detect`, `learn-watch`, `self-assess`, `self-fix` commands are `async def`, constructing their store via `await create_store(...)`. `assess`/`watch` themselves stay plain sync Click commands -- they just `asyncio.run(_rescan_fleet(...))` for the `--rescan` branch, since their non-rescan path never touches the store at all and didn't need touching. Click has no native async command support, so a small `_run_async` decorator (`asyncio.run()` wrapping, applied as the innermost decorator) lets the rest be `async def` without adding `anyio`/`asyncclick`.
+
+Every store handed to a not-yet-converted synchronous consumer -- `FleetOrchestrator`, `AutoMode` (both in `self-assess`), `RemediationDispatcher` (in `self-fix`), `EventConsumer` (in `consume`/`vuln-watch`/`slo-track`), and each watcher's constructor -- gets `store.raw`, not the async facade, so those code paths are 100% unaffected. Verified via the full existing `test_cli.py`/`test_cli_commands.py`/`test_watch.py` suites (unchanged, all green) plus manual `--help` smoke tests for every converted command and an explicit check that `sys.exit()` inside an `asyncio.run()`-wrapped command still produces the right `CliRunner` exit code (it does).
+
+### The 4 watchers -- converted, tick bodies deliberately left alone
+
+`vuln_watcher.py`, `slo_tracker.py`, `drift_detector.py`, `skill_learner.py`: only `run()` changed -- `async def run(self)`, `time.sleep(self._interval)` -> `await asyncio.sleep(self._interval)`, per §5. The tick bodies (`check_fleet`/`check_once`/`detect_once`/`research_once`) are untouched and still synchronous, because `check_fleet` and `detect_once` construct `AutoMode` (and `check_fleet` also `RemediationLoop`) and call them without `await` -- converting the tick bodies without also converting those two classes would silently break them, not just async-shape them. None of the 4 watchers previously had any test exercising `run()` at all (only the tick methods were tested); added one `TestAsyncRunLoop` class per file (`test_vuln_watcher.py` is new -- there was no test file for `VulnWatcher` before), mirroring `test_watch.py`'s `time.sleep`-raises-`KeyboardInterrupt` pattern adapted to `asyncio.sleep`.
+
+### Blocked, not guessed at: `dispatcher.py` / `remediation_loop.py`
+
+Per this pass's own safety rule ("if you're not confident a conversion is behavior-preserving, stop and document it as a blocker rather than guessing") -- **`RemediationDispatcher.dispatch()` and `RemediationLoop.trigger()`/`.start()` were not converted.** Both are called *synchronously, without `await`*, from `portal/app.py` and `portal/routes/webhooks.py` -- explicitly out of scope this pass (a different, concurrent workstream owns them right now). Making either method `async def` would not "async-shape" those call sites, it would silently break them: calling an `async def` method without `await` returns an un-awaited coroutine, and the very next line in both files (`result["files"]`, `result["outcome"]`) would raise `TypeError: 'coroutine' object is not subscriptable` the first time either route fires in production.
+
+There is no safe partial move here -- `dispatcher.py`/`remediation_loop.py`'s public API is genuinely shared between an in-scope caller (`cli.py self-fix`, `vuln_watcher.check_fleet`) and out-of-scope callers (`app.py`, `webhooks.py`), and the shared methods can only have one calling convention at a time. Converting them has to happen in the *same* pass as `app.py`/`webhooks.py`, not before or after. `cli.py self-fix` and `vuln_watcher.check_fleet` still construct `RemediationDispatcher`/`RemediationLoop` exactly as before (with `store.raw`), so their behavior is unaffected -- this is purely a "not converted yet" gap, not a workaround or a regression.
+
+### What's left for the final phase (explicitly not attempted here)
+
+1. **The portal**: `portal/app.py`, `portal/routes/{health,schedules,webhooks}.py`, `portal/helpers.py` (which owns the `get_store()` singleton) -- all still fully synchronous, per this pass's explicit scope boundary.
+2. **`dispatcher.py`/`remediation_loop.py`'s public API** -- must convert in the same pass as #1, for the reason above.
+3. **`automode.py` and `agents/orchestrator.py` (`FleetOrchestrator`)** -- not in this pass's file list at all, but discovered during this work to be additional synchronous consumers that `self-assess`/`drift_detect`/`vuln_watch` hand a store into. Whoever does the final phase should add these two to the call-site inventory explicitly; they weren't listed in §1's original grep.
+4. **The actual coordinated backend cutover** (§7) -- flipping `AGENTIT_DB_BACKEND=postgres` for real, across all 5 Deployments in one Argo CD sync, only after #1-3 are done and every remaining synchronous store consumer has either been converted or confirmed to have no remaining callers. Nothing in this pass changes any Deployment's env vars or the chart's `postgres.enabled` default.
+
 ## Why now, and why not tonight
 
 `src/agentit/portal/store.py` (`AssessmentStore`) and its callers were being actively edited by multiple other parallel workstreams at the time this plan was written (unrelated bug fixes touching `store.py` itself, plus edits in `app.py`, `helpers.py`, `webhooks.py`, and `watchers/*.py`). Rewriting the store or any call site tonight would have guaranteed merge conflicts with that in-flight work. Everything below is read-only investigation (grep/inspection) plus independent, additive infrastructure (Helm chart, one `pyproject.toml` dependency line, this doc).
@@ -28,21 +66,23 @@ Implemented in `src/agentit/portal/store_pg.py`, additively — **nothing in `sr
 
 ### Application code (`src/`) — 12 files
 
-| File | How it touches the store | Approx. call count |
-|---|---|---|
-| `portal/store.py` | **Definition itself** — this is the file being rewritten | n/a (1,405 lines, 16 tables, ~90 public methods) |
-| `portal/helpers.py` | Owns the singleton (`_store = AssessmentStore()`, `get_store()`); several direct `_store.*` calls | ~15 |
-| `portal/app.py` | `get_store()` via FastAPI `Depends`, dozens of route handlers | largest single caller — dozens of routes |
-| `portal/routes/webhooks.py` | `get_store()` via `Depends` in webhook handlers | several |
-| `portal/routes/health.py` | `get_store()` for health/status endpoints | several |
-| `portal/routes/schedules.py` | `get_store()` for CRUD on `scheduled_operations` | several |
-| `cli.py` | Direct `AssessmentStore(db_path=...)` construction for CLI commands | 4 constructions + calls |
-| `watchers/vuln_watcher.py` | `store: AssessmentStore` constructor param, calls `get_fleet_data()` etc. | ~5 |
-| `watchers/slo_tracker.py` | Same pattern, SLO-table calls | ~5 |
-| `watchers/drift_detector.py` | Same pattern, event/gate calls | ~5 |
-| `watchers/skill_learner.py` | Imports store types for skill inventory snapshotting | few |
-| `remediation_loop.py` | `store: AssessmentStore` param, gate/remediation calls | ~3 |
-| `remediation/dispatcher.py` | `store: AssessmentStore` param | ~2 |
+| File | How it touches the store | Approx. call count | Phase 3 status |
+|---|---|---|---|
+| `portal/store.py` | **Definition itself** — this is the file being rewritten | n/a (1,405 lines, 16 tables, ~90 public methods) | n/a |
+| `portal/helpers.py` | Owns the singleton (`_store = AssessmentStore()`, `get_store()`); several direct `_store.*` calls | ~15 | ⬜ not started (out of scope this pass) |
+| `portal/app.py` | `get_store()` via FastAPI `Depends`, dozens of route handlers | largest single caller — dozens of routes | ⬜ not started (out of scope this pass) |
+| `portal/routes/webhooks.py` | `get_store()` via `Depends` in webhook handlers | several | ⬜ not started (out of scope this pass) |
+| `portal/routes/health.py` | `get_store()` for health/status endpoints | several | ⬜ not started (out of scope this pass) |
+| `portal/routes/schedules.py` | `get_store()` for CRUD on `scheduled_operations` | several | ⬜ not started (out of scope this pass) |
+| `cli.py` | Constructs its store via the new `store_factory.create_store()`; commands touching the store are now `async def` | 9 constructions + calls | ✅ converted |
+| `watchers/vuln_watcher.py` | `store: AssessmentStore` constructor param (unchanged type); `run()` is now `async def` | ~5 | ✅ `run()` converted; tick body (`check_fleet`) deliberately left synchronous — see progress notes |
+| `watchers/slo_tracker.py` | Same pattern, SLO-table calls; `run()` is now `async def` | ~5 | ✅ `run()` converted; tick body (`check_once`) deliberately left synchronous |
+| `watchers/drift_detector.py` | Same pattern, event/gate calls; `run()` is now `async def` | ~5 | ✅ `run()` converted; tick body (`detect_once`) deliberately left synchronous |
+| `watchers/skill_learner.py` | Imports store types for skill inventory snapshotting; `run()` is now `async def` | few | ✅ `run()` converted; tick body (`research_once`) deliberately left synchronous |
+| `remediation_loop.py` | `store: AssessmentStore` param, gate/remediation calls | ~3 | ❌ blocked — see "Progress update: Phase 3" (shared, synchronously-called API with out-of-scope `webhooks.py`) |
+| `remediation/dispatcher.py` | `store: AssessmentStore` param | ~2 | ❌ blocked — see "Progress update: Phase 3" (shared, synchronously-called API with out-of-scope `app.py`/`webhooks.py`) |
+
+Also discovered during Phase 3 (not in the original grep below, since it predates this table): **`automode.py`** and **`agents/orchestrator.py`** (`FleetOrchestrator`) are additional synchronous store consumers, reached from `cli.py self-assess`/`self-fix` and `watchers/vuln_watcher.py`/`drift_detector.py`. Add both to whatever inventory the final phase works from.
 
 Grep totals (`rg`, repo root):
 
