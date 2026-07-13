@@ -53,10 +53,14 @@ Recommendation: {recommendation}
 Generate the minimal fix.
 """
 
-# Findings the code agent can handle (category keywords)
+# Findings the code agent can handle (category keywords) — must stay in sync
+# with the branches in _generate_change_deterministic(), otherwise findings
+# either pass the filter with no handler (silently produce nothing) or have
+# a handler that's unreachable because the category is filtered out first.
 _SUPPORTED_CATEGORIES = {
     "secrets", "gitignore", "instrumentation", "otel",
     "opentelemetry", "tracing", "logging", "structured",
+    "dockerfile", "container", "health",
 }
 
 
@@ -225,6 +229,10 @@ class CodeChangeAgent:
             return self._fix_gitignore(finding)
         if any(kw in cat for kw in ("otel", "opentelemetry", "tracing", "instrumentation")):
             return self._add_otel_config(finding, lang)
+        if "secrets" in cat:
+            return self._add_secrets_pattern(finding)
+        if any(kw in cat for kw in ("logging", "structured")):
+            return self._add_logging_config(finding, lang)
 
         return None
 
@@ -357,6 +365,90 @@ class CodeChangeAgent:
             explanation="Add standard ignores for secrets, IDE files, and build artifacts",
             finding=finding.description,
         )
+
+    def _add_secrets_pattern(self, finding: Finding) -> CodeChange:
+        """Deterministic fix for hardcoded-secrets findings: externalize to env vars."""
+        content = textwrap.dedent("""\
+            # Example environment configuration for externalized secrets.
+            # Copy to .env (already gitignored), fill in real values, and load
+            # via your framework's env/config loader instead of hardcoding.
+            DATABASE_URL=
+            API_KEY=
+            SECRET_KEY=
+        """)
+        return CodeChange(
+            file_path=".env.example",
+            action="create",
+            content=content,
+            explanation="Externalize hardcoded secrets into environment variables",
+            finding=finding.description,
+        )
+
+    def _add_logging_config(self, finding: Finding, lang: str) -> CodeChange | None:
+        """Deterministic fix for logging/structured findings: JSON logging setup."""
+        if lang == "python":
+            content = textwrap.dedent("""\
+                # Structured (JSON) logging setup for Python
+                # Install: pip install python-json-logger
+                import logging
+                from pythonjsonlogger import jsonlogger
+
+                handler = logging.StreamHandler()
+                handler.setFormatter(jsonlogger.JsonFormatter())
+
+                logger = logging.getLogger()
+                logger.addHandler(handler)
+                logger.setLevel(logging.INFO)
+            """)
+            return CodeChange(
+                file_path="logging_setup.py",
+                action="create",
+                content=content,
+                explanation="Structured JSON logging setup for Python",
+                finding=finding.description,
+            )
+        elif lang in ("node", "javascript", "typescript"):
+            content = textwrap.dedent("""\
+                // Structured (JSON) logging setup for Node.js
+                // Install: npm install pino
+                const pino = require('pino');
+                const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+
+                module.exports = logger;
+            """)
+            return CodeChange(
+                file_path="logger.js",
+                action="create",
+                content=content,
+                explanation="Structured JSON logging setup for Node.js",
+                finding=finding.description,
+            )
+        elif lang == "go":
+            content = textwrap.dedent("""\
+                // Structured (JSON) logging setup for Go using log/slog
+                package main
+
+                import (
+                    "log/slog"
+                    "os"
+                )
+
+                func initLogger() *slog.Logger {
+                    handler := slog.NewJSONHandler(os.Stdout, nil)
+                    logger := slog.New(handler)
+                    slog.SetDefault(logger)
+                    return logger
+                }
+            """)
+            return CodeChange(
+                file_path="logging_setup.go",
+                action="create",
+                content=content,
+                explanation="Structured JSON logging setup for Go",
+                finding=finding.description,
+            )
+
+        return None
 
     def _add_otel_config(self, finding: Finding, lang: str) -> CodeChange | None:
         if lang == "python":

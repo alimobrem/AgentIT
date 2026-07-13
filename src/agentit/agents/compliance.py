@@ -181,7 +181,9 @@ class ComplianceAgent:
             GeneratedFile(
                 path="kyverno-policies.yaml",
                 content=content,
-                description="Kyverno ClusterPolicies: require-labels, require-resource-limits, restrict-image-registries, disallow-latest-tag.",
+                # Namespaced kind: Policy, not ClusterPolicy — a per-app onboarding
+                # tool should stay narrowly scoped to the app's own namespace.
+                description="Namespaced Kyverno Policies: require-labels, require-resource-limits, restrict-image-registries, disallow-latest-tag.",
                 finding_addressed="; ".join(hits),
             ),
         ]

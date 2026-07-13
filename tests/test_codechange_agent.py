@@ -83,6 +83,77 @@ class TestDeterministicChanges:
         result = agent.run()
         assert "opentelemetry" in result.changes[0].content.lower()
 
+    def test_generates_dockerfile_fix(self, tmp_path: Path) -> None:
+        """'dockerfile'/'container' findings must reach _fix_dockerfile() —
+        previously filtered out by _SUPPORTED_CATEGORIES before ever
+        reaching the (already-written) handler."""
+        report = _make_report(findings=[
+            Finding(category="dockerfile", severity=Severity.high,
+                    description="No Dockerfile found", recommendation="Add one"),
+        ])
+        agent = CodeChangeAgent(report, tmp_path / "out")
+        result = agent.run()
+        assert len(result.changes) == 1
+        assert result.changes[0].file_path == "Dockerfile"
+
+    def test_generates_container_fix(self, tmp_path: Path) -> None:
+        report = _make_report(findings=[
+            Finding(category="container", severity=Severity.high,
+                    description="Running as root", recommendation="Add USER"),
+        ])
+        agent = CodeChangeAgent(report, tmp_path / "out")
+        result = agent.run()
+        assert len(result.changes) == 1
+        assert result.changes[0].file_path == "Dockerfile"
+
+    def test_generates_health_endpoint_fix(self, tmp_path: Path) -> None:
+        """'health' findings must reach _add_health_endpoint() — previously
+        filtered out by _SUPPORTED_CATEGORIES before ever reaching the
+        (already-written) handler."""
+        report = _make_report(lang="python", framework="flask", findings=[
+            Finding(category="health", severity=Severity.medium,
+                    description="No health endpoint", recommendation="Add one"),
+        ])
+        agent = CodeChangeAgent(report, tmp_path / "out")
+        result = agent.run()
+        assert len(result.changes) == 1
+        assert result.changes[0].file_path == "healthz.py"
+
+    def test_generates_secrets_fix(self, tmp_path: Path) -> None:
+        """'secrets' findings pass the _SUPPORTED_CATEGORIES filter and must
+        now have a real handler instead of silently producing nothing."""
+        report = _make_report(findings=[
+            Finding(category="secrets", severity=Severity.critical,
+                    description="Hardcoded password", recommendation="Externalize it"),
+        ])
+        agent = CodeChangeAgent(report, tmp_path / "out")
+        result = agent.run()
+        assert len(result.changes) == 1
+        assert result.changes[0].file_path == ".env.example"
+
+    def test_generates_logging_fix(self, tmp_path: Path) -> None:
+        """'logging'/'structured' findings pass the _SUPPORTED_CATEGORIES
+        filter and must now have a real handler instead of silently
+        producing nothing."""
+        report = _make_report(lang="python", findings=[
+            Finding(category="logging", severity=Severity.medium,
+                    description="No structured logging", recommendation="Add it"),
+        ])
+        agent = CodeChangeAgent(report, tmp_path / "out")
+        result = agent.run()
+        assert len(result.changes) == 1
+        assert result.changes[0].file_path == "logging_setup.py"
+
+    def test_generates_structured_logging_fix(self, tmp_path: Path) -> None:
+        report = _make_report(lang="javascript", findings=[
+            Finding(category="structured", severity=Severity.medium,
+                    description="No structured logging", recommendation="Add it"),
+        ])
+        agent = CodeChangeAgent(report, tmp_path / "out")
+        result = agent.run()
+        assert len(result.changes) == 1
+        assert result.changes[0].file_path == "logger.js"
+
 
 class TestLLMChanges:
     def test_llm_generates_change(self, tmp_path: Path) -> None:
@@ -121,6 +192,23 @@ class TestLLMChanges:
         agent = CodeChangeAgent(report, tmp_path / "out", llm_client=llm)
         result = agent.run()
         assert len(result.changes) == 0
+
+
+class TestSupportedCategoriesConsistency:
+    def test_every_supported_category_has_a_handler(self, tmp_path: Path) -> None:
+        """Every keyword in _SUPPORTED_CATEGORIES must actually be handled by
+        _generate_change_deterministic(), or matching findings pass the
+        filter and silently produce nothing."""
+        from agentit.agents.codechange import _SUPPORTED_CATEGORIES
+
+        for category in _SUPPORTED_CATEGORIES:
+            report = _make_report(lang="python", framework="flask", findings=[
+                Finding(category=category, severity=Severity.medium,
+                        description=f"{category} finding", recommendation="fix it"),
+            ])
+            agent = CodeChangeAgent(report, tmp_path / f"out-{category}")
+            result = agent.run()
+            assert len(result.changes) == 1, f"category '{category}' passed the filter but produced no change"
 
 
 class TestNoActionableFindings:

@@ -56,10 +56,31 @@ class TestKyvernoPolicies:
 
         assert (tmp_path / "out" / "kyverno-policies.yaml").exists()
 
+    def test_description_does_not_claim_cluster_wide_scope(self, tmp_path: Path) -> None:
+        """The generated manifest is a namespaced kind: Policy (a per-app
+        onboarding tool should stay narrowly scoped, not cluster-wide) —
+        the GeneratedFile.description must not mislabel it as ClusterPolicy."""
+        report = make_report(
+            scores=[_score_with_finding("compliance", "policy", "No admission policies")],
+        )
+        result = ComplianceAgent(report, tmp_path / "out").run()
+        kp = [f for f in result.files if f.path == "kyverno-policies.yaml"][0]
+        assert "ClusterPolicy" not in kp.description
+        assert "namespaced" in kp.description.lower()
+
     def test_skips_kyverno_without_findings(self, tmp_path: Path) -> None:
         report = make_report(scores=[])
         result = ComplianceAgent(report, tmp_path / "out").run()
         assert not any(f.path == "kyverno-policies.yaml" for f in result.files)
+
+
+class TestCapabilitiesDescriptionAccuracy:
+    def test_capabilities_description_does_not_claim_cluster_policy(self) -> None:
+        """capabilities.py must describe what ComplianceAgent actually
+        generates (namespaced Policy), not cluster-wide ClusterPolicy."""
+        from agentit.agents.capabilities import AGENT_CAPABILITIES
+
+        assert "ClusterPolicy" not in AGENT_CAPABILITIES["compliance"]
 
 
 class TestSbomTask:
