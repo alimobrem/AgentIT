@@ -244,7 +244,7 @@ uv run agentit activate-skill skills/custom/new-skill.md
 
 Add `--llm` to enable Claude-backed reasoning, or `--no-llm` to force it off (otherwise auto-detected from `ANTHROPIC_API_KEY` / `ANTHROPIC_VERTEX_PROJECT_ID`).
 
-Agent containerization: agents can run as K8s Jobs with `--profile lightweight|standard|full` and `--agents` filter. Set `AGENT_MODE=kubernetes` to dispatch agents as Jobs instead of local threads.
+Agent containerization: agents can run as K8s Jobs with `--profile lightweight|standard|full` and `--agents` filter. Set `AGENTIT_AGENT_MODE=kubernetes` to dispatch agents as Jobs instead of local threads.
 
 ### Portal (local)
 
@@ -272,8 +272,8 @@ All configuration is via environment variables (no config file). Nothing here be
 | `AGENTIT_KAFKA_BOOTSTRAP` | `events.py`, `consumer.py` | Kafka bootstrap servers; publisher/consumer no-op gracefully if unset |
 | `AGENTIT_AUTO_MODE` | `automode.py` | `1`/`true`/`on` to enable autonomous apply (also togglable at runtime via `/settings`) |
 | `AGENTIT_PORTAL_URL` | `remediation_loop.py` | Base URL the remediation loop calls back into (default `http://localhost:8080`) |
-| `AGENTIT_EXTERNAL_URL` | `portal/app.py` | Trusted externally-reachable base URL for outbound registrations (e.g. the GitHub webhook URL). Optional — if unset, the app looks up its own OpenShift Route; only falls back to the request's Host header if neither is available. Never derived from client input. |
-| `AGENT_MODE` | `orchestrator.py` | `local` (default) or `kubernetes` — run agents as K8s Jobs |
+| `AGENTIT_EXTERNAL_URL` | `portal/routes/assessments.py` | Trusted externally-reachable base URL for outbound registrations (e.g. the GitHub webhook URL). Optional — if unset, the app looks up its own OpenShift Route; only falls back to the request's Host header if neither is available. Never derived from client input. |
+| `AGENTIT_AGENT_MODE` | `orchestrator.py` | `local` (default) or `kubernetes` — run agents as K8s Jobs. Falls back to the undocumented `AGENT_MODE` if `AGENTIT_AGENT_MODE` is unset, for backward-compat. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Vertex SDK | Path to mounted GCP credentials JSON |
 
 </details>
@@ -376,7 +376,21 @@ AgentIT/
 │   │   └── base.py                 # Shared contract: Agent(report, output_dir).run()
 │   ├── watchers/                   # Long-lived watcher agents
 │   └── portal/
-│       ├── app.py                  # FastAPI routes (56+), async assessment, lifecycle stages
+│       ├── app.py                  # FastAPI app setup, CSRF middleware, background maintenance
+│       │                           #   loop, lifecycle hooks, template filters — routes live in
+│       │                           #   routes/*.py, included via app.include_router(...)
+│       ├── routes/                 # 56+ routes (64 handlers), one APIRouter per domain
+│       │   ├── fleet.py            # Fleet dashboard, fleet-wide SLOs/remediations
+│       │   ├── assessments.py      # Assess/onboard/apply lifecycle, PR creation, verification
+│       │   ├── gates.py            # Human approval gate queue: list, resolve, cancel
+│       │   ├── capabilities.py     # Skills/checks catalog, learning agent, agents/watchers
+│       │   ├── settings.py         # Auto-mode toggle, retention/purge, settings API
+│       │   ├── insights.py         # Fleet insights, LLM decision audit, events feed + DLQ
+│       │   ├── remediations.py     # Per-assessment remediation items and recommendations
+│       │   ├── slos.py             # Per-assessment SLO definitions and error budgets
+│       │   ├── webhooks.py         # /api/webhook/* (internal-token-gated) + GitHub push
+│       │   ├── health.py           # /health, /healthz, /readyz, platform drift
+│       │   └── schedules.py        # Watcher/cron schedule management
 │       ├── store.py                # SQLite persistence (12+ tables: assessments, events, gates,
 │       │                           #   SLOs, remediations, skill_effectiveness, agent_feedback,
 │       │                           #   processed_webhooks)
