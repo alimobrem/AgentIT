@@ -5,6 +5,7 @@ This doc covers how AgentIT is put together: the system components, the assessme
 ## Table of Contents
 
 - [System overview](#system-overview)
+- [Cluster access (`kube.py`)](#cluster-access-kubepy)
 - [Assessment pipeline](#assessment-pipeline)
 - [Skill engine & check engine](#skill-engine--check-engine)
 - [Self-improvement loop](#self-improvement-loop)
@@ -80,6 +81,27 @@ graph TB
     Portal -->|"events"| Kafka
     Watchers <--> Kafka
 ```
+
+## Cluster access (`kube.py`)
+
+Every read or write against the cluster goes through `agentit/kube.py`, a thin
+wrapper around the official `kubernetes` Python client (`core_v1()`, `apps_v1()`,
+`batch_v1()`, `custom_objects()`, plus higher-level helpers like
+`list_custom_resources`/`get_custom_resource`/`create_custom_resource`/
+`patch_custom_resource` for CRDs such as Argo CD Applications/ApplicationSets,
+Argo Rollouts, Tekton PipelineRuns, and OLM CSVs/Subscriptions). This is a
+deliberate architectural rule, not just a convenience: `kube.py` is the one
+place that needs a Kubernetes client mocked in tests, so unit tests never
+depend on `oc`/`kubectl` being installed or a cluster being reachable — and
+never risk mutating a real cluster when a test author forgets to mock
+something (this happened once: an unmocked `subprocess` `oc apply` call
+polluted a live cluster with ~180 fake Tekton PipelineRuns).
+
+The one remaining exception is `kube.apply_yaml()`, which still shells out to
+`oc apply --server-side --force-conflicts` because it applies arbitrary,
+multi-document manifests spanning many kinds (core and CRD) and needs true
+server-side-apply conflict resolution — replicating that generically over the
+Python client is tracked as a follow-up (see the `TODO` on `apply_yaml`).
 
 ## Assessment pipeline
 

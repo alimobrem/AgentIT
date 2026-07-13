@@ -7,6 +7,8 @@ from pathlib import Path
 
 import requests
 
+from agentit import kube
+
 logger = logging.getLogger(__name__)
 
 _API = "https://api.github.com"
@@ -458,8 +460,6 @@ _TRUSTED_GIT_DOMAINS = frozenset(
 
 def ensure_applicationset(infra_repo_url: str) -> bool:
     """Ensure an Argo CD ApplicationSet exists for the infra repo."""
-    import subprocess
-    import yaml
     from urllib.parse import urlparse as _urlparse
 
     parsed = _urlparse(infra_repo_url)
@@ -471,12 +471,14 @@ def ensure_applicationset(infra_repo_url: str) -> bool:
         )
         return False
 
+    name = "agentit-managed-apps"
+    namespace = "openshift-gitops"
     appset = {
         "apiVersion": "argoproj.io/v1alpha1",
         "kind": "ApplicationSet",
         "metadata": {
-            "name": "agentit-managed-apps",
-            "namespace": "openshift-gitops",
+            "name": name,
+            "namespace": namespace,
         },
         "spec": {
             "generators": [{
@@ -515,15 +517,15 @@ def ensure_applicationset(infra_repo_url: str) -> bool:
     }
 
     try:
-        result = subprocess.run(
-            ["oc", "apply", "-f", "-"],
-            input=yaml.dump(appset),
-            capture_output=True, text=True, timeout=15,
+        existing = kube.get_custom_resource(
+            "argoproj.io", "v1alpha1", "applicationsets", name, namespace=namespace,
         )
-        if result.returncode == 0:
-            logger.info("ApplicationSet ensured for %s", infra_repo_url)
-            return True
-        logger.warning("ApplicationSet apply failed: %s", result.stderr[:200])
+        if existing is None:
+            kube.create_custom_resource("argoproj.io", "v1alpha1", "applicationsets", namespace, appset)
+        else:
+            kube.patch_custom_resource("argoproj.io", "v1alpha1", "applicationsets", name, namespace, appset)
+        logger.info("ApplicationSet ensured for %s", infra_repo_url)
+        return True
     except Exception as exc:
         logger.warning("ApplicationSet apply error: %s", exc)
     return False

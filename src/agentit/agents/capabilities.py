@@ -9,7 +9,7 @@ AGENT_CAPABILITIES: dict[str, str] = {
     "security": "NetworkPolicy, Containerfile, RBAC, SCCs, resource limits, image scan task",
     "observability": "ServiceMonitor, Grafana dashboard, alerting rules, OTel collector",
     "cicd": "Tekton Pipeline (scan + SBOM), Argo CD Application, Argo Rollout, Containerfile",
-    "compliance": "Kyverno policies, SBOM task, audit policy, compliance evidence",
+    "compliance": "Namespaced Kyverno Policy, SBOM task, audit policy, compliance evidence",
     "infrastructure": "HPA, PDB, ResourceQuota, LimitRange, Namespace",
     "cost": "VPA, cost labels, cost report",
     "dependency": "Dependency report, Renovate/Dependabot config",

@@ -340,7 +340,9 @@ AgentIT/
 │   ├── models.py                   # Pydantic models
 │   ├── events.py / consumer.py     # Kafka publisher/consumer (no-op if unavailable)
 │   ├── image_builder.py            # Tekton-driven image build
-│   ├── kube.py                     # K8s client with TTL cache, Job dispatch
+│   ├── kube.py                     # K8s client with TTL cache, Job dispatch — the single,
+│   │                               #   mockable interface for cluster ops (core/apps/batch/custom
+│   │                               #   objects); `apply_yaml` is the one remaining `oc` subprocess
 │   ├── analyzers/                  # 7 read-only analyzers + stack detector + shared base
 │   ├── agents/                     # 11 agents + orchestrator + capabilities registry
 │   │   ├── orchestrator.py         # FleetOrchestrator: skills-first, agents supplement

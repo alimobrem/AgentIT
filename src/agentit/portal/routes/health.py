@@ -7,6 +7,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from agentit import kube
 from agentit.portal.helpers import get_store, get_templates
 
 log = logging.getLogger(__name__)
@@ -15,14 +16,67 @@ router = APIRouter()
 
 
 # ── Internal helpers ──────────────────────────────────────────────────
+#
+# All helpers below swallow every exception and return None/[] on failure
+# (missing resource, unreachable cluster, RBAC denial, ...) so route handlers
+# can treat "couldn't get it" as a single case, matching the previous
+# subprocess-based behavior where any `oc` failure produced no stdout.
 
 
-def _run_cmd(cmd: list[str], timeout: int = 10) -> str | None:
-    import subprocess
+def _get_pod(name: str, namespace: str = "agentit"):
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return r.stdout if r.returncode == 0 else None
-    except (OSError, subprocess.SubprocessError):
+        return kube.core_v1().read_namespaced_pod(name, namespace, _request_timeout=10)
+    except Exception:
+        log.debug("Failed to read pod %s/%s", namespace, name, exc_info=True)
+        return None
+
+
+def _get_pod_log(name: str, namespace: str = "agentit", tail_lines: int = 100, timeout: int = 15) -> str | None:
+    try:
+        return kube.core_v1().read_namespaced_pod_log(
+            name, namespace, tail_lines=tail_lines, _request_timeout=timeout,
+        )
+    except Exception:
+        log.debug("Failed to read pod log %s/%s", namespace, name, exc_info=True)
+        return None
+
+
+def _get_all_container_logs(name: str, namespace: str = "agentit", tail_lines: int = 50) -> str | None:
+    """Read and concatenate logs from every container in a pod (like `oc logs --all-containers`)."""
+    try:
+        pod = kube.core_v1().read_namespaced_pod(name, namespace, _request_timeout=10)
+    except Exception:
+        log.debug("Failed to read pod %s/%s for all-container logs", namespace, name, exc_info=True)
+        return None
+
+    parts = []
+    for c in pod.spec.containers or []:
+        try:
+            text = kube.core_v1().read_namespaced_pod_log(
+                name, namespace, container=c.name, tail_lines=tail_lines, _request_timeout=15,
+            )
+            parts.append(f"[{c.name}]\n{text}")
+        except Exception:
+            log.debug("Failed to read log for container %s in pod %s/%s", c.name, namespace, name, exc_info=True)
+    return "\n".join(parts) if parts else None
+
+
+def _get_pod_events(name: str, namespace: str = "agentit") -> list:
+    try:
+        events = kube.core_v1().list_namespaced_event(
+            namespace, field_selector=f"involvedObject.name={name}", _request_timeout=10,
+        )
+        return events.items or []
+    except Exception:
+        log.debug("Failed to list events for pod %s/%s", namespace, name, exc_info=True)
+        return []
+
+
+def _get_custom_resource_safe(group: str, version: str, plural: str, name: str, namespace: str) -> dict | None:
+    try:
+        return kube.get_custom_resource(group, version, plural, name, namespace=namespace)
+    except Exception:
+        log.debug("Failed to get %s/%s %s/%s in %s", group, version, plural, name, namespace, exc_info=True)
         return None
 
 
@@ -185,47 +239,36 @@ async def health_page(request: Request) -> HTMLResponse:
 
 @router.get("/health/pods/{pod_name}", response_class=HTMLResponse)
 async def pod_detail_page(request: Request, pod_name: str) -> HTMLResponse:
-    import json as _json
-
-    raw = await asyncio.to_thread(_run_cmd, ["oc", "get", "pod", pod_name, "-n", "agentit", "-o", "json"])
-    if not raw:
+    pod = await asyncio.to_thread(_get_pod, pod_name)
+    if pod is None:
         raise HTTPException(404, f"Pod {pod_name} not found")
 
-    pod = _json.loads(raw)
-    status = pod.get("status", {}).get("phase", "Unknown")
-    created = pod.get("metadata", {}).get("creationTimestamp", "")[:19]
+    status = pod.status.phase or "Unknown"
+    created = pod.metadata.creation_timestamp.isoformat()[:19] if pod.metadata.creation_timestamp else ""
     containers = []
     total_restarts = 0
-    for cs in pod.get("status", {}).get("containerStatuses", []):
-        restarts = cs.get("restartCount", 0)
+    for cs in pod.status.container_statuses or []:
+        restarts = cs.restart_count or 0
         total_restarts += restarts
         containers.append({
-            "name": cs.get("name", "?"),
-            "image": cs.get("image", "?"),
-            "ready": cs.get("ready", False),
+            "name": cs.name or "?",
+            "image": cs.image or "?",
+            "ready": bool(cs.ready),
             "restarts": restarts,
         })
 
-    logs = await asyncio.to_thread(
-        _run_cmd, ["oc", "logs", pod_name, "-n", "agentit", "--tail=100"], 15,
-    ) or "No logs available"
+    logs = await asyncio.to_thread(_get_pod_log, pod_name, "agentit", 100, 15) or "No logs available"
 
-    events_raw = await asyncio.to_thread(
-        _run_cmd, ["oc", "get", "events", "-n", "agentit", "--field-selector",
-                   f"involvedObject.name={pod_name}", "-o", "json"],
-    )
-    events = []
-    if events_raw:
-        try:
-            for e in _json.loads(events_raw).get("items", []):
-                events.append({
-                    "time": e.get("lastTimestamp", "")[:19],
-                    "type": e.get("type", "Normal"),
-                    "reason": e.get("reason", "?"),
-                    "message": e.get("message", "")[:200],
-                })
-        except Exception:
-            log.debug("Failed to parse pod events", exc_info=True)
+    pod_events = await asyncio.to_thread(_get_pod_events, pod_name)
+    events = [
+        {
+            "time": (e.last_timestamp.isoformat()[:19] if e.last_timestamp else ""),
+            "type": e.type or "Normal",
+            "reason": e.reason or "?",
+            "message": (e.message or "")[:200],
+        }
+        for e in pod_events
+    ]
 
     return get_templates().TemplateResponse(request, "pod_detail.html", {
         "pod_name": pod_name,
@@ -240,15 +283,12 @@ async def pod_detail_page(request: Request, pod_name: str) -> HTMLResponse:
 
 @router.get("/health/pipelines/{pipeline_name}", response_class=HTMLResponse)
 async def pipeline_detail_page(request: Request, pipeline_name: str) -> HTMLResponse:
-    import json as _json
-
-    raw = await asyncio.to_thread(
-        _run_cmd, ["oc", "get", "pipelinerun", pipeline_name, "-n", "agentit", "-o", "json"],
+    pr = await asyncio.to_thread(
+        _get_custom_resource_safe, "tekton.dev", "v1", "pipelineruns", pipeline_name, "agentit",
     )
-    if not raw:
+    if pr is None:
         raise HTTPException(404, f"PipelineRun {pipeline_name} not found")
 
-    pr = _json.loads(raw)
     conditions = pr.get("status", {}).get("conditions", [{}])
     status = conditions[0].get("reason", "Unknown") if conditions else "Unknown"
     start_time = pr.get("status", {}).get("startTime", "")[:19]
@@ -270,9 +310,7 @@ async def pipeline_detail_page(request: Request, pipeline_name: str) -> HTMLResp
     if tasks:
         last_pod = tasks[-1].get("pod", "")
         if last_pod:
-            logs = await asyncio.to_thread(
-                _run_cmd, ["oc", "logs", last_pod, "-n", "agentit", "--tail=50", "--all-containers"], 15,
-            ) or ""
+            logs = await asyncio.to_thread(_get_all_container_logs, last_pod, "agentit", 50) or ""
 
     return get_templates().TemplateResponse(request, "pipeline_detail.html", {
         "pipeline_name": pipeline_name,
@@ -333,32 +371,25 @@ async def api_health():
 @router.get("/api/operator-status")
 async def operator_status(request: Request):
     """Check if an OLM operator is installed and ready. Used by htmx polling."""
-    import shutil
-    import subprocess
-
     package = request.query_params.get("package", "")
     if not package:
         return HTMLResponse("<span>Missing package name</span>")
 
-    cli = shutil.which("oc") or shutil.which("kubectl")
-    if not cli:
-        return HTMLResponse(f"<strong>{package}</strong> -- cannot check (no oc/kubectl)")
-
     op_ns = f"openshift-{package.replace('_', '-')}"
     try:
-        result = subprocess.run(
-            [cli, "get", "csv", "-n", op_ns, "-o",
-             f"jsonpath={{.items[?(@.spec.displayName=='{package}')].status.phase}}"],
-            capture_output=True, text=True, timeout=10,
+        csvs = await asyncio.to_thread(
+            kube.list_custom_resources, "operators.coreos.com", "v1alpha1", "clusterserviceversions", op_ns,
         )
-        phase = result.stdout.strip()
+        phase = next(
+            (c.get("status", {}).get("phase", "") for c in csvs
+             if c.get("spec", {}).get("displayName") == package),
+            "",
+        )
         if not phase:
-            result2 = subprocess.run(
-                [cli, "get", "subscription.operators.coreos.com", package, "-n", op_ns,
-                 "-o", "jsonpath={.status.state}"],
-                capture_output=True, text=True, timeout=10,
+            sub = await asyncio.to_thread(
+                _get_custom_resource_safe, "operators.coreos.com", "v1alpha1", "subscriptions", package, op_ns,
             )
-            state = result2.stdout.strip()
+            state = (sub or {}).get("status", {}).get("state", "")
             if state:
                 return HTMLResponse(
                     f"<strong>{package}</strong> -- subscription {state}. Waiting for operator pod..."

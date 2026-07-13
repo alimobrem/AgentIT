@@ -94,11 +94,50 @@ def list_custom_resources(group: str, version: str, plural: str, namespace: str 
         raise KubeError(f"Failed to list {group}/{version} {plural}: {exc}") from exc
 
 
+def get_custom_resource(group: str, version: str, plural: str, name: str, namespace: str = "") -> dict | None:
+    """Get a single custom resource by name. Returns None if not found (404)."""
+    try:
+        if namespace:
+            return custom_objects().get_namespaced_custom_object(group, version, namespace, plural, name, _request_timeout=10)
+        return custom_objects().get_cluster_custom_object(group, version, plural, name, _request_timeout=10)
+    except Exception as exc:
+        if hasattr(exc, "status") and exc.status == 404:
+            return None
+        raise KubeError(f"Failed to get {group}/{version} {plural}/{name}: {exc}") from exc
+
+
+def create_custom_resource(group: str, version: str, plural: str, namespace: str, body: dict) -> dict:
+    """Create a namespaced custom resource. Raises KubeError on failure (including 'already exists')."""
+    try:
+        return custom_objects().create_namespaced_custom_object(group, version, namespace, plural, body, _request_timeout=15)
+    except Exception as exc:
+        raise KubeError(f"Failed to create {group}/{version} {plural}: {exc}") from exc
+
+
+def patch_custom_resource(group: str, version: str, plural: str, name: str, namespace: str, body: dict) -> dict:
+    """Merge-patch an existing namespaced custom resource. Raises KubeError on failure."""
+    try:
+        return custom_objects().patch_namespaced_custom_object(group, version, namespace, plural, name, body, _request_timeout=15)
+    except Exception as exc:
+        raise KubeError(f"Failed to patch {group}/{version} {plural}/{name}: {exc}") from exc
+
+
 def apply_yaml(content: str, namespace: str) -> dict:
     """Apply a YAML manifest with server-side-apply semantics.
 
     Creates resources that don't exist, patches resources that already do.
     Returns {"applied": bool, "error": str|None}.
+
+    TODO(subprocess-migration): this is the last remaining `oc` subprocess call
+    in the codebase (see get_custom_resource/create_custom_resource/patch_custom_resource
+    above for the migrated single-kind equivalents). `content` here is an arbitrary,
+    multi-document manifest spanning both core/typed kinds (ConfigMap, Namespace, ...)
+    and CRDs (Application, Rollout, Subscription, ...), so replicating `oc apply
+    --server-side --force-conflicts` requires a generic apiVersion/kind -> API-call
+    dispatcher plus real server-side-apply support (kubernetes-client patch calls with
+    content_type="application/apply-patch+yaml" and field_manager set). That's a
+    substantial, high-risk change to the most-called apply path in the app -- deferred
+    rather than rushed. Do this migration as its own reviewed change, not bundled in.
     """
     import os
     import subprocess

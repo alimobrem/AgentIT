@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from agentit.portal.github_pr import create_onboarding_pr
+from agentit.portal.github_pr import create_onboarding_pr, ensure_applicationset
 
 
 SAMPLE_FILES = [
@@ -104,3 +104,64 @@ def test_create_onboarding_pr_no_token():
         )
     assert "error" in result
     assert "GITHUB_TOKEN" in result["error"]
+
+
+# ── ensure_applicationset ────────────────────────────────────────────────
+#
+# Previously this shelled out to `oc apply -f -`, which meant it could only
+# be tested by mocking subprocess.run (or not tested at all — see the
+# incident described in test_portal.py's _override_store fixture). Now it's
+# a check-then-create-or-patch against the kube API client.
+
+
+@patch("agentit.portal.github_pr.kube")
+def test_ensure_applicationset_creates_when_missing(mock_kube):
+    mock_kube.get_custom_resource.return_value = None
+
+    result = ensure_applicationset("https://github.com/org/agentit-gitops.git")
+
+    assert result is True
+    mock_kube.get_custom_resource.assert_called_once_with(
+        "argoproj.io", "v1alpha1", "applicationsets", "agentit-managed-apps",
+        namespace="openshift-gitops",
+    )
+    mock_kube.create_custom_resource.assert_called_once()
+    args, _ = mock_kube.create_custom_resource.call_args
+    assert args[:3] == ("argoproj.io", "v1alpha1", "applicationsets")
+    assert args[3] == "openshift-gitops"
+    assert args[4]["kind"] == "ApplicationSet"
+    mock_kube.patch_custom_resource.assert_not_called()
+
+
+@patch("agentit.portal.github_pr.kube")
+def test_ensure_applicationset_patches_when_existing(mock_kube):
+    mock_kube.get_custom_resource.return_value = {"metadata": {"name": "agentit-managed-apps"}}
+
+    result = ensure_applicationset("https://github.com/org/agentit-gitops.git")
+
+    assert result is True
+    mock_kube.create_custom_resource.assert_not_called()
+    mock_kube.patch_custom_resource.assert_called_once()
+    args, _ = mock_kube.patch_custom_resource.call_args
+    assert args[0] == "argoproj.io"
+    assert args[3] == "agentit-managed-apps"
+    assert args[4] == "openshift-gitops"
+
+
+@patch("agentit.portal.github_pr.kube")
+def test_ensure_applicationset_rejects_untrusted_domain(mock_kube):
+    result = ensure_applicationset("https://evil.example.com/org/repo.git")
+
+    assert result is False
+    mock_kube.get_custom_resource.assert_not_called()
+    mock_kube.create_custom_resource.assert_not_called()
+
+
+@patch("agentit.portal.github_pr.kube")
+def test_ensure_applicationset_returns_false_on_api_error(mock_kube):
+    mock_kube.get_custom_resource.return_value = None
+    mock_kube.create_custom_resource.side_effect = Exception("403 Forbidden")
+
+    result = ensure_applicationset("https://github.com/org/agentit-gitops.git")
+
+    assert result is False

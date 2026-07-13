@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import shlex
-import subprocess
 import time
+
+from agentit import kube
 
 logger = logging.getLogger(__name__)
 
@@ -196,13 +196,10 @@ def build_app_image(
     }
 
     try:
-        result = subprocess.run(
-            ["oc", "apply", "-f", "-", "-n", namespace],
-            input=json.dumps(pipelinerun),
-            capture_output=True, text=True, timeout=15,
+        kube.custom_objects().create_namespaced_custom_object(
+            group="tekton.dev", version="v1", namespace=namespace,
+            plural="pipelineruns", body=pipelinerun, _request_timeout=15,
         )
-        if result.returncode != 0:
-            return {"error": f"Failed to create PipelineRun: {result.stderr[:200]}"}
 
         logger.info("Build triggered: %s for %s", run_name, app_name)
         return {
@@ -212,7 +209,7 @@ def build_app_image(
         }
 
     except Exception as exc:
-        return {"error": str(exc)}
+        return {"error": f"Failed to create PipelineRun: {str(exc)[:200]}"}
 
 
 def wait_for_build(run_name: str, namespace: str = "agentit", timeout: int = BUILD_TIMEOUT) -> dict:
@@ -220,12 +217,9 @@ def wait_for_build(run_name: str, namespace: str = "agentit", timeout: int = BUI
     start = time.monotonic()
     while time.monotonic() - start < timeout:
         try:
-            result = subprocess.run(
-                ["oc", "get", "pipelinerun", run_name, "-n", namespace,
-                 "-o", "jsonpath={.status.conditions[0].reason}"],
-                capture_output=True, text=True, timeout=10,
-            )
-            status = result.stdout.strip()
+            pr = kube.get_custom_resource("tekton.dev", "v1", "pipelineruns", run_name, namespace=namespace)
+            conditions = (pr or {}).get("status", {}).get("conditions") or []
+            status = conditions[0].get("reason", "") if conditions else ""
             if status == "Succeeded":
                 return {"status": "Succeeded"}
             if status in ("Failed", "PipelineRunTimeout"):
