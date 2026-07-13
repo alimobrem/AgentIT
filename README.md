@@ -136,11 +136,11 @@ Long-lived watchers (deployed as separate pods):
 
 AgentIT improves itself through three tiers of learning:
 
-1. **Feedback loop** — tracks human decisions (approve/reject/modify) on generated fixes. Skills with < 30% approval rate are flagged for review. Agents query the feedback store before generating to avoid repeating rejected patterns.
+1. **Feedback loop** — tracks human decisions (approve/reject/modify) on generated fixes. Skills with < 30% approval rate are flagged for review on the Insights page, though a human still decides whether to act on that flag. Agents query the feedback store before generating to avoid repeating rejected patterns.
 
-2. **Learning agent** — triggered on first assessment of a new app. Researches CVEs and best practices specific to the app's detected stack (languages, frameworks, databases). Generates draft skills and checks that go through human review before activation.
+2. **Learning agent** — researches CVEs and best practices via LLM and generates draft skills that go through human review before activation. This is opt-in, not automatic: trigger it from the Capabilities page ("Research CVEs & Generate Skills") or via `agentit learn` / `agentit learn-for` on the CLI.
 
-3. **Platform awareness** — `PlatformContext` discovers the cluster's K8s version, available APIs, CRDs, and operators. Every skill generation includes this context. The API drift detector snapshots the cluster API surface and auto-deprecates skills when APIs are removed.
+3. **Platform awareness** — `PlatformContext` discovers the cluster's K8s version, available APIs, CRDs, and operators. Every skill generation includes this context. The API drift detector auto-deprecates a skill specifically when the API kind it generates has been removed from the cluster (a narrower guarantee than the effectiveness-based flagging in tier 1).
 
 ## Web portal
 
@@ -154,6 +154,7 @@ Key pages:
 | **Assessment Detail** | 7-dimension scores, lifecycle stepper, score trend, timeline, remediation items |
 | **Gates** | Human approval queue with LLM reasoning, confirm/reject with reason |
 | **Insights** | Fleet stats, agent performance, low-effectiveness skills, learning feedback |
+| **Capabilities** | Skills/checks catalog, onboarding agents, watchers, and the "Research CVEs & Generate Skills" trigger |
 | **Events** | Activity feed with DLQ for failed events |
 | **Agents** | Agent registry with capabilities and performance stats |
 | **Health** | Rollout/pod/pipeline status |
@@ -210,7 +211,7 @@ uv run agentit test-skill skills/security/network-policy.md
 uv run agentit activate-skill skills/custom/new-skill.md
 ```
 
-Add `--llm` to enable Claude-backed reasoning (auto-detected if `ANTHROPIC_API_KEY` or `ANTHROPIC_VERTEX_PROJECT_ID` is set).
+Add `--llm` to enable Claude-backed reasoning, or `--no-llm` to force it off (otherwise auto-detected from `ANTHROPIC_API_KEY` / `ANTHROPIC_VERTEX_PROJECT_ID`).
 
 Agent containerization: agents can run as K8s Jobs with `--profile lightweight|standard|full` and `--agents` filter. Set `AGENT_MODE=kubernetes` to dispatch agents as Jobs instead of local threads.
 
