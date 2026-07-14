@@ -12,10 +12,9 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.responses import StreamingResponse
 
-from agentit.audit import audit_log
 from agentit.cloner import clone_repo
 from agentit.models import AssessmentReport, Severity
-from agentit.portal.cluster_apply import apply_manifests_to_cluster, install_operator
+from agentit.portal.cluster_apply import apply_manifests_to_cluster, apply_with_verification, install_operator
 from agentit.portal.github_pr import create_onboarding_pr
 from agentit.portal.helpers import get_current_user, get_llm_client, get_store, get_templates, publish_event, with_timeout
 from agentit.runner import run_assessment
@@ -599,13 +598,16 @@ async def apply_to_cluster(request: Request, assessment_id: str):
     dry_run = form.get("dry_run") == "true"
 
     try:
-        results = await asyncio.to_thread(
-            apply_manifests_to_cluster, files, namespace, dry_run,
+        results = await apply_with_verification(
+            files, namespace, dry_run,
+            force_dry_run_first=False,
+            store=s, app_name=report.repo_name,
+            skill_outcome_reason="applied to cluster",
+            actor=get_current_user(request), action="apply-to-cluster",
+            resource=f"assessment:{assessment_id}",
         )
     except Exception:
         log.exception("Cluster apply failed for assessment %s", assessment_id)
-        audit_log(actor=get_current_user(request), action="apply-to-cluster", resource=f"assessment:{assessment_id}",
-                  outcome="error", details={"namespace": namespace, "dry_run": dry_run})
         return RedirectResponse(
             url=f"/assessments/{assessment_id}/onboard-results?error={quote('Cluster apply failed — check server logs')}",
             status_code=303,
@@ -613,19 +615,9 @@ async def apply_to_cluster(request: Request, assessment_id: str):
 
     await s.save_apply_results(assessment_id, results, namespace, dry_run)
 
-    if not dry_run:
-        from agentit.skill_engine import record_skill_outcomes
-        await record_skill_outcomes(
-            s, report.repo_name, files, set(results["applied"]), "approved",
-            "applied to cluster",
-        )
-
     applied = len(results["applied"])
     skipped = len(results["skipped"])
     errs = len(results["errors"])
-    audit_log(actor=get_current_user(request), action="apply-to-cluster", resource=f"assessment:{assessment_id}",
-              outcome="success" if not results["errors"] else "partial",
-              details={"namespace": namespace, "dry_run": dry_run, "applied": applied, "errors": errs})
     return RedirectResponse(
         url=(
             f"/assessments/{assessment_id}/onboard-results"

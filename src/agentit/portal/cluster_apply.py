@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
 import yaml
 
 from agentit import kube
+from agentit.audit import audit_log
+from agentit.skill_engine import record_skill_outcomes
 
 logger = logging.getLogger(__name__)
 
@@ -325,6 +328,97 @@ def apply_manifests_to_cluster(
         "missing_operators": missing_operators,
         "repo_files": repo_files,
     }
+
+
+async def apply_with_verification(
+    files: list[dict],
+    namespace: str,
+    dry_run: bool,
+    *,
+    force_dry_run_first: bool,
+    store: object,
+    app_name: str,
+    skill_outcome_reason: str,
+    actor: str,
+    action: str,
+    resource: str,
+    record_outcomes_on_partial_failure: bool = True,
+) -> dict:
+    """Shared "apply to cluster, with consistent side effects" sequence used by
+    both the manual "Apply to Cluster" route and ``AutoMode.execute()``.
+
+    These two callers have one real, deliberately-preserved behavioral
+    difference, controlled by ``force_dry_run_first``:
+
+    - ``force_dry_run_first=False`` (the manual route): a human already
+      reviewed the plan and explicitly chose ``dry_run`` via the form -- make
+      exactly ONE call to ``apply_manifests_to_cluster(files, namespace,
+      dry_run)``. There is no automatic "dry-run first, then real apply"
+      gate; if ``dry_run=False`` the real apply happens directly.
+    - ``force_dry_run_first=True`` (``AutoMode``): always dry-run first
+      regardless of ``dry_run`` (the real apply that follows is always
+      attempted with ``dry_run=False``) -- if that dry-run reports any
+      errors, the real apply is never attempted and this returns early with
+      ``dry_run_failed=True`` so the caller can gate for human review.
+
+    Side effects, consolidated here so both call sites can't drift apart:
+
+    - ``record_skill_outcomes()`` fires after a real apply (never after a
+      dry-run-only call) that produced at least one applied file with no
+      unhandled exception. When the real apply had per-file errors,
+      ``record_outcomes_on_partial_failure`` decides whether to still record
+      outcomes for the files that *did* succeed (manual route: ``True``,
+      matching its pre-existing "record whatever actually applied" behavior)
+      or to skip recording entirely, as ``AutoMode.execute()`` did before
+      this refactor (``False``).
+    - ``audit_log()`` fires exactly once per call, covering every exit path
+      (dry-run-only, real apply, the ``force_dry_run_first`` gate, and an
+      unexpected exception) -- closing the real gap where ``AutoMode``
+      previously had no audit trail for its own auto-applies at all, unlike
+      the manual route which already audited every "Apply to Cluster" click.
+
+    Returns ``apply_manifests_to_cluster()``'s result dict, plus two keys:
+      - ``is_dry_run``: whether ``applied``/``skipped``/``errors`` reflect a
+        dry-run (``True``) or a real apply (``False``).
+      - ``dry_run_failed``: ``True`` only when ``force_dry_run_first``'s
+        safety check caught errors and the real apply was never attempted.
+    """
+    try:
+        if force_dry_run_first:
+            dry_result = await asyncio.to_thread(apply_manifests_to_cluster, files, namespace, True)
+            if dry_result["errors"]:
+                audit_log(
+                    actor=actor, action=action, resource=resource, outcome="dry-run-failed",
+                    details={"namespace": namespace, "errors": len(dry_result["errors"])},
+                )
+                return {**dry_result, "is_dry_run": True, "dry_run_failed": True}
+            result = await asyncio.to_thread(apply_manifests_to_cluster, files, namespace, False)
+            is_dry_run_result = False
+        else:
+            result = await asyncio.to_thread(apply_manifests_to_cluster, files, namespace, dry_run)
+            is_dry_run_result = dry_run
+    except Exception:
+        audit_log(
+            actor=actor, action=action, resource=resource, outcome="error",
+            details={"namespace": namespace, "dry_run": dry_run},
+        )
+        raise
+
+    if not is_dry_run_result and (record_outcomes_on_partial_failure or not result["errors"]):
+        await record_skill_outcomes(
+            store, app_name, files, set(result["applied"]), "approved", skill_outcome_reason,
+        )
+
+    audit_log(
+        actor=actor, action=action, resource=resource,
+        outcome="success" if not result["errors"] else "partial",
+        details={
+            "namespace": namespace, "dry_run": is_dry_run_result,
+            "applied": len(result["applied"]), "errors": len(result["errors"]),
+        },
+    )
+
+    return {**result, "is_dry_run": is_dry_run_result, "dry_run_failed": False}
 
 
 # Packages whose CSV only supports the OwnNamespace install mode, so they must

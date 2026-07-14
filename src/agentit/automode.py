@@ -113,7 +113,7 @@ class AutoMode:
 
         Returns {"action": "applied"|"gated"|"failed", "reason": str, "details": dict}
         """
-        from agentit.portal.cluster_apply import apply_manifests_to_cluster
+        from agentit.portal.cluster_apply import apply_with_verification
 
         manifests = [f["content"] for f in files if f["path"].endswith((".yaml", ".yml"))]
 
@@ -134,22 +134,40 @@ class AutoMode:
             )
             return {"action": "gated", "reason": reason, "details": {"gate_id": gate_id}}
 
-        # Step 1: dry-run (kube/oc apply is a blocking, synchronous call --
-        # narrowly wrapped in to_thread right here, not the whole method).
-        dry_result = await asyncio.to_thread(apply_manifests_to_cluster, files, namespace, dry_run=True)
-        if dry_result["errors"]:
+        # Dry-run first, then apply for real -- ``force_dry_run_first=True``
+        # is auto-mode's own safety gate (unlike the manual "Apply to
+        # Cluster" route, which just does whatever the human explicitly
+        # asked for via its own ``dry_run`` flag with no automatic
+        # dry-run-first sequencing). Per-skill outcome recording is
+        # deliberately gated on a *fully clean* real apply here (see
+        # ``record_outcomes_on_partial_failure=False`` below): "gated" is a
+        # deferral to a human, not a verdict on the skill, and a partial
+        # failure is intentionally left unrecorded too (the human's eventual
+        # decision at /gates is what records approved/rejected for a gated
+        # candidate). ``audit_log()`` (inside ``apply_with_verification``)
+        # now covers auto-mode's own privileged apply action too, matching
+        # the manual route -- previously auto-mode had no audit trail here
+        # at all, only the ``_log_event``/publisher calls below.
+        result = await apply_with_verification(
+            files, namespace, dry_run=False,
+            force_dry_run_first=True,
+            store=self._store, app_name=app_name,
+            skill_outcome_reason=reason,
+            record_outcomes_on_partial_failure=False,
+            actor="auto-mode", action="auto-apply",
+            resource=f"assessment:{assessment_id}",
+        )
+
+        if result["dry_run_failed"]:
             await self._log_event(
                 "auto-mode", "dry-run-failed", app_name, "warning",
-                f"Dry-run failed with {len(dry_result['errors'])} error(s)",
+                f"Dry-run failed with {len(result['errors'])} error(s)",
             )
             gate_id = await self._store.create_gate(
                 assessment_id, "dry-run-failed",
-                f"Dry-run failed: {'; '.join(dry_result['errors'][:3])}",
+                f"Dry-run failed: {'; '.join(result['errors'][:3])}",
             )
-            return {"action": "gated", "reason": "dry-run failed", "details": dry_result}
-
-        # Step 2: apply for real
-        result = await asyncio.to_thread(apply_manifests_to_cluster, files, namespace, dry_run=False)
+            return {"action": "gated", "reason": "dry-run failed", "details": result}
 
         if result["errors"]:
             await self._log_event(
@@ -165,19 +183,6 @@ class AutoMode:
         await self._log_event(
             "auto-mode", "auto-applied", app_name, "info",
             f"Applied {len(result['applied'])} manifests to {namespace}",
-        )
-
-        # Per-skill outcome, in addition to the generic event above -- lets
-        # skill_effectiveness see auto-mode's real-world successes, not just
-        # self-fix's. Deliberately only recorded for a genuine successful
-        # apply: "gated" is a deferral to a human, not a verdict on the
-        # skill, and is intentionally left unrecorded here (the human's
-        # eventual decision at /gates is what records approved/rejected for
-        # a gated candidate).
-        from agentit.skill_engine import record_skill_outcomes
-        await record_skill_outcomes(
-            self._store, app_name, files, set(result["applied"]), "approved",
-            reason,
         )
 
         remediations = await self._store.list_remediations(assessment_id)

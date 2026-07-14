@@ -494,9 +494,11 @@ async def learn_watch(interval: int, limit: int, llm_model: str | None) -> None:
 
     store = await create_store()
     # AGENTIT_SKILLS_DIR, when set (chart/templates/agents/skill-learner.yaml
-    # sets it to a dedicated mounted PVC), points drafts at persistent
-    # storage instead of this pod's own ephemeral `skills/` tree -- see
-    # SkillLearner's docstring for what this does and doesn't fix.
+    # sets it to a dedicated mounted PVC), is only the *fallback* location
+    # now -- drafts are primarily pushed to the portal via an internal API
+    # call (AGENTIT_PORTAL_URL) so they're visible on the Capabilities page
+    # immediately; this PVC only matters if the portal is unreachable. See
+    # SkillLearner's module docstring for the full mechanism.
     skills_dir_env = os.environ.get("AGENTIT_SKILLS_DIR")
     learner = SkillLearner(
         publisher=get_publisher(), llm_model=llm_model, interval=interval, limit=limit,

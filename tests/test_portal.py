@@ -1805,6 +1805,69 @@ def test_capabilities_page_shows_skill_learner_recent_heartbeat(client, _overrid
     assert "is running" in resp.text
 
 
+# ── Capabilities: watcher-submitted skill drafts (cross-pod visibility) ──
+#
+# The skill-learner watcher runs in its own pod with no shared filesystem
+# with the portal (no RWX storage class is available on this cluster --
+# see chart/templates/agents/skill-learner.yaml's comments). It now pushes
+# every draft to this internal endpoint instead of only writing to its own
+# isolated disk -- these tests prove the draft becomes visible via the
+# portal's OWN skill-listing logic (skill_engine.load_all_skills(), what
+# _cached_skills() calls), not just that a file landed somewhere.
+
+
+def test_webhook_skill_draft_requires_content(client, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "skills").mkdir()
+    resp = client.post("/api/webhook/skill-draft", json={"domain": "security"})
+    assert resp.status_code == 400
+
+
+def test_webhook_skill_draft_saves_and_busts_cache(client, tmp_path, monkeypatch):
+    """The core cross-pod-visibility fix: a draft submitted through this
+    internal endpoint (what the skill-learner watcher's own pod calls
+    instead of writing only to its own isolated filesystem) lands exactly
+    where `_cached_skills()` -- the same function backing the Capabilities
+    page -- looks, and is visible with no portal restart or manual sync."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "skills").mkdir()
+
+    from agentit.portal.routes import capabilities as capabilities_routes
+    capabilities_routes._skills_cache["data"] = ["stale-cached-list"]
+
+    content = (
+        "---\nname: watcher-drafted-cve\ndomain: security\nversion: 1\n"
+        "triggers: [test]\noutputs: [NetworkPolicy]\nstatus: draft\n---\nbody\n"
+    )
+    resp = client.post("/api/webhook/skill-draft", json={"content": content, "domain": "security"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["name"] == "watcher-drafted-cve"
+    assert (tmp_path / "skills" / "security" / "watcher-drafted-cve.md").exists()
+
+    # Prove visibility via the portal's OWN skill-listing logic, not just
+    # "the file exists on disk somewhere".
+    from agentit.skill_engine import load_all_skills
+    skills = load_all_skills(tmp_path / "skills")
+    assert any(s.name == "watcher-drafted-cve" and s.status == "draft" for s in skills)
+
+    # And the 60s Capabilities cache must be busted -- the exact same cache
+    # capabilities_learn_route busts after a manual button-triggered draft --
+    # so the next page load reflects it with no restart or manual step.
+    assert capabilities_routes._skills_cache["data"] is None
+
+
+def test_webhook_skill_draft_save_failure_returns_500(client, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "skills").mkdir()
+    with patch("agentit.learning_agent.save_skill", return_value=None):
+        resp = client.post(
+            "/api/webhook/skill-draft",
+            json={"content": "---\nname: x\n---\nbody", "domain": "security"},
+        )
+    assert resp.status_code == 500
+
+
 # ── Capabilities: activate a draft skill ────────────────────────────────
 
 
