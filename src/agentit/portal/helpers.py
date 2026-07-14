@@ -300,15 +300,32 @@ async def run_onboarding(report, assessment_id: str | None = None, store: object
             if not ar.success:
                 continue
             category_dir = base / ar.category
+            # See agents/orchestrator.py::_write_target_path_manifest -- the
+            # only way CodeChangeAgent's real target file (e.g. "Dockerfile")
+            # survives from the agent's in-memory GeneratedFile.target_path
+            # to this dict, which is all the delivery router downstream ever
+            # sees.
+            target_paths: dict[str, str] = {}
+            manifest_path = category_dir / "_target_paths.json"
+            if manifest_path.is_file():
+                import json as _json
+                try:
+                    target_paths = _json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    log.warning("Failed to read target-path manifest for %s", ar.category, exc_info=True)
             for rel_path in ar.files_generated:
                 file_path = category_dir / rel_path
                 if file_path.is_file():
-                    all_files.append({
+                    entry = {
                         "category": ar.category,
                         "path": rel_path,
                         "description": rel_path,
                         "content": file_path.read_text(encoding="utf-8"),
-                    })
+                    }
+                    target_path = target_paths.get(rel_path, "")
+                    if target_path:
+                        entry["target_path"] = target_path
+                    all_files.append(entry)
 
         orch_summary = {
             "agents": [

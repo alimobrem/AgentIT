@@ -30,6 +30,15 @@ def _recency_weight(created_at_iso: str, now: datetime, half_life_days: float) -
     return 0.5 ** (age_days / half_life_days)
 
 
+def _deserialize_delivery(row: sqlite3.Row | None) -> dict | None:
+    if row is None:
+        return None
+    d = dict(row)
+    d["categories"] = json.loads(d.pop("categories_json"))
+    d["details"] = json.loads(d.pop("details_json"))
+    return d
+
+
 class AssessmentStore:
     def __init__(self, db_path: str | None = None) -> None:
         import os
@@ -318,6 +327,30 @@ class AssessmentStore:
             """
         )
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_check_results_assessment ON check_results(assessment_id)")
+        # Tracks every change set routed through the unified delivery flow
+        # (portal/delivery.py::route_and_deliver) -- what was routed, which
+        # mechanism was chosen, delivery status, and verification outcome.
+        # See docs/unified-apply-flow.md section (C) for the track -> route
+        # -> deliver -> verify -> close loop this table backs.
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS deliveries (
+                id TEXT PRIMARY KEY,
+                assessment_id TEXT NOT NULL,
+                app_name TEXT NOT NULL,
+                categories_json TEXT NOT NULL DEFAULT '{}',
+                mechanism TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                verification TEXT NOT NULL DEFAULT 'unknown',
+                details_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (assessment_id) REFERENCES assessments(id)
+            )
+            """
+        )
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_deliveries_assessment ON deliveries(assessment_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_deliveries_app ON deliveries(app_name)")
         self._conn.commit()
         self._refresh_active_gates_metric()
 
@@ -782,6 +815,11 @@ class AssessmentStore:
                 "last_assessed": r["assessed_at"],
                 "assessment_count": trend["assessments_count"],
                 "critical_count": critical_count,
+                # Closes the plumbing gap docs/unified-apply-flow.md calls
+                # out: fleet-wide callers that only ever had this dict (e.g.
+                # vuln_watcher.check_fleet, webhooks.webhook_finding) could
+                # not previously see whether an app is GitOps-registered.
+                "infra_repo_url": report.infra_repo_url,
             })
         return fleet
 
@@ -881,6 +919,92 @@ class AssessmentStore:
         if cursor.rowcount:
             self._refresh_active_gates_metric()
         return cursor.rowcount > 0
+
+    # ── Deliveries ───────────────────────────────────────────────────────
+    #
+    # Tracking table for the unified apply flow (docs/unified-apply-flow.md):
+    # one row per `route_and_deliver()` change set, recording what was
+    # routed (`categories`), which mechanism was chosen (`mechanism`), its
+    # delivery status, and its post-delivery verification outcome.
+
+    def create_delivery(
+        self,
+        assessment_id: str,
+        app_name: str,
+        categories: dict,
+        mechanism: str,
+        status: str = "pending",
+        details: dict | None = None,
+    ) -> str:
+        delivery_id = uuid.uuid4().hex
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO deliveries
+                (id, assessment_id, app_name, categories_json, mechanism, status, verification, details_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'unknown', ?, ?, ?)
+            """,
+            (
+                delivery_id, assessment_id, app_name, json.dumps(categories), mechanism, status,
+                json.dumps(details or {}), now, now,
+            ),
+        )
+        self._conn.commit()
+        return delivery_id
+
+    def update_delivery(
+        self,
+        delivery_id: str,
+        *,
+        status: str | None = None,
+        verification: str | None = None,
+        details: dict | None = None,
+    ) -> bool:
+        row = self._conn.execute(
+            "SELECT details_json FROM deliveries WHERE id = ?", (delivery_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        merged_details = json.loads(row["details_json"])
+        if details:
+            merged_details.update(details)
+        cursor = self._conn.execute(
+            """
+            UPDATE deliveries SET
+                status = COALESCE(?, status),
+                verification = COALESCE(?, verification),
+                details_json = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (status, verification, json.dumps(merged_details), datetime.now(timezone.utc).isoformat(), delivery_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def get_delivery(self, delivery_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM deliveries WHERE id = ?", (delivery_id,),
+        ).fetchone()
+        return _deserialize_delivery(row)
+
+    def list_deliveries(self, assessment_id: str) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM deliveries WHERE assessment_id = ? ORDER BY created_at DESC", (assessment_id,),
+        ).fetchall()
+        return [_deserialize_delivery(r) for r in rows if r is not None]
+
+    def list_pending_gitops_deliveries(self) -> list[dict]:
+        """Deliveries committed to an infra repo but not yet observed as
+        synced by ``DriftDetector`` -- see ``watchers/drift_detector.py``'s
+        extended ``detect_once()``, which closes this loop asynchronously
+        once an Argo CD ``Application``'s ``status.sync.revision`` matches
+        one of these rows' committed SHA."""
+        rows = self._conn.execute(
+            "SELECT * FROM deliveries WHERE mechanism = 'infra-repo-commit' AND verification = 'unknown' "
+            "ORDER BY created_at ASC",
+        ).fetchall()
+        return [_deserialize_delivery(r) for r in rows if r is not None]
 
     # ── Remediations ───────────────────────────────────────────────────
 
@@ -1877,7 +2001,7 @@ class AssessmentStore:
         "assessments", "onboarding_results", "events", "gates", "remediations",
         "agent_registry", "slos", "apply_results", "remediation_jobs",
         "scheduled_operations", "agent_feedback", "skill_effectiveness",
-        "agent_runs", "check_results",
+        "agent_runs", "check_results", "deliveries",
     )
 
     def get_db_stats(self) -> dict:

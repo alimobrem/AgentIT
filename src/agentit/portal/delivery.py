@@ -1,0 +1,474 @@
+"""The unified apply flow's router: classify generated files into
+docs/unified-apply-flow.md's taxonomy, decide whether an app is
+GitOps-registered, and route each classified group to exactly one delivery
+mechanism -- closing the gap where "Apply to Cluster", "Create PR",
+gate-approve, ``AutoMode``, and ``DriftDetector`` could each independently
+decide "this change reaches a cluster/repo now" with no shared decision, no
+shared verification tail, and no awareness of each other.
+
+See docs/unified-apply-flow.md for the full design this module implements.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from pathlib import Path
+
+from agentit import kube
+from agentit.audit import audit_log
+from agentit.models import AssessmentReport
+from agentit.portal.cluster_apply import (
+    _OPERATOR_NAMESPACES,
+    _parse_manifest,
+    apply_with_verification,
+)
+from agentit.skill_engine import record_skill_outcomes
+
+logger = logging.getLogger(__name__)
+
+# ── Taxonomy categories (docs/unified-apply-flow.md section (D)) ──────────
+CATEGORY_CLUSTER_CONFIG = "cluster_config"
+CATEGORY_CICD_SHARED_NAMESPACE = "cicd_shared_namespace"
+CATEGORY_SOURCE_PATCH = "source_patch"
+CATEGORY_NARRATIVE_REPORT = "narrative_report"
+CATEGORY_MANIFEST_AT_REST = "manifest_at_rest"
+CATEGORY_SECRET_BLOCKED = "secret_blocked"
+
+# Mechanisms a category can be routed to.
+MECHANISM_DIRECT_APPLY = "direct-apply"
+MECHANISM_INFRA_REPO_COMMIT = "infra-repo-commit"
+MECHANISM_CLUSTER_ADMIN_REVIEW_GATE = "cluster-admin-review-gate"
+MECHANISM_SOURCE_REPO_PR = "source-repo-pr"
+MECHANISM_APP_REPO_PR = "app-repo-pr"
+MECHANISM_NONE = "none"
+
+_NARRATIVE_REPORT_FILENAMES = frozenset({"dependency-report.md", "cost-report.md"})
+
+# Human-facing mechanism descriptions surfaced at the confirmation step a
+# human must actively acknowledge before a real delivery fires (per the
+# 2026-07-14 customer-review addendum to docs/unified-apply-flow.md: a
+# dynamically-relabeled button alone is "less on-screen signal than two
+# buttons", so the *reason* a mechanism was chosen must be spelled out at
+# the point of no return, not only on an earlier, skippable dry-run screen).
+MECHANISM_DESCRIPTIONS: dict[str, str] = {
+    MECHANISM_DIRECT_APPLY: "Apply these manifests directly to the cluster -- no GitOps registration was found for this app.",
+    MECHANISM_INFRA_REPO_COMMIT: "Commit to the GitOps infra repo and open a PR -- this app is GitOps-registered via a live Argo CD Application. A human must still merge the PR; AgentIT will never auto-merge.",
+    MECHANISM_CLUSTER_ADMIN_REVIEW_GATE: "Hold for cluster-admin review -- these manifests target a shared operator namespace this service account cannot apply to without elevated RBAC.",
+    MECHANISM_SOURCE_REPO_PR: "Open a PR with a real patch against the named file(s) in this app's own source repo.",
+    MECHANISM_APP_REPO_PR: "Open an informational PR with these files under `.agentit/` in this app's own repo.",
+    MECHANISM_NONE: "Nothing to deliver.",
+}
+
+
+def confirmation_text(mechanism: str, *, infra_repo_url: str | None = None) -> str:
+    """The exact statement a human must see -- and actively acknowledge --
+    immediately before ``route_and_deliver()`` actually fires for the
+    cluster/app-config category, e.g. via a gate-approve confirmation or the
+    portal's unified "Deliver" action. Reused verbatim by both the dry-run
+    preview *and* the point-of-no-return confirmation dialog, so the two
+    can never say different things about the same decision.
+    """
+    base = MECHANISM_DESCRIPTIONS.get(mechanism, mechanism)
+    if mechanism == MECHANISM_INFRA_REPO_COMMIT and infra_repo_url:
+        return f"AgentIT will: commit to `{infra_repo_url}` and open a PR -- this app is GitOps-registered via a live Argo CD Application. A human must merge; AgentIT will never auto-merge."
+    if mechanism == MECHANISM_DIRECT_APPLY:
+        return "AgentIT will: apply these manifests directly to the cluster -- no GitOps registration was found for this app."
+    return f"AgentIT will: {base}"
+
+
+def classify_file(entry: dict) -> str:
+    """Classify one generated file into docs/unified-apply-flow.md's
+    taxonomy. Reuses ``cluster_apply.py``'s existing YAML-parsing helper
+    (kept, not replaced, per the design doc) -- this only adds the
+    category-level decision on top of it.
+    """
+    category = entry.get("category", "")
+    path = entry.get("path", "")
+    suffix = Path(path).suffix.lower()
+
+    # CodeChangeAgent output -- explicitly tagged by category rather than
+    # guessed from file extension, per the design doc. Its own summary file
+    # is documentation about the changes, not a change itself.
+    if category == "codechange":
+        if path == "code-changes-summary.md":
+            return CATEGORY_NARRATIVE_REPORT
+        return CATEGORY_SOURCE_PATCH
+
+    # DependencyAgent/CostOptimizationAgent's narrative reports -- real
+    # computed data, not a template, and never a delivery candidate (see
+    # taxonomy row "Narrative reports").
+    if category in ("dependency", "cost") and path in _NARRATIVE_REPORT_FILENAMES:
+        return CATEGORY_NARRATIVE_REPORT
+
+    if suffix not in (".yaml", ".yml"):
+        return CATEGORY_MANIFEST_AT_REST
+
+    docs = _parse_manifest(entry.get("content", ""))
+    if not docs:
+        return CATEGORY_MANIFEST_AT_REST
+
+    # Secrets/credential-adjacent changes -- named in the design doc as a
+    # permanent deny-rule, not a routing gap: never deliver via any
+    # mechanism, ever.
+    for doc in docs:
+        if (doc.get("kind") or "") == "Secret":
+            return CATEGORY_SECRET_BLOCKED
+
+    for doc in docs:
+        meta = doc.get("metadata") or {}
+        if meta.get("namespace", "") in _OPERATOR_NAMESPACES:
+            return CATEGORY_CICD_SHARED_NAMESPACE
+
+    return CATEGORY_CLUSTER_CONFIG
+
+
+def _sanitize_app_name(app_name: str) -> str:
+    return app_name.lower().replace("_", "-").replace(".", "-")
+
+
+async def is_gitops_registered(
+    app_name: str, report: AssessmentReport | None,
+) -> tuple[bool, str | None]:
+    """Whether ``app_name`` is GitOps-registered -- a real query ("does a
+    live Argo CD ``Application`` exist targeting this namespace") rather
+    than "was an infra repo URL set once", per the design doc's plumbing-gap
+    fix. Falls back to ``report.infra_repo_url is not None`` only when the
+    cluster call itself fails (unreachable/offline cluster, e.g. tests) --
+    a successful call that simply finds no ``Application`` is NOT registered
+    regardless of ``infra_repo_url``.
+    """
+    infra_repo_url = report.infra_repo_url if report is not None else None
+    sanitized = _sanitize_app_name(app_name)
+    try:
+        app = await asyncio.to_thread(
+            kube.get_custom_resource,
+            "argoproj.io", "v1alpha1", "applications", f"managed-{sanitized}",
+            namespace="openshift-gitops",
+        )
+        return app is not None, infra_repo_url
+    except Exception as exc:
+        logger.debug(
+            "GitOps registration check failed for %s, falling back to infra_repo_url: %s",
+            app_name, exc,
+        )
+        return infra_repo_url is not None, infra_repo_url
+
+
+async def deliver_with_verification(
+    *,
+    mechanism: str,
+    files: list[dict],
+    report: AssessmentReport,
+    app_name: str,
+    store: object,
+    assessment_id: str,
+    actor: str,
+    dry_run: bool,
+) -> dict:
+    """Structurally parallel to ``cluster_apply.apply_with_verification()``,
+    for the commit-and-PR delivery mechanisms
+    (``infra-repo-commit``/``source-repo-pr``/``app-repo-pr``): one
+    ``audit_log()`` call covering every exit path, and
+    ``record_skill_outcomes()`` after a successful commit/PR (not just a
+    successful apply -- a merged PR is exactly as strong a "this fix was
+    accepted" signal, per the design doc).
+    """
+    resource = f"assessment:{assessment_id}"
+
+    if dry_run:
+        audit_log(
+            actor=actor, action="deliver", resource=resource, outcome="dry-run",
+            details={"mechanism": mechanism, "files": len(files)},
+        )
+        return {"mechanism": mechanism, "dry_run": True, "files": [f["path"] for f in files]}
+
+    try:
+        if mechanism == MECHANISM_INFRA_REPO_COMMIT:
+            from agentit.portal.github_pr import commit_to_infra_repo, ensure_applicationset
+
+            result = await asyncio.to_thread(commit_to_infra_repo, report.infra_repo_url, app_name, files)
+            if "error" not in result:
+                await asyncio.to_thread(ensure_applicationset, report.infra_repo_url)
+                commit_url = result.get("commit_url", "")
+                if commit_url:
+                    result["commit_sha"] = commit_url.rsplit("/", 1)[-1]
+        elif mechanism == MECHANISM_SOURCE_REPO_PR:
+            from agentit.portal.github_pr import create_source_patch_pr
+
+            result = await asyncio.to_thread(create_source_patch_pr, report.repo_url, app_name, files)
+        elif mechanism == MECHANISM_APP_REPO_PR:
+            from agentit.portal.github_pr import create_onboarding_pr
+
+            result = await asyncio.to_thread(create_onboarding_pr, report.repo_url, app_name, files)
+        else:
+            raise ValueError(f"Unknown delivery mechanism: {mechanism}")
+    except Exception as exc:
+        audit_log(
+            actor=actor, action="deliver", resource=resource, outcome="error",
+            details={"mechanism": mechanism, "error": str(exc)[:200]},
+        )
+        raise
+
+    outcome = "error" if "error" in result else "success"
+    audit_log(
+        actor=actor, action="deliver", resource=resource, outcome=outcome,
+        details={"mechanism": mechanism, "files": len(files),
+                  **{k: v for k, v in result.items() if k != "error"}},
+    )
+
+    if outcome == "success":
+        await record_skill_outcomes(
+            store, app_name, files, {f["path"] for f in files}, "approved",
+            f"delivered via {mechanism}",
+        )
+
+    return {"mechanism": mechanism, "dry_run": False, **result}
+
+
+def _cicd_gate_summary(files: list[dict]) -> str:
+    namespaces: set[str] = set()
+    for f in files:
+        for doc in _parse_manifest(f.get("content", "")):
+            ns = (doc.get("metadata") or {}).get("namespace", "")
+            if ns:
+                namespaces.add(ns)
+    ns_list = ", ".join(sorted(namespaces)) or "a shared operator namespace"
+    return (
+        f"{len(files)} manifest(s) target {ns_list} -- needs cluster-admin RBAC "
+        "this service account doesn't have by default. Approving this gate will "
+        "apply directly into that namespace (never a silent skip)."
+    )
+
+
+async def _maybe_schedule_verification(
+    store: object, delivery_id: str, assessment_id: str, app_name: str,
+    namespace: str, mechanism: str, dry_run: bool,
+) -> None:
+    """Fire-and-forget the shared SLO-watch-and-rollback tail (generalized
+    from ``RemediationLoop``) for this delivery, exactly like every other
+    delivery through the unified router -- but only when there's an actual
+    SLO to watch for this assessment (onboarding's
+    ``FleetOrchestrator._create_default_slos()`` always creates one in
+    production). This deliberately skips scheduling a 60s background
+    verify loop for callers/tests that never set up SLOs, so unit tests
+    exercising ``route_and_deliver()`` don't leak dangling asyncio tasks.
+    """
+    if dry_run or mechanism not in (MECHANISM_DIRECT_APPLY, MECHANISM_INFRA_REPO_COMMIT):
+        return
+    try:
+        slos = await store.list_slos(assessment_id)
+    except Exception:
+        slos = []
+    if not slos:
+        return
+    asyncio.create_task(
+        verify_and_close_delivery(store, delivery_id, assessment_id, app_name, namespace, mechanism)
+    )
+
+
+async def verify_and_close_delivery(
+    store: object, delivery_id: str, assessment_id: str, app_name: str,
+    namespace: str, mechanism: str,
+) -> dict:
+    """The shared verify step every delivery ends in (docs/unified-apply-
+    flow.md section (C)): 60s SLO watch, then close the delivery row as
+    verified, or roll back (direct-apply) / report-and-stop (GitOps --
+    rollback semantics for that branch are explicitly out of scope, see the
+    design doc's "Deliberately not addressed" #3: reverting a merged commit
+    and waiting for a second human merge is a real, honestly-named gap, not
+    something this router auto-shortcuts).
+    """
+    from agentit.remediation_loop import rollback_action, verify_slos
+
+    try:
+        result = await verify_slos(store, assessment_id, app_name)
+    except Exception as exc:
+        logger.warning("Verification failed for delivery %s: %s", delivery_id, exc)
+        await store.update_delivery(delivery_id, details={"verify_error": str(exc)})
+        return {"healthy": None, "error": str(exc)}
+
+    if result["healthy"]:
+        await store.update_delivery(delivery_id, status="verified", verification="verified")
+        return result
+
+    if mechanism == MECHANISM_DIRECT_APPLY:
+        rb = await rollback_action(app_name, namespace)
+        await store.update_delivery(
+            delivery_id, status="rolled_back", verification="breached",
+            details={"rollback": rb, "breach_reason": result.get("reason")},
+        )
+    else:
+        await store.update_delivery(
+            delivery_id, status="breach-reported", verification="breached",
+            details={"breach_reason": result.get("reason")},
+        )
+    return result
+
+
+async def route_and_deliver(
+    files: list[dict],
+    *,
+    app_name: str,
+    namespace: str,
+    report: AssessmentReport | None,
+    store: object,
+    assessment_id: str,
+    actor: str,
+    dry_run: bool,
+    force_dry_run_first: bool,
+) -> dict:
+    """The one decision surface for "does this change reach a cluster/repo
+    now" -- classify, look up GitOps registration, and route each
+    classified group to exactly one delivery mechanism. Every one of the
+    design doc's six entry points (manual apply, gate-approve, AutoMode,
+    DriftDetector's future new-fix path, Create PR, Per-Agent PRs) funnels
+    through this instead of independently calling
+    ``apply_manifests_to_cluster``/``apply_with_verification``/
+    ``create_onboarding_pr``/``commit_to_infra_repo`` on their own.
+
+    ``assessment_id`` is required (not in the design doc's illustrative
+    signature) because every side effect here -- gates, SLOs, audit
+    resources, the ``deliveries`` row itself -- is keyed by it.
+    """
+    groups: dict[str, list[dict]] = {}
+    for f in files:
+        groups.setdefault(classify_file(f), []).append(f)
+
+    blocked = groups.pop(CATEGORY_SECRET_BLOCKED, [])
+    for f in blocked:
+        logger.error(
+            "Delivery blocked: %s classified as kind=Secret -- never routed to any "
+            "delivery mechanism (see docs/unified-apply-flow.md's permanent deny-rule)",
+            f.get("path"),
+        )
+
+    excluded = groups.pop(CATEGORY_NARRATIVE_REPORT, [])
+
+    registered, infra_repo_url = await is_gitops_registered(app_name, report)
+
+    categories_summary: dict[str, int] = {cat: len(fs) for cat, fs in groups.items()}
+    if blocked:
+        categories_summary[CATEGORY_SECRET_BLOCKED] = len(blocked)
+    if excluded:
+        categories_summary[CATEGORY_NARRATIVE_REPORT] = len(excluded)
+
+    mechanisms: dict[str, str] = {}
+    outcomes: dict[str, object] = {}
+
+    # Registered-but-no-known-infra-repo-URL is a real (rare) edge case the
+    # design doc doesn't name explicitly: a live Argo CD Application found
+    # for this app, but this particular assessment's report never recorded
+    # which infra repo it lives in. Direct-applying here would be exactly
+    # the footgun the design doc closes (racing Argo's next prune-sync), and
+    # there's no repo to guess for a commit -- so this refuses to pick
+    # either mechanism and surfaces the ambiguity instead.
+    cluster_files = groups.pop(CATEGORY_CLUSTER_CONFIG, [])
+    if cluster_files:
+        if registered and infra_repo_url is None:
+            mechanisms[CATEGORY_CLUSTER_CONFIG] = MECHANISM_NONE
+        else:
+            mechanisms[CATEGORY_CLUSTER_CONFIG] = (
+                MECHANISM_INFRA_REPO_COMMIT if registered else MECHANISM_DIRECT_APPLY
+            )
+
+    cicd_files = groups.pop(CATEGORY_CICD_SHARED_NAMESPACE, [])
+    if cicd_files:
+        mechanisms[CATEGORY_CICD_SHARED_NAMESPACE] = MECHANISM_CLUSTER_ADMIN_REVIEW_GATE
+
+    source_files = groups.pop(CATEGORY_SOURCE_PATCH, [])
+    if source_files:
+        mechanisms[CATEGORY_SOURCE_PATCH] = MECHANISM_SOURCE_REPO_PR
+
+    at_rest_files = groups.pop(CATEGORY_MANIFEST_AT_REST, [])
+    if at_rest_files:
+        mechanisms[CATEGORY_MANIFEST_AT_REST] = MECHANISM_APP_REPO_PR
+
+    delivery_id = await store.create_delivery(
+        assessment_id, app_name, categories_summary,
+        mechanism=",".join(f"{c}:{m}" for c, m in mechanisms.items()) or MECHANISM_NONE,
+        status="in_progress",
+        details={
+            "registered": registered, "infra_repo_url": infra_repo_url, "dry_run": dry_run,
+            "confirmation_text": {
+                cat: confirmation_text(m, infra_repo_url=infra_repo_url) for cat, m in mechanisms.items()
+            },
+        },
+    )
+
+    if cluster_files:
+        if mechanisms[CATEGORY_CLUSTER_CONFIG] == MECHANISM_NONE:
+            outcomes[CATEGORY_CLUSTER_CONFIG] = {
+                "error": (
+                    "app is GitOps-registered but no infra_repo_url is known for this "
+                    "assessment -- refusing to direct-apply (would race Argo's prune-sync) "
+                    "or guess which repo to commit to"
+                ),
+            }
+        elif registered and report is not None:
+            outcomes[CATEGORY_CLUSTER_CONFIG] = await deliver_with_verification(
+                mechanism=MECHANISM_INFRA_REPO_COMMIT, files=cluster_files, report=report,
+                app_name=app_name, store=store, assessment_id=assessment_id,
+                actor=actor, dry_run=dry_run,
+            )
+        else:
+            result = await apply_with_verification(
+                cluster_files, namespace, dry_run,
+                force_dry_run_first=force_dry_run_first,
+                store=store, app_name=app_name,
+                skill_outcome_reason=f"delivered via {actor}",
+                actor=actor, action="deliver-apply",
+                resource=f"assessment:{assessment_id}",
+            )
+            await store.save_apply_results(assessment_id, result, namespace, result["is_dry_run"])
+            outcomes[CATEGORY_CLUSTER_CONFIG] = result
+
+    if cicd_files:
+        gate_id = await store.create_gate(
+            assessment_id, "cluster-admin-review", _cicd_gate_summary(cicd_files),
+        )
+        outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = {
+            "gate_id": gate_id, "files": [f["path"] for f in cicd_files],
+        }
+
+    if source_files:
+        if report is not None:
+            outcomes[CATEGORY_SOURCE_PATCH] = await deliver_with_verification(
+                mechanism=MECHANISM_SOURCE_REPO_PR, files=source_files, report=report,
+                app_name=app_name, store=store, assessment_id=assessment_id,
+                actor=actor, dry_run=dry_run,
+            )
+        else:
+            outcomes[CATEGORY_SOURCE_PATCH] = {"error": "no assessment report available -- cannot open a source-repo PR"}
+
+    if at_rest_files:
+        if report is not None:
+            outcomes[CATEGORY_MANIFEST_AT_REST] = await deliver_with_verification(
+                mechanism=MECHANISM_APP_REPO_PR, files=at_rest_files, report=report,
+                app_name=app_name, store=store, assessment_id=assessment_id,
+                actor=actor, dry_run=dry_run,
+            )
+        else:
+            outcomes[CATEGORY_MANIFEST_AT_REST] = {"error": "no assessment report available"}
+
+    any_error = any(isinstance(o, dict) and "error" in o for o in outcomes.values())
+    overall_status = "delivered" if not any_error else "partial"
+    await store.update_delivery(
+        delivery_id, status=overall_status,
+        details={"outcomes": {k: v for k, v in outcomes.items()}},
+    )
+
+    if cluster_files:
+        mechanism_used = mechanisms[CATEGORY_CLUSTER_CONFIG]
+        await _maybe_schedule_verification(
+            store, delivery_id, assessment_id, app_name, namespace, mechanism_used, dry_run,
+        )
+
+    return {
+        "delivery_id": delivery_id,
+        "registered": registered,
+        "infra_repo_url": infra_repo_url,
+        "mechanisms": mechanisms,
+        "outcomes": outcomes,
+        "blocked": [f["path"] for f in blocked],
+        "excluded": [f["path"] for f in excluded],
+    }

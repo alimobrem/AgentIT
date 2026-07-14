@@ -20,6 +20,26 @@ def _safe_path(base: Path, relative: str) -> Path:
     clean = PurePosixPath(relative).name  # strips directory components and ..
     return base / clean
 
+
+_TARGET_PATHS_MANIFEST = "_target_paths.json"
+
+
+def _write_target_path_manifest(sub_dir: Path, files: list) -> None:
+    """Persist ``{path: target_path}`` for any generated file that carries a
+    non-empty ``GeneratedFile.target_path`` (currently only ``CodeChangeAgent``
+    output). ``AgentResult`` only threads plain relative paths through to
+    ``portal/helpers.py::run_onboarding`` -- this sidecar file is how that
+    per-file metadata survives the local-agent/K8s-Job -> portal boundary, so
+    the unified delivery router (``portal/delivery.py``) can build a real PR
+    patch against each file's actual destination in the app's own repo
+    instead of a same-named copy under a new directory.
+    """
+    mapping = {f.path: f.target_path for f in files if getattr(f, "target_path", "")}
+    if not mapping:
+        return
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    (sub_dir / _TARGET_PATHS_MANIFEST).write_text(json.dumps(mapping), encoding="utf-8")
+
 def _read_agent_mode() -> str:
     """AGENTIT_AGENT_MODE is the documented/canonical name; AGENT_MODE is
     kept as a fallback for anyone already relying on the
@@ -406,6 +426,7 @@ class FleetOrchestrator:
                 agent_run_duration_seconds.labels(agent=agent_name, mode="local").observe(elapsed)
                 agent_runs_total.labels(agent=agent_name, mode="local", status="success").inc()
                 await self._save_agent_run(agent_name, "local", "success", elapsed, resource_tier)
+                _write_target_path_manifest(sub_dir, result.files)
                 results.append(AgentResult(
                     agent_name=agent_name,
                     category=category,
@@ -567,6 +588,7 @@ class FleetOrchestrator:
                         for f in files:
                             safe = _safe_path(sub_dir, f.path)
                             safe.write_text(f.content, encoding="utf-8")
+                        _write_target_path_manifest(sub_dir, files)
                     except Exception as exc:
                         logger.warning("Failed to parse Job output for %s: %s", agent_name, exc)
                         agent_runs_total.labels(agent=agent_name, mode="kubernetes", status="error").inc()

@@ -84,6 +84,63 @@
 </div>
 {% endif %}
 
+<h2 class="section-title">Auto-Mode Allowlist</h2>
+<p class="text-muted mb-1">
+  Scope auto-mode to specific (namespace, resource-kind) combinations instead of the whole-batch
+  ON/OFF toggle above. With no allowlist entries, auto-mode's behavior is unchanged (everything the
+  decision matrix above approves gets applied). Once you add at least one entry, only manifests
+  matching an entry (namespace and kind both support <code>*</code> as a wildcard, e.g.
+  <code>*/ConfigMap</code>) are auto-applied — anything else in the same batch is gated for manual
+  review instead of blocking the whole batch.
+</p>
+<p class="text-muted mb-2">
+  <strong>{{ rbac_shaped_kinds | join(', ') }}</strong> can never be allowlisted here, regardless of
+  any pattern — auto-mode is for low-risk, reversible changes, never for identity/RBAC/credentials.
+</p>
+
+{% if allowlist_error %}
+<div class="alert alert-error mb-2">{{ allowlist_error }}</div>
+{% endif %}
+
+{% if auto_mode_allowlist %}
+<table class="mb-2">
+  <thead>
+    <tr><th>Namespace</th><th>Resource Kind</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for pattern in auto_mode_allowlist %}
+    <tr>
+      <td>{{ pattern.split('/', 1)[0] }}</td>
+      <td>{{ pattern.split('/', 1)[1] }}</td>
+      <td>
+        <form method="post" action="/settings/auto-mode-allowlist/remove" class="inline-form">
+          <input type="hidden" name="pattern" value="{{ pattern }}">
+          <button type="submit" class="btn btn-sm btn-outline">Remove</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="text-muted mb-2">No allowlist entries configured — auto-mode's whole-batch ON/OFF behavior is unaffected.</p>
+{% endif %}
+
+<form method="post" action="/settings/auto-mode-allowlist/add" class="form-narrow mb-2">
+  <div class="form-group">
+    <label class="form-label" for="allowlist-namespace">Namespace</label>
+    <input type="text" id="allowlist-namespace" name="namespace" placeholder="* for any namespace">
+  </div>
+  <div class="form-group">
+    <label class="form-label" for="allowlist-kind">Resource Kind</label>
+    <input type="text" id="allowlist-kind" name="kind" placeholder="e.g. ConfigMap" required>
+  </div>
+  <button type="submit" class="btn btn-sm btn-outline">
+    <span class="btn-label">Add to Allowlist</span>
+    <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+  </button>
+</form>
+
 <h2 class="section-title">Decision Matrix</h2>
 <table>
   <thead>

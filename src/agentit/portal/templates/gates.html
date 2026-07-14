@@ -24,18 +24,21 @@
   </div>
 
   <p class="my-4">{{ gate.summary }}</p>
+  {% if gate.delivery_confirmation %}
+  <p class="text-sm text-muted mb-1"><strong>{{ gate.delivery_confirmation }}</strong></p>
+  {% endif %}
 
   <div class="action-bar">
     <form method="POST" action="/gates/{{ gate.id }}/resolve" x-ref="approveForm">
       <input type="hidden" name="status" value="approved">
       <button type="button" class="btn btn-green"
         @click="$dispatch('show-confirm', {
-          title: 'Approve & Apply to Cluster',
-          message: 'This will apply the generated manifests to your cluster. This action modifies production resources.',
+          title: 'Approve & Deliver',
+          message: {{ gate.delivery_confirmation | default('This will apply the generated manifests to your cluster.', true) | tojson }} + ' This action modifies production resources.',
           form: $refs.approveForm,
-          opts: { confirmText: 'Apply to Cluster', danger: false }
+          opts: { confirmText: 'Approve & Deliver', danger: false }
         })">
-        Approve & Apply
+        Approve & Deliver
       </button>
     </form>
 

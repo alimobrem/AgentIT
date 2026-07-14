@@ -218,4 +218,41 @@ spec:
               `oc create secret generic github-webhook-secret -n agentit
               --from-literal=secret=<value matching GitHub's webhook config>`.
         {{- end }}
+
+        {{- if .Values.argoEvents.enabled }}
+        # Confirmed real Argo Events Sensor metric (argo_events_action_failed_total,
+        # labeled sensor_name/trigger_name -- see
+        # https://argoproj.github.io/argo-events/metrics/#argo_events_action_failed_total)
+        # for the exact CLASS of silent failure the 2026-07-13 retryStrategy.factor
+        # incident caused: a Sensor whose HTTP trigger can never fire stays
+        # Running/Ready at the Kubernetes level, so nothing about the Sensor
+        # pod itself looks unhealthy -- see docs/deployment.md's postmortem.
+        #
+        # NOT YET SCRAPED: this alert can only fire once the Sensor pods' own
+        # /metrics (container port "metrics", 7777 -- see argo-events'
+        # pkg/reconciler/sensor/resource.go) are actually scraped into this
+        # cluster's Prometheus. This chart's ServiceMonitor (servicemonitor.yaml)
+        # only covers the agentit app's own Service, not the Deployments Argo
+        # Events creates for each Sensor. Wiring that needs a PodMonitor
+        # selecting those Sensor pods -- deliberately left out here rather
+        # than guessed, since the exact pod-label selector the installed Argo
+        # Events version applies isn't something this chart controls, and a
+        # wrong guess would silently match zero pods (worse than no
+        # PodMonitor at all, and exactly the kind of silent failure this
+        # alert exists to catch).
+        - alert: AgentITSensorTriggerFailing
+          expr: |
+            increase(argo_events_action_failed_total{namespace="{{ .Release.Namespace }}"}[15m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "An AgentIT Argo Events Sensor trigger is failing to fire"
+            description: >-
+              argo_events_action_failed_total has increased for sensor
+              {{ "{{" }} $labels.sensor_name {{ "}}" }}, trigger
+              {{ "{{" }} $labels.trigger_name {{ "}}" }} in the last 15
+              minutes -- the same class of silent failure the 2026-07-13
+              retryStrategy.factor incident caused (docs/deployment.md).
+        {{- end }}
 {{- end }}

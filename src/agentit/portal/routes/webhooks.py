@@ -325,10 +325,11 @@ async def webhook_auto_apply(request: Request):
     result = await engine.execute(
         assessment_id, files, namespace,
         report.criticality, auto_approve, report.repo_name,
+        report=report,
     )
 
     log.info("auto-apply result for %s: %s -- %s", assessment_id, result["action"], result["reason"])
-    status_code = 207 if result["action"] in ("partial_failure", "failed") else 200
+    status_code = 207 if result["action"] in ("partial_failure", "failed", "split") else 200
     return JSONResponse(result, status_code=status_code)
 
 
@@ -379,10 +380,16 @@ async def webhook_finding(request: Request):
 
     if await auto.is_enabled() and result["files"]:
         namespace = app.get("deploy_namespace", app_name)
+        # `app` is `get_fleet_data()`'s summary dict, not the full report --
+        # fetch the real report so AutoMode can see `infra_repo_url` for its
+        # GitOps-aware terminal action (docs/unified-apply-flow.md's
+        # plumbing-gap fix: a fleet-wide dict alone can't answer "is this
+        # app GitOps-registered").
+        finding_report = await s.get(app["id"])
         auto_result = await auto.execute(
             app["id"], result["files"], namespace,
             app.get("criticality", "medium"), False, app_name,
-            result["agent"],
+            result["agent"], report=finding_report,
         )
         await s.log_event("dispatcher", auto_result["action"], app_name, "info",
                            f"Auto-mode {auto_result['action']} for {category}: {auto_result['reason']}")

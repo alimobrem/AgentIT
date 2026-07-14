@@ -145,3 +145,42 @@ def test_fixes_generate_name(_mock_kube):
     result = apply_manifests_to_cluster(files)
 
     assert result["applied"] == ["run.yaml"]
+
+
+def test_conflict_kept_separate_from_errors(_mock_kube):
+    """A field-manager conflict must not be lumped into `errors` -- callers
+    need to tell "another manager owns this" apart from an ordinary
+    apply failure to react appropriately (route to a human-reviewed gate
+    rather than a generic failure)."""
+    files = [_file("cm.yaml", _k8s_yaml("ConfigMap", "test"))]
+    _mock_kube.apply_yaml.return_value = {
+        "applied": False, "error": "ConfigMap/test: field-manager conflict -- ...",
+        "conflict": True, "conflict_details": [{"kind": "ConfigMap", "name": "test", "namespace": "default", "message": "..."}],
+    }
+    result = apply_manifests_to_cluster(files)
+
+    assert result["applied"] == []
+    assert result["errors"] == []
+    assert len(result["conflicts"]) == 1
+    assert result["conflicts"][0]["path"] == "cm.yaml"
+
+
+def test_force_defaults_false_and_is_passed_through(_mock_kube):
+    files = [_file("cm.yaml", _k8s_yaml("ConfigMap", "test"))]
+    apply_manifests_to_cluster(files)
+    assert _mock_kube.apply_yaml.call_args.kwargs["force"] is False
+
+
+def test_force_true_is_threaded_to_kube_apply_yaml(_mock_kube):
+    files = [_file("cm.yaml", _k8s_yaml("ConfigMap", "test"))]
+    apply_manifests_to_cluster(files, force=True)
+    assert _mock_kube.apply_yaml.call_args.kwargs["force"] is True
+
+
+def test_dry_run_never_produces_conflicts_key_growth(_mock_kube):
+    """Dry-run never calls kube.apply_yaml at all, so conflicts must stay
+    empty regardless of what a real apply would eventually report."""
+    files = [_file("cm.yaml", _k8s_yaml("ConfigMap", "test"))]
+    result = apply_manifests_to_cluster(files, dry_run=True)
+    assert result["conflicts"] == []
+    _mock_kube.apply_yaml.assert_not_called()

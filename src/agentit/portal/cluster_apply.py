@@ -216,12 +216,21 @@ def _parse_manifest(content: str) -> list[dict]:
 
 def _classify_and_fix(
     doc: dict, namespace: str, available_kinds: set[str],
+    *, allow_operator_namespaces: bool = False,
 ) -> tuple[str, str, dict]:
     """Classify a manifest document and fix namespace if needed.
 
     Returns (action, reason, fixed_doc) where action is one of:
         apply, skip_non_k8s, skip_cluster_scope, skip_operator_ns,
         skip_crd_missing
+
+    ``allow_operator_namespaces=True`` is set only by the unified delivery
+    router's cluster-admin-review gate approval path
+    (``portal/delivery.py``/``routes/gates.py``) -- a human holding elevated
+    RBAC has already explicitly approved this exact apply, so the manifest's
+    own declared operator namespace (e.g. ``openshift-pipelines``) is
+    preserved and applied as-is instead of being skipped or silently
+    rewritten to the app's own namespace.
     """
     kind = doc.get("kind", "")
     api_version = doc.get("apiVersion", "")
@@ -235,7 +244,7 @@ def _classify_and_fix(
     meta = doc.get("metadata") or {}
     manifest_ns = meta.get("namespace", "")
 
-    if manifest_ns in _OPERATOR_NAMESPACES:
+    if manifest_ns in _OPERATOR_NAMESPACES and not allow_operator_namespaces:
         return "skip_operator_ns", f"targets operator namespace {manifest_ns}", doc
 
     if available_kinds:
@@ -244,7 +253,12 @@ def _classify_and_fix(
         if kind_lower not in available_kinds and kind_plural_guess not in available_kinds:
             return "skip_crd_missing", f"{kind} ({api_version}) CRD not installed", doc
 
-    if manifest_ns and manifest_ns != namespace:
+    if manifest_ns in _OPERATOR_NAMESPACES and allow_operator_namespaces:
+        # Preserve the manifest's own declared operator namespace -- never
+        # rewrite it to the app's namespace the way the branch below does
+        # for ordinary manifests.
+        pass
+    elif manifest_ns and manifest_ns != namespace:
         meta["namespace"] = namespace
 
     if "generateName" in meta and "name" not in meta:
@@ -257,11 +271,27 @@ def apply_manifests_to_cluster(
     files: list[dict],
     namespace: str = "default",
     dry_run: bool = False,
+    *, allow_operator_namespaces: bool = False,
+    force: bool = False,
 ) -> dict:
-    """Apply manifests to the cluster with pre-flight validation."""
+    """Apply manifests to the cluster with pre-flight validation.
+
+    ``allow_operator_namespaces`` -- see ``_classify_and_fix`` -- is only set
+    by the cluster-admin-review gate's approval path in ``routes/gates.py``.
+
+    ``force`` defaults to ``False`` and is passed straight through to
+    ``kube.apply_yaml()`` -- see that function's docstring for what it does
+    (seize field-manager ownership on a server-side-apply conflict instead
+    of surfacing it). Conflicts are collected into the returned dict's
+    ``conflicts`` list, kept separate from ``errors`` so callers can tell
+    "another manager owns this field" apart from an ordinary apply failure
+    and react accordingly (e.g. route to a human-reviewed gate) instead of
+    lumping both into one generic failure count.
+    """
     applied: list[str] = []
     skipped: list[str] = []
     errors: list[str] = []
+    conflicts: list[dict] = []
     missing_operators: dict[str, dict] = {}
     repo_files: list[dict] = []
 
@@ -291,7 +321,9 @@ def apply_manifests_to_cluster(
         apply_docs = []
 
         for doc in docs:
-            action, reason, fixed = _classify_and_fix(doc, namespace, available)
+            action, reason, fixed = _classify_and_fix(
+                doc, namespace, available, allow_operator_namespaces=allow_operator_namespaces,
+            )
             if action == "apply":
                 all_skip = False
                 apply_docs.append(fixed)
@@ -313,10 +345,16 @@ def apply_manifests_to_cluster(
             applied.append(fpath)
             logger.info("Dry-run validated %s", fpath)
         else:
-            result = kube.apply_yaml(content, namespace)
+            result = kube.apply_yaml(content, namespace, force=force)
             if result["applied"]:
                 applied.append(fpath)
                 logger.info("Applied %s", fpath)
+            elif result.get("conflict"):
+                conflicts.append({
+                    "path": fpath, "error": result["error"],
+                    "details": result.get("conflict_details", []),
+                })
+                logger.warning("Field-manager conflict applying %s: %s", fpath, result["error"])
             else:
                 errors.append(f"{fpath}: {result['error']}")
                 logger.error("Failed %s: %s", fpath, result["error"])
@@ -325,6 +363,7 @@ def apply_manifests_to_cluster(
         "applied": applied,
         "skipped": skipped,
         "errors": errors,
+        "conflicts": conflicts,
         "missing_operators": missing_operators,
         "repo_files": repo_files,
     }
@@ -343,9 +382,28 @@ async def apply_with_verification(
     action: str,
     resource: str,
     record_outcomes_on_partial_failure: bool = True,
+    allow_operator_namespaces: bool = False,
+    force: bool = False,
 ) -> dict:
     """Shared "apply to cluster, with consistent side effects" sequence used by
     both the manual "Apply to Cluster" route and ``AutoMode.execute()``.
+
+    ``allow_operator_namespaces`` -- see ``apply_manifests_to_cluster`` --
+    defaults to ``False`` and, when left at that default, is never passed
+    through to ``apply_manifests_to_cluster`` at all (not even as
+    ``allow_operator_namespaces=False``), so every existing caller's calls
+    to the mocked ``apply_manifests_to_cluster`` in tests stay byte-for-byte
+    identical to before this parameter existed. Only the cluster-admin-review
+    gate approval path (``routes/gates.py``) sets this ``True``.
+
+    ``force`` -- see ``kube.apply_yaml()`` -- follows the exact same
+    "defaults to ``False``, never passed through at all when left at that
+    default" convention as ``allow_operator_namespaces`` above, for the same
+    reason (byte-for-byte identical mocked calls for every existing caller).
+    No caller sets this ``True`` today; it exists for the one narrow,
+    explicitly-human-approved case a caller genuinely needs to seize
+    field-manager ownership after a conflict (see the ``cluster-conflict-review``
+    gate type in ``routes/gates.py``).
 
     These two callers have one real, deliberately-preserved behavioral
     difference, controlled by ``force_dry_run_first``:
@@ -358,44 +416,54 @@ async def apply_with_verification(
     - ``force_dry_run_first=True`` (``AutoMode``): always dry-run first
       regardless of ``dry_run`` (the real apply that follows is always
       attempted with ``dry_run=False``) -- if that dry-run reports any
-      errors, the real apply is never attempted and this returns early with
-      ``dry_run_failed=True`` so the caller can gate for human review.
+      errors *or field-manager conflicts*, the real apply is never attempted
+      and this returns early with ``dry_run_failed=True`` so the caller can
+      gate for human review.
 
     Side effects, consolidated here so both call sites can't drift apart:
 
     - ``record_skill_outcomes()`` fires after a real apply (never after a
       dry-run-only call) that produced at least one applied file with no
-      unhandled exception. When the real apply had per-file errors,
-      ``record_outcomes_on_partial_failure`` decides whether to still record
-      outcomes for the files that *did* succeed (manual route: ``True``,
-      matching its pre-existing "record whatever actually applied" behavior)
-      or to skip recording entirely, as ``AutoMode.execute()`` did before
-      this refactor (``False``).
+      unhandled exception. When the real apply had per-file errors or
+      conflicts, ``record_outcomes_on_partial_failure`` decides whether to
+      still record outcomes for the files that *did* succeed (manual route:
+      ``True``, matching its pre-existing "record whatever actually applied"
+      behavior) or to skip recording entirely, as ``AutoMode.execute()`` did
+      before this refactor (``False``).
     - ``audit_log()`` fires exactly once per call, covering every exit path
       (dry-run-only, real apply, the ``force_dry_run_first`` gate, and an
       unexpected exception) -- closing the real gap where ``AutoMode``
       previously had no audit trail for its own auto-applies at all, unlike
       the manual route which already audited every "Apply to Cluster" click.
 
-    Returns ``apply_manifests_to_cluster()``'s result dict, plus two keys:
+    Returns ``apply_manifests_to_cluster()``'s result dict (including its
+    ``conflicts`` list -- see that function's docstring), plus two keys:
       - ``is_dry_run``: whether ``applied``/``skipped``/``errors`` reflect a
         dry-run (``True``) or a real apply (``False``).
       - ``dry_run_failed``: ``True`` only when ``force_dry_run_first``'s
-        safety check caught errors and the real apply was never attempted.
+        safety check caught errors/conflicts and the real apply was never
+        attempted.
     """
+    extra_kwargs = {"allow_operator_namespaces": True} if allow_operator_namespaces else {}
+    if force:
+        extra_kwargs["force"] = True
     try:
         if force_dry_run_first:
-            dry_result = await asyncio.to_thread(apply_manifests_to_cluster, files, namespace, True)
-            if dry_result["errors"]:
+            dry_result = await asyncio.to_thread(apply_manifests_to_cluster, files, namespace, True, **extra_kwargs)
+            if dry_result["errors"] or dry_result.get("conflicts"):
                 audit_log(
-                    actor=actor, action=action, resource=resource, outcome="dry-run-failed",
-                    details={"namespace": namespace, "errors": len(dry_result["errors"])},
+                    actor=actor, action=action, resource=resource,
+                    outcome="conflict" if dry_result.get("conflicts") and not dry_result["errors"] else "dry-run-failed",
+                    details={
+                        "namespace": namespace, "errors": len(dry_result["errors"]),
+                        "conflicts": len(dry_result.get("conflicts", [])),
+                    },
                 )
                 return {**dry_result, "is_dry_run": True, "dry_run_failed": True}
-            result = await asyncio.to_thread(apply_manifests_to_cluster, files, namespace, False)
+            result = await asyncio.to_thread(apply_manifests_to_cluster, files, namespace, False, **extra_kwargs)
             is_dry_run_result = False
         else:
-            result = await asyncio.to_thread(apply_manifests_to_cluster, files, namespace, dry_run)
+            result = await asyncio.to_thread(apply_manifests_to_cluster, files, namespace, dry_run, **extra_kwargs)
             is_dry_run_result = dry_run
     except Exception:
         audit_log(
@@ -404,17 +472,25 @@ async def apply_with_verification(
         )
         raise
 
-    if not is_dry_run_result and (record_outcomes_on_partial_failure or not result["errors"]):
+    has_issues = bool(result["errors"]) or bool(result.get("conflicts"))
+    if not is_dry_run_result and (record_outcomes_on_partial_failure or not has_issues):
         await record_skill_outcomes(
             store, app_name, files, set(result["applied"]), "approved", skill_outcome_reason,
         )
 
+    if not result["errors"] and not result.get("conflicts"):
+        outcome = "success"
+    elif result.get("conflicts") and not result["errors"]:
+        outcome = "conflict"
+    else:
+        outcome = "partial"
     audit_log(
         actor=actor, action=action, resource=resource,
-        outcome="success" if not result["errors"] else "partial",
+        outcome=outcome,
         details={
             "namespace": namespace, "dry_run": is_dry_run_result,
             "applied": len(result["applied"]), "errors": len(result["errors"]),
+            "conflicts": len(result.get("conflicts", [])),
         },
     )
 

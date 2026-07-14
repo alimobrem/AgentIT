@@ -529,6 +529,23 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
         from agentit.portal.github_pr import get_pr_status
         pr_status = await asyncio.to_thread(get_pr_status, pr_url)
 
+    # Portal visibility for the unified apply flow (docs/unified-apply-
+    # flow.md): compute, once per page load, which delivery mechanism a
+    # real "Deliver" click will use and why -- shown both as a dry-run-style
+    # preview here AND, verbatim (via `delivery_confirmation`), inside the
+    # un-skippable confirm dialog at the actual point of delivery, so the
+    # two can never say different things about the same decision.
+    from agentit.portal.delivery import (
+        MECHANISM_DIRECT_APPLY,
+        MECHANISM_INFRA_REPO_COMMIT,
+        confirmation_text,
+        is_gitops_registered,
+    )
+    gitops_registered, infra_repo_url = await is_gitops_registered(report.repo_name, report)
+    delivery_mechanism = MECHANISM_INFRA_REPO_COMMIT if gitops_registered else MECHANISM_DIRECT_APPLY
+    delivery_confirmation = confirmation_text(delivery_mechanism, infra_repo_url=infra_repo_url)
+    deliveries = await s.list_deliveries(assessment_id) if hasattr(s, "list_deliveries") else []
+
     return get_templates().TemplateResponse(
         request,
         "onboard_results.html",
@@ -540,6 +557,10 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
             "apply_results": apply_results,
             "missing_operators": missing_operators,
             "pr_status": pr_status,
+            "gitops_registered": gitops_registered,
+            "delivery_mechanism": delivery_mechanism,
+            "delivery_confirmation": delivery_confirmation,
+            "deliveries": deliveries,
         },
     )
 
@@ -624,6 +645,58 @@ async def apply_to_cluster(request: Request, assessment_id: str):
             f"?applied={applied}&skipped={skipped}&errors={errs}"
             f"&dry_run={'true' if dry_run else 'false'}"
         ),
+        status_code=303,
+    )
+
+
+@router.post("/assessments/{assessment_id}/deliver", response_model=None)
+async def deliver(request: Request, assessment_id: str):
+    """The unified apply flow's single entry point (docs/unified-apply-
+    flow.md section (A)): replaces the independent "Apply to Cluster" /
+    "Create PR" buttons for cluster/app config with one decision, computed
+    once via ``route_and_deliver()`` -- the mechanism (direct apply vs.
+    GitOps commit+PR) is no longer a human choice, only ``dry_run`` is.
+    """
+    from agentit.portal.delivery import route_and_deliver
+
+    s = await get_store()
+    report = await s.get(assessment_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    files = await s.get_onboarding(assessment_id)
+    if files is None:
+        raise HTTPException(status_code=404, detail="Onboarding not found")
+
+    form = await request.form()
+    dry_run = form.get("dry_run") == "true"
+    namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
+
+    try:
+        delivery = await route_and_deliver(
+            files, app_name=report.repo_name, namespace=namespace,
+            report=report, store=s, assessment_id=assessment_id,
+            actor=get_current_user(request), dry_run=dry_run,
+            force_dry_run_first=False,
+        )
+    except Exception:
+        log.exception("Delivery failed for assessment %s", assessment_id)
+        return RedirectResponse(
+            url=f"/assessments/{assessment_id}/onboard-results?error={quote('Delivery failed — check server logs')}",
+            status_code=303,
+        )
+
+    cluster_outcome = delivery["outcomes"].get("cluster_config")
+    params = [f"delivery_id={delivery['delivery_id']}", f"dry_run={'true' if dry_run else 'false'}"]
+    if isinstance(cluster_outcome, dict) and "applied" in cluster_outcome:
+        params.append(f"applied={len(cluster_outcome['applied'])}")
+        params.append(f"skipped={len(cluster_outcome.get('skipped', []))}")
+        params.append(f"errors={len(cluster_outcome.get('errors', []))}")
+    elif isinstance(cluster_outcome, dict) and cluster_outcome.get("pr_url"):
+        params.append(f"pr_url={cluster_outcome['pr_url']}")
+    if delivery["outcomes"].get("cicd_shared_namespace"):
+        params.append("cicd_gate=true")
+    return RedirectResponse(
+        url=f"/assessments/{assessment_id}/onboard-results?{'&'.join(params)}",
         status_code=303,
     )
 

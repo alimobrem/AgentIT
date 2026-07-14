@@ -123,3 +123,117 @@ def test_propose_capability_improvement_missing_required_field_returns_none():
     result = client.propose_capability_improvement({"doc_gaps": []})
 
     assert result is None
+
+
+# ── classify_action / review_fix safety-gate fail-closed regression ──────
+#
+# README.md previously mislabeled llm.py as "fail-open" in its repository-layout
+# comment. It's actually fail-closed: both classify_action() and review_fix()
+# return None on any _chat() failure or unparseable response, and every caller
+# (AutoMode.should_auto_apply in automode.py, cli.py's self-fix Step 3) treats
+# None as the destructive/rejected outcome, never a silent "safe" default.
+# These tests pin that contract directly against LLMClient so a future change
+# to _chat()/classify_action()/review_fix() that silently started defaulting
+# to "safe" would fail loudly here.
+
+
+def test_classify_action_timeout_returns_none():
+    import anthropic
+    import httpx
+
+    timeout_exc = anthropic.APITimeoutError(request=httpx.Request("POST", "https://example.invalid"))
+    client = _make_client(MagicMock(side_effect=timeout_exc))
+    result = client.classify_action("apply", ["kind: Deployment"], "App: demo, Criticality: high")
+
+    assert result is None
+
+
+def test_classify_action_connection_error_returns_none():
+    import anthropic
+    client = _make_client(MagicMock(side_effect=anthropic.APIConnectionError(request=MagicMock())))
+    result = client.classify_action("apply", ["kind: Deployment"], "App: demo, Criticality: high")
+
+    assert result is None
+
+
+def test_classify_action_malformed_json_returns_none():
+    client = _make_client(MagicMock(return_value=_mock_response("this is not JSON at all")))
+    result = client.classify_action("apply", ["kind: Deployment"], "App: demo, Criticality: high")
+
+    assert result is None
+
+
+def test_classify_action_missing_field_returns_none():
+    # Valid JSON, but missing the required "confidence" key -- must not be
+    # coerced into a default "safe" classification.
+    response = _mock_response(json.dumps({"is_destructive": False, "reason": "looks fine"}))
+    client = _make_client(MagicMock(return_value=response))
+    result = client.classify_action("apply", ["kind: Deployment"], "App: demo, Criticality: high")
+
+    assert result is None
+
+
+def test_classify_action_low_confidence_is_not_silently_upgraded_to_safe():
+    # classify_action() itself doesn't threshold on confidence -- it faithfully
+    # returns whatever the model reported. The fail-closed decision for a
+    # low-confidence result is made by the caller (AutoMode.should_auto_apply,
+    # see tests/test_automode.py::test_llm_low_confidence_returns_false), which
+    # rejects auto-apply below _CONFIDENCE_THRESHOLD regardless of is_destructive.
+    # This test pins that classify_action() never masks a low confidence value
+    # or substitutes a higher one.
+    response = _mock_response(json.dumps({"is_destructive": False, "confidence": 0.2, "reason": "Unclear"}))
+    client = _make_client(MagicMock(return_value=response))
+    result = client.classify_action("apply", ["kind: Deployment"], "App: demo, Criticality: high")
+
+    assert result is not None
+    assert result["confidence"] == pytest.approx(0.2)
+    assert result["is_destructive"] is False
+
+
+def test_review_fix_timeout_returns_none():
+    import anthropic
+    import httpx
+
+    timeout_exc = anthropic.APITimeoutError(request=httpx.Request("POST", "https://example.invalid"))
+    client = _make_client(MagicMock(side_effect=timeout_exc))
+    result = client.review_fix("Missing NetworkPolicy", "network", "kind: NetworkPolicy", "Go microservice")
+
+    assert result is None
+
+
+def test_review_fix_connection_error_returns_none():
+    import anthropic
+    client = _make_client(MagicMock(side_effect=anthropic.APIConnectionError(request=MagicMock())))
+    result = client.review_fix("Missing NetworkPolicy", "network", "kind: NetworkPolicy", "Go microservice")
+
+    assert result is None
+
+
+def test_review_fix_malformed_json_returns_none():
+    client = _make_client(MagicMock(return_value=_mock_response("not JSON, sorry")))
+    result = client.review_fix("Missing NetworkPolicy", "network", "kind: NetworkPolicy", "Go microservice")
+
+    assert result is None
+
+
+def test_review_fix_missing_field_returns_none():
+    response = _mock_response(json.dumps({"approved": True, "reason": "looks correct"}))
+    client = _make_client(MagicMock(return_value=response))
+    result = client.review_fix("Missing NetworkPolicy", "network", "kind: NetworkPolicy", "Go microservice")
+
+    assert result is None
+
+
+def test_review_fix_low_confidence_is_not_silently_upgraded_to_approved():
+    # Same contract as classify_action above: review_fix() faithfully returns
+    # the model's own confidence. cli.py's self-fix Step 3 gate
+    # (`review["approved"] and review["confidence"] >= 0.7`) is what actually
+    # rejects a low-confidence approval -- review_fix() itself must never
+    # substitute a higher confidence or force approved=True.
+    response = _mock_response(json.dumps({"approved": True, "confidence": 0.3, "reason": "Mostly right"}))
+    client = _make_client(MagicMock(return_value=response))
+    result = client.review_fix("Missing NetworkPolicy", "network", "kind: NetworkPolicy", "Go microservice")
+
+    assert result is not None
+    assert result["confidence"] == pytest.approx(0.3)
+    assert result["approved"] is True

@@ -21,6 +21,15 @@ class GeneratedFile(BaseModel):
     # hyphens). Left "" for files a Python agent generated -- they carry no
     # skill attribution.
     skill_name: str = ""
+    # Set by CodeChangeAgent to the real destination path in the *app's own*
+    # repo (e.g. "Dockerfile", ".gitignore") -- distinct from `path`, which is
+    # this file's name in AgentIT's own output/storage (e.g.
+    # "patch-01-Dockerfile"). Lets the unified delivery router build a real
+    # PR patch against the actual target file instead of a same-named copy
+    # under a new directory (see docs/unified-apply-flow.md's "GitHub/
+    # source-repo changes -- real source patches" taxonomy row). Left "" for
+    # every other file, which fall back to `path` unchanged.
+    target_path: str = ""
 
 
 def _sanitize_name(name: str) -> str:

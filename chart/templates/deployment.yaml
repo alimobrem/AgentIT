@@ -20,7 +20,23 @@ spec:
   strategy:
     canary:
       steps:
-        {{- toYaml .Values.rollout.steps | nindent 8 }}
+        {{- range .Values.rollout.steps }}
+        {{- toYaml (list .) | nindent 8 }}
+        {{- /* Real health-check gate before the final promotion, not just a
+        fixed pause -- see docs/deployment.md's incident postmortem and
+        analysistemplate.yaml. Opt-in via rollout.analysisEnabled (default
+        false) so existing deployments' behavior is unchanged unless this is
+        explicitly turned on. Inserted right after setWeight:50 specifically,
+        so it gates the 50%->100% promotion. */}}
+        {{- if and $.Values.rollout.analysisEnabled (hasKey . "setWeight") (eq (.setWeight | int) 50) }}
+        - analysis:
+            templates:
+              - templateName: {{ $.Release.Name }}-canary-analysis
+            args:
+              - name: service-name
+                value: {{ $.Release.Name }}
+        {{- end }}
+        {{- end }}
       canaryService: {{ .Release.Name }}-canary
       stableService: {{ .Release.Name }}
   {{- end }}
@@ -181,7 +197,11 @@ spec:
             - --cookie-secret-file=/etc/proxy/secrets/session_secret
             - --cookie-secure=true
             - --pass-user-headers=true
-            - --openshift-sar={"resource":"namespaces","verb":"get","resourceName":"{{ .Release.Namespace }}","namespace":"{{ .Release.Namespace }}"}
+            {{- $sar := dict "namespace" .Release.Namespace "resource" (.Values.auth.sarResource | default "namespaces") "verb" (.Values.auth.sarVerb | default "get") "resourceName" (.Values.auth.sarResourceName | default .Release.Namespace) }}
+            {{- if .Values.auth.sarApiGroup }}
+            {{- $_ := set $sar "group" .Values.auth.sarApiGroup }}
+            {{- end }}
+            - --openshift-sar={{ $sar | toJson }}
             - --skip-provider-button=true
           volumeMounts:
             - name: proxy-tls

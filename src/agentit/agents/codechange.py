@@ -165,6 +165,7 @@ class CodeChangeAgent:
                         content=change.content,
                         description=change.explanation,
                         finding_addressed=change.finding,
+                        target_path=change.file_path,
                     ))
         else:
             for finding in findings[:10]:
@@ -178,6 +179,7 @@ class CodeChangeAgent:
                         content=change.content,
                         description=change.explanation,
                         finding_addressed=change.finding,
+                        target_path=change.file_path,
                     ))
 
         # Write a summary of all changes

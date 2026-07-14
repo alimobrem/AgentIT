@@ -1,0 +1,40 @@
+{{- if and .Values.rollout.enabled .Values.rollout.analysisEnabled }}
+# Real promotion gate for the canary Rollout below (spec.strategy.canary.steps
+# in deployment.yaml) -- see docs/deployment.md's incident postmortem: without
+# this, a canary at setWeight:50 promotes straight to setWeight:100 after a
+# fixed 30s pause with nothing checking whether the new pods are actually
+# healthy, faster than a human can realistically watch-and-intervene on.
+# Query and threshold intentionally reuse the exact same http_requests_total
+# metric family and 5% threshold as the AgentITHighErrorRate alert in
+# prometheusrule.yaml, so "healthy enough to promote" and "healthy enough to
+# not page someone" stay the same real number instead of two invented ones.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: {{ .Release.Name }}-canary-analysis
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: release-analysis
+spec:
+  args:
+    - name: service-name
+      value: {{ .Release.Name }}
+  metrics:
+    - name: error-rate
+      # 5 measurements at 60s apart (~5m total) with a failureLimit of 3 so a
+      # single transient blip doesn't abort an otherwise-healthy rollout, but
+      # a sustained problem does -- same tolerances as the analysis-template
+      # skill this chart generates for onboarded apps (skills/release/analysis-template.md).
+      interval: 60s
+      count: 5
+      failureLimit: 3
+      successCondition: result[0] <= 0.05
+      provider:
+        prometheus:
+          address: http://prometheus-k8s.openshift-monitoring.svc:9090
+          query: |
+            sum(rate(http_requests_total{job="{{ "{{" }}args.service-name{{ "}}" }}", status=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{job="{{ "{{" }}args.service-name{{ "}}" }}"}[5m]))
+{{- end }}

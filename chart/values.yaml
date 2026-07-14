@@ -31,6 +31,14 @@ rollout:
     - setWeight: 50
     - pause: {duration: 30s}
     - setWeight: 100
+  # Real AnalysisTemplate promotion gate (chart/templates/analysistemplate.yaml)
+  # between the setWeight:50 and setWeight:100 steps above, backed by a real
+  # Prometheus error-rate query -- see docs/deployment.md's incident
+  # postmortem: today's steps are fixed time pauses only, and a real rollout
+  # advanced 10%->100% faster than a human can realistically watch-and-intervene
+  # on. Default false so this doesn't change live behavior until explicitly
+  # turned on.
+  analysisEnabled: false
 
 gcp:
   credentialsSecret: ""
@@ -226,6 +234,22 @@ auth:
   # namespace (i.e. anyone with any role binding here) rather than merely
   # "any authenticated cluster user". Tighten further (e.g. to a specific
   # group) if a narrower audience is needed.
+  #
+  # sarResource/sarVerb/sarResourceName/sarApiGroup let an operator narrow
+  # that SAR to a real RBAC check against a specific resource this app's own
+  # Role actually grants -- e.g. sarResource: rollouts, sarApiGroup:
+  # argoproj.io, sarVerb: get (a resource the -edit RoleBinding in rbac.yaml
+  # covers), instead of the blanket "can get this namespace" check every
+  # authenticated user with *any* role binding here already passes. Defaults
+  # below reproduce today's exact existing check -- unset, this is a no-op.
+  sarResource: namespaces
+  sarVerb: get
+  # Defaults to this release's own namespace (matching today's behavior) --
+  # only override if the tightened resource above needs a different name.
+  sarResourceName: ""
+  # Core API group ("") by default -- set e.g. "argoproj.io" when sarResource
+  # is a non-core-group resource like "rollouts".
+  sarApiGroup: ""
   resources:
     requests:
       cpu: 10m

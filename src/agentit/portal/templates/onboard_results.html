@@ -37,7 +37,12 @@
 {% endif %}
 {% if request.query_params.get('gate_approved') %}
 <div class="alert alert-success">
-  Gate approved — manifests applied to cluster.
+  Gate approved — delivered.
+</div>
+{% endif %}
+{% if request.query_params.get('cicd_gate') %}
+<div class="alert alert-warn">
+  Some manifests target a shared operator namespace and need cluster-admin review — see the <a href="/gates">Gates</a> page (never silently skipped).
 </div>
 {% endif %}
 {% if request.query_params.get('operator_installed') %}
@@ -86,46 +91,46 @@
 {% if not apply_results %}
 <div class="step-guide">
   <span class="step-guide-icon">&#x2460;</span>
-  <span class="step-guide-text"><strong>Start with a Dry Run</strong> to preview what will be applied, then Apply to cluster or Create a PR.</span>
+  <span class="step-guide-text"><strong>Start with a Dry Run</strong> to preview what will happen, then Deliver.</span>
 </div>
 {% elif apply_results and apply_results.get('dry_run') and not apply_results.get('errors') %}
 <div class="step-guide">
   <span class="step-guide-icon">&#x2705;</span>
-  <span class="step-guide-text"><strong>Dry run passed.</strong> You can now safely Apply to Cluster or Create a PR.</span>
+  <span class="step-guide-text"><strong>Dry run passed.</strong> You can now Deliver.</span>
 </div>
 {% elif apply_results and not apply_results.get('dry_run') and not apply_results.get('errors') %}
 <div class="step-guide">
   <span class="step-guide-icon">&#x2705;</span>
-  <span class="step-guide-text"><strong>Manifests applied successfully.</strong> Create a PR to track changes in your GitOps repo.</span>
+  <span class="step-guide-text"><strong>Delivered successfully.</strong></span>
 </div>
 {% endif %}
 
+{# ── Delivery mechanism preview -- the design doc's one decision surface: which
+   mechanism a real "Deliver" click will use is computed once, server-side, and
+   shown here AND restated verbatim in the confirm dialog below, never left to a
+   human to infer from which button they clicked. #}
+<div class="alert {% if gitops_registered %}alert-info{% else %}alert-warn{% endif %} mb-1">
+  <strong>{{ delivery_confirmation }}</strong>
+</div>
+
 <div class="action-bar">
-  <form method="post" action="/assessments/{{ assessment_id }}/apply" class="inline-form">
-    <input type="hidden" name="namespace" value="{{ report.repo_name | lower | replace('_', '-') | replace('.', '-') }}">
+  <form method="post" action="/assessments/{{ assessment_id }}/deliver" class="inline-form">
     <input type="hidden" name="dry_run" value="true">
     <button type="submit" class="btn btn-outline">
       <span class="btn-label">Dry Run</span>
       <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Running&hellip;</span>
     </button>
   </form>
-  <form method="post" action="/assessments/{{ assessment_id }}/apply" class="inline-form"
-        x-data x-ref="applyForm">
-    <input type="hidden" name="namespace" value="{{ report.repo_name | lower | replace('_', '-') | replace('.', '-') }}">
+  <form method="post" action="/assessments/{{ assessment_id }}/deliver" class="inline-form"
+        x-data x-ref="deliverForm">
     <button type="button" class="btn btn-green btn-lg"
       @click="$dispatch('show-confirm', {
-        title: 'Apply to Cluster',
-        message: 'This will apply {{ total.count }} manifest(s) to the live cluster. This modifies production resources and cannot be undone.',
-        form: $refs.applyForm,
-        opts: { confirmText: 'Apply Now', danger: false }
+        title: 'Confirm Delivery',
+        message: {{ delivery_confirmation | tojson }} + ' ({{ total.count }} manifest(s).) This modifies production resources and cannot be undone.',
+        form: $refs.deliverForm,
+        opts: { confirmText: 'Deliver Now', danger: false }
       })">
-      Apply to Cluster
-    </button>
-  </form>
-  <form method="post" action="/assessments/{{ assessment_id }}/create-pr" class="inline-form">
-    <button type="submit" class="btn btn-outline">
-      <span class="btn-label">Create PR</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+      {{ "Commit & Open PR" if gitops_registered else "Apply to Cluster" }}
     </button>
   </form>
   <form method="post" action="/assessments/{{ assessment_id }}/create-agent-prs" class="inline-form">
@@ -136,6 +141,26 @@
   </form>
   <a href="/api/assessments/{{ assessment_id }}/manifests/download" class="btn btn-outline" hx-boost="false">Download</a>
 </div>
+
+{# ── Delivery history -- what was routed, which mechanism, status, verification #}
+{% if deliveries %}
+<div x-data="{ open: false }">
+  <h3 class="text-sm collapse-toggle mb-1" @click="open = !open" :aria-expanded="open">Delivery History ({{ deliveries|length }})</h3>
+  <table class="mb-1" x-show="open" x-transition>
+    <thead><tr><th>When</th><th>Mechanism</th><th>Status</th><th>Verification</th></tr></thead>
+    <tbody>
+      {% for d in deliveries %}
+      <tr>
+        <td class="text-sm" data-timestamp="{{ d.created_at }}">{{ d.created_at[:19] }}</td>
+        <td class="text-sm">{{ d.mechanism }}</td>
+        <td><span class="badge {% if d.status in ('delivered', 'verified') %}badge-low{% elif d.status == 'partial' %}badge-medium{% elif 'fail' in d.status or 'rolled_back' in d.status or 'breach' in d.status %}badge-critical{% else %}badge-info{% endif %}">{{ d.status }}</span></td>
+        <td class="text-sm">{{ d.verification }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
 
 {# ── Apply Report ────────────────────────────────────────────────── #}
 {% if apply_results %}

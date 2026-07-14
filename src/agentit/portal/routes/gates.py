@@ -9,12 +9,50 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from agentit.audit import audit_log
-from agentit.portal.cluster_apply import apply_manifests_to_cluster
+from agentit.portal.cluster_apply import apply_with_verification
+from agentit.portal.delivery import (
+    CATEGORY_CICD_SHARED_NAMESPACE,
+    CATEGORY_CLUSTER_CONFIG,
+    MECHANISM_DIRECT_APPLY,
+    MECHANISM_INFRA_REPO_COMMIT,
+    classify_file,
+    confirmation_text,
+    is_gitops_registered,
+    route_and_deliver,
+)
 from agentit.portal.helpers import get_current_user, get_store, get_templates
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def _delivery_confirmation_for_gate(s: object, gate: dict) -> str:
+    """The exact "AgentIT will: ..." statement a human must see -- in the
+    un-skippable confirm modal, not just page prose -- before approving this
+    gate actually triggers a real delivery. Reuses ``delivery.py``'s
+    ``confirmation_text()`` so the gate list, the dry-run preview, and the
+    point-of-no-return confirmation can never say different things about
+    the same decision (per the 2026-07-14 customer-review addendum to
+    docs/unified-apply-flow.md).
+    """
+    gate_type = gate.get("gate_type", "")
+    if gate_type == "rollback-review":
+        return "AgentIT will: mark this rollback approved for manual intervention -- no automatic apply is triggered."
+    if gate_type in ("gitops-pr-pending", "cluster-admin-review", "cluster-conflict-review", "auto-mode-scope-review"):
+        # These gate types already carry the exact mechanism + reason in
+        # their own summary text (see automode.py / delivery.py's gate
+        # creation calls) -- reuse it verbatim instead of restating it.
+        return gate.get("summary", "")
+    assessment_id = gate.get("assessment_id")
+    if not assessment_id:
+        return ""
+    report = await s.get(assessment_id)
+    if report is None:
+        return ""
+    registered, infra_repo_url = await is_gitops_registered(report.repo_name, report)
+    mechanism = MECHANISM_INFRA_REPO_COMMIT if registered else MECHANISM_DIRECT_APPLY
+    return confirmation_text(mechanism, infra_repo_url=infra_repo_url)
 
 
 @router.get("/gates", response_class=HTMLResponse)
@@ -32,6 +70,7 @@ async def gates_page(request: Request):
     stale_ids = {g["id"] for g in stale}
     for g in pending:
         g["stale"] = g["id"] in stale_ids
+        g["delivery_confirmation"] = await _delivery_confirmation_for_gate(s, g)
     resolved = [g for g in all_gates if g["status"] in ("approved", "rejected", "expired")]
     resolved.sort(key=lambda g: g.get("resolved_at") or g.get("created_at", ""), reverse=True)
     return get_templates().TemplateResponse(request, "gates.html", {
@@ -72,30 +111,143 @@ async def resolve_gate(request: Request, gate_id: str):
                 status_code=303,
             )
 
+        if gate.get("gate_type") == "gitops-pr-pending":
+            # AutoMode already opened the PR autonomously when it created
+            # this gate (automode.py::execute) -- approving it is a merge,
+            # never a re-delivery, since these manifests were never meant
+            # to be applied directly for this GitOps-registered app at all
+            # (see docs/unified-apply-flow.md section (B)).
+            from agentit.portal.github_pr import merge_pr
+
+            pr_url = ""
+            summary = gate.get("summary", "")
+            for token in summary.split():
+                if token.startswith("http") and "/pull/" in token:
+                    pr_url = token.rstrip(".,")
+                    break
+            if not pr_url:
+                return RedirectResponse(
+                    url=f"/assessments/{assessment_id}/onboard-results?error={quote('No PR URL found on this gate — cannot merge')}",
+                    status_code=303,
+                )
+            merge_result = await asyncio.to_thread(merge_pr, pr_url)
+            if "error" in merge_result:
+                log.warning("PR merge failed for gate %s: %s", gate_id, merge_result["error"])
+                return RedirectResponse(
+                    url=f"/assessments/{assessment_id}/onboard-results?error={quote('PR merge failed: ' + merge_result['error'][:150])}",
+                    status_code=303,
+                )
+            await s.resolve_gate(gate_id, status, resolved_by)
+            await s.log_event(
+                "gate-resolver", "gitops-pr-merged", gate.get("target_app"), "info",
+                f"Merged GitOps PR {pr_url} for assessment {assessment_id}",
+            )
+            return RedirectResponse(
+                url=f"/assessments/{assessment_id}/onboard-results?pr_url={pr_url}&gate_approved=true",
+                status_code=303,
+            )
+
+        if gate.get("gate_type") == "cluster-admin-review":
+            # A human holding elevated RBAC has explicitly approved applying
+            # directly into a shared operator namespace -- the one case
+            # where the delivery router's own "never a direct apply into a
+            # shared operator namespace" rule is deliberately bypassed, by
+            # explicit human approval, not a code path that decides this on
+            # its own (see docs/unified-apply-flow.md's "CI/CD needs its
+            # own lane" section).
+            files = await s.get_onboarding(assessment_id)
+            report = await s.get(assessment_id)
+            if files and report:
+                cicd_files = [f for f in files if classify_file(f) == CATEGORY_CICD_SHARED_NAMESPACE]
+                namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
+                try:
+                    results = await apply_with_verification(
+                        cicd_files, namespace, False,
+                        force_dry_run_first=False,
+                        store=s, app_name=report.repo_name,
+                        skill_outcome_reason=f"cluster-admin-review gate {gate_id} approved by {resolved_by}",
+                        actor=str(resolved_by), action="cluster-admin-apply",
+                        resource=f"assessment:{assessment_id}",
+                        allow_operator_namespaces=True,
+                    )
+                except Exception:
+                    log.exception("Elevated apply failed for gate %s (assessment %s)", gate_id, assessment_id)
+                    return RedirectResponse(
+                        url=f"/assessments/{assessment_id}/onboard-results?error={quote('Elevated apply failed — gate remains pending')}",
+                        status_code=303,
+                    )
+                await s.resolve_gate(gate_id, status, resolved_by)
+                applied = len(results["applied"])
+                return RedirectResponse(
+                    url=f"/assessments/{assessment_id}/onboard-results?applied={applied}&gate_approved=true",
+                    status_code=303,
+                )
+
+        if gate.get("gate_type") == "cluster-conflict-review":
+            # A server-side-apply field-manager conflict (kube.apply_yaml()'s
+            # structured conflict result, surfaced through
+            # apply_with_verification()) was routed here instead of being
+            # silently forced through or failed. Approving this gate is the
+            # ONE place in the app that ever passes force=True to the apply
+            # pipeline -- only because a human has now explicitly reviewed
+            # which manager owns the conflicting field(s) and chosen to
+            # seize ownership anyway. Re-applying the same cluster-config
+            # manifests is safe for the documents that already succeeded
+            # (server-side-apply is idempotent for an unchanged,
+            # non-conflicting object) and forces through only the ones that
+            # actually conflicted.
+            files = await s.get_onboarding(assessment_id)
+            report = await s.get(assessment_id)
+            if files and report:
+                cluster_files = [f for f in files if classify_file(f) == CATEGORY_CLUSTER_CONFIG]
+                namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
+                try:
+                    results = await apply_with_verification(
+                        cluster_files, namespace, False,
+                        force_dry_run_first=False,
+                        store=s, app_name=report.repo_name,
+                        skill_outcome_reason=f"cluster-conflict-review gate {gate_id} approved by {resolved_by}",
+                        actor=str(resolved_by), action="cluster-conflict-force-apply",
+                        resource=f"assessment:{assessment_id}",
+                        force=True,
+                    )
+                except Exception:
+                    log.exception("Forced apply failed for gate %s (assessment %s)", gate_id, assessment_id)
+                    return RedirectResponse(
+                        url=f"/assessments/{assessment_id}/onboard-results?error={quote('Forced apply failed — gate remains pending')}",
+                        status_code=303,
+                    )
+                await s.resolve_gate(gate_id, status, resolved_by)
+                applied = len(results["applied"])
+                return RedirectResponse(
+                    url=f"/assessments/{assessment_id}/onboard-results?applied={applied}&gate_approved=true",
+                    status_code=303,
+                )
+            return RedirectResponse(
+                url=f"/assessments/{assessment_id}/onboard-results?error={quote('Cannot resolve conflict — original manifests not found for reapply')}",
+                status_code=303,
+            )
+
         files = await s.get_onboarding(assessment_id)
         report = await s.get(assessment_id)
         if files and report:
             namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
             try:
-                results = await asyncio.to_thread(
-                    apply_manifests_to_cluster, files, namespace, False,
+                delivery = await route_and_deliver(
+                    files, app_name=report.repo_name, namespace=namespace,
+                    report=report, store=s, assessment_id=assessment_id,
+                    actor=str(resolved_by), dry_run=False, force_dry_run_first=False,
                 )
             except Exception:
-                log.exception("Manifest apply failed for gate %s (assessment %s)", gate_id, assessment_id)
+                log.exception("Delivery failed for gate %s (assessment %s)", gate_id, assessment_id)
                 return RedirectResponse(
-                    url=f"/assessments/{assessment_id}/onboard-results?error={quote('Manifest apply failed — gate remains pending')}",
+                    url=f"/assessments/{assessment_id}/onboard-results?error={quote('Delivery failed — gate remains pending')}",
                     status_code=303,
                 )
             await s.resolve_gate(gate_id, status, resolved_by)
-            await s.save_apply_results(assessment_id, results, namespace, False)
 
-            from agentit.skill_engine import record_skill_outcomes
-            await record_skill_outcomes(
-                s, report.repo_name, files, set(results["applied"]), "approved",
-                f"gate {gate_id} approved by {resolved_by}",
-            )
-
-            applied = len(results["applied"])
+            cluster_outcome = delivery["outcomes"].get("cluster_config", {})
+            applied = len(cluster_outcome.get("applied", [])) if isinstance(cluster_outcome, dict) else 0
             return RedirectResponse(
                 url=f"/assessments/{assessment_id}/onboard-results?applied={applied}&gate_approved=true",
                 status_code=303,

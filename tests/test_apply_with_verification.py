@@ -311,3 +311,100 @@ class TestAutoModeForcedDryRunFirst:
         assert audit_records[0].actor == "auto-mode"
         assert audit_records[0].action == "auto-apply"
         assert audit_records[0].outcome == "success"
+
+
+class TestConflictVsOtherFailureDistinction:
+    """`apply_manifests_to_cluster()`'s `conflicts` list (kube.apply_yaml()'s
+    structured 409 result) must be tracked distinctly from `errors`
+    throughout `apply_with_verification()` -- never silently lumped into a
+    generic failure, and never silently ignored."""
+
+    def _conflict_result(self, applied=None, conflicts=None):
+        return {
+            "applied": applied or [], "skipped": [], "errors": [],
+            "conflicts": conflicts or [{"path": "x.yaml", "error": "conflict", "details": []}],
+        }
+
+    async def test_dry_run_conflict_gates_before_real_apply(self):
+        """A conflict surfaced during AutoMode's forced dry-run must gate
+        exactly like a dry-run error -- the real apply is never attempted."""
+        store, raw = make_async_store()
+        report = make_report()
+        raw.save(report)
+        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_apply.return_value = self._conflict_result()
+            result = await apply_with_verification(
+                [_skill_file()], "ns", False,
+                force_dry_run_first=True,
+                store=store, app_name="app",
+                skill_outcome_reason="r",
+                record_outcomes_on_partial_failure=False,
+                actor="auto-mode", action="auto-apply", resource="assessment:1",
+            )
+
+        mock_apply.assert_called_once_with([_skill_file()], "ns", True)
+        assert result["dry_run_failed"] is True
+        assert result["conflicts"]
+
+    async def test_real_apply_conflict_does_not_count_as_error(self):
+        store, raw = make_async_store()
+        report = make_report()
+        raw.save(report)
+        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_apply.return_value = self._conflict_result(applied=["ok.yaml"])
+            result = await apply_with_verification(
+                [_skill_file()], "ns", False,
+                force_dry_run_first=False,
+                store=store, app_name="app",
+                skill_outcome_reason="r",
+                actor="user", action="apply-to-cluster", resource="assessment:1",
+            )
+
+        assert result["errors"] == []
+        assert len(result["conflicts"]) == 1
+
+    async def test_audit_log_outcome_is_conflict_not_partial_or_success(self, caplog):
+        store, _raw = make_async_store()
+        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_apply.return_value = self._conflict_result()
+            with caplog.at_level(logging.INFO, logger="agentit.audit"):
+                await apply_with_verification(
+                    [_skill_file()], "ns", False,
+                    force_dry_run_first=False,
+                    store=store, app_name="app",
+                    skill_outcome_reason="r",
+                    actor="user", action="apply-to-cluster", resource="assessment:1",
+                )
+        audit_records = [r for r in caplog.records if getattr(r, "audit", False)]
+        assert len(audit_records) == 1
+        assert audit_records[0].outcome == "conflict"
+
+    async def test_force_default_false_never_passed_to_apply_manifests(self):
+        """`force` defaults to False and, left at that default, is never
+        passed through at all -- matching `allow_operator_namespaces`'s
+        existing "byte-for-byte identical mocked calls" convention."""
+        store, _raw = make_async_store()
+        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_apply.return_value = {"applied": ["x.yaml"], "skipped": [], "errors": []}
+            await apply_with_verification(
+                [_skill_file()], "ns", False,
+                force_dry_run_first=False,
+                store=store, app_name="app",
+                skill_outcome_reason="r",
+                actor="user", action="apply-to-cluster", resource="assessment:1",
+            )
+        mock_apply.assert_called_once_with([_skill_file()], "ns", False)
+
+    async def test_force_true_is_threaded_through(self):
+        store, _raw = make_async_store()
+        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_apply.return_value = {"applied": ["x.yaml"], "skipped": [], "errors": []}
+            await apply_with_verification(
+                [_skill_file()], "ns", False,
+                force_dry_run_first=False,
+                store=store, app_name="app",
+                skill_outcome_reason="r",
+                actor="user", action="apply-to-cluster", resource="assessment:1",
+                force=True,
+            )
+        assert mock_apply.call_args.kwargs == {"force": True}

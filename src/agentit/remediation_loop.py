@@ -34,6 +34,65 @@ VERIFY_POLL_INTERVAL = 5  # poll every 5s
 VERIFY_MAX_POLLS = 12  # 12 * 5s = 60s
 
 
+async def verify_slos(store: object | None, assessment_id: str, app_name: str) -> dict:
+    """Watch SLOs for ``VERIFY_WINDOW_SECONDS`` after a delivery.
+
+    Extracted from ``RemediationLoop._verify_slos`` (which now delegates
+    here) so the unified delivery router (``portal/delivery.py``) can run
+    the exact same verify tail for every delivery, not just the fully
+    autonomous fleet-watcher-triggered path -- see
+    docs/unified-apply-flow.md section (C), "one loop shape."
+    """
+    if store is None:
+        return {"healthy": True, "reason": "No store -- skipping SLO check"}
+
+    from agentit.slo_collector import collect_slo, is_breached
+
+    for _ in range(VERIFY_MAX_POLLS):
+        slos = await store.list_slos(assessment_id)
+        if not slos:
+            await asyncio.sleep(VERIFY_POLL_INTERVAL)
+            continue
+
+        breached = []
+        for s in slos:
+            # collect_slo does blocking kubernetes-client I/O -- narrowly
+            # wrapped in to_thread at this call site.
+            value = await asyncio.to_thread(collect_slo, s["metric_name"], app_name)
+            if value is not None:
+                status = "breached" if is_breached(s["metric_name"], value, s["target_value"]) else "met"
+                await store.update_slo(s["id"], value, status)
+                if status == "breached":
+                    breached.append(s["metric_name"])
+
+        if breached:
+            return {
+                "healthy": False,
+                "reason": f"{len(breached)} SLO(s) breached: {', '.join(breached)}",
+                "breached": breached,
+            }
+        await asyncio.sleep(VERIFY_POLL_INTERVAL)
+
+    return {"healthy": True, "reason": f"All SLOs healthy after {VERIFY_WINDOW_SECONDS}s"}
+
+
+async def rollback_action(app_name: str, namespace: str) -> dict:
+    """Execute rollback via ``kube.rollout_undo``.
+
+    Extracted from ``RemediationLoop._rollback`` (which now delegates here,
+    adding its own store/publisher logging around the result) so the
+    unified delivery router's direct-apply verification tail
+    (``portal/delivery.py::verify_and_close_delivery``) can trigger the same
+    rollback without duplicating the kube call.
+    """
+    from agentit import kube
+
+    result = await asyncio.to_thread(kube.rollout_undo, app_name, namespace)
+    if result["success"]:
+        return {"outcome": "rolled_back", "details": result["message"]}
+    return {"outcome": "rollback_failed", "error": result["message"]}
+
+
 class RemediationLoop:
     """Orchestrates the full detect -> fix -> deploy -> verify pipeline.
 
@@ -250,59 +309,22 @@ class RemediationLoop:
             return {"error": str(exc)}
 
     async def _rollback(self, app_name: str, namespace: str) -> dict:
-        """Execute rollback via kubernetes client.
-
-        ``kube.rollout_undo`` uses the synchronous ``kubernetes`` Python
-        client -- narrowly wrapped in ``asyncio.to_thread`` here rather than
-        making this whole method (or the whole class) fight against a sync
-        K8s client.
-        """
-        from agentit import kube
-
-        result = await asyncio.to_thread(kube.rollout_undo, app_name, namespace)
-        if result["success"]:
-            logger.info("Rollback succeeded for %s/%s: %s", namespace, app_name, result["message"])
+        """Execute rollback via kubernetes client (delegates to the shared
+        ``rollback_action()``, adding this loop's own store/publisher log)."""
+        result = await rollback_action(app_name, namespace)
+        if result["outcome"] == "rolled_back":
+            logger.info("Rollback succeeded for %s/%s: %s", namespace, app_name, result["details"])
             await self._log("rolled-back", app_name, "critical",
-                            f"Rollback executed: {result['message']}")
-            return {"outcome": "rolled_back", "details": result["message"]}
-
-        logger.error("Rollback failed for %s/%s: %s", namespace, app_name, result["message"])
-        await self._log("rollback-failed", app_name, "critical", f"Rollback failed: {result['message']}")
-        return {"outcome": "rollback_failed", "error": result["message"]}
+                            f"Rollback executed: {result['details']}")
+        else:
+            logger.error("Rollback failed for %s/%s: %s", namespace, app_name, result["error"])
+            await self._log("rollback-failed", app_name, "critical", f"Rollback failed: {result['error']}")
+        return result
 
     async def _verify_slos(self, assessment_id: str, app_name: str) -> dict:
-        """Watch SLOs for VERIFY_WINDOW_SECONDS after apply."""
-        if self._store is None:
-            return {"healthy": True, "reason": "No store -- skipping SLO check"}
-
-        from agentit.slo_collector import collect_slo, is_breached
-
-        for _ in range(VERIFY_MAX_POLLS):
-            slos = await self._store.list_slos(assessment_id)
-            if not slos:
-                await asyncio.sleep(VERIFY_POLL_INTERVAL)
-                continue
-
-            breached = []
-            for s in slos:
-                # collect_slo does blocking kubernetes-client I/O -- narrowly
-                # wrapped in to_thread at this call site.
-                value = await asyncio.to_thread(collect_slo, s["metric_name"], app_name)
-                if value is not None:
-                    status = "breached" if is_breached(s["metric_name"], value, s["target_value"]) else "met"
-                    await self._store.update_slo(s["id"], value, status)
-                    if status == "breached":
-                        breached.append(s["metric_name"])
-
-            if breached:
-                return {
-                    "healthy": False,
-                    "reason": f"{len(breached)} SLO(s) breached: {', '.join(breached)}",
-                    "breached": breached,
-                }
-            await asyncio.sleep(VERIFY_POLL_INTERVAL)
-
-        return {"healthy": True, "reason": f"All SLOs healthy after {VERIFY_WINDOW_SECONDS}s"}
+        """Watch SLOs for VERIFY_WINDOW_SECONDS after apply (delegates to the
+        shared ``verify_slos()``)."""
+        return await verify_slos(self._store, assessment_id, app_name)
 
     async def close(self) -> None:
         await self._client.aclose()

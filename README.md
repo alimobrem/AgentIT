@@ -182,6 +182,35 @@ GitHub's own PR UI stays the surface for reviewing the actual code diff; the por
 uv run agentit propose-watch --interval 86400 --max-open-prs 1
 ```
 
+## Unified apply flow
+
+Every path that gets a generated change into a cluster or a repo — the manual "Deliver" action, gate-approve, `AutoMode`, and `DriftDetector` — funnels through one router, `portal/delivery.py::route_and_deliver()`, instead of each independently deciding "apply now" with no shared audit trail, no shared verification, and (before this) no idea whether an app is already GitOps-registered. See [`docs/unified-apply-flow.md`](docs/unified-apply-flow.md) for the full design this implements.
+
+**Why this exists.** Before this, gate-approve called a raw, unaudited `apply_manifests_to_cluster()` while "Create PR" — when it committed to a GitOps infra repo — also unconditionally ensured a live, `selfHeal: true`/`prune: true` Argo CD `ApplicationSet` watching that same app's namespace. Nothing stopped a subsequent gate-approve or "Apply to Cluster" click from applying directly into that same namespace, one Argo reconcile away from Argo silently deleting whatever it just applied. This design closes that hole structurally.
+
+**The router's taxonomy → mechanism table, as implemented** (`classify_file()`):
+
+| Category | Detected by | Mechanism |
+|---|---|---|
+| Cluster/app config | Valid K8s YAML, not `codechange`, not a shared-operator-namespace target | GitOps-registered → commit to infra repo + open PR (never auto-merged). Not registered → direct apply. |
+| CI/CD → shared operator namespace | Valid K8s YAML whose `metadata.namespace` is one of `openshift-gitops`/`openshift-pipelines`/`openshift-operators`/`openshift-monitoring`/`openshift-logging` | A dedicated `cluster-admin-review` gate — never a silent skip. Approving it applies directly into that namespace (`allow_operator_namespaces=True`), the one case where the "never apply into a shared namespace" rule is bypassed, by explicit elevated-RBAC human approval. |
+| Source-repo patch | `category == "codechange"` (excluding its own summary doc) | PR against the app's own repo, as a real patch against each file's `target_path` (e.g. `Dockerfile`) — not a same-named copy under `.agentit/codechange/`. |
+| Narrative documentation / manifests-at-rest | Any other YAML (e.g. `ConfigMap`-wrapped runbook prose) / non-YAML config (Renovate/Dependabot) | Routed exactly like cluster/app config, or (non-YAML) as an informational PR against the app's own repo. |
+| Narrative reports | `category in ("dependency", "cost")` and filename is `dependency-report.md`/`cost-report.md` | Excluded from delivery entirely — read-only artifacts, downloadable from the assessment page, never a delivery candidate. |
+| Secrets | Any manifest with `kind: Secret` | Hard-blocked from every mechanism — logged loudly, never delivered. |
+
+**GitOps registration** is a real, current query — `kube.get_custom_resource("argoproj.io", "v1alpha1", "applications", f"managed-{app}", namespace="openshift-gitops")` — not just "was an infra repo URL ever set." It only falls back to `report.infra_repo_url is not None` when the cluster call itself fails (offline/unreachable, e.g. tests); a successful call that simply finds no `Application` is **not** registered regardless of `infra_repo_url`.
+
+**AutoMode's terminal action** (`should_auto_apply()`'s safety classification is completely unchanged) now depends on that registration check: not registered → the exact same direct-apply behavior as before. Registered → AutoMode still autonomously commits and opens a PR (it already trusts its own safety classification enough to skip human review for a direct apply), but creates a `gitops-pr-pending` gate instead of finishing — a human must merge the PR; **AgentIT never auto-merges**, matching this project's own "Argo CD is the sole deployer" stance for its own deployment.
+
+**Every delivery is tracked** in a new `deliveries` table (`store.py`/`store_pg.py`, kept in parity, same as every other table) — what was routed, which mechanism was chosen, delivery status, and verification outcome. Direct applies and GitOps commits with an actual SLO already being tracked for that assessment get the same 60-second SLO-watch tail (generalized out of `RemediationLoop` into `remediation_loop.verify_slos()`/`rollback_action()`) run in the background; `DriftDetector`'s existing ~10-minute Argo poll closes the loop for GitOps deliveries specifically once it observes the committed revision synced (Argo sync isn't synchronous, so this can't happen inline).
+
+**Point-of-no-return confirmation.** A dynamically-labeled single "Deliver" button (`onboard_results.html`) replaces the old independent "Apply to Cluster"/"Create PR" buttons — the mechanism is no longer a human's choice for cluster/app config. Both that button and every gate's "Approve & Deliver" button on `/gates` show the exact same "AgentIT will: ..." statement (`delivery.confirmation_text()`) twice: once as page-level preview text, and again inside the un-skippable confirm modal a human must actively acknowledge immediately before the real delivery fires — never only on an earlier, easy-to-click-through dry-run screen.
+
+**Real per-field-manager server-side-apply.** `kube.apply_yaml()` no longer shells out to `oc apply --server-side --force-conflicts` — it applies each document in a manifest individually via the Kubernetes Python client's dynamic-client server-side-apply support (`content_type="application/apply-patch+yaml"`, `field_manager="agentit"`), with `force` defaulting to `False`. On a genuine field-manager conflict (HTTP 409), it returns a structured, distinguishable result (`conflict: True`, `conflict_details: [...]`) instead of either failing silently or forcing through — every apply path (`AutoMode`, the unified delivery router, gate resolution) routes a real conflict to a dedicated `cluster-conflict-review` gate. Approving that gate is the **only** place in the app that ever passes `force=True`, seizing ownership from the other manager after explicit human review.
+
+**Per-(namespace, resource-kind) auto-mode allowlist.** The `auto_mode` setting is still a single global on/off toggle by default (see Settings below) — but an operator can additionally scope it to specific `namespace/kind` patterns (`*` wildcards allowed on either side, e.g. `*/ConfigMap`, `prod/NetworkPolicy`) via the same Settings page. `AutoMode.execute()` splits each apply batch per file against this allowlist rather than treating it all-or-nothing: an allowed `ConfigMap` and a disallowed `ClusterRoleBinding` in the same batch apply and gate independently (`auto-mode-scope-review` gate for the denied portion). `Secret`/`Role`/`RoleBinding`/`ClusterRole`/`ClusterRoleBinding` can never be allowlisted, even by an explicit or wildcard pattern naming them. With no allowlist configured (the default), this is a pure no-op — identical whole-batch behavior to before it existed.
+
 ## Web portal
 
 `agentit portal` launches a FastAPI + Jinja2 app (htmx + Alpine.js for interactivity, no frontend framework). 56+ routes.
@@ -192,14 +221,14 @@ Key pages:
 |---|---|
 | **Fleet** | Dashboard of all managed apps with scores and lifecycle stage |
 | **Assessment Detail** | 7-dimension scores, lifecycle stepper, score trend + a rendered score-history table with deltas, timeline, remediation items |
-| **Gates** | Human approval queue with LLM reasoning, confirm/reject with reason |
+| **Gates** | Human approval queue with LLM reasoning, confirm/reject with reason. Approving funnels through the unified delivery router (`route_and_deliver()`) for ordinary gates; `gitops-pr-pending` gates merge a PR instead of re-delivering, `cluster-admin-review` gates apply directly into a shared operator namespace, `cluster-conflict-review` gates force-reapply after a server-side-apply field-manager conflict, and `auto-mode-scope-review` gates cover manifests auto-mode denied for being outside the configured allowlist — see "Unified apply flow" above. |
 | **Insights** | Fleet stats, agent performance (from real `agent_runs` records), low-effectiveness skills, fleet-wide check compliance (pass rate per data-driven check across every recorded assessment), and fleet-wide learning feedback |
 | **Decisions** | Audit of every real LLM *decision* point (fix-review, auto-mode classify — not just LLM-generated content), attributed by the agent or skill that triggered it, with the LLM's actual reasoning and a per-agent/skill approve/reject/gate breakdown. See `llm_decisions.py` for exactly what's covered and what isn't. |
 | **Capabilities** | Skills/checks catalog, onboarding agents, watchers, and the "Research CVEs & Generate Skills" trigger. Tabbed with **Agents** (live registry of who's actually run, their real success rate, and a per-agent run-history table with duration/resource tier/error) |
 | **Events** | Activity feed with a `correlation_id` "Chain" column (click through to trace a single assess → onboard → apply run end to end) and a DLQ for failed events that now actually populates from Kafka dead-letters and republishes to the original topic on retry |
 | **Health** | Rollout/pod/pipeline status, Kafka topic/consumer-group stats, and live circuit breaker (LLM/Kubernetes) open/closed state |
 | **SLOs** | SLO definitions and error budgets |
-| **Settings** | Auto-mode toggle, decision matrix, configuration. Tabbed with **Schedules** (watcher status — now backed by real heartbeats — and cron jobs) |
+| **Settings** | Auto-mode toggle, per-(namespace, resource-kind) auto-mode allowlist, decision matrix, configuration. Tabbed with **Schedules** (watcher status — now backed by real heartbeats — and cron jobs) |
 
 Webhook endpoints power the event-driven loop: `/api/webhook/assess`, `/api/webhook/github-push`, `/api/webhook/onboard`, `/api/webhook/auto-apply`, `/api/webhook/remediate`, plus three self-monitoring endpoints described below (`/api/webhook/synthetic-probe`, `/api/webhook/backup-status`, `/api/webhook/secret-check`). All but `github-push` require the shared-secret `X-Internal-Webhook-Token` header (see [Security notes](#security-notes)).
 
@@ -410,7 +439,7 @@ AgentIT/
 │   ├── property_verifier.py        # Verify skill properties hold after generation
 │   ├── dependency_manager.py       # Dependency lifecycle management
 │   ├── resource_tuner.py           # Resource right-sizing recommendations
-│   ├── llm.py                      # Claude client (Anthropic/Vertex), safety gate, fail-open
+│   ├── llm.py                      # Claude client (Anthropic/Vertex), safety gate, fail-closed
 │   ├── automode.py                 # LLM-gated auto-apply (fail-closed)
 │   ├── remediation_loop.py         # detect → assess → onboard → apply → verify pipeline
 │   ├── cloner.py                   # Shallow git clone with SSRF prevention
@@ -446,9 +475,9 @@ AgentIT/
 │       │   ├── webhooks.py         # /api/webhook/* (internal-token-gated) + GitHub push
 │       │   ├── health.py           # /health, /healthz, /readyz, platform drift
 │       │   └── schedules.py        # Watcher/cron schedule management
-│       ├── store.py                # SQLite persistence (12+ tables: assessments, events, gates,
+│       ├── store.py                # SQLite persistence (18+ tables: assessments, events, gates,
 │       │                           #   SLOs, remediations, skill_effectiveness, agent_feedback,
-│       │                           #   processed_webhooks)
+│       │                           #   deliveries, processed_webhooks)
 │       ├── store_pg.py             # Async Postgres counterpart to store.py (asyncpg) — schema +
 │       │                           #   all methods ported and tested; the live/active backend on
 │       │                           #   the OpenShift deployment (AGENTIT_DB_BACKEND=postgres)
@@ -457,6 +486,7 @@ AgentIT/
 │       │                           #   (live-cluster default), per AGENTIT_DB_BACKEND
 │       ├── helpers.py              # CircuitBreaker, clone_assess_cleanup, safe_url, async get_store()
 │       ├── cluster_apply.py        # oc/kubectl apply with pre-flight checks
+│       ├── delivery.py             # Unified apply flow: classify + route_and_deliver()
 │       ├── github_pr.py            # GitHub REST API integration
 │       └── templates/              # 25 Jinja2 templates (htmx + Alpine.js)
 ├── skills/                         # 40 property-based skill definitions (11 domains)

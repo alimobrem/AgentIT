@@ -91,7 +91,7 @@ Defaults to `false` so merging this doesn't change behavior on any existing depl
 3. Push. On the next sync, the Deployment gains an `oauth-proxy` sidecar (`registry.redhat.io/openshift4/ose-oauth-proxy`) listening on 8443, the Service gains a `proxy-https` port plus a `service.beta.openshift.io/serving-cert-secret-name` annotation (the service-ca operator mints the sidecar's TLS cert automatically — no manual cert management needed), and the Route switches from `edge` termination on port 8080 straight to `reencrypt` termination on the proxy's port.
 4. The SA also gets a `system:auth-delegator` ClusterRoleBinding (needed for the proxy's `--openshift-sar` check) and an `oauth-redirectreference` annotation (needed for the OAuth login flow's redirect).
 
-**Prerequisite**: none beyond what every OpenShift cluster already has — `oauth-proxy` talks to the cluster's built-in OAuth server, there's no separate IdP to stand up. `--openshift-sar` is currently scoped to "can this identity `get` the `agentit` namespace" (i.e. any authenticated user with *any* role binding here) — tighten `chart/templates/deployment.yaml`'s `--openshift-sar` argument if a narrower audience is needed.
+**Prerequisite**: none beyond what every OpenShift cluster already has — `oauth-proxy` talks to the cluster's built-in OAuth server, there's no separate IdP to stand up. `--openshift-sar` defaults to "can this identity `get` the `agentit` namespace" (i.e. any authenticated user with *any* role binding here) — tighten it to a real RBAC check via `auth.sarResource`/`auth.sarVerb`/`auth.sarResourceName`/`auth.sarApiGroup` (e.g. require `get` on `rollouts` in the `argoproj.io` group, a resource the `-edit` RoleBinding in `rbac.yaml` already grants) if a narrower audience is needed. Unset, these reproduce today's exact check — purely opt-in.
 
 **Important**: this protects the browser-facing Route only. Argo Events Sensors call `/api/webhook/*` directly against the in-cluster Service (`http://agentit.agentit.svc:8080/...`), never through the Route, so they never go through this proxy regardless of `auth.enabled` — see the internal webhook token below.
 
@@ -214,17 +214,19 @@ doesn't newly break anything — but if that 302 issue ever gets fixed, that hoo
 matching secret configured on GitHub's side (it currently has none either) or it will start hard-
 failing HMAC checks instead of silently 302'ing.
 
-**Found but explicitly not fixed (out of scope — requires a chart/template change, not a live
-cluster fix):** `chart/templates/argo-events/sensor-onboard.yaml` and
-`sensor-auto-apply.yaml` both set `retryStrategy.factor` as `{value: 2.0}` (a nested object), which
-Argo Events fails to parse as a number (`strconv.ParseFloat: parsing "{\"value\":2}": invalid
-syntax`) — confirmed live via `oc logs -l sensor-name=agentit-onboard`: `failed to trigger actions,
-invalid backoff configuration, invalid factor`. This means the `agentit-onboard` and
-`agentit-auto-apply` Sensors currently **cannot fire their HTTP trigger at all**, regardless of the
-webhook-token fix above. `sensor-finding-remediate.yaml` has the correct flat `factor: 2.0` and was
-used to verify the internal-webhook-token post-deploy check instead (see below). The fix is a
-one-line chart change (`factor: 2.0` instead of `factor: {value: 2.0}`) but is left for a follow-up
-PR since this session is deploy-and-verify only.
+**Found and fixed** (originally logged here as "found but explicitly not fixed"):
+`chart/templates/argo-events/sensor-onboard.yaml` and `sensor-auto-apply.yaml` both set
+`retryStrategy.factor` as `{value: 2.0}` (a nested object), which Argo Events fails to parse as a
+number (`strconv.ParseFloat: parsing "{\"value\":2}": invalid syntax`) — confirmed live via
+`oc logs -l sensor-name=agentit-onboard`: `failed to trigger actions, invalid backoff configuration,
+invalid factor`. This meant the `agentit-onboard` and `agentit-auto-apply` Sensors could not fire
+their HTTP trigger at all, regardless of the webhook-token fix above. `sensor-finding-remediate.yaml`
+already had the correct flat `factor: 2.0`. Fixed in both files to match it exactly. A
+`AgentITSensorTriggerFailing` alert (`chart/templates/prometheusrule.yaml`, gated behind
+`monitoring.enabled` + `argoEvents.enabled`) now watches Argo Events' own
+`argo_events_action_failed_total` metric so this *class* of silent trigger failure pages someone
+going forward instead of requiring a manual `oc logs` read — see that alert's comment for what's
+still needed (a PodMonitor on the Sensor pods) before it can actually fire.
 
 **Rollout auto-promotion finding:** the canary `steps` are `[setWeight:10, pause:30s, setWeight:50,
 pause:30s, setWeight:100]` with no `AnalysisTemplate`/manual gate. The entire canary for the
@@ -234,6 +236,10 @@ up clean (no restarts, `/readyz`/`/healthz` responding 200 within ~10s of contai
 init or `AGENTIT_DB_BACKEND` tracebacks) so no intervention was needed this time, but there is
 currently no way to pause this rollout for a real manual health check before it reaches 100% short
 of pre-emptively `oc patch`-ing the Rollout to add a longer/indefinite pause — which weren't done
-here since it wasn't necessary and the task scope excluded touching Rollout config. Worth a
-follow-up: either a real `AnalysisTemplate` (the repo's `release/analysis-template` skill already
-generates these) or a much longer first pause.
+here since it wasn't necessary and the task scope excluded touching Rollout config.
+
+**Update:** a real `AnalysisTemplate` now exists (`chart/templates/analysistemplate.yaml`, using the
+same `http_requests_total{status=~"5.."}` error-rate query and 5% threshold as the
+`AgentITHighErrorRate` alert), wired into the Rollout's `setWeight:50`→`setWeight:100` step via
+`rollout.analysisEnabled` (default `false` — purely opt-in, doesn't change any existing deployment's
+behavior until explicitly turned on).

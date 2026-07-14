@@ -274,6 +274,24 @@ CREATE TABLE IF NOT EXISTS check_results (
 );
 CREATE INDEX IF NOT EXISTS idx_check_results_assessment ON check_results(assessment_id);
 
+-- Tracks every change set routed through the unified delivery flow
+-- (portal/delivery.py::route_and_deliver) -- mirrors store.py's `deliveries`
+-- table. See docs/unified-apply-flow.md section (C).
+CREATE TABLE IF NOT EXISTS deliveries (
+    id TEXT PRIMARY KEY,
+    assessment_id TEXT NOT NULL REFERENCES assessments(id),
+    app_name TEXT NOT NULL,
+    categories_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    mechanism TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    verification TEXT NOT NULL DEFAULT 'unknown',
+    details_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_deliveries_assessment ON deliveries(assessment_id);
+CREATE INDEX IF NOT EXISTS idx_deliveries_app ON deliveries(app_name);
+
 -- Migration: add correlation_id to events created before this column
 -- existed. Postgres supports ADD COLUMN IF NOT EXISTS natively, so (per
 -- plan §4) this needs none of store.py's try/except OperationalError dance.
@@ -294,7 +312,7 @@ _ALL_TABLES = [
     "settings", "remediation_jobs", "scheduled_operations",
     "processed_webhooks", "agent_feedback", "skill_effectiveness",
     "suppressed_checks", "skill_inventory_snapshots",
-    "agent_runs", "check_results",
+    "agent_runs", "check_results", "deliveries",
 ]
 
 
@@ -313,6 +331,15 @@ def _row_to_dict(row: asyncpg.Record | None) -> dict[str, Any] | None:
 
 def _rows_to_dicts(rows: list[asyncpg.Record]) -> list[dict[str, Any]]:
     return [_row_to_dict(r) for r in rows]  # type: ignore[misc]
+
+
+def _delivery_row_to_dict(row: asyncpg.Record | None) -> dict[str, Any] | None:
+    d = _row_to_dict(row)
+    if d is None:
+        return None
+    d["categories"] = json.loads(d.pop("categories_json"))
+    d["details"] = json.loads(d.pop("details_json"))
+    return d
 
 
 def _affected(status: str) -> int:
@@ -802,6 +829,7 @@ class AssessmentStore:
                 "last_assessed": r["assessed_at"].isoformat(),
                 "assessment_count": trend["assessments_count"],
                 "critical_count": critical_count,
+                "infra_repo_url": report.infra_repo_url,
             })
         return fleet
 
@@ -865,6 +893,76 @@ class AssessmentStore:
             status, _now(), resolved_by, gate_id,
         )
         return _affected(result) > 0
+
+    # ── Deliveries ───────────────────────────────────────────────────────
+
+    async def create_delivery(
+        self,
+        assessment_id: str,
+        app_name: str,
+        categories: dict,
+        mechanism: str,
+        status: str = "pending",
+        details: dict | None = None,
+    ) -> str:
+        delivery_id = uuid.uuid4().hex
+        now = _now()
+        await self._pool.execute(
+            """
+            INSERT INTO deliveries
+                (id, assessment_id, app_name, categories_json, mechanism, status, verification, details_json, created_at, updated_at)
+            VALUES ($1, $2, $3, $4::jsonb, $5, $6, 'unknown', $7::jsonb, $8, $9)
+            """,
+            delivery_id, assessment_id, app_name, json.dumps(categories), mechanism, status,
+            json.dumps(details or {}), now, now,
+        )
+        return delivery_id
+
+    async def update_delivery(
+        self,
+        delivery_id: str,
+        *,
+        status: str | None = None,
+        verification: str | None = None,
+        details: dict | None = None,
+    ) -> bool:
+        row = await self._pool.fetchrow(
+            "SELECT details_json FROM deliveries WHERE id = $1", delivery_id,
+        )
+        if row is None:
+            return False
+        merged_details = json.loads(row["details_json"])
+        if details:
+            merged_details.update(details)
+        result = await self._pool.execute(
+            """
+            UPDATE deliveries SET
+                status = COALESCE($2, status),
+                verification = COALESCE($3, verification),
+                details_json = $4::jsonb,
+                updated_at = $5
+            WHERE id = $1
+            """,
+            delivery_id, status, verification, json.dumps(merged_details), _now(),
+        )
+        return _affected(result) > 0
+
+    async def get_delivery(self, delivery_id: str) -> dict | None:
+        row = await self._pool.fetchrow("SELECT * FROM deliveries WHERE id = $1", delivery_id)
+        return _delivery_row_to_dict(row)
+
+    async def list_deliveries(self, assessment_id: str) -> list[dict]:
+        rows = await self._pool.fetch(
+            "SELECT * FROM deliveries WHERE assessment_id = $1 ORDER BY created_at DESC", assessment_id,
+        )
+        return [_delivery_row_to_dict(r) for r in rows]
+
+    async def list_pending_gitops_deliveries(self) -> list[dict]:
+        rows = await self._pool.fetch(
+            "SELECT * FROM deliveries WHERE mechanism = 'infra-repo-commit' AND verification = 'unknown' "
+            "ORDER BY created_at ASC",
+        )
+        return [_delivery_row_to_dict(r) for r in rows]
 
     # ── Remediations ───────────────────────────────────────────────────
 
@@ -1741,7 +1839,7 @@ class AssessmentStore:
         "assessments", "onboarding_results", "events", "gates", "remediations",
         "agent_registry", "slos", "apply_results", "remediation_jobs",
         "scheduled_operations", "agent_feedback", "skill_effectiveness",
-        "agent_runs", "check_results",
+        "agent_runs", "check_results", "deliveries",
     )
 
     async def get_db_stats(self) -> dict:

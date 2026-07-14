@@ -35,6 +35,28 @@ def get_client():
     return client
 
 
+_dynamic_client_cache = None
+_dynamic_client_cache_time: float = 0
+
+
+def dynamic_client():
+    """Get a cached kubernetes dynamic client (generic apiVersion/kind ->
+    REST-path resolution + server-side-apply support), used by
+    ``apply_yaml()`` below. Shares ``get_client()``'s 10-minute TTL so a
+    refreshed in-cluster service-account token is picked up the same way.
+    """
+    global _dynamic_client_cache, _dynamic_client_cache_time
+    now = _time.monotonic()
+    if _dynamic_client_cache is not None and (now - _dynamic_client_cache_time) < _CLIENT_TTL:
+        return _dynamic_client_cache
+    from kubernetes import dynamic
+
+    api_client = get_client().ApiClient()
+    _dynamic_client_cache = dynamic.DynamicClient(api_client)
+    _dynamic_client_cache_time = now
+    return _dynamic_client_cache
+
+
 def core_v1():
     return get_client().CoreV1Api()
 
@@ -122,45 +144,128 @@ def patch_custom_resource(group: str, version: str, plural: str, name: str, name
         raise KubeError(f"Failed to patch {group}/{version} {plural}/{name}: {exc}") from exc
 
 
-def apply_yaml(content: str, namespace: str) -> dict:
-    """Apply a YAML manifest with server-side-apply semantics.
+DEFAULT_FIELD_MANAGER = "agentit"
 
-    Creates resources that don't exist, patches resources that already do.
-    Returns {"applied": bool, "error": str|None}.
 
-    TODO(subprocess-migration): this is the last remaining `oc` subprocess call
-    in the codebase (see get_custom_resource/create_custom_resource/patch_custom_resource
-    above for the migrated single-kind equivalents). `content` here is an arbitrary,
-    multi-document manifest spanning both core/typed kinds (ConfigMap, Namespace, ...)
-    and CRDs (Application, Rollout, Subscription, ...), so replicating `oc apply
-    --server-side --force-conflicts` requires a generic apiVersion/kind -> API-call
-    dispatcher plus real server-side-apply support (kubernetes-client patch calls with
-    content_type="application/apply-patch+yaml" and field_manager set). That's a
-    substantial, high-risk change to the most-called apply path in the app -- deferred
-    rather than rushed. Do this migration as its own reviewed change, not bundled in.
-    """
-    import os
-    import subprocess
-    import tempfile
+def _ssa_conflict_message(exc) -> str:
+    """Best-effort human-readable message from a 409 server-side-apply
+    conflict response. The apiserver's error body is JSON with a `message`
+    field naming the conflicting field manager(s) and path(s)
+    (e.g. `Apply failed with 1 conflict: conflict with "kubectl-client-side-apply"
+    using v1: .data.foo`) -- fall back to `str(exc)` if the body isn't the
+    shape we expect (defensive against apiserver version differences)."""
+    import json
 
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
     try:
-        tmp.write(content)
-        tmp.close()
-        result = subprocess.run(
-            ["oc", "apply", "--server-side", "--force-conflicts",
-             "-n", namespace, "-f", tmp.name],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0:
-            return {"applied": True, "error": None}
-        return {"applied": False, "error": result.stderr[:200]}
-    except FileNotFoundError:
-        return {"applied": False, "error": "oc CLI not found"}
-    except subprocess.TimeoutExpired:
-        return {"applied": False, "error": "oc apply timed out after 30s"}
-    finally:
-        os.unlink(tmp.name)
+        body = json.loads(exc.body) if exc.body else {}
+        return body.get("message") or str(exc)
+    except (TypeError, ValueError, AttributeError):
+        return str(exc)
+
+
+def apply_yaml(
+    content: str, namespace: str, *,
+    field_manager: str = DEFAULT_FIELD_MANAGER, force: bool = False,
+) -> dict:
+    """Apply a YAML manifest via real per-field-manager server-side-apply.
+
+    `content` is an arbitrary, multi-document manifest spanning both
+    core/typed kinds (ConfigMap, Namespace, ...) and CRDs (Application,
+    Rollout, Subscription, ...) -- each document is resolved to its REST
+    resource via the kubernetes client's dynamic-client discovery, then
+    applied with `content_type="application/apply-patch+yaml"` and
+    `field_manager=field_manager`, matching `oc apply --server-side`'s wire
+    format but through the real Python client instead of an `oc` subprocess.
+
+    `force` defaults to `False` and is passed through as SSA's `force`
+    query parameter (`force_conflicts` in the dynamic client) only when the
+    caller explicitly opts in -- on a genuine field-manager conflict (HTTP
+    409, `reason=Conflict`) this does NOT silently retry with force; it
+    returns a structured, distinguishable result instead so callers can
+    route the conflict to a human-reviewed gate rather than either
+    failing silently or seizing ownership from another manager.
+
+    Returns a dict:
+      - applied: True only if every document in `content` applied cleanly.
+      - error: a short message (first failure) when `applied` is False.
+      - conflict: True when the failure was purely field-manager conflict(s)
+        (never true when `applied` is True, and never true alongside a
+        non-conflict failure -- a hard error takes precedence for `error`/
+        `conflict` since it needs attention regardless of ownership).
+      - conflict_details: per-document conflict info (kind/name/namespace/
+        apiserver message), empty unless `conflict` is True. One `content`
+        call can contain multiple documents (see above), so this is a list,
+        not a single conflict -- matching this function's existing
+        per-*file* (not per-document) result granularity used throughout
+        `cluster_apply.py`.
+    """
+    import yaml as _yaml
+    from kubernetes.client.exceptions import ApiException
+
+    try:
+        docs = [d for d in _yaml.safe_load_all(content) if isinstance(d, dict)]
+    except _yaml.YAMLError as exc:
+        return {"applied": False, "error": f"invalid YAML: {exc}", "conflict": False, "conflict_details": []}
+
+    if not docs:
+        return {"applied": True, "error": None, "conflict": False, "conflict_details": []}
+
+    dyn = dynamic_client()
+    conflict_details: list[dict] = []
+    first_error: str | None = None
+    any_conflict = False
+    any_failure = False
+
+    for doc in docs:
+        kind = doc.get("kind", "")
+        api_version = doc.get("apiVersion", "")
+        meta = doc.get("metadata") or {}
+        name = meta.get("name", "")
+        doc_namespace = meta.get("namespace") or namespace
+
+        if not kind or not api_version or not name:
+            any_failure = True
+            first_error = first_error or f"document missing kind/apiVersion/name (kind={kind!r}, name={name!r})"
+            continue
+
+        try:
+            resource = dyn.resources.get(api_version=api_version, kind=kind)
+        except Exception as exc:
+            any_failure = True
+            first_error = first_error or f"{kind} ({api_version}) not found on cluster: {exc}"
+            continue
+
+        try:
+            dyn.server_side_apply(
+                resource, body=doc, name=name,
+                namespace=doc_namespace if resource.namespaced else None,
+                field_manager=field_manager, force_conflicts=force,
+                _request_timeout=30,
+            )
+        except ApiException as exc:
+            if exc.status == 409:
+                any_conflict = True
+                message = _ssa_conflict_message(exc)
+                conflict_details.append({
+                    "kind": kind, "name": name, "namespace": doc_namespace, "message": message,
+                })
+                first_error = first_error or f"{kind}/{name}: field-manager conflict -- {message}"
+            else:
+                any_failure = True
+                first_error = first_error or f"{kind}/{name}: {exc.reason or exc.body or exc}"
+        except Exception as exc:
+            any_failure = True
+            first_error = first_error or f"{kind}/{name}: {exc}"
+
+    if not any_failure and not any_conflict:
+        return {"applied": True, "error": None, "conflict": False, "conflict_details": []}
+
+    return {
+        "applied": False,
+        "error": first_error,
+        "conflict": any_conflict and not any_failure,
+        "conflict_details": conflict_details if (any_conflict and not any_failure) else [],
+    }
 
 
 def _get_argo_rollout(name: str, namespace: str) -> dict | None:

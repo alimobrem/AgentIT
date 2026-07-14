@@ -327,8 +327,14 @@ def test_onboard_results_page(client, _override_store):
     # under the shared "skills" category instead of one per domain.
     assert "skills" in resp.text
     assert "Download" in resp.text
-    assert "Create PR" in resp.text
+    # The unified apply flow (docs/unified-apply-flow.md) collapsed the
+    # independent "Apply to Cluster" / "Create PR" buttons into one
+    # dynamically-labeled "Deliver" action -- the mechanism (direct apply vs.
+    # GitOps commit+PR) is no longer a human choice. This report has no
+    # infra_repo_url and isn't GitOps-registered, so the button reads "Apply
+    # to Cluster"; a GitOps-registered app would instead see "Commit & Open PR".
     assert "Apply to Cluster" in resp.text
+    assert "Per-Agent PRs" in resp.text
     assert "Dry Run" in resp.text
 
 
@@ -1357,6 +1363,74 @@ def test_settings_and_schedules_are_tabs_of_each_other(client, _override_store):
 
     schedules_resp = client.get("/schedules")
     assert 'href="/settings"' in schedules_resp.text
+
+
+# ── Auto-mode allowlist (Settings page) ───────────────────────────────
+
+
+def test_settings_page_shows_allowlist_empty_by_default(client, _override_store):
+    resp = client.get("/settings")
+    assert resp.status_code == 200
+    assert "Auto-Mode Allowlist" in resp.text
+    assert "No allowlist entries configured" in resp.text
+
+
+def test_add_auto_mode_allowlist_entry(client, _override_store):
+    store = _override_store
+    resp = client.post(
+        "/settings/auto-mode-allowlist/add",
+        data={"namespace": "prod", "kind": "ConfigMap"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    from agentit.automode import parse_allowlist
+    assert parse_allowlist(store.get_setting("auto_mode_allowlist")) == ["prod/ConfigMap"]
+
+
+def test_add_auto_mode_allowlist_entry_defaults_namespace_to_wildcard(client, _override_store):
+    store = _override_store
+    client.post("/settings/auto-mode-allowlist/add", data={"kind": "NetworkPolicy"}, follow_redirects=False)
+    from agentit.automode import parse_allowlist
+    assert parse_allowlist(store.get_setting("auto_mode_allowlist")) == ["*/NetworkPolicy"]
+
+
+def test_add_auto_mode_allowlist_rejects_rbac_shaped_kind(client, _override_store):
+    """The Settings page rejects an RBAC-shaped kind up front with a clear
+    error, rather than silently accepting a pattern that `split_files_by_
+    allowlist()` would ignore anyway."""
+    store = _override_store
+    resp = client.post(
+        "/settings/auto-mode-allowlist/add",
+        data={"namespace": "*", "kind": "Secret"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "allowlist_error" in resp.headers["location"]
+    from agentit.automode import parse_allowlist
+    assert parse_allowlist(store.get_setting("auto_mode_allowlist")) == []
+
+
+def test_remove_auto_mode_allowlist_entry(client, _override_store):
+    store = _override_store
+    client.post(
+        "/settings/auto-mode-allowlist/add", data={"namespace": "prod", "kind": "ConfigMap"},
+        follow_redirects=False,
+    )
+    resp = client.post(
+        "/settings/auto-mode-allowlist/remove", data={"pattern": "prod/ConfigMap"}, follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    from agentit.automode import parse_allowlist
+    assert parse_allowlist(store.get_setting("auto_mode_allowlist")) == []
+
+
+def test_settings_page_lists_configured_allowlist_entries(client, _override_store):
+    store = _override_store
+    store.set_setting("auto_mode_allowlist", '["prod/ConfigMap", "*/NetworkPolicy"]')
+    resp = client.get("/settings")
+    assert "prod" in resp.text
+    assert "ConfigMap" in resp.text
+    assert "NetworkPolicy" in resp.text
 
 
 # ── Schedules page ─────────────────────────────────────────────────────

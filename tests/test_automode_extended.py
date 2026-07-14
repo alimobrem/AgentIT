@@ -188,6 +188,162 @@ class TestExecuteAuditLogGapClosed:
         assert len(audit_records) == 0
 
 
+class TestExecuteGitopsAwareTerminalAction:
+    """docs/unified-apply-flow.md section (B): `should_auto_apply()`'s
+    safety classification is unchanged -- only the *terminal action* once
+    `can_apply` is True differs based on GitOps registration."""
+
+    async def test_gitops_registered_opens_pr_and_gates_for_human_merge(self):
+        s, raw = make_async_store()
+        raw.set_setting("auto_mode", "true")
+        report = make_report(criticality="low", summary="test")
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
+        aid = raw.save(report)
+
+        llm = MagicMock()
+        llm.classify_action.return_value = {
+            "is_destructive": False, "confidence": 0.95, "reason": "Adds ConfigMap",
+        }
+        files = [{"category": "skills", "path": "app-cost-labels.yaml",
+                  "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\n",
+                  "description": "labels"}]
+
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"), \
+             patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_commit.return_value = {
+                "pr_url": "https://github.com/org/infra-gitops/pull/7",
+                "commit_url": "https://github.com/org/infra-gitops/commit/deadbeef",
+                "files_committed": 1,
+            }
+            engine = AutoMode(store=s, llm_client=llm)
+            result = await engine.execute(
+                aid, files, "default", "low", True, "test-app", report=report,
+            )
+
+        assert result["action"] == "gated"
+        assert "awaiting human merge" in result["reason"]
+        mock_apply.assert_not_called()
+        mock_commit.assert_called_once()
+
+        gates = raw.list_gates(status="pending")
+        assert len(gates) == 1
+        assert gates[0]["gate_type"] == "gitops-pr-pending"
+        assert "pull/7" in gates[0]["summary"]
+        assert "never auto-merge" in gates[0]["summary"]
+
+    async def test_not_registered_still_direct_applies_when_report_omitted(self):
+        """Every pre-existing caller omits `report` -- must stay on the
+        exact prior direct-apply behavior (2 calls: dry-run then real)."""
+        s, raw = make_async_store()
+        raw.set_setting("auto_mode", "true")
+        report = make_report(criticality="low", summary="test")
+        aid = raw.save(report)
+
+        llm = MagicMock()
+        llm.classify_action.return_value = {
+            "is_destructive": False, "confidence": 0.95, "reason": "Adds ConfigMap",
+        }
+        files = [{"category": "cost", "path": "labels.yaml",
+                  "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\n",
+                  "description": "labels"}]
+
+        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_apply.return_value = {"applied": ["labels.yaml"], "skipped": [], "errors": []}
+            engine = AutoMode(store=s, llm_client=llm)
+            result = await engine.execute(aid, files, "default", "low", True, "test-app")
+
+        assert result["action"] == "applied"
+        assert mock_apply.call_count == 2
+
+
+class TestExecuteConflictHandling:
+    """`AutoMode.execute()`'s reaction to `kube.apply_yaml()`'s structured
+    server-side-apply conflict result (surfaced through `apply_with_
+    verification()`'s `conflicts` list): never silently forced, never
+    lumped in with a generic partial failure -- always routed to a
+    dedicated `cluster-conflict-review` gate."""
+
+    def _conflict_result(self, applied=None):
+        return {
+            "applied": applied or [], "skipped": [], "errors": [],
+            "conflicts": [{
+                "path": "np.yaml", "error": "field-manager conflict",
+                "details": [{"kind": "NetworkPolicy", "name": "test", "namespace": "default", "message": "conflict with kubectl"}],
+            }],
+        }
+
+    async def test_dry_run_conflict_creates_conflict_review_gate(self):
+        s, raw = make_async_store()
+        raw.set_setting("auto_mode", "true")
+        report = make_report(criticality="low", summary="test")
+        aid = raw.save(report)
+
+        llm = MagicMock()
+        llm.classify_action.return_value = {"is_destructive": False, "confidence": 0.95, "reason": "Safe"}
+        files = [{"category": "sec", "path": "np.yaml", "content": "x", "description": "np"}]
+
+        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_apply.return_value = self._conflict_result()
+            engine = AutoMode(store=s, llm_client=llm)
+            result = await engine.execute(aid, files, "default", "low", True, "test-app")
+
+        assert result["action"] == "gated"
+        assert "conflict" in result["reason"].lower()
+        mock_apply.assert_called_once()  # dry-run only; real apply never attempted
+        gates = raw.list_gates(status="pending")
+        conflict_gates = [g for g in gates if g["gate_type"] == "cluster-conflict-review"]
+        assert len(conflict_gates) == 1
+        assert "force=True" in conflict_gates[0]["summary"]
+
+    async def test_real_apply_conflict_after_clean_dry_run_creates_gate_not_partial_generic(self):
+        s, raw = make_async_store()
+        raw.set_setting("auto_mode", "true")
+        report = make_report(criticality="low", summary="test")
+        aid = raw.save(report)
+
+        llm = MagicMock()
+        llm.classify_action.return_value = {"is_destructive": False, "confidence": 0.95, "reason": "Safe"}
+        files = [{"category": "sec", "path": "np.yaml", "content": "x", "description": "np"}]
+
+        call_results = [
+            {"applied": [], "skipped": [], "errors": []},  # clean dry-run
+            self._conflict_result(),  # real apply hits a conflict
+        ]
+        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster", side_effect=call_results) as mock_apply:
+            engine = AutoMode(store=s, llm_client=llm)
+            result = await engine.execute(aid, files, "default", "low", True, "test-app")
+
+        assert mock_apply.call_count == 2
+        assert result["action"] == "partial_failure"
+        assert "conflict" in result["reason"].lower()
+        gates = raw.list_gates(status="pending")
+        assert any(g["gate_type"] == "cluster-conflict-review" for g in gates)
+
+    async def test_no_conflict_still_behaves_as_before(self):
+        """Sanity check: a clean apply with no conflicts key issues (mocked
+        return has no `conflicts` at all) must behave exactly as before this
+        feature existed."""
+        s, raw = make_async_store()
+        raw.set_setting("auto_mode", "true")
+        report = make_report(criticality="low", summary="test")
+        aid = raw.save(report)
+
+        llm = MagicMock()
+        llm.classify_action.return_value = {"is_destructive": False, "confidence": 0.95, "reason": "Safe"}
+        files = [{"category": "sec", "path": "np.yaml", "content": "x", "description": "np"}]
+
+        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_apply.return_value = {"applied": ["np.yaml"], "skipped": [], "errors": []}
+            engine = AutoMode(store=s, llm_client=llm)
+            result = await engine.execute(aid, files, "default", "low", True, "test-app")
+
+        assert result["action"] == "applied"
+        gates = raw.list_gates(status="pending")
+        assert not any(g["gate_type"] == "cluster-conflict-review" for g in gates)
+
+
 class TestExecuteWithPublisher:
     async def test_publishes_events(self):
         s, raw = make_async_store()

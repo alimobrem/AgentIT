@@ -48,6 +48,19 @@ class DriftDetector:
             status = app.get("status", {})
             sync_status = status.get("sync", {}).get("status", "Unknown")
             health = status.get("health", {}).get("status", "Unknown")
+            revision = status.get("sync", {}).get("revision", "")
+
+            # Closes the second half of the unified delivery flow's verify
+            # loop for GitOps deliveries (docs/unified-apply-flow.md
+            # section (C)): a delivery through `route_and_deliver()`'s
+            # infra-repo-commit branch can't verify synchronously the way a
+            # direct apply does -- the actual cluster change only happens
+            # once a human merges and Argo's own reconcile loop picks it up,
+            # on Argo's schedule, not AgentIT's. This existing 10-minute
+            # poll is the concrete mechanism that closes that loop, reusing
+            # a poll it already runs rather than adding a new one.
+            if revision:
+                await self._maybe_close_gitops_delivery(name, revision)
 
             if sync_status == "OutOfSync":
                 self._publisher.publish(
@@ -122,6 +135,45 @@ class DriftDetector:
         if not items:
             return None
         return {"items": items}
+
+    async def _maybe_close_gitops_delivery(self, argo_app_name: str, synced_revision: str) -> None:
+        """If ``synced_revision`` matches a pending GitOps delivery's
+        committed SHA, kick off the shared verify-and-close tail
+        (``portal/delivery.py::verify_and_close_delivery``) for it now,
+        instead of on a fixed timer -- the concrete mechanism by which
+        ``DriftDetector`` and the unified apply flow become one coherent
+        system instead of two disconnected pieces.
+        """
+        if self._store is None:
+            return
+        try:
+            pending = await self._store.list_pending_gitops_deliveries()
+        except Exception as exc:
+            logger.debug("Failed to list pending GitOps deliveries: %s", exc)
+            return
+
+        for delivery in pending:
+            sanitized = delivery["app_name"].lower().replace("_", "-").replace(".", "-")
+            if f"managed-{sanitized}" != argo_app_name:
+                continue
+            commit_sha = (delivery.get("details") or {}).get("outcomes", {}).get(
+                "cluster_config", {},
+            ).get("commit_sha", "")
+            if not commit_sha or not synced_revision.startswith(commit_sha[:7]):
+                continue
+
+            from agentit.portal.delivery import verify_and_close_delivery
+
+            namespace = sanitized
+            click_msg = f"[drift-detect] GitOps delivery {delivery['id']} for {delivery['app_name']} synced (revision {synced_revision[:12]}) -- starting verify"
+            logger.info(click_msg)
+            try:
+                await verify_and_close_delivery(
+                    self._store, delivery["id"], delivery["assessment_id"],
+                    delivery["app_name"], namespace, "infra-repo-commit",
+                )
+            except Exception as exc:
+                logger.warning("Failed to verify/close GitOps delivery %s: %s", delivery["id"], exc)
 
     async def _maybe_auto_sync(self, app_name: str) -> None:
         """If auto-mode is enabled, patch the Application to trigger a sync.
