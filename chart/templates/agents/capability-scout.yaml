@@ -1,0 +1,106 @@
+{{- if .Values.agents.capabilityScout.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-capability-scout
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-capability-scout
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-capability-scout
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-capability-scout
+        app.kubernetes.io/component: agent
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        {{- if .Values.gcp.credentialsSecret }}
+        - name: gcp-credentials
+          secret:
+            secretName: {{ .Values.gcp.credentialsSecret }}
+        {{- end }}
+      containers:
+        - name: capability-scout
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [python, -m, agentit, propose-watch]
+          args:
+            - --interval
+            - "{{ .Values.agents.capabilityScout.interval }}"
+            - --max-open-prs
+            - "{{ .Values.agents.capabilityScout.maxOpenPRs }}"
+          env:
+            # Reads AgentIT's own fleet data via the same store every other
+            # watcher uses -- no shared/RWX storage needed (this watcher is
+            # deliberately stateless: it opens PRs against AgentIT's own
+            # git remote instead of writing anything to a local PVC). See
+            # docs/self-improvement-for-agentit.md.
+            - name: AGENTIT_DB_BACKEND
+              value: {{ .Values.postgres.backend | default "sqlite" | quote }}
+            {{- if eq (.Values.postgres.backend | default "sqlite") "postgres" }}
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.bundled.credentials.secretName }}
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.bundled.credentials.secretName }}
+                  key: password
+            - name: AGENTIT_DB_DSN
+              value: "postgresql://$(PGUSER):$(PGPASSWORD)@{{ .Release.Name }}-postgres-bundled.{{ .Release.Namespace }}.svc:5432/{{ .Values.postgres.bundled.credentials.database }}"
+            {{- end }}
+            - name: ANTHROPIC_VERTEX_PROJECT_ID
+              value: {{ .Values.env.ANTHROPIC_VERTEX_PROJECT_ID | default "" | quote }}
+            - name: CLOUD_ML_REGION
+              value: {{ .Values.env.CLOUD_ML_REGION | default "" | quote }}
+            {{- if .Values.gcp.credentialsSecret }}
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /var/secrets/gcp/credentials.json
+            {{- end }}
+            # Required to push a branch and open a draft PR via `gh` --
+            # same Secret the main portal Deployment already reads for
+            # github_pr.py's REST calls (optional here: if unset, this
+            # watcher's gate-blocked/no-PR path logs a clean event instead
+            # of failing the tick).
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+                  optional: true
+          volumeMounts:
+            {{- if .Values.gcp.credentialsSecret }}
+            - name: gcp-credentials
+              mountPath: /var/secrets/gcp
+              readOnly: true
+            {{- end }}
+          livenessProbe:
+            exec:
+              command: [sh, -c, "test -f /tmp/heartbeat && test $(($(date +%s) - $(stat -c %Y /tmp/heartbeat 2>/dev/null || echo 0))) -lt 172800"]
+            initialDelaySeconds: 60
+            periodSeconds: 300
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+{{- end }}

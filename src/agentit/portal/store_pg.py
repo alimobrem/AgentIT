@@ -630,6 +630,14 @@ class AssessmentStore:
         )
         return _rows_to_dicts(rows)
 
+    async def get_event(self, event_id: str) -> dict | None:
+        """Single-row lookup by primary key — see ``store.py``'s identical
+        method for the full rationale."""
+        row = await self._pool.fetchrow(
+            "SELECT * FROM events WHERE id = $1", event_id,
+        )
+        return _row_to_dict(row)
+
     async def list_events_by_correlation_id(self, correlation_id: str, limit: int = 200) -> list[dict]:
         """Trace a single assess -> onboard -> apply chain end to end."""
         rows = await self._pool.fetch(
@@ -1256,6 +1264,33 @@ class AssessmentStore:
             app_name, finding_category,
         )
         return row["cnt"] if row else 0
+
+    async def get_fleet_wide_rejection_stats(self, limit: int = 10) -> list[dict]:
+        """Rejection counts per finding category, across every app — see
+        ``store.py``'s identical method for the full rationale."""
+        rows = await self._pool.fetch(
+            """
+            SELECT finding_category,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN action = 'rejected' THEN 1 ELSE 0 END) as rejected
+            FROM agent_feedback
+            GROUP BY finding_category
+            ORDER BY rejected DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+        result = []
+        for r in rows:
+            total = r["total"] or 0
+            rejected = r["rejected"] or 0
+            result.append({
+                "finding_category": r["finding_category"],
+                "total": total,
+                "rejected": rejected,
+                "rejection_rate": round((rejected / total * 100) if total > 0 else 0, 1),
+            })
+        return result
 
     async def get_human_override(self, app_name: str, finding_category: str) -> str | None:
         """Get the most recent human override value for this app/category."""

@@ -618,6 +618,62 @@ class TestGetAllFeedback:
         assert feedback[0]["app_name"] == "app-4"
 
 
+class TestFleetWideRejectionStats:
+    """get_fleet_wide_rejection_stats() -- capability-scout's fleet-wide
+    aggregate (docs/self-improvement-for-agentit.md), unlike
+    get_rejection_count() which is scoped to one app + one category."""
+
+    def test_aggregates_rejection_rate_per_category_across_apps(self):
+        store = make_store()
+        store.record_feedback("app-a", "security", "network-policy", "rejected")
+        store.record_feedback("app-b", "security", "network-policy", "rejected")
+        store.record_feedback("app-c", "security", "network-policy", "approved")
+        store.record_feedback("app-a", "compliance", "sbom", "approved")
+
+        stats = store.get_fleet_wide_rejection_stats()
+        by_category = {s["finding_category"]: s for s in stats}
+        assert by_category["network-policy"]["total"] == 3
+        assert by_category["network-policy"]["rejected"] == 2
+        assert by_category["network-policy"]["rejection_rate"] == round(2 / 3 * 100, 1)
+        assert by_category["sbom"]["rejected"] == 0
+
+    def test_sorted_by_rejected_count_descending(self):
+        store = make_store()
+        store.record_feedback("app-a", "security", "low-rejects", "rejected")
+        for _ in range(3):
+            store.record_feedback("app-a", "security", "high-rejects", "rejected")
+
+        stats = store.get_fleet_wide_rejection_stats()
+        assert stats[0]["finding_category"] == "high-rejects"
+
+    def test_respects_limit(self):
+        store = make_store()
+        for i in range(5):
+            store.record_feedback("app-a", "security", f"cat-{i}", "rejected")
+        assert len(store.get_fleet_wide_rejection_stats(limit=2)) == 2
+
+    def test_empty_when_no_feedback(self):
+        store = make_store()
+        assert store.get_fleet_wide_rejection_stats() == []
+
+
+class TestGetEvent:
+    """get_event() -- single-row lookup by primary key, backing the
+    Self-Improvement tab's per-run drill-through page."""
+
+    def test_returns_the_matching_event(self):
+        store = make_store()
+        eid = store.log_event("capability-scout", "capability-run", None, "info", "proposed something")
+        event = store.get_event(eid)
+        assert event is not None
+        assert event["id"] == eid
+        assert event["summary"] == "proposed something"
+
+    def test_returns_none_for_unknown_id(self):
+        store = make_store()
+        assert store.get_event("does-not-exist") is None
+
+
 # ── Dead-letter queue republish ──────────────────────────────────────────
 
 

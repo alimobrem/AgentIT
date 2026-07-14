@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Self-Improvement Run - AgentIT{% endblock %}
+{% block content %}
+<h1>Self-Improvement Run</h1>
+<p class="text-muted text-sm"><span data-timestamp="{{ event.timestamp }}">{{ event.timestamp[:19] if event.timestamp else '—' }}</span></p>
+
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-label">Outcome</div>
+    <div class="stat-value">
+      {% if details.pr_url %}
+        <span class="text-success">Proposed</span>
+      {% elif event.severity == "error" %}
+        <span class="text-danger">Error</span>
+      {% else %}
+        <span class="text-warning">{{ "Gate-blocked" if details.gate_results and (details.gate_results | rejectattr("passed") | list) else "No signal" }}</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Risk</div>
+    <div class="stat-value text-sm">{{ details.risk or "—" }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">PR Status</div>
+    <div class="stat-value">
+      {% if pr_status and pr_status.state == "merged" %}
+        <span class="badge badge-success">merged</span>
+      {% elif pr_status and pr_status.state == "open" %}
+        <span class="badge badge-info">open</span>
+      {% elif pr_status and pr_status.state == "closed" %}
+        <span class="badge badge-muted">closed (not merged)</span>
+      {% else %}
+        <span class="text-muted text-sm">— (no PR this cycle)</span>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="action-bar mb-2">
+  <a href="/capabilities/self-improvement" class="btn btn-outline btn-sm">&larr; All Capabilities</a>
+  {% if pr_url %}
+  <a href="{{ pr_url }}" target="_blank" rel="noopener" class="btn btn-outline btn-sm">View PR on GitHub</a>
+  {% endif %}
+</div>
+
+<h2 class="section-title">Evidence</h2>
+{% if details.evidence %}
+<p class="text-sm">{{ details.evidence }}</p>
+{% else %}
+<p class="text-muted text-sm">No evidence recorded for this run.</p>
+{% endif %}
+{% if details.doc_anchor %}
+<p class="text-sm text-muted">Doc anchor: <code>{{ details.doc_anchor }}</code></p>
+{% endif %}
+
+<h2 class="section-title">Safety Gates</h2>
+{% if details.gate_results %}
+<table>
+  <thead>
+    <tr>
+      <th>Gate</th>
+      <th>Result</th>
+      <th>Detail</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for gate in details.gate_results %}
+    <tr class="{% if gate.passed %}row-border-green{% else %}row-border-red{% endif %}">
+      <td class="text-bold">{{ gate.name }}</td>
+      <td>
+        {% if gate.passed %}
+          <span class="badge badge-low">pass</span>
+        {% else %}
+          <span class="badge badge-critical">fail</span>
+        {% endif %}
+      </td>
+      <td class="text-sm text-muted">{{ gate.detail }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="text-muted text-sm">No gates were evaluated this cycle — this run never reached a proposal (LLM unavailable or insufficient real signal).</p>
+{% endif %}
+
+<h2 class="section-title">Summary</h2>
+<p class="text-sm text-muted">{{ event.summary }}</p>
+{% endblock %}

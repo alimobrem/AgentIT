@@ -464,6 +464,21 @@ class TestEventsCorrelationAndAction:
         assert {r["agent_id"] for r in rows} == {"agent-a", "agent-b"}
 
 
+class TestGetEvent:
+    """get_event() -- single-row lookup by primary key, backing the
+    Self-Improvement tab's per-run drill-through page."""
+
+    async def test_returns_the_matching_event(self, store):
+        eid = await store.log_event("capability-scout", "capability-run", None, "info", "proposed something")
+        event = await store.get_event(eid)
+        assert event is not None
+        assert event["id"] == eid
+        assert event["summary"] == "proposed something"
+
+    async def test_returns_none_for_unknown_id(self, store):
+        assert await store.get_event("does-not-exist") is None
+
+
 class TestRetryDlqMessage:
     async def test_retry_republishes_to_original_topic(self, store):
         eid = await store.log_event(
@@ -548,6 +563,24 @@ class TestGetAllFeedback:
         feedback = await store.get_all_feedback()
         assert len(feedback) == 2
         assert {f["app_name"] for f in feedback} == {"app-a", "app-b"}
+
+
+class TestFleetWideRejectionStats:
+    """get_fleet_wide_rejection_stats() -- capability-scout's fleet-wide
+    aggregate (docs/self-improvement-for-agentit.md)."""
+
+    async def test_aggregates_rejection_rate_per_category_across_apps(self, store):
+        await store.record_feedback("app-a", "hardening", "network-policy", "rejected")
+        await store.record_feedback("app-b", "hardening", "network-policy", "rejected")
+        await store.record_feedback("app-c", "hardening", "network-policy", "approved")
+
+        stats = await store.get_fleet_wide_rejection_stats()
+        by_category = {s["finding_category"]: s for s in stats}
+        assert by_category["network-policy"]["total"] == 3
+        assert by_category["network-policy"]["rejected"] == 2
+
+    async def test_empty_when_no_feedback(self, store):
+        assert await store.get_fleet_wide_rejection_stats() == []
 
 
 class TestDbStats:

@@ -274,3 +274,51 @@ spec:
           port: 5432
     {{- end }}
 {{- end }}
+---
+{{- if .Values.agents.capabilityScout.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-capability-scout
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-capability-scout
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ .Release.Name }}-capability-scout
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    # NOTE: this rule intentionally has NO `ports` restriction -- see the
+    # identical rule on the other 4 watchers above for the DNS-resolution
+    # rationale (empirically confirmed on this cluster's OVN-Kubernetes).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
+    # propose_capability_improvement() calls the LLM (Anthropic direct API
+    # or Vertex AI), and git_pr.py's push/`gh pr create` calls GitHub -- both
+    # reachable only over the public internet, not selectable via
+    # podSelector/namespaceSelector, so this is scoped by port only. Unlike
+    # the other 4 watchers, this one does NOT need egress to the portal
+    # Service (no cross-pod draft-push mechanism here -- it opens a PR
+    # directly against the git remote) or to the Kubernetes API server (it
+    # never calls kube.py).
+    - ports:
+        - protocol: TCP
+          port: 443
+    {{- if .Values.postgres.bundled.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: postgres-bundled
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- end }}
+{{- end }}

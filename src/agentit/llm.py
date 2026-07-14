@@ -62,6 +62,42 @@ _EOL_USER = (
 )
 
 
+_CAPABILITY_PROPOSAL_SYSTEM = (
+    "You are a senior engineer on the AgentIT project. AgentIT already improves the "
+    "skills it generates for OTHER applications; your job here is different: propose "
+    "AT MOST ONE small, evidence-grounded improvement to AgentIT's OWN codebase. "
+    "Rules, non-negotiable:\n"
+    "1. Prefer a gap explicitly documented in AgentIT's own docs (quoted verbatim in "
+    "the evidence you are given) over inventing one from general knowledge. If the "
+    "evidence given to you is too thin to ground a real, specific proposal, set "
+    "has_proposal to false -- an honest 'nothing to propose' is correct and preferred "
+    "over a guess. Never invent evidence that isn't in the data you were given.\n"
+    "2. Only propose changes that are small, focused, and reviewable -- this project's "
+    "own convention: only modify what's directly related to the gap, never refactor, "
+    "rename, or reorder unrelated code, keep changes as minimal as possible.\n"
+    "3. Never propose anything touching chart/, argocd/, .github/workflows/, "
+    "Dockerfile, or any path containing 'secret' or 'rbac' -- scope suggested target "
+    "files to src/agentit/**/*.py, skills/, checks/, tests/, or docs/ only.\n"
+    "4. Always name at least one test file under tests/ in target_files, and describe "
+    "what it would assert in test_plan -- a change with no test coverage plan is not a "
+    "complete proposal.\n\n"
+    'Respond ONLY with valid JSON: {"has_proposal": bool, "title": str, '
+    '"gap_description": str, "evidence": str, "target_files": [str], '
+    '"change_summary": str, "risk": "low"|"medium"|"high", "test_plan": str}. '
+    'If has_proposal is false, the other string fields may be empty and target_files '
+    'an empty list.'
+)
+
+_CAPABILITY_PROPOSAL_USER = (
+    "Real signal gathered this cycle (nothing below is invented -- every field comes "
+    "from a real store query or a real grep of this repo's own docs/*.md):\n\n"
+    "{evidence}\n\n"
+    "Based ONLY on the evidence above, propose at most one small, focused improvement "
+    "to AgentIT's own codebase, or set has_proposal to false if nothing here is strong "
+    "enough evidence to ground a specific, real change. JSON only."
+)
+
+
 def _create_client() -> anthropic.Anthropic | anthropic.AnthropicVertex:
     project = os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "")
     region = os.environ.get("CLOUD_ML_REGION", "")
@@ -237,6 +273,49 @@ class LLMClient:
             ]
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             logger.warning("LLM returned unparseable EOL risk response: %s", raw)
+            return None
+
+    def propose_capability_improvement(self, evidence: dict) -> dict | None:
+        """Given real, gathered signal (fleet rejection stats, agent/check
+        health, skill effectiveness, and a static grep of this repo's own
+        ``docs/*.md`` gap admissions), propose at most one small,
+        evidence-cited improvement to AgentIT's own codebase -- see
+        ``docs/self-improvement-for-agentit.md``. This is the
+        ``capability-scout`` watcher's counterpart to ``research_cves()``/
+        ``research_skill_improvement()`` in ``learning_agent.py``, except
+        those target the skills catalog AgentIT generates for other apps;
+        this targets AgentIT's own product surface.
+
+        Returns a dict with ``has_proposal`` plus (when true)
+        ``title``/``gap_description``/``evidence``/``target_files``/
+        ``change_summary``/``risk``/``test_plan``, or ``None`` if the LLM
+        call failed or returned something unparseable (caller must treat
+        that as "no proposal this cycle", never fabricate one).
+        """
+        user_msg = _CAPABILITY_PROPOSAL_USER.format(evidence=json.dumps(evidence, default=str))
+        raw = self._chat(_CAPABILITY_PROPOSAL_SYSTEM, user_msg)
+        if raw is None:
+            return None
+        try:
+            parsed = json.loads(raw)
+            has_proposal = bool(parsed["has_proposal"])
+            if not has_proposal:
+                return {"has_proposal": False}
+            target_files = parsed["target_files"]
+            if not isinstance(target_files, list):
+                raise TypeError("'target_files' is not a list")
+            return {
+                "has_proposal": True,
+                "title": str(parsed["title"]),
+                "gap_description": str(parsed["gap_description"]),
+                "evidence": str(parsed["evidence"]),
+                "target_files": [str(f) for f in target_files],
+                "change_summary": str(parsed["change_summary"]),
+                "risk": str(parsed.get("risk", "medium")),
+                "test_plan": str(parsed.get("test_plan", "")),
+            }
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            logger.warning("LLM returned unparseable capability proposal: %s", raw)
             return None
 
     def _chat(self, system: str, user: str) -> str | None:

@@ -28,6 +28,7 @@ Point AgentIT at a Git repository and it will:
 - [Skills & check engine](#skills--check-engine)
 - [The agent fleet](#the-agent-fleet)
 - [Self-improvement loop](#self-improvement-loop)
+- [Self-improvement of AgentIT itself (capability-scout)](#self-improvement-of-agentit-itself-capability-scout)
 - [Web portal](#web-portal)
 - [Getting started](#getting-started)
   - [CLI](#cli)
@@ -156,6 +157,31 @@ AgentIT improves itself through three tiers of learning. The loop is now closed 
 
 **Auditing LLM decisions.** Two places the LLM's output directly gates an outcome (not just generates content) persist a real, attributed record today, surfaced on the **Decisions** page: `self-fix`'s Step 3 first-approver gate (`LLMClient.review_fix`) — attributed by real skill name via `skill_effectiveness` — and auto-mode's safety classification (`LLMClient.classify_action`, `AutoMode.execute`) — attributed by the real originating agent when the caller knows it (e.g. the dispatcher's `result["agent"]`), otherwise the generic `auto-mode` component name, which is still the common case since most callers apply a whole bundle of manifests spanning several agents at once. A third real decision point — the security analyzer's LLM-based secret false-positive filter (`classify_secret`) — decides per match whether to keep or drop a finding but persists nothing today; see `llm_decisions.py`'s module docstring.
 
+## Self-improvement of AgentIT itself (capability-scout)
+
+The loop above (`skill-learner`) improves what AgentIT *generates for other apps* — the skills catalog. It has no counterpart that improves AgentIT's *own* codebase, its portal routes, its watchers, its CLI. `capability-scout` is that counterpart: a separate, opt-in, 24h watcher (`agents.capabilityScout.enabled`, default **off** — this is a live-deployment decision for the repo owner to make explicitly, not something enabled as a side effect of shipping it) that mirrors `skill-learner`'s shape exactly — **research → propose → verify → human review → merge** — but aimed at AgentIT's own repo. See [`docs/self-improvement-for-agentit.md`](docs/self-improvement-for-agentit.md) for the full design; this is deliberately named distinctly from `self-assess`/`self-fix` (which run AgentIT's existing hardening pipeline *against* AgentIT's own repo, generating K8s manifests for it — not proposing new Python features for AgentIT's product surface).
+
+**The loop, end to end, every 24h:**
+
+1. **Real signal, never fabricated.** `capability_scout.gather_evidence()` reads fleet-wide rejection rates by finding category (`AssessmentStore.get_fleet_wide_rejection_stats()`, a new `GROUP BY` aggregate over `agent_feedback`), agent run health (`get_agent_stats()`), check compliance (`get_check_compliance()`), skill effectiveness (`get_skill_effectiveness()`/`get_low_effectiveness_skills()`/`get_loop_health()`), recent watcher tick failures, and — the highest-precision signal — a static grep of this repo's own `docs/*.md` for "Known gap" / "Deliberately deferred" / "Documented future idea" / "not built" text (`capability_scout.scan_doc_gaps()`). Fewer than 5 real data points anywhere → the cycle logs an honest no-op, never an invented proposal.
+2. **One LLM proposal, or none.** `LLMClient.propose_capability_improvement()` (mirrors `detect_eol_risks()`'s `_chat()`/graceful-failure/JSON-parsing convention) is given only that real evidence and asked to propose **at most one** small, evidence-cited change — title, gap description, the exact evidence that grounded it, suggested target files, risk, and a test plan — or to explicitly propose nothing. It's instructed to prefer a documented doc-gap over inventing one, and to never suggest touching `chart/`, `argocd/`, `.github/workflows/`, or anything secret/RBAC-related.
+3. **Real, executable safety gates — not stubs.** `capability_scout.run_safety_gates()` runs, in order, fail-closed: diff-size cap (≤3 files, ≤150 lines), scope allowlist (`src/agentit/`, `skills/`, `checks/`, `tests/`, `docs/` only), a secret-pattern regex scan, a test-plan-required check, `py_compile` on every touched `.py` file, a `gh pr list`-backed check that no `agentit/self-improve/*` PR is already open (configurable via `agents.capabilityScout.maxOpenPRs`, default 1), and finally the **exact** `pytest tests/ -q --ignore=...` invocation `.github/workflows/tests.yml` uses. Any failing gate discards the cycle — no PR opens, but the attempt (and exactly which gate blocked it) is still logged.
+4. **A real draft PR, never a direct commit.** When every gate passes, `git_pr.py` (extracted from `self-fix --create-pr`'s existing branch/commit/push mechanics, not reimplemented) creates a new `agentit/self-improve/<slug>-<date>` branch, commits the one artifact this cycle produced (a reviewable `docs/proposals/<slug>.md` write-up citing the evidence verbatim — see the module docstring in `capability_scout.py` for why v1 documents a proposed change rather than mechanically applying a source diff to files the LLM has never seen the contents of), pushes it, and opens it via `gh pr create --draft`. Existing CI (`tests.yml`/`security.yml`) runs on it like any other PR. Nothing here ever auto-merges.
+5. **Every outcome is logged, every cycle.** One `capability-run` event (`capability_scout.CAPABILITY_RUN_ACTION`) is logged whether the cycle proposed something, got gate-blocked, or found no signal — mirroring `learning-run`'s "every run leaves a trace" convention exactly.
+
+**Fully transparent from inside the portal, without needing to already know a PR exists:**
+- A **Self-Improvement** tab on the Capabilities page (`/capabilities/self-improvement`) — a "Self-Improvement Runs" table mirroring "Learning Agent Runs" (timestamp, trigger, evidence considered, outcome, live PR status badge).
+- A per-run drill-through (`/capabilities/self-improvement/runs/{event_id}`) mirroring `/capabilities/skills/{name}/history`'s layout: evidence, a per-gate pass/fail table, and the resulting PR's live status — polled via the same `github_pr.get_pr_status()` call `onboarding_history()` already uses, no `gh` needed inside the portal process itself.
+- A `capability-proposal` entry on the **Decisions** page (`llm_decisions.py`), filterable alongside every other real LLM decision, attributed to the `capability-scout` component.
+- A one-line addition to the **Schedules** page's watcher table (`WATCHER_AGENTS`) — real heartbeat-derived status, zero new route/template code, the same mechanism every other watcher already gets for free.
+
+GitHub's own PR UI stays the surface for reviewing the actual code diff; the portal is where a human sees what the loop considered and why.
+
+```bash
+# Long-lived watcher (24h default) -- mirrors `learn-watch`
+uv run agentit propose-watch --interval 86400 --max-open-prs 1
+```
+
 ## Web portal
 
 `agentit portal` launches a FastAPI + Jinja2 app (htmx + Alpine.js for interactivity, no frontend framework). 56+ routes.
@@ -244,6 +270,10 @@ uv run agentit self-assess
 
 # Self-fix loop: assess → skill engine generates → LLM reviews → verify → PR
 uv run agentit self-fix . --create-pr
+
+# capability-scout: propose a small, evidence-grounded change to AgentIT
+# itself as a draft PR (see "Self-improvement of AgentIT itself" above)
+uv run agentit propose-watch --interval 86400 --max-open-prs 1
 
 # Learn new skills from CVE/best-practice research
 uv run agentit learn --source cves --limit 5
@@ -363,7 +393,12 @@ AgentIT/
 │   ├── cli.py                      # click CLI: 15+ commands (assess, onboard, orchestrate,
 │   │                               #   watch, portal, self-assess, self-fix, learn, learn-for,
 │   │                               #   test-skill, activate-skill, run-agent, vuln-watch, slo-track,
-│   │                               #   drift-detect, consume)
+│   │                               #   drift-detect, learn-watch, propose-watch, consume)
+│   ├── capability_scout.py         # capability-scout's research/propose/gate logic (self-improvement
+│   │                               #   of AgentIT's own codebase, not the skills catalog -- see docs/
+│   │                               #   self-improvement-for-agentit.md)
+│   ├── git_pr.py                   # Shared git branch/commit/push + `gh pr create` mechanics,
+│   │                               #   extracted from self-fix --create-pr, reused by capability_scout.py
 │   ├── runner.py                   # run_assessment(): stack detection + analyzers + check engine
 │   ├── skill_engine.py             # Property-based skill matching, lifecycle, LLM generation
 │   ├── check_engine.py             # Data-driven YAML check loader and runner

@@ -133,6 +133,18 @@ agents:
       enabled: true
       size: 256Mi
       # storageClassName: gp3-csi
+  # capability-scout: proposes small, evidence-grounded changes to AgentIT's
+  # own codebase (not the skills catalog) as a draft PR -- see
+  # docs/self-improvement-for-agentit.md. Deliberately opt-in and off by
+  # default like every other agent flag: this writes to AgentIT's own
+  # source tree and opens real PRs against AgentIT's own repo, materially
+  # higher-risk than drafting a skill file. Stateless -- no persistence
+  # PVC, unlike skillLearner -- it opens PRs against the git remote
+  # instead of writing anything to local disk.
+  capabilityScout:
+    enabled: false
+    interval: 86400   # 24 hours
+    maxOpenPRs: 1      # only open a new proposal PR if fewer than this many agentit/self-improve/* PRs are already open
 
 backup:
   enabled: false

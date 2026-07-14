@@ -221,6 +221,127 @@ async def _get_skill_learner_status(s) -> dict:
     }
 
 
+async def _get_capability_run_history(s, limit: int = 15) -> list[dict]:
+    """Durable run history for capability-scout -- every 24h tick leaves a
+    row here, whether or not it produced a proposal (proposed / gate-blocked
+    / no-signal), exactly like ``_get_learning_run_history`` above but keyed
+    off the ``capability-run`` action instead of ``learning-run``. See
+    docs/self-improvement-for-agentit.md's "Portal transparency" section.
+    """
+    if not hasattr(s, "list_events_by_action"):
+        return []
+    from agentit.capability_scout import CAPABILITY_RUN_ACTION
+    try:
+        raw_events = await s.list_events_by_action(CAPABILITY_RUN_ACTION, limit=limit)
+    except Exception:
+        log.warning("Failed to fetch capability-run history", exc_info=True)
+        return []
+
+    runs = []
+    for ev in raw_events:
+        try:
+            details = json.loads(ev.get("details_json") or "{}")
+        except (TypeError, ValueError):
+            details = {}
+        runs.append({
+            "event_id": ev.get("id"),
+            "timestamp": ev.get("timestamp"),
+            "trigger": "Automatic (24h watcher)",
+            "considered": details.get("evidence") or details.get("doc_anchor") or "—",
+            "severity": ev.get("severity", "info"),
+            "summary": ev.get("summary", ""),
+            "pr_url": details.get("pr_url"),
+        })
+
+    pr_urls = [r["pr_url"] for r in runs if r.get("pr_url")]
+    if pr_urls:
+        from agentit.portal.github_pr import get_pr_status
+        statuses = await asyncio.gather(*(asyncio.to_thread(get_pr_status, url) for url in pr_urls))
+        status_map = dict(zip(pr_urls, statuses))
+        for r in runs:
+            if r.get("pr_url"):
+                r["pr_status"] = status_map.get(r["pr_url"], {})
+    return runs
+
+
+_CAPABILITY_SCOUT_STALE_SECONDS = 2 * 86400
+
+
+async def _get_capability_scout_status(s) -> dict:
+    """Real status of the capability-scout watcher, derived from its own
+    tick heartbeat -- see ``_get_skill_learner_status`` above for the
+    identical rationale (chart defaults aren't a reliable signal of what's
+    actually running on a live deployment)."""
+    if not hasattr(s, "list_agents"):
+        return {"has_run": False, "last_heartbeat": None, "stale": None}
+    try:
+        agents = await s.list_agents()
+    except Exception:
+        log.warning("Failed to fetch agent registry for capability-scout status", exc_info=True)
+        return {"has_run": False, "last_heartbeat": None, "stale": None}
+
+    agent = next((a for a in agents if a.get("agent_name") == "capability-scout"), None)
+    last_heartbeat = agent.get("last_heartbeat") if agent else None
+    if not last_heartbeat:
+        return {"has_run": False, "last_heartbeat": None, "stale": None}
+
+    try:
+        last = datetime.fromisoformat(last_heartbeat)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        age_seconds = (datetime.now(timezone.utc) - last).total_seconds()
+    except ValueError:
+        return {"has_run": False, "last_heartbeat": None, "stale": None}
+
+    return {
+        "has_run": True,
+        "last_heartbeat": last_heartbeat,
+        "stale": age_seconds > _CAPABILITY_SCOUT_STALE_SECONDS,
+    }
+
+
+@router.get("/capabilities/self-improvement", response_class=HTMLResponse)
+async def self_improvement_page(request: Request) -> HTMLResponse:
+    """The Self-Improvement tab -- run history for the capability-scout
+    watcher, mirroring the Catalog tab's "Learning Agent Runs" table. See
+    docs/self-improvement-for-agentit.md's "Portal transparency" section."""
+    s = await get_store()
+    runs = await _get_capability_run_history(s)
+    status = await _get_capability_scout_status(s)
+    return get_templates().TemplateResponse(request, "self_improvement.html", {
+        "runs": runs,
+        "capability_scout_status": status,
+    })
+
+
+@router.get("/capabilities/self-improvement/runs/{event_id}", response_class=HTMLResponse)
+async def capability_run_detail(request: Request, event_id: str) -> HTMLResponse:
+    """Per-run drill-through -- evidence, per-gate pass/fail table, and a
+    live PR status badge, mirroring ``skill_history``'s layout above."""
+    s = await get_store()
+    event = await s.get_event(event_id) if hasattr(s, "get_event") else None
+    if event is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    try:
+        details = json.loads(event.get("details_json") or "{}")
+    except (TypeError, ValueError):
+        details = {}
+
+    pr_url = details.get("pr_url")
+    pr_status: dict = {}
+    if pr_url:
+        from agentit.portal.github_pr import get_pr_status
+        pr_status = await asyncio.to_thread(get_pr_status, pr_url)
+
+    return get_templates().TemplateResponse(request, "capability_run_detail.html", {
+        "event": event,
+        "details": details,
+        "pr_url": pr_url,
+        "pr_status": pr_status,
+    })
+
+
 @router.get("/capabilities", response_class=HTMLResponse)
 async def capabilities_page(request: Request) -> HTMLResponse:
     from agentit.remediation.registry import FIX_REGISTRY

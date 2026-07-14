@@ -25,15 +25,26 @@ here: nothing persists its verdict today — the confidence/reason is used inlin
 decide whether to keep or drop a finding and then discarded. That's a real gap, not
 a bug in this module; it's called out in the "LLM Decisions" page and README instead
 of being silently omitted.
+
+A fourth decision point, `capability-proposal` (`LLMClient.propose_capability_improvement`,
+invoked from the `capability-scout` watcher — see docs/self-improvement-for-agentit.md),
+proposes small, evidence-grounded changes to AgentIT's own codebase. Persisted to the
+`events` table (action='capability-run') every cycle, whether or not a proposal was
+actually made — `_capability_proposal_decisions()` maps each cycle to a decision,
+attributed generically to the `capability-scout` component (there's no per-app or
+per-skill target — every proposal targets AgentIT's own repo).
 """
 from __future__ import annotations
 
 import asyncio
+import json
 
 DECISION_TYPE_FIX_REVIEW = "fix-review"
 DECISION_TYPE_AUTO_MODE = "auto-mode-classify"
+DECISION_TYPE_CAPABILITY_PROPOSAL = "capability-proposal"
 
 _AUTO_MODE_FALLBACK_AGENT = "auto-mode"
+_CAPABILITY_SCOUT_ATTRIBUTION = "capability-scout"
 
 
 def _bridge(result, loop):
@@ -109,6 +120,42 @@ def _auto_mode_decisions(store, limit: int, loop=None) -> list[dict]:
     return decisions
 
 
+def _capability_proposal_decisions(store, limit: int, loop=None) -> list[dict]:
+    """`events` rows (action='capability-run') → decisions attributed to the
+    `capability-scout` component -- every cycle becomes a decision, whether
+    or not it actually produced a proposal, mirroring `_auto_mode_decisions()`'s
+    "generic component attribution" bucket (there's no per-app/per-skill
+    target here; every proposal targets AgentIT's own repo, a constant, not
+    derived per-row)."""
+    from agentit.capability_scout import CAPABILITY_RUN_ACTION
+
+    rows = _bridge(store.list_events_by_action(CAPABILITY_RUN_ACTION, limit=limit), loop)
+    decisions = []
+    for r in rows:
+        try:
+            details = json.loads(r.get("details_json") or "{}")
+        except (TypeError, ValueError):
+            details = {}
+        if details.get("pr_url"):
+            outcome = "proposed"
+        elif r["severity"] == "error":
+            outcome = "error"
+        elif any(not g.get("passed", True) for g in (details.get("gate_results") or [])):
+            outcome = "gate-blocked"
+        else:
+            outcome = "no-signal"
+        decisions.append({
+            "timestamp": r["timestamp"],
+            "decision_type": DECISION_TYPE_CAPABILITY_PROPOSAL,
+            "attribution": _CAPABILITY_SCOUT_ATTRIBUTION,
+            "attribution_kind": "component",
+            "target_app": "agentit",
+            "outcome": outcome,
+            "reason": details.get("evidence") or r.get("summary", ""),
+        })
+    return decisions
+
+
 def list_llm_decisions(
     store,
     limit: int = 200,
@@ -125,7 +172,11 @@ def list_llm_decisions(
     ``routes/insights.py``'s call site) -- only needed when ``store`` is the
     Postgres-backed async store; ignored for the sqlite backend.
     """
-    decisions = _fix_review_decisions(store, limit, loop) + _auto_mode_decisions(store, limit, loop)
+    decisions = (
+        _fix_review_decisions(store, limit, loop)
+        + _auto_mode_decisions(store, limit, loop)
+        + _capability_proposal_decisions(store, limit, loop)
+    )
     if decision_type:
         decisions = [d for d in decisions if d["decision_type"] == decision_type]
     if attribution:

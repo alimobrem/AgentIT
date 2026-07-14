@@ -28,6 +28,7 @@ AGENT_CAPABILITIES: dict[str, str] = {
     "slo-tracker": "Checks SLO status, publishes breach alerts, recommends rollbacks",
     "drift-detector": "Queries Argo CD for OutOfSync apps, optionally auto-syncs",
     "skill-learner": "Researches CVEs via LLM, drafts new skills for human review",
+    "capability-scout": "Proposes small, evidence-grounded changes to AgentIT itself as a draft PR",
 }
 
 RESOURCE_TIERS: dict[str, dict[str, str]] = {
@@ -54,6 +55,7 @@ WATCHER_AGENTS: list[dict[str, str]] = [
     {"name": "slo-tracker", "mode": "Polling", "interval": "5 minutes", "description": "Checks SLO status across all assessments, publishes breach alerts, recommends rollbacks"},
     {"name": "drift-detector", "mode": "Argo CD polling", "interval": "10 minutes", "description": "Queries Argo CD apps for OutOfSync state, optionally auto-syncs when auto-mode is on"},
     {"name": "skill-learner", "mode": "LLM polling", "interval": "24 hours", "description": "Researches recent CVEs via LLM and drafts new skills (status: draft) for human review — requires an LLM connection"},
+    {"name": "capability-scout", "mode": "LLM polling", "interval": "24 hours", "description": "Reads fleet usage/effectiveness data and doc-gap signals, proposes one small change to AgentIT itself as a draft PR for human review — requires an LLM connection and GITHUB_TOKEN"},
 ]
 
 

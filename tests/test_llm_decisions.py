@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from agentit.llm_decisions import (
     DECISION_TYPE_AUTO_MODE,
+    DECISION_TYPE_CAPABILITY_PROPOSAL,
     DECISION_TYPE_FIX_REVIEW,
     list_llm_decisions,
     summarize_by_attribution,
@@ -103,6 +104,92 @@ class TestAutoModeDecisions:
 
         decisions = list_llm_decisions(store)
         assert decisions == []
+
+
+class TestCapabilityProposalDecisions:
+    """`capability-run` events (docs/self-improvement-for-agentit.md) →
+    decisions attributed to the generic `capability-scout` component --
+    every cycle becomes a decision, whether or not it actually proposed
+    anything."""
+
+    def test_proposed_cycle_with_pr_url_becomes_a_proposed_decision(self) -> None:
+        store = make_store()
+        store.log_event(
+            "capability-scout", "capability-run", None, "info",
+            "Opened proposal PR: Track stack signatures (https://github.com/org/agentit/pull/9)",
+            details={"evidence": "README.md:42 — Documented future idea", "pr_url": "https://github.com/org/agentit/pull/9",
+                      "gate_results": [{"name": "diff-size", "passed": True}]},
+        )
+
+        decisions = list_llm_decisions(store)
+        assert len(decisions) == 1
+        d = decisions[0]
+        assert d["decision_type"] == DECISION_TYPE_CAPABILITY_PROPOSAL
+        assert d["attribution"] == "capability-scout"
+        assert d["attribution_kind"] == "component"
+        assert d["target_app"] == "agentit"
+        assert d["outcome"] == "proposed"
+        assert d["reason"] == "README.md:42 — Documented future idea"
+
+    def test_gate_blocked_cycle_becomes_a_gate_blocked_decision(self) -> None:
+        store = make_store()
+        store.log_event(
+            "capability-scout", "capability-run", None, "warning",
+            "Proposal 'Foo' gate-blocked: test-plan-required",
+            details={"evidence": "some evidence", "pr_url": None,
+                      "gate_results": [{"name": "test-plan-required", "passed": False}]},
+        )
+
+        decisions = list_llm_decisions(store)
+        assert decisions[0]["outcome"] == "gate-blocked"
+
+    def test_no_signal_cycle_becomes_a_no_signal_decision(self) -> None:
+        store = make_store()
+        store.log_event(
+            "capability-scout", "capability-run", None, "warning",
+            "No proposal this cycle — insufficient real signal.",
+            details={"evidence": "", "pr_url": None, "gate_results": []},
+        )
+
+        decisions = list_llm_decisions(store)
+        assert decisions[0]["outcome"] == "no-signal"
+
+    def test_error_cycle_becomes_an_error_decision(self) -> None:
+        store = make_store()
+        store.log_event(
+            "capability-scout", "capability-run", None, "error",
+            "capability-scout run failed: no credentials",
+            details={"evidence": "", "pr_url": None, "gate_results": [], "error": "no credentials"},
+        )
+
+        decisions = list_llm_decisions(store)
+        assert decisions[0]["outcome"] == "error"
+
+    def test_included_alongside_fix_review_and_auto_mode_decisions(self) -> None:
+        store = make_store()
+        store.record_skill_outcome("network-policy", "app-a", "approved", "fine")
+        store.log_event("auto-mode", "decision", "app-b", "info", "AUTO-APPLY: safe: fine")
+        store.log_event(
+            "capability-scout", "capability-run", None, "info", "Opened proposal PR",
+            details={"evidence": "e", "pr_url": "https://github.com/org/agentit/pull/1"},
+        )
+
+        decisions = list_llm_decisions(store)
+        assert len(decisions) == 3
+        types = {d["decision_type"] for d in decisions}
+        assert types == {DECISION_TYPE_FIX_REVIEW, DECISION_TYPE_AUTO_MODE, DECISION_TYPE_CAPABILITY_PROPOSAL}
+
+    def test_filter_by_capability_proposal_attribution(self) -> None:
+        store = make_store()
+        store.record_skill_outcome("network-policy", "app-a", "approved", "fine")
+        store.log_event(
+            "capability-scout", "capability-run", None, "info", "Opened proposal PR",
+            details={"evidence": "e", "pr_url": "https://github.com/org/agentit/pull/1"},
+        )
+
+        decisions = list_llm_decisions(store, attribution="capability-scout")
+        assert len(decisions) == 1
+        assert decisions[0]["decision_type"] == DECISION_TYPE_CAPABILITY_PROPOSAL
 
 
 class TestListLlmDecisionsMerging:

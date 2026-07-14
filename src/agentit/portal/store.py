@@ -609,6 +609,16 @@ class AssessmentStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_event(self, event_id: str) -> dict | None:
+        """Single-row lookup by primary key — backs the Self-Improvement
+        tab's per-run drill-through page (``/capabilities/self-improvement/
+        runs/{event_id}``), the first caller that ever needs one specific
+        event rather than a filtered list."""
+        row = self._conn.execute(
+            "SELECT * FROM events WHERE id = ?", (event_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
     def list_events_by_correlation_id(self, correlation_id: str, limit: int = 200) -> list[dict]:
         """Trace a single assess -> onboard -> apply chain end to end."""
         rows = self._conn.execute(
@@ -1313,6 +1323,39 @@ class AssessmentStore:
             (app_name, finding_category),
         ).fetchone()
         return row["cnt"] if row else 0
+
+    def get_fleet_wide_rejection_stats(self, limit: int = 10) -> list[dict]:
+        """Rejection counts per finding category, across every app — unlike
+        ``get_rejection_count()`` (one app + one category at a time), this
+        is a fleet-wide ``GROUP BY`` so ``capability-scout``
+        (docs/self-improvement-for-agentit.md) can see which finding
+        categories humans distrust most overall, the same shape as
+        ``get_check_compliance()``'s existing ``GROUP BY`` against a
+        different table.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT finding_category,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN action = 'rejected' THEN 1 ELSE 0 END) as rejected
+            FROM agent_feedback
+            GROUP BY finding_category
+            ORDER BY rejected DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        result = []
+        for r in rows:
+            total = r["total"] or 0
+            rejected = r["rejected"] or 0
+            result.append({
+                "finding_category": r["finding_category"],
+                "total": total,
+                "rejected": rejected,
+                "rejection_rate": round((rejected / total * 100) if total > 0 else 0, 1),
+            })
+        return result
 
     def get_human_override(self, app_name: str, finding_category: str) -> str | None:
         """Get the most recent human override value for this app/category."""

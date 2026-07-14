@@ -2102,6 +2102,117 @@ def test_background_skill_inventory_diff_surfaces_on_events_page(client, _overri
     assert "cve-2099-1" in caps_resp.text
 
 
+# ── Capabilities: Self-Improvement tab (capability-scout) ──────────────
+#
+# docs/self-improvement-for-agentit.md's "Portal transparency" section --
+# a human should be able to see every capability-scout cycle, its evidence,
+# and its gate results entirely from inside the portal, without needing to
+# already know a PR exists.
+
+
+def test_self_improvement_tab_renders_when_empty(client):
+    resp = client.get("/capabilities/self-improvement")
+    assert resp.status_code == 200
+    assert "Self-Improvement" in resp.text
+    assert "never ticked on this deployment" in resp.text
+
+
+def test_self_improvement_tab_is_a_third_tab_alongside_catalog_and_registry(client):
+    resp = client.get("/capabilities/self-improvement")
+    assert 'href="/capabilities"' in resp.text
+    assert 'href="/agents"' in resp.text
+
+    catalog_resp = client.get("/capabilities")
+    assert 'href="/capabilities/self-improvement"' in catalog_resp.text
+
+
+def test_self_improvement_tab_shows_run_history(client, _override_store):
+    """Every cycle appears here, including ones that proposed nothing or
+    got gate-blocked -- not just the ones that shipped a PR."""
+    store = _override_store
+    store.log_event(
+        "capability-scout", "capability-run", None, "warning",
+        "No proposal this cycle — insufficient real signal (1 data point(s), need 5).",
+        details={"trigger": "watcher", "evidence": "", "doc_anchor": None, "gate_results": [], "pr_url": None},
+    )
+    store.log_event(
+        "capability-scout", "capability-run", None, "warning",
+        "Proposal 'Track stack signatures' gate-blocked: test-plan-required",
+        details={
+            "trigger": "watcher", "evidence": "README.md:42 — Documented future idea",
+            "doc_anchor": "README.md:42",
+            "gate_results": [{"name": "test-plan-required", "passed": False, "detail": "no test_plan"}],
+            "pr_url": None,
+        },
+    )
+
+    resp = client.get("/capabilities/self-improvement")
+    assert resp.status_code == 200
+    assert "Self-Improvement Runs" in resp.text
+    assert "insufficient real signal" in resp.text
+    assert "gate-blocked" in resp.text
+    assert "Automatic (24h watcher)" in resp.text
+
+
+def test_self_improvement_tab_shows_watcher_heartbeat(client, _override_store):
+    _override_store.agent_heartbeat("capability-scout")
+    resp = client.get("/capabilities/self-improvement")
+    assert resp.status_code == 200
+    assert "is running" in resp.text
+
+
+def test_capability_run_detail_page_renders_evidence_and_gates(client, _override_store):
+    store = _override_store
+    event_id = store.log_event(
+        "capability-scout", "capability-run", None, "warning",
+        "Proposal 'Track stack signatures' gate-blocked: test-plan-required",
+        details={
+            "trigger": "watcher",
+            "title": "Track stack signatures",
+            "evidence": "README.md:42 — Documented future idea",
+            "risk": "low",
+            "doc_anchor": "README.md:42",
+            "gate_results": [
+                {"name": "diff-size", "passed": True, "detail": "1 file(s), 20 line(s) — within cap"},
+                {"name": "test-plan-required", "passed": False, "detail": "proposal has no test_plan"},
+            ],
+            "pr_url": None,
+        },
+    )
+
+    resp = client.get(f"/capabilities/self-improvement/runs/{event_id}")
+    assert resp.status_code == 200
+    assert "README.md:42" in resp.text
+    assert "test-plan-required" in resp.text
+    assert "diff-size" in resp.text
+    assert "low" in resp.text
+
+
+def test_capability_run_detail_page_404s_for_unknown_run(client, _override_store):
+    resp = client.get("/capabilities/self-improvement/runs/does-not-exist")
+    assert resp.status_code == 404
+
+
+def test_capability_run_detail_shows_live_pr_status(client, _override_store):
+    store = _override_store
+    event_id = store.log_event(
+        "capability-scout", "capability-run", None, "info",
+        "Opened proposal PR: Track stack signatures (https://github.com/org/agentit/pull/9)",
+        details={
+            "trigger": "watcher", "title": "Track stack signatures", "evidence": "e", "risk": "low",
+            "gate_results": [{"name": "diff-size", "passed": True, "detail": "ok"}],
+            "pr_url": "https://github.com/org/agentit/pull/9",
+        },
+    )
+
+    with patch("agentit.portal.github_pr.get_pr_status", return_value={"state": "open", "html_url": "https://github.com/org/agentit/pull/9"}):
+        resp = client.get(f"/capabilities/self-improvement/runs/{event_id}")
+
+    assert resp.status_code == 200
+    assert "open" in resp.text
+    assert "https://github.com/org/agentit/pull/9" in resp.text
+
+
 # ── Agent registry cleanup (agent_registry_cleanup) ───────────────────
 
 

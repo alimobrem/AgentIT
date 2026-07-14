@@ -713,7 +713,8 @@ class TestRBAC:
 class TestWatcherNetworkPolicies:
     """Regression coverage for docs/code-review-2026-07-12.md item #5: the
     watcher Deployments (vuln-watcher, slo-tracker, drift-detector,
-    skill-learner) previously had no NetworkPolicy at all."""
+    skill-learner, capability-scout) previously had no NetworkPolicy at
+    all."""
 
     TEMPLATE = CHART_DIR / "networkpolicy-agents.yaml"
 
@@ -722,13 +723,14 @@ class TestWatcherNetworkPolicies:
         docs = list(yaml.safe_load_all(rendered))
         return {d["metadata"]["name"]: d for d in docs if d}
 
-    def test_parseable_and_covers_all_four_watchers(self):
+    def test_parseable_and_covers_all_five_watchers(self):
         by_name = self._by_name()
         assert set(by_name) == {
             "agentit-vuln-watcher",
             "agentit-slo-tracker",
             "agentit-drift-detector",
             "agentit-skill-learner",
+            "agentit-capability-scout",
         }
         for policy in by_name.values():
             assert policy["kind"] == "NetworkPolicy"
@@ -745,13 +747,29 @@ class TestWatcherNetworkPolicies:
             "agentit-slo-tracker": "agentit-slo-tracker",
             "agentit-drift-detector": "agentit-drift-detector",
             "agentit-skill-learner": "agentit-skill-learner",
+            "agentit-capability-scout": "agentit-capability-scout",
         }
         by_name = self._by_name()
         for name, app_label in expected.items():
             assert by_name[name]["spec"]["podSelector"]["matchLabels"]["app"] == app_label
 
+    def test_capability_scout_has_no_portal_or_kube_api_egress(self):
+        """Unlike the other 4 watchers, capability-scout never calls
+        kube.py and has no cross-pod draft-push mechanism -- it opens a PR
+        directly against the git remote instead."""
+        policy = self._by_name()["agentit-capability-scout"]
+        for rule in policy["spec"]["egress"]:
+            ports = {p.get("port") for p in rule.get("ports", [])}
+            assert 8080 not in ports
+            assert 6443 not in ports
+
     def test_egress_allows_dns_and_api_server(self):
+        """capability-scout is the one exception -- see
+        test_capability_scout_has_no_portal_or_kube_api_egress above: it
+        never calls kube.py, so it has no Kubernetes API server egress rule."""
         for name, policy in self._by_name().items():
+            if name == "agentit-capability-scout":
+                continue
             egress_ports = {
                 (rule.get("ports", [{}])[0].get("protocol"), rule.get("ports", [{}])[0].get("port"))
                 for rule in policy["spec"]["egress"]
@@ -777,6 +795,57 @@ class TestWatcherNetworkPolicies:
             ]
             assert len(dns_rules) == 1, name
             assert "ports" not in dns_rules[0], name
+
+
+# ---------------------------------------------------------------------------
+# capability-scout Deployment (chart/templates/agents/capability-scout.yaml)
+# ---------------------------------------------------------------------------
+
+class TestCapabilityScoutDeployment:
+    TEMPLATE = CHART_DIR / "agents" / "capability-scout.yaml"
+
+    def test_parseable(self):
+        doc = _load(self.TEMPLATE)
+        assert doc["kind"] == "Deployment"
+        assert doc["metadata"]["name"] == "agentit-capability-scout"
+
+    def test_invokes_propose_watch_with_configured_flags(self):
+        doc = _load(self.TEMPLATE)
+        container = doc["spec"]["template"]["spec"]["containers"][0]
+        assert container["command"] == ["python", "-m", "agentit", "propose-watch"]
+        assert "--interval" in container["args"]
+        assert "--max-open-prs" in container["args"]
+
+    def test_reads_github_token_secret_optionally(self):
+        doc = _load(self.TEMPLATE)
+        container = doc["spec"]["template"]["spec"]["containers"][0]
+        env_by_name = {e["name"]: e for e in container["env"] if "name" in e}
+        assert "GITHUB_TOKEN" in env_by_name
+        secret_ref = env_by_name["GITHUB_TOKEN"]["valueFrom"]["secretKeyRef"]
+        assert secret_ref["name"] == "github-token"
+        assert secret_ref["optional"] is True
+
+    def test_no_persistence_volume(self):
+        """Deliberately stateless -- unlike skill-learner, this watcher
+        opens PRs against the git remote instead of writing drafts to a
+        local PVC."""
+        doc = _load(self.TEMPLATE)
+        pod_spec = doc["spec"]["template"]["spec"]
+        volumes = pod_spec.get("volumes") or []
+        assert not any("persistentVolumeClaim" in v for v in volumes)
+
+    def test_has_restrictive_security_context(self):
+        doc = _load(self.TEMPLATE)
+        pod_spec = doc["spec"]["template"]["spec"]
+        assert pod_spec["securityContext"]["runAsNonRoot"] is True
+        container = pod_spec["containers"][0]
+        assert container["securityContext"]["allowPrivilegeEscalation"] is False
+        assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
+
+    def test_has_liveness_probe_via_heartbeat_file(self):
+        doc = _load(self.TEMPLATE)
+        container = doc["spec"]["template"]["spec"]["containers"][0]
+        assert "heartbeat" in container["livenessProbe"]["exec"]["command"][-1]
 
 
 # ---------------------------------------------------------------------------
@@ -808,6 +877,19 @@ class TestCostReportCronJob:
         assert command[:4] == ["python", "-m", "agentit", "watch"]
         assert "--rescan" in command
         assert "--dimension" in command
+
+
+class TestCapabilityScoutDefaultsOff:
+    """agents.capabilityScout.enabled must default to false, matching every
+    other agent flag's opt-in convention -- this is a live-deployment
+    decision for the repo owner to make explicitly (see
+    docs/self-improvement-for-agentit.md), never a side effect of shipping
+    the feature."""
+
+    def test_defaults_to_disabled_in_values(self):
+        values_path = CHART_DIR.parent / "values.yaml"
+        values = yaml.safe_load(values_path.read_text())
+        assert values["agents"]["capabilityScout"]["enabled"] is False
 
 
 class TestWorkflowCronJobsShareTheSameRescanPattern:

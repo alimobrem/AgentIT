@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Self-Improvement - AgentIT{% endblock %}
+{% block content %}
+{% from "_macros.html" import tab_nav %}
+{{ tab_nav([
+  {"href": "/capabilities", "label": "Catalog"},
+  {"href": "/agents", "label": "Registry", "prefix": "/agents"},
+  {"href": "/capabilities/self-improvement", "label": "Self-Improvement", "prefix": "/capabilities/self-improvement"},
+], request) }}
+<h1>Self-Improvement</h1>
+<p class="text-muted">
+  The <code>capability-scout</code> watcher reads AgentIT's own fleet usage/effectiveness data and its own
+  documented gaps, and proposes at most one small, evidence-cited change to AgentIT itself per cycle — landing
+  as a draft PR for human review, never a direct commit. See
+  <a href="https://github.com/alimobrem/AgentIT/blob/main/docs/self-improvement-for-agentit.md">the design doc</a>
+  for the full loop. GitHub's PR UI is where you review the actual code diff; this page is where you see what
+  the loop considered and why, without needing to already know a PR exists.
+</p>
+
+<p class="text-muted text-sm mb-2">
+  {% if capability_scout_status.has_run and not capability_scout_status.stale %}
+    capability-scout is running — last tick <span data-timestamp="{{ capability_scout_status.last_heartbeat }}">{{ capability_scout_status.last_heartbeat[:16] }}</span>, ticks every ~24h.
+  {% elif capability_scout_status.has_run and capability_scout_status.stale %}
+    capability-scout last ticked <span data-timestamp="{{ capability_scout_status.last_heartbeat }}">{{ capability_scout_status.last_heartbeat[:16] }}</span> — more than 48h ago, so the watcher may be disabled or stalled.
+  {% else %}
+    capability-scout has never ticked on this deployment — the watcher is likely disabled (<code>agents.capabilityScout.enabled</code> is off by default).
+  {% endif %}
+</p>
+
+<h2 class="section-title">Self-Improvement Runs</h2>
+<p class="text-muted mb-1">Every 24h cycle leaves a row here, whether or not it produced a proposal — this is the full loop history, not just the ones that shipped a PR.</p>
+
+{% if runs %}
+<table>
+  <thead>
+    <tr>
+      <th>Timestamp</th>
+      <th>Trigger</th>
+      <th>Considered</th>
+      <th>Outcome</th>
+      <th>PR</th>
+      <th>Details</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for run in runs %}
+    <tr>
+      <td class="text-sm"><span data-timestamp="{{ run.timestamp }}">{{ run.timestamp[:16] if run.timestamp else '—' }}</span></td>
+      <td><span class="badge badge-info">{{ run.trigger }}</span></td>
+      <td class="text-sm text-muted">{{ run.considered[:100] }}{% if run.considered|length > 100 %}&hellip;{% endif %}</td>
+      <td>
+        {% if run.severity == "info" %}
+          <span class="badge badge-success">proposed</span>
+        {% elif run.severity == "error" %}
+          <span class="badge badge-danger">error</span>
+        {% else %}
+          <span class="badge badge-warning">no-op</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if run.pr_status and run.pr_status.state == "merged" %}
+          <span class="badge badge-success">merged</span>
+        {% elif run.pr_status and run.pr_status.state == "open" %}
+          <span class="badge badge-info">open</span>
+        {% elif run.pr_status and run.pr_status.state == "closed" %}
+          <span class="badge badge-muted">closed (not merged)</span>
+        {% elif run.pr_url %}
+          <span class="badge badge-muted">unknown</span>
+        {% else %}
+          <span class="text-muted text-sm">—</span>
+        {% endif %}
+      </td>
+      <td class="text-sm">
+        <a href="/capabilities/self-improvement/runs/{{ run.event_id }}">{{ run.summary[:80] }}{% if run.summary|length > 80 %}&hellip;{% endif %}</a>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty-state">
+  <p>No capability-scout runs recorded yet. Enable <code>agents.capabilityScout.enabled</code> in <code>chart/values.yaml</code>, or wait for the next 24h tick.</p>
+</div>
+{% endif %}
+{% endblock %}
