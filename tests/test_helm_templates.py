@@ -33,15 +33,23 @@ def _render(template_path: Path) -> str:
     # being present too (yaml.safe_load just lets the later duplicate key win).
     raw = re.sub(r"[ \t]*\{\{-?\s*if\s+.*?\}\}\n?", "", raw)
     raw = re.sub(r"[ \t]*\{\{-?\s*else\s*\}\}\n?", "", raw)
+    # Strip {{- range ... }} loops the same way -- keeps one literal copy of
+    # the loop body (with its now-unbound $key/$value refs collapsed to null
+    # by the trailing substitution below), which is enough for tests that
+    # only care about the loop's fixed surrounding structure, not its
+    # runtime-only entries.
+    raw = re.sub(r"[ \t]*\{\{-?\s*range\s+.*?\}\}\n?", "", raw)
     raw = re.sub(r"[ \t]*\{\{-?\s*end\s*\}\}\n?", "", raw)
     # Strip {{- $var := ... }} variable assignments (no rendered output)
     raw = re.sub(r"[ \t]*\{\{-?\s*\$\w+\s*:=.*?-?\}\}\n?", "", raw)
     for var, val in HELM_VARS.items():
         raw = raw.replace(var, val)
-    # Any remaining "key: {{ some expression }}" (e.g. `index $x.data "y"`)
-    # we can't literally substitute — collapse to a null value so the line
-    # still parses; tests only need the *key* to be present, not the value.
-    raw = re.sub(r"^(\s*[\w-]+):\s*\{\{.*?\}\}\s*$", r"\1:", raw, flags=re.MULTILINE)
+    # Any remaining "key: {{ some expression }}" (e.g. `index $x.data "y"`,
+    # or a range loop's now-unbound `{{ $key }}`/`{{ $value }}`) we can't
+    # literally substitute — collapse to a null value so the line still
+    # parses; tests only need the *key* to be present, not the value. Covers
+    # both plain mapping entries and "- key: {{ ... }}" list-item entries.
+    raw = re.sub(r"^(\s*(?:- )?[\w-]+):\s*\{\{.*?\}\}\s*$", r"\1:", raw, flags=re.MULTILINE)
     return raw
 
 
@@ -769,3 +777,53 @@ class TestWatcherNetworkPolicies:
             ]
             assert len(dns_rules) == 1, name
             assert "ports" not in dns_rules[0], name
+
+
+# ---------------------------------------------------------------------------
+# Workflow CronJobs (chart/templates/workflows/*.yaml)
+# ---------------------------------------------------------------------------
+
+class TestCostReportCronJob:
+    """Regression coverage for bug: this CronJob called `watch --cost-report`,
+    a CLI flag that never existed (`cli.py`'s `watch()` only ever supported
+    `--rescan`/`--dimension`) -- it had presumably never worked. Fixed to
+    match the exact working pattern its siblings (compliance-rescan,
+    dependency-update) already use."""
+
+    TEMPLATE = CHART_DIR / "workflows" / "cost-report-cronjob.yaml"
+
+    def test_parseable(self):
+        doc = _load(self.TEMPLATE)
+        assert doc["kind"] == "CronJob"
+
+    def test_does_not_call_nonexistent_cost_report_flag(self):
+        doc = _load(self.TEMPLATE)
+        container = doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]
+        assert "--cost-report" not in container["command"]
+
+    def test_command_uses_a_real_watch_flag_combination(self):
+        doc = _load(self.TEMPLATE)
+        container = doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]
+        command = container["command"]
+        assert command[:4] == ["python", "-m", "agentit", "watch"]
+        assert "--rescan" in command
+        assert "--dimension" in command
+
+
+class TestWorkflowCronJobsShareTheSameRescanPattern:
+    """All 3 fleet-rescan CronJobs (compliance-rescan, dependency-update,
+    cost-report) should invoke the exact same real, supported command shape
+    -- only the --dimension value should differ."""
+
+    TEMPLATES = {
+        "compliance": CHART_DIR / "workflows" / "compliance-rescan-cronjob.yaml",
+        "dependencies": CHART_DIR / "workflows" / "dependency-update-cronjob.yaml",
+        "cost": CHART_DIR / "workflows" / "cost-report-cronjob.yaml",
+    }
+
+    def test_all_use_rescan_with_a_dimension(self):
+        for dimension, template in self.TEMPLATES.items():
+            doc = _load(template)
+            container = doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]
+            command = container["command"]
+            assert command == ["python", "-m", "agentit", "watch", "--rescan", "--dimension", dimension], template.name

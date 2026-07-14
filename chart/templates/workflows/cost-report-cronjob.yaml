@@ -28,7 +28,16 @@ spec:
             - name: cost-report
               image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
               imagePullPolicy: {{ .Values.image.pullPolicy }}
-              command: [python, -m, agentit, watch, --cost-report]
+              # `watch --cost-report` was never a real CLI flag (`cli.py`'s
+              # `watch()` only ever supported `--rescan`/`--dimension`) --
+              # this CronJob has presumably never worked. CostOptimizationAgent
+              # (agents/cost.py) is still a live, surviving Python agent, not
+              # skill-only, so there's no new equivalent to call either; this
+              # now matches the exact working pattern its two siblings
+              # (compliance-rescan, dependency-update) already use: a plain
+              # fleet re-assessment pass, scoped to the cost dimension label
+              # for the printed per-app summary.
+              command: [python, -m, agentit, watch, --rescan, --dimension, cost]
               resources:
                 requests:
                   cpu: 100m
