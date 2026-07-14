@@ -1,5 +1,19 @@
 version: 2
 
+# Credentials for registry.redhat.io, so the two `docker` entries below can
+# actually resolve/update the registry.redhat.io-hosted base images (UBI9
+# python-312, rhel9/postgresql-15, openshift4/ose-oauth-proxy) instead of
+# failing with a registry auth error. `redhat-registry-username`/
+# `redhat-registry-password` are repository-level Dependabot secrets
+# (Settings > Secrets and variables > Dependabot) holding a registry.redhat.io
+# Registry Service Account's credentials -- never the values themselves.
+registries:
+  redhat-registry:
+    type: docker-registry
+    url: registry.redhat.io
+    username: ${{secrets.REDHAT_REGISTRY_USERNAME}}
+    password: ${{secrets.REDHAT_REGISTRY_PASSWORD}}
+
 # Every `updates` entry below relies on Dependabot's *default* PR body, which
 # already includes release notes/changelog links and, for security-driven
 # bumps, the actual CVE/GHSA advisory -- confirmed by inspecting this file
@@ -42,6 +56,8 @@ updates:
   # `Dockerfile` is the documented workaround if it needs to be forced.
   - package-ecosystem: "docker"
     directory: "/"
+    registries:
+      - redhat-registry
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
@@ -69,6 +85,8 @@ updates:
   # ecosystem cannot close, not something a config tweak fixes.
   - package-ecosystem: "docker"
     directory: "/chart"
+    registries:
+      - redhat-registry
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
