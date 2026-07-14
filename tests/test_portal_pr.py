@@ -94,6 +94,58 @@ def test_create_onboarding_pr_error(mock_requests):
     assert "error" in result
 
 
+@patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"})
+@patch("agentit.portal.github_pr.requests")
+def test_create_onboarding_pr_error_surfaces_response_body(mock_requests):
+    """Regression test: the GitHub API's actual error body must be surfaced,
+    not the generic `str(HTTPError)`.
+
+    `requests.Response.__bool__` returns `self.ok`, which is False for any
+    4xx/5xx status -- exactly the status range `raise_for_status()` raises
+    for. A plain `MagicMock` doesn't reproduce this (its `__bool__` is True
+    by default), so this test builds a real `requests.Response` to exercise
+    the actual truthiness behavior that caused the bug: `if exc.response`
+    was always falsy for HTTP errors, silently discarding the real API
+    error body (e.g. "Resource not accessible by integration") in favor of
+    the uninformative "404 Client Error: Not Found for url: ..." message.
+    """
+    import requests as real_requests
+
+    def mock_get(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        if url.endswith("/repos/org/my-app"):
+            resp.json.return_value = {"default_branch": "main"}
+        elif "git/ref/heads/main" in url:
+            resp.json.return_value = {"object": {"sha": "abc123"}}
+        return resp
+
+    def mock_post(url, **kwargs):
+        if "git/trees" in url:
+            error_resp = real_requests.Response()
+            error_resp.status_code = 404
+            error_resp._content = b'{"message": "Resource not accessible by integration"}'
+            raise real_requests.HTTPError(response=error_resp)
+        resp = MagicMock()
+        resp.status_code = 201
+        return resp
+
+    mock_requests.get.side_effect = mock_get
+    mock_requests.post.side_effect = mock_post
+    mock_requests.HTTPError = real_requests.HTTPError
+
+    result = create_onboarding_pr(
+        repo_url="https://github.com/org/my-app.git",
+        repo_name="my-app",
+        files=SAMPLE_FILES,
+        branch_name="agentit/onboarding",
+    )
+
+    assert "error" in result
+    assert "Resource not accessible by integration" in result["error"]
+    assert "404 Client Error" not in result["error"]
+
+
 def test_create_onboarding_pr_no_token():
     """Verify missing GITHUB_TOKEN returns error."""
     with patch.dict("os.environ", {}, clear=True):

@@ -191,7 +191,14 @@ def create_onboarding_pr(
         return {"pr_url": pr_url, "branch": branch_name, "files_added": len(files)}
 
     except requests.HTTPError as exc:
-        msg = exc.response.text if exc.response else str(exc)
+        # `requests.Response.__bool__` returns `self.ok`, which is False for
+        # every 4xx/5xx response -- exactly the case `raise_for_status()`
+        # raises for. So `if exc.response else ...` is always falsy here and
+        # silently discards the real GitHub API error body in favor of the
+        # generic `str(exc)` (e.g. "404 Client Error: Not Found for url:
+        # ..."). Check `is not None` instead so the actual response detail
+        # surfaces to the caller.
+        msg = exc.response.text if exc.response is not None else str(exc)
         logger.exception("GitHub API error creating PR")
         return {"error": f"GitHub API error: {msg[:200]}"}
     except Exception as exc:
@@ -445,7 +452,12 @@ def commit_to_infra_repo(
         }
 
     except requests.HTTPError as exc:
-        msg = exc.response.text if exc.response else str(exc)
+        # See `create_onboarding_pr`'s except block above: `exc.response` is
+        # falsy for every error response due to `Response.__bool__` returning
+        # `self.ok`, so this must check `is not None` to actually use the
+        # GitHub API's response body instead of always falling back to the
+        # generic `str(exc)`.
+        msg = exc.response.text if exc.response is not None else str(exc)
         logger.exception("GitHub API error committing to infra repo")
         return {"error": f"GitHub API error: {msg[:200]}"}
     except Exception as exc:
@@ -628,7 +640,9 @@ def ensure_webhook(repo_url: str, webhook_url: str) -> dict:
         return {"id": hook_id, "created": True}
 
     except requests.HTTPError as exc:
-        msg = exc.response.text if exc.response else str(exc)
+        # See `create_onboarding_pr`'s except block above: same
+        # `Response.__bool__` gotcha, fixed the same way.
+        msg = exc.response.text if exc.response is not None else str(exc)
         logger.warning("Failed to create webhook on %s: %s", repo_url, msg[:200])
         return {"error": f"GitHub API error: {msg[:200]}"}
     except Exception as exc:
