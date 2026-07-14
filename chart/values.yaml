@@ -123,14 +123,13 @@ agents:
     persistence:
       # Dedicated PVC (single-consumer, this Deployment only -- never shared
       # with the main portal Deployment, so no ReadWriteOnce multi-attach
-      # risk) so draft skills this watcher writes survive ITS OWN pod
-      # restarts. Deliberately separate from the portal's own `{{ .Release.Name }}-data`
-      # PVC: this does NOT make drafts visible to the portal's Capabilities
-      # page (that needs shared/RWX storage or a git write-back pipeline --
-      # a real, documented gap; see README's Self-improvement loop section
-      # and the startup log warning in watchers/skill_learner.py). Without
-      # this, drafts were invisible AND unrecoverable; with it, they're
-      # still invisible to the portal today but at least survive a restart.
+      # risk). Fallback-only: drafts are primarily pushed to the portal via
+      # an internal API call (AGENTIT_PORTAL_URL) so they're visible on the
+      # Capabilities page immediately with no shared/RWX storage needed --
+      # see README's Self-improvement loop section and
+      # watchers/skill_learner.py's module docstring. This PVC only matters
+      # if the portal can't be reached that cycle, so a draft still survives
+      # THIS pod's own restart instead of being lost outright.
       enabled: true
       size: 256Mi
       # storageClassName: gp3-csi

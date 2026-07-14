@@ -88,6 +88,38 @@ def test_assess_rescan_with_no_fleet_apps_is_a_noop(tmp_path: Path, monkeypatch)
     assert "nothing to do" in result.output.lower()
 
 
+def test_watch_cost_report_flag_does_not_exist():
+    """Regression test: chart/templates/workflows/cost-report-cronjob.yaml
+    used to call `watch --cost-report`, a flag that was never implemented on
+    this command -- confirm it's rejected by Click, not silently ignored."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["watch", "--cost-report"])
+    assert result.exit_code != 0
+    assert "no such option" in result.output.lower()
+
+
+def test_watch_rescan_with_cost_dimension(tmp_path: Path, monkeypatch):
+    """Regression: the cost-report CronJob's fixed command
+    (`watch --rescan --dimension cost`) must actually be accepted and behave
+    the same as its siblings (compliance-rescan, dependency-update)."""
+    from agentit.portal.store import AssessmentStore
+    from conftest import make_report
+
+    db_path = str(tmp_path / "fleet-cost.db")
+    monkeypatch.setenv("AGENTIT_DB_PATH", db_path)
+
+    repo_url = _make_local_repo(tmp_path)
+    store = AssessmentStore(db_path=db_path)
+    store.save(make_report(repo_name="tracked-app-cost", repo_url=repo_url, criticality="low"))
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["watch", "--rescan", "--dimension", "cost"])
+
+    assert result.exit_code == 0, result.output
+    assert "[rescan]" in result.output
+    assert "dimension=cost" in result.output
+
+
 def test_assess_rescan_filters_dimension_count(tmp_path: Path, monkeypatch):
     from agentit.portal.store import AssessmentStore
     from conftest import make_report

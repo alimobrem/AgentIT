@@ -242,6 +242,18 @@ spec:
     - ports:
         - protocol: TCP
           port: 443
+    # _submit_draft_to_portal() (watchers/skill_learner.py) pushes each
+    # drafted skill to the portal's own process (POST /api/webhook/skill-draft)
+    # so it's visible on the Capabilities page without shared storage --
+    # same rule the other 3 watchers already have for their own
+    # AGENTIT_PORTAL_URL callbacks.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}
+      ports:
+        - protocol: TCP
+          port: 8080
     {{- if .Values.kafka.enabled }}
     - to:
         - podSelector:

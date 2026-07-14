@@ -118,6 +118,30 @@ class TestInternalWebhookToken:
         assert resp.status_code == 401
 
     @patch.dict(os.environ, {"AGENTIT_INTERNAL_WEBHOOK_TOKEN": "s3cr3t-token"})
+    def test_skill_draft_requires_token(self, portal_client):
+        """/api/webhook/skill-draft (the skill-learner watcher's cross-pod
+        visibility fix) follows the same in-cluster-only convention as every
+        other /api/webhook/* route above."""
+        client, _, _ = portal_client
+        resp = client.post(
+            "/api/webhook/skill-draft",
+            json={"content": "---\nname: x\n---\nbody", "domain": "security"},
+        )
+        assert resp.status_code == 401
+
+    @patch.dict(os.environ, {"AGENTIT_INTERNAL_WEBHOOK_TOKEN": "s3cr3t-token"})
+    def test_skill_draft_valid_token_passes_through_to_route_logic(self, portal_client, tmp_path, monkeypatch):
+        client, _, _ = portal_client
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "skills").mkdir()
+        resp = client.post(
+            "/api/webhook/skill-draft",
+            json={"content": "---\nname: token-check\ndomain: security\n---\nbody", "domain": "security"},
+            headers={"X-Internal-Webhook-Token": "s3cr3t-token"},
+        )
+        assert resp.status_code == 200
+
+    @patch.dict(os.environ, {"AGENTIT_INTERNAL_WEBHOOK_TOKEN": "s3cr3t-token"})
     def test_github_push_route_unaffected_by_internal_token(self, portal_client):
         """github-push keeps its own HMAC-signature mechanism (TestGitHubSignature
         above) -- it must not also require the internal webhook token."""

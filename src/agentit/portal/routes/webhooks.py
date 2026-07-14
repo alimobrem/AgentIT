@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import os
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -444,6 +445,48 @@ async def webhook_remediate(request: Request):
         return JSONResponse({"outcome": "failed", "error": str(exc)}, status_code=500)
 
     return JSONResponse({"status": "accepted", "job_id": job_id}, status_code=202)
+
+
+@router.post("/api/webhook/skill-draft", dependencies=[Depends(verify_internal_token)])
+async def webhook_skill_draft(request: Request):
+    """Internal-only endpoint so the ``skill-learner`` watcher's drafts land
+    in the exact same place the portal's own in-process "Research CVEs &
+    Generate Skills" button (``capabilities.py``'s ``capabilities_learn_route``)
+    already writes to, and that ``capabilities.py``'s ``_cached_skills()``
+    already scans -- making them visible on the Capabilities page with no
+    pod restart or manual sync step.
+
+    The watcher runs in its own Deployment with no shared filesystem with
+    the portal, and no ReadWriteMany storage class is available on this
+    cluster (confirmed via `oc get storageclass` -- only gp2-csi/gp3-csi,
+    both EBS-backed/ReadWriteOnce), so a watcher-drafted skill was
+    previously only ever visible via `oc exec` into that one pod. This
+    mirrors the exact same ``AGENTIT_PORTAL_URL`` + internal-token pattern
+    ``RemediationLoop`` already uses (``remediation_loop.py``) to call back
+    into the portal from a separate watcher pod, and the
+    ``/api/webhook/*`` + ``verify_internal_token`` convention every other
+    in-cluster-only route above already follows.
+
+    Accepts JSON ``{"content": "<skill markdown>", "domain": "security"}``.
+    """
+    body = await request.json()
+    content = body.get("content", "")
+    domain = body.get("domain", "security")
+    if not content:
+        raise HTTPException(400, "content required")
+
+    from agentit.learning_agent import save_skill
+    path = await asyncio.to_thread(save_skill, content, Path("skills"), domain=domain)
+    if path is None:
+        raise HTTPException(500, "Failed to save skill draft")
+
+    # Bust the Capabilities page's 60s skills cache so this draft shows up
+    # on the very next page load -- same cache `capabilities_learn_route`
+    # busts after a manual "Research CVEs & Generate Skills" run.
+    from agentit.portal.routes import capabilities as _capabilities
+    _capabilities._skills_cache["data"] = None
+
+    return JSONResponse({"status": "saved", "name": path.stem, "path": str(path)})
 
 
 @router.get("/api/remediation-jobs/{job_id}")

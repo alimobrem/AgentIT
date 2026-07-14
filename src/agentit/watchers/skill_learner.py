@@ -11,35 +11,46 @@ require human review via `agentit activate-skill` before the skill engine
 will match them against real assessments — this loop drafts, it never
 auto-activates.
 
-**Known gap (partially addressed):** this watcher runs in its own pod,
-separate from the portal. Drafts it writes go to whatever `skills_dir` this
-process was given -- by default `Path("skills")` inside *this* pod's own
-container filesystem, which is neither the portal pod's filesystem (so
-drafts never show up on the Capabilities page for review) nor persisted
-across this pod's own restarts. Setting `AGENTIT_SKILLS_DIR` to a mounted
-PVC (`chart/templates/agents/skill-learner.yaml`, gated behind
-`agents.skillLearner.persistence.enabled`, default on) fixes the
-restart-survival half of that; making drafts visible to the portal still
-needs either shared/RWX storage across both Deployments (risky with the
-default RWO storage class -- see that chart file's comments) or a
-git-write-back pipeline, neither of which ships here. `run()` below logs a
-loud warning every cycle so this isn't silent. Until one of those lands,
-prefer the portal's own "Research CVEs & Generate Skills" button or
-`agentit learn`/`learn-for` run against the portal's own data volume --
-those run in-process, so drafts are immediately visible and persisted.
+**Cross-pod visibility.** This watcher runs in its own pod, separate from
+the portal, with no shared filesystem between them (no ReadWriteMany
+storage class is available on this cluster -- confirmed via `oc get
+storageclass`: only `gp2-csi`/`gp3-csi`, both EBS-backed and
+ReadWriteOnce-only -- so a shared/RWX PVC was ruled out as the fix). Every
+draft this watcher generates is therefore pushed straight to the portal via
+an internal-token-authenticated API call
+(`POST /api/webhook/skill-draft`, `routes/webhooks.py`) -- the same
+`AGENTIT_PORTAL_URL` + `AGENTIT_INTERNAL_WEBHOOK_TOKEN` pattern
+`RemediationLoop` already uses to call back into the portal from a
+separate watcher pod. That endpoint calls the exact same `save_skill()`
+the portal's own in-process "Research CVEs & Generate Skills" button
+uses, into the portal's own `skills/` tree, and busts its 60s skills
+cache -- so a watcher-drafted skill is visible on the Capabilities page
+on the very next page load, no restart or manual sync step needed.
+
+If the portal can't be reached that cycle (network blip, mid-rollout,
+etc.), the draft falls back to this pod's own dedicated PVC
+(`AGENTIT_SKILLS_DIR`, `chart/templates/agents/skill-learner.yaml`, gated
+behind `agents.skillLearner.persistence.enabled`, default on) so nothing
+is lost -- `_save_draft` logs a loud warning in that (expected to be rare)
+case, since a draft that only exists on that PVC stays invisible until a
+human recovers it.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 import click
+import httpx
 
 from agentit.events import EventPublisher
 from agentit.watchers import record_tick
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_PORTAL = os.environ.get("AGENTIT_PORTAL_URL", "http://localhost:8080")
 
 
 class SkillLearner:
@@ -55,6 +66,8 @@ class SkillLearner:
         limit: int = 3,
         skills_dir: Path | None = None,
         store: object | None = None,
+        portal_url: str = DEFAULT_PORTAL,
+        timeout: int = 30,
     ) -> None:
         self._publisher = publisher
         self._llm_model = llm_model
@@ -62,6 +75,8 @@ class SkillLearner:
         self._limit = limit
         self._skills_dir = skills_dir or Path("skills")
         self._store = store
+        self._portal_url = portal_url.rstrip("/")
+        self._client = httpx.AsyncClient(timeout=timeout)
 
     async def research_once(self) -> tuple[list[str], list[str]]:
         """Research low-effectiveness skills first, falling back to a generic
@@ -98,7 +113,6 @@ class SkillLearner:
             generate_skill_from_research,
             research_cves,
             research_skill_improvement,
-            save_skill,
         )
 
         saved: list[str] = []
@@ -132,15 +146,15 @@ class SkillLearner:
                 # is a replacement for an existing (underperforming) skill,
                 # so a name/domain match against that same skill is
                 # expected, not a duplicate to reject.
-                path = await asyncio.to_thread(save_skill, content, self._skills_dir, domain=skill.domain)
-                if path:
-                    saved.append(path.stem)
-                    click.echo(f"[skill-learn] Drafted improvement for '{skill_name}': {path}", err=True)
+                name = await self._save_draft(content, skill.domain)
+                if name:
+                    saved.append(name)
+                    click.echo(f"[skill-learn] Drafted improvement for '{skill_name}': {name}", err=True)
                     if self._store is not None:
                         try:
                             await self._store.log_event(
                                 "skill-learner", "skill-improvement-drafted", None, "info",
-                                f"Drafted {path.stem} to improve low-effectiveness skill "
+                                f"Drafted {name} to improve low-effectiveness skill "
                                 f"'{skill_name}' ({entry.get('approval_rate', 0):.0%} approval)",
                             )
                         except Exception:
@@ -172,10 +186,10 @@ class SkillLearner:
             content = await asyncio.to_thread(generate_skill_from_research, llm_client, item, domain="security")
             if not content:
                 continue
-            path = await asyncio.to_thread(save_skill, content, self._skills_dir, domain="security")
-            if path:
-                saved.append(path.stem)
-                click.echo(f"[skill-learn] Drafted new skill: {path}", err=True)
+            name = await self._save_draft(content, "security")
+            if name:
+                saved.append(name)
+                click.echo(f"[skill-learn] Drafted new skill: {name}", err=True)
 
         if saved:
             self._publisher.publish(
@@ -191,6 +205,67 @@ class SkillLearner:
 
         await self._log_run(mode="cve-sweep", saved=saved, skipped=skipped)
         return saved, skipped
+
+    async def _save_draft(self, content: str, domain: str) -> str | None:
+        """Persist one drafted skill so it's visible on the portal's
+        Capabilities page immediately -- no shared filesystem, portal
+        restart, or manual sync step required.
+
+        Primary path: push the draft to the portal's own process via
+        ``_submit_draft_to_portal`` (an internal-API call), which writes it
+        into the exact `skills/` tree the portal's own in-process
+        "Research CVEs & Generate Skills" button already uses. Falls back
+        to this pod's own ``self._skills_dir`` (the dedicated PVC, when
+        mounted) only if the portal couldn't be reached -- see this
+        module's docstring for why that fallback is expected to be rare,
+        not the normal case.
+        """
+        name = await self._submit_draft_to_portal(content, domain)
+        if name:
+            return name
+
+        from agentit.learning_agent import save_skill
+        path = await asyncio.to_thread(save_skill, content, self._skills_dir, domain=domain)
+        if path is None:
+            return None
+        logger.warning(
+            "Portal unreachable this cycle -- draft '%s' saved to this pod's own "
+            "%s only and is NOT yet visible on the Capabilities page until "
+            "manually recovered.", path.stem, self._skills_dir,
+        )
+        return path.stem
+
+    async def _submit_draft_to_portal(self, content: str, domain: str) -> str | None:
+        """POST a drafted skill to ``/api/webhook/skill-draft`` so it lands
+        in the portal's own process instead of this pod's isolated
+        filesystem. Mirrors the ``AGENTIT_PORTAL_URL`` +
+        ``X-Internal-Webhook-Token`` pattern ``RemediationLoop`` already
+        uses for the same "separate watcher pod calling back into the
+        portal" problem. Returns the saved skill's name, or ``None`` if the
+        portal couldn't be reached or rejected the draft this cycle.
+        """
+        headers = {}
+        token = os.environ.get("AGENTIT_INTERNAL_WEBHOOK_TOKEN")
+        if token:
+            headers["X-Internal-Webhook-Token"] = token
+        try:
+            resp = await self._client.post(
+                f"{self._portal_url}/api/webhook/skill-draft",
+                json={"content": content, "domain": domain},
+                headers=headers,
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    "Portal rejected skill draft submission (HTTP %s): %s",
+                    resp.status_code, resp.text[:200],
+                )
+                return None
+            return resp.json().get("name")
+        except Exception as exc:
+            logger.warning(
+                "Could not reach portal at %s to submit skill draft: %s", self._portal_url, exc,
+            )
+            return None
 
     async def _log_run(
         self, mode: str | None, saved: list[str], skipped: list[str], error: str | None = None,
@@ -237,18 +312,12 @@ class SkillLearner:
         """
         click.echo(f"Starting skill learner (interval={self._interval}s)...", err=True)
         click.echo(
-            f"[skill-learn] Writing drafts to {self._skills_dir} in THIS pod. "
-            "Drafts are not synced to the portal's Capabilities page and are lost on "
-            "pod restart unless this path is a mounted persistent volume "
-            "(see agents.skillLearner.persistence in chart/values.yaml). "
-            "Review drafts via `agentit test-skill`/`activate-skill` against this same "
-            "path, or prefer the portal's own 'Research CVEs & Generate Skills' button "
-            "(runs in-process, immediately visible and persisted).",
+            f"[skill-learn] Drafts are submitted to the portal at {self._portal_url} "
+            "(POST /api/webhook/skill-draft) so they show up on the Capabilities page "
+            "immediately, with no restart or manual sync needed. If the portal can't "
+            f"be reached that cycle, drafts fall back to this pod's own {self._skills_dir} "
+            "and a warning is logged -- that's the only case where a draft stays invisible.",
             err=True,
-        )
-        logger.warning(
-            "skill-learner writing drafts to %s (this pod only -- not visible to the "
-            "portal's Capabilities page without shared storage)", self._skills_dir,
         )
         while True:
             try:
@@ -268,3 +337,4 @@ class SkillLearner:
             except KeyboardInterrupt:
                 click.echo("Skill learner stopped.", err=True)
                 break
+        await self._client.aclose()

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 from click.testing import CliRunner
 
 from agentit.cli import main
@@ -245,3 +246,117 @@ class TestConstructionAcceptsAsyncStoreDirectly:
 
         assert saved == []
         assert skipped == []
+
+
+class TestCrossPodVisibility:
+    """The self-improvement-loop gap this fix closes: the watcher's own pod
+    has no shared filesystem with the portal (no RWX storage class is
+    available on this cluster -- see chart/templates/agents/
+    skill-learner.yaml). ``_save_draft`` now pushes each draft to the
+    portal's own process via an internal API call instead of only writing
+    to this pod's isolated disk, falling back to local disk only if the
+    portal can't be reached.
+    """
+
+    async def test_submit_draft_to_portal_returns_name_on_success(self):
+        learner, _ = _learner()
+        learner._client.post = AsyncMock(
+            return_value=httpx.Response(200, json={"status": "saved", "name": "cve-2099-00050"})
+        )
+
+        name = await learner._submit_draft_to_portal("---\nname: cve-2099-00050\n---\nbody", "security")
+
+        assert name == "cve-2099-00050"
+        learner._client.post.assert_called_once()
+        args, kwargs = learner._client.post.call_args
+        assert args[0] == f"{learner._portal_url}/api/webhook/skill-draft"
+        assert kwargs["json"] == {"content": "---\nname: cve-2099-00050\n---\nbody", "domain": "security"}
+
+    async def test_submit_draft_to_portal_sends_internal_token_when_configured(self, monkeypatch):
+        monkeypatch.setenv("AGENTIT_INTERNAL_WEBHOOK_TOKEN", "s3cr3t-token")
+        learner, _ = _learner()
+        learner._client.post = AsyncMock(return_value=httpx.Response(200, json={"name": "x"}))
+
+        await learner._submit_draft_to_portal("content", "security")
+
+        _, kwargs = learner._client.post.call_args
+        assert kwargs["headers"]["X-Internal-Webhook-Token"] == "s3cr3t-token"
+
+    async def test_submit_draft_to_portal_returns_none_on_non_200(self):
+        learner, _ = _learner()
+        learner._client.post = AsyncMock(return_value=httpx.Response(500, text="db down"))
+
+        assert await learner._submit_draft_to_portal("content", "security") is None
+
+    async def test_submit_draft_to_portal_returns_none_when_unreachable(self):
+        """Real, unmocked failure mode -- the portal is genuinely
+        unreachable (matches the established RemediationLoop test
+        convention of pointing at a bad host with a short timeout)."""
+        learner, _ = _learner(portal_url="http://bad-host:9999", timeout=2)
+
+        assert await learner._submit_draft_to_portal("content", "security") is None
+        await learner._client.aclose()
+
+    async def test_save_draft_prefers_portal_over_local_disk(self, tmp_path):
+        learner, _ = _learner(skills_dir=tmp_path / "skills")
+        learner._client.post = AsyncMock(
+            return_value=httpx.Response(200, json={"name": "remote-saved"})
+        )
+
+        with patch("agentit.learning_agent.save_skill") as mock_save_local:
+            name = await learner._save_draft("content", "security")
+
+        assert name == "remote-saved"
+        mock_save_local.assert_not_called()
+
+    async def test_save_draft_falls_back_to_local_disk_when_portal_unreachable(self, tmp_path, caplog):
+        learner, _ = _learner(skills_dir=tmp_path / "skills")
+        learner._client.post = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
+
+        fake_path = tmp_path / "skills" / "security" / "fallback-skill.md"
+        with patch("agentit.learning_agent.save_skill", return_value=fake_path) as mock_save_local:
+            name = await learner._save_draft("content", "security")
+
+        assert name == "fallback-skill"
+        mock_save_local.assert_called_once_with("content", tmp_path / "skills", domain="security")
+        assert any("NOT yet visible on the Capabilities page" in r.message for r in caplog.records)
+
+    async def test_watcher_drafted_skill_visible_via_portal_skill_listing(self, tmp_path, monkeypatch):
+        """End-to-end proof: a skill drafted by the watcher's own code path
+        (``research_once`` -> ``_save_draft`` -> ``_submit_draft_to_portal``)
+        is actually visible via the *portal's own* skill-listing logic
+        (``skill_engine.load_all_skills`` -- the same function
+        ``capabilities.py``'s ``_cached_skills()`` calls) -- not just "a
+        file exists somewhere". Exercises the real FastAPI route
+        (``routes/webhooks.py::webhook_skill_draft``) over an in-process
+        ASGI transport; only the LLM/CVE-research plumbing is mocked.
+        """
+        from agentit.portal.app import app
+        from agentit.skill_engine import load_all_skills
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "skills" / "security").mkdir(parents=True)
+
+        learner, publisher = _learner()
+        learner._client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+        )
+        learner._portal_url = "http://testserver"
+
+        with patch("agentit.llm.LLMClient", return_value=object()), \
+             patch("agentit.learning_agent.research_cves", return_value=[{"id": "CVE-2099-00042"}]), \
+             patch("agentit.learning_agent.check_skill_exists", return_value=False), \
+             patch("agentit.learning_agent.generate_skill_from_research", return_value=(
+                 "---\nname: cve-2099-00042\ndomain: security\nversion: 1\n"
+                 "triggers: [test]\noutputs: [NetworkPolicy]\nstatus: draft\n---\nbody\n"
+             )):
+            saved, skipped = await learner.research_once()
+
+        await learner._client.aclose()
+
+        assert saved == ["cve-2099-00042"]
+        assert skipped == []
+        publisher.publish.assert_called_once()
+
+        skills = load_all_skills(tmp_path / "skills")
+        assert any(s.name == "cve-2099-00042" and s.status == "draft" for s in skills)
