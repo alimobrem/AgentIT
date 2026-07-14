@@ -78,6 +78,56 @@ watcher_last_success_timestamp = Gauge(
     ["watcher"],
 )
 
+# ── Self-monitoring additions (synthetic probe, backup, secret checks) ──
+#
+# These are all reported via internal webhooks (verify_internal_token-gated,
+# same convention as every other /api/webhook/* route) from CronJobs that run
+# outside this process -- see chart/templates/synthetic-probe-cronjob.yaml,
+# workflows/db-backup-cronjob.yaml, and secret-rotation-cronjob.yaml. Every
+# gauge here has a matching *_last_run_timestamp so a PrometheusRule can
+# alert on staleness (the CronJob itself stopped running/succeeding), not
+# just on the last-reported value -- same pattern as
+# agentit_watcher_last_success_timestamp above.
+
+synthetic_probe_up = Gauge(
+    "agentit_synthetic_probe_up",
+    "1 if the last external synthetic probe against the public Route succeeded, else 0",
+)
+
+synthetic_probe_last_run_timestamp = Gauge(
+    "agentit_synthetic_probe_last_run_timestamp",
+    "Unix timestamp of the last synthetic probe report received",
+)
+
+route_cert_expiry_days = Gauge(
+    "agentit_route_cert_expiry_days",
+    "Days remaining until the public Route's TLS certificate expires, as observed by the synthetic probe",
+)
+
+backup_last_status = Gauge(
+    "agentit_backup_last_status",
+    "1 if the last backup job for this target succeeded, else 0",
+    ["target"],
+)
+
+backup_last_success_timestamp = Gauge(
+    "agentit_backup_last_success_timestamp",
+    "Unix timestamp of the last successful backup for this target",
+    ["target"],
+)
+
+secret_check_status = Gauge(
+    "agentit_secret_check_status",
+    "1 if the named secret last passed its existence/drift check, else 0",
+    ["secret"],
+)
+
+secret_check_last_run_timestamp = Gauge(
+    "agentit_secret_check_last_run_timestamp",
+    "Unix timestamp of the last secret-check report received",
+    ["secret"],
+)
+
 
 def refresh_circuit_breaker_gauge() -> None:
     """Set `agentit_circuit_breaker_open` from the live breaker states."""

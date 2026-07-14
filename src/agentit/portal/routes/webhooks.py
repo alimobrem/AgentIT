@@ -489,6 +489,96 @@ async def webhook_skill_draft(request: Request):
     return JSONResponse({"status": "saved", "name": path.stem, "path": str(path)})
 
 
+@router.post("/api/webhook/synthetic-probe", dependencies=[Depends(verify_internal_token)])
+async def webhook_synthetic_probe(request: Request):
+    """Reports an external synthetic uptime probe result against the public
+    Route, plus the TLS certificate expiry it observed while doing so.
+
+    Accepts JSON: {"up": bool, "latency_ms": number, "cert_days_remaining": number | null}.
+    Called by the agentit-synthetic-probe CronJob
+    (chart/templates/synthetic-probe-cronjob.yaml) -- see its module comment
+    for why this check has to run from outside the pod's own Service (it's
+    the one class of failure kubelet's /healthz-based liveness/readiness
+    probes structurally can't see: Route/router-level failures).
+    """
+    import time as _time
+    body = await request.json()
+    up = bool(body.get("up"))
+    cert_days = body.get("cert_days_remaining")
+
+    from agentit.portal.metrics import (
+        synthetic_probe_up, synthetic_probe_last_run_timestamp, route_cert_expiry_days,
+    )
+    synthetic_probe_up.set(1 if up else 0)
+    synthetic_probe_last_run_timestamp.set(_time.time())
+    if cert_days is not None:
+        route_cert_expiry_days.set(float(cert_days))
+
+    s = await get_store()
+    if not up:
+        await s.log_event("synthetic-probe", "probe-failed", "agentit", "warning",
+                           f"External synthetic probe against the public Route failed: {body.get('detail', 'no detail')}")
+    return JSONResponse({"status": "recorded", "up": up, "cert_days_remaining": cert_days})
+
+
+@router.post("/api/webhook/backup-status", dependencies=[Depends(verify_internal_token)])
+async def webhook_backup_status(request: Request):
+    """Reports whether a backup CronJob run succeeded, so a silent backup
+    failure shows up as a stale/failed Prometheus gauge instead of only as a
+    line in a CronJob pod's logs nobody is tailing.
+
+    Accepts JSON: {"target": "sqlite" | "postgres", "status": "ok" | "fail", "detail": str}.
+    Called by db-backup-cronjob.yaml and postgres-bundled-backup.yaml.
+    """
+    import time as _time
+    body = await request.json()
+    target = body.get("target", "unknown")
+    ok = body.get("status") == "ok"
+
+    from agentit.portal.metrics import backup_last_status, backup_last_success_timestamp
+    backup_last_status.labels(target=target).set(1 if ok else 0)
+    if ok:
+        backup_last_success_timestamp.labels(target=target).set(_time.time())
+
+    s = await get_store()
+    detail = body.get("detail", "")
+    if ok:
+        await s.log_event("backup", "backup-succeeded", "agentit", "info", f"{target} backup succeeded. {detail}".strip())
+    else:
+        await s.log_event("backup", "backup-failed", "agentit", "warning", f"{target} backup failed. {detail}".strip())
+    return JSONResponse({"status": "recorded", "target": target, "ok": ok})
+
+
+@router.post("/api/webhook/secret-check", dependencies=[Depends(verify_internal_token)])
+async def webhook_secret_check(request: Request):
+    """Reports whether a security-sensitive Secret still exists on-cluster --
+    a drift check, not a rotation. Exists specifically to prevent a repeat of
+    the 2026-07-13 incident (docs/deployment.md): github-webhook-secret went
+    missing/unset for ~8.5 hours with nothing surfacing it until a human
+    happened to investigate a symptom. This can't verify the secret's value
+    matches what's configured on GitHub's side (that would require holding a
+    GitHub token capable of reading webhook config), only that it exists at
+    all in-cluster -- see secret-rotation-cronjob.yaml's module comment for
+    the full reasoning.
+
+    Accepts JSON: {"secret": str, "exists": bool}.
+    """
+    import time as _time
+    body = await request.json()
+    secret = body.get("secret", "unknown")
+    exists = bool(body.get("exists"))
+
+    from agentit.portal.metrics import secret_check_status, secret_check_last_run_timestamp
+    secret_check_status.labels(secret=secret).set(1 if exists else 0)
+    secret_check_last_run_timestamp.labels(secret=secret).set(_time.time())
+
+    if not exists:
+        s = await get_store()
+        await s.log_event("secret-check", "secret-missing", "agentit", "critical",
+                           f"Secret '{secret}' is missing from the cluster -- dependent webhooks/integrations will fail.")
+    return JSONResponse({"status": "recorded", "secret": secret, "exists": exists})
+
+
 @router.get("/api/remediation-jobs/{job_id}")
 async def get_remediation_job(job_id: str):
     """Return the status of a single remediation job."""

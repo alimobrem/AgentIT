@@ -1,0 +1,187 @@
+# External synthetic uptime probe + TLS certificate-expiry watch.
+#
+# kubelet's liveness/readiness probes (deployment.yaml) hit the agentit
+# container's port 8080 directly, in-pod -- they can never see a failure at
+# the Route/router layer (bad TLS config, router pool exhaustion, DNS,
+# service-ca cert rotation gone wrong). This CronJob closes that blind spot
+# by hitting the *public* Route the same way a real user's browser would,
+# from a separate pod, and reports the result back to the running portal via
+# the same internal-webhook-token convention every other in-cluster-only
+# caller uses (see webhooks.py's verify_internal_token).
+#
+# Split into an initContainer + main container because the two steps need
+# different tools: discovering the Route's actual host needs `oc` (no
+# reliable way to compute it in a Helm template -- Argo CD's repo-server
+# renders `helm template` with no destination-cluster credentials, so a
+# `lookup` for the Route's status can't be used either, see
+# internal-webhook-token-secret.yaml's comment for the same constraint hit
+# there), while the actual probe needs `curl`/`openssl`, which the `cli`
+# image doesn't reliably ship. ubi-minimal has curl already (same image
+# chart/templates/tekton/pipeline.yaml's report-status task uses for its own
+# curl call); `openssl` is attempted best-effort and the cert-expiry field is
+# simply omitted if unavailable, rather than failing the whole probe.
+{{- if .Values.syntheticProbe.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-synthetic-probe
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-synthetic-probe
+    app.kubernetes.io/instance: {{ .Release.Name }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-synthetic-probe
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-synthetic-probe
+    app.kubernetes.io/instance: {{ .Release.Name }}
+rules:
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    resourceNames: ["{{ .Release.Name }}"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-synthetic-probe
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-synthetic-probe
+    app.kubernetes.io/instance: {{ .Release.Name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-synthetic-probe
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-synthetic-probe
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}-synthetic-probe
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: synthetic-probe
+spec:
+  schedule: "{{ .Values.syntheticProbe.schedule }}"
+  concurrencyPolicy: Replace
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 120
+      template:
+        metadata:
+          labels:
+            app: {{ .Release.Name }}-synthetic-probe
+            app.kubernetes.io/component: synthetic-probe
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ .Release.Name }}-synthetic-probe
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            - name: discover-route
+              image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+              command: [/bin/sh, -c]
+              args:
+                - |
+                  set -eu
+                  oc get route {{ .Release.Name }} -n {{ .Release.Namespace }} \
+                    -o jsonpath='{.spec.host}' > /shared/route-host
+                  echo "Route host: $(cat /shared/route-host)"
+              volumeMounts:
+                - name: shared
+                  mountPath: /shared
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 25m
+                  memory: 32Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+          containers:
+            - name: probe
+              image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+              command: [/bin/sh, -c]
+              env:
+                - name: TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: agentit-internal-webhook-token
+                      key: token
+                      optional: true
+              args:
+                - |
+                  set -uo pipefail
+                  HOST=$(cat /shared/route-host 2>/dev/null || true)
+                  if [ -z "${HOST:-}" ]; then
+                    echo "Could not determine Route host -- skipping probe."
+                    exit 0
+                  fi
+
+                  START=$(date +%s%3N)
+                  HTTP_CODE=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "https://$HOST/healthz" || echo "000")
+                  END=$(date +%s%3N)
+                  LATENCY=$((END - START))
+                  UP="false"
+                  [ "$HTTP_CODE" = "200" ] && UP="true"
+
+                  CERT_DAYS="null"
+                  if command -v openssl >/dev/null 2>&1; then
+                    ENDDATE=$(echo | openssl s_client -connect "$HOST:443" -servername "$HOST" 2>/dev/null \
+                      | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+                    if [ -n "${ENDDATE:-}" ]; then
+                      EXP_EPOCH=$(date -d "$ENDDATE" +%s 2>/dev/null || echo "")
+                      if [ -n "${EXP_EPOCH:-}" ]; then
+                        CERT_DAYS=$(( (EXP_EPOCH - $(date +%s)) / 86400 ))
+                      fi
+                    fi
+                  fi
+
+                  echo "Probe: http_code=$HTTP_CODE up=$UP latency_ms=$LATENCY cert_days_remaining=$CERT_DAYS"
+
+                  if [ -z "${TOKEN:-}" ]; then
+                    echo "No internal webhook token available -- probe ran but result was not reported."
+                    exit 0
+                  fi
+                  curl -sf -X POST "http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc:8080/api/webhook/synthetic-probe" \
+                    -H "Content-Type: application/json" \
+                    -H "X-Internal-Webhook-Token: $TOKEN" \
+                    -d "{\"up\": $UP, \"latency_ms\": $LATENCY, \"cert_days_remaining\": $CERT_DAYS, \"detail\": \"http_code=$HTTP_CODE host=$HOST\"}" \
+                    || echo "Failed to report probe result to portal (non-fatal)."
+              volumeMounts:
+                - name: shared
+                  mountPath: /shared
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 25m
+                  memory: 64Mi
+                limits:
+                  cpu: 100m
+                  memory: 128Mi
+          volumes:
+            - name: shared
+              emptyDir: {}
+{{- end }}

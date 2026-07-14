@@ -1,0 +1,41 @@
+# Routes the alerts already defined in prometheusrule.yaml to a real Slack
+# channel. Before this, AgentITHighErrorRate/PodCrashLooping/WatcherStale/etc.
+# fired against the cluster's Alertmanager with no confirmed destination --
+# an alert nobody sees is not monitoring. See values.yaml's monitoring.slack
+# comment for the on-cluster secret this depends on.
+#
+# Assumes the cluster's Alertmanager (via the Prometheus Operator or
+# OpenShift's user-workload-monitoring stack) is configured to pick up
+# AlertmanagerConfig CRs -- the default on most Prometheus Operator setups,
+# but cluster-specific enough that this is opt-in (monitoring.slack.enabled)
+# rather than turned on unconditionally with monitoring.enabled.
+{{- if and .Values.monitoring.enabled .Values.monitoring.slack.enabled }}
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: monitoring
+spec:
+  route:
+    receiver: agentit-slack
+    groupBy: [alertname, namespace]
+    groupWait: 30s
+    groupInterval: 5m
+    repeatInterval: 4h
+  receivers:
+    - name: agentit-slack
+      slackConfigs:
+        - apiURL:
+            name: {{ .Values.monitoring.slack.secretName }}
+            key: {{ .Values.monitoring.slack.secretKey }}
+          channel: "{{ .Values.monitoring.slack.channel }}"
+          sendResolved: true
+          title: "[{{ "{{" }} .Status | toUpper {{ "}}" }}] {{ "{{" }} .CommonLabels.alertname {{ "}}" }}"
+          text: >-
+            {{ "{{" }} range .Alerts {{ "}}" }}{{ "{{" }} .Annotations.summary {{ "}}" }}
+            {{ "{{" }} end {{ "}}" }}
+{{- end }}

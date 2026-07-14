@@ -1,0 +1,46 @@
+# The synthetic-probe CronJob (chart/templates/synthetic-probe-cronjob.yaml)
+# is a Job, not a long-lived watcher, but it's still a background pod with no
+# inbound listener -- same ingress-denied treatment as the watcher
+# NetworkPolicies in networkpolicy-agents.yaml (kept separate from that file
+# on purpose: TestWatcherNetworkPolicies asserts that file covers exactly
+# the four long-lived watcher Deployments). It needs the Kubernetes API (its
+# initContainer looks up the Route's host) and the public internet on 443
+# (it deliberately probes the *public* Route, not an in-cluster Service,
+# since the whole point is catching Route/router-layer failures kubelet's
+# own probes can't see) in addition to DNS and the portal callback.
+{{- if .Values.syntheticProbe.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-synthetic-probe
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-synthetic-probe
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ .Release.Name }}-synthetic-probe
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
+    - ports:
+        - protocol: TCP
+          port: 6443
+    - ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}
+      ports:
+        - protocol: TCP
+          port: 8080
+{{- end }}

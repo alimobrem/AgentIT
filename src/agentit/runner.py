@@ -67,7 +67,7 @@ def run_assessment(
         SecurityAnalyzer(llm_client=llm_client),
         ObservabilityAnalyzer(),
         CICDAnalyzer(),
-        InfrastructureAnalyzer(),
+        InfrastructureAnalyzer(llm_client=llm_client),
         ComplianceAnalyzer(),
         DataGovernanceAnalyzer(),
         HADRAnalyzer(),

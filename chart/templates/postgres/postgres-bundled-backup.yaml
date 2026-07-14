@@ -56,15 +56,36 @@ spec:
               command: [/bin/sh, -c]
               args:
                 - |
-                  set -eu
+                  set -u
                   BACKUP_DIR=/backups
                   STAMP=$(date +%Y%m%d-%H%M%S)
                   OUT="$BACKUP_DIR/agentit-postgres-$STAMP.sql.gz"
-                  pg_dump -h {{ .Release.Name }}-postgres-bundled -p 5432 -U "$POSTGRESQL_USER" -d "$POSTGRESQL_DATABASE" --no-owner | gzip > "$OUT"
-                  KEEP={{ .Values.postgres.bundled.backup.retentionCount | default 8 }}
-                  ls -t $BACKUP_DIR/agentit-postgres-*.sql.gz 2>/dev/null | tail -n +$((KEEP + 1)) | xargs rm -f 2>/dev/null || true
-                  COUNT=$(ls $BACKUP_DIR/agentit-postgres-*.sql.gz 2>/dev/null | wc -l)
-                  echo "Backup $STAMP done ($COUNT retained)"
+                  STATUS="ok"
+                  DETAIL=""
+                  if pg_dump -h {{ .Release.Name }}-postgres-bundled -p 5432 -U "$POSTGRESQL_USER" -d "$POSTGRESQL_DATABASE" --no-owner | gzip > "$OUT"; then
+                    KEEP={{ .Values.postgres.bundled.backup.retentionCount | default 8 }}
+                    ls -t $BACKUP_DIR/agentit-postgres-*.sql.gz 2>/dev/null | tail -n +$((KEEP + 1)) | xargs rm -f 2>/dev/null || true
+                    COUNT=$(ls $BACKUP_DIR/agentit-postgres-*.sql.gz 2>/dev/null | wc -l)
+                    DETAIL="Backup $STAMP done ($COUNT retained)"
+                    echo "$DETAIL"
+                  else
+                    STATUS="fail"
+                    DETAIL="pg_dump failed for $STAMP"
+                    rm -f "$OUT" 2>/dev/null || true
+                    echo "$DETAIL"
+                  fi
+
+                  # Best-effort report -- see db-backup-cronjob.yaml's identical pattern
+                  # for the SQLite backup. This image (rhel9/postgresql-15) isn't
+                  # guaranteed to ship curl, hence the command -v guard.
+                  if command -v curl >/dev/null 2>&1 && [ -n "${WEBHOOK_TOKEN:-}" ]; then
+                    curl -sf -X POST "http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc:8080/api/webhook/backup-status" \
+                      -H "Content-Type: application/json" \
+                      -H "X-Internal-Webhook-Token: $WEBHOOK_TOKEN" \
+                      -d "{\"target\": \"postgres\", \"status\": \"$STATUS\", \"detail\": \"$DETAIL\"}" \
+                      || echo "Failed to report backup status to portal (non-fatal)."
+                  fi
+                  [ "$STATUS" = "ok" ]
               env:
                 - name: POSTGRESQL_USER
                   valueFrom:
@@ -78,6 +99,12 @@ spec:
                       key: password
                 - name: POSTGRESQL_DATABASE
                   value: {{ .Values.postgres.bundled.credentials.database | quote }}
+                - name: WEBHOOK_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: agentit-internal-webhook-token
+                      key: token
+                      optional: true
               volumeMounts:
                 - name: backups
                   mountPath: /backups

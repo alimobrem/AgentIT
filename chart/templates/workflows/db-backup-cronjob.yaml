@@ -22,18 +22,46 @@ spec:
           containers:
             - name: backup
               image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              env:
+                - name: WEBHOOK_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: agentit-internal-webhook-token
+                      key: token
+                      optional: true
               command: [/bin/sh, -c]
               args:
                 - |
-                  set -eu
+                  set -u
                   BACKUP_DIR=/backups
                   DB=/data/agentit.db
                   STAMP=$(date +%Y%m%d-%H%M%S)
-                  if [ ! -f "$DB" ]; then echo "No database at $DB"; exit 0; fi
-                  sqlite3 "$DB" ".backup $BACKUP_DIR/agentit-$STAMP.db"
-                  ls -t $BACKUP_DIR/agentit-*.db 2>/dev/null | tail -n +8 | xargs rm -f 2>/dev/null || true
-                  COUNT=$(ls $BACKUP_DIR/agentit-*.db 2>/dev/null | wc -l)
-                  echo "Backup $STAMP done ($COUNT retained)"
+                  STATUS="ok"
+                  DETAIL=""
+                  if [ ! -f "$DB" ]; then
+                    echo "No database at $DB"
+                  elif sqlite3 "$DB" ".backup $BACKUP_DIR/agentit-$STAMP.db"; then
+                    ls -t $BACKUP_DIR/agentit-*.db 2>/dev/null | tail -n +8 | xargs rm -f 2>/dev/null || true
+                    COUNT=$(ls $BACKUP_DIR/agentit-*.db 2>/dev/null | wc -l)
+                    DETAIL="Backup $STAMP done ($COUNT retained)"
+                    echo "$DETAIL"
+                  else
+                    STATUS="fail"
+                    DETAIL="sqlite3 .backup failed for $STAMP"
+                    echo "$DETAIL"
+                  fi
+
+                  # Reports success/failure so a silent backup failure shows up on the
+                  # Health page / as a Prometheus alert instead of only in this Job's
+                  # logs -- best-effort: never fails the Job over a reporting hiccup.
+                  if command -v curl >/dev/null 2>&1 && [ -n "${WEBHOOK_TOKEN:-}" ]; then
+                    curl -sf -X POST "http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc:8080/api/webhook/backup-status" \
+                      -H "Content-Type: application/json" \
+                      -H "X-Internal-Webhook-Token: $WEBHOOK_TOKEN" \
+                      -d "{\"target\": \"sqlite\", \"status\": \"$STATUS\", \"detail\": \"$DETAIL\"}" \
+                      || echo "Failed to report backup status to portal (non-fatal)."
+                  fi
+                  [ "$STATUS" = "ok" ]
               volumeMounts:
                 - name: data
                   mountPath: /data

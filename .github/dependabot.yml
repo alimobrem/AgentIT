@@ -1,0 +1,77 @@
+version: 2
+
+# Every `updates` entry below relies on Dependabot's *default* PR body, which
+# already includes release notes/changelog links and, for security-driven
+# bumps, the actual CVE/GHSA advisory -- confirmed by inspecting this file
+# for anything that would suppress that (a custom `commit-message` style or
+# `pull-request-branch-name` that strips context). Nothing here does. No
+# custom notification/summarization logic is needed to get "why bump this"
+# reasoning into every PR; building one would duplicate what Dependabot
+# already ships.
+updates:
+  # AgentIT ships a renovate-config/dependabot-config skill that generates
+  # exactly this file for apps it onboards (skills/dependency/dependabot-config.md)
+  # -- this wires the same capability onto AgentIT's own repo.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ci"
+
+  # Base image for the app itself (Containerfile's `FROM
+  # registry.access.redhat.com/ubi9/python-312:latest`). Dependabot's `docker`
+  # ecosystem detects `Containerfile` as well as `Dockerfile` (case-insensitive
+  # match in dependabot-core's file fetcher, dependabot/dependabot-core#6067 /
+  # #11141) -- but there is a known, still-open dependabot-core bug
+  # (dependabot/dependabot-core#11320) where PR *creation* fails with "invalid
+  # or unauthorized changes" specifically for `Containerfile`-named files, even
+  # though detection/parsing succeeds. If PRs from this entry never appear (or
+  # error) despite real base-image updates existing, that bug -- not a
+  # misconfiguration here -- is the first thing to check; renaming to
+  # `Dockerfile` is the documented workaround if it needs to be forced.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "base-image"
+
+  # Attempts to also cover the two pinned images living in chart/values.yaml
+  # (registry.redhat.io/rhel9/postgresql-15@sha256:... and
+  # registry.redhat.io/openshift4/ose-oauth-proxy:latest) -- dependabot-core's
+  # docker ecosystem parses plain YAML manifests (Kubernetes/Helm *values*
+  # files) for `image:`-shaped fields, not just Dockerfile FROM lines, and
+  # values.yaml is plain YAML (no Go template syntax), so it's a real
+  # candidate. Left in even though this is unconfirmed without a live GitHub
+  # run: worst case it simply never opens a PR from this entry, no worse than
+  # not having it.
+  #
+  # KNOWN LIMITATION, not covered by this or any Dependabot ecosystem: every
+  # *other* image reference in chart/templates/**/*.yaml (e.g.
+  # deployment.yaml's `"{{ .Values.image.repository }}:{{ .Values.image.tag }}"`)
+  # is Helm template syntax, not valid standalone YAML -- Dependabot's YAML
+  # parser can't read those files at all, let alone find an image inside one.
+  # Those pins only exist post-render, on the live cluster; there's no static
+  # file for any tool to scan. This is a real, structural gap the docker
+  # ecosystem cannot close, not something a config tweak fixes.
+  - package-ecosystem: "docker"
+    directory: "/chart"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "base-image"

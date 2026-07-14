@@ -62,6 +62,33 @@ spec:
         # docs/postgres-migration-plan.md for the full history.
         - name: postgres.backend
           value: "postgres"
+        # AgentIT is now registered in its own fleet (chart/templates/tekton/
+        # pipeline.yaml's register-self-in-fleet task, run on every CI build) --
+        # this turns on the one fleet-wide capability with no always-on
+        # equivalent (vuln-watcher already covers CVEs continuously; this
+        # covers the cost dimension weekly). See docs/deployment.md.
+        - name: cronJobs.costReport.enabled
+          value: "true"
+        # External synthetic uptime probe + TLS cert-expiry watch against the
+        # public Route -- see chart/templates/synthetic-probe-cronjob.yaml.
+        - name: syntheticProbe.enabled
+          value: "true"
+        # Monthly rotation of agentit-internal-webhook-token (+ consumer
+        # restarts) and a daily-equivalent existence check for
+        # github-webhook-secret -- see chart/templates/secret-rotation-cronjob.yaml.
+        - name: secretRotation.enabled
+          value: "true"
+        # Cheap in-memory rate limiting on the portal's own routes -- see
+        # rate_limit.py and values.yaml's rateLimit block for exactly what
+        # this does and doesn't guarantee.
+        - name: rateLimit.enabled
+          value: "true"
+        # NOTE: monitoring.slack.enabled is deliberately left off here -- it
+        # needs a real Slack incoming-webhook URL, which this repo never
+        # generates or hardcodes. Create it first:
+        #   oc create secret generic agentit-slack-webhook -n agentit \
+        #     --from-literal=url=https://hooks.slack.com/services/...
+        # then add `monitoring.slack.enabled: "true"` here.
   ignoreDifferences:
     - group: ""
       kind: Service

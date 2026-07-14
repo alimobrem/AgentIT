@@ -32,6 +32,7 @@ from agentit.portal.csrf import (
     is_csrf_exempt,
     verify_csrf,
 )
+from agentit.portal.rate_limit import check_rate_limit, client_key_for, is_enabled as rate_limit_enabled
 from agentit.agent_registry_cleanup import prune_stale_agents_and_log
 from agentit.skill_inventory import diff_and_log_inventory_changes
 
@@ -100,6 +101,21 @@ async def csrf_middleware(request: Request, call_next):
             httponly=False, samesite="lax", secure=(proto == "https"), path="/",
         )
     return response
+
+
+# Registered *after* csrf_middleware: FastAPI/Starlette runs `@app.middleware`
+# functions in reverse registration order for the request phase (the most
+# recently added one is outermost), so this one actually runs first --
+# rejecting a rate-limited request before it pays for CSRF token
+# generation/verification.
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    """Cheap, opt-in (AGENTIT_RATE_LIMIT_ENABLED) in-memory rate limiting --
+    see rate_limit.py's module docstring for exactly what this does and does
+    not guarantee."""
+    if rate_limit_enabled() and not check_rate_limit(client_key_for(request), request.url.path):
+        return JSONResponse({"detail": "Rate limit exceeded"}, status_code=429)
+    return await call_next(request)
 
 
 _maintenance_task = None

@@ -181,6 +181,54 @@ spec:
         - name: source
           workspace: source
 
+    # Registers AgentIT's own repo into its own fleet (store.get_fleet_data()),
+    # via the same /api/webhook/assess entry point Argo Events Sensors use --
+    # so the assessment is persisted through the running portal's own store
+    # connection instead of a second writer touching the SQLite/Postgres
+    # backend directly from a Tekton pod. Once AgentIT is a tracked fleet
+    # app, the vuln-watcher watcher (already enabled live) and the
+    # cost-report CronJob (chart/templates/workflows/cost-report-cronjob.yaml)
+    # automatically start covering it too -- no separate code path needed.
+    # Best-effort: failure here never fails the pipeline (self-assess above
+    # is the real CI gate).
+    - name: register-self-in-fleet
+      timeout: "2m"
+      taskSpec:
+        params:
+          - name: repo-url
+            type: string
+        steps:
+          - name: register
+            # ubi-minimal has curl available -- same image report-status already
+            # uses below for its own curl call to the GitHub API.
+            image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+            env:
+              - name: TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: agentit-internal-webhook-token
+                    key: token
+                    optional: true
+            computeResources:
+              requests:
+                memory: 64Mi
+                cpu: 50m
+            script: |
+              set -uo pipefail
+              if [ -z "${TOKEN:-}" ]; then
+                echo "No internal webhook token available -- skipping fleet self-registration."
+                exit 0
+              fi
+              curl -sf -X POST "http://agentit.agentit.svc:8080/api/webhook/assess" \
+                -H "Content-Type: application/json" \
+                -H "X-Internal-Webhook-Token: $TOKEN" \
+                -d "{\"repo_url\": \"$(params.repo-url)\", \"criticality\": \"high\"}" \
+                && echo "AgentIT registered/refreshed in its own fleet." \
+                || echo "Fleet self-registration failed (non-fatal)."
+      params:
+        - name: repo-url
+          value: $(params.repo-url)
+
     - name: report-status
       timeout: "2m"
       params:

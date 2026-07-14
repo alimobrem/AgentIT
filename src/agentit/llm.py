@@ -42,6 +42,26 @@ _ACTION_CLASSIFY_SYSTEM = (
 )
 
 
+_EOL_SYSTEM = (
+    "You are a software supply-chain analyst reviewing a repository's detected stack "
+    "and key files for end-of-life (EOL) or soon-to-be-EOL software: base container "
+    "images, language runtimes, and framework versions. Only flag a component if you "
+    "are confident about its real, published end-of-life date -- an empty result is "
+    "correct and preferred over a guess. Never invent or estimate a specific EOL date "
+    "you are not sure of; if you can't cite one you trust, omit that item entirely.\n\n"
+    'Respond ONLY with valid JSON: {"risks": [{"component": str, "version": str, '
+    '"status": "eol" or "approaching_eol", "eol_date": str, "confidence": float, '
+    '"reason": str}]}. confidence is 0.0-1.0. Return {"risks": []} if nothing qualifies.'
+)
+
+_EOL_USER = (
+    "Detected stack:\n{stack_info}\n\n"
+    "Relevant file excerpts:\n{file_excerpts}\n\n"
+    "Identify any base images, language runtimes, or framework versions above that are "
+    "already end-of-life, or approaching end-of-life within the next 6 months."
+)
+
+
 def _create_client() -> anthropic.Anthropic | anthropic.AnthropicVertex:
     project = os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "")
     region = os.environ.get("CLOUD_ML_REGION", "")
@@ -173,6 +193,50 @@ class LLMClient:
             }
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             logger.warning("LLM returned unparseable fix review: %s", raw)
+            return None
+
+    def detect_eol_risks(
+        self,
+        stack_info: dict,
+        file_excerpts: dict[str, str],
+    ) -> list[dict] | None:
+        """Open-ended EOL/near-EOL detection across the repo's whole stack.
+
+        Unlike ``classify_secret``/``classify_action`` this isn't a
+        yes/no filter over a heuristic hit -- it's genuinely open-ended
+        reasoning, so the caller (``agentit.analyzers.eol.llm_findings``)
+        treats this as purely additive to a deterministic baseline.
+
+        Returns a list of risk dicts (possibly empty -- that's a valid "the
+        LLM looked and found nothing" answer), or ``None`` if the LLM call
+        failed or returned something unparseable (caller must fall back to
+        the deterministic baseline only, never fabricate a result).
+        """
+        excerpts_text = "\n\n".join(
+            f"--- {path} ---\n{content}" for path, content in file_excerpts.items()
+        ) or "(no relevant files found)"
+        user_msg = _EOL_USER.format(stack_info=json.dumps(stack_info), file_excerpts=excerpts_text)
+        raw = self._chat(_EOL_SYSTEM, user_msg)
+        if raw is None:
+            return None
+        try:
+            parsed = json.loads(raw)
+            risks = parsed["risks"]
+            if not isinstance(risks, list):
+                raise TypeError("'risks' is not a list")
+            return [
+                {
+                    "component": str(r["component"]),
+                    "version": str(r["version"]),
+                    "status": str(r["status"]),
+                    "eol_date": str(r.get("eol_date", "")),
+                    "confidence": float(r["confidence"]),
+                    "reason": str(r["reason"]),
+                }
+                for r in risks
+            ]
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            logger.warning("LLM returned unparseable EOL risk response: %s", raw)
             return None
 
     def _chat(self, system: str, user: str) -> str | None:

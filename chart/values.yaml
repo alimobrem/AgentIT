@@ -159,6 +159,43 @@ rbac:
 
 monitoring:
   enabled: false
+  # Routes the alerts already defined in prometheusrule.yaml to a real Slack
+  # channel via an AlertmanagerConfig CR (chart/templates/alertmanager-config.yaml).
+  # Disabled by default because it needs a real incoming-webhook URL, which
+  # this chart never generates or hardcodes -- create it on-cluster first
+  # (matching the gcp-credentials/postgres-secret pattern):
+  #   oc create secret generic agentit-slack-webhook -n agentit \
+  #     --from-literal=url=https://hooks.slack.com/services/...
+  # then set slack.enabled: true and slack.secretName if you used a different name.
+  slack:
+    enabled: false
+    secretName: agentit-slack-webhook
+    secretKey: url
+    channel: "#agentit-alerts"
+
+# External synthetic uptime probe + TLS cert-expiry watch against the public
+# Route -- see chart/templates/synthetic-probe-cronjob.yaml.
+syntheticProbe:
+  enabled: false
+  schedule: "*/5 * * * *"
+
+# Rotates agentit-internal-webhook-token on a schedule (and restarts the
+# Deployments/Rollout that hold a stale copy in their env), plus a read-only
+# existence check for github-webhook-secret (see
+# chart/templates/secret-rotation-cronjob.yaml for why that one is a drift
+# check, not a rotation).
+secretRotation:
+  enabled: false
+  schedule: "0 5 1 * *"   # monthly, 1st at 05:00
+
+# Basic in-memory rate limiting on the portal's own routes (app.py). Not a
+# substitute for a real API gateway, but cheap insurance against a runaway
+# or replayed webhook loop given auto-mode can apply changes to a live
+# cluster -- see docs/deployment.md.
+rateLimit:
+  enabled: false
+  webhookPerMinute: 30
+  defaultPerMinute: 120
 
 # OpenShift oauth-proxy sidecar in front of the portal UI. Disabled by default
 # so merging this doesn't change behavior on any existing deployment -- flip

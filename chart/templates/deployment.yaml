@@ -119,6 +119,12 @@ spec:
                   name: agentit-internal-webhook-token
                   key: token
                   optional: true
+            - name: AGENTIT_RATE_LIMIT_ENABLED
+              value: {{ .Values.rateLimit.enabled | default false | quote }}
+            - name: AGENTIT_RATE_LIMIT_WEBHOOK_PER_MIN
+              value: {{ .Values.rateLimit.webhookPerMinute | default 30 | quote }}
+            - name: AGENTIT_RATE_LIMIT_DEFAULT_PER_MIN
+              value: {{ .Values.rateLimit.defaultPerMinute | default 120 | quote }}
           volumeMounts:
             - name: data
               mountPath: /data

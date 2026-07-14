@@ -99,4 +99,123 @@ spec:
             description: >-
               skill-learner's expected interval is 24h; no successful tick
               has been recorded in over 2x that interval.
+
+        {{- if .Values.syntheticProbe.enabled }}
+        # External synthetic uptime probe + TLS cert-expiry watch --
+        # see synthetic-probe-cronjob.yaml. Catches Route/router-layer
+        # failures kubelet's own liveness/readiness probes can't see.
+        - alert: AgentITSyntheticProbeDown
+          expr: |
+            agentit_synthetic_probe_up == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "External synthetic probe against the public Route is failing"
+            description: >-
+              The agentit-synthetic-probe CronJob's last run against the
+              public Route did not return a healthy response.
+
+        - alert: AgentITSyntheticProbeStale
+          expr: |
+            (time() - agentit_synthetic_probe_last_run_timestamp) > 900
+          labels:
+            severity: warning
+          annotations:
+            summary: "Synthetic probe has not reported in over 15 minutes"
+            description: >-
+              agentit-synthetic-probe's schedule is {{ .Values.syntheticProbe.schedule }};
+              no report has been received in over 15 minutes -- the CronJob
+              may have stopped running.
+
+        - alert: AgentITCertExpiringCritical
+          expr: |
+            agentit_route_cert_expiry_days < 7
+          labels:
+            severity: critical
+          annotations:
+            summary: "AgentIT's Route TLS certificate expires in under 7 days"
+            description: "agentit_route_cert_expiry_days is {{ "{{" }} $value {{ "}}" }}."
+
+        - alert: AgentITCertExpiringWarning
+          expr: |
+            agentit_route_cert_expiry_days < 14
+          labels:
+            severity: warning
+          annotations:
+            summary: "AgentIT's Route TLS certificate expires in under 14 days"
+            description: "agentit_route_cert_expiry_days is {{ "{{" }} $value {{ "}}" }}."
+
+        - alert: AgentITCertExpiringInfo
+          expr: |
+            agentit_route_cert_expiry_days < 30
+          labels:
+            severity: info
+          annotations:
+            summary: "AgentIT's Route TLS certificate expires in under 30 days"
+            description: "agentit_route_cert_expiry_days is {{ "{{" }} $value {{ "}}" }}."
+        {{- end }}
+
+        {{- if .Values.backup.enabled }}
+        - alert: AgentITBackupFailed
+          expr: |
+            agentit_backup_last_status{target="sqlite"} == 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "The last SQLite backup job reported failure"
+            description: >-
+              agentit_backup_last_status{target="sqlite"} is 0 -- see the
+              agentit-db-backup CronJob's most recent Job logs.
+
+        - alert: AgentITBackupStale
+          expr: |
+            (time() - agentit_backup_last_success_timestamp{target="sqlite"}) > 43200
+          labels:
+            severity: warning
+          annotations:
+            summary: "No successful SQLite backup reported in over 12 hours"
+            description: >-
+              agentit-db-backup's schedule is every 6h; no successful backup
+              has been reported in over 2x that interval.
+        {{- end }}
+        {{- if .Values.postgres.bundled.backup.enabled }}
+        - alert: AgentITBackupFailed
+          expr: |
+            agentit_backup_last_status{target="postgres"} == 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "The last Postgres backup job reported failure"
+            description: >-
+              agentit_backup_last_status{target="postgres"} is 0 -- see the
+              agentit-postgres-bundled-backup CronJob's most recent Job logs.
+
+        - alert: AgentITBackupStale
+          expr: |
+            (time() - agentit_backup_last_success_timestamp{target="postgres"}) > 43200
+          labels:
+            severity: warning
+          annotations:
+            summary: "No successful Postgres backup reported in over 12 hours"
+            description: >-
+              agentit-postgres-bundled-backup's schedule is
+              {{ .Values.postgres.bundled.backup.schedule }}; no successful
+              backup has been reported in over 12 hours.
+        {{- end }}
+
+        {{- if .Values.secretRotation.enabled }}
+        - alert: AgentITSecretMissing
+          expr: |
+            agentit_secret_check_status{secret="github-webhook-secret"} == 0
+          labels:
+            severity: critical
+          annotations:
+            summary: "github-webhook-secret is missing from the cluster"
+            description: >-
+              This is the exact root cause of the 2026-07-13 EventListener
+              outage (docs/deployment.md) -- recreate it with
+              `oc create secret generic github-webhook-secret -n agentit
+              --from-literal=secret=<value matching GitHub's webhook config>`.
+        {{- end }}
 {{- end }}

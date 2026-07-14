@@ -149,6 +149,80 @@ class TestInternalWebhookToken:
         resp = client.post("/api/webhook/github-push", json={}, headers={"X-GitHub-Event": "ping"})
         assert resp.status_code == 200
 
+    @patch.dict(os.environ, {"AGENTIT_INTERNAL_WEBHOOK_TOKEN": "s3cr3t-token"})
+    def test_synthetic_probe_requires_token(self, portal_client):
+        client, _, _ = portal_client
+        resp = client.post("/api/webhook/synthetic-probe", json={"up": True})
+        assert resp.status_code == 401
+
+    @patch.dict(os.environ, {"AGENTIT_INTERNAL_WEBHOOK_TOKEN": "s3cr3t-token"})
+    def test_backup_status_requires_token(self, portal_client):
+        client, _, _ = portal_client
+        resp = client.post("/api/webhook/backup-status", json={"target": "sqlite", "status": "ok"})
+        assert resp.status_code == 401
+
+    @patch.dict(os.environ, {"AGENTIT_INTERNAL_WEBHOOK_TOKEN": "s3cr3t-token"})
+    def test_secret_check_requires_token(self, portal_client):
+        client, _, _ = portal_client
+        resp = client.post("/api/webhook/secret-check", json={"secret": "github-webhook-secret", "exists": False})
+        assert resp.status_code == 401
+
+
+class TestSelfMonitoringWebhooks:
+    """/api/webhook/{synthetic-probe,backup-status,secret-check} -- see
+    docs/deployment.md's 2026-07-13 incident writeup for why these three
+    specific gaps (external uptime, backup verification, secret drift) were
+    picked first."""
+
+    def test_synthetic_probe_up_sets_gauge(self, portal_client):
+        client, _, _ = portal_client
+        resp = client.post("/api/webhook/synthetic-probe", json={"up": True, "latency_ms": 42, "cert_days_remaining": 55})
+        assert resp.status_code == 200
+        from agentit.portal.metrics import synthetic_probe_up, route_cert_expiry_days
+        assert synthetic_probe_up._value.get() == 1
+        assert route_cert_expiry_days._value.get() == 55
+
+    def test_synthetic_probe_down_sets_gauge_and_logs_event(self, portal_client):
+        client, store, _ = portal_client
+        resp = client.post("/api/webhook/synthetic-probe", json={"up": False, "detail": "http_code=503"})
+        assert resp.status_code == 200
+        from agentit.portal.metrics import synthetic_probe_up
+        assert synthetic_probe_up._value.get() == 0
+        events = store.list_events(limit=5)
+        assert any(e["action"] == "probe-failed" for e in events)
+
+    def test_backup_status_ok_sets_gauge(self, portal_client):
+        client, _, _ = portal_client
+        resp = client.post("/api/webhook/backup-status", json={"target": "sqlite", "status": "ok", "detail": "done"})
+        assert resp.status_code == 200
+        from agentit.portal.metrics import backup_last_status
+        assert backup_last_status.labels(target="sqlite")._value.get() == 1
+
+    def test_backup_status_fail_sets_gauge_and_logs_warning(self, portal_client):
+        client, store, _ = portal_client
+        resp = client.post("/api/webhook/backup-status", json={"target": "postgres", "status": "fail", "detail": "pg_dump exit 1"})
+        assert resp.status_code == 200
+        from agentit.portal.metrics import backup_last_status
+        assert backup_last_status.labels(target="postgres")._value.get() == 0
+        events = store.list_events(limit=5)
+        assert any(e["action"] == "backup-failed" for e in events)
+
+    def test_secret_check_missing_logs_critical_event(self, portal_client):
+        client, store, _ = portal_client
+        resp = client.post("/api/webhook/secret-check", json={"secret": "github-webhook-secret", "exists": False})
+        assert resp.status_code == 200
+        from agentit.portal.metrics import secret_check_status
+        assert secret_check_status.labels(secret="github-webhook-secret")._value.get() == 0
+        events = store.list_events(limit=5)
+        assert any(e["action"] == "secret-missing" and e["severity"] == "critical" for e in events)
+
+    def test_secret_check_present_sets_gauge(self, portal_client):
+        client, _, _ = portal_client
+        resp = client.post("/api/webhook/secret-check", json={"secret": "github-webhook-secret", "exists": True})
+        assert resp.status_code == 200
+        from agentit.portal.metrics import secret_check_status
+        assert secret_check_status.labels(secret="github-webhook-secret")._value.get() == 1
+
 
 class TestWebhookDedup:
     @patch("agentit.portal.routes.webhooks.clone_assess_cleanup")
