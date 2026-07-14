@@ -373,15 +373,57 @@ class SkillEngine:
                 domains.add(skill.domain)
         return domains
 
+    def skill_for_category(self, category: str) -> Skill | None:
+        """Resolve a finding category to the one skill responsible for fixing it.
+
+        This is the single function both ``generate_for_finding`` (the CLI's
+        ``self-fix`` path) and ``RemediationDispatcher`` (the portal/webhook
+        fix-a-finding path -- see ``remediation/dispatcher.py``) route
+        through, so a category like ``"policy"`` can never resolve to two
+        different skills depending on which caller asked. Before this, each
+        call site re-implemented its own category -> skill matching
+        independently: ``remediation/registry.py``'s ``FIX_REGISTRY`` mapped
+        ``"policy"`` to ``kyverno-require-labels``, while this method's old
+        keyword-trigger matching picked ``image-registry-policy`` instead
+        (both skills list "policy" as a trigger; ``image-registry-policy.md``
+        merely sorts first alphabetically) -- a real, silent disagreement.
+
+        ``FIX_REGISTRY`` is now authoritative: a category it maps to a real,
+        loaded skill always resolves to that skill. A category it doesn't
+        cover (or maps to a non-skill sentinel like ``"patch_base_image"``,
+        which ``RemediationDispatcher`` special-cases itself) falls back to
+        keyword-trigger matching, preserving this method's pre-unification
+        behavior for anything the static registry doesn't yet know about.
+        """
+        from agentit.remediation.registry import lookup
+
+        match = lookup(category)
+        if match is not None:
+            _domain, skill_name = match
+            skill = next((s for s in self.skills if s.name == skill_name), None)
+            if skill is not None:
+                return skill
+            logger.warning(
+                "FIX_REGISTRY maps category '%s' to skill '%s', but no such skill "
+                "is loaded (or it's a non-skill sentinel handled elsewhere)",
+                category, skill_name,
+            )
+            return None
+
+        category_lower = category.lower()
+        for skill in self.skills:
+            if any(t.lower() in category_lower or category_lower in t.lower() for t in skill.triggers):
+                return skill
+        return None
+
     def generate_for_finding(self, finding_category: str, finding_description: str,
                              report: AssessmentReport,
                              llm_client: object | None = None) -> list[GeneratedFile]:
         """Generate a fix for a specific finding using the best matching skill."""
-        category_lower = finding_category.lower()
-        for skill in self.skills:
-            if any(t.lower() in category_lower or category_lower in t.lower() for t in skill.triggers):
-                return self.generate(skill, report, llm_client=llm_client)
-        return []
+        skill = self.skill_for_category(finding_category)
+        if skill is None:
+            return []
+        return self.generate(skill, report, llm_client=llm_client)
 
     def find_uncovered_findings(
         self,

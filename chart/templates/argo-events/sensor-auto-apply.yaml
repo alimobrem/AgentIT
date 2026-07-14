@@ -24,8 +24,7 @@ spec:
     - retryStrategy:
         steps: 3
         duration: "30s"
-        factor:
-          value: 2.0
+        factor: 2.0
       template:
         name: trigger-auto-apply
         http:

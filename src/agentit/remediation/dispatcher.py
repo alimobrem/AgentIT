@@ -78,34 +78,40 @@ class RemediationDispatcher:
         if skill_name == "patch_base_image":
             return await self._dispatch_patch(assessment_id, domain, report, app_name)
 
-        return self._dispatch_generate(domain, skill_name, report)
+        return self._dispatch_generate(domain, finding_category, report)
 
     def _dispatch_generate(
         self,
         domain: str,
-        skill_name: str,
+        finding_category: str,
         report: object,
     ) -> dict:
         """Render the matching skill in template mode (no LLM -- deterministic,
-        matching the fully-offline behavior the Python agent methods had)."""
+        matching the fully-offline behavior the Python agent methods had).
+
+        Resolves the skill via ``SkillEngine.skill_for_category()`` -- the
+        same function ``generate_for_finding()`` (the CLI's ``self-fix``
+        path) routes through, so this call site and that one can never
+        disagree on which skill handles a given finding category.
+        """
         engine = SkillEngine(_default_skills_dir(), platform=None)
-        skill = next((s for s in engine.skills if s.name == skill_name), None)
+        skill = engine.skill_for_category(finding_category)
         if skill is None:
             return {
                 "files": [],
                 "agent": domain,
-                "method": skill_name,
-                "error": f"Skill '{skill_name}' not found for domain '{domain}'",
+                "method": "",
+                "error": f"No skill found for category '{finding_category}' (domain '{domain}')",
             }
 
         try:
             result = engine.generate(skill, report, llm_client=None)
         except Exception as exc:
-            logger.exception("Skill generator %s/%s failed", domain, skill_name)
+            logger.exception("Skill generator %s/%s failed", domain, skill.name)
             return {
                 "files": [],
                 "agent": domain,
-                "method": skill_name,
+                "method": skill.name,
                 "error": str(exc),
             }
 
@@ -122,7 +128,7 @@ class RemediationDispatcher:
         return {
             "files": files,
             "agent": domain,
-            "method": skill_name,
+            "method": skill.name,
             "error": None,
         }
 

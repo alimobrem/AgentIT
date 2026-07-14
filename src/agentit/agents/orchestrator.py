@@ -11,7 +11,6 @@ from pathlib import Path, PurePosixPath
 import yaml
 
 from agentit.models import AssessmentReport, Severity
-from agentit.portal.metrics import agent_runs_total, agent_run_duration_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -35,23 +34,39 @@ AGENT_MODE = _read_agent_mode()
 # KNOWN_KIND_CONFLICTS / path collisions in _detect_conflicts) should be
 # resolved -- it is not itself a conflict trigger. Two agents both
 # succeeding is normal and expected, not a conflict.
+#
+# security/observability/cicd/compliance/infrastructure/release (and
+# incident/retirement/chaos) are now skill-only domains -- their Python
+# agents were removed (see docs/agent-removal-readiness.md), so no
+# AgentResult is ever produced with those categories anymore; every entry
+# this dict used to have referenced at least one of them and could never
+# fire again. `cost`, `dependency`, and `codechange` are the only
+# surviving Python agent categories, plus the aggregate `skills` category
+# (Step 1 of run(), one AgentResult covering every matched skill's
+# output). The only genuine remaining collision -- cost's VPA vs. the
+# skill-generated HPA -- is a resource-kind conflict, not a generic
+# priority one, and is registered below in KNOWN_KIND_CONFLICTS instead.
+# `codechange`/`dependency` output (source patches, dependency configs)
+# has no plausible overlap with `cost` or `skills` output, so there's no
+# other real pairing to add here today.
 PRIORITY_MATRIX = {
-    ("security", "cicd"): "security",
-    ("security", "observability"): "security",
-    ("security", "compliance"): "security",
-    ("compliance", "cicd"): "compliance",
-    ("compliance", "observability"): "compliance",
-    ("cicd", "release"): "release",
-    ("infrastructure", "security"): "security",
-    ("infrastructure", "compliance"): "compliance",
+    # HPA (skill-generated, availability-oriented replica scaling) wins
+    # over an actively-resizing VPA (cost agent, "Auto" mode) -- see
+    # KNOWN_KIND_CONFLICTS below and agents/cost.py's `_generate_vpa()`.
+    ("skills", "cost"): "skills",
 }
 
 # Known agent-pair / resource-kind combinations that genuinely conflict
 # when both are actually present for the same workload -- e.g. a VPA in
 # "Auto" mode fights an HPA for control over replica/resource sizing.
-# See the TODO(orchestrator) markers in agents/cost.py / agents/infrastructure.py.
+# `infrastructure` (the former Python agent that generated the HPA) was
+# removed -- `hpa` is now a skill (skills/infrastructure/hpa.md,
+# domain=infrastructure) generated in Step 1 of run() under the
+# aggregate `skills` AgentResult, so this pairing is keyed on `skills`,
+# not `infrastructure`, to actually match a real AgentResult.agent_name.
+# See the TODO(orchestrator) marker in agents/cost.py.
 KNOWN_KIND_CONFLICTS: dict[tuple[str, str], tuple[str, str]] = {
-    ("cost", "infrastructure"): ("VerticalPodAutoscaler", "HorizontalPodAutoscaler"),
+    ("cost", "skills"): ("VerticalPodAutoscaler", "HorizontalPodAutoscaler"),
 }
 
 
@@ -354,6 +369,10 @@ class FleetOrchestrator:
     ) -> list[AgentResult]:
         """Run agents in-process (default mode)."""
         from agentit.agents.capabilities import AGENT_CLASSES
+        # Lazily imported (not at module level) so importing this module
+        # standalone -- the CLI's onboard/orchestrate commands -- never
+        # transitively pulls in prometheus_client just to run an agent.
+        from agentit.metrics import agent_runs_total, agent_run_duration_seconds
 
         results: list[AgentResult] = []
 
@@ -465,6 +484,10 @@ class FleetOrchestrator:
         """
         from agentit import kube
         from agentit.agents.capabilities import AGENT_CLASSES, RESOURCE_TIERS
+        # Lazily imported (not at module level) so importing this module
+        # standalone -- the CLI's onboard/orchestrate commands -- never
+        # transitively pulls in prometheus_client just to run an agent.
+        from agentit.metrics import agent_runs_total
 
         namespace = os.environ.get("AGENTIT_NAMESPACE", "agentit")
         pod_image = await asyncio.to_thread(kube.get_current_pod_image)

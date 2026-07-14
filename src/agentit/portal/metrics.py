@@ -4,23 +4,18 @@ from __future__ import annotations
 from prometheus_client import Counter, Gauge, Histogram, Info
 from prometheus_fastapi_instrumentator import Instrumentator
 
+# agent_runs_total / agent_run_duration_seconds live in the top-level
+# agentit.metrics module (not here) so agents/orchestrator.py -- used
+# standalone by the CLI's onboard/orchestrate commands -- can lazily
+# import them without dragging in this module's prometheus_fastapi_
+# instrumentator/FastAPI dependency. Re-exported here for portal-side
+# callers that already import agent-run metrics from portal.metrics.
+from agentit.metrics import agent_runs_total, agent_run_duration_seconds
+
 assessments_total = Counter(
     "agentit_assessments_total",
     "Total assessments run",
     ["criticality", "status"],
-)
-
-agent_runs_total = Counter(
-    "agentit_agent_runs_total",
-    "Total agent executions",
-    ["agent", "mode", "status"],
-)
-
-agent_run_duration_seconds = Histogram(
-    "agentit_agent_run_duration_seconds",
-    "Agent execution duration",
-    ["agent", "mode"],
-    buckets=[0.5, 1, 2, 5, 10, 30, 60, 120, 300],
 )
 
 onboardings_total = Counter(
