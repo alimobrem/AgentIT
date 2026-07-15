@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from agentit import kube
 from agentit.portal.delivery import (
     CATEGORY_CICD_SHARED_NAMESPACE,
     CATEGORY_CLUSTER_CONFIG,
@@ -125,16 +126,31 @@ class TestClassifyFile:
 
 class TestIsGitopsRegistered:
     async def test_falls_back_to_infra_repo_url_when_kube_unreachable(self):
-        """KUBECONFIG is invalid in the test environment -- the kube call
-        fails fast, and registration falls back to `report.infra_repo_url`."""
+        """Explicitly force the kube call to fail with the same exception
+        type a genuinely unreachable cluster raises (`kube.KubeError` --
+        `kube.get_custom_resource()` catches the real connection error from
+        the `kubernetes`/`urllib3` client and wraps it in this type before
+        it ever reaches `is_gitops_registered()`), so this test is
+        deterministic regardless of ambient `KUBECONFIG`/cluster
+        reachability rather than depending on an invalid `KUBECONFIG` in
+        the test environment. Registration then falls back to
+        `report.infra_repo_url`."""
         report = make_report()
         report.infra_repo_url = "https://github.com/org/infra-gitops"
-        registered, url = await is_gitops_registered("test-app", report)
+        with patch(
+            "agentit.portal.delivery.kube.get_custom_resource",
+            side_effect=kube.KubeError("Failed to get argoproj.io/v1alpha1 applications/managed-test-app: connection refused"),
+        ):
+            registered, url = await is_gitops_registered("test-app", report)
         assert registered is True
         assert url == "https://github.com/org/infra-gitops"
 
     async def test_not_registered_when_no_report_and_kube_unreachable(self):
-        registered, url = await is_gitops_registered("test-app", None)
+        with patch(
+            "agentit.portal.delivery.kube.get_custom_resource",
+            side_effect=kube.KubeError("Failed to get argoproj.io/v1alpha1 applications/managed-test-app: connection refused"),
+        ):
+            registered, url = await is_gitops_registered("test-app", None)
         assert registered is False
         assert url is None
 
@@ -353,3 +369,40 @@ class TestDeliveriesTracking:
         store.create_delivery(aid, "app", {}, "direct-apply")
         pending = store.list_pending_gitops_deliveries()
         assert [d["id"] for d in pending] == [gitops_id]
+
+    async def test_delivery_records_edited_files_for_traceability(self):
+        """The edit-before-apply flow's delivered-content traceability
+        requirement: a file carrying the `edited` flag
+        (`store.update_onboarding_file()` sets this) must show up in the
+        delivery row's `details.edited_files`, a permanent, queryable fact
+        about what was actually delivered vs. what was originally
+        generated -- not just a transient UI diff."""
+        store, raw = make_async_store()
+        report = make_report()
+        aid = raw.save(report)
+        edited_file = dict(_cluster_config_file())
+        edited_file["original_content"] = "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: test\n  original: true\n"
+        edited_file["edited"] = True
+        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_apply.return_value = {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": []}
+            result = await route_and_deliver(
+                [edited_file], app_name=report.repo_name, namespace="ns",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=False, force_dry_run_first=False,
+            )
+        delivery = raw.get_delivery(result["delivery_id"])
+        assert delivery["details"]["edited_files"] == ["app-network-policy.yaml"]
+
+    async def test_delivery_edited_files_empty_when_nothing_edited(self):
+        store, raw = make_async_store()
+        report = make_report()
+        aid = raw.save(report)
+        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_apply.return_value = {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": []}
+            result = await route_and_deliver(
+                [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=False, force_dry_run_first=False,
+            )
+        delivery = raw.get_delivery(result["delivery_id"])
+        assert delivery["details"]["edited_files"] == []
