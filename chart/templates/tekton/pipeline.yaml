@@ -22,7 +22,7 @@ spec:
   tasks:
     - name: git-clone
       retries: 2
-      timeout: "5m"
+      timeout: "5m0s"
       taskRef:
         resolver: cluster
         params:
@@ -43,7 +43,7 @@ spec:
 
     - name: run-tests
       retries: 1
-      timeout: "10m"
+      timeout: "10m0s"
       runAfter: [git-clone]
       taskSpec:
         workspaces:
@@ -72,7 +72,7 @@ spec:
 
     - name: build-image
       retries: 1
-      timeout: "15m"
+      timeout: "15m0s"
       runAfter: [run-tests]
       taskRef:
         resolver: cluster
@@ -98,7 +98,7 @@ spec:
 
     - name: notify-argocd
       retries: 1
-      timeout: "2m"
+      timeout: "2m0s"
       runAfter: [run-tests, build-image]
       taskSpec:
         params:
@@ -152,7 +152,7 @@ spec:
 
   finally:
     - name: self-assess
-      timeout: "10m"
+      timeout: "10m0s"
       taskSpec:
         workspaces:
           - name: source
@@ -192,7 +192,7 @@ spec:
     # Best-effort: failure here never fails the pipeline (self-assess above
     # is the real CI gate).
     - name: register-self-in-fleet
-      timeout: "2m"
+      timeout: "2m0s"
       taskSpec:
         params:
           - name: repo-url
@@ -230,7 +230,7 @@ spec:
           value: $(params.repo-url)
 
     - name: report-status
-      timeout: "2m"
+      timeout: "2m0s"
       params:
         - name: aggregateStatus
           value: $(tasks.status)
