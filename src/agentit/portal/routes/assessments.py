@@ -588,6 +588,63 @@ async def onboard_submit(request: Request, assessment_id: str):
     return RedirectResponse(url=redirect_url, status_code=303)
 
 
+@router.post("/assessments/{assessment_id}/onboard-results/edit-file", response_model=None)
+async def edit_onboarding_file(request: Request, assessment_id: str):
+    """The edit-before-apply flow: let a human edit the raw content of one
+    generated file before it's delivered. Saves directly into the same
+    ``onboarding_results`` row ``get_onboarding()``/``route_and_deliver()``
+    read -- once this returns, the SAVED (possibly-edited) content is what
+    a subsequent "Deliver" click actually delivers, closing the exact gap
+    README's "Known gap" callout named (see docs/self-improvement-for-
+    agentit.md and docs/unified-apply-flow.md, both of which cite it).
+
+    YAML/YAML-adjacent edits are re-validated via ``validate_manifest()``
+    (``agents/base.py`` -- the same structural check every generated
+    manifest already goes through) before being persisted: a human's raw
+    edit could introduce a syntax error or a structurally invalid manifest
+    the original LLM/template output wouldn't have had, and this is the
+    existing, reusable validation path rather than a new one built from
+    scratch. An invalid edit is rejected outright -- never partially saved.
+    """
+    s = await get_store()
+    report = await s.get(assessment_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+
+    form = await request.form()
+    category = str(form.get("category", ""))
+    path = str(form.get("path", ""))
+    content = str(form.get("content", ""))
+    if not category or not path:
+        raise HTTPException(status_code=400, detail="category and path required")
+
+    if path.endswith((".yaml", ".yml")):
+        from agentit.agents.base import validate_manifest
+        errors = validate_manifest(content)
+        if errors:
+            return RedirectResponse(
+                url=(
+                    f"/assessments/{assessment_id}/onboard-results?error="
+                    f"{quote('Edit rejected — invalid manifest: ' + '; '.join(errors)[:300])}"
+                ),
+                status_code=303,
+            )
+
+    updated = await s.update_onboarding_file(assessment_id, category, path, content)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Onboarding file not found")
+
+    await s.log_event(
+        "portal", "onboarding-file-edited", report.repo_name, "info",
+        f"Edited generated file before delivery: {path}",
+        correlation_id=assessment_id,
+    )
+    return RedirectResponse(
+        url=f"/assessments/{assessment_id}/onboard-results?edited={quote(path)}",
+        status_code=303,
+    )
+
+
 @router.get("/assessments/{assessment_id}/onboard-results", response_class=HTMLResponse)
 async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
     s = await get_store()
@@ -597,6 +654,17 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
     files = await s.get_onboarding(assessment_id)
     if files is None:
         raise HTTPException(status_code=404, detail="Onboarding not found")
+
+    # Edit-before-apply diff capture: any file a human has edited carries
+    # both `content` (the saved, possibly-edited version) and
+    # `original_content` (what was first generated) -- render a real
+    # line-level diff for it here rather than inventing a second diff
+    # format (see content_diff.py's module docstring for why no existing
+    # diff-rendering convention applied).
+    from agentit.portal.content_diff import diff_lines
+    for f in files:
+        if f.get("edited"):
+            f["diff"] = diff_lines(f.get("original_content", ""), f["content"])
 
     grouped: dict[str, list[dict]] = {}
     for f in files:

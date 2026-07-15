@@ -385,6 +385,19 @@ async def route_and_deliver(
     for f in files:
         groups.setdefault(classify_file(f), []).append(f)
 
+    # Delivered-content traceability (requirement: a human-edited file must
+    # be a permanent, queryable fact about what was actually delivered, not
+    # a transient UI-only detail) -- `classify_file` above already
+    # classified each entry off its *current* `content` (whatever
+    # `update_onboarding_file()` last persisted, edited or not), so the
+    # taxonomy/routing decision above this line already reacted to the real
+    # edited content, not the original generation. This just records which
+    # of the delivered files carry the `edited` flag `update_onboarding_file`
+    # sets, so `deliveries.details_json.edited_files` answers "was any of
+    # this delivery's content edited from what was originally generated"
+    # without a human needing to diff the file themselves.
+    edited_files = [f["path"] for f in files if f.get("edited")]
+
     blocked = groups.pop(CATEGORY_SECRET_BLOCKED, [])
     for f in blocked:
         logger.error(
@@ -440,6 +453,7 @@ async def route_and_deliver(
         status="in_progress",
         details={
             "registered": registered, "infra_repo_url": infra_repo_url, "dry_run": dry_run,
+            "edited_files": edited_files,
             "confirmation_text": {
                 cat: confirmation_text(m, infra_repo_url=infra_repo_url) for cat, m in mechanisms.items()
             },

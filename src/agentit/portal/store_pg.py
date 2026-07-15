@@ -569,6 +569,40 @@ class AssessmentStore:
             return None
         return json.loads(row["orchestration_json"])
 
+    async def update_onboarding_file(
+        self, assessment_id: str, category: str, path: str, content: str,
+    ) -> dict | None:
+        """Mirrors ``store.py``'s method of the same name exactly -- see its
+        docstring for the round-trip rationale. Read-modify-write happens
+        inside one ``asyncpg`` transaction so a concurrent edit of a
+        different file can't race the ``files_json`` read/write pair.
+        """
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "SELECT id, files_json FROM onboarding_results WHERE assessment_id = $1 "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    assessment_id,
+                )
+                if row is None:
+                    return None
+                files = json.loads(row["files_json"])
+                target = next(
+                    (f for f in files if f.get("category") == category and f.get("path") == path), None,
+                )
+                if target is None:
+                    return None
+                if "original_content" not in target:
+                    target["original_content"] = target["content"]
+                target["content"] = content
+                target["edited"] = True
+                target["edited_at"] = _now().isoformat()
+                await conn.execute(
+                    "UPDATE onboarding_results SET files_json = $1::jsonb WHERE id = $2",
+                    json.dumps(files), row["id"],
+                )
+        return target
+
     async def update_pr_url(self, assessment_id: str, pr_url: str) -> None:
         await self._pool.execute(
             """

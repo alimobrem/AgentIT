@@ -557,6 +557,48 @@ class AssessmentStore:
             return None
         return json.loads(row["orchestration_json"])
 
+    def update_onboarding_file(
+        self, assessment_id: str, category: str, path: str, content: str,
+    ) -> dict | None:
+        """Persist a human's edit to one generated file's raw content before
+        delivery. Updates the *same* ``onboarding_results`` row in place
+        (never inserts a new row) -- ``get_onboarding()``/
+        ``route_and_deliver()`` always read this row's ``files_json``, so
+        once this returns, whatever gets delivered is exactly this edited
+        content, not the original LLM/template output. This is the genuine
+        round trip: edit, save, deliver the saved version.
+
+        Captures ``original_content`` the first time a file is edited (never
+        overwritten by a later edit of the same file) so a real diff against
+        what was originally generated can always be reconstructed, even
+        across multiple edits. Returns the updated file dict, or ``None`` if
+        no onboarding exists yet or no file matches ``(category, path)``.
+        """
+        row = self._conn.execute(
+            "SELECT id, files_json FROM onboarding_results WHERE assessment_id = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (assessment_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        files = json.loads(row["files_json"])
+        target = next(
+            (f for f in files if f.get("category") == category and f.get("path") == path), None,
+        )
+        if target is None:
+            return None
+        if "original_content" not in target:
+            target["original_content"] = target["content"]
+        target["content"] = content
+        target["edited"] = True
+        target["edited_at"] = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            "UPDATE onboarding_results SET files_json = ? WHERE id = ?",
+            (json.dumps(files), row["id"]),
+        )
+        self._conn.commit()
+        return target
+
     def update_pr_url(self, assessment_id: str, pr_url: str) -> None:
         self._conn.execute(
             """

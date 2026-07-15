@@ -366,7 +366,7 @@
     font-size: var(--font-base);
     color: var(--color-text);
   }
-  input, select {
+  input, select, textarea {
     background: var(--color-surface);
     color: var(--color-text);
     border: 1px solid var(--color-border);
@@ -487,6 +487,29 @@
     font-size: var(--font-sm);
     color: var(--color-text);
   }
+  /* ── Edit-before-apply: manifest editor + diff view ──────────────── */
+  .editor-textarea {
+    font-family: var(--font-mono);
+    font-size: var(--font-sm);
+    resize: vertical;
+    min-height: 220px;
+    white-space: pre;
+  }
+  .diff-block {
+    background: var(--color-border);
+    padding: var(--space-4);
+    border-radius: var(--radius-md);
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: var(--font-sm);
+  }
+  .diff-line {
+    white-space: pre-wrap;
+    padding: 0 var(--space-2);
+  }
+  .diff-context { color: var(--color-muted); }
+  .diff-add     { background: rgba(46, 204, 113, 0.15); color: var(--color-success); }
+  .diff-remove  { background: rgba(220, 53, 69, 0.15); color: var(--color-danger); text-decoration: line-through; }
 
   /* ── Section Titles ────────────────────────────────────────────── */
   .section-title {
