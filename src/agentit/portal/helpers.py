@@ -88,6 +88,45 @@ async def get_store():
     return _store
 
 
+# ── Nav gate badges ───────────────────────────────────────────────────
+#
+# base.html's nav bar shows two gate-derived badges: Fleet's link carries
+# the fleet-wide count of pending, app-owner-scoped gates (the 7 types that
+# now live on Fleet rows + Assessment Detail's Actions tab), and Admin
+# Review's link carries the count of pending `cluster-admin-review` gates
+# only (docs/ui-redesign-proposal.md §2/§5). This closes a real pre-existing
+# defect: the old nav referenced a `pending_gates` template variable no
+# context processor ever actually supplied (only Insights' own page context
+# computed it, so the badge was silently blank everywhere else). Cached
+# briefly since nav renders on every page, not just Fleet's/Admin Review's.
+
+_nav_gate_badges_cache: dict = {"pending_actions": 0, "admin_review": 0, "ts": 0.0}
+_NAV_GATE_BADGES_CACHE_TTL = 20  # seconds
+
+
+async def get_nav_gate_badge_counts(store: object) -> dict[str, int]:
+    now = _time.monotonic()
+    if now - _nav_gate_badges_cache["ts"] < _NAV_GATE_BADGES_CACHE_TTL:
+        return {
+            "pending_actions": _nav_gate_badges_cache["pending_actions"],
+            "admin_review": _nav_gate_badges_cache["admin_review"],
+        }
+    try:
+        gates = await store.list_gates(status="pending")
+    except Exception:
+        log.debug("Failed to refresh nav gate badge counts", exc_info=True)
+        gates = []
+
+    from agentit.portal.delivery import ADMIN_REVIEW_GATE_TYPE
+    admin_review = sum(1 for g in gates if g.get("gate_type") == ADMIN_REVIEW_GATE_TYPE)
+    pending_actions = len(gates) - admin_review
+
+    _nav_gate_badges_cache["pending_actions"] = pending_actions
+    _nav_gate_badges_cache["admin_review"] = admin_review
+    _nav_gate_badges_cache["ts"] = now
+    return {"pending_actions": pending_actions, "admin_review": admin_review}
+
+
 # ── Event publishing ──────────────────────────────────────────────────
 
 

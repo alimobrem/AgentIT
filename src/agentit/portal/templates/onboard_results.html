@@ -8,7 +8,7 @@
 
 {% if request.query_params.get('fix_generated') %}
 <div class="alert alert-success">
-  Generated {{ request.query_params.get('fix_generated') }} fix(es) via {{ request.query_params.get('agent', 'dispatcher') }} agent. Review below and apply to cluster or create a PR.
+  Generated {{ request.query_params.get('fix_generated') }} fix(es) via {{ request.query_params.get('agent', 'dispatcher') }} agent. Review below and Deliver.
 </div>
 {% endif %}
 {% if request.query_params.get('pr_url') %}
@@ -47,7 +47,7 @@
 {% endif %}
 {% if request.query_params.get('cicd_gate') %}
 <div class="alert alert-warn">
-  Some manifests target a shared operator namespace and need cluster-admin review — see the <a href="/gates">Gates</a> page (never silently skipped).
+  Some manifests target a shared operator namespace and need cluster-admin review — see the <a href="/admin-review">Admin Review</a> page (never silently skipped).
 </div>
 {% endif %}
 {% if request.query_params.get('operator_installed') %}

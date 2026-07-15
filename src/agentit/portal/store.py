@@ -457,6 +457,27 @@ class AssessmentStore:
             return None
         return AssessmentReport.model_validate_json(row["report_json"])
 
+    def set_infra_repo_url(self, assessment_id: str, infra_repo_url: str) -> bool:
+        """Register an already-assessed app for GitOps delivery without a
+        full re-assessment -- the lightweight registration action
+        docs/ui-redesign-proposal.md §4 recommends as a nudge for
+        unregistered apps. Rewrites the stored report's `infra_repo_url`
+        field in place; the caller is responsible for also calling
+        ``github_pr.ensure_applicationset()`` so the app is actually
+        GitOps-registered per ``delivery.is_gitops_registered()``'s
+        definition, not just carrying a URL.
+        """
+        report = self.get(assessment_id)
+        if report is None:
+            return False
+        report.infra_repo_url = infra_repo_url
+        self._conn.execute(
+            "UPDATE assessments SET report_json = ? WHERE id = ?",
+            (report.model_dump_json(), assessment_id),
+        )
+        self._conn.commit()
+        return True
+
     def list_all(self) -> list[dict]:
         rows = self._conn.execute(
             """
@@ -882,15 +903,41 @@ class AssessmentStore:
 
     def list_gates(self, status: str = "pending") -> list[dict]:
         rows = self._conn.execute(
-            "SELECT * FROM gates WHERE status = ? ORDER BY created_at DESC",
+            """
+            SELECT gates.*, assessments.repo_name AS app_name
+            FROM gates LEFT JOIN assessments ON gates.assessment_id = assessments.id
+            WHERE gates.status = ? ORDER BY gates.created_at DESC
+            """,
             (status,),
         ).fetchall()
         return [dict(r) for r in rows]
 
     def list_all_gates(self) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT * FROM gates ORDER BY created_at DESC",
+            """
+            SELECT gates.*, assessments.repo_name AS app_name
+            FROM gates LEFT JOIN assessments ON gates.assessment_id = assessments.id
+            ORDER BY gates.created_at DESC
+            """,
         ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_gates_for_assessment(self, assessment_id: str, status: str | None = None) -> list[dict]:
+        """Gates belonging to one app -- powers Assessment Detail's Actions
+        tab (docs/ui-redesign-proposal.md §2), the per-app home the 7
+        app-owner-scoped gate types move to instead of the retired global
+        Gates page.
+        """
+        if status is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM gates WHERE assessment_id = ? AND status = ? ORDER BY created_at DESC",
+                (assessment_id, status),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM gates WHERE assessment_id = ? ORDER BY created_at DESC",
+                (assessment_id,),
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def get_stale_gates(self, hours: int = 24) -> list[dict]:

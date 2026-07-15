@@ -11,13 +11,11 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from agentit.audit import audit_log
 from agentit.portal.cluster_apply import apply_with_verification
 from agentit.portal.delivery import (
+    ADMIN_REVIEW_GATE_TYPE,
     CATEGORY_CICD_SHARED_NAMESPACE,
     CATEGORY_CLUSTER_CONFIG,
-    MECHANISM_DIRECT_APPLY,
-    MECHANISM_INFRA_REPO_COMMIT,
     classify_file,
-    confirmation_text,
-    is_gitops_registered,
+    gate_delivery_confirmation,
     route_and_deliver,
 )
 from agentit.portal.helpers import get_current_user, get_store, get_templates
@@ -27,37 +25,36 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 
-async def _delivery_confirmation_for_gate(s: object, gate: dict) -> str:
-    """The exact "AgentIT will: ..." statement a human must see -- in the
-    un-skippable confirm modal, not just page prose -- before approving this
-    gate actually triggers a real delivery. Reuses ``delivery.py``'s
-    ``confirmation_text()`` so the gate list, the dry-run preview, and the
-    point-of-no-return confirmation can never say different things about
-    the same decision (per the 2026-07-14 customer-review addendum to
-    docs/unified-apply-flow.md).
-    """
-    gate_type = gate.get("gate_type", "")
-    if gate_type == "rollback-review":
-        return "AgentIT will: mark this rollback approved for manual intervention -- no automatic apply is triggered."
-    if gate_type in ("gitops-pr-pending", "cluster-admin-review", "cluster-conflict-review", "auto-mode-scope-review"):
-        # These gate types already carry the exact mechanism + reason in
-        # their own summary text (see automode.py / delivery.py's gate
-        # creation calls) -- reuse it verbatim instead of restating it.
-        return gate.get("summary", "")
+def _gate_redirect_target(gate: dict) -> str:
+    """Where a human lands after resolving a gate that doesn't already
+    redirect somewhere more specific (approved gates with an assessment_id
+    mostly redirect straight to that app's onboard-results -- see below).
+    Cluster-admin-review gates are cross-app and resolved from Admin
+    Review; every other gate type is per-app and resolved from that app's
+    own Assessment Detail page."""
+    if gate.get("gate_type") == ADMIN_REVIEW_GATE_TYPE:
+        return "/admin-review"
     assessment_id = gate.get("assessment_id")
-    if not assessment_id:
-        return ""
-    report = await s.get(assessment_id)
-    if report is None:
-        return ""
-    registered, infra_repo_url = await is_gitops_registered(report.repo_name, report)
-    mechanism = MECHANISM_INFRA_REPO_COMMIT if registered else MECHANISM_DIRECT_APPLY
-    return confirmation_text(mechanism, infra_repo_url=infra_repo_url)
+    if assessment_id:
+        return f"/assessments/{assessment_id}"
+    return "/admin-review"
 
 
-@router.get("/gates", response_class=HTMLResponse)
-async def gates_page(request: Request):
-    """Show pending approval gates. Auto-expires gates older than 24h."""
+@router.get("/gates")
+async def gates_page_redirect():
+    """The global Gates page is retired (docs/ui-redesign-proposal.md §2/§5)
+    -- the 7 app-owner gate types now live on Fleet + Assessment Detail;
+    only `cluster-admin-review` still gets a standalone page. Kept as a
+    redirect, not a 404, for any stale bookmark/link."""
+    return RedirectResponse(url="/admin-review", status_code=301)
+
+
+@router.get("/admin-review", response_class=HTMLResponse)
+async def admin_review_page(request: Request):
+    """Show pending cluster-admin-review gates only -- the one gate type
+    that's genuinely cross-app, for a genuinely different audience than an
+    app owner. Auto-expires gates older than 24h, same as the retired
+    global Gates page did."""
     s = await get_store()
     expired_count = await s.expire_stale_gates(hours=24)
     if expired_count:
@@ -65,17 +62,18 @@ async def gates_page(request: Request):
                            f"Auto-expired {expired_count} stale gate(s)")
 
     all_gates = await s.list_all_gates()
-    pending = [g for g in all_gates if g["status"] == "pending"]
+    pending = [g for g in all_gates if g["status"] == "pending" and g["gate_type"] == ADMIN_REVIEW_GATE_TYPE]
+    resolved = [g for g in all_gates if g["status"] in ("approved", "rejected", "expired") and g["gate_type"] == ADMIN_REVIEW_GATE_TYPE]
     stale = await s.get_stale_gates(hours=4)
     stale_ids = {g["id"] for g in stale}
     for g in pending:
         g["stale"] = g["id"] in stale_ids
-        g["delivery_confirmation"] = await _delivery_confirmation_for_gate(s, g)
-    resolved = [g for g in all_gates if g["status"] in ("approved", "rejected", "expired")]
+        g["delivery_confirmation"] = await gate_delivery_confirmation(s, g)
     resolved.sort(key=lambda g: g.get("resolved_at") or g.get("created_at", ""), reverse=True)
-    return get_templates().TemplateResponse(request, "gates.html", {
+    return get_templates().TemplateResponse(request, "admin_review.html", {
         "pending": pending, "resolved": resolved[:20],
-        "stale_count": len(stale), "expired_count": expired_count,
+        "stale_count": sum(1 for g in pending if g["id"] in stale_ids),
+        "expired_count": expired_count,
     })
 
 
@@ -281,14 +279,18 @@ async def resolve_gate(request: Request, gate_id: str):
                     reject_reason,
                 )
 
-    return RedirectResponse(url="/gates", status_code=303)
+    return RedirectResponse(url=_gate_redirect_target(gate), status_code=303)
 
 
 @router.post("/gates/{gate_id}/cancel", response_model=None)
 async def cancel_gate(request: Request, gate_id: str):
     s = await get_store()
+    gates = await s.list_gates(status="pending")
+    gate = next((g for g in gates if g["id"] == gate_id), None)
     await s.resolve_gate(gate_id, "cancelled", get_current_user(request))
-    return RedirectResponse(url="/gates?success=Gate+dismissed", status_code=303)
+    target = _gate_redirect_target(gate) if gate else "/admin-review"
+    sep = "&" if "?" in target else "?"
+    return RedirectResponse(url=f"{target}{sep}success=Gate+dismissed", status_code=303)
 
 
 @router.get("/api/gates")

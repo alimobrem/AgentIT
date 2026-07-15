@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Admin Review - AgentIT{% endblock %}
+{% block content %}
+<h1>Admin Review</h1>
+<p class="text-muted">
+  CI/CD manifests that target a shared operator namespace (<code>openshift-gitops</code>,
+  <code>openshift-pipelines</code>, etc.) need elevated RBAC this service account doesn't have
+  by default -- these are never silently skipped. This page is intentionally narrow: it shows
+  only <code>cluster-admin-review</code> gates, for whoever holds that elevated access, not the
+  full per-app gate queue (that now lives on each app's own Assessment Detail page).
+</p>
+
+<h2>Pending Review ({{ pending | length }})</h2>
+
+{% if not pending %}
+<div class="empty-state">
+  <p>No pending gates. All clear.</p>
+</div>
+{% else %}
+{% from "_macros.html" import gate_card %}
+{% for gate in pending %}
+{{ gate_card(gate) }}
+{% endfor %}
+{% endif %}
+
+{% if resolved %}
+<details>
+  <summary class="section-toggle">Recently Resolved ({{ resolved | length }})</summary>
+  <table>
+    <thead><tr><th>Summary</th><th>Status</th><th>Resolved</th></tr></thead>
+    <tbody>
+    {% for gate in resolved %}
+    <tr>
+      <td>{{ gate.summary[:80] }}</td>
+      <td><span class="badge badge-{{ 'success' if gate.status == 'approved' else 'danger' }}">{{ gate.status | upper }}</span></td>
+      <td data-timestamp="{{ gate.resolved_at }}">{{ gate.resolved_at[:16] if gate.resolved_at else '—' }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</details>
+{% endif %}
+{% endblock %}

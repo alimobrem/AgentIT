@@ -50,6 +50,7 @@
       <th>Namespace</th>
       <th>Criticality</th>
       <th>Critical</th>
+      <th>Needs Action</th>
       <th></th>
     </tr>
   </thead>
@@ -84,10 +85,22 @@
         {% else %}
           <span class="badge badge-medium">not deployed</span>
         {% endif %}
+        {% if r.gitops_registered %}
+          <span class="badge badge-info" title="Changes to this app go through PR review + Argo CD sync">GitOps</span>
+        {% else %}
+          <span class="badge badge-muted" title="Changes to this app apply directly to the cluster">Direct apply</span>
+        {% endif %}
       </td>
       <td class="text-sm text-muted">{{ r.deploy_namespace | default("—") }}</td>
       <td><span class="badge badge-{{ r.criticality }}">{{ r.criticality }}</span></td>
       <td class="{% if r.critical_count > 0 %}text-danger text-bold{% endif %}">{{ r.critical_count }}</td>
+      <td>
+        {% if r.pending_actions_count %}
+          <span class="badge badge-medium">{{ r.pending_actions_count }} pending</span>
+        {% else %}
+          <span class="text-muted text-sm">&mdash;</span>
+        {% endif %}
+      </td>
       <td>
         <div class="gate-actions">
           <form method="post" action="/assess" class="inline-form">
@@ -133,6 +146,11 @@
         <input type="url" id="repo_url" name="repo_url" required placeholder="https://github.com/org/repo">
       </div>
       <div class="form-group">
+        <label class="form-label" for="infra_repo_url">GitOps Infra Repo <span class="text-muted text-xs">(recommended)</span></label>
+        <input type="url" id="infra_repo_url" name="infra_repo_url" placeholder="https://github.com/org/gitops-infra">
+        <span class="text-muted text-xs">Every change to this app will go through PR review and Argo CD sync instead of direct cluster apply. Leave blank and AgentIT will scaffold one for you.</span>
+      </div>
+      <div class="form-group">
         <label class="form-label" for="criticality">Criticality</label>
         <select id="criticality" name="criticality">
           <option value="low">Low</option>
@@ -140,11 +158,6 @@
           <option value="high">High</option>
           <option value="critical">Critical</option>
         </select>
-      </div>
-      <div class="form-group">
-        <label class="form-label" for="infra_repo_url">GitOps Infra Repo <span class="text-muted text-xs">(optional)</span></label>
-        <input type="url" id="infra_repo_url" name="infra_repo_url" placeholder="https://github.com/org/gitops-infra">
-        <span class="text-muted text-xs">Leave blank to auto-create one.</span>
       </div>
       <button type="submit" class="btn">
         <span class="btn-label">Run Assessment</span>

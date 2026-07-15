@@ -20,6 +20,7 @@ from agentit.portal.helpers import (
     get_store,
     get_retention_days,
     get_current_user,
+    get_nav_gate_badge_counts,
     is_authenticated,
     OAUTH_PROXY_SIGN_OUT_PATH,
     safe_url as _safe_url,
@@ -69,9 +70,22 @@ def _auth_context_processor(request: Request) -> dict:
     }
 
 
+def _nav_badges_context_processor(request: Request) -> dict:
+    """Exposes the two gate-count nav badges to every template -- computed
+    by `nav_badges_middleware` below and stashed on `request.state`, since
+    Jinja2Templates' context_processors run synchronously and can't
+    themselves `await` the store. See `helpers.get_nav_gate_badge_counts`
+    for what each count means and why this exists (docs/ui-redesign-
+    proposal.md §2/§5's nav-badge fix)."""
+    return {
+        "nav_pending_actions": getattr(request.state, "nav_pending_actions", 0),
+        "nav_admin_review_pending": getattr(request.state, "nav_admin_review_pending", 0),
+    }
+
+
 templates = Jinja2Templates(
     directory=str(TEMPLATES_DIR),
-    context_processors=[_csrf_context_processor, _auth_context_processor],
+    context_processors=[_csrf_context_processor, _auth_context_processor, _nav_badges_context_processor],
 )
 
 
@@ -115,6 +129,31 @@ async def rate_limit_middleware(request: Request, call_next):
     not guarantee."""
     if rate_limit_enabled() and not check_rate_limit(client_key_for(request), request.url.path):
         return JSONResponse({"detail": "Rate limit exceeded"}, status_code=429)
+    return await call_next(request)
+
+
+_NAV_BADGE_SKIP_PREFIXES = ("/api/", "/healthz", "/metrics", "/oauth")
+
+
+@app.middleware("http")
+async def nav_badges_middleware(request: Request, call_next):
+    """Precomputes the two gate-count nav badges (see
+    `helpers.get_nav_gate_badge_counts`, itself cached briefly) so the
+    synchronous Jinja2 context processor above can read them off
+    `request.state` -- the DB read has to happen here, in an actual
+    coroutine, not in the context processor itself. Skipped for API/health/
+    metrics/oauth paths, which never render `base.html`'s nav and don't
+    need this precomputed."""
+    request.state.nav_pending_actions = 0
+    request.state.nav_admin_review_pending = 0
+    if not request.url.path.startswith(_NAV_BADGE_SKIP_PREFIXES):
+        try:
+            s = await get_store()
+            counts = await get_nav_gate_badge_counts(s)
+            request.state.nav_pending_actions = counts["pending_actions"]
+            request.state.nav_admin_review_pending = counts["admin_review"]
+        except Exception:
+            log.debug("Failed to compute nav gate badge counts", exc_info=True)
     return await call_next(request)
 
 

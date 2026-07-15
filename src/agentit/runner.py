@@ -200,6 +200,7 @@ def generate_remediation_plan(scores: list[DimensionScore]) -> list[RemediationI
             description=finding.description,
             estimated_effort=EFFORT_MAP.get(finding.severity, "30 agent-minutes"),
             agent_responsible=AGENT_MAP.get(dimension, "Unknown Agent"),
+            category=finding.category,
         )
         for i, (dimension, finding) in enumerate(all_findings, start=1)
     ]

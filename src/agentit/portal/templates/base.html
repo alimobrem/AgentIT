@@ -784,9 +784,11 @@
 <nav x-data="{ navOpen: false }">
   <span class="logo">AgentIT</span>
   <div class="links">
-    <a href="/" class="{{ 'nav-active' if request.url.path == '/' or request.url.path.startswith('/assessments') or request.url.path == '/fleet' }}">Fleet</a>
-    <a href="/gates" class="{{ 'nav-active' if request.url.path.startswith('/gates') }}">Gates
-      {% if pending_gates %}<span class="nav-badge">{{ pending_gates }}</span>{% endif %}
+    <a href="/" class="{{ 'nav-active' if request.url.path == '/' or request.url.path.startswith('/assessments') or request.url.path == '/fleet' }}">Fleet
+      {% if nav_pending_actions %}<span class="nav-badge">{{ nav_pending_actions }}</span>{% endif %}
+    </a>
+    <a href="/admin-review" class="{{ 'nav-active' if request.url.path.startswith('/admin-review') }}">Admin Review
+      {% if nav_admin_review_pending %}<span class="nav-badge">{{ nav_admin_review_pending }}</span>{% endif %}
     </a>
     <a href="/events" class="{{ 'nav-active' if request.url.path.startswith('/events') }}">Events</a>
     <a href="/health" class="{{ 'nav-active' if request.url.path.startswith('/health') }}">Health</a>

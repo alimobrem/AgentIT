@@ -82,6 +82,14 @@ class RemediationItem(BaseModel):
     description: str
     estimated_effort: str
     agent_responsible: str
+    # Finding *category* (e.g. "container", "network") this item was derived
+    # from -- distinct from `dimension` (e.g. "security", "compliance").
+    # Defaults to "" for backward compatibility with any already-serialized
+    # report_json blob written before this field existed. The portal's Fix
+    # button needs the category (it's what `remediation.registry.lookup()`
+    # and the `/fix` route key off of), not the dimension -- see
+    # docs/ui-redesign-proposal.md §0.
+    category: str = ""
 
 
 class AssessmentReport(BaseModel):

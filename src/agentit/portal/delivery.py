@@ -34,6 +34,15 @@ CATEGORY_NARRATIVE_REPORT = "narrative_report"
 CATEGORY_MANIFEST_AT_REST = "manifest_at_rest"
 CATEGORY_SECRET_BLOCKED = "secret_blocked"
 
+# The one gate type that's genuinely cross-app, for a genuinely different
+# audience (whoever holds elevated RBAC, not the app owner) -- see
+# docs/ui-redesign-proposal.md §2. Every other gate type is per-app and
+# lives on Fleet (a "needs action" badge) + Assessment Detail (the Actions
+# tab) instead of the retired global Gates page. Defined here (not
+# routes/gates.py) so ``routes/fleet.py``/``routes/assessments.py``/
+# ``helpers.py`` can all reference it without importing a routes module.
+ADMIN_REVIEW_GATE_TYPE = "cluster-admin-review"
+
 # Mechanisms a category can be routed to.
 MECHANISM_DIRECT_APPLY = "direct-apply"
 MECHANISM_INFRA_REPO_COMMIT = "infra-repo-commit"
@@ -126,6 +135,20 @@ def _sanitize_app_name(app_name: str) -> str:
     return app_name.lower().replace("_", "-").replace(".", "-")
 
 
+def gitops_application_name(app_name: str) -> str:
+    """The Argo CD ``Application`` name a GitOps-registered app's manifests
+    sync through -- ``github_pr.ensure_applicationset()``'s ApplicationSet
+    template names every generated ``Application`` ``managed-{basename}``
+    (``github_pr.py``'s ``spec.generators[0].git.template.metadata.name``).
+    Single source of truth for that naming convention so
+    ``is_gitops_registered()`` (one live-lookup-per-app) and any bulk
+    Fleet-wide enrichment that already lists every ``Application`` in
+    ``openshift-gitops`` (``routes/fleet.py``) can check the same name
+    without duplicating -- and risking drifting -- the convention.
+    """
+    return f"managed-{_sanitize_app_name(app_name)}"
+
+
 async def is_gitops_registered(
     app_name: str, report: AssessmentReport | None,
 ) -> tuple[bool, str | None]:
@@ -138,11 +161,10 @@ async def is_gitops_registered(
     regardless of ``infra_repo_url``.
     """
     infra_repo_url = report.infra_repo_url if report is not None else None
-    sanitized = _sanitize_app_name(app_name)
     try:
         app = await asyncio.to_thread(
             kube.get_custom_resource,
-            "argoproj.io", "v1alpha1", "applications", f"managed-{sanitized}",
+            "argoproj.io", "v1alpha1", "applications", gitops_application_name(app_name),
             namespace="openshift-gitops",
         )
         return app is not None, infra_repo_url
@@ -223,6 +245,35 @@ async def deliver_with_verification(
         )
 
     return {"mechanism": mechanism, "dry_run": False, **result}
+
+
+async def gate_delivery_confirmation(store: object, gate: dict) -> str:
+    """The exact "AgentIT will: ..." statement a human must see -- in the
+    un-skippable confirm modal, not just page prose -- before approving a
+    gate actually triggers a real delivery. Shared by every surface that
+    renders a gate card (the retired global Gates page, Admin Review,
+    Assessment Detail's Actions tab, and the Fleet-embedded ones) so the
+    gate list, the dry-run preview, and the point-of-no-return confirmation
+    can never say different things about the same decision (per the
+    2026-07-14 customer-review addendum to docs/unified-apply-flow.md).
+    """
+    gate_type = gate.get("gate_type", "")
+    if gate_type == "rollback-review":
+        return "AgentIT will: mark this rollback approved for manual intervention -- no automatic apply is triggered."
+    if gate_type in ("gitops-pr-pending", "cluster-admin-review", "cluster-conflict-review", "auto-mode-scope-review"):
+        # These gate types already carry the exact mechanism + reason in
+        # their own summary text (see automode.py / delivery.py's gate
+        # creation calls) -- reuse it verbatim instead of restating it.
+        return gate.get("summary", "")
+    assessment_id = gate.get("assessment_id")
+    if not assessment_id:
+        return ""
+    report = await store.get(assessment_id)
+    if report is None:
+        return ""
+    registered, infra_repo_url = await is_gitops_registered(report.repo_name, report)
+    mechanism = MECHANISM_INFRA_REPO_COMMIT if registered else MECHANISM_DIRECT_APPLY
+    return confirmation_text(mechanism, infra_repo_url=infra_repo_url)
 
 
 def _cicd_gate_summary(files: list[dict]) -> str:

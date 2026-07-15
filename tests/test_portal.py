@@ -694,26 +694,54 @@ def test_api_events_filter_target_app(client, _override_store):
 
 # ------------------------------------------------------------------
 # Gate queue tests
+#
+# The global "/gates" page is retired (docs/ui-redesign-proposal.md §2/§5):
+# it now redirects to "/admin-review", which shows only `cluster-admin-review`
+# gates -- the one gate type that's genuinely cross-app, for a genuinely
+# different audience than an app owner. The other 7 (app-owner-scoped) gate
+# types now live on Assessment Detail's Actions tab -- see
+# test_admin_review_and_actions_tab.py for that behavior.
 # ------------------------------------------------------------------
 
 
-def test_gates_page_empty(client):
-    resp = client.get("/gates")
+def test_gates_redirects_to_admin_review(client):
+    resp = client.get("/gates", follow_redirects=False)
+    assert resp.status_code == 301
+    assert resp.headers["location"] == "/admin-review"
+
+
+def test_admin_review_page_empty(client):
+    resp = client.get("/admin-review")
     assert resp.status_code == 200
     assert "No pending gates" in resp.text
 
 
-def test_gates_page_with_pending(client, _override_store):
+def test_admin_review_page_with_pending(client, _override_store):
+    store = _override_store
+    report = _make_report()
+    aid = store.save(report)
+    store.create_gate(aid, "cluster-admin-review", "Approve deployment of test-repo")
+
+    resp = client.get("/admin-review")
+    assert resp.status_code == 200
+    assert "Approve deployment of test-repo" in resp.text
+    assert "Approve" in resp.text
+    assert "Reject" in resp.text
+
+
+def test_admin_review_page_excludes_app_owner_gate_types(client, _override_store):
+    """A "deploy"-style app-owner gate must never show up on Admin Review --
+    that's exactly the audience split docs/ui-redesign-proposal.md §2 makes.
+    It belongs on that app's own Assessment Detail Actions tab instead."""
     store = _override_store
     report = _make_report()
     aid = store.save(report)
     store.create_gate(aid, "deploy", "Approve deployment of test-repo")
 
-    resp = client.get("/gates")
+    resp = client.get("/admin-review")
     assert resp.status_code == 200
-    assert "Approve deployment of test-repo" in resp.text
-    assert "Approve" in resp.text
-    assert "Reject" in resp.text
+    assert "Approve deployment of test-repo" not in resp.text
+    assert "No pending gates" in resp.text
 
 
 def test_resolve_gate_approve(client, _override_store):
@@ -728,13 +756,49 @@ def test_resolve_gate_approve(client, _override_store):
         follow_redirects=False,
     )
     assert resp.status_code == 303
-    assert resp.headers["location"] == "/gates"
+    # A per-app ("deploy") gate with no onboarding files to deliver falls
+    # through to the generic resolve path, which lands back on that app's
+    # own Assessment Detail page -- not the retired global Gates page.
+    assert resp.headers["location"] == f"/assessments/{aid}"
 
     pending = store.list_gates(status="pending")
     assert len(pending) == 0
     approved = store.list_gates(status="approved")
     assert len(approved) == 1
     assert approved[0]["resolved_by"] == "tester"
+
+
+def test_resolve_cluster_admin_review_gate_redirects_to_admin_review(client, _override_store):
+    store = _override_store
+    report = _make_report()
+    aid = store.save(report)
+    gate_id = store.create_gate(aid, "cluster-admin-review", "CI/CD manifests need elevated review")
+
+    resp = client.post(
+        f"/gates/{gate_id}/resolve",
+        data={"status": "rejected", "resolved_by": "tester", "reason": "not now"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/admin-review"
+
+
+def test_list_gates_includes_app_name(client, _override_store):
+    """docs/ui-redesign-proposal.md §2's confirmed defect: gates never
+    carried which app they belonged to. list_gates()/list_all_gates() now
+    join back to the assessment so every gate row is attributable."""
+    store = _override_store
+    report = _make_report("attributable-app")
+    aid = store.save(report)
+    store.create_gate(aid, "deploy", "Some gate summary with no app name in it")
+
+    pending = store.list_gates(status="pending")
+    assert len(pending) == 1
+    assert pending[0]["app_name"] == "attributable-app"
+
+    all_gates = store.list_all_gates()
+    assert len(all_gates) == 1
+    assert all_gates[0]["app_name"] == "attributable-app"
 
 
 # ------------------------------------------------------------------
@@ -938,8 +1002,8 @@ def test_no_inline_styles_gates(client, _override_store):
     store = _override_store
     report = _make_report()
     aid = store.save(report)
-    store.create_gate(aid, "deploy", "Test gate")
-    resp = client.get("/gates")
+    store.create_gate(aid, "cluster-admin-review", "Test gate")
+    resp = client.get("/admin-review")
     html = resp.text
     for line in html.split("\n"):
         if "style=" in line.lower() and 'style="--pct' not in line:
@@ -1012,8 +1076,8 @@ def test_gates_uses_design_system_classes(client, _override_store):
     store = _override_store
     report = _make_report()
     aid = store.save(report)
-    store.create_gate(aid, "deploy", "Gate test")
-    resp = client.get("/gates")
+    store.create_gate(aid, "cluster-admin-review", "Gate test")
+    resp = client.get("/admin-review")
     assert "gate-actions" in resp.text
     assert "btn-approve" in resp.text
     assert "btn-danger-outline" in resp.text
@@ -1493,6 +1557,7 @@ def test_all_pages_return_200(client, _override_store):
         "/assess",
         "/events",
         "/gates",
+        "/admin-review",
         "/agents",
         "/schedules",
         "/settings",

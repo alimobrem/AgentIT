@@ -314,6 +314,63 @@ async def self_improvement_page(request: Request) -> HTMLResponse:
     })
 
 
+_CAPABILITY_SCOUT_OUTCOME_MESSAGES: dict[str, str] = {
+    "no-signal": "No proposal this cycle — insufficient real signal yet.",
+    "no-proposal": "No proposal this cycle — LLM found no evidence-grounded gap worth proposing.",
+    "gate-blocked": "Proposal generated but blocked by a safety gate — see Self-Improvement Runs below.",
+    "pr-failed": "Proposal passed gates but PR creation failed — see Self-Improvement Runs below.",
+}
+
+
+@router.post("/capabilities/self-improvement/run", response_model=None)
+async def self_improvement_run_route(request: Request):
+    """Manually trigger one capability-scout cycle right now, instead of
+    waiting up to 24h for its watcher tick -- portal parity with
+    ``/capabilities/learn``'s manual trigger for skill-learner (the gap
+    docs/ui-redesign-proposal.md §5 flags). Calls
+    ``CapabilityScout.research_once()`` synchronously, mirroring
+    ``/capabilities/learn``'s existing synchronous-call shape (including
+    the Route's ``haproxy.router.openshift.io/timeout: 200s`` annotation
+    already accommodating a similarly long-running call).
+    """
+    from agentit.events import get_publisher
+    from agentit.watchers.capability_scout import CapabilityScout
+
+    s = await get_store()
+    scout = CapabilityScout(publisher=get_publisher(), store=s, repo_dir=Path.cwd())
+
+    try:
+        result = await with_timeout(scout.research_once(), timeout=180)
+    except Exception as exc:
+        log.exception("Manual capability-scout run failed")
+        return RedirectResponse(
+            url=f"/capabilities/self-improvement?error={quote(f'Self-improvement scan failed: {exc}'[:200])}",
+            status_code=303,
+        )
+
+    outcome = result.get("outcome", "unknown")
+    if outcome == "proposed":
+        return RedirectResponse(
+            url=f"/capabilities/self-improvement?success={quote('Opened proposal PR: ' + result.get('pr_url', ''))}",
+            status_code=303,
+        )
+    if outcome == "no-llm":
+        return RedirectResponse(
+            url=(
+                f"/capabilities/self-improvement?error="
+                f"{quote('LLM unavailable — set ANTHROPIC_API_KEY or ANTHROPIC_VERTEX_PROJECT_ID to enable.')}"
+            ),
+            status_code=303,
+        )
+    return RedirectResponse(
+        url=(
+            f"/capabilities/self-improvement?warning="
+            f"{quote(_CAPABILITY_SCOUT_OUTCOME_MESSAGES.get(outcome, 'Scan completed: ' + outcome))}"
+        ),
+        status_code=303,
+    )
+
+
 @router.get("/capabilities/self-improvement/runs/{event_id}", response_class=HTMLResponse)
 async def capability_run_detail(request: Request, event_id: str) -> HTMLResponse:
     """Per-run drill-through -- evidence, per-gate pass/fail table, and a

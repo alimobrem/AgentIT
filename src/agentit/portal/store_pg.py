@@ -481,6 +481,19 @@ class AssessmentStore:
             return None
         return AssessmentReport.model_validate_json(row["report_json"])
 
+    async def set_infra_repo_url(self, assessment_id: str, infra_repo_url: str) -> bool:
+        """Postgres counterpart of ``AssessmentStore.set_infra_repo_url`` --
+        see its docstring for the full rationale."""
+        report = await self.get(assessment_id)
+        if report is None:
+            return False
+        report.infra_repo_url = infra_repo_url
+        result = await self._pool.execute(
+            "UPDATE assessments SET report_json = $1 WHERE id = $2",
+            report.model_dump_json(), assessment_id,
+        )
+        return _affected(result) > 0
+
     async def list_all(self) -> list[dict]:
         rows = await self._pool.fetch(
             """
@@ -867,12 +880,38 @@ class AssessmentStore:
 
     async def list_gates(self, status: str = "pending") -> list[dict]:
         rows = await self._pool.fetch(
-            "SELECT * FROM gates WHERE status = $1 ORDER BY created_at DESC", status,
+            """
+            SELECT gates.*, assessments.repo_name AS app_name
+            FROM gates LEFT JOIN assessments ON gates.assessment_id = assessments.id
+            WHERE gates.status = $1 ORDER BY gates.created_at DESC
+            """,
+            status,
         )
         return _rows_to_dicts(rows)
 
     async def list_all_gates(self) -> list[dict]:
-        rows = await self._pool.fetch("SELECT * FROM gates ORDER BY created_at DESC")
+        rows = await self._pool.fetch(
+            """
+            SELECT gates.*, assessments.repo_name AS app_name
+            FROM gates LEFT JOIN assessments ON gates.assessment_id = assessments.id
+            ORDER BY gates.created_at DESC
+            """
+        )
+        return _rows_to_dicts(rows)
+
+    async def list_gates_for_assessment(self, assessment_id: str, status: str | None = None) -> list[dict]:
+        """Postgres counterpart of ``AssessmentStore.list_gates_for_assessment``
+        -- see its docstring for the full rationale."""
+        if status is not None:
+            rows = await self._pool.fetch(
+                "SELECT * FROM gates WHERE assessment_id = $1 AND status = $2 ORDER BY created_at DESC",
+                assessment_id, status,
+            )
+        else:
+            rows = await self._pool.fetch(
+                "SELECT * FROM gates WHERE assessment_id = $1 ORDER BY created_at DESC",
+                assessment_id,
+            )
         return _rows_to_dicts(rows)
 
     async def get_stale_gates(self, hours: int = 24) -> list[dict]:

@@ -17,6 +17,15 @@
   the loop considered and why, without needing to already know a PR exists.
 </p>
 
+<div class="action-bar mb-1">
+  <form method="post" action="/capabilities/self-improvement/run" class="inline-form">
+    <button type="submit" class="btn btn-outline btn-sm">
+      <span class="btn-label">Run Self-Improvement Scan</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Researching &amp; gating a proposal&hellip; (can take up to 3 minutes, please don't close this tab)</span>
+    </button>
+  </form>
+</div>
+
 <p class="text-muted text-sm mb-2">
   {% if capability_scout_status.has_run and not capability_scout_status.stale %}
     capability-scout is running — last tick <span data-timestamp="{{ capability_scout_status.last_heartbeat }}">{{ capability_scout_status.last_heartbeat[:16] }}</span>, ticks every ~24h.

@@ -15,3 +15,63 @@
   {% endfor %}
 </div>
 {% endmacro %}
+
+{% macro gate_card(gate) %}
+{# Approve & Deliver / Reject / Dismiss card for one pending gate. Shared by
+   the Admin Review page (cluster-admin-review gates only) and Assessment
+   Detail's Actions tab (every other, per-app gate type) so both surfaces
+   render gate resolution identically -- see docs/ui-redesign-proposal.md §2
+   ("reuse the same partial/macro, don't reinvent it"). #}
+<div class="card mb-1" x-data="{ showReason: false }">
+  <div class="card-header">
+    <div>
+      <span class="badge badge-{{ gate.severity | default('info') }}">{{ gate.gate_type | upper }}</span>
+      <span class="text-muted text-sm" data-timestamp="{{ gate.created_at }}">{{ gate.created_at[:16] }}</span>
+    </div>
+    {% if gate.assessment_id %}
+    <a href="/assessments/{{ gate.assessment_id }}/onboard-results" class="btn btn-sm btn-outline">Preview Files</a>
+    {% endif %}
+  </div>
+
+  <p class="my-4">{{ gate.summary }}</p>
+  {% if gate.delivery_confirmation %}
+  <p class="text-sm text-muted mb-1"><strong>{{ gate.delivery_confirmation }}</strong></p>
+  {% endif %}
+
+  <div class="action-bar">
+    <form method="POST" action="/gates/{{ gate.id }}/resolve" x-ref="approveForm">
+      <input type="hidden" name="status" value="approved">
+      <button type="button" class="btn btn-green"
+        @click="$dispatch('show-confirm', {
+          title: 'Approve & Deliver',
+          message: {{ gate.delivery_confirmation | default('This will apply the generated manifests to your cluster.', true) | tojson }} + ' This action modifies production resources.',
+          form: $refs.approveForm,
+          opts: { confirmText: 'Approve & Deliver', danger: false }
+        })">
+        Approve &amp; Deliver
+      </button>
+    </form>
+
+    <form method="POST" action="/gates/{{ gate.id }}/resolve">
+      <input type="hidden" name="status" value="rejected">
+      <button type="button" class="btn btn-outline" @click="showReason = true" x-show="!showReason">Reject</button>
+      <div x-show="showReason" class="gate-reject-row">
+        <input type="text" name="reason" placeholder="Why? (helps agents learn)" class="gate-reject-input">
+        <button type="submit" class="btn btn-danger-outline">Confirm Reject</button>
+        <button type="button" class="btn btn-outline btn-sm" @click="showReason = false">Cancel</button>
+      </div>
+    </form>
+
+    <form method="POST" action="/gates/{{ gate.id }}/cancel" class="inline-form"
+          x-data x-ref="dismissGate{{ gate.id }}">
+      <button type="button" class="btn btn-outline btn-sm"
+        @click="$dispatch('show-confirm', {
+          title: 'Dismiss Gate',
+          message: 'Dismiss this gate? The pending action will be cancelled.',
+          form: $refs.dismissGate{{ gate.id }},
+          opts: { confirmText: 'Dismiss', danger: true }
+        })">Dismiss</button>
+    </form>
+  </div>
+</div>
+{% endmacro %}

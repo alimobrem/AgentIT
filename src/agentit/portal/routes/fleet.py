@@ -64,6 +64,8 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
         _argo_cache["data"] = argo_status
         _argo_cache["ts"] = now
 
+    from agentit.portal.delivery import gitops_application_name
+
     for app_item in fleet:
         app_name = app_item["repo_name"].lower().replace("_", "-").replace(".", "-")
         argo = argo_status.get(app_name)
@@ -89,10 +91,43 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
             app_item["deploy_cluster"] = "—"
             app_item["deploy_namespace"] = "—"
 
+        # Same "is there a live Argo CD Application for this app" question
+        # `delivery.is_gitops_registered()` asks per-app, answered here from
+        # the Argo CD list this enrichment pass already fetched once for
+        # every app -- avoids an extra live per-row kube call for a signal
+        # this loop already has in hand (docs/ui-redesign-proposal.md §4).
+        app_item["gitops_registered"] = gitops_application_name(app_name) in argo_status
+
     return fleet
 
 
 # ── Routes ────────────────────────────────────────────────────────────
+
+
+async def _attach_pending_actions(fleet: list[dict], s: object) -> None:
+    """"Needs action" badge per app (docs/ui-redesign-proposal.md §2) -- a
+    cheap ``GROUP BY assessment_id`` count of pending, app-owner-scoped
+    gates (``cluster-admin-review`` excluded: that's a different audience's
+    concern, counted separately for the Admin Review nav badge). Mutates
+    each fleet row in place with ``pending_actions_count``.
+    """
+    from agentit.portal.delivery import ADMIN_REVIEW_GATE_TYPE
+    try:
+        pending_gates = await s.list_gates(status="pending")
+    except Exception:
+        log.debug("Failed to fetch pending gates for fleet 'needs action' badges", exc_info=True)
+        pending_gates = []
+
+    counts: dict[str, int] = {}
+    for g in pending_gates:
+        if g.get("gate_type") == ADMIN_REVIEW_GATE_TYPE:
+            continue
+        aid = g.get("assessment_id")
+        if aid:
+            counts[aid] = counts.get(aid, 0) + 1
+
+    for app_item in fleet:
+        app_item["pending_actions_count"] = counts.get(app_item["id"], 0)
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -102,6 +137,7 @@ async def home(request: Request) -> HTMLResponse:
     loop = asyncio.get_running_loop()
     store_arg = s.raw if hasattr(s, "raw") else s
     fleet = await asyncio.to_thread(_enrich_fleet_with_cluster_status, fleet, store_arg, loop)
+    await _attach_pending_actions(fleet, s)
     total_apps = len(fleet)
     if total_apps == 0:
         return get_templates().TemplateResponse(request, "dashboard.html", {

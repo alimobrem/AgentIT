@@ -14,8 +14,7 @@ from starlette.responses import StreamingResponse
 
 from agentit.cloner import clone_repo
 from agentit.models import AssessmentReport, Severity
-from agentit.portal.cluster_apply import apply_manifests_to_cluster, apply_with_verification, install_operator
-from agentit.portal.github_pr import create_onboarding_pr
+from agentit.portal.cluster_apply import install_operator
 from agentit.portal.helpers import get_current_user, get_llm_client, get_store, get_templates, publish_event, with_timeout
 from agentit.runner import run_assessment
 
@@ -261,7 +260,27 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     onboardings = await s.list_onboardings(assessment_id)
 
     from agentit.remediation.registry import lookup
-    fixable_categories = {f.category for f in urgent_findings if lookup(f.category) is not None}
+    # Computed from every finding (not just urgent_findings' critical/high
+    # subset) so the same set correctly covers the Remediation Plan table
+    # below, which lists findings of every severity -- one source of truth
+    # for "is this finding/plan-item fixable", shared by both loops in the
+    # template instead of each re-deriving visibility independently
+    # (docs/ui-redesign-proposal.md §0's second bug).
+    all_findings = [f for sc in report.scores for f in sc.findings]
+    fixable_categories = {f.category for f in all_findings if lookup(f.category) is not None}
+
+    # The 7 app-owner-scoped gate types now live here (Actions tab) instead
+    # of the retired global Gates page -- cluster-admin-review is excluded,
+    # it's the one gate type for a genuinely different audience and stays
+    # on the separate Admin Review page (docs/ui-redesign-proposal.md §2).
+    from agentit.portal.delivery import ADMIN_REVIEW_GATE_TYPE, gate_delivery_confirmation, is_gitops_registered
+    assessment_gates = await s.list_gates_for_assessment(assessment_id, status="pending") \
+        if hasattr(s, "list_gates_for_assessment") else []
+    pending_actions = [g for g in assessment_gates if g["gate_type"] != ADMIN_REVIEW_GATE_TYPE]
+    for g in pending_actions:
+        g["delivery_confirmation"] = await gate_delivery_confirmation(s, g)
+
+    gitops_registered, infra_repo_url = await is_gitops_registered(report.repo_name, report)
 
     timeline = await s.get_assessment_timeline(assessment_id) if hasattr(s, 'get_assessment_timeline') else []
     trend = await s.get_trend(report.repo_url) if hasattr(s, 'get_trend') else {}
@@ -295,12 +314,61 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "slo_count": len(slos),
             "onboarding_count": len(onboardings),
             "fixable_categories": fixable_categories,
+            "pending_actions": pending_actions,
+            "gitops_registered": gitops_registered,
+            "infra_repo_url": infra_repo_url,
             "timeline": timeline,
             "trend": trend,
             "score_history": score_history,
             "lifecycle_stage": lifecycle_stage,
             "suppressions": suppressions,
         },
+    )
+
+
+@router.post("/assessments/{assessment_id}/register-gitops", response_model=None)
+async def register_gitops(request: Request, assessment_id: str):
+    """Lightweight GitOps registration for an already-assessed app --
+    the nudge action docs/ui-redesign-proposal.md §4 recommends for
+    unregistered apps: register now (auto-creating an infra repo when none
+    is supplied, mirroring `_auto_create_infra_repo`) rather than requiring
+    a full re-assessment with the GitOps Infra Repo field filled in from
+    scratch.
+    """
+    s = await get_store()
+    report = await s.get(assessment_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+
+    form = await request.form()
+    infra_repo_url = str(form.get("infra_repo_url", "")).strip() or None
+
+    if infra_repo_url is None:
+        infra_repo_url = await asyncio.to_thread(_auto_create_infra_repo, report.repo_url)
+        if infra_repo_url is None:
+            return RedirectResponse(
+                url=f"/assessments/{assessment_id}?error={quote('Could not auto-create a GitOps infra repo — check GitHub token permissions')}",
+                status_code=303,
+            )
+
+    await s.set_infra_repo_url(assessment_id, infra_repo_url)
+
+    from agentit.portal.github_pr import ensure_applicationset
+    ensured = await asyncio.to_thread(ensure_applicationset, infra_repo_url)
+    if not ensured:
+        return RedirectResponse(
+            url=(
+                f"/assessments/{assessment_id}?warning="
+                f"{quote('Infra repo registered, but the Argo CD ApplicationSet could not be confirmed on the cluster — it will be ensured automatically on the next delivery.')}"
+            ),
+            status_code=303,
+        )
+
+    await s.log_event("portal", "gitops-registered", report.repo_name, "info",
+                       f"Registered for GitOps delivery via {infra_repo_url}")
+    return RedirectResponse(
+        url=f"/assessments/{assessment_id}?success={quote('Registered for GitOps delivery via ' + infra_repo_url)}",
+        status_code=303,
     )
 
 
@@ -336,13 +404,15 @@ async def fix_finding(request: Request, assessment_id: str):
         )
 
     if result["files"]:
-        from agentit.portal.cluster_apply import apply_manifests_to_cluster
-        namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
-        apply_result = await asyncio.to_thread(
-            apply_manifests_to_cluster, result["files"], namespace, dry_run=True,
-        )
-        await s.save_apply_results(assessment_id, apply_result, namespace, dry_run=True)
-
+        # Pure generation step -- no direct apply here. Matching what
+        # "Onboard This App" already is for a whole plan, `fix_finding()`
+        # only generates files; "Deliver" (on Onboard Results) is the one
+        # and only verb that ever calls route_and_deliver()/
+        # apply_with_verification() (docs/ui-redesign-proposal.md §0/§3).
+        # A prior version ran a raw, unaudited
+        # apply_manifests_to_cluster(dry_run=True) here -- dead work whose
+        # result was immediately superseded by Deliver, and a bypass of the
+        # unified delivery router for a GitOps-registered app.
         for f in result["files"]:
             await s.save_remediation(
                 assessment_id, result["agent"], f["description"],
@@ -603,52 +673,6 @@ async def download_manifests(assessment_id: str):
     )
 
 
-@router.post("/assessments/{assessment_id}/apply", response_model=None)
-async def apply_to_cluster(request: Request, assessment_id: str):
-    """Apply onboarding manifests to the current cluster."""
-    s = await get_store()
-    report = await s.get(assessment_id)
-    if report is None:
-        raise HTTPException(status_code=404, detail="Assessment not found")
-    files = await s.get_onboarding(assessment_id)
-    if files is None:
-        raise HTTPException(status_code=404, detail="Onboarding not found")
-
-    form = await request.form()
-    namespace = str(form.get("namespace", "default"))
-    dry_run = form.get("dry_run") == "true"
-
-    try:
-        results = await apply_with_verification(
-            files, namespace, dry_run,
-            force_dry_run_first=False,
-            store=s, app_name=report.repo_name,
-            skill_outcome_reason="applied to cluster",
-            actor=get_current_user(request), action="apply-to-cluster",
-            resource=f"assessment:{assessment_id}",
-        )
-    except Exception:
-        log.exception("Cluster apply failed for assessment %s", assessment_id)
-        return RedirectResponse(
-            url=f"/assessments/{assessment_id}/onboard-results?error={quote('Cluster apply failed — check server logs')}",
-            status_code=303,
-        )
-
-    await s.save_apply_results(assessment_id, results, namespace, dry_run)
-
-    applied = len(results["applied"])
-    skipped = len(results["skipped"])
-    errs = len(results["errors"])
-    return RedirectResponse(
-        url=(
-            f"/assessments/{assessment_id}/onboard-results"
-            f"?applied={applied}&skipped={skipped}&errors={errs}"
-            f"&dry_run={'true' if dry_run else 'false'}"
-        ),
-        status_code=303,
-    )
-
-
 @router.post("/assessments/{assessment_id}/deliver", response_model=None)
 async def deliver(request: Request, assessment_id: str):
     """The unified apply flow's single entry point (docs/unified-apply-
@@ -798,49 +822,6 @@ async def unsuppress_check_endpoint(request: Request):
     if assessment_id:
         return RedirectResponse(f"/assessments/{assessment_id}", status_code=303)
     return {"status": "unsuppressed", "app_name": app_name, "check_source": check_source}
-
-
-@router.post("/assessments/{assessment_id}/create-pr", response_model=None)
-async def create_pr(assessment_id: str):
-    """Commit manifests to GitOps infra repo (or app repo as fallback)."""
-    from agentit.portal.github_pr import commit_to_infra_repo, ensure_applicationset
-
-    s = await get_store()
-    report = await s.get(assessment_id)
-    files = await s.get_onboarding(assessment_id)
-    if report is None or files is None:
-        raise HTTPException(status_code=404, detail="Assessment or onboarding not found")
-
-    try:
-        if report.infra_repo_url:
-            result = await with_timeout(asyncio.to_thread(
-                commit_to_infra_repo, report.infra_repo_url, report.repo_name, files,
-            ))
-            await asyncio.to_thread(ensure_applicationset, report.infra_repo_url)
-        else:
-            result = await with_timeout(asyncio.to_thread(
-                create_onboarding_pr, report.repo_url, report.repo_name, files,
-            ))
-    except Exception as exc:
-        log.exception("PR creation failed for %s", report.repo_name)
-        return RedirectResponse(
-            url=f"/assessments/{assessment_id}/onboard-results?error={quote(str(exc)[:200])}",
-            status_code=303,
-        )
-
-    if "error" in result:
-        log.warning("PR creation error for %s: %s", report.repo_name, result["error"])
-        return RedirectResponse(
-            url=f"/assessments/{assessment_id}/onboard-results?error={quote(result['error'][:200])}",
-            status_code=303,
-        )
-    await s.update_pr_url(assessment_id, result["pr_url"])
-    await s.log_event("portal", "pr-created", report.repo_name,
-                       "info", f"PR created: {result['pr_url']}")
-    return RedirectResponse(
-        url=f"/assessments/{assessment_id}/onboard-results?pr_url={result['pr_url']}",
-        status_code=303,
-    )
 
 
 @router.post("/assessments/{assessment_id}/create-agent-prs", response_model=None)
