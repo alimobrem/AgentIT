@@ -68,6 +68,8 @@ class SkillLearner:
         store: object | None = None,
         portal_url: str = DEFAULT_PORTAL,
         timeout: int = 30,
+        draft_retry_attempts: int = 3,
+        draft_retry_delay: int = 20,
     ) -> None:
         self._publisher = publisher
         self._llm_model = llm_model
@@ -77,6 +79,8 @@ class SkillLearner:
         self._store = store
         self._portal_url = portal_url.rstrip("/")
         self._client = httpx.AsyncClient(timeout=timeout)
+        self._draft_retry_attempts = draft_retry_attempts
+        self._draft_retry_delay = draft_retry_delay
 
     async def research_once(self) -> tuple[list[str], list[str]]:
         """Research low-effectiveness skills first, falling back to a generic
@@ -243,29 +247,60 @@ class SkillLearner:
         uses for the same "separate watcher pod calling back into the
         portal" problem. Returns the saved skill's name, or ``None`` if the
         portal couldn't be reached or rejected the draft this cycle.
+
+        Retries specifically on HTTP 404 (not other statuses): confirmed
+        root cause of a real incident is that ``AGENTIT_PORTAL_URL`` points
+        at the Argo Rollouts *stable* Service, whose selector only flips
+        over to the new ReplicaSet once a canary rollout fully promotes
+        (chart uses ``strategy.canary`` with ``stableService: agentit`` /
+        ``canaryService: agentit-canary``) -- so mid-rollout, this route can
+        genuinely 404 against the still-serving old pod for as long as the
+        canary takes to promote, even though the route exists and is
+        correctly wired in the code that's *about* to become stable. Live
+        cluster reproduction: `oc exec` into the stable-hash pod curling
+        this exact path returned 404 while the canary-hash pod behind the
+        same Service returned 401 (i.e. route present, just unauthenticated)
+        for the identical request. A short retry window usually outlasts
+        that skew instead of silently losing the draft to the PVC fallback
+        in ``_save_draft`` below.
         """
         headers = {}
         token = os.environ.get("AGENTIT_INTERNAL_WEBHOOK_TOKEN")
         if token:
             headers["X-Internal-Webhook-Token"] = token
-        try:
-            resp = await self._client.post(
-                f"{self._portal_url}/api/webhook/skill-draft",
-                json={"content": content, "domain": domain},
-                headers=headers,
-            )
-            if resp.status_code != 200:
+
+        for attempt in range(1, self._draft_retry_attempts + 1):
+            try:
+                resp = await self._client.post(
+                    f"{self._portal_url}/api/webhook/skill-draft",
+                    json={"content": content, "domain": domain},
+                    headers=headers,
+                )
+            except Exception as exc:
                 logger.warning(
-                    "Portal rejected skill draft submission (HTTP %s): %s",
-                    resp.status_code, resp.text[:200],
+                    "Could not reach portal at %s to submit skill draft: %s", self._portal_url, exc,
                 )
                 return None
-            return resp.json().get("name")
-        except Exception as exc:
+
+            if resp.status_code == 200:
+                return resp.json().get("name")
+
+            if resp.status_code == 404 and attempt < self._draft_retry_attempts:
+                logger.warning(
+                    "Portal 404'd skill draft submission (attempt %d/%d) -- likely "
+                    "mid-rollout version skew against the stable Service; retrying "
+                    "in %ds: %s",
+                    attempt, self._draft_retry_attempts, self._draft_retry_delay, resp.text[:200],
+                )
+                await asyncio.sleep(self._draft_retry_delay)
+                continue
+
             logger.warning(
-                "Could not reach portal at %s to submit skill draft: %s", self._portal_url, exc,
+                "Portal rejected skill draft submission (HTTP %s): %s",
+                resp.status_code, resp.text[:200],
             )
             return None
+        return None
 
     async def _log_run(
         self, mode: str | None, saved: list[str], skipped: list[str], error: str | None = None,

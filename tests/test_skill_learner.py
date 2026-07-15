@@ -297,6 +297,45 @@ class TestCrossPodVisibility:
         assert await learner._submit_draft_to_portal("content", "security") is None
         await learner._client.aclose()
 
+    async def test_submit_draft_to_portal_retries_404_then_succeeds(self):
+        """Real 2026-07-15 incident: AGENTIT_PORTAL_URL points at the Argo
+        Rollouts *stable* Service, which stays pinned to the old
+        ReplicaSet's pods until a canary rollout fully promotes -- so this
+        route can genuinely 404 for a window even though it's correctly
+        wired in the code about to become stable. A 404 followed by a 200
+        (the rollout finishing promotion) must resolve to the saved name,
+        not a permanent PVC fallback."""
+        learner, _ = _learner(draft_retry_delay=0)
+        learner._client.post = AsyncMock(side_effect=[
+            httpx.Response(404, text="not found"),
+            httpx.Response(200, json={"name": "cve-2099-00060"}),
+        ])
+
+        name = await learner._submit_draft_to_portal("content", "security")
+
+        assert name == "cve-2099-00060"
+        assert learner._client.post.call_count == 2
+
+    async def test_submit_draft_to_portal_gives_up_after_max_404_retries(self):
+        learner, _ = _learner(draft_retry_attempts=2, draft_retry_delay=0)
+        learner._client.post = AsyncMock(return_value=httpx.Response(404, text="still not found"))
+
+        name = await learner._submit_draft_to_portal("content", "security")
+
+        assert name is None
+        assert learner._client.post.call_count == 2
+
+    async def test_submit_draft_to_portal_does_not_retry_non_404_rejections(self):
+        """A 500 (or any non-404 rejection) is a real failure, not rollout
+        skew -- retrying it would just waste the tick's time budget."""
+        learner, _ = _learner(draft_retry_delay=0)
+        learner._client.post = AsyncMock(return_value=httpx.Response(500, text="db down"))
+
+        name = await learner._submit_draft_to_portal("content", "security")
+
+        assert name is None
+        learner._client.post.assert_called_once()
+
     async def test_save_draft_prefers_portal_over_local_disk(self, tmp_path):
         learner, _ = _learner(skills_dir=tmp_path / "skills")
         learner._client.post = AsyncMock(
