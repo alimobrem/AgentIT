@@ -381,7 +381,7 @@ uv run pytest -q
 |---|---|---|
 | Unit tests | ~600 | Analyzers, agents, orchestrator conflict/gate logic, portal routes, SQLite store, Helm templates |
 | LLM evals | 17 | Safety classification, fix review quality, generation correctness, learning agent, architecture summary |
-| Browser tests | 49 | Playwright end-to-end tests for all portal pages |
+| Browser tests | 61 | Playwright end-to-end tests for all portal pages, Admin Review/Fleet-badge/Actions-tab UI, retired-route 404s, accessibility |
 | Performance tests | 22 | Response time assertions on portal endpoints |
 | API contract tests | 14 | JSON response shape validation |
 | Template rendering | 16 | HTML rendering correctness |
