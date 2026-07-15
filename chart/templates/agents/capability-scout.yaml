@@ -98,19 +98,23 @@ spec:
             # as a *subprocess of this same container* -- momentarily
             # doubling up the interpreter + every import (fastapi,
             # anthropic, kubernetes client, uvicorn, ...) on top of the
-            # long-running watcher process itself. At the previous 256Mi
-            # limit this OOMKilled the pod outright (confirmed live: `oc
-            # exec`-ing the exact gate command here killed the container
-            # with exit 137) well before pytest could even finish
-            # collecting ~1900 tests. The portal Rollout, which can also
-            # trigger this same gate via the manual-run route, already
+            # long-running watcher process itself, and running the full
+            # ~1900-test suite for real minutes at a time. At 250m CPU /
+            # 1Gi memory this still OOMKilled the pod after ~15 minutes
+            # (confirmed live: the same run that takes ~3 minutes
+            # unconstrained stretched out long enough under CPU throttling
+            # for RSS to climb past 1Gi before finishing). This gate only
+            # ever runs briefly (once per watcher tick, default every 24h,
+            # or on manual trigger) so a generous temporary ceiling here
+            # costs nothing at steady state. The portal Rollout, which can
+            # also trigger this same gate via the manual-run route, already
             # runs at 512Mi for comparable reasons.
             requests:
               cpu: 50m
               memory: 256Mi
             limits:
-              cpu: 250m
-              memory: 1Gi
+              cpu: "1"
+              memory: 2Gi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

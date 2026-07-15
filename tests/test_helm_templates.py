@@ -848,13 +848,14 @@ class TestCapabilityScoutDeployment:
         assert "heartbeat" in container["livenessProbe"]["exec"]["command"][-1]
 
     def test_memory_limit_headroom_for_the_tests_pass_gate_subprocess(self):
-        """Regression test: at the previous 256Mi limit, the tests-pass
-        safety gate (capability_scout.py's run_test_suite(), which shells
-        out to `python -m pytest tests/ ...` as a subprocess of this same
-        container) OOMKilled the pod outright -- confirmed live on the
-        real agentit-capability-scout pod (exit 137) well before pytest
-        finished collecting the suite. Must stay comfortably above the
-        portal Rollout's 512Mi, which can trigger the same gate via the
+        """Regression test: at the previous 256Mi (then 1Gi) limit, the
+        tests-pass safety gate (capability_scout.py's run_test_suite(),
+        which shells out to `python -m pytest tests/ ...` as a subprocess
+        of this same container) OOMKilled the pod outright -- confirmed
+        live on the real agentit-capability-scout pod, twice (exit 137 at
+        256Mi immediately, exit 137 at 1Gi after ~15 minutes of a CPU-
+        throttled full-suite run). Must stay comfortably above the portal
+        Rollout's 512Mi, which can trigger the same gate via the
         manual-run route."""
         doc = _load(self.TEMPLATE)
         container = doc["spec"]["template"]["spec"]["containers"][0]
@@ -862,6 +863,21 @@ class TestCapabilityScoutDeployment:
         assert limit.endswith("Gi") or (limit.endswith("Mi") and int(limit[:-2]) >= 512), (
             f"capability-scout memory limit {limit} is too low for the "
             "tests-pass gate's pytest subprocess -- it will OOMKill the pod"
+        )
+
+    def test_cpu_limit_headroom_for_the_tests_pass_gate_subprocess(self):
+        """Regression test: at 250m CPU, the ~1900-test suite the
+        tests-pass gate runs took long enough under throttling (~15
+        minutes, confirmed live) that memory climbed past even a raised
+        1Gi limit before pytest finished. Needs real CPU, not just memory,
+        to finish in a reasonable window."""
+        doc = _load(self.TEMPLATE)
+        container = doc["spec"]["template"]["spec"]["containers"][0]
+        limit = container["resources"]["limits"]["cpu"]
+        millicores = int(float(limit[:-1]) * 1000) if limit.endswith("m") else int(float(limit) * 1000)
+        assert millicores >= 1000, (
+            f"capability-scout cpu limit {limit} is too low for the "
+            "tests-pass gate's pytest subprocess to finish in a reasonable time"
         )
 
 
