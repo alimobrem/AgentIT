@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
@@ -156,6 +157,116 @@ class TestConfirmModalOutsideClick:
                     f"show-confirm dispatch — fix belongs in base.html's "
                     f"#confirm-modal instead:\n  {stripped[:160]}"
                 )
+
+
+class TestTojsonForceescape:
+    """Regression: `| tojson` produces a JSON string, which always starts
+    and ends with a literal `"`. Embedding that raw inside an
+    already-`"`-delimited HTML attribute (e.g. `@click="..."`) makes a
+    browser's HTML parser terminate the attribute at that very first
+    literal quote -- silently truncating the Alpine expression mid-way, no
+    error, no visual feedback, the click handler just doesn't fire.
+    `| forceescape` immediately after `| tojson` HTML-entity-encodes those
+    quotes (`&quot;`) so the attribute value survives intact. Confirmed
+    live: exactly this bug broke both onboard_results.html's own "Deliver"
+    button and the shared `_macros.html::gate_card` "Approve & Deliver"
+    button (used by both Admin Review and the per-app Actions tab) --
+    every other `tojson`-in-an-attribute usage in the template tree
+    already had `| forceescape` (e.g. fleet.html's Delete button,
+    onboard_results.html's Install Operator button).
+    """
+
+    @pytest.mark.parametrize(
+        "template_path", sorted(TEMPLATES_DIR.glob("*.html")), ids=lambda p: p.name
+    )
+    def test_every_tojson_usage_is_forceescaped(self, template_path):
+        html = template_path.read_text(encoding="utf-8")
+        bad = []
+        for i, line in enumerate(html.splitlines(), 1):
+            if "tojson" in line and "forceescape" not in line:
+                bad.append(f"  line {i}: {line.strip()[:160]}")
+
+        assert not bad, (
+            f"{template_path.name} has `| tojson` without a following "
+            f"`| forceescape` on the same line -- this truncates the "
+            f"enclosing HTML attribute at the JSON string's own leading "
+            f"quote (see class docstring):\n" + "\n".join(bad)
+        )
+
+
+class _ClickAttrCapture(HTMLParser):
+    """Captures `@click` attribute values the way a real browser's HTML
+    parser would -- i.e. terminating a double-quoted attribute at the
+    first literal `"` it encounters, even mid-value. Used to prove a
+    rendered attribute is a single, complete, unbroken JS expression, not
+    just that the page returned 200 OK (which a truncated attribute still
+    does -- the breakage is purely client-side)."""
+
+    def __init__(self):
+        super().__init__()
+        self.clicks: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        for name, value in attrs:
+            if name == "@click" and value:
+                self.clicks.append(value)
+
+
+class TestDeliverButtonClickAttributeIntact:
+    """Confirms the fix above actually produces a valid, unbroken @click
+    expression in real rendered output -- not just that Jinja itself
+    doesn't error. Parses the response HTML with html.parser (see
+    _ClickAttrCapture), which reproduces the exact browser behavior that
+    silently broke these buttons before `| forceescape` was added."""
+
+    def test_onboard_results_deliver_click_attr_is_unbroken(self, portal_client):
+        client, _store, aid = portal_client
+        resp = client.get(f"/assessments/{aid}/onboard-results")
+        assert resp.status_code == 200
+
+        parser = _ClickAttrCapture()
+        parser.feed(resp.text)
+        deliver_clicks = [c for c in parser.clicks if "Confirm Delivery" in c]
+        assert deliver_clicks, "no @click attribute found for the Deliver button"
+
+        click = deliver_clicks[0]
+        assert "AgentIT will:" in click, (
+            f"Deliver button's @click attribute was truncated before the "
+            f"delivery_confirmation text -- likely a bare `| tojson` "
+            f"(without `| forceescape`) broke out of the HTML attribute "
+            f"early:\n{click!r}"
+        )
+        assert "cannot be undone" in click, (
+            f"Deliver button's @click attribute was truncated -- it never "
+            f"reaches the tail of the JS expression:\n{click!r}"
+        )
+        assert click.rstrip().endswith("})"), (
+            f"Deliver button's @click attribute doesn't end with a "
+            f"complete function call -- looks truncated:\n{click!r}"
+        )
+
+    def test_admin_review_gate_card_click_attr_is_unbroken(self, portal_client):
+        client, store, aid = portal_client
+        store.create_gate(aid, "cluster-admin-review", "Approve deployment of test-app")
+
+        resp = client.get("/admin-review")
+        assert resp.status_code == 200
+
+        parser = _ClickAttrCapture()
+        parser.feed(resp.text)
+        approve_clicks = [c for c in parser.clicks if "Approve & Deliver" in c]
+        assert approve_clicks, "no @click attribute found for the Approve & Deliver button"
+
+        click = approve_clicks[0]
+        assert "This action modifies production resources" in click, (
+            f"gate_card's Approve & Deliver @click attribute was "
+            f"truncated -- it never reaches the tail of the JS "
+            f"expression:\n{click!r}"
+        )
+        assert click.rstrip().endswith("})"), (
+            f"gate_card's Approve & Deliver @click attribute doesn't end "
+            f"with a complete function call -- looks truncated:\n{click!r}"
+        )
 
 
 class TestFormActions:
@@ -385,6 +496,41 @@ class TestTemplateRendering:
         breached_row = next(r for r in rows if "5.00" in r)
         assert "score-red" in breached_row, breached_row
         assert "score-green" not in breached_row
+
+    def test_slos_no_data_renders_empty_bar_not_full_green(self, portal_client):
+        """Regression: for lower_is_better metrics (error_rate,
+        latency_p99_ms), when current_value is None/falsy (no real
+        telemetry yet), `pct` previously defaulted to 100 -- a brand-new
+        app with zero real data showed a full GREEN bar for these two
+        metrics, contradicting the adjacent "unknown" status badge and
+        the project's no-fabricated-data principle. It must default to 0,
+        matching the (already-correct) default for every other metric
+        direction (e.g. availability)."""
+        client, store, aid = portal_client
+        no_data_lower_sid = store.save_slo(aid, "error_rate", 0.5)
+        no_data_other_sid = store.save_slo(aid, "availability", 99.9)
+
+        resp = client.get(f"/assessments/{aid}/slos")
+        assert resp.status_code == 200
+        rows = re.findall(r"<tr[^>]*>.*?</tr>", resp.text, re.DOTALL)
+
+        lower_row = next(r for r in rows if "error_rate" in r)
+        assert "--pct: 0" in lower_row or "--pct: 0.0" in lower_row, (
+            f"error_rate SLO with no current_value must render at 0%, not "
+            f"a full/high bar:\n{lower_row}"
+        )
+        assert "score-green" not in lower_row, (
+            f"error_rate SLO with no current_value must not render a "
+            f"misleading full green bar:\n{lower_row}"
+        )
+        assert "badge-info" in lower_row and ">unknown<" in lower_row
+
+        other_row = next(r for r in rows if "availability" in r)
+        assert "--pct: 0" in other_row or "--pct: 0.0" in other_row, (
+            f"availability SLO with no current_value must also render at "
+            f"0% (unchanged behavior, confirms both metric directions "
+            f"now agree):\n{other_row}"
+        )
 
     def test_404_page(self, portal_client):
         client, _, _ = portal_client

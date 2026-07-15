@@ -136,7 +136,7 @@
     <button type="button" class="btn btn-green btn-lg"
       @click="$dispatch('show-confirm', {
         title: 'Confirm Delivery',
-        message: {{ delivery_confirmation | tojson }} + ' ({{ total.count }} manifest(s).) This modifies production resources and cannot be undone.',
+        message: {{ delivery_confirmation | tojson | forceescape }} + ' ({{ total.count }} manifest(s).) This modifies production resources and cannot be undone.',
         form: $refs.deliverForm,
         opts: { confirmText: 'Deliver Now', danger: false }
       })">
