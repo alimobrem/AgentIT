@@ -17,7 +17,7 @@
   {% endif %}
 </p>
 
-{% if not gitops_registered %}
+{% if not gitops_registered and not infra_repo_url %}
 <div x-data="{ dismissed: false }" x-show="!dismissed" x-cloak class="alert alert-info mb-2">
   <span class="text-sm">Not GitOps-registered. Apps under Argo CD get PR review + drift protection automatically.</span>
   <form method="post" action="/assessments/{{ assessment_id }}/register-gitops" class="inline-form"
@@ -30,6 +30,19 @@
         opts: { confirmText: 'Register', danger: false }
       })">Register for GitOps</button>
   </form>
+  <button type="button" class="btn btn-sm btn-outline" @click="dismissed = true">Dismiss</button>
+</div>
+{% elif not gitops_registered and infra_repo_url %}
+{# infra_repo_url is set (registration was submitted, and the infra repo +
+   ApplicationSet exist) but no live Argo CD Application targets this app
+   yet -- that only appears once a delivery actually commits manifests under
+   apps/{{ report.repo_name }}/ in the infra repo and the resulting PR is
+   merged (see delivery.is_gitops_registered()'s docstring). Without this
+   branch, the page looked identical before and after a successful
+   registration click -- the same nudge/button reappeared with no visible
+   change, making the action look like it "did nothing". #}
+<div x-data="{ dismissed: false }" x-show="!dismissed" x-cloak class="alert alert-info mb-2">
+  <span class="text-sm">GitOps infra repo configured (<a href="{{ infra_repo_url | safe_url }}" target="_blank" hx-boost="false">{{ infra_repo_url }}</a>). This app will show as GitOps-registered once your next Fix/Onboard delivery is committed and merged there.</span>
   <button type="button" class="btn btn-sm btn-outline" @click="dismissed = true">Dismiss</button>
 </div>
 {% endif %}

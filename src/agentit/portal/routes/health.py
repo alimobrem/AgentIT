@@ -414,7 +414,7 @@ async def platform_drift():
         "platform": ctx.summary(),
         "drift": {
             "removed_apis": drift.removed_apis,
-            "deprecated_apis": [d.get("api", "") for d in drift.deprecated_apis] if hasattr(drift, 'deprecated_apis') and isinstance(drift.deprecated_apis, list) and drift.deprecated_apis and isinstance(drift.deprecated_apis[0], dict) else drift.deprecated_apis,
+            "deprecated_apis": [d.get("api", "") for d in ctx.deprecated_apis],
             "new_apis": drift.new_apis[:20],
             "has_breaking_changes": drift.has_breaking_changes,
         },

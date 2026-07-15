@@ -14,12 +14,15 @@ from unittest.mock import patch
 pytest.importorskip("playwright")
 from playwright.sync_api import Page, expect
 
+from conftest import make_report
+
 
 @pytest.fixture(scope="module")
 def app_url(tmp_path_factory):
     """Run the portal via ASGI testclient on a local port."""
     import threading
     import uvicorn
+    from agentit.models import DimensionScore, Finding, Severity
     from agentit.portal.app import app
     from agentit.portal.store import AssessmentStore
     from agentit.portal.store_factory import AsyncSQLiteStore
@@ -27,7 +30,21 @@ def app_url(tmp_path_factory):
 
     store = AssessmentStore(":memory:")
     async_store = AsyncSQLiteStore.wrap(store)
-    report = make_report()
+    # A real assessment always scores all 7 analyzer dimensions (see
+    # analyzers/*.py's dimension= literals) -- make_report()'s single-dimension
+    # default is fine for unit tests that don't care about score breakdown,
+    # but this fixture backs the shared assessment-detail page every browser
+    # test hits, so give it the full realistic set.
+    dimensions = ["security", "infrastructure", "observability", "ha_dr",
+                  "data_governance", "compliance", "cicd"]
+    report = make_report(scores=[
+        DimensionScore(
+            dimension=dim, score=80, max_score=100,
+            findings=[Finding(category="test", severity=Severity.low,
+                              description="minor", recommendation="fix")],
+        )
+        for dim in dimensions
+    ])
     aid = store.save(report)
     store.save_onboarding(aid, [
         {"category": "security", "path": "test.yaml",
@@ -99,15 +116,23 @@ class TestEveryPageLoads:
         page.goto(f"{url}/assessments/{aid}/slos")
         expect(page.locator("h1")).to_be_visible()
 
-    def test_gates_page(self, page: Page, app_url):
+    def test_gates_page_redirects_to_admin_review(self, page: Page, app_url):
+        """The global Gates page is retired -- /gates now 301s to
+        /admin-review (kept as a redirect, not a 404, for any stale
+        bookmark/link -- see routes/gates.py's gates_page_redirect())."""
         url, _, _ = app_url
         page.goto(f"{url}/gates")
-        expect(page.locator("h1")).to_contain_text("Approval Gates")
+        assert page.url == f"{url}/admin-review"
+        expect(page.locator("h1")).to_contain_text("Admin Review")
 
     def test_events_page(self, page: Page, app_url):
         url, _, _ = app_url
         page.goto(f"{url}/events")
-        expect(page.locator("h1")).to_contain_text("Activity Feed")
+        # docs/ui-redesign-proposal.md §5 explicitly lists Events as
+        # "Unchanged" and "not recommended" for touching -- the page's h1 is,
+        # and always has been, "Events" (events.html:9); only the <title>
+        # tag says "Agent Activity Feed".
+        expect(page.locator("h1")).to_contain_text("Events")
 
     def test_dlq_page(self, page: Page, app_url):
         url, _, _ = app_url
@@ -267,12 +292,23 @@ class TestNavigation:
         url, _, _ = app_url
         page.goto(url)
         expect(page.locator("nav >> text=Fleet")).to_be_visible()
-        expect(page.locator("nav >> text=Gates")).to_be_visible()
+        expect(page.locator("nav >> text=Admin Review")).to_be_visible()
+        # Gates was retired as a standalone nav concept -- the 7 app-owner
+        # gate types now surface via Fleet's "Needs Action" badge + each
+        # app's own Actions tab; only cluster-admin-review still gets a
+        # dedicated page/nav entry (Admin Review).
+        assert page.locator('nav a[href="/gates"]').count() == 0
 
     def test_secondary_nav_links(self, page: Page, app_url):
         url, _, _ = app_url
         page.goto(url)
-        for link in ["Events", "Agents", "Workflows", "Insights", "Health", "Settings"]:
+        # "Agents" and "Workflows" haven't been standalone nav items since
+        # c274055 paired them into Capabilities (Registry/Catalog tabs,
+        # base.html:803) as part of the 9->7 top-level-items consolidation
+        # docs/ui-redesign-proposal.md builds on -- check the current
+        # top-level items instead (Fleet/Admin Review are covered by
+        # test_primary_nav_links above).
+        for link in ["Events", "Health", "Insights", "Decisions", "Capabilities", "Settings"]:
             expect(page.locator(f"nav >> text={link}")).to_be_visible()
 
     def test_fleet_link_navigates(self, page: Page, app_url):
@@ -314,7 +350,13 @@ class TestComponents:
         assert bars.count() >= 5
 
     def test_stat_cards_on_fleet(self, page: Page, app_url):
-        url, _, _ = app_url
+        # fleet.html's stat grid is deliberately gated on total_apps > 1
+        # ("Stat grid only shows for 2+ apps (noise for single app)" --
+        # a75785b) -- the shared fixture only seeds one app, so add a
+        # second here rather than asserting on a single-app fleet the
+        # app intentionally renders without stat cards.
+        url, _, store = app_url
+        store.save(make_report(repo_name="browser-stat-cards-app"))
         page.goto(url)
         cards = page.locator(".stat-card")
         assert cards.count() >= 2
@@ -333,7 +375,11 @@ class TestComponents:
     def test_decision_matrix_on_settings(self, page: Page, app_url):
         url, _, _ = app_url
         page.goto(f"{url}/settings")
-        expect(page.locator("text=Decision Matrix")).to_be_visible()
+        # Settings also has prose referencing "the decision matrix above" --
+        # a legitimate, correct second (case-insensitive) substring match for
+        # the bare "text=" locator -- scope to the section heading itself to
+        # avoid the Playwright strict-mode violation.
+        expect(page.locator("h2.section-title", has_text="Decision Matrix")).to_be_visible()
 
     def test_pipeline_flow_on_workflows(self, page: Page, app_url):
         url, _, _ = app_url
@@ -378,3 +424,230 @@ class TestAccessibility:
             btn = delete_btns.nth(i)
             label = btn.get_attribute("aria-label")
             assert label, f"Delete button {i} missing aria-label"
+
+
+# ── Admin Review Page Tests ──────────────────────────────────────────
+#
+# docs/ui-redesign-proposal.md §2/§5: the retired global Gates page's
+# replacement. Intentionally narrow -- only `cluster-admin-review` gates,
+# for whoever holds the elevated RBAC that gate type needs; every other
+# gate type now lives on Fleet's "Needs Action" badge + each app's own
+# Assessment Detail Actions tab (see TestAssessmentDetailActionsTab below).
+
+
+class TestAdminReviewPage:
+    def test_admin_review_shows_cluster_admin_review_gate(self, page: Page, app_url):
+        url, _, store = app_url
+        aid = store.save(make_report(repo_name="browser-admin-review-app"))
+        store.create_gate(aid, "cluster-admin-review",
+                           "Browser test: CI/CD manifests need elevated review")
+
+        page.goto(f"{url}/admin-review")
+        expect(page.locator("h1")).to_contain_text("Admin Review")
+        # cluster-admin-review's delivery_confirmation echoes its own
+        # summary verbatim (delivery.py's gate_delivery_confirmation()), so
+        # the text legitimately appears twice within the one gate card --
+        # scope to the card itself rather than the bare text to avoid a
+        # Playwright strict-mode violation on the expected duplicate.
+        gate_card = page.locator(".card", has_text="Browser test: CI/CD manifests need elevated review")
+        expect(gate_card).to_be_visible()
+
+    def test_admin_review_excludes_app_owner_gate_types(self, page: Page, app_url):
+        """A gate type other than cluster-admin-review must never show up
+        on this page -- it belongs on that app's own Actions tab instead."""
+        url, _, store = app_url
+        aid = store.save(make_report(repo_name="browser-app-owner-gate-app"))
+        store.create_gate(aid, "auto-mode-review",
+                           "Browser test: app-owner gate, must not appear on Admin Review")
+
+        page.goto(f"{url}/admin-review")
+        expect(page.locator("h1")).to_contain_text("Admin Review")
+        assert page.locator(
+            "text=Browser test: app-owner gate, must not appear on Admin Review"
+        ).count() == 0
+
+
+# ── Fleet "Needs Action" / GitOps Badge Tests ────────────────────────
+
+
+class TestFleetBadges:
+    def test_needs_action_badge_for_app_with_pending_gate(self, page: Page, app_url):
+        """The shared fixture app already carries one pending, app-owner
+        gate (`deploy-approval`, created in the app_url fixture above) --
+        its Fleet row must show a "N pending" badge for it."""
+        url, aid, _ = app_url
+        page.goto(url)
+        row = page.locator("tr", has_text="test-app")
+        expect(row.locator("text=pending")).to_be_visible()
+
+    def test_no_needs_action_badge_when_only_admin_review_gate_pending(self, page: Page, app_url):
+        """cluster-admin-review gates must not count toward this badge --
+        they're a different audience's queue (Admin Review page)."""
+        url, _, store = app_url
+        store.save(make_report(repo_name="browser-admin-only-fleet-app"))
+        aid2 = store.save(make_report(repo_name="browser-admin-only-fleet-app-2"))
+        store.create_gate(aid2, "cluster-admin-review", "Browser test: elevated review only")
+
+        page.goto(url)
+        row = page.locator("tr", has_text="browser-admin-only-fleet-app-2")
+        assert row.locator("text=pending").count() == 0
+
+    def test_gitops_badge_for_registered_app(self, page: Page, app_url):
+        import time
+        from agentit.portal.delivery import gitops_application_name
+        from agentit.portal.routes import fleet as fleet_routes
+
+        url, _, store = app_url
+        store.save(make_report(repo_name="browser-gitops-fleet-app"))
+        fake_argo = {
+            "data": {gitops_application_name("browser-gitops-fleet-app"): {
+                "sync": "Synced", "health": "Healthy",
+                "cluster": "https://cluster", "namespace": "browser-gitops-fleet-app",
+            }},
+            "ts": time.monotonic(),
+        }
+
+        with patch.object(fleet_routes, "_argo_cache", fake_argo):
+            page.goto(url)
+
+        row = page.locator("tr", has_text="browser-gitops-fleet-app")
+        expect(row.locator(".badge", has_text="GitOps")).to_be_visible()
+
+    def test_direct_apply_badge_for_unregistered_app(self, page: Page, app_url):
+        url, _, store = app_url
+        store.save(make_report(repo_name="browser-direct-apply-fleet-app"))
+
+        page.goto(url)
+        row = page.locator("tr", has_text="browser-direct-apply-fleet-app")
+        expect(row.locator(".badge", has_text="Direct apply")).to_be_visible()
+
+
+# ── Assessment Detail Actions Tab Tests ──────────────────────────────
+#
+# The Actions tab reuses the exact same gate_card() macro/UI as the Admin
+# Review page (docs/ui-redesign-proposal.md §2's "reuse the same
+# partial, don't reinvent it") -- for every gate type except
+# cluster-admin-review, which stays on the separate Admin Review page.
+
+
+class TestAssessmentDetailActionsTab:
+    def test_actions_tab_renders_gate_approval_ui(self, page: Page, app_url):
+        url, _, store = app_url
+        # Deliberately avoids the substring "actions" in the repo name --
+        # that would make Playwright's unquoted `text=Actions` selector
+        # below also match this app's own <h1>/repo-url link.
+        aid = store.save(make_report(repo_name="browser-gate-approval-app"))
+        store.create_gate(aid, "auto-mode-review", "Browser test: auto-mode gated pending review")
+
+        page.goto(f"{url}/assessments/{aid}")
+        page.click(".tab-nav >> text=Actions")
+        # The gate's summary also legitimately appears in the (hidden,
+        # x-show) Timeline tab's pseudo-event list (get_assessment_timeline()
+        # surfaces gates too) -- scope to the gate_card's own `.card`
+        # wrapper, the one element unique to the Actions tab's rendering,
+        # so this assertion can't accidentally pass against Timeline's copy.
+        gate_card = page.locator(".card", has_text="Browser test: auto-mode gated pending review")
+        expect(gate_card).to_be_visible()
+        expect(gate_card.locator("button:has-text('Approve')")).to_be_visible()
+        # .first: "Reject" is itself a substring of the reveal-on-click
+        # "Confirm Reject" button also inside this card -- only the first
+        # (always-visible) one is being asserted on here.
+        expect(gate_card.locator("button:has-text('Reject')").first).to_be_visible()
+        expect(gate_card.locator("button:has-text('Dismiss')")).to_be_visible()
+
+    def test_actions_tab_excludes_cluster_admin_review_gate(self, page: Page, app_url):
+        url, _, store = app_url
+        aid = store.save(make_report(repo_name="browser-gate-exclude-app"))
+        store.create_gate(aid, "cluster-admin-review",
+                           "Browser test: elevated review, must not show on Actions tab")
+
+        page.goto(f"{url}/assessments/{aid}")
+        page.click(".tab-nav >> text=Actions")
+        # Same caveat as above: the gate's summary can legitimately appear
+        # in the Timeline tab's pseudo-event list -- what must be absent is
+        # a gate_card() *card* for it (i.e. it must never be resolvable
+        # from the Actions tab UI).
+        assert page.locator(
+            ".card", has_text="Browser test: elevated review, must not show on Actions tab"
+        ).count() == 0
+        expect(page.locator("text=No pending actions for this app")).to_be_visible()
+
+
+# ── Retired Routes Tests ─────────────────────────────────────────────
+#
+# /apply and /create-pr were fully removed (not just hidden), so any
+# navigation to them -- even a plain browser GET -- must 404, same as
+# test_404_page above.
+
+
+class TestRetiredRoutes:
+    def test_apply_route_gone(self, page: Page, app_url):
+        url, aid, _ = app_url
+        resp = page.goto(f"{url}/assessments/{aid}/apply")
+        assert resp.status == 404
+
+    def test_create_pr_route_gone(self, page: Page, app_url):
+        url, aid, _ = app_url
+        resp = page.goto(f"{url}/assessments/{aid}/create-pr")
+        assert resp.status == 404
+
+
+# ── Self-Improvement "Run Now" Button Test ───────────────────────────
+
+
+class TestSelfImprovementRunButton:
+    def test_run_button_present_and_clickable(self, page: Page, app_url):
+        """Clicking the button must not trigger a real capability-scout
+        cycle (LLM calls, git clone, etc.) in this test -- stub
+        CapabilityScout.research_once() the same way test_ui_redesign.py's
+        equivalent TestClient-level test does."""
+        url, _, _ = app_url
+        with patch("agentit.watchers.capability_scout.CapabilityScout.research_once",
+                   return_value={"outcome": "no-signal"}):
+            page.goto(f"{url}/capabilities/self-improvement")
+            button = page.locator("button:has-text('Run Self-Improvement Scan')")
+            expect(button).to_be_visible()
+            expect(button).to_be_enabled()
+            button.click()
+            # The redirect target's own URL (not just "still on this page")
+            # is what proves the round trip actually completed -- the
+            # pre-click URL already matches a bare "self-improvement"
+            # substring, so waiting on that alone would return immediately
+            # without the click's request/redirect ever completing.
+            page.wait_for_url(re.compile(r".*warning=.*"))
+        assert "warning=" in page.url
+
+
+# ── Fix Button Visibility Tests ──────────────────────────────────────
+#
+# Whether a finding shows a Fix button is driven entirely by
+# remediation/registry.py's FIX_REGISTRY (via fixable_categories in
+# routes/assessments.py) -- a category with no registered skill must
+# render no Fix button at all, in the real page, not just per a
+# TestClient string-search assertion.
+
+
+class TestFixButtonVisibility:
+    def test_fix_button_shown_only_for_registered_category(self, page: Page, app_url):
+        from agentit.models import DimensionScore, Finding, Severity
+
+        url, _, store = app_url
+        report = make_report(
+            repo_name="browser-fix-button-app",
+            scores=[DimensionScore(dimension="security", score=30, max_score=100, findings=[
+                Finding(category="network", severity=Severity.high,
+                        description="Browser test: no NetworkPolicy", recommendation="Add one"),
+                Finding(category="totally_unregistered_category", severity=Severity.high,
+                        description="Browser test: unmatched finding", recommendation="n/a"),
+            ])],
+        )
+        aid = store.save(report)
+
+        page.goto(f"{url}/assessments/{aid}")
+        page.click(".tab-nav >> text=Findings")
+
+        matched_item = page.locator(".finding-item", has_text="Browser test: no NetworkPolicy")
+        expect(matched_item.locator("button:has-text('Fix')")).to_be_visible()
+
+        unmatched_item = page.locator(".finding-item", has_text="Browser test: unmatched finding")
+        assert unmatched_item.locator("button:has-text('Fix')").count() == 0

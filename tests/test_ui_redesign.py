@@ -372,9 +372,63 @@ class TestGitOpsVisibility:
 
         assert resp.status_code == 303
         assert "success=" in resp.headers["location"]
+        # Bug: this used to claim "Registered for GitOps delivery via ..." as
+        # if the app were fully GitOps-registered at that instant. It isn't
+        # -- is_gitops_registered() requires a live Argo CD Application,
+        # which only appears after a delivery commits manifests under
+        # apps/{app}/ in the infra repo and that PR is merged. The message
+        # must not overclaim completion.
+        from urllib.parse import unquote
+        location = unquote(resp.headers["location"])
+        assert "Registered for GitOps delivery via" not in location
+        assert "next Fix/Onboard delivery" in location
         mock_ensure.assert_called_once_with("https://github.com/org/gitops-infra")
         report = store.get(aid)
         assert report.infra_repo_url == "https://github.com/org/gitops-infra"
+
+    def test_register_gitops_then_detail_page_shows_pending_not_stale_nudge(self, ui_client, _mock_kube):
+        """Root-cause regression for "Register for GitOps does nothing":
+        setting infra_repo_url (what register-gitops does) is not enough to
+        flip is_gitops_registered() True -- that only happens once a real
+        Argo CD Application exists, which requires a delivery to actually
+        land in the infra repo. Before this fix, the assessment detail page
+        rendered the exact same "Not GitOps-registered" nudge with the exact
+        same "Register for GitOps" button both before AND after a successful
+        registration, with zero visible change -- indistinguishable from the
+        button doing nothing at all."""
+        client, store = ui_client
+        aid = store.save(make_report(repo_name="pending-gitops-app"))
+
+        # Before registering: the real "not registered at all" nudge.
+        resp = client.get(f"/assessments/{aid}")
+        assert resp.status_code == 200
+        assert "Not GitOps-registered" in resp.text
+        assert "Register for GitOps</button>" in resp.text
+
+        with patch("agentit.portal.github_pr.ensure_applicationset", return_value=True):
+            reg_resp = client.post(
+                f"/assessments/{aid}/register-gitops",
+                data={"infra_repo_url": "https://github.com/org/gitops-infra"},
+                follow_redirects=False,
+            )
+        assert reg_resp.status_code == 303
+
+        # No live Application exists yet for this app (kube call succeeds,
+        # simply finds none) -- the honest post-registration state.
+        _mock_kube["delivery"].get_custom_resource.side_effect = None
+        _mock_kube["delivery"].get_custom_resource.return_value = None
+
+        resp = client.get(f"/assessments/{aid}")
+        assert resp.status_code == 200
+        # The stale, unchanged "not registered at all" nudge must be gone --
+        # this is the visible signal that the click had an effect.
+        assert "Not GitOps-registered" not in resp.text
+        assert "Register for GitOps</button>" not in resp.text
+        # And the page explains the real, current state instead of silently
+        # looking identical or falsely claiming full registration.
+        assert "GitOps infra repo configured" in resp.text
+        assert "next Fix/Onboard delivery" in resp.text
+        assert ">GitOps<" not in resp.text  # not fully registered yet either
 
 
 # ── 6. Nav update ────────────────────────────────────────────────────────

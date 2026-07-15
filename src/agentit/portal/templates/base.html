@@ -834,7 +834,7 @@
     <div class="toast" :class="'toast-' + t.type" x-show="t.visible"
          x-transition:enter="toast-enter" x-transition:leave="toast-leave">
       <span x-text="t.message"></span>
-      <button @click="dismiss(t.id)" class="toast-close">&times;</button>
+      <button @click="dismiss(t.id)" class="toast-close" aria-label="Dismiss notification">&times;</button>
     </div>
   </template>
 </div>

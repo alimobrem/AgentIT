@@ -366,8 +366,17 @@ async def register_gitops(request: Request, assessment_id: str):
 
     await s.log_event("portal", "gitops-registered", report.repo_name, "info",
                        f"Registered for GitOps delivery via {infra_repo_url}")
+    # Not "Registered for GitOps" -- the ApplicationSet only *discovers* an
+    # app once a delivery actually commits manifests under apps/{app}/ in the
+    # infra repo and that PR is merged (delivery.is_gitops_registered() keys
+    # off a live Application CR, not just this URL being set). Overstating
+    # completion here is exactly what made the button look like it "did
+    # nothing" -- the badge/nudge never changed to match the claim.
     return RedirectResponse(
-        url=f"/assessments/{assessment_id}?success={quote('Registered for GitOps delivery via ' + infra_repo_url)}",
+        url=(
+            f"/assessments/{assessment_id}?success="
+            f"{quote('GitOps infra repo configured via ' + infra_repo_url + '. This app will show as GitOps-registered once your next Fix/Onboard delivery is committed and merged there.')}"
+        ),
         status_code=303,
     )
 
