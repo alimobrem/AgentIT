@@ -6,6 +6,7 @@ for the watcher class itself."""
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from agentit.capability_scout import (
@@ -259,6 +260,72 @@ class TestRunTestSuite:
         assert "--ignore=tests/test_browser.py" in command
         assert "--ignore=tests/test_live_cluster_e2e.py" in command
         assert kwargs["env"]["KUBECONFIG"] == "/tmp/nonexistent-path"
+
+    def test_failure_detail_surfaces_stderr_when_stdout_is_empty(self, tmp_path):
+        """Real regression test for the production `tests-pass` gate bug:
+        the capability-scout image never installed the 'dev' extra (pytest)
+        nor shipped tests/, so every real cycle's pytest invocation died
+        immediately with "No module named pytest" on stderr while stdout
+        stayed empty. run_test_suite() used to build its failure detail from
+        stdout alone, so the gate's recorded event showed the completely
+        uninformative "pytest exited 1: " -- this is what actually blocked
+        debugging live. Confirmed against the real agentit-capability-scout
+        pod: `python -m pytest tests/ ...` there exits 1 with stdout=""
+        and stderr="/opt/app-root/bin/python: No module named pytest"."""
+        with patch("agentit.capability_scout.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=1, stdout="",
+                stderr="/opt/app-root/bin/python: No module named pytest\n",
+            )
+            passed, detail = run_test_suite(tmp_path)
+        assert passed is False
+        assert "No module named pytest" in detail
+
+    def test_real_subprocess_reports_missing_tests_dir_via_stderr(self, tmp_path):
+        """Unmocked end-to-end run against a real sandbox with no tests/
+        directory -- reproduces the second real production bug (the image
+        never `COPY tests/ tests/`), verified against a real Python
+        interpreter/pytest, not a mocked subprocess. Every other test in
+        this class patches subprocess.run, which would have hidden this
+        exact class of infra bug indefinitely -- this one actually shells
+        out, the same way the live gate does."""
+        passed, detail = run_test_suite(tmp_path)
+        assert passed is False
+        assert "not found" in detail.lower()
+        assert "tests" in detail.lower()
+
+
+class TestContainerfileShipsWhatTestsPassGateNeeds:
+    """Regression test for the root cause of every real capability-scout
+    cycle's tests-pass gate failing with an opaque "pytest exited 1": the
+    Containerfile installed only runtime deps (pip install .) and never
+    copied tests/, so run_test_suite()'s `python -m pytest tests/ ...`
+    subprocess -- run against repo_dir=Path.cwd(), the running container's
+    own filesystem, per watchers/capability_scout.py -- had neither pytest
+    importable nor a tests/ directory to point at. Confirmed live against
+    the real agentit-capability-scout pod (`No module named pytest`,
+    exit 1). Without this check, either half of the fix could silently
+    regress on a future Containerfile edit."""
+
+    def _containerfile_text(self) -> str:
+        containerfile = Path(__file__).resolve().parent.parent / "Containerfile"
+        return containerfile.read_text(encoding="utf-8")
+
+    def test_installs_the_dev_extra_so_pytest_is_importable(self):
+        content = self._containerfile_text()
+        assert "[dev]" in content, (
+            "Containerfile must pip install the 'dev' extra (pytest, "
+            "pytest-asyncio, httpx) or capability_scout.py's tests-pass "
+            "gate always fails with 'No module named pytest'"
+        )
+
+    def test_copies_the_tests_directory_into_the_image(self):
+        content = self._containerfile_text()
+        assert "COPY tests/ tests/" in content, (
+            "Containerfile must COPY tests/ tests/ or capability_scout.py's "
+            "tests-pass gate always fails with "
+            "'ERROR: file or directory not found: tests/'"
+        )
 
 
 class TestCheckNoOpenSelfImprovePr:

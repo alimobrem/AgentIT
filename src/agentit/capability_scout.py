@@ -282,7 +282,13 @@ def run_test_suite(repo_dir: Path) -> tuple[bool, str]:
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, f"pytest failed to run: {exc}"
     if result.returncode != 0:
-        return False, f"pytest exited {result.returncode}: {result.stdout[-500:]}"
+        # A bare invocation failure (e.g. pytest itself isn't importable, or
+        # `tests/` doesn't exist in this environment) writes to stderr, not
+        # stdout -- stdout alone silently produced an empty, undiagnosable
+        # "pytest exited 1: " detail for exactly that failure mode. Surface
+        # both so the real cause is visible from the gate result itself.
+        tail = (result.stdout[-500:] + "\n" + result.stderr[-500:]).strip()
+        return False, f"pytest exited {result.returncode}: {tail}"
     return True, "pytest passed"
 
 

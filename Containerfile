@@ -31,14 +31,27 @@ RUN git config --global --add safe.directory /opt/app-root/src && \
 WORKDIR /opt/app-root/src
 
 COPY pyproject.toml ./
+# capability_scout.py's `tests-pass` safety gate runs
+# `python -m pytest tests/ ...` against this image's own tree (repo_dir
+# defaults to Path.cwd(), the running container's filesystem -- see
+# watchers/capability_scout.py). The base install below used to install
+# only the runtime deps, so pytest itself was never importable in this
+# image and that gate failed every single cycle with "No module named
+# pytest" (misreported as an opaque "pytest exited 1", since run_test_suite
+# only captured stdout, where nothing was written -- see git_pr.py's
+# sibling fix in capability_scout.py for the stderr side of this). Install
+# the 'dev' extra (pytest, pytest-asyncio, httpx) here too, same as CI.
 RUN mkdir -p src/agentit && touch src/agentit/__init__.py && \
-    pip install --no-cache-dir . && \
+    pip install --no-cache-dir ".[dev]" && \
     rm -rf src/agentit
 
 COPY src/ src/
 RUN pip install --no-cache-dir --no-deps --force-reinstall .
 COPY skills/ skills/
 COPY checks/ checks/
+# See the pytest/dev-extra comment above -- the tests-pass gate also needs
+# the actual test files to run, which this image never shipped.
+COPY tests/ tests/
 
 # Real git history + origin remote so capability_scout.py / self-fix
 # --create-pr can `git checkout -b` / commit / push against AgentIT's own
