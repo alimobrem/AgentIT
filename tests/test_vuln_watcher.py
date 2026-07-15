@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import MagicMock, patch
 
-from agentit.watchers.vuln_watcher import VulnWatcher
+from agentit.watchers.vuln_watcher import _HEARTBEAT_REFRESH_SECONDS, VulnWatcher
 from conftest import make_async_store
 
 
@@ -68,6 +68,63 @@ class TestTickRunsOnEventLoop:
         mock_check_fleet.assert_called_once_with()
         events = raw_store.list_events()
         assert any(e["action"] == "tick-complete" for e in events)
+
+
+class TestHeartbeatRefreshedDuringLongSleep:
+    """Regression test for the liveness-probe crash loop: the chart's
+    livenessProbe (chart/templates/agents/vuln-watcher.yaml) kills the
+    container if /tmp/heartbeat is older than 900s, but this watcher's own
+    ``--interval`` defaults to 21600s (6h). Touching the heartbeat only once
+    per tick means every successful (or failed) tick is followed by a
+    guaranteed SIGKILL ~15-19 minutes into the sleep, forever -- confirmed
+    live via `oc describe pod` (24 restarts, all "failed liveness probe")
+    and postgres tick-complete timestamps exactly 20 minutes apart. The
+    fix: refresh the heartbeat periodically during the sleep, not just
+    before/after it.
+    """
+
+    async def test_sleep_touches_heartbeat_multiple_times_for_long_interval(self):
+        consumer = MagicMock()
+        consumer.poll_once.return_value = []
+        watcher = _watcher(consumer=consumer)
+        watcher._interval = _HEARTBEAT_REFRESH_SECONDS * 2 + 100
+
+        sleep_calls: list[int] = []
+
+        async def fake_sleep(seconds):
+            sleep_calls.append(seconds)
+
+        touch_count = 0
+
+        def fake_touch(self):
+            nonlocal touch_count
+            touch_count += 1
+
+        with patch("agentit.watchers.vuln_watcher.asyncio.sleep", side_effect=fake_sleep), \
+             patch("agentit.watchers.vuln_watcher.Path.touch", fake_touch):
+            await watcher._sleep_with_heartbeat(watcher._interval)
+
+        # Chunked into 300s + 300s + 100s, heartbeat touched after each chunk.
+        assert sleep_calls == [_HEARTBEAT_REFRESH_SECONDS, _HEARTBEAT_REFRESH_SECONDS, 100]
+        assert touch_count == 3
+
+    @patch("agentit.watchers.vuln_watcher.asyncio.sleep", side_effect=KeyboardInterrupt)
+    async def test_short_interval_still_stops_on_interrupt(self, mock_sleep):
+        """Existing single-chunk behavior (interval < refresh window) is
+        preserved -- this is the same scenario `test_run_ticks_once_then_
+        stops_on_interrupt` covers end-to-end via run()."""
+        consumer = MagicMock()
+        consumer.poll_once.return_value = []
+        watcher = _watcher(consumer=consumer)
+        watcher._interval = 1
+
+        try:
+            await watcher._sleep_with_heartbeat(1)
+            assert False, "expected KeyboardInterrupt to propagate"
+        except KeyboardInterrupt:
+            pass
+
+        mock_sleep.assert_called_once_with(1)
 
 
 class TestConstructionAcceptsAsyncStoreDirectly:
