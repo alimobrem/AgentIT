@@ -3,12 +3,31 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 
 import anthropic
 
 from agentit.portal.helpers import llm_breaker
 
 logger = logging.getLogger(__name__)
+
+# Some models wrap an otherwise-correct JSON response in a markdown code
+# fence (```json ... ``` or a bare ``` ... ``` with no language tag) despite
+# every system prompt in this file instructing "Respond ONLY with valid
+# JSON". Matches the whole (already-.strip()ped) response against an
+# optional-language-tag fence and captures the interior; text outside a
+# recognized fence is left untouched. This only strips wrapper syntax -- it
+# never validates or repairs the interior content, so anything still
+# malformed after stripping fails json.loads() in each caller exactly as it
+# did before this existed.
+_CODE_FENCE_RE = re.compile(r"^```[a-zA-Z0-9_+-]*\s*(.*?)\s*```$", re.DOTALL)
+
+
+def _strip_code_fence(raw: str) -> str:
+    """Strip a leading/trailing markdown code fence from an LLM response, if present."""
+    text = raw.strip()
+    match = _CODE_FENCE_RE.match(text)
+    return match.group(1).strip() if match else text
 
 # _chat()'s default output budget — enough for the small, fixed-shape JSON
 # responses most callers expect (a couple of scalar fields plus a one-sentence
@@ -362,7 +381,7 @@ class LLMClient:
                 timeout=60,
             )
             llm_breaker.record_success()
-            return resp.content[0].text.strip()
+            return _strip_code_fence(resp.content[0].text)
         except Exception as exc:
             llm_breaker.record_failure()
             logger.warning("LLM call failed: %s", exc)

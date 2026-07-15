@@ -353,6 +353,126 @@ def test_review_fix_missing_field_returns_none():
     assert result is None
 
 
+# ── markdown code-fence stripping (capability-scout "unparseable" bug) ────
+#
+# Live capability-scout cycles logged as "unparseable no-proposal" even after
+# _chat()'s max_tokens fix stopped truncation, because the model wraps its
+# JSON in a markdown code fence (```json ... ``` or bare ``` ... ```) despite
+# every system prompt saying "Respond ONLY with valid JSON". _chat() now
+# strips a recognized fence via the shared _strip_code_fence() helper before
+# any caller's json.loads(), so every caller gets this for free from one
+# place rather than needing its own duplicate strip logic.
+
+
+def test_strip_code_fence_json_tagged():
+    from agentit.llm import _strip_code_fence
+
+    wrapped = '```json\n{"a": 1}\n```'
+    assert _strip_code_fence(wrapped) == '{"a": 1}'
+
+
+def test_strip_code_fence_bare_no_language_tag():
+    from agentit.llm import _strip_code_fence
+
+    wrapped = '```\n{"a": 1}\n```'
+    assert _strip_code_fence(wrapped) == '{"a": 1}'
+
+
+def test_strip_code_fence_extra_whitespace_and_newlines():
+    from agentit.llm import _strip_code_fence
+
+    wrapped = '  \n\n```json\n\n{"a": 1}\n\n```\n  \n'
+    assert _strip_code_fence(wrapped) == '{"a": 1}'
+
+
+def test_strip_code_fence_leaves_unwrapped_text_untouched():
+    from agentit.llm import _strip_code_fence
+
+    unwrapped = '{"a": 1}'
+    assert _strip_code_fence(unwrapped) == unwrapped
+
+
+def test_strip_code_fence_leaves_already_invalid_text_untouched():
+    from agentit.llm import _strip_code_fence
+
+    garbage = "this is not JSON at all, and never was"
+    assert _strip_code_fence(garbage) == garbage
+
+
+def test_propose_capability_improvement_strips_json_tagged_fence():
+    """The exact live bug: model wraps the proposal in a ```json fence."""
+    proposal_payload = {
+        "has_proposal": True,
+        "title": "Add SLO burn-rate alerting",
+        "gap_description": "docs gap",
+        "evidence": "evidence quote",
+        "target_files": ["src/agentit/slo_collector.py"],
+        "change_summary": "summary",
+        "risk": "low",
+        "test_plan": "plan",
+    }
+    fenced = "```json\n" + json.dumps(proposal_payload) + "\n```"
+    client = _make_client(MagicMock(return_value=_mock_response(fenced)))
+    result = client.propose_capability_improvement({"doc_gaps": [{"file": "x", "line_no": 1}]})
+
+    assert result is not None
+    assert result["has_proposal"] is True
+    assert result["title"] == "Add SLO burn-rate alerting"
+    assert result["target_files"] == ["src/agentit/slo_collector.py"]
+
+
+def test_propose_capability_improvement_strips_bare_fence_no_language_tag():
+    proposal_payload = {"has_proposal": False}
+    fenced = "```\n" + json.dumps(proposal_payload) + "\n```"
+    client = _make_client(MagicMock(return_value=_mock_response(fenced)))
+    result = client.propose_capability_improvement({"doc_gaps": []})
+
+    assert result == {"has_proposal": False}
+
+
+def test_propose_capability_improvement_strips_fence_with_surrounding_whitespace():
+    proposal_payload = {"has_proposal": True, "title": "T", "gap_description": "G", "evidence": "E",
+                         "target_files": ["tests/test_x.py"], "change_summary": "C", "risk": "low", "test_plan": "P"}
+    fenced = "  \n```json\n\n" + json.dumps(proposal_payload) + "\n\n```\n  "
+    client = _make_client(MagicMock(return_value=_mock_response(fenced)))
+    result = client.propose_capability_improvement({"doc_gaps": [{"file": "x", "line_no": 1}]})
+
+    assert result is not None
+    assert result["has_proposal"] is True
+    assert result["title"] == "T"
+
+
+def test_classify_secret_strips_json_fence():
+    fenced = '```json\n{"is_secret": true, "confidence": 0.9, "reason": "Hardcoded key"}\n```'
+    client = _make_client(MagicMock(return_value=_mock_response(fenced)))
+    result = client.classify_secret("config.yaml", "aws_key = AKIA...", [])
+
+    assert result is not None
+    assert result["is_secret"] is True
+
+
+def test_detect_eol_risks_strips_bare_fence():
+    fenced = '```\n{"risks": [{"component": "python", "version": "3.8", "status": "eol", ' \
+             '"eol_date": "2024-10-14", "confidence": 0.9, "reason": "Upstream EOL"}]}\n```'
+    client = _make_client(MagicMock(return_value=_mock_response(fenced)))
+    result = client.detect_eol_risks({"languages": [{"name": "python", "version": "3.8"}]}, {})
+
+    assert result is not None
+    assert len(result) == 1
+    assert result[0]["component"] == "python"
+
+
+def test_classify_secret_bad_json_still_returns_none_after_fence_strip():
+    """Fence-stripping must never mask genuinely malformed JSON -- content
+    that's still invalid after stripping a (possibly absent) fence must fail
+    exactly as before, never fabricate a result."""
+    fenced = "```json\nthis is not valid json even without the fence\n```"
+    client = _make_client(MagicMock(return_value=_mock_response(fenced)))
+    result = client.classify_secret("f.py", "key=abc", [])
+
+    assert result is None
+
+
 def test_review_fix_low_confidence_is_not_silently_upgraded_to_approved():
     # Same contract as classify_action above: review_fix() faithfully returns
     # the model's own confidence. cli.py's self-fix Step 3 gate
