@@ -382,6 +382,21 @@ class TestContainerfileShipsWhatTestsPassGateNeeds:
             "inside the tests-pass gate"
         )
 
+    def test_makes_git_directories_group_writable(self):
+        """Regression test: COPY .git ./.git lands owned by root with mode
+        755 (group has read+execute but not write), which blocks git from
+        creating new lock files/refs inside it under OpenShift's arbitrary,
+        non-root, gid-0 runtime UID. Confirmed live: a real capability-scout
+        PR attempt failed with "Unable to create '.git/HEAD.lock':
+        Permission denied" -- the tests-pass gate had passed, but the PR
+        this whole loop exists to open still couldn't be created."""
+        content = self._containerfile_text()
+        assert "chmod g+w" in content and ".git" in content, (
+            "Containerfile must chmod g+w the copied .git directories or "
+            "every real PR attempt fails with 'Unable to create "
+            "'.git/HEAD.lock': Permission denied'"
+        )
+
 
 class TestCheckNoOpenSelfImprovePr:
     def test_passes_when_no_open_prs(self):

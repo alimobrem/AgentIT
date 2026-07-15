@@ -68,6 +68,22 @@ COPY Containerfile ./Containerfile
 # repository". Safe to ship: the Tekton git-clone task that populates this
 # build's workspace clones a public HTTPS URL with no embedded credentials.
 COPY .git ./.git
+# The directories COPY just created (.git and its subdirs) land owned by
+# root with mode 755 -- group has read+execute but not write. OpenShift
+# runs this container under an arbitrary per-namespace UID that's never
+# actually `1001`, but always shares gid 0 (root) -- the standard
+# OpenShift-friendly pattern is exactly this: any UID, but group-writable
+# so gid-0 membership is what actually grants access. Individual git files
+# (HEAD, config, index, ...) already come out group-writable; only the
+# *directories* were missing g+w, which blocks git from creating new lock
+# files/refs (e.g. `.git/HEAD.lock`) inside them -- confirmed live: a real
+# capability-scout PR attempt failed with "Unable to create
+# '.git/HEAD.lock': Permission denied" for exactly this reason. Must run
+# as root (USER 0) since only the owner or root can chmod files this
+# user (1001) doesn't own.
+USER 0
+RUN find .git -type d -exec chmod g+w {} +
+USER 1001
 
 EXPOSE 8080
 
