@@ -327,14 +327,26 @@ def run_test_suite(repo_dir: Path) -> tuple[bool, str]:
     return True, "pytest passed"
 
 
+_SELF_IMPROVE_BRANCH_PREFIX = "agentit/self-improve/"
+
+
 def check_no_open_self_improve_pr(max_open_prs: int = 1) -> tuple[bool, str]:
     """Weekly-cap / not-daily-spam gate: only open a new PR if fewer than
     ``max_open_prs`` ``agentit/self-improve/*`` PRs are already open —
     checked via ``gh pr list`` per the design doc, so a proposal never
-    piles up unreviewed."""
+    piles up unreviewed.
+
+    ``gh pr list --head`` does an *exact* branch-name match (confirmed live
+    against the real repo), never a prefix -- but every real branch this
+    loop creates is ``agentit/self-improve/<slug>-<unix-timestamp>``
+    (see ``_open_pr``), which never equals the literal string
+    ``agentit/self-improve``. Filtering with ``--head`` that way always
+    returned zero results regardless of how many self-improve PRs were
+    actually open, silently disabling this cap entirely. List every open
+    PR's ``headRefName`` instead and filter by prefix ourselves."""
     try:
         result = subprocess.run(
-            ["gh", "pr", "list", "--head", "agentit/self-improve", "--state", "open", "--json", "url"],
+            ["gh", "pr", "list", "--state", "open", "--limit", "100", "--json", "url,headRefName"],
             capture_output=True, text=True, timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -343,9 +355,10 @@ def check_no_open_self_improve_pr(max_open_prs: int = 1) -> tuple[bool, str]:
         return False, f"gh pr list failed: {result.stderr[:200]}"
     import json as _json
     try:
-        open_prs = _json.loads(result.stdout or "[]")
+        all_open_prs = _json.loads(result.stdout or "[]")
     except _json.JSONDecodeError:
         return False, "could not parse 'gh pr list' output"
+    open_prs = [pr for pr in all_open_prs if pr.get("headRefName", "").startswith(_SELF_IMPROVE_BRANCH_PREFIX)]
     if len(open_prs) >= max_open_prs:
         return False, f"{len(open_prs)} open agentit/self-improve/* PR(s) already outstanding (cap: {max_open_prs})"
     return True, f"{len(open_prs)} open agentit/self-improve/* PR(s) — under the {max_open_prs} cap"

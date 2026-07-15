@@ -408,11 +408,50 @@ class TestCheckNoOpenSelfImprovePr:
     def test_fails_when_at_or_over_cap(self):
         with patch("agentit.capability_scout.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
-                returncode=0, stdout='[{"url": "https://github.com/org/agentit/pull/1"}]', stderr="",
+                returncode=0,
+                stdout='[{"url": "https://github.com/org/agentit/pull/1", '
+                       '"headRefName": "agentit/self-improve/some-proposal-1784150389"}]',
+                stderr="",
             )
             passed, detail = check_no_open_self_improve_pr(max_open_prs=1)
         assert passed is False
         assert "1" in detail
+
+    def test_real_branch_names_have_a_slug_and_timestamp_suffix_and_still_count(self):
+        """Regression test for a real bug found live: `gh pr list --head
+        agentit/self-improve` does an *exact* branch-name match (confirmed
+        against the real repo), but every real branch this loop creates is
+        `agentit/self-improve/<slug>-<unix-timestamp>` (see _open_pr) --
+        never the literal string `agentit/self-improve`. That made this
+        gate's `gh pr list` call always return zero PRs regardless of how
+        many were actually open, silently disabling the cap entirely. A
+        real open PR with a real timestamped branch name must still be
+        counted, and the command itself must not filter by --head at all
+        (the filtering happens client-side by prefix instead)."""
+        with patch("agentit.capability_scout.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout='[{"url": "https://github.com/alimobrem/AgentIT/pull/15", '
+                       '"headRefName": "agentit/self-improve/add-failure-alerting-1784150389"}]',
+                stderr="",
+            )
+            passed, detail = check_no_open_self_improve_pr(max_open_prs=1)
+        args, _kwargs = mock_run.call_args
+        command = args[0]
+        assert "--head" not in command
+        assert passed is False
+        assert "1" in detail
+
+    def test_prs_with_unrelated_branch_names_are_not_counted(self):
+        with patch("agentit.capability_scout.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout='[{"url": "https://github.com/org/agentit/pull/2", '
+                       '"headRefName": "someone-elses-feature-branch"}]',
+                stderr="",
+            )
+            passed, _detail = check_no_open_self_improve_pr(max_open_prs=1)
+        assert passed is True
 
     def test_fails_closed_when_gh_unavailable(self):
         with patch("agentit.capability_scout.subprocess.run", side_effect=OSError("gh not found")):
