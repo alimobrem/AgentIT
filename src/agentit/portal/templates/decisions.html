@@ -5,13 +5,25 @@
 <p class="text-muted mb-2">
   Every place the LLM actually decides an outcome (approve/reject/auto-apply/gate) —
   not just generates text — attributed by the agent or skill that triggered it.
-  Currently covers <strong>fix-review</strong> (self-fix's first-approver gate, attributed
-  by skill) and <strong>auto-mode classify</strong> (safety classification for auto-apply,
+  Covers <strong>fix-review</strong> (self-fix's first-approver gate, attributed
+  by skill), <strong>auto-mode classify</strong> (safety classification for auto-apply,
   attributed by agent when the caller supplies one, otherwise the generic
-  <code>auto-mode</code> component name). A third decision point — the security
-  analyzer's secret false-positive filter — makes a real LLM decision per match but
-  persists nothing today, so it can't be shown here yet.
+  <code>auto-mode</code> component name), <strong>secret-classify</strong> (the security
+  analyzer's per-match hardcoded-secret false-positive filter, attributed to the
+  generic <code>security-analyzer</code> component), and <strong>capability-proposal</strong>
+  (capability-scout's self-improvement cycle, attributed to the generic
+  <code>capability-scout</code> component).
 </p>
+
+{# Outcome vocabulary spans all four decision types (see llm_decisions.py's
+   module docstring) -- classified once here instead of a two-case ternary,
+   so a genuinely successful/benign outcome (e.g. capability-proposal's
+   'proposed'/'no-signal', secret-classify's 'dropped') never renders
+   identically to a real failure ('error', 'gate-blocked', 'rejected'). Set
+   at the top (not inside either `{% if %}` below) so both the summary and
+   log tables can rely on it even when one of them is empty. #}
+{% set success_outcomes = ('approved', 'auto-applied', 'proposed', 'dropped') %}
+{% set warning_outcomes = ('gated', 'no-signal', 'kept') %}
 
 <div class="stat-grid">
   <div class="stat-card">
@@ -59,7 +71,7 @@
       <td>{{ g.total }}</td>
       <td class="text-sm">
         {% for outcome, count in g.outcomes.items() %}
-        <span class="badge badge-{{ 'success' if outcome in ('approved', 'auto-applied') else 'warning' if outcome == 'gated' else 'danger' }}">{{ outcome }}: {{ count }}</span>
+        <span class="badge badge-{{ 'success' if outcome in success_outcomes else 'warning' if outcome in warning_outcomes else 'danger' }}">{{ outcome }}: {{ count }}</span>
         {% endfor %}
       </td>
     </tr>
@@ -110,7 +122,7 @@
       <td class="text-bold">{{ d.attribution }}</td>
       <td>{{ d.target_app or "—" }}</td>
       <td>
-        <span class="badge badge-{{ 'success' if d.outcome in ('approved', 'auto-applied') else 'warning' if d.outcome == 'gated' else 'danger' }}">{{ d.outcome }}</span>
+        <span class="badge badge-{{ 'success' if d.outcome in success_outcomes else 'warning' if d.outcome in warning_outcomes else 'danger' }}">{{ d.outcome }}</span>
       </td>
       <td class="text-sm text-muted">{{ d.reason or '—' }}</td>
     </tr>

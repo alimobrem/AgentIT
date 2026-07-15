@@ -39,9 +39,10 @@ async def decisions_page(request: Request, decision_type: str = "", attribution:
 
     Answers "how is agent/skill X actually performing" — how often the LLM
     approves, rejects, or gates its output, and why — by merging the
-    fix-review (skill_effectiveness) and auto-mode classify (events) decision
-    records into one view. See agentit/llm_decisions.py for what's covered
-    and what isn't (classify_secret has no persisted decision to show yet).
+    fix-review (skill_effectiveness), auto-mode classify, secret-classify,
+    and capability-proposal (all three via events) decision records into one
+    view. See agentit/llm_decisions.py's module docstring for what each
+    decision type covers and how it's attributed.
     """
     from agentit.llm_decisions import list_llm_decisions, summarize_by_attribution
 

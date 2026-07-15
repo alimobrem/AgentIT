@@ -7,6 +7,8 @@ from agentit.llm_decisions import (
     DECISION_TYPE_AUTO_MODE,
     DECISION_TYPE_CAPABILITY_PROPOSAL,
     DECISION_TYPE_FIX_REVIEW,
+    DECISION_TYPE_SECRET_CLASSIFY,
+    build_secret_classify_events,
     list_llm_decisions,
     summarize_by_attribution,
 )
@@ -190,6 +192,106 @@ class TestCapabilityProposalDecisions:
         decisions = list_llm_decisions(store, attribution="capability-scout")
         assert len(decisions) == 1
         assert decisions[0]["decision_type"] == DECISION_TYPE_CAPABILITY_PROPOSAL
+
+
+class TestBuildSecretClassifyEvents:
+    """`SecurityAnalyzer`'s raw per-match `classify_secret` verdicts →
+    `store.log_event()` kwargs (see `analyzers.security.SecurityAnalyzer`'s
+    `secret_decisions_out` param)."""
+
+    def test_kept_decision_becomes_a_kept_prefixed_event(self) -> None:
+        events = build_secret_classify_events(
+            [{"file_path": "config.py", "secret_type": "api_key", "is_secret": True,
+              "confidence": 0.9, "reason": "Looks like a real API key", "kept": True}],
+            target_app="my-app",
+        )
+        assert len(events) == 1
+        ev = events[0]
+        assert ev["agent_id"] == "security-analyzer"
+        assert ev["action"] == "secret-classify"
+        assert ev["target_app"] == "my-app"
+        assert ev["summary"] == "KEPT: Looks like a real API key"
+        assert ev["details"] == {
+            "file_path": "config.py", "secret_type": "api_key",
+            "is_secret": True, "confidence": 0.9,
+        }
+
+    def test_dropped_decision_becomes_a_dropped_prefixed_event(self) -> None:
+        events = build_secret_classify_events(
+            [{"file_path": "app.py", "secret_type": "password", "is_secret": False,
+              "confidence": 0.95, "reason": "Reads from an env var lookup", "kept": False}],
+            target_app="my-app",
+        )
+        assert events[0]["summary"] == "DROPPED: Reads from an env var lookup"
+
+    def test_empty_decisions_produce_no_events(self) -> None:
+        assert build_secret_classify_events([], target_app="my-app") == []
+
+
+class TestSecretClassifyDecisions:
+    """`secret-classify` events → decisions attributed to the generic
+    `security-analyzer` component -- every real `classify_secret` LLM call
+    becomes a decision, whether kept or dropped."""
+
+    def test_kept_event_becomes_a_kept_decision(self) -> None:
+        store = make_store()
+        for ev in build_secret_classify_events(
+            [{"file_path": "config.py", "secret_type": "api_key", "is_secret": True,
+              "confidence": 0.9, "reason": "Looks like a real API key", "kept": True}],
+            target_app="my-app",
+        ):
+            store.log_event(**ev)
+
+        decisions = list_llm_decisions(store)
+        assert len(decisions) == 1
+        d = decisions[0]
+        assert d["decision_type"] == DECISION_TYPE_SECRET_CLASSIFY
+        assert d["attribution"] == "security-analyzer"
+        assert d["attribution_kind"] == "component"
+        assert d["target_app"] == "my-app"
+        assert d["outcome"] == "kept"
+        assert d["reason"] == "Looks like a real API key"
+
+    def test_dropped_event_becomes_a_dropped_decision(self) -> None:
+        store = make_store()
+        for ev in build_secret_classify_events(
+            [{"file_path": "app.py", "secret_type": "password", "is_secret": False,
+              "confidence": 0.95, "reason": "Reads from an env var lookup", "kept": False}],
+            target_app="my-app",
+        ):
+            store.log_event(**ev)
+
+        decisions = list_llm_decisions(store)
+        assert decisions[0]["outcome"] == "dropped"
+
+    def test_included_alongside_other_decision_types(self) -> None:
+        store = make_store()
+        store.record_skill_outcome("network-policy", "app-a", "approved", "fine")
+        store.log_event("auto-mode", "decision", "app-b", "info", "AUTO-APPLY: safe: fine")
+        for ev in build_secret_classify_events(
+            [{"file_path": "f.py", "secret_type": "token", "is_secret": True,
+              "confidence": 0.8, "reason": "real token", "kept": True}],
+            target_app="app-c",
+        ):
+            store.log_event(**ev)
+
+        decisions = list_llm_decisions(store)
+        types = {d["decision_type"] for d in decisions}
+        assert types == {DECISION_TYPE_FIX_REVIEW, DECISION_TYPE_AUTO_MODE, DECISION_TYPE_SECRET_CLASSIFY}
+
+    def test_filter_by_secret_classify_attribution(self) -> None:
+        store = make_store()
+        store.record_skill_outcome("network-policy", "app-a", "approved", "fine")
+        for ev in build_secret_classify_events(
+            [{"file_path": "f.py", "secret_type": "token", "is_secret": True,
+              "confidence": 0.8, "reason": "real token", "kept": True}],
+            target_app="app-c",
+        ):
+            store.log_event(**ev)
+
+        decisions = list_llm_decisions(store, attribution="security-analyzer")
+        assert len(decisions) == 1
+        assert decisions[0]["decision_type"] == DECISION_TYPE_SECRET_CLASSIFY
 
 
 class TestListLlmDecisionsMerging:

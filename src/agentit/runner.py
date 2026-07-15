@@ -50,6 +50,7 @@ def run_assessment(
     checks_dir: Path | None = None,
     suppressions: set[str] | None = None,
     check_results_out: list[dict] | None = None,
+    secret_decisions_out: list[dict] | None = None,
 ) -> AssessmentReport:
     """Run a full assessment.
 
@@ -57,6 +58,13 @@ def run_assessment(
     ``{"check_name", "dimension", "passed"}`` row per data-driven check that
     ran — the caller (typically the portal, once it has an `assessment_id`)
     can then persist this via `AssessmentStore.save_check_results`.
+
+    ``secret_decisions_out``, if provided, is populated (in place) with one
+    row per real `classify_secret` LLM call the security analyzer made (see
+    `analyzers.security.SecurityAnalyzer`) — the caller can persist these via
+    `llm_decisions.build_secret_classify_events()` + `store.log_event()`, the
+    same "populate then persist once an assessment_id exists" pattern as
+    `check_results_out`.
     """
     detector = StackDetector()
     stack = detector.detect(repo_path)
@@ -64,7 +72,7 @@ def run_assessment(
     architecture = _detect_architecture(repo_path)
 
     analyzers = [
-        SecurityAnalyzer(llm_client=llm_client),
+        SecurityAnalyzer(llm_client=llm_client, secret_decisions_out=secret_decisions_out),
         ObservabilityAnalyzer(),
         CICDAnalyzer(),
         InfrastructureAnalyzer(llm_client=llm_client),

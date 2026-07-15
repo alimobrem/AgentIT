@@ -141,6 +141,57 @@ class TestInternalWebhookToken:
         )
         assert resp.status_code == 200
 
+    def test_skill_draft_route_registered_with_internal_token_dependency(self):
+        """Regression guard for the 2026-07-15 incident: the skill-learner
+        watcher's cross-pod webhook (`/api/webhook/skill-draft`) 404'd
+        against a live pod. Root cause turned out to be Argo Rollouts
+        version skew (the stable Service the watcher calls stayed pinned to
+        an old ReplicaSet mid-canary-rollout), not a code regression -- but
+        this asserts directly against `app.routes` that the route itself
+        stays exactly where the watcher expects it (exact path, POST-only,
+        gated by `verify_internal_token`) so a *future* accidental drop/
+        rename/shadow during refactors (this session's webhooks.py/
+        delivery.py/assessments.py churn, or any later one) fails a test
+        instead of silently reappearing as a live-cluster incident.
+        """
+        from agentit.portal.app import app
+        from agentit.portal.routes.webhooks import router as webhooks_router, verify_internal_token
+
+        # OpenAPI schema reflects exactly what's actually wired into the
+        # running `app` (survives however a given FastAPI/Starlette version
+        # internally represents `include_router`'d routes) -- proves this
+        # exact path is registered with a POST operation, i.e. not dropped
+        # or shadowed by another route during app.py's route-module wiring.
+        schema = app.openapi()
+        assert "/api/webhook/skill-draft" in schema["paths"], "route missing, renamed, or not registered on app"
+        assert "post" in schema["paths"]["/api/webhook/skill-draft"]
+
+        # The route *definition* itself (in webhooks.py, independent of how
+        # app.py wires it in) must still require verify_internal_token.
+        matches = [r for r in webhooks_router.routes if getattr(r, "path", None) == "/api/webhook/skill-draft"]
+        assert len(matches) == 1, "route missing, renamed, or duplicated in webhooks_router"
+        route = matches[0]
+        assert route.methods == {"POST"}
+        dependency_calls = [d.call for d in route.dependant.dependencies]
+        assert verify_internal_token in dependency_calls
+
+    @patch.dict(os.environ, {"AGENTIT_INTERNAL_WEBHOOK_TOKEN": "s3cr3t-token"})
+    def test_skill_draft_valid_authed_request_never_404s(self, portal_client, tmp_path, monkeypatch):
+        """A validly-authed request must never come back 404 -- that's
+        exactly the symptom the watcher saw when it hit a stale pod during
+        an in-flight canary rollout (see module docstring above). This is
+        the code-level half of that guarantee: as long as this route is
+        wired into the running app, an authed request resolves it."""
+        client, _, _ = portal_client
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "skills").mkdir()
+        resp = client.post(
+            "/api/webhook/skill-draft",
+            json={"content": "---\nname: never-404\n---\nbody", "domain": "security"},
+            headers={"X-Internal-Webhook-Token": "s3cr3t-token"},
+        )
+        assert resp.status_code != 404
+
     @patch.dict(os.environ, {"AGENTIT_INTERNAL_WEBHOOK_TOKEN": "s3cr3t-token"})
     def test_github_push_route_unaffected_by_internal_token(self, portal_client):
         """github-push keeps its own HMAC-signature mechanism (TestGitHubSignature

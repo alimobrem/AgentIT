@@ -85,9 +85,13 @@ async def webhook_assess(request: Request):
         raise HTTPException(400, "repo_url required")
     criticality = body.get("criticality", "medium")
     check_results: list[dict] = []
+    secret_decisions: list[dict] = []
     try:
         report = await with_timeout(
-            asyncio.to_thread(clone_assess_cleanup, repo_url, criticality, check_results_out=check_results)
+            asyncio.to_thread(
+                clone_assess_cleanup, repo_url, criticality,
+                check_results_out=check_results, secret_decisions_out=secret_decisions,
+            )
         )
     except Exception:
         from agentit.portal.metrics import assessments_total as _at
@@ -97,6 +101,9 @@ async def webhook_assess(request: Request):
     _at.labels(criticality=criticality, status="success").inc()
     assessment_id = await s.save(report)
     await s.save_check_results(assessment_id, check_results)
+    from agentit.llm_decisions import build_secret_classify_events
+    for ev in build_secret_classify_events(secret_decisions, report.repo_name):
+        await s.log_event(**ev, correlation_id=assessment_id)
     from agentit.events import TOPIC_ASSESSMENTS
     publish_event("assessment-complete", report.repo_name,
                   f"Assessment complete: {report.overall_score:.0f}/100",
@@ -156,12 +163,19 @@ async def webhook_github_push(request: Request):
 
     criticality = managed.get("criticality", "medium")
     check_results: list[dict] = []
+    secret_decisions: list[dict] = []
     try:
         report = await with_timeout(
-            asyncio.to_thread(clone_assess_cleanup, repo_url, criticality, check_results_out=check_results)
+            asyncio.to_thread(
+                clone_assess_cleanup, repo_url, criticality,
+                check_results_out=check_results, secret_decisions_out=secret_decisions,
+            )
         )
         assessment_id = await s.save(report)
         await s.save_check_results(assessment_id, check_results)
+        from agentit.llm_decisions import build_secret_classify_events
+        for ev in build_secret_classify_events(secret_decisions, report.repo_name):
+            await s.log_event(**ev, correlation_id=assessment_id)
         await s.log_event("github-webhook", "reassessment-complete", managed["repo_name"],
                            "info", f"Re-assessment complete: {report.overall_score:.0f}/100 (was {managed.get('latest_score', '?')})")
         from agentit.events import TOPIC_ASSESSMENTS as _TOPIC_ASSESSMENTS

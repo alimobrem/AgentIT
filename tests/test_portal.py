@@ -2494,3 +2494,70 @@ def test_decisions_page_filters_by_decision_type(client, _override_store):
     assert resp.status_code == 200
     assert "fine skill decision" in resp.text
     assert "fine auto decision" not in resp.text
+
+
+def test_decisions_page_shows_secret_classify_decisions(client, _override_store):
+    """Regression guard for the gap README/llm_decisions.py used to document:
+    classify_secret decisions previously persisted nothing and never showed
+    up here (see analyzers/security.py's secret_decisions_out param)."""
+    from agentit.llm_decisions import build_secret_classify_events
+
+    store = _override_store
+    for ev in build_secret_classify_events(
+        [{"file_path": "config.py", "secret_type": "api_key", "is_secret": True,
+          "confidence": 0.9, "reason": "Looks like a real hardcoded API key", "kept": True}],
+        target_app="my-app",
+    ):
+        store.log_event(**ev)
+
+    resp = client.get("/decisions")
+    assert resp.status_code == 200
+    assert "secret-classify" in resp.text
+    assert "security-analyzer" in resp.text
+    assert "Looks like a real hardcoded API key" in resp.text
+    assert "kept" in resp.text
+
+
+def test_decisions_page_filters_by_secret_classify_decision_type(client, _override_store):
+    from agentit.llm_decisions import build_secret_classify_events
+
+    store = _override_store
+    store.record_skill_outcome("network-policy", "app-a", "approved", "fine skill decision")
+    for ev in build_secret_classify_events(
+        [{"file_path": "app.py", "secret_type": "password", "is_secret": False,
+          "confidence": 0.8, "reason": "env var lookup, false positive", "kept": False}],
+        target_app="app-b",
+    ):
+        store.log_event(**ev)
+
+    resp = client.get("/decisions?decision_type=secret-classify")
+    assert resp.status_code == 200
+    assert "env var lookup, false positive" in resp.text
+    assert "fine skill decision" not in resp.text
+
+
+def test_decisions_page_capability_proposal_success_outcomes_are_not_danger_badges(client, _override_store):
+    """Regression guard: the outcome-badge lookup previously only
+    special-cased 'approved'/'auto-applied' (green) and 'gated' (yellow),
+    defaulting everything else -- including capability-proposal's genuinely
+    successful 'proposed' outcome and its benign 'no-signal' no-op -- to a
+    red 'danger' badge, misrepresenting a successful self-improvement cycle
+    as a failure on the live page."""
+    store = _override_store
+    store.log_event(
+        "capability-scout", "capability-run", None, "info",
+        "Opened proposal PR: Track stack signatures",
+        details={"evidence": "README.md:42", "pr_url": "https://github.com/org/agentit/pull/9"},
+    )
+    store.log_event(
+        "capability-scout", "capability-run", None, "warning",
+        "No proposal this cycle — insufficient real signal.",
+        details={"evidence": "", "pr_url": None, "gate_results": []},
+    )
+
+    resp = client.get("/decisions")
+    assert resp.status_code == 200
+    assert 'badge badge-success">proposed' in resp.text
+    assert 'badge badge-warning">no-signal' in resp.text
+    assert 'badge badge-danger">proposed' not in resp.text
+    assert 'badge badge-danger">no-signal' not in resp.text

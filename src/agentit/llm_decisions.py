@@ -2,7 +2,7 @@
 generation) into one queryable, attributed view.
 
 "Decision" here means the LLM's output directly gates an outcome (approve/reject/
-auto-apply/gate) — not just "the LLM generated some text". Two decision points
+auto-apply/gate) — not just "the LLM generated some text". Four decision points
 currently produce durable records that this module can query:
 
   - fix-review (`LLMClient.review_fix`, invoked from `cli.py`'s `self-fix` command's
@@ -19,20 +19,23 @@ currently produce durable records that this module can query:
     because most callers (onboarding, self-fix) apply a whole bundle of manifests
     spanning many agents at once, not a single agent/skill's output.
 
-A third real decision point, `classify_secret` (the security analyzer's LLM-based
-false-positive filter on potential hardcoded secrets), is deliberately NOT included
-here: nothing persists its verdict today — the confidence/reason is used inline to
-decide whether to keep or drop a finding and then discarded. That's a real gap, not
-a bug in this module; it's called out in the "LLM Decisions" page and README instead
-of being silently omitted.
+  - secret-classify (`LLMClient.classify_secret`, invoked from
+    `analyzers.security.SecurityAnalyzer._check_secrets`): decides per regex match
+    whether a potential hardcoded secret is real (`kept` — stays a critical finding)
+    or a false positive (`dropped` — confidence > 0.7 that it isn't a secret, so the
+    finding is discarded before it ever reaches the report). Persisted to the `events`
+    table (action='secret-classify') via `build_secret_classify_events()`, attributed
+    generically to the `security-analyzer` component (there's no per-skill target —
+    every classification happens inside one analyzer, not a generated skill), with
+    `target_app` carrying the real repo being scanned.
 
-A fourth decision point, `capability-proposal` (`LLMClient.propose_capability_improvement`,
-invoked from the `capability-scout` watcher — see docs/self-improvement-for-agentit.md),
-proposes small, evidence-grounded changes to AgentIT's own codebase. Persisted to the
-`events` table (action='capability-run') every cycle, whether or not a proposal was
-actually made — `_capability_proposal_decisions()` maps each cycle to a decision,
-attributed generically to the `capability-scout` component (there's no per-app or
-per-skill target — every proposal targets AgentIT's own repo).
+  - capability-proposal (`LLMClient.propose_capability_improvement`, invoked from
+    the `capability-scout` watcher — see docs/self-improvement-for-agentit.md),
+    proposes small, evidence-grounded changes to AgentIT's own codebase. Persisted to
+    the `events` table (action='capability-run') every cycle, whether or not a
+    proposal was actually made — `_capability_proposal_decisions()` maps each cycle to
+    a decision, attributed generically to the `capability-scout` component (there's no
+    per-app or per-skill target — every proposal targets AgentIT's own repo).
 """
 from __future__ import annotations
 
@@ -41,9 +44,11 @@ import json
 
 DECISION_TYPE_FIX_REVIEW = "fix-review"
 DECISION_TYPE_AUTO_MODE = "auto-mode-classify"
+DECISION_TYPE_SECRET_CLASSIFY = "secret-classify"  # == analyzers.security.SECRET_CLASSIFY_ACTION
 DECISION_TYPE_CAPABILITY_PROPOSAL = "capability-proposal"
 
 _AUTO_MODE_FALLBACK_AGENT = "auto-mode"
+_SECRET_CLASSIFY_ATTRIBUTION = "security-analyzer"
 _CAPABILITY_SCOUT_ATTRIBUTION = "capability-scout"
 
 
@@ -120,6 +125,73 @@ def _auto_mode_decisions(store, limit: int, loop=None) -> list[dict]:
     return decisions
 
 
+def build_secret_classify_events(decisions: list[dict], target_app: str) -> list[dict]:
+    """Turn `SecurityAnalyzer`'s raw per-match `classify_secret` verdicts into
+    `store.log_event()` call kwargs, ready to persist once a caller has run an
+    assessment (see `runner.run_assessment`'s `secret_decisions_out` param).
+
+    Mirrors `AutoMode.execute()`'s "{OUTCOME}: {reason}" summary convention
+    exactly so `_secret_classify_decisions()` below can parse it the same way
+    `_parse_auto_mode_summary()` does.
+    """
+    from agentit.analyzers.security import SECRET_CLASSIFY_ACTION
+
+    events = []
+    for d in decisions:
+        outcome = "KEPT" if d["kept"] else "DROPPED"
+        events.append({
+            "agent_id": _SECRET_CLASSIFY_ATTRIBUTION,
+            "action": SECRET_CLASSIFY_ACTION,
+            "target_app": target_app,
+            "severity": "info",
+            "summary": f"{outcome}: {d['reason']}",
+            "details": {
+                "file_path": d["file_path"],
+                "secret_type": d["secret_type"],
+                "is_secret": d["is_secret"],
+                "confidence": d["confidence"],
+            },
+        })
+    return events
+
+
+def _parse_secret_classify_summary(summary: str) -> tuple[str, str]:
+    """Split a secret-classify decision event's summary into (outcome, reason).
+
+    Summaries are logged as `f"{'KEPT' if kept else 'DROPPED'}: {reason}"` by
+    `build_secret_classify_events()` above.
+    """
+    if ": " in summary:
+        prefix, reason = summary.split(": ", 1)
+    else:
+        prefix, reason = summary, ""
+    outcome = "kept" if prefix.strip() == "KEPT" else "dropped"
+    return outcome, reason
+
+
+def _secret_classify_decisions(store, limit: int, loop=None) -> list[dict]:
+    """`events` rows (action='secret-classify') → decisions attributed to the
+    generic `security-analyzer` component -- every real `classify_secret` LLM
+    call becomes a decision, whether the match was kept as a finding or
+    dropped as a false positive (see module docstring)."""
+    from agentit.analyzers.security import SECRET_CLASSIFY_ACTION
+
+    rows = _bridge(store.list_events_by_action(SECRET_CLASSIFY_ACTION, limit=limit), loop)
+    decisions = []
+    for r in rows:
+        outcome, reason = _parse_secret_classify_summary(r["summary"])
+        decisions.append({
+            "timestamp": r["timestamp"],
+            "decision_type": DECISION_TYPE_SECRET_CLASSIFY,
+            "attribution": _SECRET_CLASSIFY_ATTRIBUTION,
+            "attribution_kind": "component",
+            "target_app": r.get("target_app") or "",
+            "outcome": outcome,
+            "reason": reason,
+        })
+    return decisions
+
+
 def _capability_proposal_decisions(store, limit: int, loop=None) -> list[dict]:
     """`events` rows (action='capability-run') → decisions attributed to the
     `capability-scout` component -- every cycle becomes a decision, whether
@@ -175,6 +247,7 @@ def list_llm_decisions(
     decisions = (
         _fix_review_decisions(store, limit, loop)
         + _auto_mode_decisions(store, limit, loop)
+        + _secret_classify_decisions(store, limit, loop)
         + _capability_proposal_decisions(store, limit, loop)
     )
     if decision_type:

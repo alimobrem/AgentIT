@@ -28,12 +28,30 @@ IGNORED_SECRET_SUFFIXES = {
 
 HELM_TEMPLATE_RE = re.compile(r"\{\{.*\}\}")
 
+# Action name for the durable event `classify_secret` decisions are persisted
+# under (see `agentit.llm_decisions`) -- mirrors `capability_scout
+# .CAPABILITY_RUN_ACTION`'s convention of a module-owned constant the
+# decision-audit layer imports rather than duplicating the literal string.
+SECRET_CLASSIFY_ACTION = "secret-classify"
+
 
 class SecurityAnalyzer:
     dimension = "security"
 
-    def __init__(self, llm_client: object | None = None) -> None:
+    def __init__(
+        self,
+        llm_client: object | None = None,
+        secret_decisions_out: list[dict] | None = None,
+    ) -> None:
+        """``secret_decisions_out``, if given, is populated (in place) with one
+        ``{"file_path", "secret_type", "is_secret", "confidence", "reason", "kept"}``
+        row per real `classify_secret` LLM call -- mirrors `runner.run_assessment`'s
+        `check_results_out` convention. The caller (once it has an
+        `assessment_id`) persists these via `llm_decisions.build_secret_classify_events()`
+        + `store.log_event()`.
+        """
         self._llm = llm_client
+        self._secret_decisions_out = secret_decisions_out
 
     def analyze(self, repo_path: Path) -> DimensionScore:
         findings: list[Finding] = []
@@ -65,8 +83,19 @@ class SecurityAnalyzer:
                         matched_line = _get_match_line(content, match.start())
                         context_lines = _get_context_lines(content, match.start(), radius=3)
                         verdict = self._llm.classify_secret(rel_path, matched_line, context_lines)
-                        if verdict is not None and not verdict["is_secret"] and verdict["confidence"] > 0.7:
-                            continue
+                        if verdict is not None:
+                            dropped = not verdict["is_secret"] and verdict["confidence"] > 0.7
+                            if self._secret_decisions_out is not None:
+                                self._secret_decisions_out.append({
+                                    "file_path": rel_path,
+                                    "secret_type": secret_type,
+                                    "is_secret": verdict["is_secret"],
+                                    "confidence": verdict["confidence"],
+                                    "reason": verdict["reason"],
+                                    "kept": not dropped,
+                                })
+                            if dropped:
+                                continue
                     findings.append(Finding(
                         category="secrets",
                         severity=Severity.critical,

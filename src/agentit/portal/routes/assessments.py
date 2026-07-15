@@ -65,6 +65,7 @@ def _clone_assess_cleanup(
     criticality: str,
     infra_repo_url: str | None = None,
     check_results_out: list[dict] | None = None,
+    secret_decisions_out: list[dict] | None = None,
 ):
     repo_path = clone_repo(repo_url)
     try:
@@ -72,6 +73,7 @@ def _clone_assess_cleanup(
             repo_path, repo_url, criticality,
             llm_client=get_llm_client(), infra_repo_url=infra_repo_url,
             check_results_out=check_results_out,
+            secret_decisions_out=secret_decisions_out,
         )
     finally:
         shutil.rmtree(repo_path, ignore_errors=True)
@@ -82,12 +84,16 @@ def _assess_sync(
     criticality: str,
     infra_repo_url: str | None = None,
     check_results_out: list[dict] | None = None,
+    secret_decisions_out: list[dict] | None = None,
 ):
     """Run assessment synchronously. Used by webhooks and background threads."""
     infra = infra_repo_url
     if not infra:
         infra = _auto_create_infra_repo(repo_url)
-    return _clone_assess_cleanup(repo_url, criticality, infra, check_results_out=check_results_out)
+    return _clone_assess_cleanup(
+        repo_url, criticality, infra,
+        check_results_out=check_results_out, secret_decisions_out=secret_decisions_out,
+    )
 
 
 @router.get("/assess")
@@ -150,12 +156,19 @@ async def assess_submit(
             _bridge(store.update_assessment_job(job_id, "cloning", "Cloning repository..."))
             _bridge(store.update_assessment_job(job_id, "assessing", "Analyzing repository..."))
             check_results: list[dict] = []
-            report = _assess_sync(repo_url, criticality, infra, check_results_out=check_results)
+            secret_decisions: list[dict] = []
+            report = _assess_sync(
+                repo_url, criticality, infra,
+                check_results_out=check_results, secret_decisions_out=secret_decisions,
+            )
             _bridge(store.update_assessment_job(job_id, "saving", "Saving results..."))
             from agentit.portal.metrics import assessments_total as _at
             _at.labels(criticality=criticality, status="success").inc()
             assessment_id = _bridge(store.save(report))
             _bridge(store.save_check_results(assessment_id, check_results))
+            from agentit.llm_decisions import build_secret_classify_events
+            for ev in build_secret_classify_events(secret_decisions, report.repo_name):
+                _bridge(store.log_event(**ev, correlation_id=assessment_id))
             # Publish event on first assessment for this repo
             history = _bridge(store.list_history(report.repo_url))
             if len(history) <= 1:
@@ -217,10 +230,12 @@ async def self_assess_route(request: Request):
     repo_url = "https://github.com/alimobrem/AgentIT"
     infra = await asyncio.to_thread(_auto_create_infra_repo, repo_url)
     check_results: list[dict] = []
+    secret_decisions: list[dict] = []
     try:
         report = await with_timeout(
             asyncio.to_thread(
-                _clone_assess_cleanup, repo_url, "high", infra, check_results_out=check_results,
+                _clone_assess_cleanup, repo_url, "high", infra,
+                check_results_out=check_results, secret_decisions_out=secret_decisions,
             )
         )
     except Exception as exc:
@@ -229,6 +244,9 @@ async def self_assess_route(request: Request):
     s = await get_store()
     assessment_id = await s.save(report)
     await s.save_check_results(assessment_id, check_results)
+    from agentit.llm_decisions import build_secret_classify_events
+    for ev in build_secret_classify_events(secret_decisions, report.repo_name):
+        await s.log_event(**ev, correlation_id=assessment_id)
     await s.log_event("self-assess", "assessment-complete", "agentit", "info",
                        f"Self-assessment complete: {report.overall_score:.0f}/100")
     from agentit.events import TOPIC_ASSESSMENTS as _TOPIC_ASSESS
