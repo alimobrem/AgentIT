@@ -93,12 +93,24 @@ spec:
             periodSeconds: 300
             failureThreshold: 3
           resources:
+            # The tests-pass safety gate (capability_scout.py's
+            # run_test_suite()) shells out to `python -m pytest tests/ ...`
+            # as a *subprocess of this same container* -- momentarily
+            # doubling up the interpreter + every import (fastapi,
+            # anthropic, kubernetes client, uvicorn, ...) on top of the
+            # long-running watcher process itself. At the previous 256Mi
+            # limit this OOMKilled the pod outright (confirmed live: `oc
+            # exec`-ing the exact gate command here killed the container
+            # with exit 137) well before pytest could even finish
+            # collecting ~1900 tests. The portal Rollout, which can also
+            # trigger this same gate via the manual-run route, already
+            # runs at 512Mi for comparable reasons.
             requests:
               cpu: 50m
-              memory: 128Mi
+              memory: 256Mi
             limits:
               cpu: 250m
-              memory: 256Mi
+              memory: 1Gi
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
