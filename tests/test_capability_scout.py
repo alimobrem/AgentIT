@@ -281,6 +281,28 @@ class TestRunTestSuite:
         assert passed is False
         assert "No module named pytest" in detail
 
+    def test_strips_in_cluster_service_account_env_vars(self, tmp_path, monkeypatch):
+        """Regression test for the dominant real root cause of the live
+        `tests-pass` gate hanging for ~900s+ and getting killed (confirmed
+        twice, at two different resource ceilings): overriding KUBECONFIG
+        alone does nothing when this gate runs inside a real cluster pod,
+        because kube.py's config loader tries load_incluster_config()
+        FIRST, which only checks KUBERNETES_SERVICE_HOST/PORT and the
+        mounted service-account token -- never KUBECONFIG. Confirmed live
+        against the real agentit-capability-scout pod: load_incluster_config()
+        succeeded in <1ms with KUBECONFIG overridden, only failing (and
+        falling back to the fast, KUBECONFIG-respecting path) once these
+        two vars were also stripped."""
+        monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+        monkeypatch.setenv("KUBERNETES_SERVICE_PORT", "443")
+        with patch("agentit.capability_scout.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            run_test_suite(tmp_path)
+        _args, kwargs = mock_run.call_args
+        assert "KUBERNETES_SERVICE_HOST" not in kwargs["env"]
+        assert "KUBERNETES_SERVICE_PORT" not in kwargs["env"]
+        assert kwargs["env"]["KUBECONFIG"] == "/tmp/nonexistent-path"
+
     def test_real_subprocess_reports_missing_tests_dir_via_stderr(self, tmp_path):
         """Unmocked end-to-end run against a real sandbox with no tests/
         directory -- reproduces the second real production bug (the image

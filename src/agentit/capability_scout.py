@@ -267,10 +267,29 @@ def check_syntax(diff: dict[str, str]) -> tuple[bool, str]:
 def run_test_suite(repo_dir: Path) -> tuple[bool, str]:
     """The exact same invocation `.github/workflows/tests.yml` uses, same
     `KUBECONFIG` env var per CLAUDE.md's Testing section — a red suite is
-    an automatic discard, never a PR with a note saying tests are failing."""
+    an automatic discard, never a PR with a note saying tests are failing.
+
+    Unlike CI (which runs outside any cluster), this gate can itself run
+    from inside a real pod on a real cluster (capability-scout's own
+    watcher deployment). The `kubernetes` client's config loader tries
+    ``load_incluster_config()`` *before* ``load_kube_config()`` (see
+    ``kube.py``), and in-cluster loading only looks at the
+    ``KUBERNETES_SERVICE_HOST``/``KUBERNETES_SERVICE_PORT`` env vars and
+    the mounted service-account token -- it never consults ``KUBECONFIG``
+    at all. So overriding ``KUBECONFIG`` alone silently does nothing here:
+    every kube-touching test still succeeds against the real cluster
+    instead of failing fast, each one taking real network round-trips
+    against real fleet data instead of <300ms. Confirmed live against the
+    real agentit-capability-scout pod: with these two vars left in place,
+    the same suite that takes ~190s outside a cluster ran for ~900s+ and
+    was ultimately killed twice, at both 256Mi/250m and 2Gi/1-core limits.
+    Stripping them forces the same clean, fast ConfigException-driven
+    fallback CI already gets."""
     import os
 
     env = {**os.environ, "KUBECONFIG": "/tmp/nonexistent-path"}
+    env.pop("KUBERNETES_SERVICE_HOST", None)
+    env.pop("KUBERNETES_SERVICE_PORT", None)
     try:
         result = subprocess.run(
             [sys.executable, "-m", "pytest", "tests/", "-q",
