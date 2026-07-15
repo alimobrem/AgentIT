@@ -50,8 +50,16 @@ RUN pip install --no-cache-dir --no-deps --force-reinstall .
 COPY skills/ skills/
 COPY checks/ checks/
 # See the pytest/dev-extra comment above -- the tests-pass gate also needs
-# the actual test files to run, which this image never shipped.
+# the actual test files to run, which this image never shipped. Most of
+# tests/test_helm_templates.py (plus a chart-consistency check in
+# test_helpers.py, and this Containerfile's own regression coverage in
+# test_capability_scout.py) reads chart/templates/*.yaml and this
+# Containerfile straight off disk relative to the repo root -- neither was
+# ever copied in either, so those tests failed with a bare FileNotFoundError
+# every real cycle, regardless of the actual proposal being tested.
 COPY tests/ tests/
+COPY chart/ chart/
+COPY Containerfile ./Containerfile
 
 # Real git history + origin remote so capability_scout.py / self-fix
 # --create-pr can `git checkout -b` / commit / push against AgentIT's own

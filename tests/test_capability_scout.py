@@ -303,6 +303,25 @@ class TestRunTestSuite:
         assert "KUBERNETES_SERVICE_PORT" not in kwargs["env"]
         assert kwargs["env"]["KUBECONFIG"] == "/tmp/nonexistent-path"
 
+    def test_strips_ambient_postgres_backend_env_vars(self, tmp_path, monkeypatch):
+        """Regression test: store_factory.create_store() reads
+        AGENTIT_DB_BACKEND directly, so leaving it set to 'postgres' (as
+        this watcher's own Deployment does, to share the real fleet's
+        store) makes any test that doesn't explicitly monkeypatch it
+        silently connect to the *real* shared Postgres instead of its own
+        isolated fixture -- confirmed live: test_watch_rescan_iterates_the_fleet
+        saw the real fleet's actual apps instead of its one fixture app."""
+        monkeypatch.setenv("AGENTIT_DB_BACKEND", "postgres")
+        monkeypatch.setenv("AGENTIT_DB_DSN", "postgresql://real-prod-host/agentit")
+        monkeypatch.setenv("PGUSER", "realuser")
+        monkeypatch.setenv("PGPASSWORD", "realpass")
+        with patch("agentit.capability_scout.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            run_test_suite(tmp_path)
+        _args, kwargs = mock_run.call_args
+        for var in ("AGENTIT_DB_BACKEND", "AGENTIT_DB_DSN", "PGUSER", "PGPASSWORD"):
+            assert var not in kwargs["env"], f"{var} must be stripped so tests default to sqlite"
+
     def test_real_subprocess_reports_missing_tests_dir_via_stderr(self, tmp_path):
         """Unmocked end-to-end run against a real sandbox with no tests/
         directory -- reproduces the second real production bug (the image
@@ -347,6 +366,20 @@ class TestContainerfileShipsWhatTestsPassGateNeeds:
             "Containerfile must COPY tests/ tests/ or capability_scout.py's "
             "tests-pass gate always fails with "
             "'ERROR: file or directory not found: tests/'"
+        )
+
+    def test_copies_the_chart_directory_into_the_image(self):
+        """Regression test: most of tests/test_helm_templates.py (plus a
+        chart-consistency check in test_helpers.py) reads
+        chart/templates/*.yaml straight off disk relative to the repo
+        root. Without shipping chart/, every one of those tests fails with
+        a bare FileNotFoundError inside the real tests-pass gate,
+        regardless of the actual proposal under test -- confirmed live."""
+        content = self._containerfile_text()
+        assert "COPY chart/ chart/" in content, (
+            "Containerfile must COPY chart/ chart/ or every "
+            "test_helm_templates.py test fails with FileNotFoundError "
+            "inside the tests-pass gate"
         )
 
 

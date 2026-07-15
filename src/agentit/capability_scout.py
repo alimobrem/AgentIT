@@ -284,12 +284,28 @@ def run_test_suite(repo_dir: Path) -> tuple[bool, str]:
     the same suite that takes ~190s outside a cluster ran for ~900s+ and
     was ultimately killed twice, at both 256Mi/250m and 2Gi/1-core limits.
     Stripping them forces the same clean, fast ConfigException-driven
-    fallback CI already gets."""
+    fallback CI already gets.
+
+    The same problem, same shape, hits ``AGENTIT_DB_BACKEND=postgres`` (set
+    on this watcher's own Deployment so it can share the real fleet's
+    store): ``store_factory.create_store()`` reads that env var directly,
+    so any test that doesn't explicitly monkeypatch it (most don't need
+    to -- CI never sets it, so the sqlite default just applies) silently
+    gets a live connection to the *real* shared Postgres instead of its
+    own isolated fixture. Confirmed live: ``test_watch_rescan_iterates_the_fleet``
+    saw the real fleet's actual apps instead of its one fixture app, and a
+    concurrent real-Postgres-pool contention error
+    (``asyncpg... cannot perform operation: another operation is in
+    progress``) hit other tests sharing that same live pool under
+    full-suite load. Stripped for the same reason as the kube vars above."""
     import os
 
     env = {**os.environ, "KUBECONFIG": "/tmp/nonexistent-path"}
-    env.pop("KUBERNETES_SERVICE_HOST", None)
-    env.pop("KUBERNETES_SERVICE_PORT", None)
+    for var in (
+        "KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT",
+        "AGENTIT_DB_BACKEND", "AGENTIT_DB_DSN", "PGUSER", "PGPASSWORD",
+    ):
+        env.pop(var, None)
     try:
         result = subprocess.run(
             [sys.executable, "-m", "pytest", "tests/", "-q",
