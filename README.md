@@ -132,7 +132,7 @@ Long-lived watchers (deployed as separate pods):
 | Watcher | Loop | Role |
 |---|---|---|
 | **vuln-watcher** | 6h | Fleet CVE monitoring, triggers remediation |
-| **slo-tracker** | 5m | Collects fresh `availability`/`error_rate` metrics from the cluster (via `slo_collector`; `latency_p99_ms` has no collector yet and is skipped/logged, not silently ignored) for every tracked SLO, checks breaches with the correct per-metric direction (`availability` = higher is better; `error_rate`/`latency_p99_ms` = lower is better), publishes breach alerts, and opens rollback gates |
+| **slo-tracker** | 5m | Collects fresh `availability`/`error_rate`/`latency_p99_ms` metrics for every tracked SLO (via `slo_collector`: `availability`/`error_rate` from pod status via the kubernetes client, `latency_p99_ms` from Prometheus — `histogram_quantile(0.99, ...)` over `http_request_duration_seconds_bucket`, scoped to the app's namespace, same `AGENTIT_PROMETHEUS_URL` connection `resource_tuner` uses; apps with no data yet are skipped/logged, not silently ignored), checks breaches with the correct per-metric direction (`availability` = higher is better; `error_rate`/`latency_p99_ms` = lower is better), publishes breach alerts, and opens rollback gates |
 | **drift-detector** | 10m | Argo CD sync monitoring, API drift detection, auto-deprecation of affected skills, reports still-in-use deprecated APIs (`PlatformContext.deprecated_apis`) |
 | **skill-learner** | 24h | Researches CVEs via LLM, drafts new skills for human review — opt-in via `agents.skillLearner.enabled` (chart default: disabled; enabled on the live deployment via `argocd/application.yaml`), requires an LLM connection |
 
