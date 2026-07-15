@@ -89,6 +89,14 @@ def list_pods(namespace: str, label_selector: str = "") -> list[dict]:
                     for cs in (p.status.container_statuses or [])
                 ),
                 "container_statuses": p.status.container_statuses or [],
+                # The controlling owner's kind (e.g. "TaskRun", "ReplicaSet", "Job"),
+                # or None if the pod has no controller owner. Lets callers tell a
+                # one-shot Tekton task pod apart from an actual long-running
+                # service pod without a second API call.
+                "owner_kind": next(
+                    (o.kind for o in (p.metadata.owner_references or []) if o.controller),
+                    None,
+                ),
             }
             for p in pods.items
         ]

@@ -1590,6 +1590,55 @@ def test_health_nav_link(client):
     assert 'href="/health"' in resp.text
 
 
+def test_failed_taskrun_pod_excluded_from_platform_degraded(client):
+    """A Tekton TaskRun-owned pod that ended up Failed (e.g. a one-off
+    onboarding/build attempt against a bad branch) is a terminal, one-shot
+    execution record -- not an ongoing service health signal -- so it must
+    not pin `pods_failed` (and the Health page's "Platform" card) at
+    Degraded forever. A Failed pod NOT owned by a TaskRun (a real crashing
+    service pod) must still count. Regression test for a live incident: a
+    stale `*-git-clone-pod` kept /health reporting Degraded for hours after
+    the onboarding attempt itself had already finished."""
+    taskrun_pod = {
+        "name": "build-hello-world-25952-git-clone-pod", "status": "Failed",
+        "restarts": 0, "age": "2026-07-15T14", "owner_kind": "TaskRun",
+    }
+    real_failure_pod = {
+        "name": "agentit-worker-abc123", "status": "Failed",
+        "restarts": 3, "age": "2026-07-15T17", "owner_kind": "ReplicaSet",
+    }
+    # `_get_cluster_health` does a local `from agentit import kube`, which
+    # shadows any patch on `agentit.portal.routes.health.kube` -- patch the
+    # real `agentit.kube` functions it actually resolves to instead.
+    with patch("agentit.kube.list_pods") as mock_list_pods, \
+            patch("agentit.kube.list_custom_resources") as mock_list_crs:
+        mock_list_pods.return_value = [taskrun_pod, real_failure_pod]
+        mock_list_crs.return_value = []
+        resp = client.get("/api/health")
+
+    data = resp.json()
+    assert data["pods_failed"] == 1
+    assert resp.status_code == 503
+
+
+def test_failed_non_taskrun_pod_only_excluded_when_owned_by_taskrun(client):
+    """Sanity check the inverse: with only the TaskRun-owned failed pod
+    present (no other failures), pods_failed is 0 and /api/health is
+    healthy on that signal."""
+    taskrun_pod = {
+        "name": "build-hello-world-25952-git-clone-pod", "status": "Failed",
+        "restarts": 0, "age": "2026-07-15T14", "owner_kind": "TaskRun",
+    }
+    with patch("agentit.kube.list_pods") as mock_list_pods, \
+            patch("agentit.kube.list_custom_resources") as mock_list_crs:
+        mock_list_pods.return_value = [taskrun_pod]
+        mock_list_crs.return_value = []
+        resp = client.get("/api/health")
+
+    data = resp.json()
+    assert data["pods_failed"] == 0
+
+
 def test_pod_detail_404(client):
     """Mock the kube client so this test is hermetic (no live-cluster round trip)."""
     with patch("agentit.portal.routes.health.kube") as mock_kube:

@@ -129,6 +129,19 @@ def _get_cluster_health(store=None) -> dict:
         for p in pods:
             if p["status"] in ("Succeeded", "Completed"):
                 continue
+            # A Tekton TaskRun-owned pod that reached "Failed" is a one-shot
+            # execution record (e.g. a single onboarding/build attempt), not
+            # an ongoing service health signal -- it will never restart or
+            # recover, and its outcome is already surfaced separately via
+            # `pipeline_status`/`pipelines` above for CI runs. Without this,
+            # a single historical build failure pins `pods_failed` (and the
+            # "Platform" card) at Degraded forever, even though nothing
+            # about the running application is actually broken. Verified
+            # live: a stale `*-git-clone-pod` from an unrelated onboarding
+            # attempt kept /health reporting Degraded for hours after the
+            # attempt itself had already finished.
+            if p["status"] == "Failed" and p.get("owner_kind") == "TaskRun":
+                continue
             result["pods"].append({
                 "name": p["name"], "status": p["status"],
                 "restarts": p["restarts"], "age": p["age"],
