@@ -685,15 +685,38 @@ async def deliver(request: Request, assessment_id: str):
             status_code=303,
         )
 
-    cluster_outcome = delivery["outcomes"].get("cluster_config")
+    outcomes = delivery["outcomes"]
+    cluster_outcome = outcomes.get("cluster_config")
     params = [f"delivery_id={delivery['delivery_id']}", f"dry_run={'true' if dry_run else 'false'}"]
     if isinstance(cluster_outcome, dict) and "applied" in cluster_outcome:
         params.append(f"applied={len(cluster_outcome['applied'])}")
         params.append(f"skipped={len(cluster_outcome.get('skipped', []))}")
         params.append(f"errors={len(cluster_outcome.get('errors', []))}")
-    elif isinstance(cluster_outcome, dict) and cluster_outcome.get("pr_url"):
-        params.append(f"pr_url={cluster_outcome['pr_url']}")
-    if delivery["outcomes"].get("cicd_shared_namespace"):
+
+    # Every commit/PR-based outcome (cluster_config-via-GitOps, source_patch,
+    # manifest_at_rest) shares deliver_with_verification()'s
+    # {"pr_url"|"error", "dry_run", ...} shape -- surface every one of them,
+    # not just cluster_config's, and not just the success case. Previously,
+    # only a cluster_config "pr_url" was ever rendered here: a failed
+    # commit_to_infra_repo()/create_source_patch_pr()/create_onboarding_pr()
+    # (which returns {"error": ...} rather than raising) or a plain dry-run
+    # preview produced a redirect with *no* params reflecting it at all --
+    # the page reloaded looking identical to before the click, i.e. exactly
+    # "commit and open PR doesn't do anything".
+    pr_urls = [o["pr_url"] for o in outcomes.values() if isinstance(o, dict) and o.get("pr_url")]
+    errors = [o["error"] for o in outcomes.values() if isinstance(o, dict) and o.get("error")]
+    dry_run_previews = [
+        f"{o.get('mechanism', cat)} ({len(o['files'])} file(s))"
+        for cat, o in outcomes.items()
+        if isinstance(o, dict) and o.get("dry_run") and "files" in o
+    ]
+    if pr_urls:
+        params.append(f"pr_url={quote(pr_urls[0])}")
+    if errors:
+        params.append(f"error={quote(' | '.join(errors)[:300])}")
+    if dry_run_previews:
+        params.append(f"dry_run_summary={quote(' + '.join(dry_run_previews))}")
+    if outcomes.get("cicd_shared_namespace"):
         params.append("cicd_gate=true")
     return RedirectResponse(
         url=f"/assessments/{assessment_id}/onboard-results?{'&'.join(params)}",

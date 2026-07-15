@@ -95,3 +95,68 @@ class TestDeliverRegisteredCommitsToInfraRepo:
         mock_commit.assert_called_once()
         mock_ensure.assert_called_once()
         _mock_kube.apply_yaml.assert_not_called()
+
+    def test_dry_run_of_gitops_commit_surfaces_a_preview_not_nothing(self, deliver_client, _mock_kube):
+        """Regression test for the live bug report "commit and open PR
+        doesn't do anything": for a GitOps-registered app, clicking "Dry
+        Run" routed cluster_config to ``MECHANISM_INFRA_REPO_COMMIT``'s
+        dry-run branch, which only ever returned ``{"dry_run": True,
+        "files": [...]}`` -- the ``deliver()`` route only ever looked at
+        ``cluster_outcome.get("pr_url")``/``"applied"``, so this dry-run
+        outcome added *zero* redirect params beyond ``delivery_id``/
+        ``dry_run=true``, and the reloaded page showed no alert, no updated
+        step-guide, nothing -- indistinguishable from the button doing
+        nothing at all.
+        """
+        client, store, aid = deliver_client
+        report = store.get(aid)
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
+        store._conn.execute(
+            "UPDATE assessments SET report_json = ? WHERE id = ?",
+            (report.model_dump_json(), aid),
+        )
+        store._conn.commit()
+
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}):
+            resp = client.post(f"/assessments/{aid}/deliver", data={"dry_run": "true"}, follow_redirects=False)
+
+        assert resp.status_code == 303
+        location = resp.headers["location"]
+        assert "dry_run=true" in location
+        assert "dry_run_summary=" in location, (
+            "dry-run through the GitOps-commit path produced no visible "
+            "preview in the redirect -- this is the 'doesn't do anything' bug"
+        )
+        assert "infra-repo-commit" in location
+
+    def test_failed_infra_repo_commit_surfaces_a_visible_error(self, deliver_client, _mock_kube):
+        """A real (non-dry-run) ``commit_to_infra_repo()`` failure returns
+        ``{"error": ...}`` rather than raising (see github_pr.py) -- the old
+        ``deliver()`` redirect logic only ever inspected ``pr_url``/
+        ``applied`` on the cluster_config outcome, so this error was
+        silently dropped: the redirect carried only ``delivery_id``/
+        ``dry_run=false``, no ``error`` param, and the page looked
+        unchanged -- the exact "doesn't do anything" symptom, but for a
+        real failed delivery rather than a dry run.
+        """
+        client, store, aid = deliver_client
+        report = store.get(aid)
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
+        store._conn.execute(
+            "UPDATE assessments SET report_json = ? WHERE id = ?",
+            (report.model_dump_json(), aid),
+        )
+        store._conn.commit()
+
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit:
+            mock_commit.return_value = {"error": "GitHub API error: 404 Not Found"}
+            resp = client.post(f"/assessments/{aid}/deliver", data={"dry_run": "false"}, follow_redirects=False)
+
+        assert resp.status_code == 303
+        location = resp.headers["location"]
+        assert "error=" in location, (
+            "a failed commit_to_infra_repo() was silently dropped from the "
+            "redirect -- this is the 'doesn't do anything' bug"
+        )
+        assert "Not+Found" in location or "Not%20Found" in location

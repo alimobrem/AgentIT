@@ -27,6 +27,11 @@
   </ul>
 </div>
 {% endif %}
+{% if request.query_params.get('dry_run_summary') %}
+<div class="alert alert-info">
+  <strong>Dry run complete — nothing was delivered.</strong> Would deliver via: {{ request.query_params.get('dry_run_summary') }}. Click "Commit &amp; Open PR" / "Apply to Cluster" above to actually deliver.
+</div>
+{% endif %}
 {% if request.query_params.get('error') %}
 <div class="alert alert-error">{{ request.query_params.get('error') }}</div>
 {% endif %}
