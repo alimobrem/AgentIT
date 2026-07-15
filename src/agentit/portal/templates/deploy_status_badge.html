@@ -1,0 +1,15 @@
+{# Ambient nav deploy-status badge fragment. Rendered both as the initial
+   inline markup in base.html (from the cheap in-memory `build_info` context
+   processor) and as the response of GET /api/deploy-status (polled via
+   htmx) -- keep the two in sync if you change this. #}
+<span class="deploy-status-badge deploy-status-{{ deploy_status.state }}" role="status" aria-live="polite"
+      aria-label="AgentIT version {{ deploy_status.running.version | default('unknown') }}, commit {{ deploy_status.running.commit | default('unknown') }}{% if deploy_status.state == 'deploying' %}. Deployment in progress: {{ deploy_status.stage | default('starting') }}{% elif deploy_status.state == 'failed' %}. Deployment failed: {{ deploy_status.reason | default('unknown reason') }}{% endif %}">
+  <span class="deploy-status-dot"></span>
+  {% if deploy_status.state == 'deploying' %}
+  <span class="deploy-status-text">Deploying &middot; {{ deploy_status.stage | default('starting') }}<span class="spinner"></span></span>
+  {% elif deploy_status.state == 'failed' %}
+  <span class="deploy-status-text">Deploy failed</span>
+  {% else %}
+  <span class="deploy-status-text">v{{ deploy_status.running.version | default('unknown') }}{% if deploy_status.running.commit and deploy_status.running.commit != 'unknown' %} &middot; <code>{{ deploy_status.running.commit[:7] }}</code>{% endif %}</span>
+  {% endif %}
+</span>

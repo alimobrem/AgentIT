@@ -50,6 +50,28 @@ build_info = Info(
     "AgentIT build information",
 )
 
+# In-process cache of the last values passed to `build_info.info(...)` --
+# `prometheus_client.Info` doesn't expose a public read-back API, and the
+# ambient deploy-status indicator (routes/health.py) needs "what version is
+# this instance actually running" on every request without scraping our own
+# /metrics endpoint over HTTP.
+_current_build_info: dict[str, str] = {"version": "unknown", "commit": "unknown", "image_tag": "unknown"}
+
+
+def set_build_info(version: str, commit: str, image_tag: str) -> None:
+    """Populate the `agentit_build` Info metric and cache the same values for
+    `get_build_info()`. Called once at startup (`app.py`'s
+    `_set_build_info`)."""
+    global _current_build_info
+    _current_build_info = {"version": version, "commit": commit, "image_tag": image_tag}
+    build_info.info(_current_build_info)
+
+
+def get_build_info() -> dict[str, str]:
+    """Return the build info last set by `set_build_info()` -- the
+    "currently running" half of the deploy-status indicator."""
+    return dict(_current_build_info)
+
 circuit_breaker_open = Gauge(
     "agentit_circuit_breaker_open",
     "1 if the named circuit breaker is currently open (failing closed), else 0",

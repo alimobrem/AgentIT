@@ -88,6 +88,39 @@ def get_pr_status(pr_url: str) -> dict:
         return {"state": "unknown", "merged_at": "", "html_url": pr_url}
 
 
+def get_commit_info(repo_url: str, sha: str) -> dict:
+    """Fetch a single commit's message/author/URL from the GitHub API.
+
+    Used by the deploy-status indicator (routes/health.py) to show *what's
+    actually changing* in an in-progress or just-finished deployment -- the
+    real commit message for the revision being built/deployed, not a
+    fabricated placeholder. Returns `{}` on any failure (missing
+    GITHUB_TOKEN, network error, unknown SHA, ...); callers must treat that
+    as "no commit info available", never synthesize one.
+    """
+    try:
+        token = _get_token()
+        hdrs = _headers(token)
+        owner, repo = _parse_owner_repo(repo_url)
+        resp = requests.get(
+            f"{_API}/repos/{owner}/{repo}/commits/{sha}",
+            headers=hdrs, timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        commit = data.get("commit", {})
+        message = commit.get("message", "")
+        return {
+            "sha": data.get("sha", sha),
+            "message": message.split("\n", 1)[0] if message else "",
+            "author": commit.get("author", {}).get("name", ""),
+            "html_url": data.get("html_url", ""),
+        }
+    except Exception:
+        logger.warning("Failed to fetch commit info for %s@%s", repo_url, sha, exc_info=True)
+        return {}
+
+
 def create_onboarding_pr(
     repo_url: str,
     repo_name: str,

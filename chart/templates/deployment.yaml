@@ -85,6 +85,16 @@ spec:
             - containerPort: 8080
               protocol: TCP
           env:
+            # Same value as the image ref above (`.Values.image.tag`) --
+            # the CI pipeline pins both the built image tag and this Helm
+            # parameter to the commit SHA (see tekton/pipeline.yaml's
+            # `notify-argocd` task), so this is real "what commit is this
+            # instance actually running" data for `agentit_build`/the
+            # deploy-status indicator, not a placeholder.
+            - name: AGENTIT_GIT_COMMIT
+              value: {{ .Values.image.tag | quote }}
+            - name: AGENTIT_IMAGE_TAG
+              value: {{ .Values.image.tag | quote }}
             - name: AGENTIT_DB_PATH
               value: /data/agentit.db
             - name: AGENTIT_DB_BACKEND

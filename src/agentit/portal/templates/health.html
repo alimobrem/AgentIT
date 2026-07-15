@@ -43,6 +43,62 @@
   {% endif %}
 </div>
 
+<h2 class="section-title">Deployment Status</h2>
+<div id="deploy-status-panel" hx-get="/health" hx-trigger="every 15s" hx-select="#deploy-status-panel" hx-target="this" hx-swap="outerHTML">
+<div class="deploy-status-panel deploy-status-panel-{{ deploy_status.state }}">
+  <div class="deploy-status-panel-header">
+    <span class="badge {% if deploy_status.state == 'deploying' %}badge-medium{% elif deploy_status.state == 'failed' %}badge-critical{% else %}badge-low{% endif %}">
+      {% if deploy_status.state == 'deploying' %}Deploying{% elif deploy_status.state == 'failed' %}Failed{% else %}Idle{% endif %}
+    </span>
+    <span class="text-sm text-muted">Running v{{ deploy_status.running.version | default('unknown') }} &middot; <code>{{ deploy_status.running.commit | default('unknown') }}</code> (image tag <code>{{ deploy_status.running.image_tag | default('unknown') }}</code>)</span>
+  </div>
+
+  {% if deploy_status.errors %}
+  <p class="text-danger text-sm mb-1">{{ deploy_status.errors | join(" &middot; ") | safe }}</p>
+  {% endif %}
+
+  {% if deploy_status.pipeline %}
+  <h3 class="text-sm mt-1 mb-1">PipelineRun: <a href="/health/pipelines/{{ deploy_status.pipeline.name }}">{{ deploy_status.pipeline.name }}</a></h3>
+  <div class="lifecycle-stepper">
+    {% for task in deploy_status.pipeline.tasks %}
+    <div class="lifecycle-step {% if task.status == 'Succeeded' %}step-done{% elif task.status in ('Running', 'Started') %}step-active{% endif %}">
+      <div class="step-marker">{% if task.status == 'Succeeded' %}&check;{% elif task.status in ('Running', 'Started') %}&hellip;{% elif task.status == 'Unknown' %}&middot;{% else %}&#33;{% endif %}</div>
+      <div class="step-label">{{ task.name }}</div>
+    </div>
+    {% if not loop.last %}<div class="step-connector {% if task.status == 'Succeeded' %}connector-done{% endif %}"></div>{% endif %}
+    {% endfor %}
+  </div>
+  {% if deploy_status.pipeline.revision %}
+  <p class="text-sm text-muted mt-1">Target commit: <code>{{ deploy_status.pipeline.revision[:12] }}</code></p>
+  {% endif %}
+  {% endif %}
+
+  {% if deploy_status.argo %}
+  <p class="text-sm mt-1">Argo CD:
+    <span class="badge {% if deploy_status.argo.sync == 'Synced' %}badge-low{% else %}badge-critical{% endif %}">{{ deploy_status.argo.sync }}</span>
+    <span class="badge {% if deploy_status.argo.health == 'Healthy' %}badge-low{% elif deploy_status.argo.health == 'Progressing' %}badge-medium{% else %}badge-critical{% endif %}">{{ deploy_status.argo.health }}</span>
+  </p>
+  {% if deploy_status.argo.health_message %}<p class="text-sm text-muted">{{ deploy_status.argo.health_message }}</p>{% endif %}
+  {% endif %}
+
+  {% if deploy_status.commit_info %}
+  <p class="text-sm mt-1">Change: <strong>{{ deploy_status.commit_info.message | default("(no message)") }}</strong>{% if deploy_status.commit_info.author %} by {{ deploy_status.commit_info.author }}{% endif %}{% if deploy_status.commit_info.html_url %} (<a href="{{ deploy_status.commit_info.html_url }}" target="_blank" rel="noopener">view on GitHub</a>){% endif %}</p>
+  {% endif %}
+
+  {% if deploy_status.state == 'failed' and deploy_status.reason %}
+  <p class="text-danger mt-1">{{ deploy_status.reason }}</p>
+  {% endif %}
+
+  {% if deploy_status.resolved %}
+  <p class="mt-1 {% if deploy_status.resolved.outcome == 'healthy' %}text-success{% else %}text-warning{% endif %}">{{ deploy_status.resolved.message }}</p>
+  {% endif %}
+
+  {% if deploy_status.state == 'idle' and not deploy_status.resolved and not deploy_status.pipeline %}
+  <p class="text-muted text-sm mt-1">No deployment history found for this pipeline.</p>
+  {% endif %}
+</div>
+</div>
+
 <h2 class="section-title">Argo CD</h2>
 <table>
   <thead><tr><th>App</th><th>Sync</th><th>Health</th></tr></thead>

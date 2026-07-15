@@ -624,6 +624,61 @@
   }
   .modal-close:hover { color: var(--color-text); }
 
+  /* ── Deploy Status Badge (ambient, nav) ──────────────────────────── */
+  .deploy-status { display: flex; align-items: center; }
+  .deploy-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--font-xs);
+    font-family: var(--font-mono);
+    padding: 2px 10px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--color-border);
+    background: var(--color-surface-2);
+    color: var(--color-muted);
+    white-space: nowrap;
+  }
+  .deploy-status-badge code { font-family: inherit; color: var(--color-text); }
+  .deploy-status-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--color-muted);
+    flex-shrink: 0;
+  }
+  .deploy-status-idle .deploy-status-dot { background: var(--color-success); }
+  .deploy-status-deploying { border-color: var(--color-warning); color: var(--color-warning); }
+  .deploy-status-deploying .deploy-status-dot {
+    background: var(--color-warning);
+    animation: deploy-status-pulse 1.2s ease-in-out infinite;
+  }
+  .deploy-status-failed { border-color: var(--color-danger); color: var(--color-danger); background: rgba(220, 53, 69, 0.1); }
+  .deploy-status-failed .deploy-status-dot { background: var(--color-danger); }
+  .deploy-status-text { display: inline-flex; align-items: center; gap: var(--space-2); }
+  @keyframes deploy-status-pulse {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(240, 165, 0, 0.5); }
+    50% { opacity: 0.6; box-shadow: 0 0 0 4px rgba(240, 165, 0, 0); }
+  }
+
+  /* ── Deployment Status Panel (Health page detail) ─────────────────── */
+  .deploy-status-panel {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-6);
+    margin-bottom: var(--space-6);
+  }
+  .deploy-status-panel-deploying { border-left: 3px solid var(--color-warning); }
+  .deploy-status-panel-failed { border-left: 3px solid var(--color-danger); }
+  .deploy-status-panel-idle { border-left: 3px solid var(--color-success); }
+  .deploy-status-panel-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    margin-bottom: var(--space-4);
+    flex-wrap: wrap;
+  }
+
   /* ── Nav Secondary ─────────────────────────────────────────────── */
   nav .links-secondary { display: flex; gap: var(--space-5); margin-left: auto; align-items: center; }
   nav .links-secondary a { color: var(--color-muted); font-size: var(--font-sm); }
@@ -806,6 +861,13 @@
 <a href="#main-content" class="skip-link">Skip to content</a>
 <nav x-data="{ navOpen: false }">
   <span class="logo">AgentIT</span>
+  <div id="deploy-status" class="deploy-status" hx-get="/api/deploy-status" hx-trigger="load, every 15s" hx-swap="innerHTML">
+    <span class="deploy-status-badge deploy-status-idle" role="status" aria-live="polite"
+          aria-label="AgentIT version {{ build_info.version | default('unknown') }}, commit {{ build_info.commit | default('unknown') }}">
+      <span class="deploy-status-dot"></span>
+      <span class="deploy-status-text">v{{ build_info.version | default('unknown') }}{% if build_info.commit and build_info.commit != 'unknown' %} &middot; <code>{{ build_info.commit[:7] }}</code>{% endif %}</span>
+    </span>
+  </div>
   <div class="links">
     <a href="/" class="{{ 'nav-active' if request.url.path == '/' or request.url.path.startswith('/assessments') or request.url.path == '/fleet' }}">Fleet
       {% if nav_pending_actions %}<span class="nav-badge">{{ nav_pending_actions }}</span>{% endif %}

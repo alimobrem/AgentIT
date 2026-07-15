@@ -83,9 +83,22 @@ def _nav_badges_context_processor(request: Request) -> dict:
     }
 
 
+def _build_info_context_processor(request: Request) -> dict:
+    """Exposes `{{ build_info }}` (version/commit/image_tag) to every
+    template -- a pure in-memory read of `portal/metrics.py::get_build_info()`
+    (no cluster/network I/O), so base.html's ambient deploy-status badge can
+    render the running version on the very first paint, before its htmx poll
+    (`/api/deploy-status`) upgrades it with live PipelineRun/Argo CD state."""
+    from agentit.portal.metrics import get_build_info
+    return {"build_info": get_build_info()}
+
+
 templates = Jinja2Templates(
     directory=str(TEMPLATES_DIR),
-    context_processors=[_csrf_context_processor, _auth_context_processor, _nav_badges_context_processor],
+    context_processors=[
+        _csrf_context_processor, _auth_context_processor, _nav_badges_context_processor,
+        _build_info_context_processor,
+    ],
 )
 
 
@@ -212,21 +225,23 @@ async def _background_maintenance() -> None:
 def _set_build_info() -> None:
     """Populate the `agentit_build` Info metric once at startup.
 
-    Best-effort: `AGENTIT_IMAGE_TAG`/`AGENTIT_GIT_COMMIT` are set by the CI
-    pipeline in the container's env; falls back to "unknown" locally rather
-    than failing the whole startup sequence.
+    Best-effort: `AGENTIT_IMAGE_TAG`/`AGENTIT_GIT_COMMIT` are set by
+    `chart/templates/deployment.yaml` from `.Values.image.tag` (the same
+    value the CI pipeline patches onto the live Argo CD Application); falls
+    back to "unknown" locally rather than failing the whole startup
+    sequence.
     """
-    from agentit.portal.metrics import build_info
+    from agentit.portal.metrics import set_build_info
     try:
         import importlib.metadata
         version = importlib.metadata.version("agentit")
     except Exception:
         version = "unknown"
-    build_info.info({
-        "version": version,
-        "commit": os.environ.get("AGENTIT_GIT_COMMIT", "unknown"),
-        "image_tag": os.environ.get("AGENTIT_IMAGE_TAG", "unknown"),
-    })
+    set_build_info(
+        version,
+        os.environ.get("AGENTIT_GIT_COMMIT", "unknown"),
+        os.environ.get("AGENTIT_IMAGE_TAG", "unknown"),
+    )
 
 
 @app.on_event("startup")

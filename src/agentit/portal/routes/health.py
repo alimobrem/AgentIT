@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from agentit import kube
+from agentit.portal import github_pr
 from agentit.portal.helpers import get_circuit_breaker_states, get_store, get_templates
 
 log = logging.getLogger(__name__)
@@ -79,6 +80,164 @@ def _get_custom_resource_safe(group: str, version: str, plural: str, name: str, 
     except Exception:
         log.debug("Failed to get %s/%s %s/%s in %s", group, version, plural, name, namespace, exc_info=True)
         return None
+
+
+def _taskrun_status(name: str, namespace: str = "agentit") -> str:
+    """Real status for a single Tekton TaskRun by name.
+
+    Verified live against a real cluster: Tekton v1 ``PipelineRun.status.
+    childReferences`` entries carry only ``name``/``kind``/``pipelineTaskName``
+    -- never an embedded ``conditions`` array (that was a v1beta1-only field,
+    since removed) -- so a task's actual running/done/failed state has to be
+    read off its own TaskRun object, one ``get`` per child. Without this, a
+    naive read of ``childReferences[].conditions`` (as ``pipeline_detail_page``
+    above still does) always reports "Unknown" for every task on this
+    cluster's Tekton version, regardless of real progress.
+    """
+    try:
+        tr = kube.get_custom_resource("tekton.dev", "v1", "taskruns", name, namespace=namespace)
+        if tr is None:
+            return "Pending"
+        conditions = tr.get("status", {}).get("conditions", [{}])
+        return conditions[0].get("reason", "Unknown") if conditions else "Unknown"
+    except Exception:
+        log.debug("Failed to read TaskRun %s for deploy status", name, exc_info=True)
+        return "Unknown"
+
+
+def _get_deploy_status(include_commit_info: bool = False) -> dict:
+    """"Is a deploy in progress, and what's changing" -- combines the
+    currently-running build (`agentit_build` Info metric, via
+    ``get_build_info()``) with the live ``agentit-ci`` PipelineRun and the
+    live ``agentit`` Argo CD Application. Backs both the ambient nav badge
+    (``/api/deploy-status``, ``include_commit_info=False`` -- no GitHub call
+    on every poll) and the Health page's detailed section
+    (``include_commit_info=True``).
+
+    Every field is either real data from a live API call or ``None``/absent
+    on failure -- an unreachable PipelineRun/Application API is reported via
+    ``errors``, never silently treated as "nothing in progress".
+    """
+    from agentit.portal.metrics import get_build_info
+
+    status: dict = {
+        "running": get_build_info(),
+        "pipeline": None,
+        "argo": None,
+        "commit_info": None,
+        "state": "idle",  # "idle" | "deploying" | "failed"
+        "stage": None,
+        "reason": None,
+        "resolved": None,
+        "errors": [],
+    }
+
+    latest_run = None
+    try:
+        runs = kube.list_custom_resources("tekton.dev", "v1", "pipelineruns", namespace="agentit")
+        ci_runs = [
+            r for r in runs
+            if r.get("metadata", {}).get("labels", {}).get("tekton.dev/pipeline") == "agentit-ci"
+        ]
+        latest_run = ci_runs[-1] if ci_runs else None
+    except Exception:
+        log.warning("Failed to list agentit-ci PipelineRuns for deploy status", exc_info=True)
+        status["errors"].append("Could not reach the Tekton PipelineRun API")
+
+    if latest_run is not None:
+        conditions = latest_run.get("status", {}).get("conditions", [{}])
+        cond = conditions[0] if conditions else {}
+        reason = cond.get("reason", "Unknown")
+        is_running = cond.get("status", "Unknown") == "Unknown"
+        revision = next(
+            (p.get("value", "") for p in latest_run.get("spec", {}).get("params", []) if p.get("name") == "revision"),
+            "",
+        )
+        tasks = []
+        for child in latest_run.get("status", {}).get("childReferences", []):
+            child_name = child.get("name", "")
+            task_reason = _taskrun_status(child_name) if child_name else "Unknown"
+            tasks.append({"name": child.get("pipelineTaskName", child_name or "?"), "status": task_reason})
+        status["pipeline"] = {
+            "name": latest_run.get("metadata", {}).get("name", "?"),
+            "reason": reason,
+            "running": is_running,
+            "revision": revision,
+            "tasks": tasks,
+        }
+        if is_running:
+            status["state"] = "deploying"
+            status["stage"] = next((t["name"] for t in tasks if t["status"] != "Succeeded"), "starting")
+        elif reason not in ("Succeeded", "Completed"):
+            status["state"] = "failed"
+            status["reason"] = f"CI pipeline {reason}"
+
+    agentit_app = None
+    try:
+        apps = kube.list_custom_resources("argoproj.io", "v1alpha1", "applications", namespace="openshift-gitops")
+        agentit_app = next((a for a in apps if a.get("metadata", {}).get("name") == "agentit"), None)
+    except Exception:
+        log.warning("Failed to fetch the agentit Argo CD Application for deploy status", exc_info=True)
+        status["errors"].append("Could not reach the Argo CD Application API")
+
+    if agentit_app is not None:
+        sync = agentit_app.get("status", {}).get("sync", {})
+        health = agentit_app.get("status", {}).get("health", {})
+        sync_status = sync.get("status", "Unknown")
+        health_status = health.get("status", "Unknown")
+        params = agentit_app.get("spec", {}).get("source", {}).get("helm", {}).get("parameters", [])
+        image_tag = next((p.get("value", "") for p in params if p.get("name") == "image.tag"), "")
+        status["argo"] = {
+            "sync": sync_status,
+            "health": health_status,
+            "health_message": health.get("message", ""),
+            "image_tag": image_tag,
+            "repo_url": agentit_app.get("spec", {}).get("source", {}).get("repoURL", ""),
+        }
+        if status["state"] != "deploying":
+            if health_status == "Degraded":
+                status["state"] = "failed"
+                status["reason"] = status["argo"]["health_message"] or "Argo CD reports the agentit Application as Degraded"
+            elif sync_status != "Synced":
+                status["state"] = "deploying"
+                status["stage"] = "syncing"
+            elif health_status == "Progressing":
+                status["state"] = "deploying"
+                status["stage"] = "rolling out"
+
+    # Resolved outcome: once the latest PipelineRun succeeded and nothing is
+    # actively deploying/failed, check whether this running instance's own
+    # commit (its real, live env, not a guess) actually matches that
+    # PipelineRun's target revision -- catches a canary that got aborted /
+    # rolled back after the pipeline itself succeeded.
+    if status["state"] == "idle" and status["pipeline"] and status["pipeline"]["reason"] == "Succeeded":
+        running_commit = status["running"].get("commit", "unknown")
+        revision = status["pipeline"]["revision"]
+        if running_commit not in ("unknown", "") and revision:
+            if running_commit == revision or running_commit.startswith(revision) or revision.startswith(running_commit):
+                status["resolved"] = {
+                    "outcome": "healthy",
+                    "message": "This instance is running the version built by the latest PipelineRun.",
+                }
+            else:
+                msg = (
+                    f"This instance is running commit {running_commit[:12]}, not the latest "
+                    f"PipelineRun's target ({revision[:12]}) -- likely rolled back."
+                )
+                if status["argo"] and status["argo"].get("health_message"):
+                    msg += f" Argo CD: {status['argo']['health_message']}"
+                status["resolved"] = {"outcome": "rolled_back", "message": msg}
+
+    if include_commit_info and status["pipeline"] and status["argo"]:
+        revision = status["pipeline"].get("revision")
+        repo_url = status["argo"].get("repo_url")
+        if revision and repo_url:
+            try:
+                status["commit_info"] = github_pr.get_commit_info(repo_url, revision) or None
+            except Exception:
+                log.warning("Failed to fetch commit info for deploy status", exc_info=True)
+
+    return status
 
 
 def _get_cluster_health(store=None) -> dict:
@@ -269,7 +428,20 @@ async def _sync_store_handle():
 async def health_page(request: Request) -> HTMLResponse:
     store = await _sync_store_handle()
     data = await asyncio.to_thread(_get_cluster_health, store)
+    data["deploy_status"] = await asyncio.to_thread(_get_deploy_status, True)
     return get_templates().TemplateResponse(request, "health.html", data)
+
+
+@router.get("/api/deploy-status", response_class=HTMLResponse)
+async def deploy_status_badge(request: Request) -> HTMLResponse:
+    """Ambient nav badge fragment -- polled by htmx from base.html on every
+    page (``hx-trigger="load, every 15s"``) so "what version is running / is
+    a deploy in progress right now" stays visible without navigating to
+    /health or reloading. Deliberately lightweight: no GitHub call here
+    (that only happens for the Health page's detailed section via
+    ``_get_deploy_status(include_commit_info=True)``)."""
+    status = await asyncio.to_thread(_get_deploy_status)
+    return get_templates().TemplateResponse(request, "deploy_status_badge.html", {"deploy_status": status})
 
 
 @router.get("/health/pods/{pod_name}", response_class=HTMLResponse)
