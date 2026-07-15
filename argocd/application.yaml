@@ -47,6 +47,16 @@ spec:
           value: "86400"
         - name: agents.skillLearner.limit
           value: "3"
+        # Self-improvement loop over AgentIT's own codebase (not the skills
+        # catalog -- that's skillLearner above) -- see
+        # docs/self-improvement-for-agentit.md. Separate watcher, pod, and
+        # opt-in flag by design: proposes at most one small, evidence-cited
+        # code change per cycle as a draft PR, gated by tests/scope/diff-size
+        # checks before a human ever sees it.
+        - name: agents.capabilityScout.enabled
+          value: "true"
+        - name: agents.capabilityScout.interval
+          value: "86400"
         - name: monitoring.enabled
           value: "true"
         # Stands up AgentIT's own bundled, non-operator Postgres instance
