@@ -1,6 +1,34 @@
 # Self-Improvement for AgentIT Itself
 
-**Status: design only, not yet built.** This is a proposal doc for the repo owner to review and approve before any of it lands as code — following this project's own human-in-the-loop philosophy (LLM proposes, something with real teeth verifies, a human approves). Nothing in this doc has been implemented except where explicitly marked "PoC" below.
+**Status: implemented (as `capability-scout`), opt-in and off by default.**
+Shipped starting with `ffcdbb7` ("Add capability-scout: a self-improvement
+loop over AgentIT's own codebase") and hardened by several follow-up
+commits — `cdec3c0` (fixed the missing `gh` CLI/git-repo prerequisite,
+enabled via Helm param on the live deployment), `569a735` (proposal
+truncation), `fb62554`/`20408c6`/`280801f` (the tests-pass safety gate's
+missing test deps, then its memory and CPU limits) — see
+`git log --all -- src/agentit/capability_scout.py` and
+`git log --all --grep=capability-scout --oneline` for the full list. The
+watcher, CLI command (`agentit propose-watch`), chart flag
+(`agents.capabilityScout.enabled`, default `false` in `values.yaml`, but
+**enabled on the live deployment** via `argocd/application.yaml`, same
+pattern as `skillLearner`), safety gates, and
+portal transparency surfaces (Self-Improvement tab, Decisions-page entry,
+Schedules-page row) described below are real and match this design
+closely. **One deliberate deviation from this doc's original "What the
+OUTPUT actually is" section, worth knowing before reading further**: v1
+does not mechanically apply a generated source diff to files the LLM has
+never seen the contents of — instead, per `capability_scout.py`'s own
+module docstring, it commits a reviewable `docs/proposals/<slug>.md`
+write-up citing the evidence verbatim, and opens *that* as the draft PR.
+Treat every code-diff-specific claim below (steps 1–2 of "What the OUTPUT
+actually is") as the original design intent, not the shipped v1 behavior —
+check `capability_scout.py` directly before assuming otherwise. Everything
+else — the research→propose→verify→human-review→merge shape, the safety
+gates, the doc-gap scanner, the one-open-PR throttle, and the portal
+transparency surfaces — matches this design as built. See the README's
+"Self-improvement of AgentIT itself (capability-scout)" section for the
+current, living description.
 
 ## The gap this closes
 

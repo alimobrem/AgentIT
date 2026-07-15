@@ -1,8 +1,23 @@
 # UI/UX Redesign Proposal
 
-**Status: design only, not yet built.** Same posture as
-`docs/unified-apply-flow.md` — a proposal for the repo owner to review
-before any of it lands as code. Nothing in this doc has been implemented.
+**Status: implemented.** Shipped in `8bd2d66` ("Ship UX redesign: unified
+gates, Admin Review page, GitOps badges"), with the `fix_finding()`
+7th-path bug from §0 fixed in the same pass. Verified against the current
+working tree: `base.html`'s nav is Fleet / Admin Review / Events / Health /
+Insights / Decisions (7 top-level items, no standalone "Gates" link,
+`GET /gates` redirects to `/admin-review`), `admin_review.html` renders only
+`cluster-admin-review` gates, `fleet.html` has the GitOps/Direct-apply badge
+pair plus a "Needs Action" count, and `assessment_detail.html` has the
+4-tab shape (Overview / Findings / Actions / Timeline). See
+`docs/ledger-design-spec.md` §0 for the fuller verification this was based
+on, and the README's "Web portal" section for the current, living
+description. The rest of this document is preserved as the original design
+rationale. Also verified as landed: the two "dead" routes named in §3
+(`POST /assessments/{id}/apply` and `/create-pr`) no longer exist in
+`routes/assessments.py` at all (fully retired, not merely unlinked), and
+Self-Improvement's "Run Self-Improvement Scan" button (§5) exists exactly
+as this doc specified — `POST /capabilities/self-improvement/run`
+(`routes/capabilities.py`).
 
 This doc answers the "the entire UI feels disconnected" complaint with a
 concrete IA/journey audit, not aesthetics. It builds on, and does not

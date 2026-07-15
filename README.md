@@ -71,7 +71,7 @@ The real system has more moving parts — an event-driven path via Kafka + Argo 
 
 AgentIT uses two complementary systems for assessment and remediation:
 
-### Property-based skills (40 skills across 11 domains)
+### Property-based skills (45 skills across 12 domains)
 
 Skills are Markdown files with YAML frontmatter that define **what must be true** (properties), not how to generate manifests. The skill engine matches skills to assessment findings; the LLM generates tailored fixes using the skill's constraints and the app's platform context. `FleetOrchestrator` builds and passes an LLM client into the skill engine on every run (CLI, portal, and webhook onboarding alike) whenever `ANTHROPIC_API_KEY`/`ANTHROPIC_VERTEX_PROJECT_ID` is configured, so LLM-only skills (no template block — e.g. `network-policy`, `containerfile`, `tekton-pipeline`) actually produce tailored output in production, not just template substitution.
 
@@ -87,7 +87,8 @@ skills/
 ├── incident/        # runbook, pagerduty-config, alertmanager-config
 ├── release/         # analysis-template, rollout-patch, rollback-policy, release-runbook
 ├── retirement/      # decommission-plan, cleanup-task, data-archive-job
-└── custom/          # learning-agent-generated skills
+├── chaos/           # pod-delete, network-latency (LitmusChaos, template-only, no LLM needed)
+└── custom/          # learning-agent-generated skills (created on first draft; not present until then)
 ```
 
 Skills have lifecycle management: `draft` → `active` → `deprecated` → `retired`. The API drift detector auto-deprecates skills when their target APIs are removed from the cluster. Low-effectiveness skills (< 30% human approval rate) are flagged for review.
@@ -213,7 +214,7 @@ Every path that gets a generated change into a cluster or a repo — the manual 
 
 ## Web portal
 
-`agentit portal` launches a FastAPI + Jinja2 app (htmx + Alpine.js for interactivity, no frontend framework). 56+ routes.
+`agentit portal` launches a FastAPI + Jinja2 app (htmx + Alpine.js for interactivity, no frontend framework). 98 routes.
 
 Key pages:
 
@@ -376,7 +377,7 @@ See the full deployment topology diagram: [`docs/architecture.md#deployment-topo
 uv run pytest -q
 ```
 
-1,490+ tests across 84 test files (grows continuously; the counts below are a representative breakdown, not an exact partition):
+2,000+ tests across 100 test files (grows continuously; the counts below are a representative breakdown, not an exact partition — verify current totals with `pytest --collect-only`, since this table isn't regenerated on every commit):
 
 | Suite | Tests | What it covers |
 |---|---|---|
@@ -419,7 +420,7 @@ Additional test markers: `--run-real-repos` (clone live GitHub repos), `--live-c
 
 ```
 AgentIT/
-├── src/agentit/                    # ~21K lines across 71 Python files
+├── src/agentit/                    # ~24K lines across 86 Python files
 │   ├── cli.py                      # click CLI: 15+ commands (assess, onboard, orchestrate,
 │   │                               #   watch, portal, self-assess, self-fix, learn, learn-for,
 │   │                               #   test-skill, activate-skill, run-agent, vuln-watch, slo-track,
@@ -464,7 +465,7 @@ AgentIT/
 │       ├── app.py                  # FastAPI app setup, CSRF middleware, background maintenance
 │       │                           #   loop, lifecycle hooks, template filters — routes live in
 │       │                           #   routes/*.py, included via app.include_router(...)
-│       ├── routes/                 # 56+ routes (64 handlers), one APIRouter per domain
+│       ├── routes/                 # 98 routes, one APIRouter per domain
 │       │   ├── fleet.py            # Fleet dashboard, fleet-wide SLOs/remediations
 │       │   ├── assessments.py      # Assess/onboard/deliver lifecycle, GitOps registration, per-agent PR creation, verification
 │       │   ├── gates.py            # Gate resolve/cancel actions; Admin Review page (cluster-admin-
@@ -491,21 +492,33 @@ AgentIT/
 │       ├── cluster_apply.py        # oc/kubectl apply with pre-flight checks
 │       ├── delivery.py             # Unified apply flow: classify + route_and_deliver()
 │       ├── github_pr.py            # GitHub REST API integration
-│       └── templates/              # 25 Jinja2 templates (htmx + Alpine.js)
-├── skills/                         # 40 property-based skill definitions (11 domains)
+│       └── templates/              # 31 Jinja2 templates (htmx + Alpine.js)
+├── skills/                         # 45 property-based skill definitions (12 domains, incl. chaos + a
+│                                   #   dynamically-created custom/ the learning agent writes drafts into)
 ├── checks/                         # 20 data-driven YAML check files (7 dimensions)
 ├── chart/                          # Helm chart (30+ templates: Rollout, Services, Route, RBAC,
 │                                   #   NetworkPolicy, ResourceQuota, LimitRange, PDB, Tekton,
 │                                   #   Kafka, Argo Events, watcher agents, backup CronJob,
 │                                   #   bundled non-operator Postgres)
 ├── argocd/application.yaml         # Argo CD Application for self-deployment
-├── docs/
-│   ├── architecture.md             # System diagrams, pipeline, event loop, agent fleet
-│   ├── deployment.md               # GitOps operational rules
-│   └── postgres-migration-plan.md  # SQLite → Postgres/asyncpg migration history; Postgres is now
-│                                   #   the live default backend on the OpenShift deployment
+├── docs/                           # 13 files -- living docs, implemented-design docs, and dated
+│   │                               #   historical records; see each file's own status line
+│   ├── architecture.md             # System diagrams, pipeline, event loop, agent fleet (living)
+│   ├── deployment.md               # GitOps operational rules + incident writeups (living + historical)
+│   ├── postgres-migration-plan.md  # SQLite → Postgres/asyncpg migration history; Postgres is now
+│   │                               #   the live default backend on the OpenShift deployment (living)
+│   ├── kafka-hardening-plan.md     # TLS/SASL + multi-broker Kafka -- not started (plan only)
+│   ├── unified-apply-flow.md       # route_and_deliver() design -- implemented
+│   ├── ui-redesign-proposal.md     # Admin Review/Fleet-badge/Actions-tab IA -- implemented
+│   ├── self-improvement-for-agentit.md  # capability-scout design -- implemented (v1 detail differs, see status line)
+│   ├── ledger-design-spec.md       # Next unified-activity-feed proposal, not yet built
+│   ├── ux-design-requirements.md   # UX research checklist + stack recommendation, not yet built
+│   ├── next-gen-ux-concepts.md     # Blue-sky UX brainstorm, not a build spec
+│   ├── agent-removal-readiness.md  # Dated readiness audit backing the 9-agent removal (historical)
+│   ├── code-review-2026-07-12.md   # Dated point-in-time code review (historical)
+│   └── session-status-2026-07-13.md  # Dated session handoff snapshot (historical)
 ├── Containerfile                   # UBI9 Python 3.12, HEALTHCHECK, non-root
-└── tests/                          # 787 tests across 65 files
+└── tests/                          # 2,000+ tests across 100 files -- see "Testing" above
 ```
 
 </details>

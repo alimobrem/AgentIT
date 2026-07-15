@@ -1,9 +1,20 @@
 # Unified Apply Flow
 
-**Status: design only, not yet built.** This is a proposal doc for the repo
-owner to review and approve before any of it lands as code — same posture as
-`docs/self-improvement-for-agentit.md` and `docs/agent-removal-readiness.md`.
-Nothing in this doc has been implemented.
+**Status: implemented.** This design shipped in `e041d05` ("Unify
+apply/delivery flow, add real server-side-apply, and scope auto-mode by
+allowlist") and is now the live routing path for every delivery mechanism —
+`portal/delivery.py::route_and_deliver()` exists, `gates.py::resolve_gate()`
+and `AutoMode.execute()` both call it, the `deliveries` table is real, and
+`kube.apply_yaml()` really does use per-field-manager server-side-apply via
+the Kubernetes Python client (not `oc` subprocess) as described below. See
+the README's "Unified apply flow" section for the current, living
+description of this system, and `docs/ui-redesign-proposal.md`/
+`docs/ledger-design-spec.md` for what was built on top of it since. The rest
+of this document is preserved as the original design rationale — read it for
+*why* the system is shaped this way, not as a to-do list. Two items from
+"Deliberately not addressed" below remain genuinely open (auto-merge opt-in
+knob, GitOps-branch rollback semantics) — verify against current code before
+assuming either has since landed.
 
 ## The gap this closes, and why it's urgent rather than just untidy
 

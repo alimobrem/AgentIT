@@ -26,12 +26,12 @@ graph TB
 
     subgraph Core["AgentIT Core (src/agentit)"]
         CLI["CLI\n(click, 15+ commands)"]
-        Portal["Portal\nFastAPI + Jinja2\n56+ routes"]
+        Portal["Portal\nFastAPI + Jinja2\n98 routes"]
         Cloner["cloner.py\nshallow clone + SSRF prevention"]
         Runner["runner.py\nrun_assessment()"]
         Analyzers["7 Analyzers\n(security, observability, cicd,\ninfra, compliance, data-gov, ha/dr)"]
         CheckEngine["CheckEngine\n20 YAML checks"]
-        SkillEngine["SkillEngine\n40 property-based skills"]
+        SkillEngine["SkillEngine\n45 property-based skills"]
         Orchestrator["FleetOrchestrator\nskills-first, agents supplement"]
         Agents["Agent Fleet\n(3 specialized agents:\ndependency, cost, codechange)"]
         AutoMode["AutoMode\nLLM safety gate (fail-closed)"]
@@ -40,7 +40,9 @@ graph TB
         Learning["Learning Agent\nCVE research, skill generation"]
         Platform["PlatformContext\nK8s version, APIs, CRDs, operators"]
         DriftDetector["API Drift Detector\nsnapshot comparison"]
-        Store[("SQLite\n12+ tables\nWAL mode")]
+        Delivery["delivery.py\nroute_and_deliver() -- one router for\nevery apply/PR/gate path"]
+        CapScout["capability_scout.py\nself-improvement of AgentIT's OWN\ncode -- separate from the skills loop"]
+        Store[("AssessmentStore\n19 tables\nSQLite (local default) or\nasyncpg/Postgres (live-cluster default)")]
     end
 
     subgraph Cluster["OpenShift Cluster"]
@@ -49,7 +51,7 @@ graph TB
         Kafka["Kafka (Strimzi)\nagentit-events / alerts"]
         ArgoEvents["Argo Events\nEventSource + Sensors"]
         Tekton["Tekton\n(build/push pipeline)"]
-        Watchers["Watcher agents\nvuln / slo / drift"]
+        Watchers["5 watchers\nvuln / slo / drift /\nskill-learner / capability-scout"]
         Target["Onboarded app"]
     end
 
@@ -63,13 +65,17 @@ graph TB
     SkillEngine -->|"platform context"| Platform
     SkillEngine & Agents -->|"generated files"| Store
     AutoMode -->|"classify action"| LLM
+    AutoMode -->|"apply/PR decision"| Delivery
     Portal --> Store
-    Portal -->|"create PR"| GH
-    Portal -->|"dry-run + apply"| Cluster
-    AutoMode -->|"LLM-gated apply"| Cluster
+    Portal -->|"apply/PR decision"| Delivery
+    Delivery -->|"direct apply"| Cluster
+    Delivery -->|"commit + PR\n(GitOps-registered apps)"| GH
     RemLoop -->|"calls portal webhooks"| Portal
     Learning -->|"research"| LLM
     Learning -->|"new skills/checks"| SkillEngine & CheckEngine
+    CapScout -->|"reads own fleet telemetry\n+ docs/*.md gaps"| Store
+    CapScout -->|"propose ONE change"| LLM
+    CapScout -->|"draft PR against\nAgentIT's own repo"| GH
     DriftDetector -->|"auto-deprecate"| SkillEngine
     DriftDetector -->|"snapshot"| Platform
 
@@ -81,6 +87,15 @@ graph TB
     Portal -->|"events"| Kafka
     Watchers <--> Kafka
 ```
+
+`AutoMode`/`Portal` used to call `cluster_apply.py`/`github_pr.py` directly
+and independently for every delivery decision; both now funnel through
+`delivery.py::route_and_deliver()` (the "Unified apply flow" — see the
+README section of the same name, and `docs/unified-apply-flow.md`, now
+marked implemented). `capability_scout.py` is a distinct, opt-in loop from
+`Learning`/`skill-learner` above — it improves AgentIT's *own* codebase
+(portal routes, watchers, CLI), not the skills catalog AgentIT generates
+for onboarded apps; see `docs/self-improvement-for-agentit.md`.
 
 ## Cluster access (`kube.py`)
 
@@ -97,11 +112,20 @@ never risk mutating a real cluster when a test author forgets to mock
 something (this happened once: an unmocked `subprocess` `oc apply` call
 polluted a live cluster with ~180 fake Tekton PipelineRuns).
 
-The one remaining exception is `kube.apply_yaml()`, which still shells out to
-`oc apply --server-side --force-conflicts` because it applies arbitrary,
-multi-document manifests spanning many kinds (core and CRD) and needs true
-server-side-apply conflict resolution — replicating that generically over the
-Python client is tracked as a follow-up (see the `TODO` on `apply_yaml`).
+`kube.apply_yaml()` no longer shells out to `oc` at all — it resolves each
+document in an arbitrary, multi-document manifest (spanning both core kinds
+and CRDs) to its REST resource via the Kubernetes Python client's dynamic-
+client discovery, then applies it with `content_type="application/apply-patch+yaml"`
+and an explicit `field_manager`, matching `oc apply --server-side`'s wire
+format through the real client instead of a subprocess. A genuine
+field-manager conflict (HTTP 409) returns a structured, distinguishable
+result (`conflict: True`, `conflict_details: [...]`) rather than silently
+retrying with `force` — every apply path (`AutoMode`, `route_and_deliver()`,
+gate resolution) routes a real conflict to a dedicated `cluster-conflict-review`
+gate instead. This was the one remaining `oc`-subprocess exception noted in
+an earlier version of this doc; it was closed as part of the "Unified apply
+flow" work (`docs/unified-apply-flow.md`, now implemented) — see that doc's
+"Real per-field-manager server-side-apply" section for the full rationale.
 
 ## Assessment pipeline
 
@@ -128,10 +152,17 @@ flowchart TD
     N -->|"no"| P["Gates created:\nsecurity-review\ndeploy-approval\nfinal-approval"]
     O & P --> Q["orchestration-summary.md"]
 
-    Q --> R{"Human / operator decides"}
-    R -->|"create PR"| S["github_pr.py"]
-    R -->|"apply"| T["cluster_apply.py\ndry-run → LLM classify → apply"]
+    Q --> R["delivery.py::route_and_deliver()\none router for every entry point:\nmanual Deliver, gate-approve, AutoMode, DriftDetector"]
+    R -->|"GitOps-registered app"| S["commit to infra repo + PR\n(github_pr.py, never auto-merged)"]
+    R -->|"not registered"| T["cluster_apply.py\ndry-run → LLM classify → real per-field-manager SSA"]
+    R -->|"CI/CD → shared operator namespace"| U["cluster-admin-review gate\n(never a silent skip)"]
 ```
+
+Every path that used to independently decide "apply now" (manual apply,
+gate-approve, `AutoMode`, `DriftDetector`) now funnels through this one
+router — see "Unified apply flow" in the README and
+`docs/unified-apply-flow.md` (marked implemented) for the full taxonomy of
+what gets routed where and why.
 
 ## Skill engine & check engine
 
@@ -177,17 +208,17 @@ Fallback:    Python agents cover anything skills don't match
 
 ## Self-improvement loop
 
-AgentIT improves through three tiers:
+AgentIT improves through three tiers, closed end-to-end — `record_skill_outcome()` fires from every real production apply/gate/PR path, not just the CLI `self-fix` command. See the README's "Self-improvement loop" section for the full current wiring (which routes call it, the recency-weighted effectiveness calculation, and the edit-before-apply flow that lets a human correct generated content before it's delivered — the diff between generated and applied content is now a real, captured fact, not a documented gap).
 
 ### Tier 1: Feedback store
 
-The `agent_feedback` table in SQLite records every human decision on generated fixes:
+The `agent_feedback` table records every human decision on generated fixes:
 
 - **approve**: fix was applied as-is
 - **modify**: fix was applied with changes (the modified version is stored)
 - **reject**: fix was rejected (reason stored)
 
-Skills query this before generating. The `skill_effectiveness` table tracks approval rates per skill. Skills below 30% are surfaced on the Insights page for review.
+Skills query this before generating. The `skill_effectiveness` table tracks a **recency-weighted** approval rate per skill (half-life ~90 days, `AssessmentStore.get_skill_effectiveness()`), so a skill that was bad months ago and has since improved can recover off the "Skills Needing Review" list rather than staying flagged forever. Skills below 30% are surfaced on the Insights page for review.
 
 ### Tier 2: Learning agent (`learning_agent.py`)
 
@@ -211,6 +242,26 @@ The drift detector (`watchers/drift_detector.py`) and API drift detector (`api_d
 3. If APIs are removed from the cluster, skills that generate those API kinds are auto-deprecated
 4. If APIs are deprecated, warnings are published to the event stream
 5. If new APIs appear, they're logged for potential skill creation
+
+### A fourth, separate loop: capability-scout (self-improvement of AgentIT itself)
+
+The three tiers above improve what AgentIT *generates for other apps* — the
+skills catalog. `capability_scout.py` is a distinct, opt-in (default off)
+24h watcher that improves AgentIT's *own* codebase instead — its portal
+routes, watchers, and CLI. It mirrors `skill-learner`'s
+research → propose → verify → human-review → merge shape, but reads
+AgentIT's own fleet-wide telemetry (rejection rates, agent/check health,
+skill effectiveness) plus a static grep of this repo's own `docs/*.md` for
+admitted gaps ("Known gap" / "Deliberately deferred" / "not built"), asks
+the LLM for **at most one** small, evidence-cited change, runs it through
+fail-closed safety gates (diff-size cap, scope allowlist, secret-pattern
+scan, `py_compile`, the exact `pytest` invocation CI uses, a one-open-PR
+throttle), and — if every gate passes — commits a reviewable
+`docs/proposals/<slug>.md` write-up as a draft PR against AgentIT's own
+repo. It never mechanically applies a source diff in its current form, and
+it never auto-merges. See `docs/self-improvement-for-agentit.md` (now
+marked implemented) for the full design and exactly how the shipped
+version differs from the original proposal.
 
 ## Autonomous remediation loop
 
@@ -326,6 +377,8 @@ graph LR
         SloTracker["slo-tracker"]
         DriftDetector["drift-detector"]
         SkillLearner["skill-learner"]
+        CapabilityScout["capability-scout\n(opt-in, default off)"]
+        PgBundled["Postgres (bundled,\nnon-operator)\nlive default backend"]
     end
 
     AppYaml -->|"watched by"| ArgoCD
@@ -334,7 +387,9 @@ graph LR
     Chart --> NetPol & Quota & LimitRange & PDB
     Chart --> KafkaCluster & EventSource & SensorOnboard
     Chart --> Pipeline & BackupCron
-    Chart --> VulnWatcher & SloTracker & DriftDetector & SkillLearner
+    Chart --> VulnWatcher & SloTracker & DriftDetector & SkillLearner & CapabilityScout
+    Chart --> PgBundled
+    Rollout & VulnWatcher & SloTracker & DriftDetector & SkillLearner -->|"AGENTIT_DB_BACKEND=postgres"| PgBundled
 ```
 
 ### Authentication (`auth.enabled`)
@@ -361,14 +416,20 @@ Resource tiers control K8s Job resource requests/limits when agents run in conta
 | standard | 100m / 500m | 256Mi / 512Mi |
 | large | 250m / 1000m | 512Mi / 1Gi |
 
-Three long-lived watcher agents run as separate Deployments:
+Five long-lived watcher agents run as separate Deployments (three of the
+five are always-on by default; `skill-learner` and `capability-scout` are
+both opt-in via a chart flag, though `skill-learner` is enabled on the live
+deployment via `argocd/application.yaml`):
 
 | Watcher | Default interval | Role |
 |---|---|---|
 | **vuln-watcher** | 6h | Fleet CVE monitoring, triggers RemediationLoop |
-| **slo-tracker** | 5m | SLO polling, breach alerts, rollback gates |
+| **slo-tracker** | 5m | SLO polling (real Prometheus `latency_p99_ms` + pod-status `availability`/`error_rate`), breach alerts, rollback gates |
 | **drift-detector** | 10m | Argo CD sync + API drift detection, auto-deprecation |
-| **skill-learner** | 24h | Researches CVEs via LLM, drafts new skills for human review (disabled by default, needs an LLM connection) |
+| **skill-learner** | 24h | Researches CVEs via LLM, drafts new skills for human review (chart default: disabled; needs an LLM connection) |
+| **capability-scout** | 24h | Proposes small, evidence-grounded changes to AgentIT's *own* codebase as a draft PR (chart default: disabled) — see "A fourth, separate loop" above |
+
+Every watcher records real tick telemetry (`tick-complete`/`tick-failed` events plus an `agent_heartbeat()` call) after each loop iteration, backing a per-watcher `AgentITWatcherStale` Prometheus alert — see the README's "The agent fleet" section for the exact mechanism.
 
 ## Assessment dimensions
 
@@ -379,7 +440,7 @@ Three long-lived watcher agents run as separate Deployments:
 | `security` | `SecurityAnalyzer` | 3 | Hardcoded secrets, root containers, missing HEALTHCHECK, :latest tags, missing NetworkPolicy, non-UBI base |
 | `observability` | `ObservabilityAnalyzer` | 3 | Health probes, metrics endpoint, structured logging |
 | `cicd` | `CICDAnalyzer` | 3 | CI pipeline, Dockerfile/Containerfile, GitOps wiring |
-| `infrastructure` | `InfrastructureAnalyzer` | 3 | Helm chart, K8s manifests, ResourceQuota |
+| `infrastructure` | `InfrastructureAnalyzer` | 3 | Helm chart, K8s manifests, ResourceQuota, **base-image/runtime EOL detection** (`analyzers/eol.py` — a deterministic baseline of cited support-lifecycle dates for Python/Node.js/Ubuntu/Debian/CentOS/Alpine, plus an optional LLM-additive pass, `LLMClient.detect_eol_risks()`, that degrades to nothing rather than fabricating a date) |
 | `compliance` | `ComplianceAnalyzer` | 3 | Admission policies, license, SBOM |
 | `data_governance` | `DataGovernanceAnalyzer` | 2 | Backup config, retention policy |
 | `ha_dr` | `HADRAnalyzer` | 3 | HPA, PDB, replica count |
