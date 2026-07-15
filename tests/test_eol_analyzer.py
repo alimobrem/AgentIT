@@ -336,3 +336,70 @@ class TestLLMClientDetectEolRisks:
         client = _make_client(MagicMock(side_effect=anthropic.APIConnectionError(request=MagicMock())))
         result = client.detect_eol_risks({"languages": []}, {})
         assert result is None
+
+    def test_multiple_risks_requests_higher_token_budget_and_parses(self) -> None:
+        """Regression test: a repo with several aging components at once (an
+        EOL runtime, an EOL framework, an EOL base image, and a few more)
+        produces a multi-item risks list realistically larger than the
+        512-token default -- detect_eol_risks must request a bigger budget
+        (agentit.llm._EOL_MAX_TOKENS) so a real response like this isn't cut
+        off mid-JSON, and it must still parse cleanly once it isn't."""
+        import json
+
+        from agentit.llm import _EOL_MAX_TOKENS
+
+        risks = [
+            {"component": "Python", "version": "3.9", "status": "eol", "eol_date": "2025-10-05",
+             "confidence": 0.95, "reason": "Python 3.9 reached end of life in October 2025 and no "
+             "longer receives security patches from the core Python maintainers, so any service "
+             "still running it is exposed to unpatched vulnerabilities."},
+            {"component": "Django", "version": "3.2", "status": "eol", "eol_date": "2024-04-01",
+             "confidence": 0.9, "reason": "Django 3.2 was the last LTS release in the 3.x series and "
+             "its extended support window closed in April 2024; teams should upgrade to a "
+             "currently-supported LTS release such as 4.2."},
+            {"component": "node", "version": "16", "status": "eol", "eol_date": "2023-09-11",
+             "confidence": 0.9, "reason": "Node.js 16 reached end of life in September 2023 and no "
+             "longer receives upstream security fixes, npm registry compatibility updates, or V8 "
+             "engine patches."},
+            {"component": "ubuntu", "version": "18.04", "status": "eol", "eol_date": "2023-05-31",
+             "confidence": 0.85, "reason": "Ubuntu 18.04 LTS standard support ended in May 2023; the "
+             "container base image should be rebuilt on a currently-maintained Ubuntu LTS or a "
+             "minimal distroless equivalent."},
+            {"component": "openssl", "version": "1.1.1", "status": "approaching_eol",
+             "eol_date": "2023-09-11", "confidence": 0.7, "reason": "OpenSSL 1.1.1 is past its own "
+             "community support window and should be upgraded to the 3.x series to keep receiving "
+             "security patches and FIPS validation updates."},
+            {"component": "postgresql", "version": "11", "status": "eol", "eol_date": "2023-11-09",
+             "confidence": 0.9, "reason": "PostgreSQL 11 reached end of life in November 2023 and no "
+             "longer receives minor version security releases; migrate to a currently-supported major "
+             "version."},
+            {"component": "ruby", "version": "2.7", "status": "eol", "eol_date": "2023-03-31",
+             "confidence": 0.88, "reason": "Ruby 2.7 reached end of life in March 2023 and receives no "
+             "further security fixes upstream; upgrade to a maintained 3.x release."},
+            {"component": "alpine", "version": "3.14", "status": "approaching_eol",
+             "eol_date": "2023-05-01", "confidence": 0.65, "reason": "Alpine 3.14 is past its "
+             "one-year support window; rebuilding on a current Alpine release keeps musl libc and "
+             "apk packages patched."},
+        ]
+        response_json = json.dumps({"risks": risks})
+        # Sanity check: at ~4 chars/token, this realistic multi-item response
+        # is comfortably larger than the old 512-token default -- confirming
+        # this is a genuine regression test for the truncation bug, not a
+        # trivially small payload that would have passed either way.
+        assert len(response_json) // 4 > 512
+
+        mock_create = MagicMock(return_value=_mock_response(response_json))
+        client = _make_client(mock_create)
+        result = client.detect_eol_risks(
+            {"languages": [{"name": "python"}]},
+            {"Dockerfile": "FROM ubuntu:18.04"},
+        )
+
+        assert result is not None
+        assert len(result) == len(risks)
+        assert result[0]["component"] == "Python"
+        assert result[-1]["component"] == "alpine"
+
+        _, kwargs = mock_create.call_args
+        assert kwargs["max_tokens"] == _EOL_MAX_TOKENS
+        assert kwargs["max_tokens"] > 512

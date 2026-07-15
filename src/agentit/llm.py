@@ -10,6 +10,36 @@ from agentit.portal.helpers import llm_breaker
 
 logger = logging.getLogger(__name__)
 
+# _chat()'s default output budget — enough for the small, fixed-shape JSON
+# responses most callers expect (a couple of scalar fields plus a one-sentence
+# "reason"): classify_secret, classify_action, review_fix, summarize_architecture.
+# Callers whose response shape is genuinely open-ended or has several
+# free-text/paragraph fields must pass their own higher max_tokens explicitly
+# (see detect_eol_risks/propose_capability_improvement below) rather than
+# raising this default for everyone — those simple callers don't need a bigger
+# worst-case generation budget, and this cap also bounds cost/latency if the
+# model ever misbehaves and rambles.
+_DEFAULT_MAX_TOKENS = 512
+
+# detect_eol_risks() returns an open-ended *list* of risk dicts (one per
+# EOL/near-EOL component found across base image, runtime, and frameworks),
+# each with 6 fields including a full-sentence "reason" — a repo with several
+# aging components at once (e.g. an old base image + an EOL runtime + 2-3
+# outdated framework versions) can realistically need more than a single
+# 3-field response, so this gets double the default budget.
+_EOL_MAX_TOKENS = 1024
+
+# propose_capability_improvement() returns 7 fields, several of them full
+# prose paragraphs (gap_description, evidence, change_summary, test_plan) plus
+# a target_files list — several times the content of the simple classifiers
+# above. This is the call that was observed truncating real proposals at the
+# 512-token default. 2048 tokens comfortably covers a realistic proposal
+# (title + up to ~4 paragraphs + a short file list, well under ~1000 tokens in
+# practice) with headroom, while staying far below the real output ceiling for
+# claude-sonnet-4-6 (64,000 tokens per Anthropic's published model limits) —
+# there's no reason to approach that ceiling for a handful of prose fields.
+_CAPABILITY_PROPOSAL_MAX_TOKENS = 2048
+
 _CLASSIFY_SYSTEM = (
     "You are a security analyst reviewing source code for hardcoded secrets. "
     'Respond ONLY with valid JSON: {"is_secret": bool, "confidence": float, "reason": str}. '
@@ -252,7 +282,7 @@ class LLMClient:
             f"--- {path} ---\n{content}" for path, content in file_excerpts.items()
         ) or "(no relevant files found)"
         user_msg = _EOL_USER.format(stack_info=json.dumps(stack_info), file_excerpts=excerpts_text)
-        raw = self._chat(_EOL_SYSTEM, user_msg)
+        raw = self._chat(_EOL_SYSTEM, user_msg, max_tokens=_EOL_MAX_TOKENS)
         if raw is None:
             return None
         try:
@@ -293,7 +323,7 @@ class LLMClient:
         that as "no proposal this cycle", never fabricate one).
         """
         user_msg = _CAPABILITY_PROPOSAL_USER.format(evidence=json.dumps(evidence, default=str))
-        raw = self._chat(_CAPABILITY_PROPOSAL_SYSTEM, user_msg)
+        raw = self._chat(_CAPABILITY_PROPOSAL_SYSTEM, user_msg, max_tokens=_CAPABILITY_PROPOSAL_MAX_TOKENS)
         if raw is None:
             return None
         try:
@@ -318,14 +348,14 @@ class LLMClient:
             logger.warning("LLM returned unparseable capability proposal: %s", raw)
             return None
 
-    def _chat(self, system: str, user: str) -> str | None:
+    def _chat(self, system: str, user: str, max_tokens: int = _DEFAULT_MAX_TOKENS) -> str | None:
         if llm_breaker.is_open:
             logger.warning("LLM circuit breaker open — skipping call")
             return None
         try:
             resp = self._client.messages.create(
                 model=self.model,
-                max_tokens=512,
+                max_tokens=max_tokens,
                 system=system,
                 messages=[{"role": "user", "content": user}],
                 temperature=0.2,
