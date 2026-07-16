@@ -186,7 +186,7 @@ uv run agentit propose-watch --interval 86400 --max-open-prs 1
 uv run agentit propose-once --mode auto --max-open-prs 1
 ```
 
-**Build modes:** `docs` (proposal markdown only), `source` (edit `skills/`/`checks/`/`tests/` when targets allow), `auto` (source when eligible, else docs). Dogfood sets `agents.capabilityScout.mode=auto` via Helm.
+**Build modes:** `docs` (proposal markdown only), `source` (edit `skills/`/`checks/`/`tests/`/`src/agentit/` when every target is in that allowlist), `auto` (source when eligible, else docs). Dogfood sets `agents.capabilityScout.mode=auto` via Helm.
 
 See [`docs/superpowers/plans/2026-07-15-autonomous-self-improve-dogfood.md`](docs/superpowers/plans/2026-07-15-autonomous-self-improve-dogfood.md) for the L0→L5 dogfood milestone plan (substrate → source PRs → outcome loop).
 
@@ -367,6 +367,7 @@ All configuration is via environment variables (no config file). Nothing here be
 AgentIT deploys itself the same way it onboards other apps — via the Helm chart in `chart/` and the Argo CD `Application` in `argocd/application.yaml`. **Argo CD is the sole deployer**; see [`docs/deployment.md`](docs/deployment.md) for the full operational runbook.
 
 - Change behavior: edit `argocd/application.yaml` Helm parameters, commit, push. The CI pipeline's `notify-argocd` task re-applies this file to the live `Application` object on every run (before re-pinning `image.tag`), so the parameter list stays in sync automatically — no manual `oc apply` needed. See [`docs/deployment.md`](docs/deployment.md) for the details and why this exists.
+- The `smoke-test-image` Tekton task (and GitHub Actions `image-smoke-test`) sets `git config --global --add safe.directory /opt/app-root/src` before `git status`, because OpenShift runs the image under an arbitrary UID that does not see the build-time USER 1001 gitconfig. The image also writes the same path via `git config --system` in the Containerfile so scout/portal pods can use `.git` at runtime.
 - Change a secret: `oc create secret` on-cluster, then reference it via a Helm parameter. Never in Git.
 - Never `helm upgrade` manually or `oc edit` the `Rollout`.
 

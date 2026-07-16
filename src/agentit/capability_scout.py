@@ -8,11 +8,10 @@ docs/self-improvement-for-agentit.md for the full design.
 - ``docs`` (default / safe fallback): the LLM proposes and documents a
   change as ``docs/proposals/<slug>.md`` — never auto-applies source.
 - ``source`` / ``auto`` (L3 dogfood): when every ``target_files`` entry sits
-  under ``skills/``, ``checks/``, or ``tests/``, the LLM is asked for full
-  file contents for those paths only (current text fed in). Paths outside
-  that set, LLM failures, or empty patches fall back to the docs artifact
-  rather than inventing a ``src/agentit/`` edit. ``src/agentit/`` source
-  autonomy is deliberately deferred until skills/tests dogfood proves out.
+  under ``skills/``, ``checks/``, ``tests/``, or ``src/agentit/``, the LLM
+  is asked for full file contents for those paths only (current text fed
+  in). Paths outside that set, LLM failures, or empty patches fall back to
+  the docs artifact rather than inventing an out-of-scope edit.
 """
 from __future__ import annotations
 
@@ -35,8 +34,9 @@ MAX_DIFF_LINES = 150
 SCOPE_ALLOWED_PREFIXES = ("src/agentit/", "skills/", "checks/", "tests/", "docs/")
 SCOPE_DENY_SUBSTRINGS = ("chart/", "argocd/", ".github/workflows/", "dockerfile", "secret", "rbac")
 
-# L3 source-mode allowlist — narrower than SCOPE_ALLOWED_PREFIXES on purpose.
-SOURCE_ALLOWED_PREFIXES = ("skills/", "checks/", "tests/")
+# L3 source-mode allowlist — matches SCOPE_ALLOWED_PREFIXES minus docs/
+# (docs mode already owns the proposal-markdown path).
+SOURCE_ALLOWED_PREFIXES = ("skills/", "checks/", "tests/", "src/agentit/")
 
 # The single highest-precision signal source per the design doc — explicit,
 # human-written admissions of missing functionality in this repo's own docs.
@@ -223,8 +223,8 @@ def build_docs_diff(proposal: dict) -> dict[str, str]:
 
 
 def paths_eligible_for_source(target_files: list[str] | None) -> bool:
-    """True when every target path is under skills/, checks/, or tests/ and
-    none hit the denylist — the L3 source-mode allowlist."""
+    """True when every target path is under skills/, checks/, tests/, or
+    src/agentit/ and none hit the denylist — the L3 source-mode allowlist."""
     if not target_files:
         return False
     for path in target_files:

@@ -141,8 +141,9 @@ _CAPABILITY_PROPOSAL_SYSTEM = (
     "own convention: only modify what's directly related to the gap, never refactor, "
     "rename, or reorder unrelated code, keep changes as minimal as possible.\n"
     "3. Never propose anything touching chart/, argocd/, .github/workflows/, "
-    "Dockerfile, or any path containing 'secret' or 'rbac' -- scope suggested target "
-    "files to src/agentit/**/*.py, skills/, checks/, tests/, or docs/ only.\n"
+    "Dockerfile, or any path containing 'secret' or 'rbac' — scope suggested target "
+    "files to src/agentit/**/*.py, skills/, checks/, or tests/ only (prefer those "
+    "executable paths over docs/ so source/auto mode can open a real code PR).\n"
     "4. Always name at least one test file under tests/ in target_files, and describe "
     "what it would assert in test_plan -- a change with no test coverage plan is not a "
     "complete proposal.\n\n"
@@ -400,7 +401,7 @@ class LLMClient:
         )
         system = (
             "You implement a small, evidence-grounded change for AgentIT's own repo. "
-            "Only edit skills/, checks/, or tests/ files you were given. "
+            "Only edit skills/, checks/, tests/, or src/agentit/ files you were given. "
             "Respond ONLY with valid JSON — no markdown fences. "
             'If you cannot produce a safe change, return {"files": {}}.'
         )

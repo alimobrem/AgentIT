@@ -18,15 +18,12 @@ USER 1001
 RUN git config --global user.email "agentit@agentit.local" && \
     git config --global user.name "AgentIT"
 
-# OpenShift runs this image under an arbitrary, per-namespace UID that never
-# matches the build-time file owner of the .git directory copied in below --
-# git's dubious-ownership check would otherwise refuse every git command
-# against it. The credential helper supplies GITHUB_TOKEN (read from the
-# environment at call time -- the same Secret already wired into the
-# capability-scout/portal Deployments) for HTTPS push auth; no token is ever
-# baked into the image itself.
-RUN git config --global --add safe.directory /opt/app-root/src && \
-    git config --global credential.helper '!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f'
+# Credential helper supplies GITHUB_TOKEN (read from the environment at call
+# time -- the same Secret already wired into the capability-scout/portal
+# Deployments) for HTTPS push auth; no token is ever baked into the image.
+# safe.directory is set --system (as root, below) so arbitrary OpenShift
+# UIDs see it; --global here only covers USER 1001 local runs.
+RUN git config --global credential.helper '!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f'
 
 WORKDIR /opt/app-root/src
 
@@ -88,7 +85,12 @@ COPY .git ./.git
 # as root (USER 0) since only the owner or root can chmod files this
 # user (1001) doesn't own.
 USER 0
-RUN find .git -type d -exec chmod g+w {} +
+# OpenShift runs under an arbitrary per-namespace UID that never matches the
+# build-time owner of .git. Put safe.directory in /etc/gitconfig (--system)
+# so every UID sees it; --global alone lives under USER 1001's home and is
+# invisible to Tekton/OpenShift smoke and scout pods (dubious ownership).
+RUN git config --system --add safe.directory /opt/app-root/src && \
+    find .git -type d -exec chmod g+w {} +
 USER 1001
 
 EXPOSE 8080

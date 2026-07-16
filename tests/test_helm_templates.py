@@ -239,6 +239,7 @@ class TestTektonPipeline:
             "test -d chart",
             "git --version",
             "gh --version",
+            "safe.directory",
             "git -C /opt/app-root/src status",
         ):
             assert expected in script, f"smoke-test-image script missing check: {expected!r}"

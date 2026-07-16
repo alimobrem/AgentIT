@@ -158,7 +158,10 @@ class TestResolveBuildMode:
             _proposal(target_files=["skills/security/x.md", "tests/test_x.py"]), "auto",
         ) == "source"
         assert resolve_build_mode(
-            _proposal(target_files=["src/agentit/portal/store.py"]), "auto",
+            _proposal(target_files=["src/agentit/portal/store.py", "tests/test_store.py"]), "auto",
+        ) == "source"
+        assert resolve_build_mode(
+            _proposal(target_files=["docs/proposals/x.md"]), "auto",
         ) == "docs"
 
     def test_source_mode_falls_back_to_docs_when_targets_ineligible(self):
@@ -195,6 +198,29 @@ class TestBuildSourceDiff:
         current = call.args[1] if call.args and len(call.args) > 1 else call.kwargs.get("current_files")
         assert "skills/security/existing.md" in current
         assert "old" in current["skills/security/existing.md"]
+
+    def test_build_diff_source_mode_allows_src_agentit(self, tmp_path):
+        from agentit.capability_scout import build_diff
+
+        src = tmp_path / "src" / "agentit"
+        src.mkdir(parents=True)
+        (src / "widget.py").write_text("def old():\n    return 0\n", encoding="utf-8")
+        tests = tmp_path / "tests"
+        tests.mkdir()
+        (tests / "test_widget.py").write_text("def test_old():\n    assert True\n", encoding="utf-8")
+
+        llm = MagicMock()
+        llm.generate_capability_files.return_value = {
+            "src/agentit/widget.py": "def new():\n    return 1\n",
+            "tests/test_widget.py": "def test_new():\n    assert True\n",
+        }
+        proposal = _proposal(
+            title="Improve widget",
+            target_files=["src/agentit/widget.py", "tests/test_widget.py"],
+        )
+        diff = build_diff(proposal, mode="auto", repo_dir=tmp_path, llm_client=llm)
+        assert set(diff) == {"src/agentit/widget.py", "tests/test_widget.py"}
+        assert "def new()" in diff["src/agentit/widget.py"]
 
     def test_build_diff_source_rejects_llm_paths_outside_targets(self, tmp_path):
         from agentit.capability_scout import build_diff

@@ -164,6 +164,11 @@ spec:
                 git --version
                 gh --version
                 echo "/opt/app-root/src is a real, valid git checkout:"
+                # OpenShift/Tekton run this step as an arbitrary UID; the
+                # build-time `git config --global` (USER 1001 home) is not
+                # visible, so git's dubious-ownership check rejects .git
+                # without a runtime safe.directory for the current user.
+                git config --global --add safe.directory /opt/app-root/src
                 git -C /opt/app-root/src status
                 echo "Image smoke test passed."
       params:

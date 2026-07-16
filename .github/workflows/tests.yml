@@ -96,6 +96,8 @@ jobs:
             git --version
             gh --version
             echo "/opt/app-root/src is a real, valid git checkout:"
+            # Mirror Tekton smoke: runtime UID may not see build-time gitconfig.
+            git config --global --add safe.directory /opt/app-root/src
             git -C /opt/app-root/src status
             echo "Image smoke test passed."
           '
