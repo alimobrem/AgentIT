@@ -1049,6 +1049,7 @@ def run_test_suite(repo_dir: Path) -> tuple[bool, str]:
             [sys.executable, "-m", "pytest", "tests/", "-q",
              "--ignore=tests/test_real_repos.py",
              "--ignore=tests/test_browser.py",
+             "--ignore=tests/test_browser_critical.py",
              "--ignore=tests/test_live_cluster_e2e.py"],
             cwd=repo_dir, capture_output=True, text=True, timeout=900, env=env,
         )

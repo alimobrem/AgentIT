@@ -417,6 +417,24 @@ uv run python scripts/check_portal_edl.py
 
 Asserts MUST rules from [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md): no status badges inside `<button>`, Dry Run → deliver choice with status outside CTAs, modals `role="dialog"` + Escape, `pr_url|safe_url`, badge ≥12px, Events bell/drawer IA, `#toasts` / `.btn-danger` present. Also asserts button SHOULD rules: ≤3-word labels and `.btn` (or documented icon control) on interactive `<button>`s. GitOps dry-run unlock coverage in `tests/test_deliver_route.py` accepts HTML-escaped `Commit &amp; Open PR`.
 
+### Browser / journey tests (CI-gated)
+
+GitHub Actions runs a dedicated **`browser-critical`** job (Playwright + Chromium) on every PR. It executes the lean Alpine/htmx journeys in `tests/test_browser_critical.py` only:
+
+- Dry Run success → **Commit & Open PR** enabled (no contradictory “No dry run yet” / `NO DRY RUN YET`)
+- **Back to Assessment** clickable after hx-boost (Events drawer overlay not blocking)
+- **Register for GitOps** surfaces success/error after a boosted redirect (toast or inline alert)
+
+The full crawl (`tests/test_browser.py`) stays ignored in CI and Tekton — too broad/flaky for a merge gate. Tekton’s `run-tests` task mirrors the default pytest ignores (no Chromium in the UBI image); browser coverage is the Actions job above.
+
+```bash
+uv sync --extra dev --extra browser
+uv run playwright install chromium
+uv run pytest tests/test_browser_critical.py --browser-tests -q
+```
+
+`--browser-tests` is required (see `tests/conftest.py`); without it, `@pytest.mark.browser` tests skip so capability-scout and the default suite never need Chromium.
+
 2,000+ tests across 100 test files (grows continuously; the counts below are a representative breakdown, not an exact partition — verify current totals with `pytest --collect-only`, since this table isn't regenerated on every commit):
 
 | Suite | Tests | What it covers |
@@ -424,7 +442,8 @@ Asserts MUST rules from [`docs/portal-experience-design-language.md`](docs/porta
 | Portal EDL | ~8 | Experience Design Language MUST rules (`tests/test_portal_edl.py` + `scripts/check_portal_edl.py`) |
 | Unit tests | ~600 | Analyzers, agents, orchestrator conflict/gate logic, portal routes, the Postgres store, Helm templates |
 | LLM evals | 17 | Safety classification, fix review quality, generation correctness, learning agent, architecture summary |
-| Browser tests | 61 | Playwright end-to-end tests for all portal pages, Admin Review/Fleet-badge/Actions-tab UI, retired-route 404s, accessibility |
+| Browser critical (CI) | 4 | Playwright journeys gated in Actions `browser-critical` (`tests/test_browser_critical.py`) |
+| Browser crawl (local) | 61 | Full Playwright crawl of portal pages — ignored in CI (`tests/test_browser.py`) |
 | Performance tests | 22 | Response time assertions on portal endpoints |
 | API contract tests | 14 | JSON response shape validation |
 | Template rendering | 16 | HTML rendering correctness |
@@ -438,7 +457,7 @@ Asserts MUST rules from [`docs/portal-experience-design-language.md`](docs/porta
 | Skill validation | ~15 | All 40 skills load, valid frontmatter, generate valid YAML |
 | Self-observability | ~50 | `agent_runs`/`check_results` persistence, DLQ republish, correlation-id tracing, circuit-breaker/DB-size/event-buffer/watcher-staleness metrics, watcher tick telemetry (`tests/test_watchers_telemetry.py`, `tests/test_durability.py`, extensions to `tests/test_store_extended.py`) |
 
-Additional test markers: `--run-real-repos` (clone live GitHub repos), `--live-cluster` (e2e against OpenShift), `--browser-tests` (Playwright), `--run-llm-evals` (requires API key).
+Additional test markers: `--run-real-repos` (clone live GitHub repos), `--live-cluster` (e2e against OpenShift), `--browser-tests` (Playwright critical journeys), `--run-llm-evals` (requires API key).
 
 ## Security notes
 

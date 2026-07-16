@@ -761,6 +761,7 @@ class TestRunTestSuite:
         command = args[0]
         assert "--ignore=tests/test_real_repos.py" in command
         assert "--ignore=tests/test_browser.py" in command
+        assert "--ignore=tests/test_browser_critical.py" in command
         assert "--ignore=tests/test_live_cluster_e2e.py" in command
         assert kwargs["env"]["KUBECONFIG"] == "/tmp/nonexistent-path"
 

@@ -64,7 +64,53 @@ jobs:
           uv run python -m pytest tests/ -q --tb=short \
             --ignore=tests/test_real_repos.py \
             --ignore=tests/test_browser.py \
+            --ignore=tests/test_browser_critical.py \
             --ignore=tests/test_live_cluster_e2e.py
+
+  # Lean Playwright journeys for Alpine/htmx critical paths. The full crawl
+  # (tests/test_browser.py) stays ignored — too slow/flaky for every PR —
+  # but Dry Run unlock, Back-to-Assessment-after-boost, and Register-for-
+  # GitOps feedback must not ship green without a real browser gate.
+  browser-critical:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: agentit_test
+          POSTGRES_PASSWORD: agentit_test
+          POSTGRES_DB: agentit_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      KUBECONFIG: /tmp/nonexistent-path
+      AGENTIT_TEST_PG_DSN: postgresql://agentit_test:agentit_test@localhost:5432/agentit_test
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - name: Install dependencies
+        run: uv sync --extra dev --extra browser
+      - name: Install Chromium for Playwright
+        run: uv run playwright install chromium --with-deps
+      - name: Run critical browser journeys
+        run: |
+          uv run python -m pytest tests/test_browser_critical.py --browser-tests -q --tb=short
 
   # Builds the real deployed image (same Containerfile the Tekton pipeline's
   # build-image task builds via buildah) and smoke-tests it here too, so a
