@@ -193,19 +193,15 @@ spec:
           # spec.source.helm.parameters could silently drift from git until someone
           # noticed and force-applied it by hand (which also used to clobber image.tag —
           # fixed by always running update-image-tag right after, below).
+          # Rewrite image.tag in the committed Application manifest to this
+          # build's REVISION *before* oc apply, then apply once. Applying the
+          # bootstrap `latest` value and patching afterward races Argo
+          # selfHeal / concurrent PipelineRuns onto the stale :latest tag
+          # (confirmed live: scout CrashLoopBackOff — "No such command
+          # 'propose-watch'" from a days-old latest digest).
           - name: sync-application-spec
             image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
             workingDir: $(workspaces.source.path)
-            computeResources:
-              requests:
-                memory: 64Mi
-                cpu: 50m
-            script: |
-              set -euo pipefail
-              oc apply -f argocd/application.yaml
-              echo "Synced argocd/application.yaml onto the live Application object"
-          - name: update-image-tag
-            image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
             env:
               - name: REVISION
                 value: $(params.revision)
@@ -215,13 +211,12 @@ spec:
                 cpu: 50m
             script: |
               set -euo pipefail
-              TAG_INDEX=$(oc -n openshift-gitops get applications.argoproj.io agentit \
-                -o jsonpath='{range .spec.source.helm.parameters[*]}{.name}{"\n"}{end}' | \
-                grep -n '^image.tag$' | cut -d: -f1)
-              TAG_INDEX=$((TAG_INDEX - 1))
-              oc -n openshift-gitops patch applications.argoproj.io agentit --type=json \
-                -p "[{\"op\":\"replace\",\"path\":\"/spec/source/helm/parameters/${TAG_INDEX}/value\",\"value\":\"${REVISION}\"}]"
-              echo "Updated Application image.tag to ${REVISION}"
+              # Replace only the image.tag Helm parameter value (bootstrap is "latest").
+              sed -i -E '/name: image\.tag/{n;s/^([[:space:]]*value: ).*/\1'"${REVISION}"'/;}' \
+                argocd/application.yaml
+              grep -A1 'name: image.tag' argocd/application.yaml
+              oc apply -f argocd/application.yaml
+              echo "Synced argocd/application.yaml with image.tag=${REVISION}"
       params:
         - name: revision
           value: $(params.revision)

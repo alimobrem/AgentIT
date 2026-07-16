@@ -89,8 +89,16 @@ USER 0
 # build-time owner of .git. Put safe.directory in /etc/gitconfig (--system)
 # so every UID sees it; --global alone lives under USER 1001's home and is
 # invisible to Tekton/OpenShift smoke and scout pods (dubious ownership).
+# Group-writable dirs OpenShift arbitrary UIDs (gid 0) need to mutate at
+# runtime: .git for branch/commit/push, plus the L3 source-mode allowlist
+# paths capability-scout writes before opening a PR. Without g+w on
+# tests/skills/checks/src/docs, source-mode cycles fail at write_text with
+# PermissionError even after gates pass (confirmed live on fa7db61).
 RUN git config --system --add safe.directory /opt/app-root/src && \
-    find .git -type d -exec chmod g+w {} +
+    find .git -type d -exec chmod g+w {} + && \
+    for d in tests skills checks src docs; do \
+      if [ -d "$d" ]; then find "$d" -type d -exec chmod g+w {} +; fi; \
+    done
 USER 1001
 
 EXPOSE 8080

@@ -179,31 +179,35 @@ class TestTektonPipeline:
         assert "notify-argocd" in task_names, "Pipeline should notify Argo CD instead"
 
     def test_notify_argocd_updates_image_tag(self):
-        """Verify notify-argocd patches the Application's image.tag param."""
+        """Verify notify-argocd pins image.tag to this build's REVISION before apply."""
         doc = _load(self.TEMPLATE)
         tasks = {t["name"]: t for t in doc["spec"]["tasks"]}
         steps = {s["name"]: s for s in tasks["notify-argocd"]["taskSpec"]["steps"]}
-        script = steps["update-image-tag"]["script"]
-        assert "patch application" in script
+        script = steps["sync-application-spec"]["script"]
         assert "image.tag" in script
+        assert "REVISION" in script
+        assert "oc apply -f argocd/application.yaml" in script
 
-    def test_notify_argocd_syncs_application_spec_before_patching_tag(self):
-        """Regression for the incident where a new Helm parameter committed to
-        argocd/application.yaml required a manual `oc apply` to take effect, and
-        that manual apply also clobbered the live-patched image.tag. notify-argocd
-        must re-apply argocd/application.yaml (so any new/changed parameter list
-        syncs automatically on every deploy) BEFORE re-pinning image.tag (so the
-        apply can never leave the live tag on the git placeholder value)."""
+    def test_notify_argocd_pins_tag_before_applying_application_spec(self):
+        """Regression: applying argocd/application.yaml with bootstrap
+        image.tag=latest then patching afterward raced Argo selfHeal onto the
+        stale :latest digest (scout CrashLoopBackOff). Rewrite REVISION into
+        the manifest, then apply once — no separate update-image-tag step."""
         doc = _load(self.TEMPLATE)
         tasks = {t["name"]: t for t in doc["spec"]["tasks"]}
         task = tasks["notify-argocd"]
         step_names = [s["name"] for s in task["taskSpec"]["steps"]]
-        assert step_names.index("sync-application-spec") < step_names.index(
-            "update-image-tag"
-        ), "argocd/application.yaml must be re-applied before the image.tag patch"
+        assert "sync-application-spec" in step_names
+        assert "update-image-tag" not in step_names, (
+            "image.tag must be rewritten into application.yaml before apply; "
+            "a post-apply patch races Argo onto :latest"
+        )
         steps = {s["name"]: s for s in task["taskSpec"]["steps"]}
-        assert "oc apply -f argocd/application.yaml" in steps["sync-application-spec"]["script"]
-        # The step needs the cloned repo to read argocd/application.yaml from.
+        script = steps["sync-application-spec"]["script"]
+        assert "sed" in script and "oc apply -f argocd/application.yaml" in script
+        assert any(
+            e.get("name") == "REVISION" for e in steps["sync-application-spec"].get("env", [])
+        ), "sync-application-spec needs REVISION to pin image.tag before apply"
         ws_names = {w["name"] for w in task["taskSpec"]["workspaces"]}
         assert "source" in ws_names
         task_ws_names = {w["name"] for w in task["workspaces"]}

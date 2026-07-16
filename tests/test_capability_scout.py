@@ -589,6 +589,18 @@ class TestContainerfileShipsWhatTestsPassGateNeeds:
             "'.git/HEAD.lock': Permission denied'"
         )
 
+    def test_makes_source_allowlist_directories_group_writable(self):
+        """L3 source mode writes new files under tests/skills/checks/src/docs
+        before opening a PR. Those COPY dirs also land root-owned 755; without
+        g+w, scout fails at write_text with PermissionError after gates pass
+        (confirmed live: tests/test_stack_signature_detector.py)."""
+        content = self._containerfile_text()
+        for path in ("tests", "skills", "checks", "src", "docs"):
+            assert path in content, f"Containerfile chmod loop must cover {path}/"
+        assert "for d in tests skills checks src docs" in content or (
+            "tests" in content and "skills" in content and "chmod g+w" in content
+        ), "Containerfile must chmod g+w the L3 source-mode allowlist directories"
+
 
 class TestCheckNoOpenSelfImprovePr:
     def test_passes_when_no_open_prs(self):
