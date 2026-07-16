@@ -3,7 +3,7 @@
 {% block content %}
 <div x-data="{ assessOpen: {{ 'true' if request.query_params.get('assess') else 'false' }} }" @keydown.escape.window="assessOpen = false">
 <h1>Fleet</h1>
-<p class="text-muted text-sm mb-1">Portfolio scoreboard — apps, scores, Assess / Re-assess / Delete.</p>
+<p class="text-muted text-sm mb-1">Portfolio scoreboard — apps, scores, Assess / Re-assess (or Refresh Onboard) / Delete.</p>
 
 <div class="action-bar">
   <button class="btn" @click="assessOpen = true">Assess New Repo</button>
@@ -99,6 +99,27 @@
       <td class="{% if r.critical_count > 0 %}text-danger text-bold{% endif %}">{{ r.critical_count }}</td>
       <td>
         <div class="gate-actions">
+          {# Previously onboarded apps: one primary "Refresh Onboard" that
+             re-assesses then auto-chains into onboard (continue_onboard=1).
+             Never-onboarded apps keep plain Re-assess → Assessment Detail. #}
+          {% if r.ever_onboarded %}
+          <form method="post" action="/assess" class="inline-form"
+                x-data x-ref="refreshOnboard{{ r.id }}">
+            <input type="hidden" name="repo_url" value="{{ r.repo_url }}">
+            <input type="hidden" name="criticality" value="{{ r.criticality }}">
+            <input type="hidden" name="continue_onboard" value="1">
+            <button type="button" class="btn btn-sm btn-action"
+              @click="$dispatch('show-confirm', {
+                title: 'Refresh Onboard',
+                message: 'Re-assess ' + {{ r.repo_name | tojson | forceescape }} + ' and regenerate onboard manifests in one step. You will land on Onboard Results to Dry Run → Apply.',
+                form: $refs.refreshOnboard{{ r.id }},
+                opts: { confirmText: 'Refresh Onboard' }
+              })">
+              <span class="btn-label">Refresh Onboard</span>
+              <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Refreshing&hellip;</span>
+            </button>
+          </form>
+          {% else %}
           <form method="post" action="/assess" class="inline-form">
             <input type="hidden" name="repo_url" value="{{ r.repo_url }}">
             <input type="hidden" name="criticality" value="{{ r.criticality }}">
@@ -107,6 +128,7 @@
               <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
             </button>
           </form>
+          {% endif %}
           <form method="post" action="/assessments/{{ r.id }}/delete" class="inline-form"
                 x-data x-ref="deleteForm{{ r.id }}">
             {# Type-to-confirm: Delete App is one of only two actions in the
