@@ -1419,7 +1419,23 @@ function completeLoading() {
 document.body.addEventListener('htmx:afterSettle', completeLoading);
 // Re-initialize Alpine on htmx-swapped content so x-data, @click, $dispatch work
 document.body.addEventListener('htmx:afterSettle', function(e) {
-  if (e.detail && e.detail.target && window.Alpine && e.detail.target.querySelector('[x-data]')) {
+  if (!window.Alpine || !e.detail) return;
+  if (e.detail.boosted) {
+    // Boosted nav links/forms (hx-boost="true" on <body>) replace <body>'s
+    // children wholesale on every click. A plain initTree() here isn't
+    // enough: Alpine's own MutationObserver-based auto-init races with
+    // htmx's settle phase (which pauses briefly for CSS transitions), so
+    // directives like x-show can end up bound against an intermediate,
+    // not-yet-settled DOM state -- symptom: the Events drawer panel stays
+    // visible after any boosted nav click even though its `open` state is
+    // false, because its x-show binding never actually attached. destroyTree()
+    // first tears down whatever Alpine's own observer already
+    // (mis)initialized, so initTree() then binds cleanly against the final,
+    // settled DOM -- the fix Alpine's own maintainers recommend for this
+    // exact htmx-boost interaction (alpinejs/alpine discussion #4485).
+    Alpine.destroyTree(document.body);
+    Alpine.initTree(document.body);
+  } else if (e.detail.target && e.detail.target.querySelector('[x-data]')) {
     Alpine.initTree(e.detail.target);
   }
 });
