@@ -116,7 +116,10 @@ async def assess_submit(
     # chains into onboard after the new scorecard is saved — avoids the
     # Re-assess → assessed → Onboard again two-click trap for apps that
     # already generated manifests once.
-    chain = continue_onboard.strip().lower() in ("1", "true", "yes", "on")
+    # Direct callers (tests/test_assess_submit_postgres.py) bypass FastAPI
+    # Form injection, so the default may still be a Form() object — coerce.
+    continue_flag = continue_onboard if isinstance(continue_onboard, str) else ""
+    chain = continue_flag.strip().lower() in ("1", "true", "yes", "on")
     job_id = await s.create_assessment_job(repo_url, continue_onboard=chain)
     # The work below runs in a background thread (long clone+assess pipeline)
     # via a plain `threading.Thread`, not `asyncio.to_thread` -- unlike
