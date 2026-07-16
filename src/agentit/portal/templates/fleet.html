@@ -2,7 +2,7 @@
 {% block title %}AgentIT{% endblock %}
 {% block content %}
 <div x-data="{ assessOpen: {{ 'true' if request.query_params.get('assess') else 'false' }} }" @keydown.escape.window="assessOpen = false">
-<h1>Enterprise Readiness</h1>
+<h1>Fleet</h1>
 
 <div class="action-bar">
   <button class="btn" @click="assessOpen = true">Assess New Repo</button>

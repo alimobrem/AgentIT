@@ -144,11 +144,9 @@ class TestDeliverRegisteredCommitsToInfraRepo:
 
 
 class TestOnboardResultsWarnsBeforeDryRun:
-    """The page's own banner recommends dry-run-then-deliver, but nothing
-    enforced or even visually hinted at this -- a user could click Deliver
-    with zero friction, having never dry-run. A visible warning badge next
-    to (not inside) the Deliver button must appear until a dry run (or a
-    real delivery) has actually happened for this assessment."""
+    """Soft-gate Apply until Dry Run succeeds: warning chip outside the CTA,
+    primary Apply disabled, override confirm available. After a successful
+    dry run the primary unlocks with mechanism-specific confirm text."""
 
     async def test_warning_badge_shown_before_any_apply_action(self, deliver_client):
         client, _store, aid = deliver_client
@@ -159,6 +157,12 @@ class TestOnboardResultsWarnsBeforeDryRun:
         assert "delivery-step-status" in resp.text
         assert 'class="btn btn-green btn-lg"' not in resp.text
         assert "NO DRY RUN YET" not in resp.text
+        assert "Apply to Cluster" in resp.text
+        assert "Deliver Now" not in resp.text
+        assert "Override — Apply to Cluster anyway" in resp.text
+        # Primary Apply carries a disabled attribute while ungated.
+        assert 'data-action="apply"' in resp.text
+        assert 'data-action="apply-override"' in resp.text
 
     async def test_warning_badge_gone_after_a_dry_run(self, deliver_client, _mock_kube):
         client, _store, aid = deliver_client
@@ -168,6 +172,10 @@ class TestOnboardResultsWarnsBeforeDryRun:
         assert resp.status_code == 200
         assert "No dry run yet" not in resp.text
         assert "Dry run passed" in resp.text
+        assert "Override —" not in resp.text
+        assert "confirmText: " in resp.text or "Apply to Cluster" in resp.text
+        # Unlocked primary: no static disabled on the apply button markup path.
+        assert "Override — Apply to Cluster anyway" not in resp.text
 
     async def test_warning_badge_gone_after_a_real_delivery(self, deliver_client, _mock_kube):
         client, _store, aid = deliver_client

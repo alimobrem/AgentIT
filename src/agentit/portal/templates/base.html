@@ -439,7 +439,9 @@
   }
   .inline-form { display: inline; }
 
-  /* ── Delivery action path (onboard-results) ─────────────────────── */
+  /* ── Delivery action path (onboard-results) ───────────────────────
+     Vertical Dry Run → Apply stack. Numbered markers + connector mirror
+     .lifecycle-stepper tokens (active = accent fill, done = success fill). */
   .delivery-actions {
     display: flex;
     flex-wrap: wrap;
@@ -465,11 +467,11 @@
   }
   .delivery-step-num {
     flex-shrink: 0;
-    width: 1.5rem;
-    height: 1.5rem;
+    width: 1.75rem;
+    height: 1.75rem;
     border-radius: 50%;
-    border: 1px solid var(--color-border);
-    background: var(--color-surface-2);
+    border: 2px solid var(--color-border);
+    background: var(--color-surface);
     color: var(--color-muted);
     font-size: var(--font-sm);
     font-weight: 600;
@@ -479,21 +481,25 @@
     line-height: 1;
   }
   .delivery-step-num.is-done {
-    border-color: var(--color-btn-green);
-    color: var(--color-btn-green);
+    border-color: var(--color-success);
+    background: var(--color-success);
+    color: #fff;
   }
   .delivery-step-num.is-active {
     border-color: var(--color-accent);
-    color: var(--color-text);
+    background: var(--color-accent);
+    color: #fff;
+    box-shadow: var(--glow-accent);
   }
   .delivery-connector {
     width: 2px;
     height: var(--space-5);
     background: var(--color-border);
-    margin-left: calc(0.75rem - 1px);
+    margin-left: calc(0.875rem - 1px);
     margin-top: var(--space-1);
     margin-bottom: var(--space-1);
   }
+  .delivery-connector.is-done { background: var(--color-success); }
   .delivery-step-row .inline-form { flex: 1; display: flex; }
   .delivery-step-row .btn {
     flex: 1;
@@ -501,13 +507,17 @@
     min-width: 10rem;
   }
   .delivery-step-status {
-    margin-left: calc(1.5rem + var(--space-3));
+    margin-left: calc(1.75rem + var(--space-3));
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: var(--space-2);
     font-size: var(--font-sm);
     color: var(--color-muted);
+  }
+  .delivery-override {
+    margin-left: calc(1.75rem + var(--space-3));
+    font-size: var(--font-sm);
   }
   .delivery-secondary {
     display: flex;

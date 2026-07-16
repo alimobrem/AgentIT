@@ -135,7 +135,7 @@ class TestFixFindingIsPureGeneration:
         resp = await client.get(f"/assessments/{aid}/onboard-results?fix_generated=1&agent=security")
         assert resp.status_code == 200
         assert "apply to cluster or create a PR" not in resp.text
-        assert "Review below and Deliver" in resp.text
+        assert "Review below, then Apply to Cluster" in resp.text
 
 
 # ── 2. Remediation Plan table's Fix button uses the shared category set ──

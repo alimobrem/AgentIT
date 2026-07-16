@@ -336,18 +336,25 @@ async def test_onboard_results_page(client, _override_store):
     assert "Download" in resp.text
     # The unified apply flow (docs/unified-apply-flow.md) collapsed the
     # independent "Apply to Cluster" / "Create PR" buttons into one
-    # dynamically-labeled Deliver action -- short CTA labels ("Apply" /
-    # "Open PR"); mechanism is no longer a human choice. This report has no
-    # infra_repo_url and isn't GitOps-registered, so the button reads "Apply".
-    assert 'btn-label">Apply</span>' in resp.text
+    # dynamically-labeled Deliver action -- GitOps → "Commit & Open PR",
+    # Direct → "Apply to Cluster". This report has no infra_repo_url and
+    # isn't GitOps-registered, so the button reads "Apply to Cluster".
+    assert "Apply to Cluster" in resp.text
+    assert "Commit & Open PR" not in resp.text
+    assert "Deliver Now" not in resp.text
     assert "Per-Agent PRs" in resp.text
     assert "Dry Run" in resp.text
     assert "delivery-actions" in resp.text
     assert "delivery-primary" in resp.text
     assert "delivery-secondary" in resp.text
+    assert "delivery-connector" in resp.text
     # Status chip lives outside the Apply CTA (not packed into the button).
     assert "No dry run yet" in resp.text
     assert "NO DRY RUN YET" not in resp.text
+    # Soft-gate: primary Apply disabled until Dry Run succeeds; override remains.
+    assert 'data-action="apply"' in resp.text
+    assert "disabled" in resp.text
+    assert "Override — Apply to Cluster anyway" in resp.text
 
 
 async def test_api_manifests(client, _override_store):
@@ -567,7 +574,39 @@ async def test_assessment_detail_has_onboard_button(client, _override_store):
     resp = await client.get(f"/assessments/{aid}")
     assert resp.status_code == 200
     assert f"/assessments/{aid}/onboard" in resp.text
-    assert "Onboard" in resp.text
+    assert "Onboard This App" in resp.text
+    assert "btn-action btn-lg" in resp.text
+    assert "&larr; Fleet" in resp.text or "← Fleet" in resp.text or "Fleet</a>" in resp.text
+    assert "Dashboard" not in resp.text or "Fleet" in resp.text
+
+
+async def test_assessment_detail_lifecycle_primary_cta_after_onboard(client, _override_store):
+    """Once onboarded, Review & Deliver is primary — not a giant Onboard."""
+    store = _override_store
+    report = _make_report()
+    aid = await store.save(report)
+    await store.save_onboarding(aid, [{
+        "category": "skills",
+        "path": "netpol.yaml",
+        "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n",
+        "description": "test",
+    }])
+
+    resp = await client.get(f"/assessments/{aid}")
+    assert resp.status_code == 200
+    assert "Review &amp; Deliver" in resp.text or "Review & Deliver" in resp.text
+    assert f'href="/assessments/{aid}/onboard-results"' in resp.text
+    assert "Re-onboard" in resp.text
+    assert "Onboard This App" not in resp.text
+
+
+async def test_fleet_h1_not_enterprise_readiness(client, _override_store):
+    store = _override_store
+    await store.save(_make_report())
+    resp = await client.get("/")
+    assert resp.status_code == 200
+    assert "<h1>Fleet</h1>" in resp.text
+    assert "Enterprise Readiness" not in resp.text
 
 
 # ------------------------------------------------------------------
@@ -590,6 +629,8 @@ async def test_masthead_nav_structure(client, _override_store):
     assert "/api/events?limit=50" in html
     assert "agentit.events.lastSeenAt" in html
     assert "refreshBadge" in html
+    assert "_isBadgeSeverity" in html
+    assert "_eventHref" in html
     assert "activity-menu" not in html
     # Bell shares Alpine scope with the drawer (aria-expanded + focus restore).
     assert ':aria-expanded="open"' in html
