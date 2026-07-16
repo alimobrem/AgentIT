@@ -317,6 +317,52 @@ async def test_onboard_creates_results(client, _override_store):
     assert f"/assessments/{aid}/onboard-results" in progress_resp.headers["location"]
 
 
+async def test_back_to_assessment_links_are_live(client, _override_store):
+    """Regression: Back to Assessment must be a real href to Assessment Detail
+    with hx-boost=false — a dead # / broken Alpine / stuck Events overlay made
+    these clicks look like no-ops after boosted Deliver navigations."""
+    import re
+
+    store = _override_store
+    report = _make_report()
+    aid = await store.save(report)
+    await store.save_onboarding(aid, [{
+        "category": "skills",
+        "path": "netpol.yaml",
+        "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n",
+        "description": "test",
+    }])
+
+    pages = [
+        f"/assessments/{aid}/onboard-results",
+        f"/assessments/{aid}/remediations",
+        f"/assessments/{aid}/slos",
+        f"/assessments/{aid}/onboarding-history",
+    ]
+    for path in pages:
+        resp = await client.get(path)
+        assert resp.status_code == 200, path
+        # Prefer the marked back-nav control; fall back to any Assessment crumb.
+        marked = re.findall(
+            rf'<a[^>]*data-nav="back-to-assessment"[^>]*>',
+            resp.text,
+        )
+        assert marked, f"missing data-nav=back-to-assessment on {path}"
+        for tag in marked:
+            assert f'href="/assessments/{aid}"' in tag or \
+                   f'href="/assessments/{aid}?' in tag, (path, tag)
+            assert 'href="#"' not in tag, (path, tag)
+            assert 'hx-boost="false"' in tag, (path, tag)
+
+    # Progress page (running job) also exposes a live back link.
+    job_id = await store.create_remediation_job(aid)
+    progress = await client.get(f"/assessments/{aid}/onboard/progress/{job_id}")
+    assert progress.status_code == 200
+    assert f'data-nav="back-to-assessment"' in progress.text
+    assert f'href="/assessments/{aid}"' in progress.text
+    assert 'hx-boost="false"' in progress.text
+
+
 async def test_onboard_results_page(client, _override_store):
     store = _override_store
     report = _make_report_with_findings()
@@ -639,6 +685,12 @@ async def test_masthead_nav_structure(client, _override_store):
     assert 'x-ref="bellBtn"' in html
     assert 'x-ref="closeBtn"' in html
     assert 'x-ref="drawerPanel"' in html
+    # Overlay/panel closed by CSS default + `.open` class (not x-show alone) —
+    # prevents a post-boost Alpine race from leaving a full-screen click trap.
+    assert ".events-drawer-overlay.open" in html
+    assert ".events-drawer-panel.open" in html
+    assert ":class=\"{ 'open': open }\"" in html
+    assert "destroy()" in html and "_removeTrap()" in html
     # Mobile hamburger owns primary + secondary (not secondary-only).
     assert 'id="nav-primary"' in html
     assert 'id="nav-secondary"' in html

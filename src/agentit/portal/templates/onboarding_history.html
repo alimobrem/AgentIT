@@ -4,7 +4,7 @@
 <h1>Onboarding History: {{ report.repo_name }}</h1>
 
 <div class="action-bar mb-2">
-  <a href="/assessments/{{ assessment_id }}" class="btn btn-outline btn-sm">&larr; Back to Assessment</a>
+  <a href="/assessments/{{ assessment_id }}" class="btn btn-outline btn-sm" data-nav="back-to-assessment" hx-boost="false">&larr; Back to Assessment</a>
 </div>
 
 {% if onboardings %}

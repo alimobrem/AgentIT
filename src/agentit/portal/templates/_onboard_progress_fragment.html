@@ -45,7 +45,8 @@
 
   {% if job.status == "failed" %}
   <div class="alert alert-error mt-1">{{ job.error or "Onboarding failed" }}</div>
-  <a href="/assessments/{{ assessment_id }}" class="btn btn-outline">Back to Assessment</a>
+  <a href="/assessments/{{ assessment_id }}?error={{ (job.error or 'Onboarding failed') | urlencode }}"
+     class="btn btn-outline" data-nav="back-to-assessment" hx-boost="false">Back to Assessment</a>
   {% endif %}
 </div>
 {% if job.status == "completed" %}

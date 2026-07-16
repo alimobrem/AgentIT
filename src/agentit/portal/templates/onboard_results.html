@@ -2,7 +2,10 @@
 {% block title %}Onboarding Results - {{ report.repo_name }} - AgentIT{% endblock %}
 {% block content %}
 <p class="mb-1">
-  <a href="/assessments/{{ assessment_id }}">&larr; {{ report.repo_name }} Assessment</a>
+  {# hx-boost=false: full navigation back to Assessment Detail — avoids the
+     Events-drawer overlay / Alpine re-init race after boosted Deliver that
+     left this link looking like a dead click. #}
+  <a href="/assessments/{{ assessment_id }}" data-nav="back-to-assessment" hx-boost="false">&larr; {{ report.repo_name }} Assessment</a>
 </p>
 <h1>Onboarding: {{ report.repo_name }}</h1>
 
