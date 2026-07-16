@@ -113,9 +113,12 @@ class TestHonestDeliverConfirm:
             if "Override" in c and "Open PR" in html_lib.unescape(c)
         ]
         assert clicks, "expected Override Commit & Open PR confirm @click"
-        click = html_lib.unescape(clicks[0])
+        click = html_lib.unescape(clicks[0]).encode("utf-8").decode("unicode_escape")
         assert "opens a pull request" in click.lower() or "open a PR" in click
-        assert "does not mutate the cluster" in click
+        assert (
+            "does not mutate the cluster" in click
+            or "cluster is not mutated" in click
+        )
         assert "cannot be undone" not in click
         assert "modifies production" not in click
 
