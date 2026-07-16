@@ -31,7 +31,8 @@ Feedback columns follow EDL §3 (busy / success / error / empty / confirm).
 | Settings | Page load | **Pass*** | — | — |
 | Ledger | Nav link | **Pass** | — | — |
 | Insights | Page load | Not fully click-tested charts | needs human eyes | — |
-| Schedules | Mutating toggles | Not fully click-tested | needs human eyes | — |
+| Schedules | Create / Save / Disable (confirm present) | **Pass*** (page loads; Delete confirm wired) | — | — |
+| Cmd+K | Command palette | **Pass** (opens; nav + apps listed) | — | — |
 | Mobile hamburger | Nav drawer | Not tested at mobile viewport | needs human eyes | — |
 | Events drawer | Bell → slide-over | Not fully exercised | needs human eyes | — |
 
