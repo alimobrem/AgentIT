@@ -218,6 +218,18 @@
       Findings ({{ urgent_findings|length }})
     </h2>
     <div class="collapse-body" x-show="open" x-transition>
+      {# Pre-onboard: Onboard This App already generates manifests for every
+         finding. Per-finding Fix is a competing generation path that lands on
+         the same Dry Run → Apply flow and was shipping as a dead/confusing
+         control (confirm without busy feedback; Remediation Plan Fix had no
+         confirm). Hide it until onboarding has run; then Fix is the right
+         verb for incremental remediations. #}
+      {% if lifecycle_stage == "assessed" and fixable_categories %}
+      <p class="text-muted text-sm mb-1" role="status">
+        To fix these findings, use <strong>Onboard This App</strong> above, then Dry Run → Apply on Onboard Results.
+        Per-finding Fix appears here after onboarding.
+      </p>
+      {% endif %}
       <ul class="finding-list">
         {% for f in urgent_findings %}
         {# Optimistic UI (docs/ux-design-requirements.md checklist #7):
@@ -234,19 +246,23 @@
           {{ f.description }}
           {% if f.source %}<span class="badge badge-muted finding-source">{{ f.source | clean_source }}</span>{% endif %}
           {% if f.file_path %}<span class="finding-file">{{ f.file_path }}</span>{% endif %}
-          {% if f.category in fixable_categories %}
+          {% if f.category in fixable_categories and lifecycle_stage != "assessed" %}
+          {# x-data on the form (same pattern as Delete / Register for GitOps)
+             so $refs resolves in the button's Alpine scope; htmx-indicator
+             gives busy feedback while /fix generates. #}
           <form method="post" action="/assessments/{{ assessment_id }}/fix" class="inline-form"
-                x-ref="fixFinding{{ loop.index }}">
+                x-data x-ref="fixFinding{{ loop.index }}">
             <input type="hidden" name="category" value="{{ f.category }}">
             <input type="hidden" name="description" value="{{ f.description }}">
             <button type="button" class="btn btn-sm btn-green"
               @click="$dispatch('show-confirm', {
                 title: 'Generate Fix',
-                message: 'Generate a fix for this finding?',
+                message: 'Generate a fix for this finding? You will review it on Onboard Results before Apply.',
                 form: $refs.fixFinding{{ loop.index }},
                 opts: { confirmText: 'Generate Fix', danger: false }
               })">
               <span class="btn-label">Fix</span>
+              <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Generating&hellip;</span>
             </button>
           </form>
           {% endif %}
@@ -293,10 +309,20 @@
             <td>{{ item.estimated_effort }}</td>
             <td>{{ item.agent_responsible }}</td>
             <td>
-              {% if item.category in fixable_categories %}
-              <form method="post" action="/assessments/{{ assessment_id }}/fix" class="inline-form">
+              {% if item.category in fixable_categories and lifecycle_stage != "assessed" %}
+              <form method="post" action="/assessments/{{ assessment_id }}/fix" class="inline-form"
+                    x-data x-ref="fixPlan{{ loop.index }}">
                 <input type="hidden" name="category" value="{{ item.category }}">
-                <button type="submit" class="btn btn-sm btn-green">Fix</button>
+                <button type="button" class="btn btn-sm btn-green"
+                  @click="$dispatch('show-confirm', {
+                    title: 'Generate Fix',
+                    message: 'Generate a fix for this remediation item? You will review it on Onboard Results before Apply.',
+                    form: $refs.fixPlan{{ loop.index }},
+                    opts: { confirmText: 'Generate Fix', danger: false }
+                  })">
+                  <span class="btn-label">Fix</span>
+                  <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Generating&hellip;</span>
+                </button>
               </form>
               {% endif %}
               <form method="post" action="/api/feedback" class="inline-form"
