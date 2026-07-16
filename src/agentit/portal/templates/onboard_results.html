@@ -128,6 +128,7 @@
   <strong>{{ delivery_confirmation }}</strong>
 </div>
 
+{# EDL §7: Dry Run → Apply. Status chips beside controls, never inside Apply. #}
 <div class="action-bar">
   <form method="post" action="/assessments/{{ assessment_id }}/deliver" class="inline-form">
     <input type="hidden" name="dry_run" value="true">
@@ -136,6 +137,10 @@
       <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Running&hellip;</span>
     </button>
   </form>
+  {% if not apply_results %}
+  <span class="badge badge-warning" role="status"
+        title="No Dry Run has been performed yet for this onboarding -- consider running Dry Run first to preview what will happen.">&#9888; No dry run yet</span>
+  {% endif %}
   <form method="post" action="/assessments/{{ assessment_id }}/deliver" class="inline-form"
         x-data x-ref="deliverForm">
     <button type="button" class="btn btn-green btn-lg"
@@ -145,9 +150,6 @@
         form: $refs.deliverForm,
         opts: { confirmText: 'Deliver Now', danger: false }
       })">
-      {% if not apply_results %}
-      <span class="badge badge-warning" title="No Dry Run has been performed yet for this onboarding -- consider running Dry Run first to preview what will happen.">&#9888; No dry run yet</span>
-      {% endif %}
       {{ "Commit & Open PR" if gitops_registered else "Apply to Cluster" }}
     </button>
   </form>

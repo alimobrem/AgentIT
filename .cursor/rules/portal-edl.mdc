@@ -1,0 +1,25 @@
+---
+description: AgentIT portal Experience Design Language — load before changing portal templates/UI
+globs:
+  - src/agentit/portal/templates/**/*
+  - src/agentit/portal/**/*.py
+  - tests/test_portal_edl.py
+  - scripts/check_portal_edl.py
+  - docs/portal-experience-design-language.md
+alwaysApply: false
+---
+
+# Portal EDL
+
+Before editing portal templates or UI chrome, read and follow:
+
+**[`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md)**
+
+Enforce with:
+
+```bash
+uv run pytest tests/test_portal_edl.py -q
+uv run python scripts/check_portal_edl.py
+```
+
+Key MUST rules: no status text/badges inside `<button>`; Dry Run → Apply on onboard-results; modals `role="dialog"` + Escape; `pr_url` via `safe_url`; badges ≥ 12px (`var(--font-xs)`); Events bell/drawer IA; CSS variables only for new chrome.

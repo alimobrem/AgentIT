@@ -142,10 +142,12 @@
 {% endif %}
 
 <!-- Assess Modal -->
-<div id="assess-modal" :class="{ 'open': assessOpen }" class="modal-overlay" @click.self="assessOpen = false">
+<div id="assess-modal" :class="{ 'open': assessOpen }" class="modal-overlay"
+     role="dialog" aria-modal="true" aria-labelledby="assess-modal-title"
+     @keydown.escape.window="assessOpen = false" @click.self="assessOpen = false">
   <div class="modal">
-    <button class="modal-close" @click="assessOpen = false" aria-label="Close">&times;</button>
-    <h2>New Assessment</h2>
+    <button type="button" class="modal-close" @click="assessOpen = false" aria-label="Close">&times;</button>
+    <h2 id="assess-modal-title">New Assessment</h2>
     <form method="post" action="/assess" class="form-narrow">
       <div class="form-group">
         <label class="form-label" for="repo_url">Repository URL</label>
