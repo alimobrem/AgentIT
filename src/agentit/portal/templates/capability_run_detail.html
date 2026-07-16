@@ -8,12 +8,21 @@
   <div class="stat-card">
     <div class="stat-label">Outcome</div>
     <div class="stat-value">
-      {% if details.pr_url %}
-        <span class="text-success">Proposed</span>
-      {% elif event.severity == "error" %}
-        <span class="text-danger">Error</span>
+      {% set o = outcome or "no-op" %}
+      {% if o == "proposed" %}
+        <span class="badge badge-success">proposed</span>
+      {% elif o == "already-implemented" %}
+        <span class="badge badge-info">already-implemented</span>
+      {% elif o == "gate-blocked" or o == "outcome-blocked" %}
+        <span class="badge badge-warning">{{ o }}</span>
+      {% elif o == "no-signal" %}
+        <span class="badge badge-muted">no-signal</span>
+      {% elif o == "parse-error" or o == "error" or o == "pr-failed" or o == "source-generation-failed" %}
+        <span class="badge badge-danger">{{ o }}</span>
+      {% elif o == "no-proposal" %}
+        <span class="badge badge-muted">no-proposal</span>
       {% else %}
-        <span class="text-warning">{{ "Gate-blocked" if details.gate_results and (details.gate_results | rejectattr("passed") | list) else "No signal" }}</span>
+        <span class="badge badge-muted">{{ o }}</span>
       {% endif %}
     </div>
   </div>
@@ -52,6 +61,70 @@
 {% endif %}
 {% if details.doc_anchor %}
 <p class="text-sm text-muted">Doc anchor: <code>{{ details.doc_anchor }}</code></p>
+{% endif %}
+
+{% if cited_merges %}
+<h2 class="section-title">Cited merges</h2>
+<p class="text-muted mb-1">Prior merged self-improve PRs this cycle used as L4 feedback (do not re-propose).</p>
+<table>
+  <thead>
+    <tr>
+      <th>Title</th>
+      <th>PR</th>
+      <th>Merged</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for m in cited_merges %}
+    <tr>
+      <td class="text-sm">{{ m.title or "—" }}</td>
+      <td class="text-sm">
+        {% if m.pr_url %}
+        <a href="{{ m.pr_url }}" target="_blank" rel="noopener">#{{ m.pr_url.split('/')[-1] }}</a>
+        {% else %}—{% endif %}
+      </td>
+      <td class="text-sm text-muted">{{ (m.merged_at or m.recorded_at or "—")[:19] }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if proposal_outcomes %}
+<h2 class="section-title">Proposal outcomes (context)</h2>
+<p class="text-muted mb-1">Recent <code>capability-outcome</code> rows available when this run gathered evidence.</p>
+<table>
+  <thead>
+    <tr>
+      <th>State</th>
+      <th>Title</th>
+      <th>PR</th>
+      <th>Reject reason</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for o in proposal_outcomes[:10] %}
+    <tr>
+      <td>
+        {% if o.state == "merged" %}
+          <span class="badge badge-success">merged</span>
+        {% elif o.state == "closed" %}
+          <span class="badge badge-muted">closed</span>
+        {% else %}
+          <span class="badge badge-warning">{{ o.state }}</span>
+        {% endif %}
+      </td>
+      <td class="text-sm">{{ o.title or "—" }}</td>
+      <td class="text-sm">
+        {% if o.pr_url %}
+        <a href="{{ o.pr_url }}" target="_blank" rel="noopener">#{{ o.pr_url.split('/')[-1] }}</a>
+        {% else %}—{% endif %}
+      </td>
+      <td class="text-sm text-muted">{{ o.reject_reason or "—" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
 {% endif %}
 
 <h2 class="section-title">Safety Gates</h2>

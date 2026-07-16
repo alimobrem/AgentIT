@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 CAPABILITY_RUN_ACTION = "capability-run"
 CAPABILITY_OUTCOME_ACTION = "capability-outcome"
 
+# Branch prefix for scout (and human) self-improve PRs — used by the open-PR
+# cap gate and by L4 outcome sync discovery.
+_SELF_IMPROVE_BRANCH_PREFIX = "agentit/self-improve/"
+
 # L4: closed-as-wontfix titles stay deprioritized / blocked this long.
 OUTCOME_COOLDOWN_DAYS = 30
 # Open self-improve PRs older than this are recorded as stale once.
@@ -425,14 +429,74 @@ def collect_tracked_prs(run_events: list[dict] | None) -> list[dict]:
     return tracked
 
 
+def list_self_improve_prs_from_gh(*, state: str = "all", limit: int = 50) -> list[dict]:
+    """Discover ``agentit/self-improve/*`` PRs via ``gh`` (url + title).
+
+    Store-only tracking misses human/Cursor merges on self-improve branches
+    that never logged a ``capability-run`` with ``pr_url`` (e.g. #23).
+    Same ``gh pr list`` + prefix filter as ``check_no_open_self_improve_pr``.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh", "pr", "list",
+                "--state", state,
+                "--limit", str(limit),
+                "--json", "url,title,headRefName",
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("capability-scout: gh pr list unavailable for outcome sync: %s", exc)
+        return []
+    if result.returncode != 0:
+        logger.warning("capability-scout: gh pr list failed: %s", (result.stderr or "")[:200])
+        return []
+    try:
+        rows = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        logger.warning("capability-scout: could not parse gh pr list output")
+        return []
+    out: list[dict] = []
+    for pr in rows if isinstance(rows, list) else []:
+        head = str(pr.get("headRefName") or "")
+        if not head.startswith(_SELF_IMPROVE_BRANCH_PREFIX):
+            continue
+        url = str(pr.get("url") or "")
+        if not url:
+            continue
+        out.append({"pr_url": url, "title": str(pr.get("title") or "")})
+    return out
+
+
+def merge_tracked_prs(*sources: list[dict] | None) -> list[dict]:
+    """Deduplicate tracked PR dicts by ``pr_url`` (first title wins)."""
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for source in sources:
+        for row in source or []:
+            pr_url = str(row.get("pr_url") or "")
+            if not pr_url or pr_url in seen:
+                continue
+            seen.add(pr_url)
+            merged.append({
+                "pr_url": pr_url,
+                "title": str(row.get("title") or ""),
+            })
+    return merged
+
+
 async def sync_proposal_outcomes(
     store: object | None,
     *,
     get_status=None,
+    list_prs=None,
     now: str | datetime | None = None,
 ) -> list[dict]:
-    """Poll open self-improve PRs and log new ``capability-outcome`` events.
+    """Poll self-improve PRs and log new ``capability-outcome`` events.
 
+    Sources: prior ``capability-run`` rows *and* ``gh pr list`` discovery so
+    human merges on ``agentit/self-improve/*`` branches are not missed.
     Idempotent per ``pr_url``: already-recorded outcomes are skipped. Returns
     only newly recorded outcome dicts.
     """
@@ -440,14 +504,21 @@ async def sync_proposal_outcomes(
         return []
     if get_status is None:
         from agentit.portal.github_pr import get_pr_status as get_status
+    if list_prs is None:
+        list_prs = list_self_improve_prs_from_gh
 
-    run_events = await _safe_call(store, "list_events_by_action", CAPABILITY_RUN_ACTION, limit=50)
+    run_events = await _safe_call(store, "list_events_by_action", CAPABILITY_RUN_ACTION, limit=100)
     prior = proposal_outcomes_from_events(
         await _safe_call(store, "list_events_by_action", CAPABILITY_OUTCOME_ACTION, limit=100),
     )
     already = {o["pr_url"] for o in prior if o.get("pr_url")}
     newly: list[dict] = []
-    for tracked in collect_tracked_prs(run_events):
+    try:
+        gh_prs = list_prs() if callable(list_prs) else []
+    except Exception:
+        logger.warning("capability-scout: list_prs failed during outcome sync", exc_info=True)
+        gh_prs = []
+    for tracked in merge_tracked_prs(collect_tracked_prs(run_events), gh_prs):
         pr_url = tracked["pr_url"]
         if pr_url in already:
             continue
@@ -986,9 +1057,6 @@ def run_test_suite(repo_dir: Path) -> tuple[bool, str]:
         tail = (result.stdout[-500:] + "\n" + result.stderr[-500:]).strip()
         return False, f"pytest exited {result.returncode}: {tail}"
     return True, "pytest passed"
-
-
-_SELF_IMPROVE_BRANCH_PREFIX = "agentit/self-improve/"
 
 
 def check_no_open_self_improve_pr(max_open_prs: int = 1) -> tuple[bool, str]:

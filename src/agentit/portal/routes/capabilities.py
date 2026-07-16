@@ -256,6 +256,8 @@ async def _get_capability_run_history(s, limit: int = 15) -> list[dict]:
             "severity": ev.get("severity", "info"),
             "summary": ev.get("summary", ""),
             "pr_url": details.get("pr_url"),
+            "outcome": _capability_run_outcome_label(ev, details),
+            "cited_merges": details.get("cited_merges") or [],
         })
 
     pr_urls = [r["pr_url"] for r in runs if r.get("pr_url")]
@@ -267,6 +269,38 @@ async def _get_capability_run_history(s, limit: int = 15) -> list[dict]:
             if r.get("pr_url"):
                 r["pr_status"] = status_map.get(r["pr_url"], {})
     return runs
+
+
+def _capability_run_outcome_label(event: dict, details: dict) -> str:
+    """Stable outcome badge key for the Self-Improvement UI (L4 loop story)."""
+    explicit = str(details.get("outcome") or "").strip()
+    if explicit:
+        return explicit
+    if details.get("pr_url"):
+        return "proposed"
+    if event.get("severity") == "error" or details.get("error"):
+        return "error"
+    summary = str(event.get("summary") or "")
+    if "gate-blocked" in summary:
+        return "gate-blocked"
+    if "insufficient real signal" in summary:
+        return "no-signal"
+    if "no evidence-grounded" in summary or "No proposal this cycle" in summary:
+        return "no-proposal"
+    return "no-op"
+
+
+async def _get_recent_capability_outcomes(s, limit: int = 10) -> list[dict]:
+    """Recent ``capability-outcome`` rows for the Self-Improvement L4 panel."""
+    if not hasattr(s, "list_events_by_action"):
+        return []
+    from agentit.capability_scout import CAPABILITY_OUTCOME_ACTION, proposal_outcomes_from_events
+    try:
+        raw = await s.list_events_by_action(CAPABILITY_OUTCOME_ACTION, limit=limit)
+    except Exception:
+        log.warning("Failed to fetch capability-outcome history", exc_info=True)
+        return []
+    return proposal_outcomes_from_events(raw)
 
 
 _CAPABILITY_SCOUT_STALE_SECONDS = 2 * 86400
@@ -313,9 +347,13 @@ async def self_improvement_page(request: Request) -> HTMLResponse:
     s = await get_store()
     runs = await _get_capability_run_history(s)
     status = await _get_capability_scout_status(s)
+    recent_outcomes = await _get_recent_capability_outcomes(s)
+    cited_merges = [o for o in recent_outcomes if o.get("state") == "merged"][:5]
     return get_templates().TemplateResponse(request, "self_improvement.html", {
         "runs": runs,
         "capability_scout_status": status,
+        "recent_outcomes": recent_outcomes,
+        "cited_merges": cited_merges,
     })
 
 
@@ -396,11 +434,15 @@ async def capability_run_detail(request: Request, event_id: str) -> HTMLResponse
         from agentit.portal.github_pr import get_pr_status
         pr_status = await asyncio.to_thread(get_pr_status, pr_url)
 
+    outcome = _capability_run_outcome_label(event, details)
     return get_templates().TemplateResponse(request, "capability_run_detail.html", {
         "event": event,
         "details": details,
         "pr_url": pr_url,
         "pr_status": pr_status,
+        "outcome": outcome,
+        "cited_merges": details.get("cited_merges") or [],
+        "proposal_outcomes": details.get("proposal_outcomes") or [],
     })
 
 

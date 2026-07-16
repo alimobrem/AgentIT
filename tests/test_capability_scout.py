@@ -309,15 +309,55 @@ class TestProposalOutcomes:
                 "created_at": "2026-07-15T12:00:00Z",
             }
 
-        first = await sync_proposal_outcomes(async_store, get_status=_status)
+        first = await sync_proposal_outcomes(
+            async_store, get_status=_status, list_prs=lambda: [],
+        )
         assert len(first) == 1
         assert first[0]["state"] == "merged"
-        second = await sync_proposal_outcomes(async_store, get_status=_status)
+        second = await sync_proposal_outcomes(
+            async_store, get_status=_status, list_prs=lambda: [],
+        )
         assert second == []
         rows = await raw_store.list_events_by_action(CAPABILITY_OUTCOME_ACTION)
         assert len(rows) == 1
         details = rows[0].get("details") or json.loads(rows[0].get("details_json") or "{}")
         assert details["pr_url"] == "https://github.com/o/r/pull/20"
+
+    async def test_sync_proposal_outcomes_discovers_gh_only_merge(self):
+        """Human/Cursor merges on self-improve branches (no capability-run pr_url)."""
+        async_store, raw_store = await make_async_store()
+
+        def _status(url):
+            return {
+                "state": "merged",
+                "merged_at": "2026-07-16T14:24:47Z",
+                "html_url": url,
+                "labels": [],
+                "title": "Add tick_failure_classifier for permission-denied tick-failure hints",
+                "body": "",
+                "created_at": "2026-07-16T14:19:55Z",
+            }
+
+        first = await sync_proposal_outcomes(
+            async_store,
+            get_status=_status,
+            list_prs=lambda: [{
+                "pr_url": "https://github.com/o/r/pull/23",
+                "title": "Add tick_failure_classifier for permission-denied tick-failure hints",
+            }],
+        )
+        assert len(first) == 1
+        assert first[0]["state"] == "merged"
+        assert first[0]["pr_url"] == "https://github.com/o/r/pull/23"
+        second = await sync_proposal_outcomes(
+            async_store,
+            get_status=_status,
+            list_prs=lambda: [{
+                "pr_url": "https://github.com/o/r/pull/23",
+                "title": "Add tick_failure_classifier for permission-denied tick-failure hints",
+            }],
+        )
+        assert second == []
 
     async def test_gather_evidence_includes_outcomes_and_cites_merges(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)

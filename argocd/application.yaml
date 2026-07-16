@@ -71,10 +71,10 @@ spec:
         # checks before a human ever sees it.
         - name: agents.capabilityScout.enabled
           value: "true"
-        # Dogfood milestone: hourly cycles (was 86400). Restore to 86400 after
-        # L3 proof — see docs/superpowers/plans/2026-07-15-autonomous-self-improve-dogfood.md
+        # Daily cadence restored after L3/L4 dogfood (was temporarily 3600).
+        # See docs/superpowers/plans/2026-07-15-autonomous-self-improve-dogfood.md
         - name: agents.capabilityScout.interval
-          value: "3600"
+          value: "86400"
         # L3 dogfood: prefer skills/checks/tests source PRs when targets allow
         - name: agents.capabilityScout.mode
           value: "auto"
