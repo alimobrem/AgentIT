@@ -112,24 +112,41 @@ def get_pod_count(namespace: str) -> tuple[int, int]:
     return running, failed
 
 
-def list_custom_resources(group: str, version: str, plural: str, namespace: str = "") -> list[dict]:
-    """List custom resources. Returns raw dicts."""
+def list_custom_resources(
+    group: str, version: str, plural: str, namespace: str = "", timeout: int = 10,
+) -> list[dict]:
+    """List custom resources. Returns raw dicts.
+
+    ``timeout`` is the per-call kube-apiserver deadline (seconds). Hot paths
+    like the ambient deploy-status badge pass a shorter value so a wedged
+    apiserver cannot pin portal workers until oauth-proxy returns 502/503.
+    """
     try:
         if namespace:
-            result = custom_objects().list_namespaced_custom_object(group, version, namespace, plural, _request_timeout=10)
+            result = custom_objects().list_namespaced_custom_object(
+                group, version, namespace, plural, _request_timeout=timeout,
+            )
         else:
-            result = custom_objects().list_cluster_custom_object(group, version, plural, _request_timeout=10)
+            result = custom_objects().list_cluster_custom_object(
+                group, version, plural, _request_timeout=timeout,
+            )
         return result.get("items", [])
     except Exception as exc:
         raise KubeError(f"Failed to list {group}/{version} {plural}: {exc}") from exc
 
 
-def get_custom_resource(group: str, version: str, plural: str, name: str, namespace: str = "") -> dict | None:
+def get_custom_resource(
+    group: str, version: str, plural: str, name: str, namespace: str = "", timeout: int = 10,
+) -> dict | None:
     """Get a single custom resource by name. Returns None if not found (404)."""
     try:
         if namespace:
-            return custom_objects().get_namespaced_custom_object(group, version, namespace, plural, name, _request_timeout=10)
-        return custom_objects().get_cluster_custom_object(group, version, plural, name, _request_timeout=10)
+            return custom_objects().get_namespaced_custom_object(
+                group, version, namespace, plural, name, _request_timeout=timeout,
+            )
+        return custom_objects().get_cluster_custom_object(
+            group, version, plural, name, _request_timeout=timeout,
+        )
     except Exception as exc:
         if hasattr(exc, "status") and exc.status == 404:
             return None

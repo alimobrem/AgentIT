@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import time
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -22,6 +23,14 @@ from agentit.portal.helpers import get_circuit_breaker_states, get_store, get_te
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Ambient /api/deploy-status is polled every 15s from every page. Keep kube
+# calls short and cache last-good so a wedged apiserver cannot pin workers
+# until oauth-proxy returns 502/503 awaiting response headers.
+_DEPLOY_STATUS_K8S_TIMEOUT = 2
+_DEPLOY_STATUS_DEADLINE = 3.0
+_DEPLOY_STATUS_CACHE_TTL = 20.0
+_deploy_status_cache: dict = {"data": None, "ts": 0.0}
 
 
 # ── Internal helpers ──────────────────────────────────────────────────
@@ -102,7 +111,10 @@ def _taskrun_status(name: str, namespace: str = "agentit") -> str:
     cluster's Tekton version, regardless of real progress.
     """
     try:
-        tr = kube.get_custom_resource("tekton.dev", "v1", "taskruns", name, namespace=namespace)
+        tr = kube.get_custom_resource(
+            "tekton.dev", "v1", "taskruns", name,
+            namespace=namespace, timeout=_DEPLOY_STATUS_K8S_TIMEOUT,
+        )
         if tr is None:
             return "Pending"
         conditions = tr.get("status", {}).get("conditions", [{}])
@@ -110,6 +122,74 @@ def _taskrun_status(name: str, namespace: str = "agentit") -> str:
     except Exception:
         log.debug("Failed to read TaskRun %s for deploy status", name, exc_info=True)
         return "Unknown"
+
+
+def _degraded_deploy_status(errors: list[str] | None = None) -> dict:
+    """Fallback when kube calls time out or fail -- never hang the badge."""
+    from agentit.portal.metrics import get_build_info
+
+    return {
+        "running": get_build_info(),
+        "pipeline": None,
+        "argo": None,
+        "commit_info": None,
+        "state": "idle",
+        "stage": None,
+        "reason": None,
+        "resolved": None,
+        "errors": list(errors or ["Deploy status unavailable"]),
+        "degraded": True,
+    }
+
+
+def _get_fresh_cached_deploy_status() -> dict | None:
+    cached = _deploy_status_cache["data"]
+    if cached is None:
+        return None
+    if (time.monotonic() - _deploy_status_cache["ts"]) >= _DEPLOY_STATUS_CACHE_TTL:
+        return None
+    return cached
+
+
+def _get_last_good_deploy_status() -> dict | None:
+    return _deploy_status_cache["data"]
+
+
+def _store_deploy_status_cache(status: dict) -> None:
+    """Cache last-good only (no errors) so degraded polls can fall back."""
+    if status.get("errors") or status.get("degraded"):
+        return
+    _deploy_status_cache["data"] = status
+    _deploy_status_cache["ts"] = time.monotonic()
+
+
+def _get_deploy_status_bounded(include_commit_info: bool = False) -> dict:
+    """Cache-aware deploy status for the ambient badge (no GitHub enrichment).
+
+    Serves a fresh cache hit within ``_DEPLOY_STATUS_CACHE_TTL`` to cut
+    apiserver load from htmx polling; on API errors prefers last-good over
+    a blank degraded response when available.
+    """
+    if not include_commit_info:
+        cached = _get_fresh_cached_deploy_status()
+        if cached is not None:
+            return cached
+
+    status = _get_deploy_status(include_commit_info=include_commit_info)
+
+    if not include_commit_info:
+        if not status.get("errors"):
+            _store_deploy_status_cache(status)
+        else:
+            last_good = _get_last_good_deploy_status()
+            if last_good is not None:
+                out = dict(last_good)
+                out["errors"] = list(status.get("errors") or []) + [
+                    "Serving last-good deploy status",
+                ]
+                out["degraded"] = True
+                return out
+    return status
 
 
 def _get_deploy_status(include_commit_info: bool = False) -> dict:
@@ -141,7 +221,10 @@ def _get_deploy_status(include_commit_info: bool = False) -> dict:
 
     latest_run = None
     try:
-        runs = kube.list_custom_resources("tekton.dev", "v1", "pipelineruns", namespace="agentit")
+        runs = kube.list_custom_resources(
+            "tekton.dev", "v1", "pipelineruns",
+            namespace="agentit", timeout=_DEPLOY_STATUS_K8S_TIMEOUT,
+        )
         ci_runs = [
             r for r in runs
             if r.get("metadata", {}).get("labels", {}).get("tekton.dev/pipeline") == "agentit-ci"
@@ -188,7 +271,10 @@ def _get_deploy_status(include_commit_info: bool = False) -> dict:
 
     agentit_app = None
     try:
-        apps = kube.list_custom_resources("argoproj.io", "v1alpha1", "applications", namespace="openshift-gitops")
+        apps = kube.list_custom_resources(
+            "argoproj.io", "v1alpha1", "applications",
+            namespace="openshift-gitops", timeout=_DEPLOY_STATUS_K8S_TIMEOUT,
+        )
         agentit_app = next((a for a in apps if a.get("metadata", {}).get("name") == "agentit"), None)
     except Exception:
         log.warning("Failed to fetch the agentit Argo CD Application for deploy status", exc_info=True)
@@ -497,8 +583,33 @@ async def deploy_status_badge(request: Request) -> HTMLResponse:
     a deploy in progress right now" stays visible without navigating to
     /health or reloading. Deliberately lightweight: no GitHub call here
     (that only happens for the Health page's detailed section via
-    ``_get_deploy_status(include_commit_info=True)``)."""
-    status = await asyncio.to_thread(_get_deploy_status)
+    ``_get_deploy_status(include_commit_info=True)``).
+
+    Bounded by ``_DEPLOY_STATUS_DEADLINE`` so a slow/wedged kube-apiserver
+    returns **200** with degraded/last-good HTML instead of hanging the
+    worker until oauth-proxy times out with 502/503.
+    """
+    try:
+        status = await asyncio.wait_for(
+            asyncio.to_thread(_get_deploy_status_bounded),
+            timeout=_DEPLOY_STATUS_DEADLINE,
+        )
+    except asyncio.TimeoutError:
+        log.warning(
+            "GET /api/deploy-status timed out after %.1fs; returning degraded/last-good",
+            _DEPLOY_STATUS_DEADLINE,
+        )
+        last_good = _get_last_good_deploy_status()
+        if last_good is not None:
+            status = dict(last_good)
+            status["degraded"] = True
+            status["errors"] = list(status.get("errors") or []) + [
+                "Deploy status timed out waiting for the Kubernetes API; serving last-good",
+            ]
+        else:
+            status = _degraded_deploy_status(
+                ["Deploy status timed out waiting for the Kubernetes API"],
+            )
     return get_templates().TemplateResponse(request, "deploy_status_badge.html", {"deploy_status": status})
 
 

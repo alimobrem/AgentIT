@@ -10,6 +10,7 @@ makes a real cluster round trip, and `prime_csrf`/an `httpx.AsyncClient`
 """
 from __future__ import annotations
 
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -18,9 +19,20 @@ from httpx import ASGITransport, AsyncClient
 from agentit.portal import github_pr
 from agentit.portal.app import app
 from agentit.portal.metrics import get_build_info, set_build_info
+from agentit.portal.routes import health as health_routes
 from agentit.portal.routes.health import _get_deploy_status
 
 from conftest import prime_csrf
+
+
+@pytest.fixture(autouse=True)
+def _clear_deploy_status_cache():
+    """Isolate last-good / TTL cache across tests."""
+    health_routes._deploy_status_cache["data"] = None
+    health_routes._deploy_status_cache["ts"] = 0.0
+    yield
+    health_routes._deploy_status_cache["data"] = None
+    health_routes._deploy_status_cache["ts"] = 0.0
 
 
 @pytest.fixture
@@ -128,7 +140,7 @@ def _taskrun_get_custom_resource(task_statuses: dict[str, str]):
     (``<pipelinerun>-<task>``, matching ``_pipelinerun`` above) to a real
     TaskRun-shaped status dict, or ``None`` (404) for a task not in
     ``task_statuses`` (not started yet)."""
-    def _get(group, version, plural, name, namespace=""):
+    def _get(group, version, plural, name, namespace="", **_kwargs):
         for task_name, task_status in task_statuses.items():
             if name == f"{_PR_NAME}-{task_name}":
                 return {"status": {"conditions": [{"reason": task_status}]}}
@@ -368,6 +380,76 @@ async def test_deploy_status_badge_never_calls_github(client):
         await client.get("/api/deploy-status")
 
     mock_commit_info.assert_not_called()
+
+
+async def test_deploy_status_badge_timeout_returns_200_degraded(client, monkeypatch):
+    """Regression for the outage: a wedged kube-apiserver must not hang the
+    badge until oauth-proxy returns 502/503 -- respond 200 degraded/unknown."""
+    monkeypatch.setattr(health_routes, "_DEPLOY_STATUS_DEADLINE", 0.05)
+    released = threading.Event()
+
+    def _hang(*_a, **_kw):
+        released.wait(timeout=5)
+        return {}
+
+    try:
+        with patch("agentit.portal.routes.health._get_deploy_status_bounded", side_effect=_hang):
+            resp = await client.get("/api/deploy-status")
+    finally:
+        released.set()
+
+    assert resp.status_code == 200
+    assert "deploy-status-badge" in resp.text
+    assert "deploy-status-degraded" in resp.text
+    assert "Status unknown" in resp.text
+
+
+async def test_deploy_status_badge_timeout_serves_last_good(client, monkeypatch):
+    """When a prior poll succeeded, a timed-out poll serves last-good HTML."""
+    monkeypatch.setattr(health_routes, "_DEPLOY_STATUS_DEADLINE", 0.05)
+    good = {
+        "running": {"version": "9.9.9", "commit": "abcdef0123456789", "image_tag": "abcdef0123456789"},
+        "pipeline": None,
+        "argo": {"sync": "Synced", "health": "Healthy"},
+        "commit_info": None,
+        "state": "idle",
+        "stage": None,
+        "reason": None,
+        "resolved": None,
+        "errors": [],
+    }
+    health_routes._deploy_status_cache["data"] = good
+    health_routes._deploy_status_cache["ts"] = 0.0  # stale — force refresh path
+    released = threading.Event()
+
+    def _hang(*_a, **_kw):
+        released.wait(timeout=5)
+        return {}
+
+    try:
+        with patch("agentit.portal.routes.health._get_deploy_status_bounded", side_effect=_hang):
+            resp = await client.get("/api/deploy-status")
+    finally:
+        released.set()
+
+    assert resp.status_code == 200
+    assert "deploy-status-degraded" in resp.text
+    assert "v9.9.9" in resp.text
+    assert "abcdef0" in resp.text
+
+
+def test_deploy_status_bounded_uses_cache_within_ttl():
+    """htmx polling must not hammer the apiserver every 15s when cache is warm."""
+    with patch("agentit.portal.routes.health.kube") as mock_kube:
+        mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
+            [] if "tekton" in group else [_argo_app("Synced", "Healthy")]
+        )
+        first = health_routes._get_deploy_status_bounded()
+        second = health_routes._get_deploy_status_bounded()
+
+    assert first["state"] == "idle"
+    assert second is first
+    assert mock_kube.list_custom_resources.call_count == 2  # tekton + argo, once
 
 
 async def test_health_page_shows_deployment_status_section(client):
