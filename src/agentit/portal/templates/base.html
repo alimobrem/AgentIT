@@ -817,6 +817,10 @@
   .user-menu-item.nav-active { color: var(--color-accent); }
   .user-menu-divider { height: 1px; background: var(--color-border); margin: var(--space-2) 0; }
   .user-menu-info { padding: var(--space-2) var(--space-4); color: var(--color-muted); font-size: var(--font-xs); }
+  /* The deploy-status badge brings its own pill padding/border, so trim the
+     surrounding menu-item padding to avoid double-padding around it. */
+  .user-menu-item.deploy-status-link { padding: var(--space-2) var(--space-4); }
+  .user-menu-item.deploy-status-link .deploy-status-badge { width: 100%; box-sizing: border-box; }
 
   /* ── Command Palette Trigger (nav) ────────────────────────────── */
   .cmdk-trigger {
@@ -1121,13 +1125,6 @@
      @keydown.escape.window="if (open) close()">
 <nav>
   <span class="logo">AgentIT</span>
-  <div id="deploy-status" class="deploy-status" hx-get="/api/deploy-status" hx-trigger="load, every 15s" hx-swap="innerHTML">
-    <span class="deploy-status-badge deploy-status-idle" role="status" aria-live="polite"
-          aria-label="AgentIT version {{ build_info.version | default('unknown') }}, commit {{ build_info.commit | default('unknown') }}">
-      <span class="deploy-status-dot"></span>
-      <span class="deploy-status-text">v{{ build_info.version | default('unknown') }}{% if build_info.commit and build_info.commit != 'unknown' %} &middot; <code>{{ build_info.commit[:7] }}</code>{% endif %}</span>
-    </span>
-  </div>
   {# Cmd+K / Ctrl+K command palette trigger -- discoverable both by click
      (mouse users see the kbd hint right here) and by the shortcut itself
      firing from anywhere on the page (see #command-palette below). This is
@@ -1183,6 +1180,19 @@
         <div class="user-menu-info">Logged in as {{ current_user }}</div>
         <a href="{{ oauth_sign_out_path }}" role="menuitem" class="user-menu-item">Logout</a>
         {% endif %}
+        <div class="user-menu-divider"></div>
+        {# Moved out of the ambient top-level nav bar and into the menu
+           footer -- still the same live-polled badge (unchanged route/
+           partial), just relocated and now a real link through to the
+           Health page's full deploy-status detail instead of inert text. #}
+        <a href="/health" id="deploy-status" class="user-menu-item deploy-status-link" role="menuitem"
+           hx-get="/api/deploy-status" hx-trigger="load, every 15s" hx-swap="innerHTML">
+          <span class="deploy-status-badge deploy-status-idle" role="status" aria-live="polite"
+                aria-label="AgentIT version {{ build_info.version | default('unknown') }}, commit {{ build_info.commit | default('unknown') }}">
+            <span class="deploy-status-dot"></span>
+            <span class="deploy-status-text">v{{ build_info.version | default('unknown') }}{% if build_info.commit and build_info.commit != 'unknown' %} &middot; <code>{{ build_info.commit[:7] }}</code>{% endif %}</span>
+          </span>
+        </a>
       </div>
     </div>
   </div>
