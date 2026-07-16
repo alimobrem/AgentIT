@@ -835,9 +835,21 @@ async def test_ledger_nav_link_present(client, _override_store):
 
 # ------------------------------------------------------------------
 # Next-step hint (visual hierarchy pass): ties the lifecycle stepper to
-# the actual action that moves the app forward, pending actions win
-# regardless of stage.
+# the actual action that moves the app forward. While assessed, Onboard
+# always wins (Actions must not compete). After onboard, pending gates win.
 # ------------------------------------------------------------------
+
+
+def _next_step_hint_html(page: str) -> str:
+    """Slice the Assessment Detail next-step hint block.
+
+    Class may include modifiers (``next-step-hint-primary`` /
+    ``next-step-hint-attention``), so match the prefix without requiring
+    a closing quote immediately after ``next-step-hint``.
+    """
+    marker = 'class="next-step-hint'
+    assert marker in page, "next-step-hint block missing from page"
+    return page.split(marker, 1)[1].split("</div>", 1)[0]
 
 
 async def test_next_step_hint_prompts_onboarding_when_freshly_assessed(client, _override_store):
@@ -845,27 +857,51 @@ async def test_next_step_hint_prompts_onboarding_when_freshly_assessed(client, _
     aid = await store.save(_make_report("fresh-app"))
     resp = await client.get(f"/assessments/{aid}")
     assert resp.status_code == 200
-    assert "Ready to onboard" in resp.text
-    assert "next-step-hint" in resp.text
-    hint = resp.text.split('class="next-step-hint"', 1)[1].split("</div>", 1)[0]
+    assert "Onboard This App" in resp.text
+    hint = _next_step_hint_html(resp.text)
+    assert "Next step: click" in hint
     assert "pending action" not in hint
 
 
-async def test_next_step_hint_prioritizes_pending_actions_over_stage(client, _override_store):
-    """A pending gate is the most urgent thing regardless of lifecycle
-    stage -- must win even for a freshly-assessed app that hasn't been
-    onboarded yet (e.g. a gate created via the per-finding Fix flow)."""
+async def test_next_step_hint_onboard_wins_over_leftover_gates_when_assessed(client, _override_store):
+    """Leftover Actions gates (e.g. rollback-review from a prior apply of
+    the same app) must not steal the primary CTA while lifecycle is still
+    assessed — founder confusion: "do these 3 Actions or Onboard?"."""
     store = _override_store
-    aid = await store.save(_make_report("gated-app"))
+    aid = await store.save(_make_report("gated-assessed-app"))
+    await store.create_gate(aid, "auto-mode-review", "needs review")
+    resp = await client.get(f"/assessments/{aid}")
+    assert resp.status_code == 200
+    hint = _next_step_hint_html(resp.text)
+    assert "Next step: click" in hint
+    assert "Onboard This App" in hint
+    assert "do not fix them one-by-one" in hint
+    assert "1</strong> pending action" not in hint
+    assert f'href="/assessments/{aid}?tab=actions"' in hint
+    # Actions tab count badge is demoted while assessed (no "Actions (1)").
+    assert "Actions (1)" not in resp.text
+    assert "leftover gates from earlier deliveries" in resp.text
+
+
+async def test_next_step_hint_prioritizes_pending_actions_after_onboard(client, _override_store):
+    """After onboarding, a pending gate is the urgent human work."""
+    store = _override_store
+    aid = await store.save(_make_report("gated-onboarded-app"))
+    await store.save_onboarding(aid, [{
+        "category": "skills",
+        "path": "deploy.yaml",
+        "content": "kind: Deployment",
+        "description": "test",
+    }])
     await store.create_gate(aid, "auto-mode-review", "needs review")
     resp = await client.get(f"/assessments/{aid}")
     assert resp.status_code == 200
     assert "1</strong> pending action" in resp.text
-    assert "Ready to onboard" not in resp.text
+    assert "Next step: click" not in resp.text
     # Regression: the hint sits outside the tab strip's x-data, so an
     # Alpine @click="tab = 'actions'" is a dead handler. Must be a real
     # ?tab=actions href (same convention as Fleet's pending badge).
-    hint = resp.text.split('class="next-step-hint"', 1)[1].split("</div>", 1)[0]
+    hint = _next_step_hint_html(resp.text)
     assert f'href="/assessments/{aid}?tab=actions"' in hint
     assert "@click.prevent=\"tab = 'actions'\"" not in hint
     assert "@click=\"tab = 'actions'\"" not in hint

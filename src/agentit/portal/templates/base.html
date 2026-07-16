@@ -1187,16 +1187,19 @@
 
   /* ── Next-Step Hint (Assessment Detail) ────────────────────────────
      Ties the lifecycle stepper directly to the one action that actually
-     moves the app forward -- visual hierarchy: a pending action (accent,
-     needs-attention color per this file's own convention) always reads
-     as more urgent than a routine "here's what to do next" (muted border,
-     text color), which in turn reads as more urgent than "nothing to do"
-     (success color, checkmark). */
+     moves the app forward. Primary (assessed → Onboard) and attention
+     (post-onboard pending gates) use the accent border; routine / done
+     stages keep the muted border. */
   .next-step-hint {
     display: flex; align-items: baseline; gap: var(--space-3);
     padding: var(--space-4) var(--space-5); margin-bottom: var(--space-6);
     background: var(--color-surface-2); border-left: 3px solid var(--color-border);
     border-radius: var(--radius-sm); font-size: var(--font-sm); color: var(--color-text);
+  }
+  .next-step-hint-primary,
+  .next-step-hint-attention {
+    border-left-color: var(--color-accent);
+    background: var(--color-surface);
   }
   .next-step-icon { color: var(--color-accent); font-size: var(--font-xs); flex-shrink: 0; }
   .next-step-icon-done { color: var(--color-success); font-size: var(--font-md); }

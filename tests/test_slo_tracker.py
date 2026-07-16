@@ -101,6 +101,39 @@ class TestBreachDirection:
         assert (await store.list_slos(aid))[0]["status"] == "met"
 
 
+class TestOneTickPerApp:
+    """list_all() returns every historical assessment; the tracker must tick
+    each repo_url once so re-assessed apps do not get N rollback-review gates."""
+
+    @patch("agentit.watchers.slo_tracker.collect_slo")
+    async def test_check_once_dedupes_assessments_of_same_app(self, mock_collect):
+        async_store, store = await make_async_store()
+        old_id = await store.save(make_report(repo_name="app-triple"))
+        await store.save_slo(old_id, "error_rate", 0.5)
+        await store.save_apply_results(
+            old_id, {"applied": ["deployment.yaml"], "skipped": [], "errors": []},
+            "app-triple", dry_run=False,
+        )
+        new_id = await store.save(make_report(repo_name="app-triple"))
+        assert new_id != old_id
+        await store.save_apply_results(
+            new_id, {"applied": ["deployment.yaml"], "skipped": [], "errors": []},
+            "app-triple", dry_run=False,
+        )
+        # list_slos joins by repo_url, so either assessment sees the same SLO.
+        # Without per-app uniquify, collect_slo would run once per assessment.
+        mock_collect.return_value = 5.0  # breach
+
+        tracker = _tracker(async_store)
+        breached_count = await tracker.check_once()
+
+        assert breached_count == 1
+        mock_collect.assert_called_once_with("error_rate", "app-triple")
+        gates = await store.list_gates_for_assessment(new_id, status="pending")
+        rollback = [g for g in gates if g["gate_type"] == "rollback-review"]
+        assert len(rollback) == 1
+
+
 class TestRollbackRecommendationLogged:
     """docs/ledger-design-spec.md Phase 0: a rollback recommendation must be
     persisted via log_event(), not only published to Kafka's TOPIC_ALERTS --

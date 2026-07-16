@@ -46,9 +46,22 @@ class SloTracker:
         Returns the number of apps with at least one breached SLO.
         """
         assessments = await self._store.list_all()
+        # list_all() is every historical assessment (newest first). SLOs and
+        # rollback gates are app-scoped (repo_url), so tick each app once —
+        # otherwise N assessments of the same app create N rollback-review
+        # gates and N Kafka breach events (Actions tab "×3" symptom).
+        seen_repos: set[str] = set()
+        apps = []
+        for a in assessments:
+            repo_url = a.get("repo_url") or ""
+            if repo_url in seen_repos:
+                continue
+            seen_repos.add(repo_url)
+            apps.append(a)
+
         breached_apps = 0
 
-        for a in assessments:
+        for a in apps:
             slos = await self._store.list_slos(a["id"])
             await self._collect_fresh_values(a, slos)
             app_breaches = [s for s in slos if s["status"] == "breached"]
@@ -71,7 +84,7 @@ class SloTracker:
                 await self._recommend_rollback(a, app_breaches)
 
         click.echo(
-            f"[slo-track] Checked {len(assessments)} apps, {breached_apps} with breaches",
+            f"[slo-track] Checked {len(apps)} apps, {breached_apps} with breaches",
             err=True,
         )
         return breached_apps
