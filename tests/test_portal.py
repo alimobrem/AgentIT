@@ -644,18 +644,19 @@ async def test_masthead_nav_structure(client, _override_store):
     assert 'aria-controls="nav-primary nav-secondary"' in html
     assert ":aria-expanded=\"navOpen\"" in html
     assert 'nav .links.links-open' in html
-    # Cmd+K search lives in the right cluster (not absolute-centered) so
-    # primary nav links are never covered; still reasonably wide.
+    # Cmd+K search is a real center column (not absolute overlay / not
+    # right-cluster) so primary nav links are never covered; still wide.
     assert "cmdk-trigger" in html
     assert "cmdk-trigger-label" in html
     assert 'class="nav-start"' in html
     assert 'class="nav-end"' in html
+    assert "grid-template-columns: minmax(0, 1fr) minmax(12rem, 20rem)" in html
     assert "max-width: 20rem" in html
     assert "left: 50%" not in html
     assert "translateX(-50%)" not in html
-    # Search markup sits inside the right cluster with Events / Menu.
+    # Search sits between clusters; Events / Menu stay in the right cluster.
     nav_end = html.split('class="nav-end"', 1)[1].split("</nav>", 1)[0]
-    assert "cmdk-trigger" in nav_end
+    assert "cmdk-trigger" not in nav_end
     assert "events-bell" in nav_end
     assert 'id="nav-secondary"' in nav_end
     assert 'id="nav-primary"' not in nav_end
