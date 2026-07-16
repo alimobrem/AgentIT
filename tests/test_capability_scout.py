@@ -22,7 +22,10 @@ from agentit.capability_scout import (
     check_scope_allowlist,
     check_syntax,
     describe_capability_run,
+    filter_actionable_doc_gaps,
     gather_evidence,
+    proposal_already_implemented,
+    recent_capability_titles,
     render_proposal_doc,
     run_safety_gates,
     run_test_suite,
@@ -81,6 +84,69 @@ class TestScanDocGaps:
 
     def test_missing_docs_dir_returns_empty_list(self, tmp_path):
         assert scan_doc_gaps(tmp_path / "nonexistent") == []
+
+
+# ── filter already-implemented / meta gaps ─────────────────────────────────
+
+
+class TestFilterActionableDocGaps:
+    def test_skips_stack_signature_when_module_present(self, tmp_path):
+        src = tmp_path / "src" / "agentit"
+        src.mkdir(parents=True)
+        (src / "stack_signature_detector.py").write_text("def detect():\n    return []\n", encoding="utf-8")
+        gaps = [{
+            "file": "docs/self-improvement-for-agentit.md",
+            "line_no": 178,
+            "anchor": "Documented future idea",
+            "text": 'Documented future idea (not built): stack-signature detection logic',
+        }]
+        assert filter_actionable_doc_gaps(gaps, repo_dir=tmp_path) == []
+
+    def test_keeps_unrelated_gap(self, tmp_path):
+        src = tmp_path / "src" / "agentit"
+        src.mkdir(parents=True)
+        (src / "stack_signature_detector.py").write_text("x = 1\n", encoding="utf-8")
+        gaps = [{
+            "file": "docs/ledger-design-spec.md",
+            "line_no": 165,
+            "anchor": "not built",
+            "text": '**Explicitly not built:** the predictive "fast-forward" view',
+        }]
+        assert len(filter_actionable_doc_gaps(gaps, repo_dir=tmp_path)) == 1
+
+    def test_skips_shipped_marker_and_meta_anchor_lists(self, tmp_path):
+        gaps = [
+            {
+                "file": "docs/x.md",
+                "line_no": 1,
+                "anchor": "Known gap",
+                "text": "~~scanner~~ — **shipped**: Do not re-propose this as a gap.",
+            },
+            {
+                "file": "docs/x.md",
+                "line_no": 2,
+                "anchor": "Known gap",
+                "text": 'Prefer "Known gap" / "Deliberately deferred" / "Documented future idea" text',
+            },
+        ]
+        assert filter_actionable_doc_gaps(gaps, repo_dir=tmp_path) == []
+
+    def test_proposal_already_implemented_uses_sibling_module(self, tmp_path):
+        src = tmp_path / "src" / "agentit"
+        src.mkdir(parents=True)
+        (src / "ledger_predictive_fast_forward.py").write_text("x = 1\n", encoding="utf-8")
+        assert proposal_already_implemented(
+            {"title": "Add ledger predictive fast forward"},
+            tmp_path,
+        )
+
+    def test_recent_capability_titles_from_events(self):
+        titles = recent_capability_titles([
+            {"summary": "Opened proposal PR: Add stack-signature detector (https://x)", "details": {}},
+            {"summary": "x", "details": {"title": "Wire tick-failure alerts"}},
+        ])
+        assert "Add stack-signature detector" in titles[0]
+        assert "Wire tick-failure alerts" in titles
 
 
 # ── gather_evidence ─────────────────────────────────────────────────────────

@@ -69,11 +69,12 @@ class CapabilityScout:
             build_diff,
             describe_capability_run,
             gather_evidence,
+            proposal_already_implemented,
             resolve_build_mode,
             run_safety_gates,
         )
 
-        evidence = await gather_evidence(self._store)
+        evidence = await gather_evidence(self._store, repo_dir=self._repo_dir)
 
         try:
             from agentit.llm import LLMClient
@@ -116,6 +117,17 @@ class CapabilityScout:
             severity, summary, details = describe_capability_run(evidence, proposal, None, None)
             await self._log_run(severity, summary, details)
             return {"outcome": "no-proposal"}
+
+        if proposal_already_implemented(proposal, self._repo_dir):
+            click.echo(
+                f"[capability-scout] Skipping already-implemented proposal "
+                f"'{proposal.get('title')}' (module present in tree).",
+                err=True,
+            )
+            severity, summary, details = describe_capability_run(evidence, proposal, None, None)
+            details["outcome"] = "already-implemented"
+            await self._log_run(severity, summary, details)
+            return {"outcome": "already-implemented"}
 
         resolved_mode = resolve_build_mode(proposal, self._mode)
         click.echo(

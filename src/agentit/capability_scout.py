@@ -90,6 +90,83 @@ def scan_doc_gaps(docs_dir: Path | None = None) -> list[dict]:
     return gaps
 
 
+def list_existing_src_modules(repo_dir: Path | None = None) -> list[str]:
+    """Basenames of ``src/agentit/*.py`` already present in the working tree."""
+    src = (repo_dir or Path(".")) / "src" / "agentit"
+    if not src.is_dir():
+        return []
+    return sorted(p.name for p in src.glob("*.py") if p.is_file())
+
+
+def filter_actionable_doc_gaps(
+    gaps: list[dict],
+    *,
+    repo_dir: Path | None = None,
+    recent_titles: list[str] | None = None,
+) -> list[dict]:
+    """Drop doc-gap hits that are meta, already shipped, or already in-tree.
+
+    Prevents L3 dogfood from re-proposing the same capability after a merge
+    (e.g. stack-signature detector) when the docs still quote the old
+    "not built" wording, or when the module is already present on disk.
+    """
+    existing = set(list_existing_src_modules(repo_dir))
+    recent_blob = " ".join(recent_titles or []).lower()
+    out: list[dict] = []
+    for gap in gaps:
+        text = str(gap.get("text") or "")
+        lower = text.lower()
+        if "**shipped**" in lower or "do not re-propose" in lower:
+            continue
+        # Meta lines that only document the scanner's own anchor vocabulary.
+        anchor_hits = sum(1 for a in _DOC_GAP_ANCHORS if a.lower() in lower)
+        if anchor_hits >= 2:
+            continue
+        # Section headers / "matches our Known gap convention" prose, not gaps.
+        if lower.lstrip().startswith("#") or " convention" in lower:
+            continue
+        if "stack signature" in lower or "stack-signature" in lower:
+            if "stack_signature_detector.py" in existing:
+                continue
+            if "stack signature" in recent_blob or "stack-signature" in recent_blob:
+                continue
+        out.append(gap)
+    return out
+
+
+def recent_capability_titles(events: list[dict] | None) -> list[str]:
+    """Extract proposal titles from recent ``capability-run`` event rows."""
+    titles: list[str] = []
+    for event in events or []:
+        details = event.get("details") if isinstance(event.get("details"), dict) else {}
+        title = (details or {}).get("title") or ""
+        if not title:
+            summary = str(event.get("summary") or "")
+            for prefix in ("Opened proposal PR: ", "Proposal '", "Proposal "):
+                if summary.startswith(prefix):
+                    title = summary[len(prefix):]
+                    break
+            title = title.split("' gate-blocked", 1)[0].split(" (", 1)[0].strip(" '")
+        if title and title not in titles:
+            titles.append(title)
+    return titles[:20]
+
+
+def proposal_already_implemented(proposal: dict, repo_dir: Path | None = None) -> bool:
+    """True when the proposal's sibling module (or stack-signature) already exists."""
+    repo_dir = repo_dir or Path(".")
+    title = str(proposal.get("title") or "")
+    sibling = sibling_module_path(title)
+    if (repo_dir / sibling).is_file():
+        return True
+    lower = title.lower()
+    if ("stack signature" in lower or "stack-signature" in lower) and (
+        repo_dir / "src/agentit/stack_signature_detector.py"
+    ).is_file():
+        return True
+    return False
+
+
 async def _safe_call(store: object, method_name: str, *args, default=None, **kwargs):
     """Best-effort store call — a missing method or a query failure must
     never block the rest of evidence-gathering, mirroring every other
@@ -104,13 +181,24 @@ async def _safe_call(store: object, method_name: str, *args, default=None, **kwa
         return default if default is not None else []
 
 
-async def gather_evidence(store: object | None) -> dict:
+async def gather_evidence(store: object | None, repo_dir: Path | None = None) -> dict:
     """Collect every real signal source the design doc specifies — nothing
     here is invented; every field comes straight from a real store query or
     a real grep of this repo's own docs. ``signal_count`` is how the caller
     decides whether there's enough real data to ground a proposal at all.
     """
-    doc_gaps = scan_doc_gaps()
+    repo_dir = repo_dir or Path(".")
+    recent_titles: list[str] = []
+    if store is not None:
+        recent_events = await _safe_call(
+            store, "list_events_by_action", CAPABILITY_RUN_ACTION, limit=20,
+        )
+        recent_titles = recent_capability_titles(recent_events)
+
+    doc_gaps = filter_actionable_doc_gaps(
+        scan_doc_gaps(), repo_dir=repo_dir, recent_titles=recent_titles,
+    )
+    existing_modules = list_existing_src_modules(repo_dir)
 
     if store is None:
         return {
@@ -122,6 +210,8 @@ async def gather_evidence(store: object | None) -> dict:
             "low_effectiveness_skills": [],
             "loop_health": {},
             "tick_failures": [],
+            "existing_modules": existing_modules,
+            "recent_proposal_titles": recent_titles,
             "signal_count": len(doc_gaps),
         }
 
@@ -147,6 +237,8 @@ async def gather_evidence(store: object | None) -> dict:
         "low_effectiveness_skills": low_effectiveness_skills,
         "loop_health": loop_health,
         "tick_failures": tick_failures,
+        "existing_modules": existing_modules,
+        "recent_proposal_titles": recent_titles,
         "signal_count": signal_count,
     }
 

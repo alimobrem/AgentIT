@@ -156,7 +156,11 @@ _CAPABILITY_PROPOSAL_SYSTEM = (
     "existing module — full-file rewrites of big files fail the source generator. "
     "Never list an existing file that is already large (e.g. capability_scout.py, "
     "llm.py, portal routes) in target_files; always invent a new sibling module path "
-    "instead. The combined source you would write must fit in ≤3 files and ≤150 lines.\n\n"
+    "instead. The combined source you would write must fit in ≤3 files and ≤150 lines.\n"
+    "6. Never re-propose a capability whose module basename already appears in "
+    "evidence.existing_modules, or whose title overlaps evidence.recent_proposal_titles "
+    "(including stack-signature / stack_signature_detector — already shipped). "
+    "Prefer a different actionable doc gap, tick-failure, skill, or check signal.\n\n"
     'Respond ONLY with valid JSON: {"has_proposal": bool, "title": str, '
     '"gap_description": str, "evidence": str, "target_files": [str], '
     '"change_summary": str, "risk": "low"|"medium"|"high", "test_plan": str}. '
