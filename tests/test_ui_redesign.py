@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import re
 from unittest.mock import patch
 
 import pytest
@@ -656,7 +657,7 @@ class TestNavUpdate:
         # One cluster-admin-review gate -> nav badge shows "1" next to Admin
         # Review, not 2 (the app-owner "auto-mode-review" gate must not
         # count toward this badge).
-        assert 'Admin Review\n      <span class="nav-badge">1</span>' in resp.text
+        assert re.search(r'Admin Review\s*<span class="nav-badge">1</span>', resp.text)
 
 
 # ── 7. Self-Improvement "run now" trigger ───────────────────────────────
