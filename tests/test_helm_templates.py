@@ -400,7 +400,10 @@ class TestPostgresBundledBackup:
 
     def test_parseable(self):
         by_kind = self._docs()
-        assert set(by_kind) == {"PersistentVolumeClaim", "CronJob"}
+        # `Job` is the Sync-hook PVC-bind probe added alongside the
+        # CronJob/PVC pair -- see this template's own header comment for why
+        # a WaitForFirstConsumer backup PVC needs an immediate consumer.
+        assert set(by_kind) == {"PersistentVolumeClaim", "CronJob", "Job"}
 
     def test_cronjob_has_valid_schedule(self):
         by_kind = self._docs()
@@ -413,6 +416,21 @@ class TestPostgresBundledBackup:
         args = "\n".join(container["args"])
         assert "pg_dump" in args
         assert "agentit-postgres-bundled" in args
+
+    def test_pvc_bind_job_is_a_sync_hook_that_mounts_the_backup_claim(self):
+        """Regression guard for the fix this Job exists for: it must run
+        during Sync (not PostSync, which Argo CD won't fire until the
+        Application is already Healthy -- but a WaitForFirstConsumer PVC
+        stays Pending, and therefore Progressing, until something mounts
+        it), and it must actually mount the same backup PVC to bind it."""
+        by_kind = self._docs()
+        job = by_kind["Job"]
+        annotations = job["metadata"]["annotations"]
+        assert annotations["argocd.argoproj.io/hook"] == "Sync"
+        assert annotations["argocd.argoproj.io/hook-delete-policy"] == "HookSucceeded"
+        volumes = job["spec"]["template"]["spec"]["volumes"]
+        claim_names = {v["persistentVolumeClaim"]["claimName"] for v in volumes if "persistentVolumeClaim" in v}
+        assert claim_names == {by_kind["PersistentVolumeClaim"]["metadata"]["name"]}
 
 
 class TestArgoCDApplicationParams:
@@ -614,11 +632,16 @@ class TestSecretInitJob:
         docs = list(yaml.safe_load_all(rendered))
         assert len(docs) == 4
 
-    def test_job_is_a_postsync_hook(self):
+    def test_job_is_a_sync_hook(self):
+        """Regression: this used to run as a PostSync hook, but PostSync
+        only fires once the Application is already Healthy -- and
+        oauth-proxy CrashLoops without session_secret (this Job's own job)
+        until it's healthy, so PostSync never actually ran on a fresh
+        auth-enabled sync. See this template's own header comment."""
         by_kind = self._by_kind()
         job = by_kind["Job"]
         annotations = job["metadata"]["annotations"]
-        assert annotations["argocd.argoproj.io/hook"] == "PostSync"
+        assert annotations["argocd.argoproj.io/hook"] == "Sync"
         assert annotations["argocd.argoproj.io/hook-delete-policy"] == "HookSucceeded"
 
     def test_job_uses_dedicated_service_account(self):
