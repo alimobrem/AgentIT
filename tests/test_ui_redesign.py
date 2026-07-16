@@ -269,6 +269,44 @@ class TestGateAppAttributionAndActionsTab:
         assert resp.status_code == 200
         assert "Auto-mode gated: low confidence" in resp.text
 
+    async def test_assessment_detail_ledger_tab_renders_pending_gate_read_only(self, ui_client):
+        """docs/ledger-design-spec.md Phase 1: the same pending gate that
+        renders interactive Approve/Reject/Dismiss buttons on the Actions
+        tab also shows up on the new Ledger tab, but read-only (linking
+        back to Actions instead of duplicating gate_card's form)."""
+        client, store = ui_client
+        aid = await store.save(make_report(repo_name="ledger-app"))
+        await store.create_gate(aid, "auto-mode-review", "Auto-mode gated: low confidence")
+
+        resp = await client.get(f"/assessments/{aid}")
+        assert resp.status_code == 200
+        ledger_tab = resp.text.split('x-show="tab === \'ledger\'"', 1)[1]
+        assert "Auto-mode gated: low confidence" in ledger_tab
+        assert f'/assessments/{aid}?tab=actions' in ledger_tab
+
+    async def test_assessment_detail_ledger_tab_shows_the_assessment_complete_card(self, ui_client):
+        """store.save() itself calls log_event(action='assessment-complete')
+        -- every assessed app has at least this one real card, so the empty
+        state is exercised separately below via a store with no assessments
+        rendered at all (there's no assessment-complete-free assessed app
+        to construct through the real save() path)."""
+        client, store = ui_client
+        aid = await store.save(make_report(repo_name="quiet-ledger-app"))
+
+        resp = await client.get(f"/assessments/{aid}")
+        assert resp.status_code == 200
+        ledger_tab = resp.text.split('x-show="tab === \'ledger\'"', 1)[1]
+        assert "assessment-complete" in ledger_tab
+        assert "No Ledger activity yet for this app." not in ledger_tab
+
+    async def test_assessment_detail_tab_query_param_opens_ledger_tab(self, ui_client):
+        client, store = ui_client
+        aid = await store.save(make_report(repo_name="ledger-tab-param-app"))
+
+        resp = await client.get(f"/assessments/{aid}?tab=ledger")
+        assert resp.status_code == 200
+        assert "x-data=\"{ tab: 'ledger' }\"" in resp.text
+
     async def test_fleet_needs_action_badge_counts_app_owner_gates_only(self, ui_client):
         client, store = ui_client
         aid = await store.save(make_report(repo_name="needs-action-app"))

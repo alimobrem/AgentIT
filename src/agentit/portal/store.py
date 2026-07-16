@@ -1101,6 +1101,16 @@ class AssessmentStore:
         )
         return [_delivery_row_to_dict(r) for r in rows]
 
+    async def list_all_deliveries(self, limit: int = 200) -> list[dict]:
+        """Fleet-wide deliveries, newest first -- read-only accessor for the
+        Ledger's global view (docs/ledger-design-spec.md card type F).
+        ``list_deliveries()`` above stays scoped to one assessment; nothing
+        about that call site changes."""
+        rows = await self._pool.fetch(
+            "SELECT * FROM deliveries ORDER BY created_at DESC LIMIT $1", limit,
+        )
+        return [_delivery_row_to_dict(r) for r in rows]
+
     async def list_pending_gitops_deliveries(self) -> list[dict]:
         rows = await self._pool.fetch(
             "SELECT * FROM deliveries WHERE mechanism = 'infra-repo-commit' AND verification = 'unknown' "

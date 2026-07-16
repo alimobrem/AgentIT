@@ -305,6 +305,11 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     gitops_registered, infra_repo_url = await is_gitops_registered(report.repo_name, report)
 
     timeline = await s.get_assessment_timeline(assessment_id) if hasattr(s, 'get_assessment_timeline') else []
+    # docs/ledger-design-spec.md Phase 1: additive 5th tab, alongside (not
+    # replacing) Actions/Timeline above -- same gate_card macro, same
+    # route_and_deliver()/resolve_gate() paths, nothing existing changes.
+    from agentit.ledger import get_ledger_cards
+    ledger_cards = await get_ledger_cards(s, target_app=report.repo_name, assessment_id=assessment_id)
     trend = await s.get_trend(report.repo_url) if hasattr(s, 'get_trend') else {}
     score_history = await s.get_score_history(report.repo_url) if hasattr(s, 'get_score_history') else []
     for i, h in enumerate(score_history):
@@ -348,6 +353,7 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "gitops_registered": gitops_registered,
             "infra_repo_url": infra_repo_url,
             "timeline": timeline,
+            "ledger_cards": ledger_cards,
             "trend": trend,
             "score_history": score_history,
             "lifecycle_stage": lifecycle_stage,

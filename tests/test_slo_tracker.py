@@ -101,6 +101,48 @@ class TestBreachDirection:
         assert (await store.list_slos(aid))[0]["status"] == "met"
 
 
+class TestRollbackRecommendationLogged:
+    """docs/ledger-design-spec.md Phase 0: a rollback recommendation must be
+    persisted via log_event(), not only published to Kafka's TOPIC_ALERTS --
+    otherwise it's invisible on the app's own timeline (Ledger card type J)."""
+
+    @patch("agentit.watchers.slo_tracker.collect_slo")
+    async def test_recommend_rollback_logs_event_alongside_kafka_publish(self, mock_collect):
+        async_store, store = await make_async_store()
+        aid = await store.save(make_report(repo_name="app-rollback"))
+        await store.save_slo(aid, "error_rate", 0.5)
+        await store.save_apply_results(
+            aid, {"applied": ["deployment.yaml"], "skipped": [], "errors": []},
+            "app-rollback", dry_run=False,
+        )
+        mock_collect.return_value = 5.0  # breach
+
+        tracker = _tracker(async_store)
+        await tracker.check_once()
+
+        events = await store.list_events()
+        rollback_events = [e for e in events if e["action"] == "rollback-recommended"]
+        assert len(rollback_events) == 1
+        assert rollback_events[0]["target_app"] == "app-rollback"
+        assert rollback_events[0]["severity"] == "critical"
+        assert "rollback" in rollback_events[0]["summary"].lower()
+
+    @patch("agentit.watchers.slo_tracker.collect_slo")
+    async def test_no_rollback_event_without_a_prior_apply(self, mock_collect):
+        """_recommend_rollback returns early when there's no applied result --
+        no event, no gate, matching the pre-existing early-return behavior."""
+        async_store, store = await make_async_store()
+        aid = await store.save(make_report(repo_name="app-no-apply"))
+        await store.save_slo(aid, "error_rate", 0.5)
+        mock_collect.return_value = 5.0
+
+        tracker = _tracker(async_store)
+        await tracker.check_once()
+
+        events = await store.list_events()
+        assert not any(e["action"] == "rollback-recommended" for e in events)
+
+
 class TestAsyncRunLoop:
     """Phase 3 (docs/postgres-migration-plan.md §9): run() became async def,
     with time.sleep() -> await asyncio.sleep()."""

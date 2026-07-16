@@ -602,6 +602,121 @@ async def test_events_target_app_links_to_assessment_when_resolvable(client, _ov
     assert f'<a href="/assessments/{aid}">linked-app</a>' in resp.text
 
 
+# ------------------------------------------------------------------
+# Ledger tests (docs/ledger-design-spec.md Phase 1)
+# ------------------------------------------------------------------
+
+
+async def test_ledger_page_renders_fleet_wide_cards(client, _override_store):
+    """Default view is grouped by app (docs/ledger-design-spec.md §2 rule 2)
+    -- the app's row shows its own most-recent card summarized inline and
+    links back to that app's Assessment Detail Ledger tab. A freshly
+    assessed app with no open gates isn't "Needs You" (rule 3), so this
+    disables that filter to check the underlying grouped rendering itself."""
+    store = _override_store
+    aid = await store.save(_make_report("ledger-fleet-app"))
+
+    resp = await client.get("/ledger?needs_you=0")
+    assert resp.status_code == 200
+    assert "Ledger" in resp.text
+    assert "assessment-complete" in resp.text
+    assert f'<a href="/assessments/{aid}?tab=ledger">ledger-fleet-app</a>' in resp.text
+
+
+async def test_ledger_page_filters_by_card_type(client, _override_store):
+    """Card-type filtering is exercised in the flat stream (?view=flat) --
+    a watcher tick has no target_app, so it can never appear in a
+    grouped-by-app row (docs/ledger-design-spec.md §2 rule 2 is strictly
+    per-app; untargeted fleet-level events live in the flat view only)."""
+    store = _override_store
+    await store.save(_make_report("card-a-app"))
+    await store.log_event("vuln-watcher", "tick-complete", None, "info", "tick ok")
+
+    resp = await client.get("/ledger?view=flat&card_type=H")
+    assert resp.status_code == 200
+    assert "tick-complete" in resp.text
+    assert "assessment-complete" not in resp.text
+
+
+async def test_ledger_page_filters_by_app(client, _override_store):
+    store = _override_store
+    await store.save(_make_report("app-one"))
+    await store.save(_make_report("app-two"))
+
+    resp = await client.get("/ledger?app=app-one")
+    assert resp.status_code == 200
+    assert "app-one" in resp.text
+    assert "app-two" not in resp.text
+
+
+async def test_ledger_page_empty_state(client, _override_store):
+    resp = await client.get("/ledger")
+    assert resp.status_code == 200
+    assert "No Ledger activity yet" in resp.text
+
+
+async def test_ledger_nav_link_present(client, _override_store):
+    resp = await client.get("/ledger")
+    assert resp.status_code == 200
+    assert 'href="/ledger"' in resp.text
+
+
+async def test_ledger_needs_you_filter_hides_healthy_apps_by_default(client, _override_store):
+    """docs/ledger-design-spec.md §2 rule 3: "Needs You" (on by default)
+    shows only apps with a pending gate, a stale gate, or an unresolved SLO
+    breach -- a healthy app with no open work is hidden until toggled off."""
+    store = _override_store
+    await store.save(_make_report("healthy-app"))
+    needs_aid = await store.save(_make_report("needs-app"))
+    await store.create_gate(needs_aid, "finding-security", "Review this finding")
+
+    resp = await client.get("/ledger")
+    assert resp.status_code == 200
+    assert "needs-app" in resp.text
+    assert "healthy-app" not in resp.text
+
+    resp_all = await client.get("/ledger?needs_you=0")
+    assert resp_all.status_code == 200
+    assert "needs-app" in resp_all.text
+    assert "healthy-app" in resp_all.text
+
+
+async def test_ledger_watcher_failure_banner_shown_within_window(client, _override_store):
+    """The 4th "Needs You" signal (a watcher's last tick failed recently) is
+    fleet-wide, not attributable to one app row, so it renders as its own
+    banner instead of a per-app filter criterion."""
+    store = _override_store
+    await store.log_event("vuln-watcher", "tick-failed", None, "error", "vuln-watcher tick failed: boom")
+
+    resp = await client.get("/ledger")
+    assert resp.status_code == 200
+    assert "watcher tick failure" in resp.text.lower()
+    assert "vuln-watcher" in resp.text
+
+
+async def test_ledger_chain_route_replays_a_real_chain_read_only(client, _override_store):
+    """docs/ledger-design-spec.md §4: the rewind scrubber. store.save()
+    already logs its own "assessment-complete" event with
+    correlation_id=assessment_id, so every assessed app has a real,
+    one-card-so-far chain to replay -- no fabricated correlation id needed."""
+    store = _override_store
+    aid = await store.save(_make_report("chain-route-app"))
+    await store.create_gate(aid, "finding-security", "Review this finding")
+
+    resp = await client.get(f"/ledger/chain/{aid}")
+    assert resp.status_code == 200
+    assert "Replay this chain" in resp.text
+    assert "assessment-complete" in resp.text
+    assert "finding-security" in resp.text
+    assert 'action="/gates/' not in resp.text  # read-only: no gate-resolution form here
+
+
+async def test_ledger_chain_route_empty_for_unknown_correlation_id(client, _override_store):
+    resp = await client.get("/ledger/chain/does-not-exist")
+    assert resp.status_code == 200
+    assert "No chain found" in resp.text
+
+
 async def test_events_target_app_plain_text_when_no_assessment_resolves(client, _override_store):
     """Never fabricate a link target -- an event whose target_app doesn't
     match any known app must render as plain text, not a broken link."""
