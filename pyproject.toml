@@ -36,6 +36,12 @@ dev = [
     # docs/postgres-migration-plan.md's testing-strategy history.
     "pytest-asyncio>=0.24",
 ]
+# Playwright is opt-in: the default `dev` extra (and capability-scout's
+# tests-pass gate) must stay free of browser downloads. CI's browser-critical
+# job and local `pytest --browser-tests` install this extra + chromium.
+browser = [
+    "playwright>=1.49",
+]
 
 [project.scripts]
 agentit = "agentit.cli:main"
