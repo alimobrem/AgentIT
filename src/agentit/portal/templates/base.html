@@ -1534,14 +1534,7 @@
           <div class="events-drawer-item-meta">
             <span x-text="(e.timestamp || '').slice(0, 16)"></span>
             <span x-text="e.agent_id || '—'"></span>
-            <span class="badge"
-                  :class="{
-                    'badge-critical': e.severity === 'critical',
-                    'badge-high': e.severity === 'high',
-                    'badge-medium': e.severity === 'medium' || e.severity === 'warning',
-                    'badge-info': !e.severity || e.severity === 'info'
-                  }"
-                  x-text="e.severity || 'info'"></span>
+            <span :class="_badgeClass(e)" x-text="e.severity || 'info'"></span>
           </div>
           <div class="events-drawer-item-summary">
             <strong x-text="e.action || ''"></strong>
@@ -1908,6 +1901,15 @@ function eventsDrawer() {
       }
       return '/events';
     },
+    _badgeClass(e) {
+      // Always return a severity color class — unknown/empty → info.
+      var s = (e && e.severity) || 'info';
+      if (s === 'critical') return 'badge badge-critical';
+      if (s === 'high') return 'badge badge-high';
+      if (s === 'medium' || s === 'warning') return 'badge badge-medium';
+      if (s === 'low' || s === 'success') return 'badge badge-low';
+      return 'badge badge-info';
+    },
     _markSeen(rows) {
       var maxTs = '';
       (rows || []).forEach(function(e) {
@@ -1966,7 +1968,14 @@ function eventsDrawer() {
       this._removeTrap();
       const self = this;
       this._trapHandler = function(e) {
-        if (!self.open || e.key !== 'Tab') return;
+        if (!self.open) return;
+        // Esc here mirrors @keydown.escape.window so close works even when
+        // focus is outside the Alpine scope or a nested menu also listens.
+        if (e.key === 'Escape') {
+          self.close();
+          return;
+        }
+        if (e.key !== 'Tab') return;
         const nodes = self._focusable();
         if (!nodes.length) return;
         const first = nodes[0];

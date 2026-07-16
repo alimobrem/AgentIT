@@ -10,26 +10,27 @@
     <div class="stat-label">Assessments Run</div>
     <div class="stat-value">{{ insights.total_assessments }}</div>
   </div>
-  <div class="stat-card">
+  {# Actionable rollups deep-link to the page that owns the work (EDL §1). #}
+  <a class="stat-card" href="/fleet" title="Open Fleet scoreboard">
     <div class="stat-label">Apps Managed</div>
     <div class="stat-value text-success">{{ insights.unique_apps }}</div>
-  </div>
+  </a>
   <div class="stat-card">
     <div class="stat-label">Onboardings</div>
     <div class="stat-value">{{ insights.total_onboardings }}</div>
   </div>
-  <div class="stat-card">
+  <a class="stat-card" href="/fleet/remediations" title="Open fleet remediations">
     <div class="stat-label">Remediations</div>
     <div class="stat-value">{{ insights.total_remediations }}</div>
-  </div>
-  <div class="stat-card">
+  </a>
+  <a class="stat-card" href="/ledger?needs_you=1" title="Open Ledger Needs You">
     <div class="stat-label">Pending Gates</div>
     <div class="stat-value {% if insights.pending_gates > 0 %}text-warning{% else %}text-success{% endif %}">{{ insights.pending_gates }}</div>
-  </div>
-  <div class="stat-card">
+  </a>
+  <a class="stat-card" href="/events" title="Open Events feed">
     <div class="stat-label">Events Logged</div>
     <div class="stat-value">{{ insights.total_events }}</div>
-  </div>
+  </a>
   {% if loop_health and loop_health.flagged_count > 0 %}
   <div class="stat-card">
     <div class="stat-label">Loop Health: Flagged Skills Improved (last {{ loop_health.window_days }}d)</div>
@@ -64,7 +65,7 @@
   <tbody>
     {% for a in agent_stats %}
     <tr>
-      <td><strong>{{ a.agent }}</strong></td>
+      <td><strong><a href="/agents/{{ a.agent }}">{{ a.agent }}</a></strong></td>
       <td>{{ a.total_events }}</td>
       <td class="text-success">{{ a.successes }}</td>
       <td class="{% if a.failures > 0 %}text-danger{% else %}text-muted{% endif %}">{{ a.failures }}</td>
@@ -102,7 +103,7 @@
   <tbody>
   {% for ls in low_skills %}
   <tr>
-    <td>{{ ls.skill }}</td>
+    <td><a href="/capabilities/skills/{{ ls.skill }}/history">{{ ls.skill }}</a></td>
     <td class="text-danger">{{ (ls.approval_rate * 100)|round }}%</td>
     <td class="text-muted">{{ (ls.raw_approval_rate * 100)|round }}%</td>
     <td>{{ ls.total }}</td>
@@ -110,6 +111,7 @@
   {% endfor %}
   </tbody>
 </table>
+<p class="text-muted text-sm"><a href="/capabilities">Open Capabilities</a> to activate drafts or run self-improvement.</p>
 {% endif %}
 
 {% if check_compliance %}

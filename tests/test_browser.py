@@ -394,15 +394,63 @@ class TestNavigation:
         hamburger = page.locator("[aria-label='Toggle menu']")
         expect(hamburger).to_be_visible()
         expect(hamburger).to_have_attribute("aria-expanded", "false")
-        # Primary Fleet…Insights + Events/account are collapsed until open.
+        # Primary Ledger…Insights + Events/account are collapsed until open.
         expect(page.locator("#nav-primary")).to_be_hidden()
         expect(page.locator("#nav-secondary")).to_be_hidden()
         hamburger.click()
         expect(hamburger).to_have_attribute("aria-expanded", "true")
+        expect(page.locator("#nav-primary >> text=Ledger")).to_be_visible()
         expect(page.locator("#nav-primary >> text=Fleet")).to_be_visible()
         expect(page.locator("#nav-primary >> text=Insights")).to_be_visible()
         expect(page.locator("#nav-secondary .events-bell")).to_be_visible()
         expect(page.locator("#nav-secondary .user-menu-trigger")).to_be_visible()
+        hamburger.click()
+        expect(hamburger).to_have_attribute("aria-expanded", "false")
+        expect(page.locator("#nav-primary")).to_be_hidden()
+
+    def test_events_drawer_escape_and_focus_trap(self, page: Page, app_url):
+        """Esc closes the drawer; Tab wraps inside the dialog (EDL a11y)."""
+        url, _, _ = app_url
+        page.goto(url)
+        bell = page.locator(".events-bell")
+        bell.click()
+        panel = page.locator("#events-drawer-panel")
+        expect(panel).to_be_visible()
+        expect(page.locator(".events-drawer-close")).to_be_focused()
+        # Tab from last focusable wraps to close; Shift+Tab from close → footer.
+        page.locator("#events-drawer-panel >> text=View all").focus()
+        page.keyboard.press("Tab")
+        expect(page.locator(".events-drawer-close")).to_be_focused()
+        page.keyboard.press("Shift+Tab")
+        expect(page.locator("#events-drawer-panel >> text=View all")).to_be_focused()
+        page.keyboard.press("Escape")
+        expect(panel).to_be_hidden()
+        expect(bell).to_be_focused()
+
+    def test_events_drawer_severity_badge_class(self, page: Page, app_url):
+        """Drawer rows always get a colored severity badge (incl. warning→medium)."""
+        url, _, _ = app_url
+        page.route("**/api/events**", lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=(
+                '[{"id":"1","timestamp":"2099-01-01T00:00:00+00:00","severity":"warning",'
+                '"action":"drift","summary":"warn","agent_id":"t","target_app":"a"},'
+                '{"id":"2","timestamp":"2099-01-02T00:00:00+00:00","severity":"critical",'
+                '"action":"alert","summary":"crit","agent_id":"t","target_app":"a"},'
+                '{"id":"3","timestamp":"2099-01-03T00:00:00+00:00","severity":"mystery",'
+                '"action":"x","summary":"unknown sev","agent_id":"t","target_app":"a"}]'
+            ),
+        ))
+        page.goto(url)
+        page.locator(".events-bell").click()
+        expect(page.locator("#events-drawer-panel")).to_be_visible()
+        badges = page.locator(".events-drawer-item .badge")
+        expect(badges.nth(0)).to_have_class(re.compile(r"badge-medium"))
+        expect(badges.nth(0)).to_have_text("warning")
+        expect(badges.nth(1)).to_have_class(re.compile(r"badge-critical"))
+        expect(badges.nth(2)).to_have_class(re.compile(r"badge-info"))
+        page.unroute("**/api/events**")
 
     def test_events_bell_badge_from_real_events(self, page: Page, app_url):
         """Severity-gated unread badge: critical/high only; info never re-badges."""
