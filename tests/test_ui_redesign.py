@@ -604,7 +604,7 @@ class TestNavUpdate:
         # One cluster-admin-review gate -> nav badge shows "1" next to Admin
         # Review, not 2 (the app-owner "auto-mode-review" gate must not
         # count toward this badge).
-        assert 'Admin Review\n      <span class="nav-badge">1</span>' in resp.text
+        assert 'Admin Review\n        <span class="nav-badge">1</span>' in resp.text
 
 
 # ── 7. Self-Improvement "run now" trigger ───────────────────────────────

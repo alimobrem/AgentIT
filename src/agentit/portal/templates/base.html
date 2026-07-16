@@ -79,26 +79,53 @@
   a { color: var(--color-link); text-decoration: none; }
   a:hover { text-decoration: underline; }
 
-  /* ── Nav ────────────────────────────────────────────────────────── */
+  /* ── Nav ──────────────────────────────────────────────────────────
+     Left cluster (brand + primary) | right cluster (Cmd+K + Events +
+     Menu). Search is never absolute-centered over primary links. */
   nav {
     background: linear-gradient(180deg, var(--color-surface), var(--color-bg));
     padding: var(--space-4) var(--space-8);
     display: flex;
     align-items: center;
-    gap: var(--space-8);
+    justify-content: space-between;
+    gap: var(--space-5);
     border-bottom: 1px solid var(--color-border);
     box-shadow: 0 2px 12px rgba(0,0,0,0.3);
     position: sticky;
     top: 0;
     z-index: 100;
   }
+  .nav-start {
+    display: flex;
+    align-items: center;
+    gap: var(--space-6);
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+  .nav-end {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-4);
+    min-width: 0;
+    flex: 0 1 auto;
+    margin-left: auto;
+  }
   nav .logo {
     font-size: 1.4rem;
     font-weight: 700;
     color: var(--color-accent);
     letter-spacing: 1px;
+    flex-shrink: 0;
   }
-  nav .links { display: flex; gap: var(--space-7); }
+  nav .links {
+    display: flex;
+    gap: var(--space-6);
+    min-width: 0;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    scrollbar-width: thin;
+  }
   nav .links a {
     color: var(--color-text);
     font-size: var(--font-md);
@@ -106,8 +133,10 @@
     padding: var(--space-1) 0;
     border-bottom: 2px solid transparent;
     transition: color 0.15s, border-color 0.15s;
+    flex-shrink: 0;
+    white-space: nowrap;
   }
-  .links-secondary { border-left: 1px solid var(--color-border); padding-left: var(--space-5); margin-left: auto; }
+  .links-secondary { border-left: 1px solid var(--color-border); padding-left: var(--space-5); margin-left: 0; }
   .links-secondary a { font-size: var(--font-sm); color: var(--color-muted); }
   nav .links a:hover {
     color: var(--color-accent);
@@ -896,7 +925,7 @@
   }
 
   /* ── Nav Secondary ─────────────────────────────────────────────── */
-  nav .links-secondary { display: flex; gap: var(--space-5); margin-left: auto; align-items: center; }
+  nav .links-secondary { display: flex; gap: var(--space-5); margin-left: 0; align-items: center; }
   nav .links-secondary a { color: var(--color-muted); font-size: var(--font-sm); }
   nav .links-secondary a:hover { color: var(--color-text); text-decoration: none; }
   nav .nav-user { color: var(--color-muted); font-size: var(--font-sm); white-space: nowrap; }
@@ -951,18 +980,17 @@
   .user-menu-item.deploy-status-link .deploy-status-badge { width: 100%; box-sizing: border-box; }
 
   /* ── Command Palette Trigger (nav) ──────────────────────────────
-     Absolutely centered in the masthead so primary nav (left) and
-     Events/menu (right) stay balanced; taken out of flex flow. */
+     Right-cluster control (with Events / Menu) — reasonably wide but
+     max-width constrained so it never overlays primary nav links. */
   .cmdk-trigger {
-    position: absolute; left: 50%; transform: translateX(-50%);
     display: inline-flex; align-items: center; justify-content: space-between;
     gap: var(--space-3);
-    width: min(20rem, 36vw); min-width: 14rem;
+    width: min(20rem, 28vw); max-width: 20rem; min-width: 10rem;
+    flex: 0 1 20rem;
     background: var(--color-surface-2); border: 1px solid var(--color-border);
     color: var(--color-muted); border-radius: var(--radius-md);
     padding: var(--space-2) var(--space-4); font-size: var(--font-sm); cursor: pointer;
     transition: border-color 0.15s, color 0.15s;
-    z-index: 1;
   }
   .cmdk-trigger:hover { border-color: var(--color-accent); color: var(--color-text); }
   .cmdk-trigger-label {
@@ -1286,26 +1314,50 @@
   ::selection { background: rgba(233, 69, 96, 0.3); color: #fff; }
 
   /* ── Responsive ────────────────────────────────────────────────── */
+  @media (max-width: 1100px) {
+    nav { gap: var(--space-3); padding: var(--space-4) var(--space-5); }
+    nav .links { gap: var(--space-4); }
+    .nav-start { gap: var(--space-4); }
+    .cmdk-trigger { width: min(16rem, 26vw); min-width: 8rem; }
+  }
   @media (max-width: 768px) {
     .stat-grid { grid-template-columns: 1fr; }
     .card-grid { grid-template-columns: 1fr; }
-    nav { flex-wrap: wrap; gap: var(--space-4); padding: var(--space-4); }
-    .nav-toggle { display: block; margin-left: auto; }
-    /* Keep search centered between logo and hamburger; shorten so it
-       does not collide with either side control. */
-    .cmdk-trigger {
-      width: min(14rem, calc(100% - 9rem));
-      min-width: 0;
+    /* Logo | search | hamburger on row 1; primary/secondary full-width
+       below when the hamburger opens. display:contents lets children
+       occupy named areas without changing the DOM ids tests rely on. */
+    nav {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-areas:
+        "logo search toggle"
+        "primary primary primary"
+        "secondary secondary secondary";
+      gap: var(--space-4);
+      padding: var(--space-4);
     }
+    .nav-start, .nav-end { display: contents; }
+    nav .logo { grid-area: logo; }
+    .cmdk-trigger {
+      grid-area: search;
+      width: 100%;
+      max-width: none;
+      min-width: 0;
+      flex: none;
+    }
+    .nav-toggle { display: block; grid-area: toggle; margin-left: 0; }
     /* Hamburger owns the full primary stack (Ledger…Insights) plus Events
        and account — not only secondary chrome. Match ancestor selectors so
        these beat the desktop `nav .links` / `nav .links-secondary` rules. */
     nav .links {
+      grid-area: primary;
       display: none; flex-direction: column; width: 100%;
       gap: var(--space-4); align-items: flex-start;
+      overflow-x: visible;
     }
     nav .links.links-open { display: flex; }
     nav .links-secondary {
+      grid-area: secondary;
       display: none; flex-direction: column; width: 100%;
       align-items: flex-start; margin-left: 0; padding-left: 0; border-left: none;
     }
@@ -1350,95 +1402,101 @@
 <div id="events-drawer" x-data="eventsDrawer()"
      @keydown.escape.window="if (open) close()">
 <nav>
-  <span class="logo">AgentIT</span>
-  {# Cmd+K / Ctrl+K command palette trigger -- discoverable both by click
-     (mouse users see the kbd hint right here) and by the shortcut itself
-     firing from anywhere on the page (see #command-palette below). This is
-     the one persistent, always-visible shortcut hint the checklist asks
-     for at minimum (docs/ux-design-requirements.md Part 3 item 9). #}
-  <button type="button" class="cmdk-trigger" @click="$dispatch('open-command-palette')" aria-label="Open command palette (search navigation and apps)">
-    <span class="cmdk-trigger-label">Search&hellip;</span>
-    <span class="cmdk-kbd">&#8984;K</span>
-  </button>
-  {# Mobile: hamburger toggles primary + secondary together (see @media).
-     Desktop: toggle is display:none; both stacks stay visible. #}
-  <button type="button" class="nav-toggle" @click="navOpen = !navOpen"
-          :aria-expanded="navOpen" aria-controls="nav-primary nav-secondary"
-          aria-label="Toggle menu">
-    <span x-show="!navOpen">&#9776;</span>
-    <span x-show="navOpen" x-cloak>&#10005;</span>
-  </button>
-  <div id="nav-primary" class="links" :class="{ 'links-open': navOpen }">
-    {# Exclusive jobs (docs/portal-experience-design-language.md §1):
-       Ledger = ops inbox (Needs You badge); Fleet = scoreboard only;
-       Admin Review = elevated queue (primary only when count > 0). #}
-    <a href="/ledger" class="{{ 'nav-active' if request.url.path == '/' or request.url.path.startswith('/ledger') }}">Ledger
-      {% if nav_pending_actions %}<span class="nav-badge">{{ nav_pending_actions }}</span>{% endif %}
-    </a>
-    <a href="/fleet" class="{{ 'nav-active' if request.url.path.startswith('/fleet') or request.url.path.startswith('/assessments') }}">Fleet</a>
-    {% if nav_admin_review_pending %}
-    <a href="/admin-review" class="{{ 'nav-active' if request.url.path.startswith('/admin-review') }}">Admin Review
-      <span class="nav-badge">{{ nav_admin_review_pending }}</span>
-    </a>
-    {% endif %}
-    <a href="/health" class="{{ 'nav-active' if request.url.path.startswith('/health') }}">Health</a>
-    <a href="/insights" class="{{ 'nav-active' if request.url.path == '/insights' }}">Insights</a>
+<div class="nav-start">
+    <span class="logo">AgentIT</span>
+    <div id="nav-primary" class="links" :class="{ 'links-open': navOpen }">
+      {# Exclusive jobs (docs/portal-experience-design-language.md §1):
+         Ledger = ops inbox (Needs You badge); Fleet = scoreboard only;
+         Admin Review = elevated queue (primary only when count > 0). #}
+      <a href="/ledger" class="{{ 'nav-active' if request.url.path == '/' or request.url.path.startswith('/ledger') }}">Ledger
+        {% if nav_pending_actions %}<span class="nav-badge">{{ nav_pending_actions }}</span>{% endif %}
+      </a>
+      <a href="/fleet" class="{{ 'nav-active' if request.url.path.startswith('/fleet') or request.url.path.startswith('/assessments') }}">Fleet</a>
+      {% if nav_admin_review_pending %}
+      <a href="/admin-review" class="{{ 'nav-active' if request.url.path.startswith('/admin-review') }}">Admin Review
+        <span class="nav-badge">{{ nav_admin_review_pending }}</span>
+      </a>
+      {% endif %}
+      <a href="/health" class="{{ 'nav-active' if request.url.path.startswith('/health') }}">Health</a>
+      <a href="/insights" class="{{ 'nav-active' if request.url.path == '/insights' }}">Insights</a>
+    </div>
   </div>
-  <div id="nav-secondary" class="links-secondary" :class="{ 'links-open': navOpen }">
-    {# Events: notification-bell control; opens the drawer below (not a
-       primary-nav text link). Full page remains at /events. Badge count
-       comes from real /api/events (unread vs last-seen, or critical/high). #}
-    <button type="button" class="events-bell {{ 'nav-active' if request.url.path.startswith('/events') }}"
-            x-ref="bellBtn"
-            @click="openDrawer()"
-            :aria-expanded="open"
-            :aria-label="badgeCount > 0 ? ('Open events feed, ' + badgeCount + ' unread') : 'Open events feed'"
-            aria-haspopup="dialog"
-            aria-controls="events-drawer-panel">
-      <svg class="events-bell-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
-        <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
-      </svg>
-      <span class="events-bell-badge" x-show="badgeCount > 0" x-cloak
-            x-text="badgeCount > 99 ? '99+' : badgeCount" aria-hidden="true"></span>
+  <div class="nav-end">
+    {# Cmd+K / Ctrl+K command palette trigger -- discoverable both by click
+       (mouse users see the kbd hint right here) and by the shortcut itself
+       firing from anywhere on the page (see #command-palette below). This is
+       the one persistent, always-visible shortcut hint the checklist asks
+       for at minimum (docs/ux-design-requirements.md Part 3 item 9).
+       Lives in the right cluster with Events / Menu so it cannot cover
+       primary nav links. #}
+    <button type="button" class="cmdk-trigger" @click="$dispatch('open-command-palette')" aria-label="Open command palette (search navigation and apps)">
+      <span class="cmdk-trigger-label">Search&hellip;</span>
+      <span class="cmdk-kbd">&#8984;K</span>
     </button>
-    <div class="user-menu" x-data="{ open: false }" @keydown.escape.window="open = false">
-      <button type="button" class="user-menu-trigger" @click="open = !open" :aria-expanded="open" aria-haspopup="true" aria-label="Open account and settings menu">
-        <span class="user-menu-avatar" aria-hidden="true">{{ (current_user[0] | upper) if is_authenticated and current_user else 'A' }}</span>
-        <span class="user-menu-label">{{ current_user if is_authenticated and current_user else 'Menu' }}</span>
-        <span class="user-menu-chevron" aria-hidden="true">&#9662;</span>
+    {# Mobile: hamburger toggles primary + secondary together (see @media).
+       Desktop: toggle is display:none; both stacks stay visible. #}
+    <button type="button" class="nav-toggle" @click="navOpen = !navOpen"
+            :aria-expanded="navOpen" aria-controls="nav-primary nav-secondary"
+            aria-label="Toggle menu">
+      <span x-show="!navOpen">&#9776;</span>
+      <span x-show="navOpen" x-cloak>&#10005;</span>
+    </button>
+    <div id="nav-secondary" class="links-secondary" :class="{ 'links-open': navOpen }">
+      {# Events: notification-bell control; opens the drawer below (not a
+         primary-nav text link). Full page remains at /events. Badge count
+         comes from real /api/events (unread vs last-seen, or critical/high). #}
+      <button type="button" class="events-bell {{ 'nav-active' if request.url.path.startswith('/events') }}"
+              x-ref="bellBtn"
+              @click="openDrawer()"
+              :aria-expanded="open"
+              :aria-label="badgeCount > 0 ? ('Open events feed, ' + badgeCount + ' unread') : 'Open events feed'"
+              aria-haspopup="dialog"
+              aria-controls="events-drawer-panel">
+        <svg class="events-bell-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+          <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+        </svg>
+        <span class="events-bell-badge" x-show="badgeCount > 0" x-cloak
+              x-text="badgeCount > 99 ? '99+' : badgeCount" aria-hidden="true"></span>
       </button>
-      <div class="user-menu-dropdown" x-show="open" x-cloak x-transition.opacity.duration.100ms
-           @click.outside.capture="open = false" @click="open = false" role="menu">
-        <a href="/capabilities" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/capabilities' or request.url.path.startswith('/agents') }}">Capabilities</a>
-        <a href="/settings" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/settings' }}">Settings</a>
-        <a href="/schedules" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/schedules' }}">Schedules</a>
-        <a href="/decisions" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/decisions') }}">Decisions
-          <span class="user-menu-item-sub">Audit log — Ledger owns the stream</span>
-        </a>
-        {% if not nav_admin_review_pending %}
-        <a href="/admin-review" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/admin-review') }}">Admin Review
-          <span class="user-menu-item-sub">Elevated approvals</span>
-        </a>
-        {% endif %}
-        {% if is_authenticated %}
-        <div class="user-menu-divider"></div>
-        <div class="user-menu-info">Logged in as {{ current_user }}</div>
-        <a href="{{ oauth_sign_out_path }}" role="menuitem" class="user-menu-item">Logout</a>
-        {% endif %}
-        <div class="user-menu-divider"></div>
-        {# Moved out of the ambient top-level nav bar and into the menu
-           footer -- still the same live-polled badge (unchanged route/
-           partial), just relocated and now a real link through to the
-           Health page's full deploy-status detail instead of inert text. #}
-        <a href="/health" id="deploy-status" class="user-menu-item deploy-status-link" role="menuitem"
-           hx-get="/api/deploy-status" hx-trigger="load, every 15s" hx-swap="innerHTML">
-          <span class="deploy-status-badge deploy-status-idle" role="status" aria-live="polite"
-                aria-label="AgentIT version {{ build_info.version | default('unknown') }}, commit {{ build_info.commit | default('unknown') }}">
-            <span class="deploy-status-dot"></span>
-            <span class="deploy-status-text">v{{ build_info.version | default('unknown') }}{% if build_info.commit and build_info.commit != 'unknown' %} &middot; <code>{{ build_info.commit[:7] }}</code>{% endif %}</span>
-          </span>
-        </a>
+      <div class="user-menu" x-data="{ open: false }" @keydown.escape.window="open = false">
+        <button type="button" class="user-menu-trigger" @click="open = !open" :aria-expanded="open" aria-haspopup="true" aria-label="Open account and settings menu">
+          <span class="user-menu-avatar" aria-hidden="true">{{ (current_user[0] | upper) if is_authenticated and current_user else 'A' }}</span>
+          <span class="user-menu-label">{{ current_user if is_authenticated and current_user else 'Menu' }}</span>
+          <span class="user-menu-chevron" aria-hidden="true">&#9662;</span>
+        </button>
+        <div class="user-menu-dropdown" x-show="open" x-cloak x-transition.opacity.duration.100ms
+             @click.outside.capture="open = false" @click="open = false" role="menu">
+          <a href="/capabilities" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/capabilities' or request.url.path.startswith('/agents') }}">Capabilities</a>
+          <a href="/settings" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/settings' }}">Settings</a>
+          <a href="/schedules" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/schedules' }}">Schedules</a>
+          <a href="/decisions" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/decisions') }}">Decisions
+            <span class="user-menu-item-sub">Audit log — Ledger owns the stream</span>
+          </a>
+          {% if not nav_admin_review_pending %}
+          <a href="/admin-review" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/admin-review') }}">Admin Review
+            <span class="user-menu-item-sub">Elevated approvals</span>
+          </a>
+          {% endif %}
+          {% if is_authenticated %}
+          <div class="user-menu-divider"></div>
+          <div class="user-menu-info">Logged in as {{ current_user }}</div>
+          <a href="{{ oauth_sign_out_path }}" role="menuitem" class="user-menu-item">Logout</a>
+          {% endif %}
+          <div class="user-menu-divider"></div>
+          {# Moved out of the ambient top-level nav bar and into the menu
+             footer -- still the same live-polled badge (unchanged route/
+             partial), just relocated and now a real link through to the
+             Health page's full deploy-status detail instead of inert text. #}
+          <a href="/health" id="deploy-status" class="user-menu-item deploy-status-link" role="menuitem"
+             hx-get="/api/deploy-status" hx-trigger="load, every 15s" hx-swap="innerHTML">
+            <span class="deploy-status-badge deploy-status-idle" role="status" aria-live="polite"
+                  aria-label="AgentIT version {{ build_info.version | default('unknown') }}, commit {{ build_info.commit | default('unknown') }}">
+              <span class="deploy-status-dot"></span>
+              <span class="deploy-status-text">v{{ build_info.version | default('unknown') }}{% if build_info.commit and build_info.commit != 'unknown' %} &middot; <code>{{ build_info.commit[:7] }}</code>{% endif %}</span>
+            </span>
+          </a>
+        </div>
       </div>
     </div>
   </div>
