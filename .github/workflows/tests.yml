@@ -45,7 +45,7 @@ jobs:
       KUBECONFIG: /tmp/nonexistent-path
       AGENTIT_TEST_PG_DSN: postgresql://agentit_test:agentit_test@localhost:5432/agentit_test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -78,7 +78,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build image
         run: docker build -t agentit-smoke-test:ci -f Containerfile .
       - name: Smoke-test image contents
