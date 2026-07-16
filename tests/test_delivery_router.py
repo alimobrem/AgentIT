@@ -21,6 +21,7 @@ from agentit.portal.delivery import (
     MECHANISM_INFRA_REPO_COMMIT,
     MECHANISM_SOURCE_REPO_PR,
     classify_file,
+    has_unresolved_placeholders,
     is_gitops_registered,
     route_and_deliver,
 )
@@ -82,6 +83,20 @@ def _secret_file() -> dict:
         "path": "db-secret.yaml",
         "content": "apiVersion: v1\nkind: Secret\nmetadata:\n  name: db\ndata:\n  password: c2VjcmV0\n",
         "description": "should never be delivered",
+    }
+
+
+def _placeholder_cronjob_file() -> dict:
+    return {
+        "category": "cost",
+        "path": "cost-cronjob.yaml",
+        "content": (
+            "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: cost\n"
+            "spec:\n  jobTemplate:\n    spec:\n      template:\n        spec:\n"
+            "          containers:\n          - name: job\n"
+            "            image: REPLACE_WITH_AGENTIT_IMAGE\n"
+        ),
+        "description": "unresolved image placeholder",
     }
 
 
@@ -213,6 +228,29 @@ class TestRouteAndDeliverClusterConfig:
         mock_commit.assert_called_once()
         mock_ensure.assert_called_once()
         mock_apply.assert_not_called()
+        gate_id = result["outcomes"]["cluster_config"].get("gate_id")
+        assert gate_id
+        gates = await raw.list_gates(status="pending")
+        assert any(g["id"] == gate_id and g["gate_type"] == "gitops-pr-pending" for g in gates)
+
+    async def test_placeholder_files_are_not_committed(self):
+        store, raw = await make_async_store()
+        report = make_report()
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
+        aid = await raw.save(report)
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit:
+            result = await route_and_deliver(
+                [_placeholder_cronjob_file(), _cluster_config_file()],
+                app_name=report.repo_name, namespace="ns",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=False, force_dry_run_first=False,
+            )
+        assert "cost-cronjob.yaml" in result["placeholder_blocked"]
+        assert has_unresolved_placeholders(_placeholder_cronjob_file()["content"])
+        # Only the non-placeholder cluster_config file is committed.
+        committed = mock_commit.call_args[0][2]
+        assert [f["path"] for f in committed] == ["app-network-policy.yaml"]
 
     async def test_dry_run_skips_infra_commit_call(self):
         store, raw = await make_async_store()
