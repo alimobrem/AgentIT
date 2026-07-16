@@ -976,30 +976,50 @@ class AssessmentStore:
         (docs/architecture.md). Without the join, re-assess + SLO tracker
         (which iterates every historical assessment) left N pending
         ``rollback-review`` rows of the same type on Actions.
-        """
-        existing = await self._pool.fetchrow(
-            """
-            SELECT gates.id FROM gates
-            INNER JOIN assessments ON gates.assessment_id = assessments.id
-            WHERE assessments.repo_url = (SELECT repo_url FROM assessments WHERE id = $1)
-              AND gates.gate_type = $2
-              AND gates.status = 'pending'
-            ORDER BY gates.created_at DESC
-            LIMIT 1
-            """,
-            assessment_id, gate_type,
-        )
-        if existing:
-            return existing["id"]
 
-        gate_id = uuid.uuid4().hex
-        await self._pool.execute(
-            """
-            INSERT INTO gates (id, assessment_id, gate_type, status, summary, created_at)
-            VALUES ($1, $2, $3, 'pending', $4, $5)
-            """,
-            gate_id, assessment_id, gate_type, summary, _now(),
-        )
+        The dedup key spans a join (``gates.gate_type`` + the owning
+        assessment's ``repo_url``), so it can't be enforced with a plain
+        unique index on ``gates`` alone. Instead, the existence check and
+        the INSERT run inside one transaction serialized by a Postgres
+        advisory lock keyed on ``(repo_url, gate_type)`` -- two genuinely
+        concurrent callers for the same app+type (e.g. slo-tracker's tick
+        racing a webhook-triggered dispatch) now block on the lock rather
+        than both seeing "no pending gate" and both inserting a duplicate.
+        """
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                repo_row = await conn.fetchrow(
+                    "SELECT repo_url FROM assessments WHERE id = $1", assessment_id,
+                )
+                repo_url = repo_row["repo_url"] if repo_row else assessment_id
+                await conn.fetchval(
+                    "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+                    f"{repo_url}:{gate_type}",
+                )
+
+                existing = await conn.fetchrow(
+                    """
+                    SELECT gates.id FROM gates
+                    INNER JOIN assessments ON gates.assessment_id = assessments.id
+                    WHERE assessments.repo_url = $1
+                      AND gates.gate_type = $2
+                      AND gates.status = 'pending'
+                    ORDER BY gates.created_at DESC
+                    LIMIT 1
+                    """,
+                    repo_url, gate_type,
+                )
+                if existing:
+                    return existing["id"]
+
+                gate_id = uuid.uuid4().hex
+                await conn.execute(
+                    """
+                    INSERT INTO gates (id, assessment_id, gate_type, status, summary, created_at)
+                    VALUES ($1, $2, $3, 'pending', $4, $5)
+                    """,
+                    gate_id, assessment_id, gate_type, summary, _now(),
+                )
         await self._refresh_active_gates_metric()
         return gate_id
 
@@ -1203,31 +1223,45 @@ class AssessmentStore:
         status: str = "generated",
         manifest_path: str | None = None,
     ) -> str:
-        existing = await self._pool.fetchrow(
-            """
-            SELECT id, status FROM remediations
-            WHERE assessment_id = $1 AND agent_name = $2 AND description = $3
-              AND status NOT IN ('completed', 'applied')
-            LIMIT 1
-            """,
-            assessment_id, agent_name, description,
-        )
-        if existing:
-            if status != "generated" and status != existing["status"]:
-                await self._pool.execute(
-                    "UPDATE remediations SET status = $1 WHERE id = $2",
-                    status, existing["id"],
+        """Create a remediation, or return/update the existing live one for
+        this exact (assessment_id, agent_name, description).
+
+        The dedup key is entirely within this table, so the existence
+        check and the INSERT run inside one transaction serialized by a
+        Postgres advisory lock keyed on that triple -- two genuinely
+        concurrent callers no longer both see "no live remediation" and
+        both insert a duplicate."""
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.fetchval(
+                    "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+                    f"{assessment_id}:{agent_name}:{description}",
                 )
-            return existing["id"]
-        rem_id = uuid.uuid4().hex
-        await self._pool.execute(
-            """
-            INSERT INTO remediations (id, assessment_id, agent_name, description, status, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            """,
-            rem_id, assessment_id, agent_name, description, status, _now(),
-        )
-        return rem_id
+                existing = await conn.fetchrow(
+                    """
+                    SELECT id, status FROM remediations
+                    WHERE assessment_id = $1 AND agent_name = $2 AND description = $3
+                      AND status NOT IN ('completed', 'applied')
+                    LIMIT 1
+                    """,
+                    assessment_id, agent_name, description,
+                )
+                if existing:
+                    if status != "generated" and status != existing["status"]:
+                        await conn.execute(
+                            "UPDATE remediations SET status = $1 WHERE id = $2",
+                            status, existing["id"],
+                        )
+                    return existing["id"]
+                rem_id = uuid.uuid4().hex
+                await conn.execute(
+                    """
+                    INSERT INTO remediations (id, assessment_id, agent_name, description, status, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    rem_id, assessment_id, agent_name, description, status, _now(),
+                )
+                return rem_id
 
     async def update_remediation_status(self, remediation_id: str, status: str) -> bool:
         result = await self._pool.execute(

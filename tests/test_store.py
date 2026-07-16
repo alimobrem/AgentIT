@@ -252,6 +252,22 @@ class TestGates:
         gates = await store.list_gates(status="pending")
         assert gates[0]["repo_url"] == "https://github.com/org/repo-y"
 
+    async def test_create_gate_concurrent_calls_create_only_one_pending_gate(self, store):
+        """Regression guard for the check-then-act create_gate race
+        (Priority 1c): genuinely concurrent callers for the same app+type
+        (e.g. slo-tracker's tick racing a webhook-triggered dispatch) must
+        not both see "no pending gate" and both insert one. The advisory
+        lock inside create_gate() serializes them instead."""
+        import asyncio
+
+        assessment_id = await store.save(_make_report("repo-concurrent-gate"))
+        ids = await asyncio.gather(
+            *(store.create_gate(assessment_id, "security", "needs review") for _ in range(10))
+        )
+        assert len(set(ids)) == 1
+        gates = await store.list_gates_for_assessment(assessment_id, status="pending")
+        assert len([g for g in gates if g["gate_type"] == "security"]) == 1
+
     async def test_gate_from_old_assessment_visible_after_reassessment(self, store):
         """Orphaned-gate-attribution regression (parity with store.py): a
         gate created against an app's OLD assessment_id must still be
@@ -375,6 +391,22 @@ class TestRemediations:
         await store.save_remediation(assessment_id, "hardening", "Add NetworkPolicy")
         rem_id = (await store.list_remediations(assessment_id))[0]["id"]
         assert await store.delete_remediation(rem_id, other_id) is False
+
+    async def test_save_remediation_concurrent_calls_create_only_one_live_row(self, store):
+        """Regression guard for the check-then-act save_remediation race
+        (Priority 1c): genuinely concurrent callers for the same
+        (assessment_id, agent_name, description) must not both see "no
+        live remediation" and both insert one. The advisory lock inside
+        save_remediation() serializes them instead."""
+        import asyncio
+
+        assessment_id = await store.save(_make_report())
+        ids = await asyncio.gather(
+            *(store.save_remediation(assessment_id, "hardening", "Add NetworkPolicy") for _ in range(10))
+        )
+        assert len(set(ids)) == 1
+        remediations = await store.list_remediations(assessment_id)
+        assert len(remediations) == 1
 
 
 class TestAgentRegistry:
