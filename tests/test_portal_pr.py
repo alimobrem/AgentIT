@@ -272,3 +272,71 @@ def test_ensure_infra_repo_creates_private_org_repo_on_fallback(mock_requests):
     assert result["created"] is True
     org_call = next(c for c in mock_requests.post.call_args_list if "/orgs/" in str(c))
     assert org_call.kwargs["json"]["private"] is True
+
+
+@patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"})
+@patch("agentit.portal.github_pr.requests")
+def test_ensure_infra_repo_reuses_token_user_repo_on_422(mock_requests):
+    """Register for GitOps against a third-party app owner (octocat/...) must
+    reuse the token user's existing agentit-gitops instead of failing after
+    /user/repos 422 — that silent failure made the portal button look dead."""
+    owner_get = MagicMock()
+    owner_get.status_code = 404
+
+    me_get = MagicMock()
+    me_get.status_code = 200
+    me_get.ok = True
+    me_get.json.return_value = {"login": "agentit-bot"}
+
+    user_repo_get = MagicMock()
+    user_repo_get.status_code = 200
+    user_repo_get.json.return_value = {
+        "html_url": "https://github.com/agentit-bot/agentit-gitops",
+    }
+
+    def get_side_effect(url, **kwargs):
+        if url.endswith("/user"):
+            return me_get
+        if "/repos/agentit-bot/agentit-gitops" in url:
+            return user_repo_get
+        return owner_get
+
+    mock_requests.get.side_effect = get_side_effect
+
+    user_post_resp = MagicMock()
+    user_post_resp.status_code = 422
+    mock_requests.post.return_value = user_post_resp
+
+    result = ensure_infra_repo("octocat", "agentit-gitops")
+
+    assert result == {
+        "repo_url": "https://github.com/agentit-bot/agentit-gitops",
+        "created": False,
+    }
+    assert not any("/orgs/" in str(c) for c in mock_requests.post.call_args_list)
+
+
+@patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"})
+@patch("agentit.portal.github_pr.requests")
+def test_ensure_infra_repo_writes_gitkeep_to_created_owner(mock_requests):
+    """/user/repos creates under the token login — gitkeep must target that
+    owner, not the (possibly third-party) requested app owner."""
+    get_resp = MagicMock()
+    get_resp.status_code = 404
+    mock_requests.get.return_value = get_resp
+
+    post_resp = MagicMock()
+    post_resp.status_code = 201
+    post_resp.json.return_value = {"html_url": "https://github.com/agentit-bot/agentit-gitops"}
+    mock_requests.post.return_value = post_resp
+
+    put_resp = MagicMock()
+    put_resp.status_code = 201
+    mock_requests.put.return_value = put_resp
+
+    result = ensure_infra_repo("octocat", "agentit-gitops")
+
+    assert result["created"] is True
+    put_url = mock_requests.put.call_args.args[0]
+    assert "/repos/agentit-bot/agentit-gitops/contents/apps/.gitkeep" in put_url
+    assert "/repos/octocat/" not in put_url

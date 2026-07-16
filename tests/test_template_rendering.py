@@ -101,6 +101,34 @@ class TestAlpineScoping:
         )
 
 
+class TestUrlParamToastsSurviveHtmxBoost:
+    """Boosted form POSTs (Register for GitOps, Deliver, ...) redirect with
+    ?error=/?success= and swap <body> via htmx. alpine:initialized only fires
+    once per full page load, so without an explicit re-call after
+    Alpine.destroyTree/initTree the flash toast never appears and the click
+    looks like a no-op. Confirmed live against the deployed portal before
+    showUrlParamToasts() was wired into htmx:afterSettle.
+    """
+
+    def test_show_url_param_toasts_helper_exists(self):
+        html = (TEMPLATES_DIR / "base.html").read_text(encoding="utf-8")
+        assert "function showUrlParamToasts()" in html
+        assert "document.addEventListener('alpine:initialized', showUrlParamToasts)" in html
+
+    def test_htmx_after_settle_reinvokes_url_param_toasts_on_boost(self):
+        html = (TEMPLATES_DIR / "base.html").read_text(encoding="utf-8")
+        reiniter_idx = html.find("Alpine.destroyTree(document.body)")
+        assert reiniter_idx != -1
+        toast_idx = html.find("showUrlParamToasts()", reiniter_idx)
+        assert toast_idx != -1, (
+            "base.html must call showUrlParamToasts() after Alpine.initTree "
+            "on boosted htmx:afterSettle — otherwise Register/Deliver flash "
+            "messages are silently dropped"
+        )
+        else_idx = html.find("else if (e.detail.target", reiniter_idx)
+        assert else_idx == -1 or toast_idx < else_idx
+
+
 class TestConfirmModalOutsideClick:
     """Regression: the shared confirm-modal's outside-click handler must use
     the `capture` modifier.

@@ -745,8 +745,13 @@ def ensure_applicationset(infra_repo_url: str) -> bool:
 def ensure_infra_repo(owner: str, repo_name: str = "agentit-gitops") -> dict:
     """Create a GitOps infra repo if it doesn't exist. Returns {"repo_url"} or {"error"}.
 
-    Checks if the repo exists first. If not, creates it with a README
-    and apps/ directory structure.
+    Checks if the repo exists first under ``owner``. If not, creates a private
+    repo via ``/user/repos`` (authenticated token owner). When that 422s
+    because the name already exists under the token user, reuses that repo
+    instead of failing — this is the Register-for-GitOps path for third-party
+    app owners (e.g. ``octocat/Hello-World``) where ``/orgs/{owner}/repos``
+    is not permitted. ``apps/.gitkeep`` is written to the repo that was
+    actually created/reused, not blindly to ``owner/repo_name``.
     """
     try:
         token = _get_token()
@@ -755,7 +760,7 @@ def ensure_infra_repo(owner: str, repo_name: str = "agentit-gitops") -> dict:
 
         resp = requests.get(f"{_API}/repos/{owner}/{repo_name}", headers=hdrs, timeout=10)
         if resp.status_code == 200:
-            return {"repo_url": repo_url, "created": False}
+            return {"repo_url": resp.json().get("html_url", repo_url), "created": False}
 
         # Private: this repo holds cluster manifests (namespace names, internal
         # service names, schedule commands) that shouldn't be world-readable.
@@ -770,6 +775,21 @@ def ensure_infra_repo(owner: str, repo_name: str = "agentit-gitops") -> dict:
             },
         )
         if resp.status_code == 422:
+            # Already exists under the authenticated user — reuse it. Fall
+            # back to org create only when the user-owned repo is missing.
+            me = requests.get(f"{_API}/user", headers=hdrs, timeout=10)
+            login = me.json().get("login") if me.ok else None
+            if login:
+                existing = requests.get(
+                    f"{_API}/repos/{login}/{repo_name}", headers=hdrs, timeout=10,
+                )
+                if existing.status_code == 200:
+                    return {
+                        "repo_url": existing.json().get(
+                            "html_url", f"https://github.com/{login}/{repo_name}"
+                        ),
+                        "created": False,
+                    }
             resp = requests.post(
                 f"{_API}/orgs/{owner}/repos",
                 headers=hdrs, timeout=10,
@@ -782,9 +802,12 @@ def ensure_infra_repo(owner: str, repo_name: str = "agentit-gitops") -> dict:
             )
         resp.raise_for_status()
         created_url = resp.json().get("html_url", repo_url)
+        # /user/repos always creates under the token login — write gitkeep
+        # there, not to the (possibly third-party) requested owner path.
+        actual_owner, actual_repo = _parse_owner_repo(created_url)
 
         requests.put(
-            f"{_API}/repos/{owner}/{repo_name}/contents/apps/.gitkeep",
+            f"{_API}/repos/{actual_owner}/{actual_repo}/contents/apps/.gitkeep",
             headers=hdrs, timeout=10,
             json={
                 "message": "chore: initialize apps directory for managed applications",
