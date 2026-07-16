@@ -166,11 +166,15 @@ spec:
     # above (and the retryStrategy.factor Sensor fix in docs/deployment.md) --
     # not something the chart can or should try to hand-encode, since it's a
     # Tekton-API-version-specific serialization detail, not real spec drift.
+    # Sidecar `computeResources: {}` is also API-normalized; the chart now
+    # emits that empty object too, and this ignore covers older live objects
+    # until the next sync rewrites them.
     - group: tekton.dev
       kind: Pipeline
       jqPathExpressions:
         - .spec.tasks[].taskSpec.metadata
         - .spec.tasks[].taskSpec.spec
+        - .spec.tasks[].taskSpec.sidecars[].computeResources
         - .spec.finally[].taskSpec.metadata
         - .spec.finally[].taskSpec.spec
   destination:

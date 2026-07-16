@@ -32,6 +32,11 @@ spec:
             - --interval
             - "{{ .Values.agents.vulnWatcher.interval }}"
           env:
+            # Same source of truth as the image ref above / portal Rollout.
+            - name: AGENTIT_GIT_COMMIT
+              value: {{ .Values.image.tag | quote }}
+            - name: AGENTIT_IMAGE_TAG
+              value: {{ .Values.image.tag | quote }}
             {{- if .Values.kafka.enabled }}
             - name: AGENTIT_KAFKA_BOOTSTRAP
               value: {{ .Values.kafka.bootstrapServers }}

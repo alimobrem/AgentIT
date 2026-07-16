@@ -45,6 +45,11 @@ spec:
             - --limit
             - "{{ .Values.agents.skillLearner.limit }}"
           env:
+            # Same source of truth as the image ref above / portal Rollout.
+            - name: AGENTIT_GIT_COMMIT
+              value: {{ .Values.image.tag | quote }}
+            - name: AGENTIT_IMAGE_TAG
+              value: {{ .Values.image.tag | quote }}
             # Drafts are primarily pushed to the portal via an internal API
             # call (POST /api/webhook/skill-draft) so they're visible on the
             # Capabilities page immediately -- no shared/RWX storage needed

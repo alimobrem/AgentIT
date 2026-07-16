@@ -379,7 +379,11 @@ Key `chart/values.yaml` feature flags: `rollout.enabled` (canary via Argo Rollou
 
 The chart includes: NetworkPolicy, ResourceQuota, LimitRange, PodDisruptionBudget, anti-affinity, backup CronJob, dedicated ServiceAccount (not `default`), and a self-assess step in the CI pipeline.
 
-**Auth + backup sync notes (dogfood):** `session_secret` / webhook `token` are filled by an Argo CD **Sync** hook Job (`chart/templates/secret-init-job.yaml`), not PostSync — PostSync never ran while oauth-proxy CrashLooped on an empty secret or while a WaitForFirstConsumer backup PVC stayed Pending. Bundled Postgres backups also ship a one-shot PVC-bind Sync Job so `gp3-csi` claims Bound during the same sync. Prefer `/data` (writable) for watcher event-buffer SQLite when a PVC is mounted.
+**Auth + backup sync notes (dogfood):** `session_secret` / webhook `token` are filled by an Argo CD **Sync** hook Job (`chart/templates/secret-init-job.yaml`), not PostSync — PostSync never ran while oauth-proxy CrashLooped on an empty secret or while a WaitForFirstConsumer backup PVC stayed Pending. Bundled Postgres backups also ship a one-shot PVC-bind Sync Job (`BeforeHookCreation,HookSucceeded`, generous deadline) so `gp3-csi` claims Bound during the same sync without a failed Job permanently blocking Argo. Prefer `/data` (writable) for watcher event-buffer SQLite when a PVC is mounted.
+
+**Build identity env:** Portal and watcher Deployments set `AGENTIT_GIT_COMMIT` / `AGENTIT_IMAGE_TAG` (scout also `GIT_REVISION`) from `.Values.image.tag` — the same Helm param CI pins to the deploy SHA — so those env vars cannot lag the container image after an Argo sync.
+
+**Argo Pipeline drift:** `argocd/application.yaml` `ignoreDifferences` covers Tekton-normalized `Pipeline` fields (`taskSpec.metadata`/`spec`, empty sidecar `computeResources`); the chart also emits matching `computeResources: {}` on the `run-tests` postgres sidecar so `Pipeline/agentit-ci` can stay Synced.
 
 
 The `Route` sets `haproxy.router.openshift.io/timeout: 200s` because `/capabilities/learn` runs synchronous CVE research that can take up to 180s server-side — the router's 30s default would otherwise kill the connection with a 504 before the backend responds.

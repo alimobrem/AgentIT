@@ -42,6 +42,18 @@ spec:
             - --mode
             - "{{ .Values.agents.capabilityScout.mode | default "docs" }}"
           env:
+            # Same source of truth as the image ref above and the portal
+            # Rollout (`.Values.image.tag`). Live dogfood once left orphan
+            # AGENTIT_IMAGE_TAG/GIT_REVISION env values from an older
+            # manual/SSA write that Argo never owned, so the container
+            # image advanced while these env vars stayed pinned to a
+            # stale SHA -- reclaim them here so every sync updates them.
+            - name: AGENTIT_GIT_COMMIT
+              value: {{ .Values.image.tag | quote }}
+            - name: AGENTIT_IMAGE_TAG
+              value: {{ .Values.image.tag | quote }}
+            - name: GIT_REVISION
+              value: {{ .Values.image.tag | quote }}
             # Reads AgentIT's own fleet data via the same store every other
             # watcher uses -- no shared/RWX storage needed (this watcher is
             # deliberately stateless: it opens PRs against AgentIT's own
