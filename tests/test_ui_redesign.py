@@ -7,8 +7,8 @@
    category), not `dimension`.
 3. Gate app attribution: `list_gates()`/`list_all_gates()` join back to the
    assessment for an `app_name`; the 7 app-owner gate types surface on
-   Assessment Detail's Actions tab and Fleet's "Needs Action" badge;
-   `cluster-admin-review` stays on the separate Admin Review page/badge.
+   Assessment Detail's Actions tab and Ledger Needs You (Fleet keeps only a
+   quiet pointer); `cluster-admin-review` stays on Admin Review.
 4. The orphaned `/apply` and `/create-pr` routes are gone (404).
 5. GitOps-registration visibility on Fleet and Assessment Detail.
 6. Nav: Gates retired as a standalone concept, Admin Review takes its place.
@@ -307,42 +307,39 @@ class TestGateAppAttributionAndActionsTab:
         assert resp.status_code == 200
         assert "x-data=\"{ tab: 'ledger' }\"" in resp.text
 
-    async def test_fleet_needs_action_badge_counts_app_owner_gates_only(self, ui_client):
+    async def test_fleet_quiet_ledger_pointer_counts_app_owner_gates_only(self, ui_client):
+        """Fleet is scoreboard-only: pending ops → quiet Ledger link, not a
+        Needs Action column. cluster-admin-review must not inflate the count."""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="needs-action-app"))
         await store.create_gate(aid, "auto-mode-review", "gate 1")
         await store.create_gate(aid, "dry-run-failed", "gate 2")
-        # cluster-admin-review must NOT count toward this app's Fleet badge.
         await store.create_gate(aid, "cluster-admin-review", "gate 3")
 
-        resp = await client.get("/")
+        resp = await client.get("/fleet")
         assert resp.status_code == 200
-        assert "2 pending" in resp.text
+        assert "2 need you → Ledger" in resp.text
+        assert "Needs Action" not in resp.text
 
-    async def test_fleet_no_badge_when_no_pending_gates(self, ui_client):
+    async def test_fleet_no_pending_pointer_when_no_pending_gates(self, ui_client):
         client, store = ui_client
         await store.save(make_report(repo_name="clean-app"))
 
-        resp = await client.get("/")
+        resp = await client.get("/fleet")
         assert resp.status_code == 200
-        assert "pending</span>" not in resp.text
+        assert "need you → Ledger" not in resp.text
 
-    async def test_fleet_needs_action_badge_is_a_real_link_to_the_actions_tab(self, ui_client):
-        """Regression: the "N pending" badge was a plain <span>, not a
-        link, despite being the most action-oriented element on the row.
-        It must link to that app's Assessment Detail Actions tab -- using
-        the real client_tab_nav query-param convention, not a bare
-        `#actions` anchor the Alpine-driven tabs would ignore."""
+    async def test_fleet_pending_pointer_links_to_ledger(self, ui_client):
+        """Pending ops are Ledger's job — Fleet only offers a quiet pointer."""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="linked-badge-app"))
         await store.create_gate(aid, "auto-mode-review", "needs review")
 
-        resp = await client.get("/")
+        resp = await client.get("/fleet")
         assert resp.status_code == 200
-        # badge-accent, not badge-medium -- a pending action is a
-        # needs-your-attention signal (base.html reserves --color-accent
-        # exclusively for that), not a routine medium-severity indicator.
-        assert f'<a href="/assessments/{aid}?tab=actions" class="badge badge-accent"' in resp.text
+        assert 'href="/ledger"' in resp.text
+        assert "1 need you → Ledger" in resp.text
+        assert f'?tab=actions' not in resp.text or f'/assessments/{aid}?tab=actions' not in resp.text
 
     async def test_assessment_detail_tab_query_param_opens_actions_tab(self, ui_client):
         """The badge above links with ?tab=actions -- the Alpine tab state
@@ -438,7 +435,7 @@ class TestGitOpsVisibility:
         # Fleet's Argo enrichment caches for 60s at module scope -- force a
         # fresh fetch so this test's mock is actually consulted.
         with patch("agentit.portal.routes.fleet._argo_cache", {"data": {}, "ts": 0}):
-            resp = await client.get("/")
+            resp = await client.get("/fleet")
 
         assert resp.status_code == 200
         assert ">GitOps<" in resp.text
@@ -447,7 +444,7 @@ class TestGitOpsVisibility:
         client, store = ui_client
         await store.save(make_report(repo_name="plain-fleet-app"))
         with patch("agentit.portal.routes.fleet._argo_cache", {"data": {}, "ts": 0}):
-            resp = await client.get("/")
+            resp = await client.get("/fleet")
 
         assert resp.status_code == 200
         assert ">Direct apply<" in resp.text
@@ -530,13 +527,14 @@ class TestGitOpsVisibility:
 class TestNavUpdate:
     async def test_nav_has_no_standalone_gates_link(self, ui_client):
         client, _store = ui_client
-        resp = await client.get("/")
+        resp = await client.get("/ledger")
         assert resp.status_code == 200
         assert 'href="/gates"' not in resp.text
 
     async def test_nav_has_admin_review_link(self, ui_client):
         client, _store = ui_client
-        resp = await client.get("/")
+        # When count is 0, Admin Review is buried in the account menu.
+        resp = await client.get("/ledger")
         assert resp.status_code == 200
         assert 'href="/admin-review"' in resp.text
 
@@ -551,7 +549,7 @@ class TestNavUpdate:
         # get counted, not whatever an earlier test in the same run left behind.
         with patch("agentit.portal.helpers._nav_gate_badges_cache",
                    {"pending_actions": 0, "admin_review": 0, "ts": 0.0}):
-            resp = await client.get("/")
+            resp = await client.get("/ledger")
         assert resp.status_code == 200
         # One cluster-admin-review gate -> nav badge shows "1" next to Admin
         # Review, not 2 (the app-owner "auto-mode-review" gate must not

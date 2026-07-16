@@ -4,9 +4,10 @@
 {% block content %}
 <h1>Ledger</h1>
 <p class="text-muted text-sm mb-1">
-  Every event, gate, delivery, and fix-review decision across the fleet, newest first.
-  Read-only — resolve a pending action from its app's own
-  <a href="/">Fleet</a> row or <a href="/admin-review">Admin Review</a>.
+  Morning inbox — Needs You, what happened, and human gates needing action.
+  Elevated <code>cluster-admin-review</code> gates point to
+  <a href="/admin-review">Admin Review</a>; the portfolio table lives on
+  <a href="/fleet">Fleet</a>.
 </p>
 
 {% if watcher_alerts %}

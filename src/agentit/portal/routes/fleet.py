@@ -138,8 +138,19 @@ async def _attach_pending_actions(fleet: list[dict], s: object) -> None:
         app_item["pending_actions_count"] = counts.get(app_item["repo_url"], 0)
 
 
-@router.get("/", response_class=HTMLResponse)
-async def home(request: Request) -> HTMLResponse:
+@router.get("/")
+async def home() -> RedirectResponse:
+    """Ops home is the Ledger (Needs You inbox) — Fleet is the scoreboard at /fleet."""
+    return RedirectResponse(url="/ledger", status_code=302)
+
+
+@router.get("/fleet", response_class=HTMLResponse)
+async def fleet_page(request: Request) -> HTMLResponse:
+    """Portfolio scoreboard: apps, scores, Assess / Re-assess / Delete.
+
+    Pending human gates are owned by Ledger Needs You — this page only
+    offers a quiet pointer, never an ops-inbox badge column.
+    """
     s = await get_store()
     fleet = await s.get_fleet_data()
     loop = asyncio.get_running_loop()
@@ -152,6 +163,7 @@ async def home(request: Request) -> HTMLResponse:
         })
     avg_score = sum(r["latest_score"] for r in fleet) / total_apps
     critical_total = sum(r["critical_count"] for r in fleet)
+    pending_need_you = sum(r.get("pending_actions_count", 0) for r in fleet)
 
     from agentit.portal.metrics import fleet_size as _fs, fleet_avg_score as _fas
     _fs.set(total_apps)
@@ -165,13 +177,9 @@ async def home(request: Request) -> HTMLResponse:
             "total_apps": total_apps,
             "avg_score": avg_score,
             "critical_total": critical_total,
+            "pending_need_you": pending_need_you,
         },
     )
-
-
-@router.get("/fleet", response_class=HTMLResponse)
-async def fleet_redirect() -> RedirectResponse:
-    return RedirectResponse(url="/", status_code=301)
 
 
 @router.get("/fleet/slos", response_class=HTMLResponse)

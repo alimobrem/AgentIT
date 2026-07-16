@@ -133,7 +133,7 @@ async def test_confirm_modal_focuses_cancel_on_show(client):
 async def test_delete_app_uses_type_to_confirm(client, _override_store):
     store = _override_store
     await store.save(_make_report("delete-me-app"))
-    resp = await client.get("/")
+    resp = await client.get("/fleet")
     assert resp.status_code == 200
     assert "typeToConfirm:" in resp.text
     assert "I understand, delete this app" in resp.text

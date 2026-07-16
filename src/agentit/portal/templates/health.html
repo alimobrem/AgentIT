@@ -4,6 +4,7 @@
 {% set truly_healthy = argo_synced and pods_failed == 0 and kafka_ready %}
 {% set links = card_links | default({}) %}
 <h1>System Health</h1>
+<p class="text-muted text-sm mb-1">Live infrastructure telemetry — pods, pipelines, Kafka, deploy status.</p>
 <p class="text-muted text-sm">Cluster: {{ cluster_url | default("in-cluster") }} &middot; Namespace: {{ namespace | default("agentit") }}</p>
 
 <div class="stat-grid" hx-get="/health" hx-trigger="every 30s" hx-select=".stat-grid" hx-target="this" hx-swap="outerHTML">

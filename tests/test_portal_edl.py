@@ -110,7 +110,7 @@ async def test_fleet_assess_modal_has_dialog_semantics(edl_client):
     """Fleet template (served once ≥1 assessment exists) carries dialog a11y."""
     client, store = edl_client
     await store.save(make_report())
-    resp = await client.get("/")
+    resp = await client.get("/fleet")
     assert resp.status_code == 200
     assert 'id="assess-modal"' in resp.text
     m = re.search(r'<div[^>]*id="assess-modal"[^>]*>', resp.text)

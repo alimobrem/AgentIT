@@ -97,7 +97,7 @@ async def get_store():
 # defect: the old nav referenced a `pending_gates` template variable no
 # context processor ever actually supplied (only Insights' own page context
 # computed it, so the badge was silently blank everywhere else). Cached
-# briefly since nav renders on every page, not just Fleet's/Admin Review's.
+# briefly since nav renders on every page (Ledger Needs You + Admin Review).
 
 _nav_gate_badges_cache: dict = {"pending_actions": 0, "admin_review": 0, "ts": 0.0}
 _NAV_GATE_BADGES_CACHE_TTL = 20  # seconds

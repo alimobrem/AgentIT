@@ -36,7 +36,9 @@ def client():
 
 
 async def test_get_sets_csrf_cookie(client):
-    resp = await client.get("/")
+    # Hit a real HTML page (not `/`, which 302s to Ledger — redirect hops
+    # don't expose Set-Cookie on the final response.cookies).
+    resp = await client.get("/ledger")
     assert "csrf_token" in resp.cookies
     assert len(resp.cookies["csrf_token"]) > 20
 
@@ -52,13 +54,13 @@ async def test_post_with_cookie_but_no_matching_header_rejected(client):
     """The victim's browser auto-sends the cookie, but a cross-origin
     attacker page can't read its value (same-origin policy) to also set a
     matching header -- this is exactly the attack double-submit defeats."""
-    await client.get("/")  # sets the cookie
+    await client.get("/ledger")  # sets the cookie
     resp = await client.post("/settings/auto-mode", data={"value": "true"})
     assert resp.status_code == 403
 
 
 async def test_post_with_mismatched_header_rejected(client):
-    await client.get("/")
+    await client.get("/ledger")
     resp = await client.post(
         "/settings/auto-mode", data={"value": "true"},
         headers={"X-CSRF-Token": "not-the-real-token"},
@@ -67,7 +69,7 @@ async def test_post_with_mismatched_header_rejected(client):
 
 
 async def test_post_with_valid_double_submit_header_succeeds(client):
-    get_resp = await client.get("/")
+    get_resp = await client.get("/ledger")
     token = get_resp.cookies["csrf_token"]
     resp = await client.post(
         "/settings/auto-mode", data={"value": "true"},
@@ -80,7 +82,7 @@ async def test_post_with_valid_form_field_fallback_succeeds():
     """Non-JS/non-htmx submission path: the token as a hidden form field
     instead of a header (see csrf.py's get_submitted_token)."""
     client = AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True)
-    get_resp = await client.get("/")
+    get_resp = await client.get("/ledger")
     token = get_resp.cookies["csrf_token"]
     resp = await client.post(
         "/settings/auto-mode",
