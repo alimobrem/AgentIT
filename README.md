@@ -375,7 +375,7 @@ All configuration is via environment variables (no config file). Nothing here be
 AgentIT deploys itself the same way it onboards other apps — via the Helm chart in `chart/` and the Argo CD `Application` in `argocd/application.yaml`. **Argo CD is the sole deployer**; see [`docs/deployment.md`](docs/deployment.md) for the full operational runbook.
 
 - Change behavior: edit `argocd/application.yaml` Helm parameters, commit, push. The CI pipeline's `notify-argocd` task rewrites `image.tag` to the build revision in that file, then `oc apply`s it once — so new Helm params sync without briefly deploying the bootstrap `latest` tag. See [`docs/deployment.md`](docs/deployment.md) for the details and why this exists.
-- The `smoke-test-image` Tekton task (and GitHub Actions `image-smoke-test`) sets `git config --global --add safe.directory /opt/app-root/src` before `git status`, because OpenShift runs the image under an arbitrary UID that does not see the build-time USER 1001 gitconfig. The image also writes the same path via `git config --system` in the Containerfile so scout/portal pods can use `.git` at runtime. The same Containerfile step marks `.git/` **and** the L3 allowlist trees (`tests/`, `skills/`, `checks/`, `src/`, `docs/`) group-writable so capability-scout can write source diffs before `gh pr create` under OpenShift's arbitrary UID (gid 0).
+- The `smoke-test-image` Tekton task (and GitHub Actions `image-smoke-test`) sets `git config --global --add safe.directory /opt/app-root/src` before `git status`, because OpenShift runs the image under an arbitrary UID that does not see the build-time USER 1001 gitconfig. The image also writes the same path via `git config --system` in the Containerfile so scout/portal pods can use `.git` at runtime. The same Containerfile step marks `.git/` **and** the L3 allowlist trees (`tests/`, `skills/`, `checks/`, `src/`, `docs/`) group-writable (`chmod -R g+w`) so capability-scout can create **and overwrite** source diffs before `gh pr create` under OpenShift's arbitrary UID (gid 0). Runtime half: `src/agentit/write_guard.py` preflights those paths in `_open_pr`, drops stale permission-denied tick-failure evidence once the tree is writable again, and the scout Deployment mounts an `emptyDir` at `/tmp/agentit-scout` (`TMPDIR`) for git/gh/py_compile scratch.
 - Change a secret: `oc create secret` on-cluster, then reference it via a Helm parameter. Never in Git.
 - Never `helm upgrade` manually or `oc edit` the `Rollout`.
 
@@ -451,6 +451,7 @@ AgentIT/
 │   ├── capability_scout.py         # capability-scout's research/propose/gate logic (self-improvement
 │   │                               #   of AgentIT's own codebase, not the skills catalog -- see docs/
 │   │                               #   self-improvement-for-agentit.md)
+│   ├── write_guard.py              # Preflight writability for scout source-mode writes (OpenShift EACCES)
 │   ├── git_pr.py                   # Shared git branch/commit/push + `gh pr create` mechanics,
 │   │                               #   extracted from self-fix --create-pr, reused by capability_scout.py
 │   ├── runner.py                   # run_assessment(): stack detection + analyzers + check engine

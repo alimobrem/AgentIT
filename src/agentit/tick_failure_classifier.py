@@ -3,7 +3,9 @@ import re
 
 _PATTERNS = [
     (r"\[Errno 13\] Permission denied: '([^']+)'", "permission_denied",
-     "Check file ownership and permissions; run: chmod 644 {path} or chown <user> {path}"),
+     "OpenShift arbitrary UID needs group-writable allowlist trees; "
+     "Containerfile chmod g+w on tests/skills/checks/src/docs/.git, "
+     "and capability-scout write_guard before write_text ({path})"),
     (r"\[Errno 2\] No such file[^:]*: '([^']+)'", "file_not_found",
      "Ensure the file exists at {path} before running the agent."),
 ]

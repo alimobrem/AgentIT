@@ -1,5 +1,5 @@
 """Tests for tick_failure_classifier."""
-from src.agentit.tick_failure_classifier import classify
+from agentit.tick_failure_classifier import classify
 
 EVIDENCE_EVENT = {
     "id": "da3eacbb80f2434ba5f5039da5cd9c72",
@@ -16,6 +16,7 @@ def test_permission_denied_from_evidence():
     assert r["error_class"] == "permission_denied"
     assert r["affected_path"] == "/opt/app-root/src/tests/test_stack_signature_detector.py"
     assert "chmod" in r["remediation_hint"]
+    assert "write_guard" in r["remediation_hint"]
 
 
 def test_no_match_returns_unknown():

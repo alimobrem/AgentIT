@@ -199,6 +199,7 @@ def _shipped_module_phrases() -> list[tuple[tuple[str, ...], str]]:
     return [
         (("stack signature", "stack-signature", "stack_signature"), "stack_signature_detector.py"),
         (("tick failure", "tick-failure", "tick_failure"), "tick_failure_classifier.py"),
+        (("write guard", "write-guard", "write_guard", "unwritable"), "write_guard.py"),
     ]
 
 
@@ -626,6 +627,11 @@ async def gather_evidence(store: object | None, repo_dir: Path | None = None) ->
     low_effectiveness_skills = await _safe_call(store, "get_low_effectiveness_skills")
     loop_health = await _safe_call(store, "get_loop_health", default={})
     tick_failures = await _safe_call(store, "list_events_by_action", "tick-failed", limit=20)
+    # Drop stale EACCES rows once allowlist paths are writable again so scout
+    # does not keep proposing docs-only write-guards after the image fix.
+    from agentit.write_guard import filter_stale_permission_tick_failures
+
+    tick_failures = filter_stale_permission_tick_failures(tick_failures, repo_dir)
 
     # Prefer previously rejected finding categories (remediable human signal)
     # ahead of low-volume noise when ranking evidence for the LLM.

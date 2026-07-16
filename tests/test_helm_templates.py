@@ -1091,6 +1091,20 @@ class TestCapabilityScoutDeployment:
         volumes = pod_spec.get("volumes") or []
         assert not any("persistentVolumeClaim" in v for v in volumes)
 
+    def test_empty_dir_tmpdir_for_git_gh_scratch(self):
+        """Writable TMPDIR emptyDir for git/gh/py_compile temps; L3 source
+        trees stay on the image layer with Containerfile g+w."""
+        doc = _load(self.TEMPLATE)
+        pod_spec = doc["spec"]["template"]["spec"]
+        volumes = {v["name"]: v for v in (pod_spec.get("volumes") or [])}
+        assert "scout-tmp" in volumes
+        assert "emptyDir" in volumes["scout-tmp"]
+        container = pod_spec["containers"][0]
+        mounts = {m["name"]: m["mountPath"] for m in (container.get("volumeMounts") or [])}
+        assert mounts.get("scout-tmp") == "/tmp/agentit-scout"
+        env_by_name = {e["name"]: e.get("value") for e in container["env"] if "name" in e}
+        assert env_by_name.get("TMPDIR") == "/tmp/agentit-scout"
+
     def test_has_restrictive_security_context(self):
         doc = _load(self.TEMPLATE)
         pod_spec = doc["spec"]["template"]["spec"]

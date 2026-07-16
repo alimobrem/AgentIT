@@ -167,6 +167,22 @@ class TestFilterActionableDocGaps:
         }]
         assert filter_actionable_doc_gaps(gaps, repo_dir=tmp_path) == []
 
+    def test_skips_write_guard_when_module_present(self, tmp_path):
+        src = tmp_path / "src" / "agentit"
+        src.mkdir(parents=True)
+        (src / "write_guard.py").write_text("def is_writable(p):\n    return True\n", encoding="utf-8")
+        assert proposal_already_implemented(
+            {"title": "Add a capability-scout write-guard that skips unwritable paths"},
+            tmp_path,
+        )
+        gaps = [{
+            "file": "docs/x.md",
+            "line_no": 1,
+            "anchor": "Known gap",
+            "text": "Known gap: write-guard for unwritable allowlist paths",
+        }]
+        assert filter_actionable_doc_gaps(gaps, repo_dir=tmp_path) == []
+
 
 # ── L4 proposal outcomes ────────────────────────────────────────────────────
 
@@ -906,6 +922,10 @@ class TestContainerfileShipsWhatTestsPassGateNeeds:
         assert "for d in tests skills checks src docs" in content or (
             "tests" in content and "skills" in content and "chmod g+w" in content
         ), "Containerfile must chmod g+w the L3 source-mode allowlist directories"
+        assert "chmod -R g+w" in content, (
+            "Containerfile must chmod -R g+w allowlist trees so existing "
+            "root-owned files are overwritable, not only new files in g+w dirs"
+        )
 
 
 class TestCheckNoOpenSelfImprovePr:

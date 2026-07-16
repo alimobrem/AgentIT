@@ -28,6 +28,11 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       volumes:
+        # Writable tmp for git/gh/py_compile scratch (and TMPDIR below). The
+        # L3 source tree itself stays on the image layer with Containerfile
+        # g+w; this emptyDir is the guaranteed-writable fallback for temps.
+        - name: scout-tmp
+          emptyDir: {}
         {{- if .Values.gcp.credentialsSecret }}
         - name: gcp-credentials
           secret:
@@ -46,6 +51,8 @@ spec:
             - --mode
             - "{{ .Values.agents.capabilityScout.mode | default "docs" }}"
           env:
+            - name: TMPDIR
+              value: /tmp/agentit-scout
             # Same source of truth as the image ref above and the portal
             # Rollout (`.Values.image.tag`). Live dogfood once left orphan
             # AGENTIT_IMAGE_TAG/GIT_REVISION env values from an older
@@ -96,6 +103,8 @@ spec:
                   key: token
                   optional: true
           volumeMounts:
+            - name: scout-tmp
+              mountPath: /tmp/agentit-scout
             {{- if .Values.gcp.credentialsSecret }}
             - name: gcp-credentials
               mountPath: /var/secrets/gcp
