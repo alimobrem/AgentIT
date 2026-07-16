@@ -570,6 +570,35 @@ async def test_assessment_detail_has_onboard_button(client, _override_store):
 # ------------------------------------------------------------------
 
 
+async def test_masthead_nav_structure(client, _override_store):
+    """Ledger is primary nav; Decisions is in the user/main menu; Events is
+    a bell icon + drawer (full page still at /events). No Activity dropdown."""
+    resp = await client.get("/")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "events-bell" in html
+    assert 'id="events-drawer"' in html
+    assert "eventsDrawer()" in html
+    assert "/api/events?limit=20" in html
+    assert "activity-menu" not in html
+    # Bell shares Alpine scope with the drawer (aria-expanded + focus restore).
+    assert ':aria-expanded="open"' in html
+    assert 'x-ref="bellBtn"' in html
+    assert 'x-ref="closeBtn"' in html
+    assert 'x-ref="drawerPanel"' in html
+    # Single "View all" CTA (footer), not duplicated in the header.
+    drawer = html.split('id="events-drawer-panel"', 1)[1].split("id=\"nav-loading\"", 1)[0]
+    assert drawer.count(">View all<") == 1
+    assert "Open full Events page" not in drawer
+    primary = html.split('class="links"', 1)[1].split("links-secondary", 1)[0]
+    assert 'href="/ledger"' in primary
+    assert 'href="/decisions"' not in primary
+    assert 'href="/events"' not in primary
+    dropdown_idx = html.index("user-menu-dropdown")
+    decisions_in_menu = html.index('href="/decisions"', dropdown_idx)
+    assert decisions_in_menu > dropdown_idx
+
+
 async def test_events_page_renders(client, _override_store):
     store = _override_store
     await store.log_event("test-agent", "scan", "my-app", "high", "Found vuln")
@@ -578,6 +607,17 @@ async def test_events_page_renders(client, _override_store):
     assert "Agent Activity Feed" in resp.text
     assert "test-agent" in resp.text
     assert "Found vuln" in resp.text
+
+
+async def test_api_events_returns_real_events(client, _override_store):
+    """Events drawer fetches this endpoint — must return real store rows."""
+    store = _override_store
+    await store.log_event("drawer-agent", "scan", "drawer-app", "info", "drawer visible")
+    resp = await client.get("/api/events?limit=20")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, list)
+    assert any(e.get("summary") == "drawer visible" for e in data)
 
 
 async def test_events_page_filters_by_correlation_id(client, _override_store):
@@ -659,6 +699,77 @@ async def test_ledger_nav_link_present(client, _override_store):
     resp = await client.get("/ledger")
     assert resp.status_code == 200
     assert 'href="/ledger"' in resp.text
+
+
+# ------------------------------------------------------------------
+# Next-step hint (visual hierarchy pass): ties the lifecycle stepper to
+# the actual action that moves the app forward, pending actions win
+# regardless of stage.
+# ------------------------------------------------------------------
+
+
+async def test_next_step_hint_prompts_onboarding_when_freshly_assessed(client, _override_store):
+    store = _override_store
+    aid = await store.save(_make_report("fresh-app"))
+    resp = await client.get(f"/assessments/{aid}")
+    assert resp.status_code == 200
+    assert "Ready to onboard" in resp.text
+    assert "next-step-hint" in resp.text
+    hint = resp.text.split('class="next-step-hint"', 1)[1].split("</div>", 1)[0]
+    assert "pending action" not in hint
+
+
+async def test_next_step_hint_prioritizes_pending_actions_over_stage(client, _override_store):
+    """A pending gate is the most urgent thing regardless of lifecycle
+    stage -- must win even for a freshly-assessed app that hasn't been
+    onboarded yet (e.g. a gate created via the per-finding Fix flow)."""
+    store = _override_store
+    aid = await store.save(_make_report("gated-app"))
+    await store.create_gate(aid, "auto-mode-review", "needs review")
+    resp = await client.get(f"/assessments/{aid}")
+    assert resp.status_code == 200
+    assert "1</strong> pending action" in resp.text
+    assert "Ready to onboard" not in resp.text
+    # Regression: the hint sits outside the tab strip's x-data, so an
+    # Alpine @click="tab = 'actions'" is a dead handler. Must be a real
+    # ?tab=actions href (same convention as Fleet's pending badge).
+    hint = resp.text.split('class="next-step-hint"', 1)[1].split("</div>", 1)[0]
+    assert f'href="/assessments/{aid}?tab=actions"' in hint
+    assert "@click.prevent=\"tab = 'actions'\"" not in hint
+    assert "@click=\"tab = 'actions'\"" not in hint
+
+
+# ------------------------------------------------------------------
+# Finding source badge display (masthead/UI cleanup pass)
+# ------------------------------------------------------------------
+
+
+async def test_finding_source_badge_strips_absolute_path(client, _override_store):
+    """A data-driven check's real source is an absolute filesystem path
+    (check_engine.py's source_path=str(path)) -- deployment-location-
+    dependent and not meaningful to a human reader. The rendered badge
+    must show only the checks/... portion; the hidden check_source form
+    field /api/suppress matches against must stay the exact raw value, so
+    existing suppression records keep matching unchanged."""
+    store = _override_store
+    report = _make_report("path-cleanup-app")
+    report.scores[0].findings.append(
+        Finding(
+            category="ci-pipeline",
+            severity=Severity.high,
+            description="No GitLab CI pipeline configuration found",
+            recommendation="Add a .gitlab-ci.yml",
+            source="check:/opt/app-root/src/checks/cicd/ci-pipeline.yaml",
+        )
+    )
+    aid = await store.save(report)
+
+    resp = await client.get(f"/assessments/{aid}")
+    assert resp.status_code == 200
+    assert '<span class="badge badge-muted finding-source">check:checks/cicd/ci-pipeline.yaml</span>' in resp.text
+    # The hidden suppress form field must keep the exact raw source, unchanged
+    # -- only the visible badge is cleaned up, not the value suppressions match on.
+    assert 'name="check_source" value="check:/opt/app-root/src/checks/cicd/ci-pipeline.yaml"' in resp.text
 
 
 async def test_ledger_needs_you_filter_hides_healthy_apps_by_default(client, _override_store):
@@ -2101,6 +2212,29 @@ async def test_capabilities_page_has_learn_button(client):
     assert "Research CVEs" in resp.text
 
 
+async def test_capabilities_learn_button_uses_toast_not_verbose_label(client):
+    """The "can take up to 3 minutes, please don't close this tab" caveat
+    belongs in a dismissible toast fired on click (showToast(...) in the
+    button's @click), not crammed into the button's own visible loading-
+    state label -- that stays a short "Researching..." regardless of state."""
+    resp = await client.get("/capabilities")
+    assert resp.status_code == 200
+    assert "showToast(" in resp.text
+    assert "can take up to 3 minutes" in resp.text  # present, but inside the toast trigger below
+    indicator = resp.text.split('class="htmx-indicator spinner-wrap"', 1)[1][:150]
+    assert "can take up to 3 minutes" not in indicator
+    assert "Researching" in indicator
+
+
+async def test_capabilities_catalog_collapses_use_buttons(client):
+    """New Capabilities collapses are real <button> toggles (keyboard /
+    AT), not clickable <h2> headings."""
+    resp = await client.get("/capabilities")
+    assert resp.status_code == 200
+    assert 'type="button" class="section-title collapse-toggle"' in resp.text
+    assert resp.text.count('type="button" class="section-title collapse-toggle"') >= 3
+
+
 async def test_capabilities_learn_without_llm_shows_error(client, _override_store):
     with patch("agentit.portal.routes.capabilities.get_llm_client", return_value=None):
         resp = await client.post("/capabilities/learn", follow_redirects=False)
@@ -2636,6 +2770,21 @@ async def test_capability_run_detail_shows_live_pr_status(client, _override_stor
     assert resp.status_code == 200
     assert "open" in resp.text
     assert "https://github.com/org/agentit/pull/9" in resp.text
+    # External PR hrefs go through the safe_url filter (javascript: etc. → #).
+    assert 'href="https://github.com/org/agentit/pull/9"' in resp.text
+    assert 'href="{{ pr_url }}"' not in resp.text
+
+
+async def test_ledger_pending_count_uses_badge_accent(client, _override_store):
+    """Pending-action counts on Ledger rows are attention signals — same
+    badge-accent as Fleet's Needs Action badge, not badge-warning."""
+    store = _override_store
+    aid = await store.save(_make_report("ledger-pending-badge"))
+    await store.create_gate(aid, "auto-mode-review", "needs review")
+    resp = await client.get("/ledger?needs_you=0")
+    assert resp.status_code == 200
+    assert 'class="badge badge-accent">1 pending</span>' in resp.text
+    assert 'class="badge badge-warning">1 pending</span>' not in resp.text
 
 
 # ── Agent registry cleanup (agent_registry_cleanup) ───────────────────

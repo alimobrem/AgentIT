@@ -80,6 +80,35 @@
   {% endfor %}
 </div>
 
+{# Next-step hint: ties the stepper above directly to the one action that
+   actually moves this app forward, instead of leaving "why am I on this
+   step" and "what do I click next" implicit. Pending actions always win
+   regardless of lifecycle stage -- a gate is the most urgent, blocking
+   thing regardless of where onboarding otherwise stands. #}
+<div class="next-step-hint">
+  {% if pending_actions %}
+  <span class="next-step-icon" aria-hidden="true">&#9679;</span>
+  <strong>{{ pending_actions|length }}</strong> pending action{{ 's' if pending_actions|length != 1 }} need{{ '' if pending_actions|length != 1 else 's' }} your review —
+  {# Real ?tab=actions href — this hint sits outside the tab strip's
+     x-data, so an Alpine @click="tab = 'actions'" would be a dead handler
+     (see base.html's dead-button detector). Fleet's pending badge already
+     uses the same query-param convention. #}
+  <a href="/assessments/{{ assessment_id }}?tab=actions">see the Actions tab below</a>.
+  {% elif lifecycle_stage == "assessed" %}
+  <span class="next-step-icon" aria-hidden="true">&#9679;</span>
+  Ready to onboard — click <strong>Onboard This App</strong> below to generate manifests for the findings on this page.
+  {% elif lifecycle_stage == "onboarded" %}
+  <span class="next-step-icon" aria-hidden="true">&#9679;</span>
+  Onboarding complete — <a href="/assessments/{{ assessment_id }}/onboard-results">review the generated files and deliver</a>.
+  {% elif lifecycle_stage == "applied" %}
+  <span class="next-step-icon next-step-icon-done" aria-hidden="true">&#10003;</span>
+  Applied to the cluster — add SLOs (via the Onboard flow) to reach the Monitored stage.
+  {% elif lifecycle_stage == "monitored" %}
+  <span class="next-step-icon next-step-icon-done" aria-hidden="true">&#10003;</span>
+  Fully onboarded and monitored — no action needed right now.
+  {% endif %}
+</div>
+
 <div class="action-bar mt-2 mb-2">
   <form method="post" action="/assessments/{{ assessment_id }}/onboard" class="inline-form">
     <button type="submit" class="btn btn-action btn-lg">
@@ -87,7 +116,7 @@
       <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Running agents&hellip;</span>
     </button>
   </form>
-  <form method="post" action="/assessments/{{ assessment_id }}/delete" class="inline-form"
+  <form method="post" action="/assessments/{{ assessment_id }}/delete" class="inline-form danger-zone"
         x-data x-ref="deleteAssessment">
     <button type="button" class="btn btn-sm btn-danger-outline"
       @click="$dispatch('show-confirm', {
@@ -184,7 +213,7 @@
             x-transition:leave="suppress-leave" x-transition:leave-end="suppress-leave-end">
           <span class="badge badge-{{ f.severity.name }} finding-badge">{{ f.severity.name }}</span>
           {{ f.description }}
-          {% if f.source %}<span class="badge badge-muted finding-source">{{ f.source }}</span>{% endif %}
+          {% if f.source %}<span class="badge badge-muted finding-source">{{ f.source | clean_source }}</span>{% endif %}
           {% if f.file_path %}<span class="finding-file">{{ f.file_path }}</span>{% endif %}
           {% if f.category in fixable_categories %}
           <form method="post" action="/assessments/{{ assessment_id }}/fix" class="inline-form"

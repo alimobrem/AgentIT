@@ -18,10 +18,11 @@
 </p>
 
 <div class="action-bar mb-1">
-  <form method="post" action="/capabilities/self-improvement/run" class="inline-form">
-    <button type="submit" class="btn btn-outline btn-sm">
+  <form method="post" action="/capabilities/self-improvement/run" class="inline-form" x-data>
+    <button type="submit" class="btn btn-outline btn-sm"
+      @click="showToast('Researching &amp; gating a proposal\u2026 this can take up to 3 minutes \u2014 please don\u2019t close this tab.', 'info', 8000)">
       <span class="btn-label">Run Self-Improvement Scan</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Researching &amp; gating a proposal&hellip; (can take up to 3 minutes, please don't close this tab)</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Researching&hellip;</span>
     </button>
   </form>
 </div>
@@ -55,7 +56,7 @@
       <td><span class="badge badge-success">{{ m.state }}</span></td>
       <td class="text-sm">
         {% if m.pr_url %}
-        <a href="{{ m.pr_url }}" target="_blank" rel="noopener">{{ m.pr_url.split('/')[-1] }}</a>
+        <a href="{{ m.pr_url | safe_url }}" target="_blank" rel="noopener">{{ m.pr_url.split('/')[-1] }}</a>
         {% else %}—{% endif %}
       </td>
       <td class="text-sm text-muted">{{ (m.merged_at or m.recorded_at or "—")[:19] }}</td>
@@ -91,7 +92,7 @@
       </td>
       <td class="text-sm">
         {% if o.pr_url %}
-        <a href="{{ o.pr_url }}" target="_blank" rel="noopener">#{{ o.pr_url.split('/')[-1] }}</a>
+        <a href="{{ o.pr_url | safe_url }}" target="_blank" rel="noopener">#{{ o.pr_url.split('/')[-1] }}</a>
         {% else %}—{% endif %}
       </td>
     </tr>

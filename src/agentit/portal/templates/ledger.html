@@ -49,7 +49,7 @@
    by default. #}
 <div class="action-bar mb-1">
   {% if needs_you_filter != '0' %}
-  <span class="badge badge-warning">Needs You: {{ needs_you_count }} of {{ total_apps }} app(s)</span>
+  <span class="badge badge-accent">Needs You: {{ needs_you_count }} of {{ total_apps }} app(s)</span>
   <a href="/ledger?needs_you=0&q={{ q|default('') }}&severity={{ severity_filter|default('') }}&card_type={{ card_type_filter|default('') }}" class="btn btn-sm btn-outline">Show all apps</a>
   {% else %}
   <span class="badge badge-muted">Showing all {{ total_apps }} app(s)</span>
@@ -63,10 +63,10 @@
 <details class="ledger-app-row">
   <summary>
     <span class="ledger-app-row-summary">
-      {% if row.needs_you %}<span class="badge badge-warning">Needs You</span>{% endif %}
+      {% if row.needs_you %}<span class="badge badge-accent">Needs You</span>{% endif %}
       <a href="/assessments/{{ row.assessment_id }}?tab=ledger">{{ row.repo_name }}</a>
       <span class="badge badge-muted">score {{ row.score }}</span>
-      {% if row.pending_actions_count > 0 %}<span class="badge badge-warning">{{ row.pending_actions_count }} pending</span>{% endif %}
+      {% if row.pending_actions_count > 0 %}<span class="badge badge-accent">{{ row.pending_actions_count }} pending</span>{% endif %}
       {% if row.breached_slo_count > 0 %}<span class="badge badge-critical">{{ row.breached_slo_count }} SLO breach(es)</span>{% endif %}
       {% if row.latest_card %}
       <span class="text-muted text-sm">{{ row.latest_card.title }} — {{ row.latest_card.timestamp[:16] }}</span>

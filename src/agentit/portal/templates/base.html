@@ -120,6 +120,61 @@
     border-bottom-color: var(--color-accent);
   }
 
+  /* ── Events Bell + Drawer (nav) ────────────────────────────────────
+     Events is a notification-style control (bell icon → slide-over panel)
+     rather than a primary-nav text link. Ledger is primary; Decisions
+     lives in the user/main menu. Full /events page remains for filters,
+     pagination, and the DLQ tab. */
+  .events-bell {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 2.25rem; height: 2.25rem; padding: 0;
+    background: none; border: 1px solid transparent; border-radius: var(--radius-md);
+    color: var(--color-muted); cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, color 0.15s;
+  }
+  .events-bell:hover, .events-bell[aria-expanded="true"], .events-bell.nav-active {
+    color: var(--color-accent); border-color: var(--color-border); background: var(--color-surface-2);
+  }
+  .events-bell-icon { width: 1.15rem; height: 1.15rem; display: block; }
+  .events-drawer-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 250;
+  }
+  .events-drawer-panel {
+    position: fixed; top: 0; right: 0; bottom: 0; width: min(26rem, 100vw);
+    background: var(--color-surface-2); border-left: 1px solid var(--color-border);
+    box-shadow: -8px 0 32px rgba(0,0,0,0.4); z-index: 260;
+    display: flex; flex-direction: column;
+  }
+  .events-drawer-header {
+    display: flex; align-items: center; justify-content: space-between; gap: var(--space-4);
+    padding: var(--space-5) var(--space-6); border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+  }
+  .events-drawer-title { font-family: var(--font-display); font-size: var(--font-lg); color: var(--color-heading); margin: 0; }
+  .events-drawer-actions { display: flex; align-items: center; gap: var(--space-3); }
+  .events-drawer-body { flex: 1; overflow-y: auto; padding: var(--space-4); }
+  .events-drawer-item {
+    display: block; padding: var(--space-4); margin-bottom: var(--space-3);
+    background: var(--color-surface); border: 1px solid var(--color-border);
+    border-radius: var(--radius-md); color: var(--color-text);
+  }
+  .events-drawer-item:hover { border-color: var(--color-link); text-decoration: none; }
+  .events-drawer-item-meta {
+    display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;
+    margin-bottom: var(--space-2); font-size: var(--font-xs); color: var(--color-muted);
+  }
+  .events-drawer-item-summary { font-size: var(--font-sm); color: var(--color-text); }
+  .events-drawer-empty { padding: var(--space-8) var(--space-5); text-align: center; color: var(--color-muted); font-size: var(--font-sm); }
+  .events-drawer-footer {
+    padding: var(--space-4) var(--space-6); border-top: 1px solid var(--color-border);
+    flex-shrink: 0; text-align: center;
+  }
+  .events-drawer-close {
+    background: none; border: none; color: var(--color-muted); font-size: var(--font-xl);
+    cursor: pointer; line-height: 1; padding: var(--space-1) var(--space-2);
+  }
+  .events-drawer-close:hover { color: var(--color-text); }
+
   /* ── Layout ────────────────────────────────────────────────────── */
   .container { max-width: 1100px; margin: 0 auto; padding: var(--space-8); }
   h1 { color: var(--color-heading); margin-bottom: var(--space-7); font-family: var(--font-display); font-weight: 700; font-size: 1.6rem; letter-spacing: -0.5px; }
@@ -279,6 +334,15 @@
   .badge-danger   { background: var(--color-danger); color: #fff; }
   .badge-warning  { background: var(--color-warning); color: var(--color-bg); }
   .badge-muted    { background: var(--color-border); color: var(--color-muted); }
+  /* "Needs your attention" badges (pending gate counts, "Needs You" fleet
+     filters) -- kept visually distinct from severity badges (badge-medium/
+     -warning, both --color-warning) by using --color-accent, the one color
+     this file's own convention reserves exclusively for that signal (see
+     this file's :root comment). Fleet's "N pending" badge and the Ledger's
+     "Needs You" badges previously used badge-medium/-warning here, which
+     accidentally made a routine medium-severity finding and an actionable
+     pending gate look identical -- this is the one class either should use. */
+  .badge-accent   { background: var(--color-accent); color: #fff; box-shadow: var(--glow-accent); }
 
   /* ── Buttons ───────────────────────────────────────────────────── */
   .btn {
@@ -592,6 +656,17 @@
     gap: var(--space-2);
     user-select: none;
   }
+  /* Reset native <button> chrome when used as a collapse toggle (Capabilities
+     catalogs) so it still reads as a section title, not a form control. */
+  button.collapse-toggle {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    width: 100%;
+    text-align: left;
+    color: inherit;
+  }
   .collapse-toggle::before {
     content: '▸';
     font-size: var(--font-sm);
@@ -702,6 +777,46 @@
   /* ── Nav Toggle (mobile hamburger) ────────────────────────────── */
   .nav-toggle { display: none; background: none; border: none; color: var(--color-text); font-size: 1.5rem; cursor: pointer; }
   .nav-badge { background: var(--color-accent); color: #fff; font-size: var(--font-xs); padding: 1px 6px; border-radius: var(--radius-pill); margin-left: 4px; }
+
+  /* ── User Menu (nav) ──────────────────────────────────────────────
+     Consolidates what used to be flat Capabilities/Settings/account-
+     status links into one dropdown, so the masthead reads as one compact
+     control instead of a growing list of loose text links. */
+  .user-menu { position: relative; }
+  .user-menu-trigger {
+    display: inline-flex; align-items: center; gap: var(--space-2);
+    background: none; border: 1px solid transparent; border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-3); cursor: pointer;
+    color: var(--color-text); font-size: var(--font-sm); font-family: inherit;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .user-menu-trigger:hover, .user-menu-trigger[aria-expanded="true"] {
+    border-color: var(--color-border); background: var(--color-surface-2);
+  }
+  .user-menu-avatar {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.6rem; height: 1.6rem; border-radius: 50%;
+    background: var(--color-surface-3); color: var(--color-heading);
+    font-family: var(--font-mono); font-size: var(--font-xs); font-weight: 700;
+    flex-shrink: 0;
+  }
+  .user-menu-label { color: var(--color-muted); max-width: 10rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .user-menu-chevron { color: var(--color-muted); font-size: var(--font-xs); transition: transform 0.15s; }
+  .user-menu-trigger[aria-expanded="true"] .user-menu-chevron { transform: rotate(180deg); }
+  .user-menu-dropdown {
+    position: absolute; top: calc(100% + var(--space-2)); right: 0;
+    min-width: 12rem; background: var(--color-surface-2); border: 1px solid var(--color-border);
+    border-radius: var(--radius-md); box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    padding: var(--space-2); z-index: 110;
+  }
+  .user-menu-item {
+    display: block; padding: var(--space-3) var(--space-4); border-radius: var(--radius-sm);
+    color: var(--color-text); font-size: var(--font-sm); white-space: nowrap;
+  }
+  .user-menu-item:hover { background: var(--color-surface-3); text-decoration: none; }
+  .user-menu-item.nav-active { color: var(--color-accent); }
+  .user-menu-divider { height: 1px; background: var(--color-border); margin: var(--space-2) 0; }
+  .user-menu-info { padding: var(--space-2) var(--space-4); color: var(--color-muted); font-size: var(--font-xs); }
 
   /* ── Command Palette Trigger (nav) ────────────────────────────── */
   .cmdk-trigger {
@@ -891,6 +1006,29 @@
   }
   .connector-done { background: var(--color-success); }
 
+  /* ── Next-Step Hint (Assessment Detail) ────────────────────────────
+     Ties the lifecycle stepper directly to the one action that actually
+     moves the app forward -- visual hierarchy: a pending action (accent,
+     needs-attention color per this file's own convention) always reads
+     as more urgent than a routine "here's what to do next" (muted border,
+     text color), which in turn reads as more urgent than "nothing to do"
+     (success color, checkmark). */
+  .next-step-hint {
+    display: flex; align-items: baseline; gap: var(--space-3);
+    padding: var(--space-4) var(--space-5); margin-bottom: var(--space-6);
+    background: var(--color-surface-2); border-left: 3px solid var(--color-border);
+    border-radius: var(--radius-sm); font-size: var(--font-sm); color: var(--color-text);
+  }
+  .next-step-icon { color: var(--color-accent); font-size: var(--font-xs); flex-shrink: 0; }
+  .next-step-icon-done { color: var(--color-success); font-size: var(--font-md); }
+
+  /* ── Danger Zone (destructive actions) ─────────────────────────────
+     A destructive action shouldn't sit at the same visual weight as the
+     routine primary action right next to it -- pushed to the opposite
+     end of the action bar with a quiet separator, matching the
+     "de-emphasized until needed" pattern GitHub's own danger-zone uses. */
+  .action-bar .danger-zone { margin-left: auto; padding-left: var(--space-5); border-left: 1px solid var(--color-border); }
+
   .filter-input { max-width: 300px; }
   .pagination { display: flex; align-items: center; justify-content: center; gap: var(--space-5); margin-top: var(--space-5); padding: var(--space-5) 0; }
 
@@ -956,8 +1094,14 @@
     .card-grid { grid-template-columns: 1fr; }
     nav { flex-wrap: wrap; gap: var(--space-4); padding: var(--space-4); }
     .nav-toggle { display: block; margin-left: auto; }
-    .links-secondary { display: none; flex-direction: column; width: 100%; }
-    .links-secondary.links-open { display: flex; }
+    /* Pre-existing bug, surfaced (not introduced) by the user-menu work:
+       the desktop rule is `nav .links-secondary { display: flex; ... }`
+       (specificity 0-1-1), which beats a bare `.links-secondary { display:
+       none }` here (0-1-0) regardless of source order -- so this toggle
+       never actually hid anything on mobile. Match the ancestor selector
+       so this override actually wins. */
+    nav .links-secondary { display: none; flex-direction: column; width: 100%; align-items: flex-start; }
+    nav .links-secondary.links-open { display: flex; }
     .container { padding: var(--space-5); }
     .dimension-row { flex-direction: column; align-items: stretch; }
     .dimension-label { width: auto; }
@@ -969,7 +1113,13 @@
 </head>
 <body hx-boost="true">
 <a href="#main-content" class="skip-link">Skip to content</a>
-<nav x-data="{ navOpen: false }">
+{# Shell wraps masthead + Events drawer so the bell and panel share one
+   Alpine scope (aria-expanded, focus restore). Overlay/panel stay siblings
+   of <nav> (not inside .links-secondary) so mobile display:none on the
+   secondary links never hides a fixed drawer. #}
+<div id="events-drawer" x-data="eventsDrawer()"
+     @keydown.escape.window="if (open) close()">
+<nav>
   <span class="logo">AgentIT</span>
   <div id="deploy-status" class="deploy-status" hx-get="/api/deploy-status" hx-trigger="load, every 15s" hx-swap="innerHTML">
     <span class="deploy-status-badge deploy-status-idle" role="status" aria-live="polite"
@@ -994,25 +1144,97 @@
     <a href="/admin-review" class="{{ 'nav-active' if request.url.path.startswith('/admin-review') }}">Admin Review
       {% if nav_admin_review_pending %}<span class="nav-badge">{{ nav_admin_review_pending }}</span>{% endif %}
     </a>
-    <a href="/events" class="{{ 'nav-active' if request.url.path.startswith('/events') }}">Events</a>
+    <a href="/ledger" class="{{ 'nav-active' if request.url.path.startswith('/ledger') }}">Ledger</a>
     <a href="/health" class="{{ 'nav-active' if request.url.path.startswith('/health') }}">Health</a>
     <a href="/insights" class="{{ 'nav-active' if request.url.path == '/insights' }}">Insights</a>
-    <a href="/decisions" class="{{ 'nav-active' if request.url.path == '/decisions' }}">Decisions</a>
-    <a href="/ledger" class="{{ 'nav-active' if request.url.path == '/ledger' }}">Ledger</a>
   </div>
   <button class="nav-toggle" @click="navOpen = !navOpen" aria-label="Toggle menu">
     <span x-show="!navOpen">&#9776;</span>
     <span x-show="navOpen">&#10005;</span>
   </button>
   <div class="links-secondary" :class="{ 'links-open': navOpen }">
-    <a href="/capabilities" class="{{ 'nav-active' if request.url.path == '/capabilities' or request.url.path.startswith('/agents') }}">Capabilities</a>
-    <a href="/settings" class="{{ 'nav-active' if request.url.path == '/settings' or request.url.path == '/schedules' }}">Settings</a>
-    {% if is_authenticated %}
-    <span class="nav-user">Logged in as {{ current_user }}</span>
-    <a href="{{ oauth_sign_out_path }}">Logout</a>
-    {% endif %}
+    {# Events: notification-bell control; opens the drawer below (not a
+       primary-nav text link). Full page remains at /events. #}
+    <button type="button" class="events-bell {{ 'nav-active' if request.url.path.startswith('/events') }}"
+            x-ref="bellBtn"
+            @click="openDrawer()"
+            :aria-expanded="open"
+            aria-label="Open events feed" aria-haspopup="dialog"
+            aria-controls="events-drawer-panel">
+      <svg class="events-bell-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+        <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+      </svg>
+    </button>
+    <div class="user-menu" x-data="{ open: false }" @keydown.escape.window="open = false">
+      <button type="button" class="user-menu-trigger" @click="open = !open" :aria-expanded="open" aria-haspopup="true" aria-label="Open account and settings menu">
+        <span class="user-menu-avatar" aria-hidden="true">{{ (current_user[0] | upper) if is_authenticated and current_user else 'A' }}</span>
+        <span class="user-menu-label">{{ current_user if is_authenticated and current_user else 'Menu' }}</span>
+        <span class="user-menu-chevron" aria-hidden="true">&#9662;</span>
+      </button>
+      <div class="user-menu-dropdown" x-show="open" x-cloak x-transition.opacity.duration.100ms
+           @click.outside.capture="open = false" @click="open = false" role="menu">
+        <a href="/capabilities" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/capabilities' or request.url.path.startswith('/agents') }}">Capabilities</a>
+        <a href="/settings" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/settings' }}">Settings</a>
+        <a href="/schedules" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/schedules' }}">Schedules</a>
+        <a href="/decisions" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/decisions') }}">Decisions</a>
+        {% if is_authenticated %}
+        <div class="user-menu-divider"></div>
+        <div class="user-menu-info">Logged in as {{ current_user }}</div>
+        <a href="{{ oauth_sign_out_path }}" role="menuitem" class="user-menu-item">Logout</a>
+        {% endif %}
+      </div>
+    </div>
   </div>
 </nav>
+{# Events notification drawer -- real events from /api/events (same store
+   the Events page uses). Single "View all" CTA (footer) → full /events. #}
+  <div class="events-drawer-overlay" x-show="open" x-cloak
+       x-transition.opacity.duration.150ms @click="close()" aria-hidden="true"></div>
+  <aside id="events-drawer-panel" class="events-drawer-panel" x-ref="drawerPanel"
+         x-show="open" x-cloak
+         x-transition.opacity.duration.150ms
+         role="dialog" aria-modal="true" aria-labelledby="events-drawer-title">
+    <div class="events-drawer-header">
+      <h2 id="events-drawer-title" class="events-drawer-title">Events</h2>
+      <div class="events-drawer-actions">
+        <button type="button" class="events-drawer-close" x-ref="closeBtn" @click="close()" aria-label="Close events drawer">&times;</button>
+      </div>
+    </div>
+    <div class="events-drawer-body">
+      <p class="events-drawer-empty" x-show="loading" x-cloak>Loading events&hellip;</p>
+      <p class="events-drawer-empty" x-show="!loading && error" x-cloak x-text="error"></p>
+      <div class="events-drawer-empty" x-show="!loading && !error && events.length === 0" x-cloak>
+        <p>No events recorded yet.</p>
+      </div>
+      <template x-for="e in events" :key="e.id">
+        <a :href="e.correlation_id ? ('/events?correlation_id=' + e.correlation_id) : '/events'"
+           class="events-drawer-item" @click="close()">
+          <div class="events-drawer-item-meta">
+            <span x-text="(e.timestamp || '').slice(0, 16)"></span>
+            <span x-text="e.agent_id || '—'"></span>
+            <span class="badge"
+                  :class="{
+                    'badge-critical': e.severity === 'critical',
+                    'badge-high': e.severity === 'high',
+                    'badge-medium': e.severity === 'medium' || e.severity === 'warning',
+                    'badge-info': !e.severity || e.severity === 'info'
+                  }"
+                  x-text="e.severity || 'info'"></span>
+          </div>
+          <div class="events-drawer-item-summary">
+            <strong x-text="e.action || ''"></strong>
+            <span x-show="e.summary" x-text="' — ' + e.summary"></span>
+            <span class="text-muted" x-show="e.target_app" x-text="' · ' + e.target_app"></span>
+          </div>
+        </a>
+      </template>
+    </div>
+    <div class="events-drawer-footer">
+      <a href="/events" class="btn btn-sm" @click="close()">View all</a>
+    </div>
+  </aside>
+</div>
 <div id="nav-loading" class="nav-loading-bar"></div>
 <div id="main-content" class="container">
 {% block content %}{% endblock %}
@@ -1069,7 +1291,7 @@
   <div class="cmdk-panel" @click.outside.capture="close()">
     <div class="cmdk-input-row">
       <span class="cmdk-input-icon">&#8981;</span>
-      <input type="text" class="cmdk-input" x-ref="paletteInput" x-model="query" @input="computeResults()"
+      <input type="text" id="command-palette-input" name="q" class="cmdk-input" x-ref="paletteInput" x-model="query" @input="computeResults()"
              placeholder="Search navigation or apps&hellip;" autocomplete="off" spellcheck="false"
              aria-label="Search navigation or apps"
              @keydown.down.prevent="moveDown()" @keydown.up.prevent="moveUp()" @keydown.enter.prevent="selectActive()">
@@ -1274,6 +1496,90 @@ function confirmModal() {
     }
   };
 }
+// Events notification drawer -- loads real events from /api/events
+// (same AssessmentStore.list_events the Events page uses). Never mocked.
+// Focus pattern mirrors confirmModal / commandPalette: move focus into
+// the dialog on open, restore the trigger on close, trap Tab while open.
+function eventsDrawer() {
+  return {
+    navOpen: false,
+    open: false,
+    loading: false,
+    error: '',
+    events: [],
+    _returnFocus: null,
+    _trapHandler: null,
+    async openDrawer() {
+      if (this.open) return;
+      this._returnFocus = document.activeElement;
+      this.open = true;
+      this.loading = true;
+      this.error = '';
+      this.events = [];
+      this.$nextTick(() => {
+        this._installTrap();
+        if (this.$refs.closeBtn) this.$refs.closeBtn.focus();
+      });
+      try {
+        const res = await fetch('/api/events?limit=20');
+        if (!res.ok) {
+          this.error = 'Could not load events.';
+        } else {
+          this.events = await res.json();
+        }
+      } catch (e) {
+        this.error = 'Could not load events.';
+      }
+      this.loading = false;
+    },
+    close() {
+      if (!this.open) return;
+      this.open = false;
+      this._removeTrap();
+      const target = (this._returnFocus && typeof this._returnFocus.focus === 'function')
+        ? this._returnFocus
+        : this.$refs.bellBtn;
+      this._returnFocus = null;
+      this.$nextTick(() => { if (target) target.focus(); });
+    },
+    _focusable() {
+      const root = this.$refs.drawerPanel;
+      if (!root) return [];
+      // getClientRects (not offsetParent): position:fixed nodes often have
+      // a null offsetParent even when visible.
+      return Array.from(root.querySelectorAll(
+        'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])'
+      )).filter(function(el) {
+        return el.getClientRects().length > 0;
+      });
+    },
+    _installTrap() {
+      this._removeTrap();
+      const self = this;
+      this._trapHandler = function(e) {
+        if (!self.open || e.key !== 'Tab') return;
+        const nodes = self._focusable();
+        if (!nodes.length) return;
+        const first = nodes[0];
+        const last = nodes[nodes.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      };
+      document.addEventListener('keydown', this._trapHandler);
+    },
+    _removeTrap() {
+      if (this._trapHandler) {
+        document.removeEventListener('keydown', this._trapHandler);
+        this._trapHandler = null;
+      }
+    },
+  };
+}
 // Command palette (Cmd+K / Ctrl+K) -- a genuinely reusable Alpine
 // component, not a one-off: fuzzy-searches every nav destination plus
 // every real app in the fleet (fetched from /api/fleet, never mocked).
@@ -1288,12 +1594,12 @@ function commandPalette() {
     navItems: [
       { label: 'Fleet', href: '/', hint: 'All monitored apps' },
       { label: 'Admin Review', href: '/admin-review', hint: 'Cluster-admin-review gates' },
-      { label: 'Events', href: '/events', hint: 'Agent activity feed' },
-      { label: 'Dead-Letter Queue', href: '/events/dlq', hint: 'Undeliverable events' },
+      { label: 'Ledger', href: '/ledger', hint: 'Fleet-wide event/gate/delivery/decision stream' },
       { label: 'Health', href: '/health', hint: 'System health & pipelines' },
       { label: 'Insights', href: '/insights', hint: 'Fleet-wide insights' },
+      { label: 'Events', href: '/events', hint: 'Agent activity feed' },
+      { label: 'Dead-Letter Queue', href: '/events/dlq', hint: 'Undeliverable events' },
       { label: 'Decisions', href: '/decisions', hint: 'LLM decision log' },
-      { label: 'Ledger', href: '/ledger', hint: 'Fleet-wide event/gate/delivery/decision stream' },
       { label: 'Capabilities', href: '/capabilities', hint: 'Agent registry & catalog' },
       { label: 'Settings', href: '/settings', hint: 'Auto-mode & allowlist' },
       { label: 'Schedules', href: '/schedules', hint: 'Scheduled operations' },
@@ -1408,6 +1714,15 @@ function toastManager() {
       setTimeout(function() { self.toasts = self.toasts.filter(function(t) { return t.id !== id; }); }, 300);
     }
   };
+}
+// Small reusable wrapper so a plain @click can fire a toast without every
+// call site repeating the getElementById + Alpine.$data boilerplate --
+// e.g. a long-running action's "this can take a few minutes" caveat,
+// which belongs in a dismissible notification, not crammed into the
+// triggering button's own label/loading text.
+function showToast(message, type, duration) {
+  var tm = document.getElementById('toasts');
+  if (tm && Alpine.$data(tm)) Alpine.$data(tm).show(message, type, duration);
 }
 // Auto-show toasts from URL params. Must wait for 'alpine:initialized' (fires
 // once ALL components on the page have been initialized), not 'alpine:init'

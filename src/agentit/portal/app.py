@@ -289,9 +289,30 @@ def _tojson_filter(value: object) -> "Markup":
     return Markup(raw)
 
 
+def _clean_source(value: str) -> str:
+    """Display-only cleanup for `Finding.source` badges.
+
+    A data-driven check's source is `f"check:{check.source_path}"`, where
+    `source_path` is the *absolute* filesystem path `check_engine.py`
+    loaded the YAML file from (e.g. `check:/opt/app-root/src/checks/cicd/
+    ci-pipeline.yaml`) -- deployment-location-dependent and not meaningful
+    to a human reader. This only affects the rendered badge text; the
+    underlying value (`f.source`, and the hidden `check_source` form field
+    `/api/suppress` matches against) is untouched, so existing suppression
+    records keep matching exactly as before.
+    """
+    if not value.startswith("check:"):
+        return value
+    path = value[len("check:"):]
+    if "checks/" in path:
+        return "check:checks/" + path.split("checks/", 1)[1]
+    return value
+
+
 templates.env.filters["safe_url"] = _safe_url
 templates.env.filters["dimension_label"] = _format_dimension
 templates.env.filters["tojson"] = _tojson_filter
+templates.env.filters["clean_source"] = _clean_source
 
 
 @app.exception_handler(404)

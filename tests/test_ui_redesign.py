@@ -339,7 +339,10 @@ class TestGateAppAttributionAndActionsTab:
 
         resp = await client.get("/")
         assert resp.status_code == 200
-        assert f'<a href="/assessments/{aid}?tab=actions" class="badge badge-medium"' in resp.text
+        # badge-accent, not badge-medium -- a pending action is a
+        # needs-your-attention signal (base.html reserves --color-accent
+        # exclusively for that), not a routine medium-severity indicator.
+        assert f'<a href="/assessments/{aid}?tab=actions" class="badge badge-accent"' in resp.text
 
     async def test_assessment_detail_tab_query_param_opens_actions_tab(self, ui_client):
         """The badge above links with ?tab=actions -- the Alpine tab state
