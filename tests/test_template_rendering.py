@@ -101,6 +101,54 @@ class TestAlpineScoping:
         )
 
 
+class TestUrlParamToastsSurviveHtmxBoost:
+    """Boosted form POSTs (Register for GitOps, Deliver, ...) redirect with
+    ?error=/?success= and swap <body> via htmx. alpine:initialized only fires
+    once per full page load, so without an explicit re-call after
+    Alpine.destroyTree/initTree the flash toast never appears and the click
+    looks like a no-op. Confirmed live against the deployed portal before
+    showUrlParamToasts() was wired into htmx:afterSettle.
+    """
+
+    def test_show_url_param_toasts_helper_exists(self):
+        html = (TEMPLATES_DIR / "base.html").read_text(encoding="utf-8")
+        assert "function showUrlParamToasts()" in html
+        assert "document.addEventListener('alpine:initialized', showUrlParamToasts)" in html
+
+    def test_htmx_after_settle_reinvokes_url_param_toasts_on_boost(self):
+        html = (TEMPLATES_DIR / "base.html").read_text(encoding="utf-8")
+        # The Alpine reiniter and the toast re-call must both live in the
+        # boosted afterSettle path — order: destroyTree → initTree → toasts.
+        reiniter_idx = html.find("Alpine.destroyTree(document.body)")
+        assert reiniter_idx != -1
+        toast_idx = html.find("showUrlParamToasts()", reiniter_idx)
+        assert toast_idx != -1, (
+            "base.html must call showUrlParamToasts() after Alpine.initTree "
+            "on boosted htmx:afterSettle — otherwise Register/Deliver flash "
+            "messages are silently dropped"
+        )
+        # Still inside the same boosted branch (before the else-if non-boost path).
+        else_idx = html.find("else if (e.detail.target", reiniter_idx)
+        assert else_idx == -1 or toast_idx < else_idx
+
+
+class TestAssessmentDetailFlashBanners:
+    """Register for GitOps (and Fix/Onboard) redirect with ?error=/?success=.
+    Toast JS alone is not enough after htmx-boost — Assessment Detail must
+    also render durable alert banners from the query params.
+    """
+
+    def test_assessment_detail_renders_error_success_query_banners(self):
+        html = (TEMPLATES_DIR / "assessment_detail.html").read_text(encoding="utf-8")
+        assert "request.query_params.get('error')" in html
+        assert 'class="alert alert-error' in html
+        assert "request.query_params.get('success')" in html
+        assert 'class="alert alert-success' in html
+        assert 'data-action="register-gitops"' in html
+        assert 'name="infra_repo_url"' in html
+        assert "btn-loading" in html
+
+
 class TestConfirmModalOutsideClick:
     """Regression: the shared confirm-modal's outside-click handler must use
     the `capture` modifier.
