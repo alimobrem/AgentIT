@@ -336,13 +336,18 @@ async def test_onboard_results_page(client, _override_store):
     assert "Download" in resp.text
     # The unified apply flow (docs/unified-apply-flow.md) collapsed the
     # independent "Apply to Cluster" / "Create PR" buttons into one
-    # dynamically-labeled "Deliver" action -- the mechanism (direct apply vs.
-    # GitOps commit+PR) is no longer a human choice. This report has no
-    # infra_repo_url and isn't GitOps-registered, so the button reads "Apply
-    # to Cluster"; a GitOps-registered app would instead see "Commit & Open PR".
-    assert "Apply to Cluster" in resp.text
+    # dynamically-labeled Deliver action -- short CTA labels ("Apply" /
+    # "Open PR"); mechanism is no longer a human choice. This report has no
+    # infra_repo_url and isn't GitOps-registered, so the button reads "Apply".
+    assert 'btn-label">Apply</span>' in resp.text
     assert "Per-Agent PRs" in resp.text
     assert "Dry Run" in resp.text
+    assert "delivery-actions" in resp.text
+    assert "delivery-primary" in resp.text
+    assert "delivery-secondary" in resp.text
+    # Status chip lives outside the Apply CTA (not packed into the button).
+    assert "No dry run yet" in resp.text
+    assert "NO DRY RUN YET" not in resp.text
 
 
 async def test_api_manifests(client, _override_store):
@@ -597,6 +602,12 @@ async def test_masthead_nav_structure(client, _override_store):
     assert 'aria-controls="nav-primary nav-secondary"' in html
     assert ":aria-expanded=\"navOpen\"" in html
     assert 'nav .links.links-open' in html
+    # Cmd+K search is visually centered and a bit wider than content-sized.
+    assert "cmdk-trigger" in html
+    assert "cmdk-trigger-label" in html
+    assert "left: 50%" in html
+    assert "translateX(-50%)" in html
+    assert "min-width: 14rem" in html
     # Single "View all" CTA (footer), not duplicated in the header.
     drawer = html.split('id="events-drawer-panel"', 1)[1].split("id=\"nav-loading\"", 1)[0]
     assert drawer.count(">View all<") == 1
@@ -1398,7 +1409,9 @@ async def test_onboard_results_uses_design_system_classes(client, _override_stor
     assert "manifest-title" in resp.text
     assert "manifest-desc" in resp.text
     assert "code-block" in resp.text
-    assert "action-bar" in resp.text
+    assert "delivery-actions" in resp.text
+    assert "delivery-step" in resp.text
+    assert "delivery-connector" in resp.text
     assert 'hx-boost="false"' in resp.text
 
 

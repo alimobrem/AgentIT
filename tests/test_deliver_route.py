@@ -147,14 +147,18 @@ class TestOnboardResultsWarnsBeforeDryRun:
     """The page's own banner recommends dry-run-then-deliver, but nothing
     enforced or even visually hinted at this -- a user could click Deliver
     with zero friction, having never dry-run. A visible warning badge next
-    to the Deliver button must appear until a dry run (or a real delivery)
-    has actually happened for this assessment."""
+    to (not inside) the Deliver button must appear until a dry run (or a
+    real delivery) has actually happened for this assessment."""
 
     async def test_warning_badge_shown_before_any_apply_action(self, deliver_client):
         client, _store, aid = deliver_client
         resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert resp.status_code == 200
         assert "No dry run yet" in resp.text
+        # Chip is in the status region, not packed into the Apply CTA label.
+        assert "delivery-step-status" in resp.text
+        assert 'class="btn btn-green btn-lg"' not in resp.text
+        assert "NO DRY RUN YET" not in resp.text
 
     async def test_warning_badge_gone_after_a_dry_run(self, deliver_client, _mock_kube):
         client, _store, aid = deliver_client
@@ -163,6 +167,7 @@ class TestOnboardResultsWarnsBeforeDryRun:
         resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert resp.status_code == 200
         assert "No dry run yet" not in resp.text
+        assert "Dry run passed" in resp.text
 
     async def test_warning_badge_gone_after_a_real_delivery(self, deliver_client, _mock_kube):
         client, _store, aid = deliver_client
