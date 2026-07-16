@@ -36,6 +36,70 @@
   {% endif %}
 </p>
 
+{% if cited_merges %}
+<h2 class="section-title">Cited merges (L4)</h2>
+<p class="text-muted mb-1">Recent self-improve PRs recorded as <code>capability-outcome</code> merged — the next scout cycle cites these so it does not re-propose shipped work.</p>
+<table>
+  <thead>
+    <tr>
+      <th>Title</th>
+      <th>State</th>
+      <th>PR</th>
+      <th>Merged</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for m in cited_merges %}
+    <tr>
+      <td class="text-sm">{{ m.title or "—" }}</td>
+      <td><span class="badge badge-success">{{ m.state }}</span></td>
+      <td class="text-sm">
+        {% if m.pr_url %}
+        <a href="{{ m.pr_url }}" target="_blank" rel="noopener">{{ m.pr_url.split('/')[-1] }}</a>
+        {% else %}—{% endif %}
+      </td>
+      <td class="text-sm text-muted">{{ (m.merged_at or m.recorded_at or "—")[:19] }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if recent_outcomes and not cited_merges %}
+<h2 class="section-title">Recent proposal outcomes</h2>
+<p class="text-muted mb-1">Merged, closed, and stale self-improve PRs from outcome sync.</p>
+<table>
+  <thead>
+    <tr>
+      <th>Title</th>
+      <th>State</th>
+      <th>PR</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for o in recent_outcomes[:8] %}
+    <tr>
+      <td class="text-sm">{{ o.title or "—" }}</td>
+      <td>
+        {% if o.state == "merged" %}
+          <span class="badge badge-success">merged</span>
+        {% elif o.state == "closed" %}
+          <span class="badge badge-muted">closed</span>
+        {% else %}
+          <span class="badge badge-warning">{{ o.state }}</span>
+        {% endif %}
+      </td>
+      <td class="text-sm">
+        {% if o.pr_url %}
+        <a href="{{ o.pr_url }}" target="_blank" rel="noopener">#{{ o.pr_url.split('/')[-1] }}</a>
+        {% else %}—{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 <h2 class="section-title">Self-Improvement Runs</h2>
 <p class="text-muted mb-1">Every 24h cycle leaves a row here, whether or not it produced a proposal — this is the full loop history, not just the ones that shipped a PR.</p>
 
@@ -58,12 +122,21 @@
       <td><span class="badge badge-info">{{ run.trigger }}</span></td>
       <td class="text-sm text-muted">{{ run.considered[:100] }}{% if run.considered|length > 100 %}&hellip;{% endif %}</td>
       <td>
-        {% if run.severity == "info" %}
+        {% set o = run.outcome or "no-op" %}
+        {% if o == "proposed" %}
           <span class="badge badge-success">proposed</span>
-        {% elif run.severity == "error" %}
-          <span class="badge badge-danger">error</span>
+        {% elif o == "already-implemented" %}
+          <span class="badge badge-info">already-implemented</span>
+        {% elif o == "gate-blocked" or o == "outcome-blocked" %}
+          <span class="badge badge-warning">{{ o }}</span>
+        {% elif o == "no-signal" %}
+          <span class="badge badge-muted">no-signal</span>
+        {% elif o == "parse-error" or o == "error" or o == "pr-failed" or o == "source-generation-failed" %}
+          <span class="badge badge-danger">{{ o }}</span>
+        {% elif o == "no-proposal" %}
+          <span class="badge badge-muted">no-proposal</span>
         {% else %}
-          <span class="badge badge-warning">no-op</span>
+          <span class="badge badge-muted">{{ o }}</span>
         {% endif %}
       </td>
       <td>
