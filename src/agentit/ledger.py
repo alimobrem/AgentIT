@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from agentit.analyzers.security import SECRET_CLASSIFY_ACTION
 from agentit.capability_scout import CAPABILITY_RUN_ACTION
 from agentit.learning_agent import LEARNING_RUN_ACTION
 
@@ -41,6 +42,16 @@ _EVENT_ACTION_TO_CARD_TYPE: dict[str, str] = {
     "fix-generated": "B",
     "onboarding-complete": "B",
     "decision": "C",
+    # docs/ledger-design-spec.md §3's own claim that the Decisions page is
+    # "Absorbed as card types C and G" only holds if every one of its four
+    # decision types actually maps to a card -- secret-classify (the other
+    # non-fix-review, non-capability-proposal decision type) was missing
+    # here, so every real classify_secret verdict silently vanished from
+    # the Ledger even though it's a real, already-persisted decision (see
+    # `llm_decisions.DECISION_TYPE_SECRET_CLASSIFY`). Card C's shape
+    # (`_event_card()`) doesn't assume auto-mode's specific summary
+    # wording, so a secret-classify event renders there correctly as-is.
+    SECRET_CLASSIFY_ACTION: "C",
     "tick-complete": "H",
     "tick-failed": "H",
     "critical-findings-detected": "I",
