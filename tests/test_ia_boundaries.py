@@ -5,6 +5,7 @@ See docs/portal-experience-design-language.md §1 and docs/ledger-design-spec.md
 """
 from __future__ import annotations
 
+import re
 from unittest.mock import patch
 
 import pytest
@@ -72,8 +73,8 @@ async def test_nav_needs_you_badge_on_ledger_not_fleet(ui_client):
     primary = resp.text.split('id="nav-primary"', 1)[1].split("links-secondary", 1)[0]
     assert 'href="/ledger"' in primary
     assert 'href="/fleet"' in primary
-    assert 'Ledger\n      <span class="nav-badge">1</span>' in primary
-    assert "Fleet\n      <span class=\"nav-badge\">" not in primary
+    assert re.search(r'Ledger\s*<span class="nav-badge">1</span>', primary)
+    assert not re.search(r'Fleet\s*<span class="nav-badge">', primary)
 
 
 async def test_fleet_quiet_pointer_to_ledger_needs_you(ui_client):
@@ -114,7 +115,7 @@ async def test_admin_review_primary_nav_when_count_positive(ui_client):
         resp = await client.get("/ledger")
     assert resp.status_code == 200
     primary = resp.text.split('id="nav-primary"', 1)[1].split("links-secondary", 1)[0]
-    assert 'Admin Review\n      <span class="nav-badge">1</span>' in primary
+    assert re.search(r'Admin Review\s*<span class="nav-badge">1</span>', primary)
     dropdown = resp.text.split("user-menu-dropdown", 1)[1].split("deploy-status", 1)[0]
     assert "Elevated approvals" not in dropdown
 
