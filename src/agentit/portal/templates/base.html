@@ -817,6 +817,10 @@
   .user-menu-item.nav-active { color: var(--color-accent); }
   .user-menu-divider { height: 1px; background: var(--color-border); margin: var(--space-2) 0; }
   .user-menu-info { padding: var(--space-2) var(--space-4); color: var(--color-muted); font-size: var(--font-xs); }
+  /* The deploy-status badge brings its own pill padding/border, so trim the
+     surrounding menu-item padding to avoid double-padding around it. */
+  .user-menu-item.deploy-status-link { padding: var(--space-2) var(--space-4); }
+  .user-menu-item.deploy-status-link .deploy-status-badge { width: 100%; box-sizing: border-box; }
 
   /* ── Command Palette Trigger (nav) ────────────────────────────── */
   .cmdk-trigger {
@@ -1121,13 +1125,6 @@
      @keydown.escape.window="if (open) close()">
 <nav>
   <span class="logo">AgentIT</span>
-  <div id="deploy-status" class="deploy-status" hx-get="/api/deploy-status" hx-trigger="load, every 15s" hx-swap="innerHTML">
-    <span class="deploy-status-badge deploy-status-idle" role="status" aria-live="polite"
-          aria-label="AgentIT version {{ build_info.version | default('unknown') }}, commit {{ build_info.commit | default('unknown') }}">
-      <span class="deploy-status-dot"></span>
-      <span class="deploy-status-text">v{{ build_info.version | default('unknown') }}{% if build_info.commit and build_info.commit != 'unknown' %} &middot; <code>{{ build_info.commit[:7] }}</code>{% endif %}</span>
-    </span>
-  </div>
   {# Cmd+K / Ctrl+K command palette trigger -- discoverable both by click
      (mouse users see the kbd hint right here) and by the shortcut itself
      firing from anywhere on the page (see #command-palette below). This is
@@ -1183,6 +1180,19 @@
         <div class="user-menu-info">Logged in as {{ current_user }}</div>
         <a href="{{ oauth_sign_out_path }}" role="menuitem" class="user-menu-item">Logout</a>
         {% endif %}
+        <div class="user-menu-divider"></div>
+        {# Moved out of the ambient top-level nav bar and into the menu
+           footer -- still the same live-polled badge (unchanged route/
+           partial), just relocated and now a real link through to the
+           Health page's full deploy-status detail instead of inert text. #}
+        <a href="/health" id="deploy-status" class="user-menu-item deploy-status-link" role="menuitem"
+           hx-get="/api/deploy-status" hx-trigger="load, every 15s" hx-swap="innerHTML">
+          <span class="deploy-status-badge deploy-status-idle" role="status" aria-live="polite"
+                aria-label="AgentIT version {{ build_info.version | default('unknown') }}, commit {{ build_info.commit | default('unknown') }}">
+            <span class="deploy-status-dot"></span>
+            <span class="deploy-status-text">v{{ build_info.version | default('unknown') }}{% if build_info.commit and build_info.commit != 'unknown' %} &middot; <code>{{ build_info.commit[:7] }}</code>{% endif %}</span>
+          </span>
+        </a>
       </div>
     </div>
   </div>
@@ -1266,9 +1276,17 @@
     </div>
     <div class="action-bar modal-actions">
       <button class="btn btn-outline" x-ref="cancelBtn" @click="cancel()">Cancel</button>
+      {# !! wrappers matter here: when typedConfirmTarget is '' (the default,
+         non-type-to-confirm case), `'' && x` short-circuits to the string ''
+         rather than boolean false. Alpine's boolean-attribute normalization
+         (bindAttribute in its bind.js) only clears :disabled for exactly
+         null/undefined/false -- a falsy '' is treated as truthy and the
+         button gets stuck disabled="disabled" forever, since nothing ever
+         re-evaluates it again with a *different* falsy value. Coercing to a
+         real boolean avoids relying on that internal Alpine quirk. #}
       <button class="btn" :class="dangerClass" @click="proceed()"
-              :disabled="typedConfirmTarget && typedValue !== typedConfirmTarget"
-              :title="(typedConfirmTarget && typedValue !== typedConfirmTarget) ? ('Type &quot;' + typedConfirmTarget + '&quot; exactly to enable this button') : ''"
+              :disabled="!!typedConfirmTarget && typedValue !== typedConfirmTarget"
+              :title="(!!typedConfirmTarget && typedValue !== typedConfirmTarget) ? ('Type &quot;' + typedConfirmTarget + '&quot; exactly to enable this button') : ''"
               x-text="confirmText"></button>
     </div>
   </div>
@@ -1401,7 +1419,23 @@ function completeLoading() {
 document.body.addEventListener('htmx:afterSettle', completeLoading);
 // Re-initialize Alpine on htmx-swapped content so x-data, @click, $dispatch work
 document.body.addEventListener('htmx:afterSettle', function(e) {
-  if (e.detail && e.detail.target && window.Alpine && e.detail.target.querySelector('[x-data]')) {
+  if (!window.Alpine || !e.detail) return;
+  if (e.detail.boosted) {
+    // Boosted nav links/forms (hx-boost="true" on <body>) replace <body>'s
+    // children wholesale on every click. A plain initTree() here isn't
+    // enough: Alpine's own MutationObserver-based auto-init races with
+    // htmx's settle phase (which pauses briefly for CSS transitions), so
+    // directives like x-show can end up bound against an intermediate,
+    // not-yet-settled DOM state -- symptom: the Events drawer panel stays
+    // visible after any boosted nav click even though its `open` state is
+    // false, because its x-show binding never actually attached. destroyTree()
+    // first tears down whatever Alpine's own observer already
+    // (mis)initialized, so initTree() then binds cleanly against the final,
+    // settled DOM -- the fix Alpine's own maintainers recommend for this
+    // exact htmx-boost interaction (alpinejs/alpine discussion #4485).
+    Alpine.destroyTree(document.body);
+    Alpine.initTree(document.body);
+  } else if (e.detail.target && e.detail.target.querySelector('[x-data]')) {
     Alpine.initTree(e.detail.target);
   }
 });
@@ -1743,6 +1777,13 @@ document.addEventListener('alpine:initialized', function() {
 // Relative timestamps
 function relativeTime(iso) {
   var d = new Date(iso);
+  // Many call sites pass a "—" placeholder (or an empty string) for agents/
+  // rows that genuinely have no timestamp yet (see e.g. agents.html's
+  // synthetic watcher-agent entries). new Date() on that is an Invalid Date,
+  // and toLocaleDateString() on an Invalid Date returns the literal string
+  // "Invalid Date" -- returning null here instead tells the caller to leave
+  // whatever the server already rendered (its own "—" fallback) untouched.
+  if (isNaN(d.getTime())) return null;
   var now = new Date();
   var diff = (now - d) / 1000;
   if (diff < 60) return 'just now';
@@ -1751,12 +1792,23 @@ function relativeTime(iso) {
   if (diff < 604800) return Math.floor(diff / 86400) + 'd ago';
   return d.toLocaleDateString();
 }
-document.addEventListener('DOMContentLoaded', function() {
-  document.querySelectorAll('[data-timestamp]').forEach(function(el) {
+function formatTimestamps(root) {
+  (root || document).querySelectorAll('[data-timestamp]').forEach(function(el) {
     var iso = el.getAttribute('data-timestamp');
-    el.textContent = relativeTime(iso);
+    var rel = relativeTime(iso);
+    if (rel === null) return;
+    el.textContent = rel;
     el.title = iso;
   });
+}
+document.addEventListener('DOMContentLoaded', function() { formatTimestamps(document); });
+// DOMContentLoaded only fires once per real page load -- it never re-fires
+// for htmx-swapped content (boosted or not), so any [data-timestamp]
+// element that only exists after a swap (i.e. everywhere except whatever
+// page happened to load first) was permanently stuck showing the server's
+// raw ISO-sliced fallback text instead of "3m ago". Re-run on every settle.
+document.body.addEventListener('htmx:afterSettle', function(e) {
+  formatTimestamps(e.detail && e.detail.boosted ? document : (e.detail && e.detail.target) || document);
 });
 </script>
 </body>

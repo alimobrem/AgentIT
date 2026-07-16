@@ -765,6 +765,13 @@ class TestConfirmModalFocusAndTypeToConfirm:
         gate_card.locator("button:has-text('Dismiss')").click()
         expect(page.locator("#confirm-modal")).to_have_class(re.compile("open"))
         expect(page.locator("#type-confirm-input")).not_to_be_visible()
+        # Regression guard: Alpine's boolean-attribute normalization only
+        # clears :disabled for an expression that evaluates to exactly
+        # null/undefined/false. `typedConfirmTarget && ...` short-circuits to
+        # the falsy string '' (not boolean false) for every ordinary confirm,
+        # which Alpine previously (mis)treated as truthy and left the button
+        # permanently disabled -- see the onboard-results "Deliver Now" bug.
+        expect(page.locator("#confirm-modal button", has_text="Dismiss")).to_be_enabled()
 
 
 # ── UX Requirements: Command Palette (#4, #5) ────────────────────────────
