@@ -2,44 +2,80 @@
 {% block title %}System Health - AgentIT{% endblock %}
 {% block content %}
 {% set truly_healthy = argo_synced and pods_failed == 0 and kafka_ready %}
+{% set links = card_links | default({}) %}
 <h1>System Health</h1>
 <p class="text-muted text-sm">Cluster: {{ cluster_url | default("in-cluster") }} &middot; Namespace: {{ namespace | default("agentit") }}</p>
 
 <div class="stat-grid" hx-get="/health" hx-trigger="every 30s" hx-select=".stat-grid" hx-target="this" hx-swap="outerHTML">
-  <div class="stat-card">
+  {% set platform_link = links.get('platform') %}
+  {% if platform_link and platform_link.href %}
+  <a class="stat-card" href="{{ platform_link.href | safe_url }}" {% if platform_link.external %}target="_blank" rel="noopener" hx-boost="false"{% endif %} title="{{ platform_link.title }}">
+  {% else %}
+  <div class="stat-card stat-card-disabled" {% if platform_link and platform_link.reason %}title="{{ platform_link.reason }}"{% endif %}>
+  {% endif %}
     <div class="stat-label">Platform</div>
     <div class="stat-value {% if truly_healthy %}text-success{% elif pods_failed > 0 %}text-danger{% else %}text-warning{% endif %}">
       {% if truly_healthy %}Healthy{% elif pods_failed > 0 %}Degraded{% else %}Partial{% endif %}
     </div>
-  </div>
-  <div class="stat-card">
+  {% if platform_link and platform_link.href %}</a>{% else %}</div>{% endif %}
+
+  {% set rollout_link = links.get('rollout') %}
+  {% if rollout_link and rollout_link.href %}
+  <a class="stat-card" href="{{ rollout_link.href | safe_url }}" {% if rollout_link.external %}target="_blank" rel="noopener" hx-boost="false"{% endif %} title="{{ rollout_link.title }}">
+  {% else %}
+  <div class="stat-card stat-card-disabled" {% if rollout_link and rollout_link.reason %}title="{{ rollout_link.reason }}"{% endif %}>
+  {% endif %}
     <div class="stat-label">Rollout</div>
     <div class="stat-value text-sm {% if rollout_phase == 'Healthy' %}text-success{% elif rollout_phase == 'Paused' %}text-warning{% else %}text-danger{% endif %}">
       {{ rollout_phase | default("Unknown") }}
       {% if rollout_phase == 'Paused' and rollout_total_steps %}<span class="text-muted"> ({{ rollout_step }}/{{ rollout_total_steps }})</span>{% endif %}
     </div>
-  </div>
-  <div class="stat-card">
+  {% if rollout_link and rollout_link.href %}</a>{% else %}</div>{% endif %}
+
+  {% set pods_link = links.get('pods') %}
+  {% if pods_link and pods_link.href %}
+  <a class="stat-card" href="{{ pods_link.href | safe_url }}" {% if pods_link.external %}target="_blank" rel="noopener" hx-boost="false"{% endif %} title="{{ pods_link.title }}">
+  {% else %}
+  <div class="stat-card stat-card-disabled" {% if pods_link and pods_link.reason %}title="{{ pods_link.reason }}"{% endif %}>
+  {% endif %}
     <div class="stat-label">Pods Running</div>
     <div class="stat-value">{{ pods_running }}{% if pods_failed %} <span class="text-danger text-sm">/ {{ pods_failed }} failed</span>{% endif %}</div>
-  </div>
-  <div class="stat-card">
+  {% if pods_link and pods_link.href %}</a>{% else %}</div>{% endif %}
+
+  {% set pipeline_link = links.get('pipeline') %}
+  {% if pipeline_link and pipeline_link.href %}
+  <a class="stat-card" href="{{ pipeline_link.href | safe_url }}" {% if pipeline_link.external %}target="_blank" rel="noopener" hx-boost="false"{% endif %} title="{{ pipeline_link.title }}">
+  {% else %}
+  <div class="stat-card stat-card-disabled" {% if pipeline_link and pipeline_link.reason %}title="{{ pipeline_link.reason }}"{% endif %}>
+  {% endif %}
     <div class="stat-label">Last Pipeline</div>
     <div class="stat-value text-sm {% if pipeline_status == 'Succeeded' %}text-success{% elif pipeline_status == 'Running' %}text-warning{% else %}text-danger{% endif %}">
       {{ pipeline_status }}
     </div>
-  </div>
+  {% if pipeline_link and pipeline_link.href %}</a>{% else %}</div>{% endif %}
+
   {% if current_commit %}
-  <div class="stat-card">
+  {% set commit_link = links.get('deployed_commit') %}
+  {% if commit_link and commit_link.href %}
+  <a class="stat-card" href="{{ commit_link.href | safe_url }}" {% if commit_link.external %}target="_blank" rel="noopener" hx-boost="false"{% endif %} title="{{ commit_link.title }}">
+  {% else %}
+  <div class="stat-card stat-card-disabled" {% if commit_link and commit_link.reason %}title="{{ commit_link.reason }}"{% endif %}>
+  {% endif %}
     <div class="stat-label">Deployed Commit</div>
     <div class="stat-value text-sm"><code>{{ current_commit }}</code></div>
-  </div>
+  {% if commit_link and commit_link.href %}</a>{% else %}</div>{% endif %}
   {% endif %}
+
   {% if last_successful_ci %}
-  <div class="stat-card">
+  {% set last_ci_link = links.get('last_successful_ci') %}
+  {% if last_ci_link and last_ci_link.href %}
+  <a class="stat-card" href="{{ last_ci_link.href | safe_url }}" {% if last_ci_link.external %}target="_blank" rel="noopener" hx-boost="false"{% endif %} title="{{ last_ci_link.title }}">
+  {% else %}
+  <div class="stat-card stat-card-disabled" {% if last_ci_link and last_ci_link.reason %}title="{{ last_ci_link.reason }}"{% endif %}>
+  {% endif %}
     <div class="stat-label">Last Good CI</div>
     <div class="stat-value text-sm text-success">{{ last_successful_ci }}</div>
-  </div>
+  {% if last_ci_link and last_ci_link.href %}</a>{% else %}</div>{% endif %}
   {% endif %}
 </div>
 
@@ -58,7 +94,14 @@
   {% endif %}
 
   {% if deploy_status.pipeline %}
-  <h3 class="text-sm mt-1 mb-1">PipelineRun: <a href="/health/pipelines/{{ deploy_status.pipeline.name }}">{{ deploy_status.pipeline.name }}</a></h3>
+  <h3 class="text-sm mt-1 mb-1">PipelineRun:
+    {% set pipe_console = links.get('pipeline') %}
+    {% if pipe_console and pipe_console.href and pipe_console.external %}
+    <a href="{{ pipe_console.href | safe_url }}" target="_blank" rel="noopener" hx-boost="false">{{ deploy_status.pipeline.name }}</a>
+    {% else %}
+    <a href="/health/pipelines/{{ deploy_status.pipeline.name }}">{{ deploy_status.pipeline.name }}</a>
+    {% endif %}
+  </h3>
   <div class="lifecycle-stepper">
     {% for task in deploy_status.pipeline.tasks %}
     <div class="lifecycle-step {% if task.status == 'Succeeded' %}step-done{% elif task.status in ('Running', 'Started') %}step-active{% endif %}">
@@ -75,14 +118,22 @@
 
   {% if deploy_status.argo %}
   <p class="text-sm mt-1">Argo CD:
+    {% set argo_link = links.get('argo_app') %}
+    {% if argo_link and argo_link.href %}
+    <a href="{{ argo_link.href | safe_url }}" target="_blank" rel="noopener" hx-boost="false" title="{{ argo_link.title }}">
+      <span class="badge {% if deploy_status.argo.sync == 'Synced' %}badge-low{% else %}badge-critical{% endif %}">{{ deploy_status.argo.sync }}</span>
+      <span class="badge {% if deploy_status.argo.health == 'Healthy' %}badge-low{% elif deploy_status.argo.health == 'Progressing' %}badge-medium{% else %}badge-critical{% endif %}">{{ deploy_status.argo.health }}</span>
+    </a>
+    {% else %}
     <span class="badge {% if deploy_status.argo.sync == 'Synced' %}badge-low{% else %}badge-critical{% endif %}">{{ deploy_status.argo.sync }}</span>
     <span class="badge {% if deploy_status.argo.health == 'Healthy' %}badge-low{% elif deploy_status.argo.health == 'Progressing' %}badge-medium{% else %}badge-critical{% endif %}">{{ deploy_status.argo.health }}</span>
+    {% endif %}
   </p>
   {% if deploy_status.argo.health_message %}<p class="text-sm text-muted">{{ deploy_status.argo.health_message }}</p>{% endif %}
   {% endif %}
 
   {% if deploy_status.commit_info %}
-  <p class="text-sm mt-1">Change: <strong>{{ deploy_status.commit_info.message | default("(no message)") }}</strong>{% if deploy_status.commit_info.author %} by {{ deploy_status.commit_info.author }}{% endif %}{% if deploy_status.commit_info.html_url %} (<a href="{{ deploy_status.commit_info.html_url }}" target="_blank" rel="noopener">view on GitHub</a>){% endif %}</p>
+  <p class="text-sm mt-1">Change: <strong>{{ deploy_status.commit_info.message | default("(no message)") }}</strong>{% if deploy_status.commit_info.author %} by {{ deploy_status.commit_info.author }}{% endif %}{% if deploy_status.commit_info.html_url %} (<a href="{{ deploy_status.commit_info.html_url | safe_url }}" target="_blank" rel="noopener" hx-boost="false">view on GitHub</a>){% endif %}</p>
   {% endif %}
 
   {% if deploy_status.state == 'failed' and deploy_status.reason %}
@@ -105,7 +156,13 @@
   <tbody>
     {% for app in argo_apps %}
     <tr class="{% if app.sync == 'Synced' %}row-border-green{% else %}row-border-red{% endif %}">
-      <td class="text-bold"><a href="/health/pods/{{ app.name }}">{{ app.name }}</a></td>
+      <td class="text-bold">
+        {% if app.href %}
+        <a href="{{ app.href | safe_url }}" target="_blank" rel="noopener" hx-boost="false" title="{{ app.href_title | default('Open in OpenShift console') }}">{{ app.name }}</a>
+        {% else %}
+        <span title="{{ app.href_title | default('OpenShift console URL not resolved') }}">{{ app.name }}</span>
+        {% endif %}
+      </td>
       <td><span class="badge {% if app.sync == 'Synced' %}badge-low{% else %}badge-critical{% endif %}">{{ app.sync }}</span></td>
       <td><span class="badge {% if app.health == 'Healthy' %}badge-low{% elif app.health == 'Progressing' %}badge-medium{% else %}badge-critical{% endif %}">{{ app.health }}</span></td>
     </tr>
@@ -141,7 +198,13 @@
   <tbody>
     {% for p in pipelines %}
     <tr class="{% if p.status == 'Succeeded' %}row-border-green{% elif p.status == 'Running' %}row-border-yellow{% else %}row-border-red{% endif %}">
-      <td class="text-bold"><a href="/health/pipelines/{{ p.name }}">{{ p.name }}</a></td>
+      <td class="text-bold">
+        {% if p.console_href %}
+        <a href="{{ p.console_href | safe_url }}" target="_blank" rel="noopener" hx-boost="false" title="Open PipelineRun in OpenShift console">{{ p.name }}</a>
+        {% else %}
+        <a href="{{ p.portal_href or ('/health/pipelines/' ~ p.name) }}">{{ p.name }}</a>
+        {% endif %}
+      </td>
       <td><span class="badge {% if p.status == 'Succeeded' %}badge-low{% elif p.status == 'Running' %}badge-medium{% else %}badge-critical{% endif %}">{{ p.status }}</span></td>
       <td class="text-sm">{{ p.duration }}</td>
     </tr>
@@ -154,8 +217,15 @@
 <table>
   <thead><tr><th>Component</th><th>Status</th></tr></thead>
   <tbody>
+    {% set kafka_link = links.get('kafka') %}
     <tr class="{% if kafka_ready %}row-border-green{% else %}row-border-red{% endif %}">
-      <td class="text-bold">Kafka Broker</td>
+      <td class="text-bold">
+        {% if kafka_link and kafka_link.href %}
+        <a href="{{ kafka_link.href | safe_url }}" target="_blank" rel="noopener" hx-boost="false" title="{{ kafka_link.title }}">Kafka Broker</a>
+        {% else %}
+        <span {% if kafka_link and kafka_link.reason %}title="{{ kafka_link.reason }}"{% endif %}>Kafka Broker</span>
+        {% endif %}
+      </td>
       <td><span class="badge {% if kafka_ready %}badge-low{% else %}badge-critical{% endif %}">{{ "Ready" if kafka_ready else "Not Found" }}</span></td>
     </tr>
     <tr><td class="text-bold">Event Publisher</td>
@@ -171,7 +241,14 @@
   <tbody>
     {% for name, state in circuit_breakers.items() %}
     <tr class="{% if state.open %}row-border-red{% else %}row-border-green{% endif %}">
-      <td class="text-bold">{{ name }}</td>
+      <td class="text-bold">
+        {% set metrics_link = links.get('platform') %}
+        {% if metrics_link and metrics_link.href %}
+        <a href="{{ metrics_link.href | safe_url }}" target="_blank" rel="noopener" hx-boost="false" title="Open Observe metrics">{{ name }}</a>
+        {% else %}
+        {{ name }}
+        {% endif %}
+      </td>
       <td><span class="badge {% if state.open %}badge-critical{% else %}badge-low{% endif %}">{{ "OPEN" if state.open else "closed" }}</span></td>
       <td>{{ state.failures }}</td>
     </tr>

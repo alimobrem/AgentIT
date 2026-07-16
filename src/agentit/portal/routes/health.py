@@ -10,6 +10,13 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from agentit import kube
 from agentit.portal import github_pr
+from agentit.portal.health_links import (
+    build_health_card_links,
+    enrich_argo_apps_with_links,
+    enrich_pipelines_with_links,
+    resolve_console_url,
+    resolve_github_repo_url,
+)
 from agentit.portal.helpers import get_circuit_breaker_states, get_store, get_templates
 
 log = logging.getLogger(__name__)
@@ -258,6 +265,14 @@ def _get_cluster_health(store=None, loop=None) -> dict:
         "kafka_ready": False, "publisher_ok": False,
         "namespace": os.environ.get("AGENTIT_NAMESPACE", "agentit"),
         "cluster_url": os.environ.get("KUBERNETES_SERVICE_HOST", "local"),
+        "latest_pipeline_name": None,
+        "last_successful_ci_name": None,
+        "current_commit": "",
+        "current_commit_full": "",
+        "github_repo_url": None,
+        "console_url": None,
+        "kafka_name": None,
+        "card_links": {},
     }
 
     managed_names = {"agentit"}
@@ -341,11 +356,13 @@ def _get_cluster_health(store=None, loop=None) -> dict:
             result["pipelines"].append({"name": name, "status": status, "duration": duration})
         if result["pipelines"]:
             result["pipeline_status"] = result["pipelines"][-1]["status"]
+            result["latest_pipeline_name"] = result["pipelines"][-1]["name"]
         for r in reversed(all_runs):
             conds = r.get("status", {}).get("conditions", [{}])
             if conds and conds[0].get("reason") == "Succeeded":
                 ct = r.get("status", {}).get("completionTime", "")
                 result["last_successful_ci"] = ct[:19] if ct else "?"
+                result["last_successful_ci_name"] = r.get("metadata", {}).get("name")
                 break
     except Exception:
         log.warning("Failed to list pipeline runs", exc_info=True)
@@ -375,17 +392,24 @@ def _get_cluster_health(store=None, loop=None) -> dict:
         )
         if agentit_app:
             rev = agentit_app.get("status", {}).get("sync", {}).get("revision", "")
-            result["current_commit"] = rev[:12]
+            result["current_commit_full"] = rev
+            result["current_commit"] = rev[:12] if rev else ""
+            result["github_repo_url"] = resolve_github_repo_url(
+                agentit_app.get("spec", {}).get("source", {}).get("repoURL", ""),
+            )
         else:
             result["current_commit"] = ""
+            result["current_commit_full"] = ""
     except Exception:
         log.debug("Failed to get current commit from Argo CD", exc_info=True)
         result["current_commit"] = ""
+        result["current_commit_full"] = ""
 
     # Kafka
     try:
         kafkas = kube.list_custom_resources("kafka.strimzi.io", "v1beta2", "kafkas", namespace="agentit")
         if kafkas:
+            result["kafka_name"] = kafkas[0].get("metadata", {}).get("name")
             conditions = kafkas[0].get("status", {}).get("conditions", [])
             result["kafka_ready"] = any(
                 c.get("type") == "Ready" and c.get("status") == "True" for c in conditions
@@ -415,6 +439,23 @@ def _get_cluster_health(store=None, loop=None) -> dict:
     except Exception:
         log.debug("Failed to collect circuit breaker states", exc_info=True)
         result["circuit_breakers"] = {}
+
+    # Deep-links for Health cards / tables — real console/GitHub URLs only.
+    console_url = resolve_console_url()
+    result["console_url"] = console_url
+    result["argo_apps"] = enrich_argo_apps_with_links(result["argo_apps"], console_url)
+    result["pipelines"] = enrich_pipelines_with_links(
+        result["pipelines"], console_url, result["namespace"],
+    )
+    result["card_links"] = build_health_card_links(
+        console_url=console_url,
+        github_repo_url=result.get("github_repo_url"),
+        namespace=result["namespace"],
+        latest_pipeline_name=result.get("latest_pipeline_name"),
+        last_successful_ci_name=result.get("last_successful_ci_name"),
+        current_commit=result.get("current_commit_full") or result.get("current_commit"),
+        kafka_name=result.get("kafka_name"),
+    )
 
     return result
 
