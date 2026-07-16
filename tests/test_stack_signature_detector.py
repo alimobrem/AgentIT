@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from src.agentit.stack_signature_detector import detect_repeated_stack_patterns
+from agentit.stack_signature_detector import detect_repeated_stack_patterns
 
 NOW = datetime.now(timezone.utc)
 OLD = NOW - timedelta(days=40)
