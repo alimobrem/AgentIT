@@ -307,8 +307,15 @@ class TestNavigation:
         # docs/ui-redesign-proposal.md builds on -- check the current
         # top-level items instead (Fleet/Admin Review are covered by
         # test_primary_nav_links above).
-        for link in ["Events", "Health", "Insights", "Decisions"]:
+        for link in ["Health", "Insights"]:
             expect(page.locator(f"nav >> text={link}")).to_be_visible()
+        # Events/Decisions/Ledger overlap heavily in purpose (all three are
+        # "what happened" views over the same underlying data) -- grouped
+        # under one primary-nav "Activity" dropdown (base.html's
+        # .activity-menu) instead of three separate top-level items.
+        page.click(".activity-menu-trigger")
+        for link in ["Events", "Decisions", "Ledger"]:
+            expect(page.locator(f".activity-menu-dropdown >> text={link}")).to_be_visible()
         # Capabilities/Settings/Schedules were flat secondary links until the
         # masthead cleanup consolidated them into one user-menu dropdown
         # (base.html's .user-menu) -- closed by default, so they're only
