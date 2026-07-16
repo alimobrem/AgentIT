@@ -124,6 +124,23 @@ async def resolve_gate(request: Request, gate_id: str):
     if gate is None:
         raise HTTPException(404, "Gate not found")
 
+    # Atomically claim the gate BEFORE performing any of the side effects
+    # below (cluster apply / PR merge / GitOps commit) -- `resolve_gate()`'s
+    # `UPDATE ... WHERE status = 'pending'` only succeeds for the first of
+    # any near-simultaneous resolve requests for this gate_id; a second one
+    # loses the claim and bails out here instead of racing the first
+    # through the same side effect. If a claimed side effect below then
+    # fails, that branch calls `s.reopen_gate(gate_id, status)` to put the
+    # gate back to `pending` rather than leaving it falsely marked resolved.
+    claimed = await s.resolve_gate(gate_id, status, resolved_by)
+    if not claimed:
+        target = _gate_redirect_target(gate)
+        sep = "&" if "?" in target else "?"
+        return RedirectResponse(
+            url=f"{target}{sep}error={quote('This gate was already resolved by another request')}",
+            status_code=303,
+        )
+
     audit_log(actor=str(resolved_by), action=f"gate-{status}", resource=f"gate:{gate_id}",
               details={"gate_type": gate.get("gate_type"), "assessment_id": gate.get("assessment_id")})
 
@@ -131,7 +148,6 @@ async def resolve_gate(request: Request, gate_id: str):
         assessment_id = gate["assessment_id"]
 
         if gate.get("gate_type") == "rollback-review":
-            await s.resolve_gate(gate_id, status, resolved_by)
             await s.log_event(
                 "gate-resolver", "rollback-approved",
                 gate.get("target_app"), "warning",
@@ -157,18 +173,19 @@ async def resolve_gate(request: Request, gate_id: str):
                     pr_url = token.rstrip(".,")
                     break
             if not pr_url:
+                await s.reopen_gate(gate_id, status)
                 return RedirectResponse(
                     url=f"/assessments/{assessment_id}/onboard-results?error={quote('No PR URL found on this gate — cannot merge')}",
                     status_code=303,
                 )
             merge_result = await asyncio.to_thread(merge_pr, pr_url)
             if "error" in merge_result:
+                await s.reopen_gate(gate_id, status)
                 log.warning("PR merge failed for gate %s: %s", gate_id, merge_result["error"])
                 return RedirectResponse(
                     url=f"/assessments/{assessment_id}/onboard-results?error={quote('PR merge failed: ' + merge_result['error'][:150])}",
                     status_code=303,
                 )
-            await s.resolve_gate(gate_id, status, resolved_by)
             await s.log_event(
                 "gate-resolver", "gitops-pr-merged", gate.get("target_app"), "info",
                 f"Merged GitOps PR {pr_url} for assessment {assessment_id}",
@@ -202,6 +219,7 @@ async def resolve_gate(request: Request, gate_id: str):
                         allow_operator_namespaces=True,
                     )
                 except Exception as exc:
+                    await s.reopen_gate(gate_id, status)
                     log.exception("Elevated apply failed for gate %s (assessment %s)", gate_id, assessment_id)
                     return RedirectResponse(
                         url=(
@@ -210,7 +228,6 @@ async def resolve_gate(request: Request, gate_id: str):
                         ),
                         status_code=303,
                     )
-                await s.resolve_gate(gate_id, status, resolved_by)
                 applied = len(results["applied"])
                 # Redirect to the NEXT pending cluster-admin-review gate (if
                 # any) rather than always landing on this app's own
@@ -253,6 +270,7 @@ async def resolve_gate(request: Request, gate_id: str):
                         force=True,
                     )
                 except Exception as exc:
+                    await s.reopen_gate(gate_id, status)
                     log.exception("Forced apply failed for gate %s (assessment %s)", gate_id, assessment_id)
                     return RedirectResponse(
                         url=(
@@ -261,12 +279,12 @@ async def resolve_gate(request: Request, gate_id: str):
                         ),
                         status_code=303,
                     )
-                await s.resolve_gate(gate_id, status, resolved_by)
                 applied = len(results["applied"])
                 return RedirectResponse(
                     url=f"/assessments/{assessment_id}/onboard-results?applied={applied}&gate_approved=true",
                     status_code=303,
                 )
+            await s.reopen_gate(gate_id, status)
             return RedirectResponse(
                 url=f"/assessments/{assessment_id}/onboard-results?error={quote('Cannot resolve conflict — original manifests not found for reapply')}",
                 status_code=303,
@@ -283,6 +301,7 @@ async def resolve_gate(request: Request, gate_id: str):
                     actor=str(resolved_by), dry_run=False, force_dry_run_first=False,
                 )
             except Exception as exc:
+                await s.reopen_gate(gate_id, status)
                 log.exception("Delivery failed for gate %s (assessment %s)", gate_id, assessment_id)
                 return RedirectResponse(
                     url=(
@@ -291,7 +310,6 @@ async def resolve_gate(request: Request, gate_id: str):
                     ),
                     status_code=303,
                 )
-            await s.resolve_gate(gate_id, status, resolved_by)
 
             cluster_outcome = delivery["outcomes"].get("cluster_config", {})
             applied = len(cluster_outcome.get("applied", [])) if isinstance(cluster_outcome, dict) else 0
@@ -299,8 +317,6 @@ async def resolve_gate(request: Request, gate_id: str):
                 url=f"/assessments/{assessment_id}/onboard-results?applied={applied}&gate_approved=true",
                 status_code=303,
             )
-
-    await s.resolve_gate(gate_id, status, resolved_by)
 
     if status == "rejected":
         reject_reason = str(form.get("reason", ""))

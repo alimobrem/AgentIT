@@ -1076,12 +1076,37 @@ class AssessmentStore:
         return _rows_to_dicts(rows)
 
     async def resolve_gate(self, gate_id: str, status: str, resolved_by: str) -> bool:
+        """Atomically flip a gate away from `pending`. The `WHERE status =
+        'pending'` makes this the actual claim: only one of any
+        near-simultaneous callers for the same gate_id can ever see
+        `True` back. Callers must check the return value and only
+        proceed to a side effect (cluster apply / PR merge / GitOps
+        commit) after a `True` claim -- see `reopen_gate()` below for
+        undoing a claim whose side effect then failed."""
         result = await self._pool.execute(
             """
             UPDATE gates SET status = $1, resolved_at = $2, resolved_by = $3
             WHERE id = $4 AND status = 'pending'
             """,
             status, _now(), resolved_by, gate_id,
+        )
+        changed = _affected(result) > 0
+        if changed:
+            await self._refresh_active_gates_metric()
+        return changed
+
+    async def reopen_gate(self, gate_id: str, from_status: str) -> bool:
+        """Revert a gate claimed by `resolve_gate()` back to `pending`
+        after its side effect failed, so a human can retry (or reject)
+        instead of it being left falsely marked resolved. Scoped to
+        `WHERE status = from_status` so this only ever undoes the exact
+        claim the calling request itself just made."""
+        result = await self._pool.execute(
+            """
+            UPDATE gates SET status = 'pending', resolved_at = NULL, resolved_by = NULL
+            WHERE id = $1 AND status = $2
+            """,
+            gate_id, from_status,
         )
         changed = _affected(result) > 0
         if changed:

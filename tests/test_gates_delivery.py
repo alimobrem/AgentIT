@@ -81,6 +81,50 @@ class TestResolveGateFunnelsThroughRouter:
         assert len(deliveries) == 1
         assert deliveries[0]["mechanism"] == "cluster_config:direct-apply"
 
+    async def test_concurrent_resolve_requests_apply_only_once(self, gate_client, _mock_kube):
+        """Regression guard for the check-then-act gate-resolution race
+        (Priority 1b): two genuinely concurrent resolve requests for the
+        SAME pending gate must not both perform the cluster apply. Before
+        the fix, the route read the gate as `pending`, ran the side
+        effect, and only afterward called the atomic `resolve_gate()`
+        status-flip -- so two near-simultaneous requests could both read
+        `pending` and both apply. `list_gates("pending")` (the route's
+        own initial read) is slowed down here so both concurrent requests
+        genuinely observe the gate as still-pending before either one
+        reaches its `resolve_gate()` claim -- reproducing the exact
+        "read pending, then race to act" window the bug describes,
+        rather than one request simply finishing before the other starts.
+        """
+        import asyncio
+
+        from agentit.portal.store import AssessmentStore
+
+        client, store, aid = gate_client
+        await store.save_onboarding(aid, [_cluster_config_file()])
+        gate_id = await store.create_gate(aid, "deploy", "Approve deployment")
+
+        orig_list_gates = AssessmentStore.list_gates
+
+        async def _slow_list_gates(self, status="pending"):
+            result = await orig_list_gates(self, status)
+            if status == "pending":
+                await asyncio.sleep(0.2)
+            return result
+
+        with patch.object(AssessmentStore, "list_gates", _slow_list_gates):
+            resp1, resp2 = await asyncio.gather(
+                client.post(f"/gates/{gate_id}/resolve", data={"status": "approved", "resolved_by": "tester"}, follow_redirects=False),
+                client.post(f"/gates/{gate_id}/resolve", data={"status": "approved", "resolved_by": "tester"}, follow_redirects=False),
+            )
+
+        assert _mock_kube.apply_yaml.call_count == 1
+        locations = [resp1.headers["location"], resp2.headers["location"]]
+        assert sum(1 for l in locations if "error=" in l) == 1
+        assert sum(1 for l in locations if "gate_approved=true" in l) == 1
+
+        approved = await store.list_gates(status="approved")
+        assert len(approved) == 1
+
     async def test_approve_audits_the_delivery(self, gate_client, _mock_kube, caplog):
         import logging
         client, store, aid = gate_client
