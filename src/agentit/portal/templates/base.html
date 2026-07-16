@@ -1266,9 +1266,17 @@
     </div>
     <div class="action-bar modal-actions">
       <button class="btn btn-outline" x-ref="cancelBtn" @click="cancel()">Cancel</button>
+      {# !! wrappers matter here: when typedConfirmTarget is '' (the default,
+         non-type-to-confirm case), `'' && x` short-circuits to the string ''
+         rather than boolean false. Alpine's boolean-attribute normalization
+         (bindAttribute in its bind.js) only clears :disabled for exactly
+         null/undefined/false -- a falsy '' is treated as truthy and the
+         button gets stuck disabled="disabled" forever, since nothing ever
+         re-evaluates it again with a *different* falsy value. Coercing to a
+         real boolean avoids relying on that internal Alpine quirk. #}
       <button class="btn" :class="dangerClass" @click="proceed()"
-              :disabled="typedConfirmTarget && typedValue !== typedConfirmTarget"
-              :title="(typedConfirmTarget && typedValue !== typedConfirmTarget) ? ('Type &quot;' + typedConfirmTarget + '&quot; exactly to enable this button') : ''"
+              :disabled="!!typedConfirmTarget && typedValue !== typedConfirmTarget"
+              :title="(!!typedConfirmTarget && typedValue !== typedConfirmTarget) ? ('Type &quot;' + typedConfirmTarget + '&quot; exactly to enable this button') : ''"
               x-text="confirmText"></button>
     </div>
   </div>
