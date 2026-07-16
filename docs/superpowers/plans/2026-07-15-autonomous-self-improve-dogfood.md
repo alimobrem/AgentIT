@@ -227,7 +227,7 @@ Allowed change classes for v1 source autonomy (pick in order):
 
 - [x] Pick one fleet app (e.g. pinky/guestbook) already GitOps-managed — **pinky** / `managed-pinky`
 - [x] GitOps PR merged for pinky improvement ([agentit-gitops#7](https://github.com/alimobrem/agentit-gitops/pull/7); PLACEHOLDER Pod removed).
-- [x] Full portal Assess → Onboard → Deliver on pinky (2026-07-16): assessment `ae0e85b707d3460c8220d949c6bc26cc` → onboard 11 files → real Deliver opened [agentit-gitops#8](https://github.com/alimobrem/agentit-gitops/pull/8) (closed without merge: unresolved `REPLACE_WITH_AGENTIT_IMAGE`). Follow-up: portal Deliver now blocks those placeholders and creates `gitops-pr-pending` so Approve & Deliver can merge a clean PR.
+- [x] Full portal Assess → Onboard → Gate → Approve & Deliver on pinky (2026-07-16): after [#35](https://github.com/alimobrem/AgentIT/pull/35) deployed, assessment `f2d0bae7954f4ed299b6940a6f793389` → onboard 11 files (placeholder CronJobs stripped) → Deliver opened [agentit-gitops#10](https://github.com/alimobrem/agentit-gitops/pull/10) → Approve & Deliver **merged** (no `REPLACE_WITH_AGENTIT_IMAGE`); `managed-pinky` Synced/Healthy. Prior [#8](https://github.com/alimobrem/agentit-gitops/pull/8) closed for placeholders; empty [#9](https://github.com/alimobrem/agentit-gitops/pull/9) also merged via the same gate.
 - [x] Separately, run a skill that originated from learner and was activated after scout-quality Activate checks — live `skill-activated` for learner CVE drafts `cve-2018-1002105-…`, `cve-2019-5736-…`, `cve-2021-25741-…` (verify_skill passed).
 - [x] **skill-improvement mode proven (2026-07-16):** empty `skill_effectiveness` was a wiring bug — `PlatformContext.has_api()` ignored post-init `available_kinds` and `get_api_resources()` discovered named groups as anonymous ([#42](https://github.com/alimobrem/AgentIT/pull/42)). After deploy (`e5ab1cd`): discovery reports ~448 kinds; pinky skill generate yields 24 `category=skills` files; 5 real rejects of `resourcequota` → `get_low_effectiveness_skills()` flags it → `learning-run` `mode=skill-improvement` drafts `resourcequota-scoped` → `verify_skill` + Activate → `skill-activated`; `get_loop_health()` = 100% with recent improvement.
 
@@ -236,7 +236,7 @@ Allowed change classes for v1 source autonomy (pick in order):
 **Files:** `docs/dogfood-self-improve-milestone.md`
 
 - [x] Evidence: PR links, merge times, metrics moved, failures hit, what remains manual — see [`docs/dogfood-self-improve-milestone.md`](../dogfood-self-improve-milestone.md)
-- [x] Explicit claim: “L4 on AgentIT; L5 sample on app pinky”
+- [x] Explicit claim: “L4 on AgentIT; L5 full on app pinky” (portal Approve & Deliver merge)
 - [x] Explicit non-claim: AutoMode / unattended merge still off
 
 **Phase 4 exit:** Public (internal) write-up + demo path another engineer can replay.
