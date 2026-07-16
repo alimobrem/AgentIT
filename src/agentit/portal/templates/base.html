@@ -411,6 +411,12 @@
     animation: btn-spin 0.6s linear infinite;
     margin-left: var(--space-2);
   }
+  /* Prefer the in-button spinner-wrap when present (same label↔busy swap
+     as .btn.submitting / htmx-request) so Dry Run / Apply / Per-Agent PRs
+     share one feedback mechanism instead of stacking two spinners. */
+  .btn-loading .btn-label { display: none; }
+  .btn-loading .htmx-indicator { display: inline-flex; }
+  .btn-loading:has(.htmx-indicator)::after { display: none; content: none; }
   @keyframes btn-spin {
     to { transform: rotate(360deg); }
   }
@@ -432,6 +438,86 @@
     margin-bottom: var(--space-7);
   }
   .inline-form { display: inline; }
+
+  /* ── Delivery action path (onboard-results) ─────────────────────── */
+  .delivery-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-6);
+    align-items: flex-start;
+    margin-bottom: var(--space-7);
+  }
+  .delivery-primary {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    min-width: 14rem;
+  }
+  .delivery-step {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .delivery-step-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+  .delivery-step-num {
+    flex-shrink: 0;
+    width: 1.5rem;
+    height: 1.5rem;
+    border-radius: 50%;
+    border: 1px solid var(--color-border);
+    background: var(--color-surface-2);
+    color: var(--color-muted);
+    font-size: var(--font-sm);
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+  }
+  .delivery-step-num.is-done {
+    border-color: var(--color-btn-green);
+    color: var(--color-btn-green);
+  }
+  .delivery-step-num.is-active {
+    border-color: var(--color-accent);
+    color: var(--color-text);
+  }
+  .delivery-connector {
+    width: 2px;
+    height: var(--space-5);
+    background: var(--color-border);
+    margin-left: calc(0.75rem - 1px);
+    margin-top: var(--space-1);
+    margin-bottom: var(--space-1);
+  }
+  .delivery-step-row .inline-form { flex: 1; display: flex; }
+  .delivery-step-row .btn {
+    flex: 1;
+    justify-content: center;
+    min-width: 10rem;
+  }
+  .delivery-step-status {
+    margin-left: calc(1.5rem + var(--space-3));
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--font-sm);
+    color: var(--color-muted);
+  }
+  .delivery-secondary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    align-items: center;
+    padding-top: var(--space-1);
+    border-left: 1px solid var(--color-border);
+    padding-left: var(--space-6);
+  }
 
   /* ── Alerts ────────────────────────────────────────────────────── */
   .alert {
@@ -1128,6 +1214,15 @@
     .dimension-value { width: auto; text-align: left; }
     .action-bar { flex-direction: column; align-items: stretch; }
     .action-bar .btn { text-align: center; justify-content: center; }
+    .delivery-actions { flex-direction: column; }
+    .delivery-secondary {
+      border-left: none;
+      padding-left: 0;
+      border-top: 1px solid var(--color-border);
+      padding-top: var(--space-4);
+      width: 100%;
+    }
+    .delivery-step-row .btn { width: 100%; }
   }
 </style>
 </head>

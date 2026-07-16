@@ -104,6 +104,19 @@ class TestEveryPageLoads:
         url, aid, _ = app_url
         page.goto(f"{url}/assessments/{aid}/onboard-results")
         expect(page.locator("h1")).to_contain_text("Onboarding")
+        # Vertical Dry Run → Apply path; short labels; status outside CTAs.
+        expect(page.locator(".delivery-actions")).to_be_visible()
+        expect(page.locator(".delivery-primary")).to_be_visible()
+        expect(page.locator(".delivery-connector")).to_be_attached()
+        expect(page.locator(".delivery-secondary")).to_be_visible()
+        dry_run = page.locator(".delivery-primary button", has_text="Dry Run")
+        apply_btn = page.locator(".delivery-primary button", has_text="Apply")
+        expect(dry_run).to_be_visible()
+        expect(apply_btn).to_be_visible()
+        expect(apply_btn).not_to_contain_text("No dry run yet")
+        expect(page.locator(".delivery-step-status", has_text="No dry run yet")).to_be_visible()
+        expect(page.locator(".delivery-secondary button", has_text="Per-Agent PRs")).to_be_visible()
+        expect(page.locator(".delivery-secondary a", has_text="Download")).to_be_visible()
 
     def test_remediations_page(self, page: Page, app_url):
         url, aid, _ = app_url
