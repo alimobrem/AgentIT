@@ -177,14 +177,18 @@ async def ledger_page(
         })
 
     # §2 rule 2: fleet-wide default is grouped by app, collapsed to one row
-    # each -- same fields fleet.html already computes (score, GitOps badge,
-    # pending-action count), plus that app's own most-recent Ledger card.
-    # Same enrichment call `home()` makes (one cached Argo CD list, not one
-    # live kube call per app) -- only needed here in the grouped branch,
-    # since the flat stream above never renders a GitOps badge.
-    from agentit.portal.routes.fleet import _enrich_fleet_with_cluster_status
-    loop = asyncio.get_running_loop()
-    fleet = await asyncio.to_thread(_enrich_fleet_with_cluster_status, fleet, s, loop)
+    # each -- score and pending-action count, plus that app's own most-
+    # recent Ledger card. Deliberately skips fleet.html's live cluster/Argo
+    # CD enrichment (`_enrich_fleet_with_cluster_status`) -- that call
+    # bridges a worker thread back onto this request's event loop via
+    # `run_coroutine_threadsafe` (see its own docstring), and this grouped
+    # view already runs `list_slos()` per app just below; stacking a second
+    # thread-bridged cluster call on top added real, measured extra load on
+    # that bridge under the full test suite for a GitOps badge the "Needs
+    # You" triage view doesn't need (a user who clicks through to Fleet or
+    # Assessment Detail already sees it there). If a live deploy-status
+    # badge is wanted here later, do it as its own follow-up, not bundled
+    # into this view by default.
     await _attach_pending_actions(fleet, s)
     stale_gate_ids = {g["id"] for g in await s.get_stale_gates(hours=4)}
     all_gates = await s.list_all_gates()
@@ -208,7 +212,6 @@ async def ledger_page(
             "repo_name": a["repo_name"],
             "assessment_id": a["id"],
             "score": a["latest_score"],
-            "gitops_registered": a.get("gitops_registered", False),
             "pending_actions_count": a.get("pending_actions_count", 0),
             "breached_slo_count": breached_count,
             "needs_you": row_needs_you,
