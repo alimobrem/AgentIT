@@ -1268,13 +1268,38 @@ class AssessmentStore:
     async def list_slos(self, assessment_id: str) -> list[dict]:
         """Keyed off ``repo_url``, joined back through every historical
         assessment of the same app, the same fix shape
-        ``list_gates_for_assessment()`` already has."""
+        ``list_gates_for_assessment()`` already has.
+
+        Identical ``(metric_name, target_value)`` rows from repeated
+        onboarding (before default-SLO seeding skipped existing metrics)
+        are collapsed to the newest assessment that owns that identity,
+        so Fleet / per-app SLO pages do not show each metric N times.
+        Multiple rows with the same identity on a *single* assessment
+        (Add-SLO / progress-bar fixtures) are preserved.
+        """
         rows = await self._pool.fetch(
             """
-            SELECT slos.* FROM slos
-            INNER JOIN assessments ON slos.assessment_id = assessments.id
-            WHERE assessments.repo_url = (SELECT repo_url FROM assessments WHERE id = $1)
-            ORDER BY slos.metric_name
+            WITH scoped AS (
+                SELECT slos.*, assessments.assessed_at
+                FROM slos
+                INNER JOIN assessments ON slos.assessment_id = assessments.id
+                WHERE assessments.repo_url = (
+                    SELECT repo_url FROM assessments WHERE id = $1
+                )
+            ),
+            newest AS (
+                SELECT metric_name, target_value, MAX(assessed_at) AS max_at
+                FROM scoped
+                GROUP BY metric_name, target_value
+            )
+            SELECT s.id, s.assessment_id, s.metric_name, s.target_value,
+                   s.current_value, s.status, s.created_at, s.updated_at
+            FROM scoped s
+            INNER JOIN newest n
+              ON s.metric_name = n.metric_name
+             AND s.target_value = n.target_value
+             AND s.assessed_at = n.max_at
+            ORDER BY s.metric_name
             """,
             assessment_id,
         )
