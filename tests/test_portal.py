@@ -577,19 +577,32 @@ async def test_masthead_nav_structure(client, _override_store):
     assert resp.status_code == 200
     html = resp.text
     assert "events-bell" in html
+    assert "events-bell-badge" in html
     assert 'id="events-drawer"' in html
     assert "eventsDrawer()" in html
     assert "/api/events?limit=20" in html
+    # Badge polls the same real feed (slightly larger window for unread).
+    assert "/api/events?limit=50" in html
+    assert "agentit.events.lastSeenAt" in html
+    assert "refreshBadge" in html
     assert "activity-menu" not in html
     # Bell shares Alpine scope with the drawer (aria-expanded + focus restore).
     assert ':aria-expanded="open"' in html
     assert 'x-ref="bellBtn"' in html
     assert 'x-ref="closeBtn"' in html
     assert 'x-ref="drawerPanel"' in html
+    # Mobile hamburger owns primary + secondary (not secondary-only).
+    assert 'id="nav-primary"' in html
+    assert 'id="nav-secondary"' in html
+    assert 'aria-controls="nav-primary nav-secondary"' in html
+    assert ":aria-expanded=\"navOpen\"" in html
+    assert 'nav .links.links-open' in html
     # Single "View all" CTA (footer), not duplicated in the header.
     drawer = html.split('id="events-drawer-panel"', 1)[1].split("id=\"nav-loading\"", 1)[0]
     assert drawer.count(">View all<") == 1
     assert "Open full Events page" not in drawer
+    assert "Run an assessment from Fleet" in drawer
+    assert "events-drawer-empty-hint" in drawer
     primary = html.split('class="links"', 1)[1].split("links-secondary", 1)[0]
     assert 'href="/ledger"' in primary
     assert 'href="/decisions"' not in primary

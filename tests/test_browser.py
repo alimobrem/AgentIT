@@ -349,6 +349,43 @@ class TestNavigation:
         page.goto(url)
         hamburger = page.locator("[aria-label='Toggle menu']")
         expect(hamburger).to_be_visible()
+        expect(hamburger).to_have_attribute("aria-expanded", "false")
+        # Primary Fleet…Insights + Events/account are collapsed until open.
+        expect(page.locator("#nav-primary")).to_be_hidden()
+        expect(page.locator("#nav-secondary")).to_be_hidden()
+        hamburger.click()
+        expect(hamburger).to_have_attribute("aria-expanded", "true")
+        expect(page.locator("#nav-primary >> text=Fleet")).to_be_visible()
+        expect(page.locator("#nav-primary >> text=Insights")).to_be_visible()
+        expect(page.locator("#nav-secondary .events-bell")).to_be_visible()
+        expect(page.locator("#nav-secondary .user-menu-trigger")).to_be_visible()
+
+    def test_events_bell_badge_from_real_events(self, page: Page, app_url):
+        """Unread/critical badge uses /api/events + last-seen; hide when zero."""
+        url, _, _ = app_url
+        # First visit with no last-seen: critical/high from the live API
+        # badge the bell. Route a real-shaped payload so the assertion is
+        # deterministic (browser fixture store may only have info events).
+        page.route("**/api/events**", lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body='[{"id":"1","timestamp":"2099-01-01T00:00:00+00:00","severity":"critical","action":"alert","summary":"badge test","agent_id":"t","target_app":"a"}]',
+        ))
+        page.goto(url)
+        page.evaluate("() => localStorage.removeItem('agentit.events.lastSeenAt')")
+        page.reload()
+        bell = page.locator(".events-bell")
+        badge = page.locator(".events-bell-badge")
+        expect(bell).to_be_visible()
+        expect(badge).to_be_visible()
+        expect(badge).to_have_text("1")
+        expect(bell).to_have_attribute("aria-label", "Open events feed, 1 unread")
+        # Opening the drawer marks last-seen and clears the badge.
+        bell.click()
+        expect(page.locator("#events-drawer-panel")).to_be_visible()
+        page.click(".events-drawer-close")
+        expect(badge).to_be_hidden()
+        expect(bell).to_have_attribute("aria-label", "Open events feed")
 
     def test_assessment_detail_back_link(self, page: Page, app_url):
         url, aid, _ = app_url
