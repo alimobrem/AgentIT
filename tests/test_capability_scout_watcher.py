@@ -143,7 +143,7 @@ async def test_research_once_opens_pr_and_logs_proposed_event(tmp_path, monkeypa
          patch("agentit.git_pr.open_draft_pr", return_value={"pr_url": "https://github.com/org/agentit/pull/9"}):
         result = await scout.research_once()
 
-    assert result == {"outcome": "proposed", "pr_url": "https://github.com/org/agentit/pull/9"}
+    assert result == {"outcome": "proposed", "pr_url": "https://github.com/org/agentit/pull/9", "build_mode": "docs"}
     events = await store.list_events_by_action("capability-run")
     assert len(events) == 1
     assert events[0]["severity"] == "info"
@@ -197,10 +197,11 @@ def test_defaults_to_none_store_when_omitted():
 
 
 class TestAsyncRunLoop:
-    @patch("agentit.watchers.capability_scout.asyncio.sleep", side_effect=KeyboardInterrupt)
-    async def test_run_ticks_once_then_stops_on_interrupt(self, mock_sleep, capsys):
-        scout, _ = _scout()
-        with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")):
+    async def test_run_ticks_once_then_stops_on_interrupt(self, capsys):
+        # Skip startup grace so the first sleep_with_heartbeat is the tick interval.
+        scout, _ = _scout(startup_grace_seconds=0)
+        with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")), \
+             patch("agentit.watchers.sleep_with_heartbeat", side_effect=KeyboardInterrupt) as mock_sleep:
             await scout.run()
 
         captured = capsys.readouterr()
@@ -208,14 +209,32 @@ class TestAsyncRunLoop:
         assert "capability-scout stopped." in captured.err
         mock_sleep.assert_called_once_with(86400)
 
+    async def test_startup_grace_interrupt_stops_gracefully(self, capsys):
+        """A KeyboardInterrupt during the startup-grace sleep (the real
+        default -- startup_grace_seconds=90) must be caught the same way
+        the steady-state loop's is, not propagate out of run() uncaught.
+        Regression test: the startup-grace sleep used to be unwrapped, so
+        this would previously raise instead of stopping gracefully."""
+        scout, _ = _scout()  # default startup_grace_seconds=90
+        with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")), \
+             patch("agentit.watchers.sleep_with_heartbeat", side_effect=KeyboardInterrupt) as mock_sleep:
+            await scout.run()
+
+        captured = capsys.readouterr()
+        assert "Startup grace" in captured.err
+        assert "capability-scout stopped." in captured.err
+        # Never reached the tick loop -- the interrupt fired during the
+        # grace period's own sleep_with_heartbeat(90) call.
+        mock_sleep.assert_called_once_with(90)
+
 
 class TestTickRunsOnEventLoopAndRecordsTelemetry:
-    @patch("agentit.watchers.capability_scout.asyncio.sleep", side_effect=KeyboardInterrupt)
-    async def test_research_once_awaited_directly_and_telemetry_records(self, mock_sleep):
+    async def test_research_once_awaited_directly_and_telemetry_records(self):
         async_store, store = await make_async_store()
-        scout, _ = _scout(store=async_store)
+        scout, _ = _scout(store=async_store, startup_grace_seconds=0)
 
         with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")), \
+             patch("agentit.watchers.sleep_with_heartbeat", side_effect=KeyboardInterrupt), \
              patch.object(scout, "research_once", wraps=scout.research_once) as mock_research_once:
             await scout.run()
 

@@ -156,30 +156,9 @@ spec:
             description: "agentit_route_cert_expiry_days is {{ "{{" }} $value {{ "}}" }}."
         {{- end }}
 
-        {{- if .Values.backup.enabled }}
-        - alert: AgentITBackupFailed
-          expr: |
-            agentit_backup_last_status{target="sqlite"} == 0
-          labels:
-            severity: warning
-          annotations:
-            summary: "The last SQLite backup job reported failure"
-            description: >-
-              agentit_backup_last_status{target="sqlite"} is 0 -- see the
-              agentit-db-backup CronJob's most recent Job logs.
-
-        - alert: AgentITBackupStale
-          expr: |
-            (time() - agentit_backup_last_success_timestamp{target="sqlite"}) > 43200
-          labels:
-            severity: warning
-          annotations:
-            summary: "No successful SQLite backup reported in over 12 hours"
-            description: >-
-              agentit-db-backup's schedule is every 6h; no successful backup
-              has been reported in over 2x that interval.
-        {{- end }}
-        {{- if .Values.postgres.bundled.backup.enabled }}
+        {{- /* SQLite backup alerts removed — store is Postgres-only.
+             Match postgres-bundled-backup.yaml's enable gate. */}}
+        {{- if and .Values.postgres.bundled.enabled .Values.postgres.bundled.backup.enabled }}
         - alert: AgentITBackupFailed
           expr: |
             agentit_backup_last_status{target="postgres"} == 0

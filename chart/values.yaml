@@ -186,6 +186,11 @@ agents:
     enabled: false
     interval: 86400   # 24 hours
     maxOpenPRs: 1      # only open a new proposal PR if fewer than this many agentit/self-improve/* PRs are already open
+    # Diff mode for propose-watch: docs (proposal markdown only), source
+    # (skills/checks/tests file edits when targets allow), auto (pick source
+    # when eligible else docs). Chart default stays docs; dogfood sets auto
+    # via argocd/application.yaml.
+    mode: docs
 
 rbac:
   # Cross-namespace apply is the core "Apply to Cluster" feature: onboarding a

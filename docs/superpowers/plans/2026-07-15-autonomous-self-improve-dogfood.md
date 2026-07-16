@@ -150,44 +150,46 @@
 
 ### Task 2.1: Design the source-diff path (small, fail-closed)
 
-**Files:** new helpers in `src/agentit/capability_scout.py` (or `capability_patch.py`), tests first
+**Files:** helpers in `src/agentit/capability_scout.py` + `LLMClient.generate_capability_files`, tests first
 
 Allowed change classes for v1 source autonomy (pick in order):
 1. **Skill/check markdown** under `skills/` / `checks/` (safest — mirrors skill-learner)
 2. **Test-only fixes** under `tests/` (prove gates + pytest)
-3. **Narrow bugfix** under `src/agentit/` with file contents fed into the LLM
+3. **Narrow bugfix** under `src/agentit/` with file contents fed into the LLM — **deferred**; v1 source allowlist is `skills/`|`checks/`|`tests/` only
 
-- [ ] Write failing tests for: allowlist, deny chart/argocd, line cap, require test_plan, require `py_compile` + targeted pytest
-- [ ] Implement `build_source_diff(proposal, repo_dir) -> dict[path, content]` that:
+- [x] Write tests for: resolve_build_mode, source allowlist, drop out-of-target LLM paths, docs fallback
+- [x] Implement `build_source_diff(proposal, repo_dir, llm_client) -> dict[path, content]` that:
   - reads current file text for each `target_files` entry
-  - asks LLM for a unified diff or full-file replacement **only for those files**
+  - asks LLM for full-file replacement **only for those files**
   - rejects if paths drift outside proposal allowlist
+- [x] Fall back to docs proposal when LLM returns nothing / ineligible targets
 
 ### Task 2.2: Gate upgrade
 
 **Files:** `run_safety_gates`
 
-- [ ] Run `pytest` on touched tests + CI-equivalent ignore list (same as `.github/workflows/tests.yml`)
-- [ ] Fail if diff empty, or only docs when `change_class=source` requested
-- [ ] Keep secret regex scan
+- [x] Existing gates still apply to source diffs (size, scope, secrets, test_plan, py_compile, pytest suite)
+- [ ] Optional follow-up: fail hard if `mode=source` requested but only docs/proposals landed (today we soft-fallback to docs)
+- [x] Keep secret regex scan
 
 ### Task 2.3: Dual-mode scout
 
 **Files:** `watchers/capability_scout.py`, values `agents.capabilityScout.mode: docs|source|auto`
 
-- [ ] `docs` = today’s behavior (safe fallback)
-- [ ] `source` = Task 2.1 path
-- [ ] `auto` = prefer source when risk=low and target_files ⊆ skills|tests|single module; else docs
-- [ ] Dogfood with `source` or `auto` only after 2 green docs PRs in Phase 1
+- [x] `docs` = today’s behavior (safe fallback / chart default)
+- [x] `source` = Task 2.1 path (falls back to docs if ineligible)
+- [x] `auto` = source when all targets ⊆ skills|checks|tests; else docs
+- [x] Dogfood Helm: `agents.capabilityScout.mode=auto` in `argocd/application.yaml`; CLI `--mode`; chart template args
 
 ### Task 2.4: First merged source PR (manual governor)
 
-- [ ] Trigger `propose-once` until a low-risk source PR opens
+- [ ] Commit + push Phase 2 + prometheusrule fix so Argo can clear ComparisonError and scout redeploys with `mode=auto`
+- [ ] Trigger `propose-once --mode auto` (or wait for hourly tick) until a low-risk source PR opens
 - [ ] Human reviews; merge if CI green
 - [ ] Record time-to-merge and edit distance (lines you rewrote)
 - [ ] Repeat until **2 merges** meet north-star (&lt;30 min rewrite)
 
-**Phase 2 exit:** L3 achieved — two merged executable self-improve PRs; docs updated to say source mode is real.
+**Phase 2 exit:** L3 achieved — two merged executable self-improve PRs; docs updated to say source mode is real. (Code path shipped locally; live merges still open.)
 
 ---
 

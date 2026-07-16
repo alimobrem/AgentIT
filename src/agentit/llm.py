@@ -380,6 +380,49 @@ class LLMClient:
             logger.warning("LLM capability proposal still unparseable after retry: %s", (raw2 or "")[:500])
         return None
 
+    def generate_capability_files(self, proposal: dict, current_files: dict[str, str]) -> dict[str, str] | None:
+        """Given a capability-scout proposal and the current text of each
+        target file, return a full-file replacement map for those paths only.
+
+        Used by L3 ``source`` / ``auto`` mode in ``capability_scout.build_source_diff``.
+        Returns ``None`` on LLM/parse failure (caller falls back to docs mode).
+        Never invents paths that weren't in ``current_files``.
+        """
+        user_msg = (
+            "Proposal (JSON):\n"
+            f"{json.dumps(proposal, default=str)}\n\n"
+            "Current file contents (JSON object path -> text; empty string means new file):\n"
+            f"{json.dumps(current_files)}\n\n"
+            "Return ONLY valid JSON of the form "
+            '{"files": {"relative/path": "full new file contents", ...}} '
+            "including every path from the current-files object you choose to change. "
+            "Do not add paths that were not provided. Keep each file as small as possible."
+        )
+        system = (
+            "You implement a small, evidence-grounded change for AgentIT's own repo. "
+            "Only edit skills/, checks/, or tests/ files you were given. "
+            "Respond ONLY with valid JSON — no markdown fences. "
+            'If you cannot produce a safe change, return {"files": {}}.'
+        )
+        raw = self._chat(system, user_msg, max_tokens=_CAPABILITY_PROPOSAL_MAX_TOKENS)
+        if raw is None:
+            return None
+        try:
+            parsed = json.loads(raw)
+            files = parsed.get("files", parsed)
+            if not isinstance(files, dict):
+                raise TypeError("'files' is not an object")
+            allowed = set(current_files)
+            out = {
+                str(path): str(content)
+                for path, content in files.items()
+                if str(path) in allowed
+            }
+            return out or None
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            logger.warning("LLM returned unparseable capability files payload: %s", (raw or "")[:500])
+            return None
+
     def _parse_capability_proposal(self, raw: str | None) -> dict | None:
         """Parse a capability-scout proposal payload. Returns None on failure."""
         if raw is None:

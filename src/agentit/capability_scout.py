@@ -3,20 +3,16 @@
 skills catalog AgentIT generates for the apps it onboards. See
 docs/self-improvement-for-agentit.md for the full design.
 
-**Scope boundary (read this before extending).** The LLM step
-(``LLMClient.propose_capability_improvement``) proposes and documents a
-change — title, gap, evidence, suggested target files, risk, test plan —
-as a real, reviewable artifact (a new ``docs/proposals/<slug>.md`` file).
-It does NOT auto-generate or mechanically apply the actual source diff
-those target files would need: the design doc's own "Cheap reuse vs. real
-new work" section explicitly calls out "actually generating a source code
-diff ... via LLM and applying it mechanically" as separate, harder,
-not-yet-built work, distinct from this loop's reused plumbing (watcher
-lifecycle, event logging, git-branch-push, portal transparency). Every
-proposal this module ships is therefore exactly what the real evidence
-supports — a durable, evidence-cited recommendation a human can act on,
-never a fabricated code change to a file the LLM has never seen the
-contents of.
+**Scope boundary (read this before extending).** Two build modes:
+
+- ``docs`` (default / safe fallback): the LLM proposes and documents a
+  change as ``docs/proposals/<slug>.md`` — never auto-applies source.
+- ``source`` / ``auto`` (L3 dogfood): when every ``target_files`` entry sits
+  under ``skills/``, ``checks/``, or ``tests/``, the LLM is asked for full
+  file contents for those paths only (current text fed in). Paths outside
+  that set, LLM failures, or empty patches fall back to the docs artifact
+  rather than inventing a ``src/agentit/`` edit. ``src/agentit/`` source
+  autonomy is deliberately deferred until skills/tests dogfood proves out.
 """
 from __future__ import annotations
 
@@ -38,6 +34,9 @@ MAX_DIFF_LINES = 150
 
 SCOPE_ALLOWED_PREFIXES = ("src/agentit/", "skills/", "checks/", "tests/", "docs/")
 SCOPE_DENY_SUBSTRINGS = ("chart/", "argocd/", ".github/workflows/", "dockerfile", "secret", "rbac")
+
+# L3 source-mode allowlist — narrower than SCOPE_ALLOWED_PREFIXES on purpose.
+SOURCE_ALLOWED_PREFIXES = ("skills/", "checks/", "tests/")
 
 # The single highest-precision signal source per the design doc — explicit,
 # human-written admissions of missing functionality in this repo's own docs.
@@ -190,13 +189,112 @@ def render_proposal_doc(proposal: dict) -> str:
     return "\n".join(lines)
 
 
-def build_diff(proposal: dict) -> dict[str, str]:
-    """The literal set of file changes this cycle would commit — see this
-    module's docstring for the scope boundary (a documentation artifact,
-    not an auto-applied source diff)."""
+def build_diff(
+    proposal: dict,
+    *,
+    mode: str = "docs",
+    repo_dir: Path | None = None,
+    llm_client: object | None = None,
+) -> dict[str, str]:
+    """File changes this cycle would commit.
+
+    ``mode``:
+    - ``docs``: always ``docs/proposals/<slug>.md`` (v1 behavior).
+    - ``source`` / ``auto``: attempt skill/check/test file generation when
+      targets are eligible; otherwise fall back to the docs artifact.
+    """
+    resolved = resolve_build_mode(proposal, mode)
+    if resolved == "source" and repo_dir is not None and llm_client is not None:
+        source = build_source_diff(proposal, Path(repo_dir), llm_client)
+        if source:
+            return source
+        logger.warning(
+            "capability-scout source mode produced no files for %r — falling back to docs proposal",
+            proposal.get("title"),
+        )
+    return build_docs_diff(proposal)
+
+
+def build_docs_diff(proposal: dict) -> dict[str, str]:
+    """The literal docs/proposals artifact (v1 / fallback)."""
     slug = slugify(proposal.get("title", "proposal"))
     path = f"docs/proposals/{slug}.md"
     return {path: render_proposal_doc(proposal)}
+
+
+def paths_eligible_for_source(target_files: list[str] | None) -> bool:
+    """True when every target path is under skills/, checks/, or tests/ and
+    none hit the denylist — the L3 source-mode allowlist."""
+    if not target_files:
+        return False
+    for path in target_files:
+        normalized = path.replace("\\", "/")
+        lowered = normalized.lower()
+        if any(bad in lowered for bad in SCOPE_DENY_SUBSTRINGS):
+            return False
+        if not any(normalized.startswith(prefix) for prefix in SOURCE_ALLOWED_PREFIXES):
+            return False
+    return True
+
+
+def resolve_build_mode(proposal: dict, mode: str) -> str:
+    """Map requested mode + proposal targets to ``docs`` or ``source``."""
+    requested = (mode or "docs").strip().lower()
+    if requested not in ("docs", "source", "auto"):
+        requested = "docs"
+    if requested == "docs":
+        return "docs"
+    eligible = paths_eligible_for_source(proposal.get("target_files") or [])
+    if requested == "source":
+        return "source" if eligible else "docs"
+    # auto
+    return "source" if eligible else "docs"
+
+
+def load_target_file_contents(repo_dir: Path, target_files: list[str]) -> dict[str, str]:
+    """Read current file text for each target (empty string if creating new)."""
+    out: dict[str, str] = {}
+    for path in target_files:
+        normalized = path.replace("\\", "/")
+        full = repo_dir / normalized
+        if full.is_file():
+            try:
+                out[normalized] = full.read_text(encoding="utf-8")
+            except OSError:
+                out[normalized] = ""
+        else:
+            out[normalized] = ""
+    return out
+
+
+def build_source_diff(proposal: dict, repo_dir: Path, llm_client: object) -> dict[str, str]:
+    """Ask the LLM for full-file replacements for eligible target_files only.
+
+    Drops any path the LLM returns that wasn't in the proposal's target set
+    or isn't source-allowlisted — never widen scope mid-cycle.
+    """
+    targets = [p.replace("\\", "/") for p in (proposal.get("target_files") or [])]
+    if not paths_eligible_for_source(targets):
+        return {}
+    current = load_target_file_contents(repo_dir, targets)
+    generate = getattr(llm_client, "generate_capability_files", None)
+    if generate is None:
+        return {}
+    generated = generate(proposal, current)
+    if not generated or not isinstance(generated, dict):
+        return {}
+    allowed = set(targets)
+    cleaned: dict[str, str] = {}
+    for path, content in generated.items():
+        normalized = str(path).replace("\\", "/")
+        if normalized not in allowed:
+            logger.warning("Dropping LLM path outside proposal targets: %s", normalized)
+            continue
+        if not paths_eligible_for_source([normalized]):
+            logger.warning("Dropping LLM path outside source allowlist: %s", normalized)
+            continue
+        cleaned[normalized] = str(content)
+    return cleaned
 
 
 # ── Safety gates ─────────────────────────────────────────────────────────

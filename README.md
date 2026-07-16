@@ -183,8 +183,10 @@ GitHub's own PR UI stays the surface for reviewing the actual code diff; the por
 uv run agentit propose-watch --interval 86400 --max-open-prs 1
 
 # One-shot cycle for dogfood / debugging (no startup grace, no loop)
-uv run agentit propose-once --max-open-prs 1
+uv run agentit propose-once --mode auto --max-open-prs 1
 ```
+
+**Build modes:** `docs` (proposal markdown only), `source` (edit `skills/`/`checks/`/`tests/` when targets allow), `auto` (source when eligible, else docs). Dogfood sets `agents.capabilityScout.mode=auto` via Helm.
 
 See [`docs/superpowers/plans/2026-07-15-autonomous-self-improve-dogfood.md`](docs/superpowers/plans/2026-07-15-autonomous-self-improve-dogfood.md) for the L0→L5 dogfood milestone plan (substrate → source PRs → outcome loop).
 

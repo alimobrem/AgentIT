@@ -39,6 +39,8 @@ spec:
             - "{{ .Values.agents.capabilityScout.interval }}"
             - --max-open-prs
             - "{{ .Values.agents.capabilityScout.maxOpenPRs }}"
+            - --mode
+            - "{{ .Values.agents.capabilityScout.mode | default "docs" }}"
           env:
             # Reads AgentIT's own fleet data via the same store every other
             # watcher uses -- no shared/RWX storage needed (this watcher is

@@ -515,8 +515,12 @@ async def learn_watch(interval: int, limit: int, llm_model: str | None) -> None:
 @click.option("--interval", default=86400, type=int, help="Research interval in seconds (default: 24 hours).")
 @click.option("--llm-model", default=None, help="Claude model to use.")
 @click.option("--max-open-prs", default=1, type=int, help="Max concurrent open agentit/self-improve/* PRs.")
+@click.option(
+    "--mode", default="docs", type=click.Choice(["docs", "source", "auto"], case_sensitive=False),
+    help="Diff mode: docs (proposal markdown), source (skills/checks/tests files), auto.",
+)
 @_run_async
-async def propose_watch(interval: int, llm_model: str | None, max_open_prs: int) -> None:
+async def propose_watch(interval: int, llm_model: str | None, max_open_prs: int, mode: str) -> None:
     """Long-lived capability-scout — periodically proposes small, evidence-grounded improvements to AgentIT's own codebase.
 
     See docs/self-improvement-for-agentit.md. Distinct from `self-assess`/
@@ -531,7 +535,7 @@ async def propose_watch(interval: int, llm_model: str | None, max_open_prs: int)
     store = await create_store()
     scout = CapabilityScout(
         publisher=get_publisher(), llm_model=llm_model, interval=interval,
-        store=store, max_open_prs=max_open_prs,
+        store=store, max_open_prs=max_open_prs, mode=mode,
     )
     await scout.run()
 
@@ -539,12 +543,16 @@ async def propose_watch(interval: int, llm_model: str | None, max_open_prs: int)
 @main.command("propose-once")
 @click.option("--llm-model", default=None, help="Claude model to use.")
 @click.option("--max-open-prs", default=1, type=int, help="Max concurrent open agentit/self-improve/* PRs.")
+@click.option(
+    "--mode", default="auto", type=click.Choice(["docs", "source", "auto"], case_sensitive=False),
+    help="Diff mode (default auto for dogfood one-shots).",
+)
 @_run_async
-async def propose_once(llm_model: str | None, max_open_prs: int) -> None:
+async def propose_once(llm_model: str | None, max_open_prs: int, mode: str) -> None:
     """Run a single capability-scout cycle (dogfood / debugging).
 
     Same research→gate→draft-PR path as ``propose-watch``, without the
-    long-lived loop or startup grace — use this to exercise L1/L2 during
+    long-lived loop or startup grace — use this to exercise L1/L3 during
     the autonomous self-improve dogfood milestone without waiting for the
     hourly/daily tick.
     """
@@ -554,10 +562,12 @@ async def propose_once(llm_model: str | None, max_open_prs: int) -> None:
     store = await create_store()
     scout = CapabilityScout(
         publisher=get_publisher(), llm_model=llm_model,
-        store=store, max_open_prs=max_open_prs, startup_grace_seconds=0,
+        store=store, max_open_prs=max_open_prs, startup_grace_seconds=0, mode=mode,
     )
     result = await scout.research_once()
     click.echo(f"[propose-once] outcome={result.get('outcome')}" + (
+        f" mode={result.get('build_mode')}" if result.get("build_mode") else ""
+    ) + (
         f" pr={result['pr_url']}" if result.get("pr_url") else ""
     ))
 

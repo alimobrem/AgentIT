@@ -75,6 +75,9 @@ spec:
         # L3 proof — see docs/superpowers/plans/2026-07-15-autonomous-self-improve-dogfood.md
         - name: agents.capabilityScout.interval
           value: "3600"
+        # L3 dogfood: prefer skills/checks/tests source PRs when targets allow
+        - name: agents.capabilityScout.mode
+          value: "auto"
         # OpenShift oauth-proxy in front of the portal Route — required for
         # dogfood (privileged automation console must not stay open). See
         # docs/deployment.md#authentication.

@@ -142,6 +142,82 @@ class TestBuildDiff:
         assert slugify("") == "proposal"
 
 
+# ── source / auto mode (L3 dogfood) ─────────────────────────────────────────
+
+
+class TestResolveBuildMode:
+    def test_docs_mode_always_docs(self):
+        from agentit.capability_scout import resolve_build_mode
+
+        assert resolve_build_mode(_proposal(target_files=["skills/security/x.md"]), "docs") == "docs"
+
+    def test_auto_picks_source_for_skills_checks_tests_only(self):
+        from agentit.capability_scout import resolve_build_mode
+
+        assert resolve_build_mode(
+            _proposal(target_files=["skills/security/x.md", "tests/test_x.py"]), "auto",
+        ) == "source"
+        assert resolve_build_mode(
+            _proposal(target_files=["src/agentit/portal/store.py"]), "auto",
+        ) == "docs"
+
+    def test_source_mode_falls_back_to_docs_when_targets_ineligible(self):
+        from agentit.capability_scout import resolve_build_mode
+
+        assert resolve_build_mode(
+            _proposal(target_files=["src/agentit/llm.py", "chart/values.yaml"]), "source",
+        ) == "docs"
+
+
+class TestBuildSourceDiff:
+    def test_build_diff_source_mode_uses_llm_file_map(self, tmp_path):
+        from agentit.capability_scout import build_diff
+
+        skill = tmp_path / "skills" / "security"
+        skill.mkdir(parents=True)
+        (skill / "existing.md").write_text("---\nname: existing\n---\nold\n", encoding="utf-8")
+
+        llm = MagicMock()
+        llm.generate_capability_files.return_value = {
+            "skills/security/existing.md": "---\nname: existing\n---\nnew body\n",
+        }
+        proposal = _proposal(
+            title="Improve existing skill",
+            target_files=["skills/security/existing.md"],
+        )
+        diff = build_diff(proposal, mode="source", repo_dir=tmp_path, llm_client=llm)
+
+        assert diff == {
+            "skills/security/existing.md": "---\nname: existing\n---\nnew body\n",
+        }
+        llm.generate_capability_files.assert_called_once()
+        call = llm.generate_capability_files.call_args
+        current = call.args[1] if call.args and len(call.args) > 1 else call.kwargs.get("current_files")
+        assert "skills/security/existing.md" in current
+        assert "old" in current["skills/security/existing.md"]
+
+    def test_build_diff_source_rejects_llm_paths_outside_targets(self, tmp_path):
+        from agentit.capability_scout import build_diff
+
+        llm = MagicMock()
+        llm.generate_capability_files.return_value = {
+            "skills/security/ok.md": "ok",
+            "src/agentit/evil.py": "nope",
+        }
+        proposal = _proposal(target_files=["skills/security/ok.md"])
+        diff = build_diff(proposal, mode="source", repo_dir=tmp_path, llm_client=llm)
+        assert diff == {"skills/security/ok.md": "ok"}
+
+    def test_build_diff_source_returns_docs_fallback_when_llm_returns_nothing(self, tmp_path):
+        from agentit.capability_scout import build_diff
+
+        llm = MagicMock()
+        llm.generate_capability_files.return_value = None
+        proposal = _proposal(title="Fallback", target_files=["skills/security/x.md"])
+        diff = build_diff(proposal, mode="source", repo_dir=tmp_path, llm_client=llm)
+        assert list(diff) == ["docs/proposals/fallback.md"]
+
+
 # ── Safety gates ────────────────────────────────────────────────────────────
 
 
