@@ -149,11 +149,10 @@ palette follow the same expectation).
 Ordered primary path on `/assessments/{id}/onboard-results`:
 
 1. **Dry Run** (secondary, `.btn-outline`) — preview only; nothing delivered.
-2. **Apply** (primary, `.btn-green`) — the real delivery. Short labels preferred:
-   **Apply** (direct) or **Open PR** (GitOps). Longer mechanism copy
-   (“Apply to Cluster”, “Commit & Open PR”) **MAY** remain until a dedicated
-   action-bar redesign lands, but both are the Apply step of this path — do
-   not add a third competing primary.
+2. **Apply** (primary, `.btn-green`) — the real delivery. Shipped short labels:
+   **Apply** (direct) or **Open PR** (GitOps), typically via
+   `{% set _deliver_label = … %}`. Longer mechanism copy (“Apply to Cluster”,
+   “Commit & Open PR”) is legacy — do not add a third competing primary.
 
 **MUST [check]** Dry Run appear as its own control (not only inside Apply).
 
