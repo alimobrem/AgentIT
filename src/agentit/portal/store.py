@@ -1268,13 +1268,28 @@ class AssessmentStore:
     async def list_slos(self, assessment_id: str) -> list[dict]:
         """Keyed off ``repo_url``, joined back through every historical
         assessment of the same app, the same fix shape
-        ``list_gates_for_assessment()`` already has."""
+        ``list_gates_for_assessment()`` already has.
+
+        Identical ``(metric_name, target_value)`` rows from repeated
+        onboarding (before default-SLO seeding skipped existing metrics)
+        are collapsed to the newest row so Fleet / per-app SLO pages do
+        not show each metric N times. Distinct targets for the same
+        metric_name are preserved (Add-SLO multi-threshold use case).
+        """
         rows = await self._pool.fetch(
             """
-            SELECT slos.* FROM slos
-            INNER JOIN assessments ON slos.assessment_id = assessments.id
-            WHERE assessments.repo_url = (SELECT repo_url FROM assessments WHERE id = $1)
-            ORDER BY slos.metric_name
+            SELECT * FROM (
+                SELECT DISTINCT ON (slos.metric_name, slos.target_value) slos.*
+                FROM slos
+                INNER JOIN assessments ON slos.assessment_id = assessments.id
+                WHERE assessments.repo_url = (
+                    SELECT repo_url FROM assessments WHERE id = $1
+                )
+                ORDER BY slos.metric_name, slos.target_value,
+                         COALESCE(slos.updated_at, slos.created_at) DESC,
+                         slos.created_at DESC
+            ) deduped
+            ORDER BY metric_name
             """,
             assessment_id,
         )

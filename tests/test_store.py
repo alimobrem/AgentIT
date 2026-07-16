@@ -261,6 +261,25 @@ class TestSlos:
         slos = await store.list_slos(new_id)
         assert [s["id"] for s in slos] == [slo_id]
 
+    async def test_list_slos_collapses_identical_rows_across_reassessments(self, store):
+        """Identical default SLOs under each historical assessment_id must
+        collapse so Fleet SLOs does not show each metric N times."""
+        from datetime import datetime, timezone
+
+        assessment_ids: list[str] = []
+        for month in (1, 2, 3):
+            report = _make_report("slo-triple-app")
+            report.assessed_at = datetime(2025, month, 1, tzinfo=timezone.utc)
+            aid = await store.save(report)
+            assessment_ids.append(aid)
+            await store.save_slo(aid, "availability", 99.9)
+            await store.save_slo(aid, "error_rate", 1.0)
+
+        slos = await store.list_slos(assessment_ids[-1])
+        assert len(slos) == 2
+        assert sorted(s["metric_name"] for s in slos) == ["availability", "error_rate"]
+        assert {s["assessment_id"] for s in slos} == {assessment_ids[-1]}
+
     async def test_delete_slo_from_old_assessment_via_new_assessment_id(self, store):
         old_id = await store.save(_make_report("repo-y"))
         slo_id = await store.save_slo(old_id, "availability", 99.9)

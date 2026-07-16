@@ -580,16 +580,48 @@ class TestSlosTable:
         """`save_slo()` itself stays a plain insert -- the Add-SLO form and
         the progress-bar-direction test both rely on being able to track
         more than one threshold for the same metric_name on one
-        assessment. The dedup fix for duplicate *default* SLOs belongs at
-        the seeding call site (`FleetOrchestrator._create_default_slos()`),
-        not in this generic store primitive -- see test_orchestrator.py's
-        `TestDefaultSlosDedup`."""
+        assessment. Seeding dedup lives in
+        `FleetOrchestrator._create_default_slos()`; `list_slos()` only
+        collapses identical ``(metric_name, target_value)`` pairs across
+        historical assessments (see
+        ``test_list_slos_collapses_identical_rows_across_reassessments``).
+        """
         store = await make_store()
         aid = await store.save(make_report())
         await store.save_slo(aid, "availability", 99.5)
         await store.save_slo(aid, "availability", 99.9)
 
         assert len(await store.list_slos(aid)) == 2
+
+    async def test_list_slos_collapses_identical_rows_across_reassessments(self):
+        """Fleet SLOs regression: before default-SLO seeding skipped
+        existing metrics, each re-onboard inserted another full set of
+        the same ``(metric_name, target_value)`` under a new
+        assessment_id. ``list_slos()`` is repo_url-scoped, so those
+        historical copies all surfaced — N of each metric on
+        ``/fleet/slos``. Collapse identical pairs to the newest row.
+        """
+        store = await make_store()
+        assessment_ids: list[str] = []
+        for month in (1, 2, 3):
+            report = make_report(repo_name="slo-triple-app")
+            report.assessed_at = datetime(2025, month, 1, tzinfo=timezone.utc)
+            aid = await store.save(report)
+            assessment_ids.append(aid)
+            await store.save_slo(aid, "availability", 99.9)
+            await store.save_slo(aid, "error_rate", 1.0)
+
+        raw_count = await store._pool.fetchval(
+            "SELECT COUNT(*) FROM slos WHERE assessment_id = ANY($1::text[])",
+            assessment_ids,
+        )
+        assert raw_count == 6
+
+        slos = await store.list_slos(assessment_ids[-1])
+        assert len(slos) == 2
+        assert sorted(s["metric_name"] for s in slos) == ["availability", "error_rate"]
+        assert {s["assessment_id"] for s in slos} == {assessment_ids[-1]}
+        assert {s["target_value"] for s in slos} == {99.9, 1.0}
 
     async def test_slo_from_old_assessment_visible_after_reassessment(self):
         """Orphaned-SLO-attribution regression, same shape as gates: an SLO
