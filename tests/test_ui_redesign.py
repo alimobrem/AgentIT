@@ -543,7 +543,10 @@ class TestGitOpsVisibility:
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
         assert "Not GitOps-registered" in resp.text
-        assert "Register for GitOps</button>" in resp.text
+        # Button label may wrap in .btn-label + spinner (busy feedback); match
+        # the control itself, not a brittle "</button>" adjacency.
+        assert 'data-action="register-gitops"' in resp.text
+        assert "Register for GitOps" in resp.text
 
         with patch("agentit.portal.github_pr.ensure_applicationset", return_value=True):
             reg_resp = await client.post(
@@ -563,7 +566,7 @@ class TestGitOpsVisibility:
         # The stale, unchanged "not registered at all" nudge must be gone --
         # this is the visible signal that the click had an effect.
         assert "Not GitOps-registered" not in resp.text
-        assert "Register for GitOps</button>" not in resp.text
+        assert 'data-action="register-gitops"' not in resp.text
         # And the page explains the real, current state instead of silently
         # looking identical or falsely claiming full registration.
         assert "GitOps infra repo configured" in resp.text
