@@ -253,15 +253,23 @@
     </tr>
   </thead>
   <tbody>
-    {% for fb in recent_activity %}
+    {# Rows come from skill_effectiveness via get_recent_skill_activity()
+       (skill_name / outcome / reason) — not agent_feedback (agent_name /
+       action / human_reason). Incomplete rows are skipped so App+Timestamp
+       alone cannot look like a real skill decision. #}
+    {% for fb in recent_activity if fb.skill_name and fb.outcome %}
     <tr>
       <td class="text-sm"><span data-timestamp="{{ fb.created_at }}">{{ fb.created_at[:16] if fb.created_at else '—' }}</span></td>
-      <td class="text-bold">{{ fb.agent_name }}</td>
-      <td>{{ fb.app_name }}</td>
+      <td class="text-bold">{{ fb.skill_name }}</td>
+      <td>{{ fb.app_name or '—' }}</td>
       <td>
-        <span class="badge badge-{{ 'success' if fb.action == 'approved' else 'danger' if fb.action == 'rejected' else 'info' }}">{{ fb.action }}</span>
+        <span class="badge badge-{{ 'success' if fb.outcome == 'approved' else 'danger' if fb.outcome == 'rejected' else 'info' }}">{{ fb.outcome }}</span>
       </td>
-      <td class="text-sm text-muted">{{ fb.human_reason or '—' }}</td>
+      <td class="text-sm text-muted">{{ fb.reason or '—' }}</td>
+    </tr>
+    {% else %}
+    <tr>
+      <td colspan="5" class="text-sm text-muted">Skill activity rows exist but lack skill name or outcome — check skill_effectiveness writes.</td>
     </tr>
     {% endfor %}
   </tbody>

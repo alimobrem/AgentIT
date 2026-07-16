@@ -2277,6 +2277,49 @@ async def test_capabilities_page_has_learn_button(client):
     assert "Research CVEs" in resp.text
 
 
+async def test_capabilities_skill_activity_uses_skill_effectiveness_fields(
+    client, _override_store,
+):
+    """Skill Activity must render skill_effectiveness columns (skill_name /
+    outcome / reason), not agent_feedback aliases (agent_name / action /
+    human_reason). Pinky dogfood rows look like this in Postgres."""
+    await _override_store.record_skill_outcome(
+        "resourcequota",
+        "pinky",
+        "rejected",
+        "dogfood skill-improvement proof: human reject of real skill output (1/5)",
+    )
+    resp = await client.get("/capabilities")
+    assert resp.status_code == 200
+    assert "Skill Activity" in resp.text
+    assert "resourcequota" in resp.text
+    assert "pinky" in resp.text
+    assert "rejected" in resp.text
+    assert "dogfood skill-improvement proof" in resp.text
+
+
+async def test_capabilities_skill_activity_hides_incomplete_rows(
+    client, _override_store, monkeypatch,
+):
+    """Rows missing skill_name or outcome must not render as blank misleading cells."""
+    async def _incomplete(limit: int = 20):
+        return [
+            {
+                "skill_name": "",
+                "app_name": "pinky",
+                "outcome": "",
+                "reason": "",
+                "created_at": "2026-07-16T19:20:48+00:00",
+            }
+        ]
+
+    monkeypatch.setattr(_override_store, "get_recent_skill_activity", _incomplete)
+    resp = await client.get("/capabilities")
+    assert resp.status_code == 200
+    assert "lack skill name or outcome" in resp.text
+    assert ">pinky<" not in resp.text
+
+
 async def test_capabilities_learn_button_uses_toast_not_verbose_label(client):
     """The "can take up to 3 minutes, please don't close this tab" caveat
     belongs in a dismissible toast fired on click (showToast(...) in the
