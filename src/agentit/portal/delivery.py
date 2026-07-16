@@ -493,92 +493,106 @@ async def route_and_deliver(
         },
     )
 
-    if cluster_files:
-        if mechanisms[CATEGORY_CLUSTER_CONFIG] == MECHANISM_NONE:
-            outcomes[CATEGORY_CLUSTER_CONFIG] = {
-                "error": (
-                    "app is GitOps-registered but no infra_repo_url is known for this "
-                    "assessment -- refusing to direct-apply (would race Argo's prune-sync) "
-                    "or guess which repo to commit to"
-                ),
+    # Everything below can raise (cluster API calls, GitHub PR creation,
+    # namespace checks) -- without this try/except, an exception here left
+    # the just-created row stuck at status="in_progress" forever: the
+    # caller's error banner correctly told the human the delivery failed,
+    # but Delivery History kept showing an eternally in-progress row for the
+    # same attempt (confirmed live: two failed "Apply to Cluster" attempts
+    # against an unreachable cluster left two permanently in_progress rows,
+    # never "failed").
+    try:
+        if cluster_files:
+            if mechanisms[CATEGORY_CLUSTER_CONFIG] == MECHANISM_NONE:
+                outcomes[CATEGORY_CLUSTER_CONFIG] = {
+                    "error": (
+                        "app is GitOps-registered but no infra_repo_url is known for this "
+                        "assessment -- refusing to direct-apply (would race Argo's prune-sync) "
+                        "or guess which repo to commit to"
+                    ),
+                }
+            elif registered and report is not None:
+                outcomes[CATEGORY_CLUSTER_CONFIG] = await deliver_with_verification(
+                    mechanism=MECHANISM_INFRA_REPO_COMMIT, files=cluster_files, report=report,
+                    app_name=app_name, store=store, assessment_id=assessment_id,
+                    actor=actor, dry_run=dry_run,
+                )
+                # Mirror AutoMode: portal Deliver opens the PR; Approve & Deliver
+                # on gitops-pr-pending merges it. Without this gate the manual
+                # Assess→Generate→Deliver path had no Gate step for GitOps apps.
+                cluster_outcome = outcomes[CATEGORY_CLUSTER_CONFIG]
+                pr_url = (
+                    cluster_outcome.get("pr_url")
+                    if isinstance(cluster_outcome, dict) and not dry_run
+                    else None
+                )
+                if pr_url and "error" not in cluster_outcome:
+                    mechanism_text = confirmation_text(
+                        MECHANISM_INFRA_REPO_COMMIT, infra_repo_url=infra_repo_url,
+                    )
+                    gate_id = await store.create_gate(
+                        assessment_id, "gitops-pr-pending",
+                        f"{mechanism_text} PR opened: {pr_url}. "
+                        "Approving this gate merges the PR -- AgentIT never auto-merges.",
+                    )
+                    cluster_outcome["gate_id"] = gate_id
+            else:
+                result = await apply_with_verification(
+                    cluster_files, namespace, dry_run,
+                    force_dry_run_first=force_dry_run_first,
+                    store=store, app_name=app_name,
+                    skill_outcome_reason=f"delivered via {actor}",
+                    actor=actor, action="deliver-apply",
+                    resource=f"assessment:{assessment_id}",
+                )
+                await store.save_apply_results(assessment_id, result, namespace, result["is_dry_run"])
+                outcomes[CATEGORY_CLUSTER_CONFIG] = result
+
+        if cicd_files:
+            gate_id = await store.create_gate(
+                assessment_id, "cluster-admin-review", _cicd_gate_summary(cicd_files),
+            )
+            outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = {
+                "gate_id": gate_id, "files": [f["path"] for f in cicd_files],
             }
-        elif registered and report is not None:
-            outcomes[CATEGORY_CLUSTER_CONFIG] = await deliver_with_verification(
-                mechanism=MECHANISM_INFRA_REPO_COMMIT, files=cluster_files, report=report,
-                app_name=app_name, store=store, assessment_id=assessment_id,
-                actor=actor, dry_run=dry_run,
-            )
-            # Mirror AutoMode: portal Deliver opens the PR; Approve & Deliver
-            # on gitops-pr-pending merges it. Without this gate the manual
-            # Assess→Generate→Deliver path had no Gate step for GitOps apps.
-            cluster_outcome = outcomes[CATEGORY_CLUSTER_CONFIG]
-            pr_url = (
-                cluster_outcome.get("pr_url")
-                if isinstance(cluster_outcome, dict) and not dry_run
-                else None
-            )
-            if pr_url and "error" not in cluster_outcome:
-                mechanism_text = confirmation_text(
-                    MECHANISM_INFRA_REPO_COMMIT, infra_repo_url=infra_repo_url,
+
+        if source_files:
+            if report is not None:
+                outcomes[CATEGORY_SOURCE_PATCH] = await deliver_with_verification(
+                    mechanism=MECHANISM_SOURCE_REPO_PR, files=source_files, report=report,
+                    app_name=app_name, store=store, assessment_id=assessment_id,
+                    actor=actor, dry_run=dry_run,
                 )
-                gate_id = await store.create_gate(
-                    assessment_id, "gitops-pr-pending",
-                    f"{mechanism_text} PR opened: {pr_url}. "
-                    "Approving this gate merges the PR -- AgentIT never auto-merges.",
+            else:
+                outcomes[CATEGORY_SOURCE_PATCH] = {"error": "no assessment report available -- cannot open a source-repo PR"}
+
+        if at_rest_files:
+            if report is not None:
+                outcomes[CATEGORY_MANIFEST_AT_REST] = await deliver_with_verification(
+                    mechanism=MECHANISM_APP_REPO_PR, files=at_rest_files, report=report,
+                    app_name=app_name, store=store, assessment_id=assessment_id,
+                    actor=actor, dry_run=dry_run,
                 )
-                cluster_outcome["gate_id"] = gate_id
-        else:
-            result = await apply_with_verification(
-                cluster_files, namespace, dry_run,
-                force_dry_run_first=force_dry_run_first,
-                store=store, app_name=app_name,
-                skill_outcome_reason=f"delivered via {actor}",
-                actor=actor, action="deliver-apply",
-                resource=f"assessment:{assessment_id}",
-            )
-            await store.save_apply_results(assessment_id, result, namespace, result["is_dry_run"])
-            outcomes[CATEGORY_CLUSTER_CONFIG] = result
+            else:
+                outcomes[CATEGORY_MANIFEST_AT_REST] = {"error": "no assessment report available"}
 
-    if cicd_files:
-        gate_id = await store.create_gate(
-            assessment_id, "cluster-admin-review", _cicd_gate_summary(cicd_files),
+        any_error = any(isinstance(o, dict) and "error" in o for o in outcomes.values())
+        overall_status = "delivered" if not any_error else "partial"
+        await store.update_delivery(
+            delivery_id, status=overall_status,
+            details={"outcomes": {k: v for k, v in outcomes.items()}},
         )
-        outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = {
-            "gate_id": gate_id, "files": [f["path"] for f in cicd_files],
-        }
 
-    if source_files:
-        if report is not None:
-            outcomes[CATEGORY_SOURCE_PATCH] = await deliver_with_verification(
-                mechanism=MECHANISM_SOURCE_REPO_PR, files=source_files, report=report,
-                app_name=app_name, store=store, assessment_id=assessment_id,
-                actor=actor, dry_run=dry_run,
+        if cluster_files:
+            mechanism_used = mechanisms[CATEGORY_CLUSTER_CONFIG]
+            await _maybe_schedule_verification(
+                store, delivery_id, assessment_id, app_name, namespace, mechanism_used, dry_run,
             )
-        else:
-            outcomes[CATEGORY_SOURCE_PATCH] = {"error": "no assessment report available -- cannot open a source-repo PR"}
-
-    if at_rest_files:
-        if report is not None:
-            outcomes[CATEGORY_MANIFEST_AT_REST] = await deliver_with_verification(
-                mechanism=MECHANISM_APP_REPO_PR, files=at_rest_files, report=report,
-                app_name=app_name, store=store, assessment_id=assessment_id,
-                actor=actor, dry_run=dry_run,
-            )
-        else:
-            outcomes[CATEGORY_MANIFEST_AT_REST] = {"error": "no assessment report available"}
-
-    any_error = any(isinstance(o, dict) and "error" in o for o in outcomes.values())
-    overall_status = "delivered" if not any_error else "partial"
-    await store.update_delivery(
-        delivery_id, status=overall_status,
-        details={"outcomes": {k: v for k, v in outcomes.items()}},
-    )
-
-    if cluster_files:
-        mechanism_used = mechanisms[CATEGORY_CLUSTER_CONFIG]
-        await _maybe_schedule_verification(
-            store, delivery_id, assessment_id, app_name, namespace, mechanism_used, dry_run,
+    except Exception as exc:
+        await store.update_delivery(
+            delivery_id, status="failed", details={"error": str(exc)[:500]},
         )
+        raise
 
     return {
         "delivery_id": delivery_id,
