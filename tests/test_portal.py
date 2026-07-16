@@ -393,12 +393,19 @@ async def test_onboard_results_page(client, _override_store):
     assert "Dry Run" in resp.text
     assert "delivery-actions" in resp.text
     assert "delivery-primary" in resp.text
+    assert "delivery-choice" in resp.text
     assert "delivery-secondary" in resp.text
     assert "delivery-connector" in resp.text
+    assert "One PR for everything, or a PR per agent." in resp.text
+    # Per-Agent is a peer of Apply (step 2), not demoted beside Download.
+    assert 'data-action="prs"' in resp.text
+    secondary = resp.text.split('aria-label="Secondary actions"', 1)[-1][:800]
+    assert "Download" in secondary
+    assert "Per-Agent" not in secondary
     # Status chip lives outside the Apply CTA (not packed into the button).
     assert "No dry run yet" in resp.text
     assert "NO DRY RUN YET" not in resp.text
-    # Soft-gate: primary Apply disabled until Dry Run succeeds; override remains.
+    # Soft-gate: both deliver options disabled until Dry Run succeeds; override remains.
     assert 'data-action="apply"' in resp.text
     assert "disabled" in resp.text
     assert 'data-action="apply-override"' in resp.text

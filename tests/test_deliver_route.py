@@ -5,6 +5,7 @@ cluster/app config with one router-computed decision.
 """
 from __future__ import annotations
 
+import re
 from unittest.mock import patch
 
 import pytest
@@ -116,6 +117,22 @@ class TestDeliverRegisteredCommitsToInfraRepo:
         )
         assert "infra-repo-commit" in location
 
+        # Persist unlock: GitOps dry-run must write apply_results so Commit /
+        # Per-Agent stay enabled after the flash URL is cleared.
+        page = await client.get(f"/assessments/{aid}/onboard-results")
+        assert page.status_code == 200
+        assert "No dry run yet" not in page.text
+        assert "Dry run passed" in page.text
+        assert 'data-dry-done="true"' in page.text
+        assert 'data-action="apply-override"' not in page.text
+        assert not re.search(
+            r'data-action="apply"[^>]*\sdisabled(?:\s|=|>)', page.text, re.I,
+        )
+        assert not re.search(
+            r'data-action="prs"[^>]*\sdisabled(?:\s|=|>)', page.text, re.I,
+        )
+        assert "delivery-choice" in page.text
+
     async def test_failed_infra_repo_commit_surfaces_a_visible_error(self, deliver_client, _mock_kube):
         """A real (non-dry-run) ``commit_to_infra_repo()`` failure returns
         ``{"error": ...}`` rather than raising (see github_pr.py) -- the old
@@ -171,9 +188,91 @@ class TestOnboardResultsWarnsBeforeDryRun:
         resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert resp.status_code == 200
         assert "No dry run yet" not in resp.text
+        assert "NO DRY RUN YET" not in resp.text
         assert "Dry run passed" in resp.text
         assert 'data-action="apply-override"' not in resp.text
+        assert 'data-dry-done="true"' in resp.text
+        assert "dryDone: true" in resp.text
+        assert not re.search(
+            r'data-action="apply"[^>]*\sdisabled(?:\s|=|>)', resp.text, re.I,
+        )
         assert "confirmText: " in resp.text or "Apply to Cluster" in resp.text
+
+    async def test_gitops_dry_run_unlocks_commit_and_never_contradicts(self, deliver_client, _mock_kube):
+        """P0: GitOps dry-run showed 'Dry run complete' + 'NO DRY RUN YET'."""
+        from urllib.parse import unquote
+
+        client, store, aid = deliver_client
+        await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
+
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}):
+            post = await client.post(
+                f"/assessments/{aid}/deliver", data={"dry_run": "true"}, follow_redirects=False,
+            )
+        assert post.status_code == 303
+        location = post.headers["location"]
+        assert "dry_run_summary=" in location
+
+        flash_resp = await client.get(location)
+        assert flash_resp.status_code == 200
+        html = flash_resp.text
+        assert "Dry run complete" in html
+        assert "No dry run yet" not in html
+        assert "NO DRY RUN YET" not in html
+        assert "Dry run passed" in html
+        assert 'data-dry-done="true"' in html
+        assert "dryDone: true" in html
+        # Label depends on is_gitops_registered() at GET time (Argo may be
+        # unreachable in unit tests); unlock is what matters for the P0.
+        assert "Commit & Open PR" in html or "Apply to Cluster" in html
+        assert not re.search(
+            r'data-action="apply"[^>]*\sdisabled(?:\s|=|>)', html, re.I,
+        ), "Deliver CTA still has static disabled after GitOps dry run"
+        assert "Start with a Dry Run" not in html
+
+        clean = await client.get(f"/assessments/{aid}/onboard-results")
+        assert clean.status_code == 200
+        assert "No dry run yet" not in clean.text
+        assert 'data-dry-done="true"' in clean.text
+        persisted = await store.get_apply_results(aid)
+        assert persisted is not None
+        assert persisted["dry_run"] is True
+        assert not persisted.get("errors")
+        assert "infra-repo-commit" in unquote(location)
+
+    async def test_dry_run_summary_flash_alone_unlocks_without_contradiction(self, deliver_client):
+        """dry_run_summary flash must unlock Commit even before persistence."""
+        client, _store, aid = deliver_client
+        resp = await client.get(
+            f"/assessments/{aid}/onboard-results"
+            "?dry_run=true&dry_run_summary=infra-repo-commit%20(1%20file(s))"
+        )
+        assert resp.status_code == 200
+        assert "Dry run complete" in resp.text
+        assert "No dry run yet" not in resp.text
+        assert "NO DRY RUN YET" not in resp.text
+        assert 'data-dry-done="true"' in resp.text
+        assert "dryDone: true" in resp.text
+
+    async def test_onboard_results_fewer_stacked_alerts_after_gitops_dry_run(
+        self, deliver_client, _mock_kube,
+    ):
+        """Primary status alert only; GitOps/admin-review are secondary details."""
+        client, store, aid = deliver_client
+        await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}):
+            post = await client.post(
+                f"/assessments/{aid}/deliver", data={"dry_run": "true"}, follow_redirects=False,
+            )
+        location = post.headers["location"] + "&cicd_gate=true"
+        resp = await client.get(location)
+        html = resp.text
+        alerts = re.findall(r'class="alert[^"]*"', html)
+        assert sum(
+            1 for a in alerts if "alert-info" in a or "alert-warn" in a or "alert-success" in a
+        ) <= 2
+        assert "delivery-meta" in html
+        assert "Start with a Dry Run" not in html
 
     async def test_warning_badge_gone_after_a_real_delivery(self, deliver_client, _mock_kube):
         client, _store, aid = deliver_client

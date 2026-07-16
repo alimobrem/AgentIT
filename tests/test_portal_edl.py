@@ -153,7 +153,7 @@ async def test_fleet_assess_modal_has_dialog_semantics(edl_client):
 
 
 async def test_onboard_results_dry_run_apply_status_outside_button(edl_client):
-    """EDL §7: Dry Run → Apply; 'No dry run yet' is a sibling chip, not inside Apply."""
+    """EDL §7: Dry Run → deliver choice; 'No dry run yet' is a sibling chip."""
     client, store = edl_client
     aid = await store.save(make_report())
     await store.save_onboarding(aid, [
@@ -175,6 +175,9 @@ async def test_onboard_results_dry_run_apply_status_outside_button(edl_client):
         or re.search(r">\s*Open PR\s*<", html)
         or "_deliver_label" in html
     )
+    assert "Per-Agent PRs" in html
+    assert "delivery-choice" in html
+    assert "One PR for everything, or a PR per agent." in html
     assert "No dry run yet" in html
     # No button may contain the status chip.
     for m in re.finditer(r"<button\b[^>]*>[\s\S]*?</button>", html, re.I):
