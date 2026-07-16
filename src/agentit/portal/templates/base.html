@@ -331,7 +331,8 @@
     display: inline-block;
     padding: 2px 8px;
     border-radius: var(--radius-pill);
-    font-size: 0.65rem;
+    /* EDL: 12px floor — use --font-xs (0.75rem), never smaller literals */
+    font-size: var(--font-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -393,6 +394,8 @@
   }
   .btn-approve { background: var(--color-success); }
 
+  .btn-danger { background: var(--color-danger); color: #fff; }
+  .btn-danger:hover { box-shadow: 0 2px 8px rgba(220, 53, 69, 0.35); }
   .btn-danger-outline { border-color: var(--color-danger); color: var(--color-danger); background: transparent; }
   .btn-danger-outline:hover { background: var(--color-danger); color: #fff; }
   .btn-loading {
@@ -538,6 +541,7 @@
   .alert-success { background: #1a4a2e; border: 1px solid var(--color-btn-green); }
   .alert-warn    { background: #4a3a1a; border: 1px solid var(--color-warning); }
   .alert-error   { background: #4a1a1a; border: 1px solid var(--color-danger); }
+  .alert-info    { background: #1a2a4a; border: 1px solid var(--color-info); }
 
   /* ── Forms ─────────────────────────────────────────────────────── */
   .form-narrow {
@@ -1369,7 +1373,7 @@
         </p>
       </div>
       <template x-for="e in events" :key="e.id">
-        <a :href="e.correlation_id ? ('/events?correlation_id=' + e.correlation_id) : '/events'"
+        <a :href="_eventHref(e)"
            class="events-drawer-item" @click="close()">
           <div class="events-drawer-item-meta">
             <span x-text="(e.timestamp || '').slice(0, 16)"></span>
@@ -1402,13 +1406,13 @@
 </div>
 <!-- Confirm Modal -->
 <div id="confirm-modal" x-data="confirmModal()" :class="{ 'open': open }"
-     class="modal-overlay" @keydown.escape.window="cancel()" @show-confirm.window="show($event.detail.title, $event.detail.message, $event.detail.form, $event.detail.opts)" role="dialog" aria-modal="true">
+     class="modal-overlay" @keydown.escape.window="cancel()" @show-confirm.window="show($event.detail.title, $event.detail.message, $event.detail.form, $event.detail.opts)" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title">
   {# .capture ensures cancel() runs (as a no-op) during the capture phase, before the
      triggering button's own @click bubbles here and sets open=true — without it, every
      trigger button's click also counts as an "outside" click and instantly re-closes
      the modal it just opened. #}
   <div class="modal" @click.outside.capture="cancel()">
-    <h3 x-text="title" class="modal-title"></h3>
+    <h3 id="confirm-modal-title" x-text="title" class="modal-title"></h3>
     <p x-text="message" class="modal-message"></p>
     {# Type-to-confirm: reserved for the highest-blast-radius actions only
        (cluster-admin-review gate approval, Delete App) -- see _macros.html's
@@ -1710,20 +1714,38 @@ function eventsDrawer() {
         // Leave badge at 0 if the feed is unreachable.
       }
     },
+    _isBadgeSeverity(e) {
+      // Only critical/high (actionable) ever badge — info/noise must not
+      // permanently badge after the drawer is opened / last-seen advances.
+      return e && (e.severity === 'critical' || e.severity === 'high');
+    },
     _computeBadge(rows) {
       if (!Array.isArray(rows) || !rows.length) return 0;
       let lastSeen = '';
       try { lastSeen = localStorage.getItem(this._lastSeenKey) || ''; } catch (e) { lastSeen = ''; }
-      if (!lastSeen) {
-        // First visit: surface critical/high only so info chatter does not
-        // badge the bell permanently.
-        return rows.filter(function(e) {
-          return e.severity === 'critical' || e.severity === 'high';
-        }).length;
-      }
+      const self = this;
       return rows.filter(function(e) {
+        if (!self._isBadgeSeverity(e)) return false;
+        // First visit (no last-seen): surface all critical/high in the window.
+        // After open: only newer critical/high count as unread.
+        if (!lastSeen) return true;
         return e.timestamp && e.timestamp > lastSeen;
       }).length;
+    },
+    _eventHref(e) {
+      // Prefer app-scoped action surfaces when we have an assessment id
+      // (enriched by /api/events); else Ledger Needs You by app; else
+      // correlation filter on Events.
+      if (e && e.assessment_id) {
+        return '/assessments/' + e.assessment_id + '?tab=actions';
+      }
+      if (e && e.target_app) {
+        return '/ledger?needs_you=1&app=' + encodeURIComponent(e.target_app);
+      }
+      if (e && e.correlation_id) {
+        return '/events?correlation_id=' + encodeURIComponent(e.correlation_id);
+      }
+      return '/events';
     },
     _markSeen(rows) {
       var maxTs = '';

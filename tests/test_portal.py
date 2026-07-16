@@ -340,6 +340,7 @@ async def test_onboard_results_page(client, _override_store):
     # Direct → "Apply to Cluster". This report has no infra_repo_url and
     # isn't GitOps-registered, so the button reads "Apply to Cluster".
     assert "Apply to Cluster" in resp.text
+    assert "Commit &amp; Open PR" not in resp.text
     assert "Commit & Open PR" not in resp.text
     assert "Deliver Now" not in resp.text
     assert "Per-Agent PRs" in resp.text
@@ -629,6 +630,8 @@ async def test_masthead_nav_structure(client, _override_store):
     assert "/api/events?limit=50" in html
     assert "agentit.events.lastSeenAt" in html
     assert "refreshBadge" in html
+    assert "_isBadgeSeverity" in html
+    assert "_eventHref" in html
     assert "activity-menu" not in html
     # Bell shares Alpine scope with the drawer (aria-expanded + focus restore).
     assert ':aria-expanded="open"' in html
