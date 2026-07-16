@@ -234,14 +234,25 @@ class TestBuildSourceDiff:
         diff = build_diff(proposal, mode="source", repo_dir=tmp_path, llm_client=llm)
         assert diff == {"skills/security/ok.md": "ok"}
 
-    def test_build_diff_source_returns_docs_fallback_when_llm_returns_nothing(self, tmp_path):
+    def test_build_diff_source_returns_empty_when_llm_returns_nothing(self, tmp_path):
+        """Source/auto must not open a docs-only PR when generation fails —
+        that burned max-open-prs with fake Build mode: source drafts."""
         from agentit.capability_scout import build_diff
 
         llm = MagicMock()
         llm.generate_capability_files.return_value = None
         proposal = _proposal(title="Fallback", target_files=["skills/security/x.md"])
         diff = build_diff(proposal, mode="source", repo_dir=tmp_path, llm_client=llm)
-        assert list(diff) == ["docs/proposals/fallback.md"]
+        assert diff == {}
+        diff_auto = build_diff(proposal, mode="auto", repo_dir=tmp_path, llm_client=llm)
+        assert diff_auto == {}
+
+    def test_build_diff_docs_mode_still_writes_proposal_md(self, tmp_path):
+        from agentit.capability_scout import build_diff
+
+        proposal = _proposal(title="Docs only", target_files=["skills/security/x.md"])
+        diff = build_diff(proposal, mode="docs", repo_dir=tmp_path, llm_client=MagicMock())
+        assert list(diff) == ["docs/proposals/docs-only.md"]
 
 
 # ── Safety gates ────────────────────────────────────────────────────────────

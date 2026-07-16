@@ -74,6 +74,8 @@ _EOL_MAX_TOKENS = 1024
 # claude-sonnet-4-6 (64,000 tokens per Anthropic's published model limits) —
 # there's no reason to approach that ceiling for a handful of prose fields.
 _CAPABILITY_PROPOSAL_MAX_TOKENS = 2048
+# Full-file source generation needs more headroom than the proposal JSON.
+_CAPABILITY_FILES_MAX_TOKENS = 8192
 
 _CLASSIFY_SYSTEM = (
     "You are a security analyst reviewing source code for hardcoded secrets. "
@@ -146,7 +148,10 @@ _CAPABILITY_PROPOSAL_SYSTEM = (
     "executable paths over docs/ so source/auto mode can open a real code PR).\n"
     "4. Always name at least one test file under tests/ in target_files, and describe "
     "what it would assert in test_plan -- a change with no test coverage plan is not a "
-    "complete proposal.\n\n"
+    "complete proposal.\n"
+    "5. Prefer NEW small modules (e.g. src/agentit/<feature>.py + "
+    "tests/test_<feature>.py, or a small skills/checks file) over rewriting a large "
+    "existing module — full-file rewrites of big files fail the source generator.\n\n"
     'Respond ONLY with valid JSON: {"has_proposal": bool, "title": str, '
     '"gap_description": str, "evidence": str, "target_files": [str], '
     '"change_summary": str, "risk": "low"|"medium"|"high", "test_plan": str}. '
@@ -402,10 +407,12 @@ class LLMClient:
         system = (
             "You implement a small, evidence-grounded change for AgentIT's own repo. "
             "Only edit skills/, checks/, tests/, or src/agentit/ files you were given. "
+            "Prefer creating or lightly editing small new files; if a current file is "
+            "truncated, do not attempt a full rewrite — return {\"files\": {}} instead. "
             "Respond ONLY with valid JSON — no markdown fences. "
             'If you cannot produce a safe change, return {"files": {}}.'
         )
-        raw = self._chat(system, user_msg, max_tokens=_CAPABILITY_PROPOSAL_MAX_TOKENS)
+        raw = self._chat(system, user_msg, max_tokens=_CAPABILITY_FILES_MAX_TOKENS)
         if raw is None:
             return None
         try:

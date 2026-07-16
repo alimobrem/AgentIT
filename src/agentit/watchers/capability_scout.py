@@ -126,28 +126,49 @@ class CapabilityScout:
         diff = await asyncio.to_thread(
             build_diff, proposal, mode=self._mode, repo_dir=self._repo_dir, llm_client=llm_client,
         )
+        if not diff:
+            click.echo(
+                f"[capability-scout] Source generation produced no files for "
+                f"'{proposal.get('title')}' — skipping (no docs-only PR).",
+                err=True,
+            )
+            severity, summary, details = describe_capability_run(
+                evidence, proposal, None, None,
+                error="source generation returned no files",
+            )
+            details["build_mode"] = resolved_mode
+            details["outcome"] = "source-generation-failed"
+            await self._log_run(severity, summary, details)
+            return {"outcome": "source-generation-failed", "build_mode": resolved_mode}
+
+        # Label the PR from the actual diff, not the pre-generation resolve
+        # (source resolve + empty generation used to open docs/proposals PRs
+        # still stamped Build mode: source).
+        effective_mode = (
+            "docs" if all(p.replace("\\", "/").startswith("docs/proposals/") for p in diff) else "source"
+        )
         gate_result = await asyncio.to_thread(run_safety_gates, proposal, diff, self._repo_dir, self._max_open_prs)
 
         if not gate_result["passed"]:
             failed = [g["name"] for g in gate_result["gates"] if not g["passed"]]
             click.echo(f"[capability-scout] Proposal '{proposal['title']}' gate-blocked: {', '.join(failed)}", err=True)
             severity, summary, details = describe_capability_run(evidence, proposal, gate_result, None)
-            details["build_mode"] = resolved_mode
+            details["build_mode"] = effective_mode
             await self._log_run(severity, summary, details)
             return {"outcome": "gate-blocked"}
 
-        pr_result = await asyncio.to_thread(self._open_pr, proposal, diff, resolved_mode)
+        pr_result = await asyncio.to_thread(self._open_pr, proposal, diff, effective_mode)
         pr_url = pr_result.get("pr_url")
         if pr_url:
             click.echo(f"[capability-scout] Opened draft PR: {pr_url}", err=True)
             severity, summary, details = describe_capability_run(evidence, proposal, gate_result, pr_url)
-            details["build_mode"] = resolved_mode
+            details["build_mode"] = effective_mode
             await self._log_run(severity, summary, details)
             self._publisher.publish(
                 "agentit-events", agent_id="capability-scout", action="capability-proposed",
                 target_app=None, severity="info", summary=summary,
             )
-            return {"outcome": "proposed", "pr_url": pr_url, "build_mode": resolved_mode}
+            return {"outcome": "proposed", "pr_url": pr_url, "build_mode": effective_mode}
 
         click.echo(f"[capability-scout] PR creation failed: {pr_result.get('error')}", err=True)
         severity, summary, details = describe_capability_run(

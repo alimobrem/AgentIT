@@ -38,6 +38,10 @@ SCOPE_DENY_SUBSTRINGS = ("chart/", "argocd/", ".github/workflows/", "dockerfile"
 # (docs mode already owns the proposal-markdown path).
 SOURCE_ALLOWED_PREFIXES = ("skills/", "checks/", "tests/", "src/agentit/")
 
+# Full-file LLM rewrites of huge modules truncate / fail to parse. Prefer
+# new small siblings; when reading an existing target, cap what we send.
+MAX_SOURCE_FILE_CHARS = 6000
+
 # The single highest-precision signal source per the design doc — explicit,
 # human-written admissions of missing functionality in this repo's own docs.
 _DOC_GAP_ANCHORS = ("Known gap", "Deliberately deferred", "Documented future idea", "not built")
@@ -200,8 +204,11 @@ def build_diff(
 
     ``mode``:
     - ``docs``: always ``docs/proposals/<slug>.md`` (v1 behavior).
-    - ``source`` / ``auto``: attempt skill/check/test file generation when
-      targets are eligible; otherwise fall back to the docs artifact.
+    - ``source`` / ``auto``: attempt skill/check/test/src file generation when
+      targets are eligible. On generation failure return ``{}`` (caller must
+      not open a docs-only PR labeled as source — that burned the open-PR
+      cap during L3 dogfood). When targets are ineligible, ``auto``/``source``
+      still fall back to the docs artifact via ``resolve_build_mode`` → docs.
     """
     resolved = resolve_build_mode(proposal, mode)
     if resolved == "source" and repo_dir is not None and llm_client is not None:
@@ -209,9 +216,13 @@ def build_diff(
         if source:
             return source
         logger.warning(
-            "capability-scout source mode produced no files for %r — falling back to docs proposal",
+            "capability-scout source mode produced no files for %r — not falling back to docs",
             proposal.get("title"),
         )
+        return {}
+    if resolved == "source":
+        # Eligible targets but no llm/repo — cannot invent source; fail closed.
+        return {}
     return build_docs_diff(proposal)
 
 
@@ -252,16 +263,28 @@ def resolve_build_mode(proposal: dict, mode: str) -> str:
 
 
 def load_target_file_contents(repo_dir: Path, target_files: list[str]) -> dict[str, str]:
-    """Read current file text for each target (empty string if creating new)."""
+    """Read current file text for each target (empty string if creating new).
+
+    Oversized existing files are truncated with a note so the LLM is steered
+    toward a small additive change or a new sibling module rather than a
+    full rewrite that will not fit in the generation token budget.
+    """
     out: dict[str, str] = {}
     for path in target_files:
         normalized = path.replace("\\", "/")
         full = repo_dir / normalized
         if full.is_file():
             try:
-                out[normalized] = full.read_text(encoding="utf-8")
+                text = full.read_text(encoding="utf-8")
             except OSError:
-                out[normalized] = ""
+                text = ""
+            if len(text) > MAX_SOURCE_FILE_CHARS:
+                text = (
+                    text[:MAX_SOURCE_FILE_CHARS]
+                    + "\n\n# ... truncated for LLM context — do not rewrite this whole file; "
+                    + "add a small new sibling module or a minimal additive change instead.\n"
+                )
+            out[normalized] = text
         else:
             out[normalized] = ""
     return out

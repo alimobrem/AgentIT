@@ -186,7 +186,7 @@ uv run agentit propose-watch --interval 86400 --max-open-prs 1
 uv run agentit propose-once --mode auto --max-open-prs 1
 ```
 
-**Build modes:** `docs` (proposal markdown only), `source` (edit `skills/`/`checks/`/`tests/`/`src/agentit/` when every target is in that allowlist), `auto` (source when eligible, else docs). Dogfood sets `agents.capabilityScout.mode=auto` via Helm.
+**Build modes:** `docs` (proposal markdown only), `source` (edit `skills/`/`checks/`/`tests/`/`src/agentit/` when every target is in that allowlist), `auto` (source when eligible, else docs). Prefer **new small modules** over rewriting large files — full-file generation of big modules fails and (in `source`/`auto`) skips the cycle rather than opening a docs-only PR. Dogfood sets `agents.capabilityScout.mode=auto` via Helm.
 
 See [`docs/superpowers/plans/2026-07-15-autonomous-self-improve-dogfood.md`](docs/superpowers/plans/2026-07-15-autonomous-self-improve-dogfood.md) for the L0→L5 dogfood milestone plan (substrate → source PRs → outcome loop).
 
