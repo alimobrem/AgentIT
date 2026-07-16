@@ -191,7 +191,7 @@ uv run agentit propose-once --mode auto --max-open-prs 1
 
 **Build modes:** `docs` (proposal markdown only), `source` (edit `skills/`/`checks/`/`tests/`/`src/agentit/` when every target is in that allowlist), `auto` (source when eligible, else docs). Prefer **new small modules** over rewriting large files — full-file generation of big modules fails and (in `source`/`auto`) skips the cycle rather than opening a docs-only PR. When a proposal targets an existing file already over the 150-line size cap, scout rewrites that target to a new `src/agentit/<feature>.py` sibling before calling the LLM (so L3 cycles are not stuck gate-blocked on `diff-size`). File generation uses a higher token budget and a compact JSON retry when the first reply truncates. Dogfood sets `agents.capabilityScout.mode=auto` via Helm.
 
-See [`docs/superpowers/plans/2026-07-15-autonomous-self-improve-dogfood.md`](docs/superpowers/plans/2026-07-15-autonomous-self-improve-dogfood.md) for the L0→L5 dogfood milestone plan (substrate → source PRs → outcome loop).
+See [`docs/superpowers/plans/2026-07-15-autonomous-self-improve-dogfood.md`](docs/superpowers/plans/2026-07-15-autonomous-self-improve-dogfood.md) for the L0→L5 dogfood milestone plan (substrate → source PRs → outcome loop), and [`docs/dogfood-self-improve-milestone.md`](docs/dogfood-self-improve-milestone.md) for the 2026-07-16 retrospective (L4 on AgentIT; L5 sample on pinky).
 
 ## Unified apply flow
 

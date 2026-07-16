@@ -225,17 +225,17 @@ Allowed change classes for v1 source autonomy (pick in order):
 
 ### Task 4.1: One external app, same engine shape
 
-- [ ] Pick one fleet app (e.g. pinky/guestbook) already GitOps-managed
-- [ ] Run Assess → Generate → GitOps PR (customer wedge) **using the same delivery + gate discipline**
+- [x] Pick one fleet app (e.g. pinky/guestbook) already GitOps-managed — **pinky** / `managed-pinky`
+- [x] GitOps PR merged for pinky improvement ([agentit-gitops#7](https://github.com/alimobrem/agentit-gitops/pull/7); PLACEHOLDER Pod removed). Full portal Assess→Generate→Deliver replay still optional.
 - [ ] Separately, if applicable, run a skill improvement that originated from learner and was activated after scout-quality Activate checks
 
 ### Task 4.2: Write the milestone retrospective
 
 **Files:** `docs/dogfood-self-improve-milestone.md`
 
-- [ ] Evidence: PR links, merge times, metrics moved, failures hit, what remains manual
-- [ ] Explicit claim: “L4 on AgentIT; L5 sample on app X”
-- [ ] Explicit non-claim: AutoMode / unattended merge still off
+- [x] Evidence: PR links, merge times, metrics moved, failures hit, what remains manual — see [`docs/dogfood-self-improve-milestone.md`](../dogfood-self-improve-milestone.md)
+- [x] Explicit claim: “L4 on AgentIT; L5 sample on app pinky”
+- [x] Explicit non-claim: AutoMode / unattended merge still off
 
 **Phase 4 exit:** Public (internal) write-up + demo path another engineer can replay.
 
