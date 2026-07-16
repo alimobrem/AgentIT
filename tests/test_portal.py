@@ -6,7 +6,7 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -393,12 +393,19 @@ async def test_onboard_results_page(client, _override_store):
     assert "Dry Run" in resp.text
     assert "delivery-actions" in resp.text
     assert "delivery-primary" in resp.text
+    assert "delivery-choice" in resp.text
     assert "delivery-secondary" in resp.text
     assert "delivery-connector" in resp.text
+    assert "One PR for everything, or a PR per agent." in resp.text
+    # Per-Agent is a peer of Apply (step 2), not demoted beside Download.
+    assert 'data-action="prs"' in resp.text
+    secondary = resp.text.split('aria-label="Secondary actions"', 1)[-1][:800]
+    assert "Download" in secondary
+    assert "Per-Agent" not in secondary
     # Status chip lives outside the Apply CTA (not packed into the button).
     assert "No dry run yet" in resp.text
     assert "NO DRY RUN YET" not in resp.text
-    # Soft-gate: primary Apply disabled until Dry Run succeeds; override remains.
+    # Soft-gate: both deliver options disabled until Dry Run succeeds; override remains.
     assert 'data-action="apply"' in resp.text
     assert "disabled" in resp.text
     assert 'data-action="apply-override"' in resp.text
@@ -729,6 +736,35 @@ async def test_masthead_nav_structure(client, _override_store):
     dropdown_idx = html.index("user-menu-dropdown")
     decisions_in_menu = html.index('href="/decisions"', dropdown_idx)
     assert decisions_in_menu > dropdown_idx
+
+
+async def test_assess_progress_keeps_portal_chrome(client, _override_store):
+    """Running Assessment must keep masthead chrome (EDL §1).
+
+    Regression: hx-target="body" + hx-select=".container" swapped the
+    content container into <body>, wiping nav / Cmd+K / Events / Menu after
+    the first 2s poll.
+    """
+    store = _override_store
+    job_id = await store.create_assessment_job("https://github.com/org/progress-chrome-app")
+    await store.update_assessment_job(job_id, "assessing", "Analyzing repository...")
+    resp = await client.get(f"/assess/progress/{job_id}")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "Running Assessment" in html
+    assert "Analyzing repository..." in html
+    # Standard shell present on first paint (extends base.html).
+    assert 'id="nav-primary"' in html
+    assert "cmdk-trigger" in html
+    assert "events-bell" in html
+    assert 'class="user-menu"' in html or "user-menu-trigger" in html
+    assert 'id="main-content"' in html
+    # Poll must refresh main content only — never replace <body>.
+    assert 'hx-target="#main-content"' in html
+    assert 'hx-select="#main-content"' in html
+    assert 'hx-target="body"' not in html
+    assert 'hx-select=".container"' not in html
+    assert 'hx-trigger="every 2s"' in html
 
 
 async def test_events_page_renders(client, _override_store):
@@ -1511,6 +1547,67 @@ async def test_dashboard_uses_design_system_classes(client, _override_store):
     assert "css-app" in resp.text
     assert "<table>" in resp.text
     assert "Re-assess" in resp.text
+
+
+async def test_fleet_refresh_onboard_cta_when_ever_onboarded(client, _override_store):
+    """Previously onboarded apps get one primary Refresh Onboard CTA on Fleet."""
+    store = _override_store
+    old_id = await store.save(_make_report_scored("refresh-me", 55))
+    await store.save_onboarding(old_id, [{
+        "category": "hardening", "path": "deploy.yaml",
+        "content": "kind: Deployment\n", "description": "deploy",
+    }])
+    # New assessment (as Re-assess would create) — lifecycle back to assessed,
+    # but fleet still knows this repo was onboarded before.
+    await store.save(_make_report_scored("refresh-me", 60))
+    resp = await client.get("/fleet")
+    assert "Refresh Onboard" in resp.text
+    assert 'name="continue_onboard" value="1"' in resp.text
+    # Never-onboarded sibling still uses plain Re-assess.
+    await store.save(_make_report_scored("fresh-only", 70))
+    resp2 = await client.get("/fleet")
+    assert "Re-assess" in resp2.text
+    assert "Refresh Onboard" in resp2.text
+
+
+async def test_assess_progress_chains_to_onboard_when_continue_flag(
+    client, _override_store,
+):
+    """Completed assess job with continue_onboard redirects into onboard progress."""
+    store = _override_store
+    aid = await store.save(_make_report_scored("chain-app", 50))
+    job_id = await store.create_assessment_job(
+        "https://github.com/org/chain-app", continue_onboard=True,
+    )
+    await store.update_assessment_job(
+        job_id, "completed", "Assessment complete", assessment_id=aid,
+    )
+    with patch(
+        "agentit.portal.routes.assessments._run_onboarding_job",
+        new=AsyncMock(return_value=None),
+    ):
+        resp = await client.get(f"/assess/progress/{job_id}", follow_redirects=False)
+    assert resp.status_code == 303
+    loc = resp.headers["location"]
+    assert f"/assessments/{aid}/onboard/progress/" in loc
+    # Second poll must not start another onboard job.
+    resp2 = await client.get(f"/assess/progress/{job_id}", follow_redirects=False)
+    assert resp2.status_code == 303
+    assert resp2.headers["location"] == f"/assessments/{aid}"
+
+
+async def test_assessment_detail_prior_onboarded_hint(client, _override_store):
+    store = _override_store
+    old_id = await store.save(_make_report_scored("prior-onboard", 40))
+    await store.save_onboarding(old_id, [{
+        "category": "hardening", "path": "a.yaml",
+        "content": "x", "description": "d",
+    }])
+    new_id = await store.save(_make_report_scored("prior-onboard", 45))
+    resp = await client.get(f"/assessments/{new_id}")
+    assert "New scorecard after re-assess" in resp.text
+    assert "Refresh Onboard" in resp.text
+    assert "Onboard This App" in resp.text
 
 
 async def test_fleet_uses_design_system_classes(client, _override_store):

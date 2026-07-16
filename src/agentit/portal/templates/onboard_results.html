@@ -10,18 +10,31 @@
 <h1>Onboarding: {{ report.repo_name }}</h1>
 
 {% set _deliver_label = "Commit & Open PR" if gitops_registered else "Apply to Cluster" %}
-{% if request.query_params.get('fix_generated') %}
-<div class="alert alert-success">
-  Generated {{ request.query_params.get('fix_generated') }} fix(es) via {{ request.query_params.get('agent', 'dispatcher') }} agent. Review below, then {{ _deliver_label }}.
+{# One primary status region: error XOR dry-run/delivery flash. #}
+{% if request.query_params.get('error') %}
+<div class="alert alert-error" role="status">{{ request.query_params.get('error') }}</div>
+{% elif request.query_params.get('dry_run_summary') %}
+<div class="alert alert-info" role="status">
+  <strong>Dry run complete — nothing was delivered.</strong>
+  Would deliver via: {{ request.query_params.get('dry_run_summary') }}.
+  Next: choose how to deliver.
 </div>
-{% endif %}
-{% if request.query_params.get('pr_url') %}
-<div class="alert alert-success">
+{% elif request.query_params.get('pr_url') %}
+<div class="alert alert-success" role="status">
   PR created: <a href="{{ request.query_params.get('pr_url') | safe_url }}" target="_blank" hx-boost="false">{{ request.query_params.get('pr_url') }}</a>
 </div>
-{% endif %}
-{% if request.query_params.get('agent_prs') %}
-<div class="alert alert-success">
+{% elif request.query_params.get('gate_approved') %}
+<div class="alert alert-success" role="status">Gate approved — delivered.</div>
+{% elif request.query_params.get('fix_generated') %}
+<div class="alert alert-success" role="status">
+  Generated {{ request.query_params.get('fix_generated') }} fix(es) via {{ request.query_params.get('agent', 'dispatcher') }} agent. Review below, then {{ _deliver_label }}.
+</div>
+{% elif request.query_params.get('edited') %}
+<div class="alert alert-success" role="status">
+  Saved edit to <strong>{{ request.query_params.get('edited') }}</strong> — this edited version is what "{{ _deliver_label }}" will use.
+</div>
+{% elif request.query_params.get('agent_prs') %}
+<div class="alert alert-success" role="status">
   Per-agent PRs created:
   <ul class="mb-0">
     {% for pair in request.query_params.get('agent_prs').split('|') %}
@@ -30,34 +43,10 @@
     {% endfor %}
   </ul>
 </div>
-{% endif %}
-{% if request.query_params.get('dry_run_summary') %}
-<div class="alert alert-info">
-  <strong>Dry run complete — nothing was delivered.</strong> Would deliver via: {{ request.query_params.get('dry_run_summary') }}. Click "{{ _deliver_label }}" above to actually deliver.
-</div>
-{% endif %}
-{% if request.query_params.get('edited') %}
-<div class="alert alert-success">
-  Saved edit to <strong>{{ request.query_params.get('edited') }}</strong> — this edited version is what "{{ _deliver_label }}" will use, not the original generated content.
-</div>
-{% endif %}
-{% if request.query_params.get('error') %}
-<div class="alert alert-error">{{ request.query_params.get('error') }}</div>
-{% endif %}
-{% if request.query_params.get('warning') %}
+{% elif request.query_params.get('warning') %}
 {% for w in request.query_params.get('warning').split('|') %}
-<div class="alert alert-warn">{{ w }}</div>
+<div class="alert alert-warn" role="status">{{ w }}</div>
 {% endfor %}
-{% endif %}
-{% if request.query_params.get('gate_approved') %}
-<div class="alert alert-success">
-  Gate approved — delivered.
-</div>
-{% endif %}
-{% if request.query_params.get('cicd_gate') %}
-<div class="alert alert-warn">
-  Some manifests target a shared operator namespace and need cluster-admin review — see the <a href="/admin-review">Admin Review</a> page (never silently skipped).
-</div>
 {% endif %}
 {% if request.query_params.get('operator_installed') %}
 {% set install_status = request.query_params.get('install_status', 'installing') %}
@@ -78,7 +67,6 @@
 </div>
 {% endif %}
 
-{# ── Persistent PR Status ────────────────────────────────────────── #}
 {% if pr_status %}
 <div class="alert {% if pr_status.state == 'merged' %}alert-success{% elif pr_status.state == 'open' %}alert-warn{% else %}alert-info{% endif %}">
   {% if pr_status.state == 'merged' %}
@@ -98,6 +86,18 @@
 </div>
 {% endif %}
 
+{# Compact secondary context (not stacked alerts). #}
+<details class="delivery-meta mb-1">
+  <summary class="text-sm text-muted">Delivery details</summary>
+  <p class="text-sm mb-1">{{ delivery_confirmation }}</p>
+  {% if request.query_params.get('cicd_gate') %}
+  <p class="text-sm mb-0">
+    Shared-operator manifests need cluster-admin review —
+    see <a href="/admin-review">Admin Review</a> (never silently skipped).
+  </p>
+  {% endif %}
+</details>
+
 {# ── Primary Actions ─────────────────────────────────────────────── #}
 {% set total = namespace(count=0) %}
 {% for cat, files in grouped.items() %}{% set total.count = total.count + files|length %}{% endfor %}
@@ -113,45 +113,27 @@
 {% set _override_tail = 'Proceeding skips the dry-run preview and applies to namespace ' ~ _deliver_ns ~ ', which may modify cluster resources.' %}
 {% endif %}
 
-{% if not apply_results %}
-<div class="step-guide">
-  <span class="step-guide-icon">&#x2460;</span>
-  <span class="step-guide-text"><strong>Start with a Dry Run</strong> to preview what will happen, then {{ _deliver_label }}.</span>
-</div>
-{% elif apply_results and apply_results.get('dry_run') and not apply_results.get('errors') %}
-<div class="step-guide">
-  <span class="step-guide-icon">&#x2705;</span>
-  <span class="step-guide-text"><strong>Dry run passed.</strong> You can now {{ _deliver_label }}.</span>
-</div>
-{% elif apply_results and not apply_results.get('dry_run') and not apply_results.get('errors') %}
+{% if apply_results and not apply_results.get('dry_run') and not apply_results.get('errors') %}
 {# Moment of joy (docs/ux-design-requirements.md checklist #9): reserved
    for a genuinely clean MULTI-manifest delivery (>= 3 applied, zero
-   errors) -- not every routine single-file delivery, which would gamify a
-   real production action the checklist explicitly warns against. #}
+   errors) -- not every routine single-file delivery. #}
 {% set _multi_clean = apply_results.applied and apply_results.applied|length >= 3 %}
-<div class="step-guide {% if _multi_clean %}celebrate{% endif %}">
-  <span class="step-guide-icon">{% if _multi_clean %}&#127881;{% else %}&#x2705;{% endif %}</span>
-  <span class="step-guide-text"><strong>{% if _multi_clean %}Delivered successfully -- all {{ apply_results.applied|length }} manifests applied clean.{% else %}Delivered successfully.{% endif %}</strong></span>
+{% if _multi_clean %}
+<div class="step-guide celebrate">
+  <span class="step-guide-icon">&#127881;</span>
+  <span class="step-guide-text"><strong>Delivered successfully -- all {{ apply_results.applied|length }} manifests applied clean.</strong></span>
 </div>
 {% endif %}
+{% endif %}
 
-{# ── Delivery mechanism preview -- the design doc's one decision surface: which
-   mechanism a real Apply click will use is computed once, server-side, and
-   shown here AND restated verbatim in the confirm dialog below, never left to a
-   human to infer from which button they clicked. #}
-<div class="alert {% if gitops_registered %}alert-info{% else %}alert-warn{% endif %} mb-1">
-  <strong>{{ delivery_confirmation }}</strong>
-</div>
-
-{# EDL §7: Dry Run → Apply vertical path; status chips outside Apply CTA. #}
-{# Primary path is a vertical Dry Run → Apply stack with a connector so
-   order of operations is obvious. Status chips live beside/below the step
-   (never inside the CTA). Soft-gate: Apply disabled until Dry Run succeeds;
-   override confirm remains available. Secondary actions sit aside. #}
-{% set _dry_done = apply_results and apply_results.get('dry_run') and not apply_results.get('errors') %}
+{# EDL §7: Dry Run → deliver choice (combined vs per-agent). Status chips
+   outside CTAs. Both deliver options soft-gated until Dry Run succeeds;
+   dry_run_done is server-computed (persisted apply_results and/or flash). #}
+{% set _dry_done = dry_run_done|default(false) %}
 {% set _delivered = apply_results and not apply_results.get('dry_run') and not apply_results.get('errors') %}
 {% set _dry_failed = apply_results and apply_results.get('dry_run') and apply_results.get('errors') %}
-<div class="delivery-actions" x-data="{ busy: '' }">
+<div class="delivery-actions" x-data="{ busy: '', dryDone: {{ 'true' if _dry_done else 'false' }} }"
+     data-dry-done="{{ 'true' if _dry_done else 'false' }}">
   <div class="delivery-primary" role="group" aria-label="Delivery steps">
     <div class="delivery-step">
       <div class="delivery-step-row">
@@ -167,7 +149,7 @@
           </button>
         </form>
       </div>
-      {% if _dry_done %}
+      {% if _dry_done and not _delivered %}
       <div class="delivery-step-status">
         <span class="badge badge-low">Dry run passed</span>
       </div>
@@ -184,40 +166,55 @@
     <div class="delivery-step">
       <div class="delivery-step-row">
         <span class="delivery-step-num {% if _delivered %}is-done{% elif _dry_done %}is-active{% endif %}" aria-hidden="true">2</span>
-        <form method="post" action="/assessments/{{ assessment_id }}/deliver" class="inline-form"
-              x-ref="deliverForm" @submit="busy = 'apply'">
-          <button type="button" class="btn btn-green" data-action="apply"
-                  {% if not _dry_done %}disabled aria-disabled="true"{% endif %}
-                  :disabled="busy !== ''{% if not _dry_done %} || true{% endif %}"
-                  :aria-busy="busy === 'apply'"
-                  :class="{ 'btn-loading': busy === 'apply', 'submitting': busy === 'apply' }"
-            {% if _dry_done %}
-            @click="$dispatch('show-confirm', {
-              title: {{ ('Confirm ' ~ _deliver_label) | tojson | forceescape }},
-              message: {{ delivery_confirmation | tojson | forceescape }} + ' ({{ total.count }} manifest(s).) ' + {{ _confirm_tail | tojson | forceescape }},
-              form: $refs.deliverForm,
-              opts: { confirmText: {{ _deliver_label | tojson | forceescape }}, danger: false }
-            })"
-            {% endif %}>
-            <span class="btn-label">{{ _deliver_label }}</span>
-            <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Working&hellip;</span>
-          </button>
-        </form>
+        <div class="delivery-choice" role="group" aria-label="Deliver choice">
+          <form method="post" action="/assessments/{{ assessment_id }}/deliver" class="inline-form"
+                x-ref="deliverForm" @submit="busy = 'apply'">
+            <button type="button" class="btn btn-green" data-action="apply"
+                    {% if not _dry_done %}disabled aria-disabled="true"{% endif %}
+                    :disabled="busy !== '' || !dryDone"
+                    :aria-disabled="!dryDone"
+                    :aria-busy="busy === 'apply'"
+                    :class="{ 'btn-loading': busy === 'apply', 'submitting': busy === 'apply' }"
+              {% if _dry_done %}
+              @click="$dispatch('show-confirm', {
+                title: {{ ('Confirm ' ~ _deliver_label) | tojson | forceescape }},
+                message: {{ delivery_confirmation | tojson | forceescape }} + ' ({{ total.count }} manifest(s).) ' + {{ _confirm_tail | tojson | forceescape }},
+                form: $refs.deliverForm,
+                opts: { confirmText: {{ _deliver_label | tojson | forceescape }}, danger: false }
+              })"
+              {% endif %}>
+              <span class="btn-label">{{ _deliver_label }}</span>
+              <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Working&hellip;</span>
+            </button>
+          </form>
+          <form method="post" action="/assessments/{{ assessment_id }}/create-agent-prs" class="inline-form"
+                @submit="busy = 'prs'">
+            <button type="submit" class="btn btn-green" data-action="prs"
+                    {% if not _dry_done %}disabled aria-disabled="true"{% endif %}
+                    :disabled="busy !== '' || !dryDone"
+                    :aria-disabled="!dryDone"
+                    :aria-busy="busy === 'prs'"
+                    :class="{ 'btn-loading': busy === 'prs', 'submitting': busy === 'prs' }">
+              <span class="btn-label">Per-Agent PRs</span>
+              <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Working&hellip;</span>
+            </button>
+          </form>
+        </div>
       </div>
+      <p class="delivery-choice-hint">One PR for everything, or a PR per agent.</p>
       <div class="delivery-step-status">
         {% if not _dry_done and not _delivered %}
         <span class="badge badge-warning" title="No successful Dry Run yet — run Dry Run first, or use Override below.">No dry run yet</span>
-        <span>Run Dry Run before {{ _deliver_label }}.</span>
+        <span>Run Dry Run before delivering.</span>
         {% elif _delivered %}
         <span class="badge badge-low">Delivered</span>
         {% elif _dry_done %}
-        <span>Ready — {{ _deliver_label }}.</span>
+        <span>Ready — choose a deliver option.</span>
         {% endif %}
       </div>
       {% if not _dry_done %}
-      {# Soft-gate override: primary CTA stays disabled; override needs an
-         explicit danger confirm restating the mechanism + missing dry run.
-         Stays in the parent delivery-actions x-data so busy / $refs work. #}
+      {# Soft-gate override: combined deliver stays disabled; override needs an
+         explicit danger confirm restating the mechanism + missing dry run. #}
       <div class="delivery-override">
         <form method="post" action="/assessments/{{ assessment_id }}/deliver" class="inline-form"
               x-ref="overrideDeliverForm" @submit="busy = 'apply'">
@@ -236,15 +233,6 @@
   </div>
 
   <div class="delivery-secondary" role="group" aria-label="Secondary actions">
-    <form method="post" action="/assessments/{{ assessment_id }}/create-agent-prs" class="inline-form"
-          @submit="busy = 'prs'">
-      <button type="submit" class="btn btn-outline" data-action="prs"
-              :disabled="busy !== ''" :aria-busy="busy === 'prs'"
-              :class="{ 'btn-loading': busy === 'prs', 'submitting': busy === 'prs' }">
-        <span class="btn-label">Per-Agent PRs</span>
-        <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Working&hellip;</span>
-      </button>
-    </form>
     <a href="/api/assessments/{{ assessment_id }}/manifests/download" class="btn btn-outline" hx-boost="false"
        :class="{ 'btn-loading': busy !== '' }" :aria-disabled="busy !== ''"
        @click="if (busy !== '') $event.preventDefault()">Download</a>

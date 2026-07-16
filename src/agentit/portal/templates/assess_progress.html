@@ -1,11 +1,21 @@
 {% extends "base.html" %}
 {% block title %}Assessing... - AgentIT{% endblock %}
 {% block content %}
-<div hx-get="/assess/progress/{{ job_id }}" hx-trigger="every 2s" hx-target="body" hx-select=".container" hx-swap="innerHTML">
+{# Poll refreshes #main-content only — never hx-target="body". Targeting
+   body + hx-select=".container" replaced the whole document (masthead,
+   Cmd+K, Events, Menu) with the content container after the first tick,
+   leaving a full-viewport progress view with no portal chrome (EDL §1). #}
+<div id="assess-progress"
+     hx-get="/assess/progress/{{ job_id }}"
+     hx-trigger="every 2s"
+     hx-target="#main-content"
+     hx-select="#main-content"
+     hx-swap="outerHTML"
+     hx-push-url="true">
 
 <h1>Running Assessment</h1>
 
-<div class="card" class="form-narrow">
+<div class="card form-narrow">
   <div class="lifecycle-stepper">
     {% set stages = [("cloning", "Cloning"), ("assessing", "Analyzing"), ("saving", "Saving")] %}
     {% for key, label in stages %}
@@ -23,6 +33,10 @@
   </div>
 
   <p class="text-muted text-center">{{ job.current_step or "Starting..." }}</p>
+
+  {% if "continue_onboard" in (job.steps_completed or []) %}
+  <p class="text-muted text-center text-sm">After scoring, onboarding will start automatically.</p>
+  {% endif %}
 
   {% if job.status == "failed" %}
   <div class="alert alert-error">

@@ -116,8 +116,13 @@
   {% if lifecycle_stage == "assessed" %}
   <span class="next-step-icon" aria-hidden="true">&#9679;</span>
   <span>
+    {% if prior_onboarded %}
+    New scorecard after re-assess — click <strong>Onboard This App</strong> below to regenerate manifests
+    (next time use Fleet <strong>Refresh Onboard</strong> to re-assess and onboard in one step).
+    {% else %}
     Next step: click <strong>Onboard This App</strong> below.
     Onboard generates remediations for all findings — do not fix them one-by-one on the Actions tab first.
+    {% endif %}
     {% if pending_actions %}
     <span class="text-muted">
       ({{ pending_actions|length }} leftover gate{{ 's' if pending_actions|length != 1 }} from earlier deliveries can wait —

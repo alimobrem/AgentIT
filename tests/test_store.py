@@ -176,6 +176,30 @@ class TestFleetAndTrend:
         assert fleet[0]["repo_name"] == "app-a"
         assert fleet[0]["critical_count"] == 1
         assert isinstance(fleet[0]["last_assessed"], str)
+        assert fleet[0]["ever_onboarded"] is False
+
+    async def test_fleet_ever_onboarded_survives_reassessment(self, store):
+        """Onboarding on an older assessment still marks the fleet row."""
+        old_id = await store.save(_make_report("refresh-app"))
+        await store.save_onboarding(old_id, [{
+            "category": "x", "path": "a.yaml", "content": "", "description": "",
+        }])
+        new_id = await store.save(_make_report("refresh-app"))
+        assert new_id != old_id
+        fleet = [r for r in await store.get_fleet_data() if r["repo_name"] == "refresh-app"]
+        assert fleet[0]["ever_onboarded"] is True
+        assert await store.repo_has_onboarding(fleet[0]["repo_url"]) is True
+
+    async def test_assessment_job_continue_onboard_claim_once(self, store):
+        job_id = await store.create_assessment_job(
+            "https://github.com/org/chain-app", continue_onboard=True,
+        )
+        job = await store.get_remediation_job(job_id)
+        assert "continue_onboard" in job["steps_completed"]
+        assert await store.claim_continue_onboard(job_id) is True
+        assert await store.claim_continue_onboard(job_id) is False
+        job = await store.get_remediation_job(job_id)
+        assert "continue_onboard" not in job["steps_completed"]
 
     async def test_get_trend_no_history(self, store):
         trend = await store.get_trend("https://github.com/org/nope")

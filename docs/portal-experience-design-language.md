@@ -233,25 +233,29 @@ controls; desktop always shows the horizontal wrap row.
 Ordered primary path on `/assessments/{id}/onboard-results`:
 
 1. **Dry Run** (secondary, `.btn-outline`) — preview only; nothing delivered.
-2. **Apply** (primary, `.btn-green`) — the real delivery. Shipped short labels:
-   **Apply** (direct) or **Open PR** (GitOps), typically via
-   `{% set _deliver_label = … %}`. Longer mechanism copy (“Apply to Cluster”,
-   “Commit & Open PR”) is legacy — do not add a third competing primary.
+2. **Deliver choice** — two equal primary options (both `.btn-green`), both
+   soft-gated until a successful Dry Run:
+   - **Commit & Open PR** / **Apply to Cluster** — single combined delivery
+     (mechanism via `{% set _deliver_label = … %}`).
+   - **Per-Agent PRs** — separate PR per agent/issue.
+   One short hint line explains the choice (“One PR for everything, or a PR
+   per agent”). Status chips stay outside the buttons.
 
 **MUST [check]** Dry Run appear as its own control (not only inside Apply).
 
-**MUST [check]** Apply label stay short; dry-run / warning status **MUST** live
-*outside* the Apply button (chip or step-guide), never nested inside it.
+**MUST [check]** deliver labels stay short; dry-run / warning status **MUST**
+live *outside* the deliver buttons (chip or step-guide), never nested inside.
 
 **MUST** restate `delivery.confirmation_text()` in the confirm modal before
-Apply fires.
+the combined deliver fires.
 
-**SHOULD** keep Per-Agent PRs / Download as secondary actions, visually quieter
-than Dry Run → Apply.
+**SHOULD** keep **Download** as the only secondary action (visually quieter
+than the Dry Run → deliver-choice stack). Do not demote Per-Agent PRs beside
+Download — it is a peer of Commit & Open PR.
 
-> Concurrent redesigns of this action bar should keep Dry Run → Apply ordering
-> and “no status inside buttons”; rebase onto this EDL rather than inventing a
-> parallel primary.
+> Concurrent redesigns of this action bar should keep Dry Run → deliver-choice
+> ordering and “no status inside buttons”; rebase onto this EDL rather than
+> inventing a parallel primary.
 
 ---
 
@@ -304,7 +308,7 @@ ancestor (same template scope). Dead handlers are bugs.
 | EDL-BADGE-MIN | MUST | `.badge { font-size: … }` ≥ 12px / `var(--font-xs)` |
 | EDL-TOKEN-HEX | SHOULD | No `style="…#hex…"` on `.btn` / links in templates |
 | EDL-NAV-EVENTS | MUST | Events bell + drawer present in `base.html` |
-| EDL-ONBOARD-ORDER | MUST | Onboard results: Dry Run control + Apply label; status outside Apply |
+| EDL-ONBOARD-ORDER | MUST | Onboard results: Dry Run + deliver choice labels; status outside CTAs |
 | EDL-DANGER-CLASS | MUST | `.btn-danger` defined when confirm modal uses it |
 | EDL-TOASTS | MUST | `#toasts` present in `base.html` |
 | EDL-FILTER-BAR | MUST | Decisions / Events / Ledger GET filters use `.filter-bar` (not `.action-bar`) |
