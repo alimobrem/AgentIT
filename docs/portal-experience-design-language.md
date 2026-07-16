@@ -139,7 +139,7 @@ palette follow the same expectation).
 
 ---
 
-## 6. Forms, empty states, badges
+## 6. Forms, filters, empty states, badges
 
 **Forms**
 
@@ -147,6 +147,64 @@ palette follow the same expectation).
 - **SHOULD** use `.form-narrow` / `.form-group` / `.form-label` for stacked forms.
 - **MUST NOT** disable primary submit solely because of off-screen validation
   errors without an adjacent error message.
+
+**Filters (list / log pages)**
+
+List and log pages that expose query filters (Decisions, Events, Ledger, and
+any future peer) use a **compact filter toolbar**, not the primary `.action-bar`
+(which is for page actions) and not stacked full-width form cards.
+
+| Role | Classes | Notes |
+|---|---|---|
+| **Filter bar** | `.filter-bar` on the GET `<form>` | One horizontal wrap row; compact control height |
+| **Field** | `.filter-field` wrapping label + control | Small label above (or `aria-label` on the control) |
+| **Wide text** | `.filter-field-wide` on the field or input | Search `q` only — still capped, never full viewport |
+| **Actions** | `.filter-actions` | Filter submit + Clear/reset as `.btn btn-sm btn-outline` |
+| **Mobile shell** | `.filter-panel` + `<summary class="filter-panel-summary">` | Optional `<details open>`; summary hidden on desktop |
+
+**MUST [check]** GET filter forms on Decisions / Events / Ledger use
+`class="filter-bar"` (not `class="action-bar"`).
+
+**MUST [check]** `base.html` define `.filter-bar` styles that override the
+global `input, select { width: 100% }` rule so filter controls stay compact
+(`width: auto`, bounded `max-width`, shared control height / `font-size`).
+
+**MUST** keep control heights consistent inside `.filter-bar` (shared padding /
+line-height); do not mix oversized selects with tiny buttons.
+
+**MUST** provide a Clear / reset affordance when any filter query param is
+active (link back to the bare list path, same secondary button classes as
+Filter).
+
+**SHOULD** collapse the bar behind a “Filters” disclosure on narrow viewports
+(`.filter-panel` / `.filter-panel-summary`) when there are more than two
+controls; desktop always shows the horizontal wrap row.
+
+**Do**
+
+```html
+<details class="filter-panel" open>
+  <summary class="filter-panel-summary">Filters</summary>
+  <form method="get" action="/decisions" class="filter-bar" role="search"
+        aria-label="Filter decisions">
+    <div class="filter-field">
+      <label for="filter-decision-type">Decision type</label>
+      <select id="filter-decision-type" name="decision_type">…</select>
+    </div>
+    <div class="filter-actions">
+      <button type="submit" class="btn btn-sm btn-outline">Filter</button>
+      <a href="/decisions" class="btn btn-sm btn-outline">Clear</a>
+    </div>
+  </form>
+</details>
+```
+
+**Don't**
+
+- Put filter `<select>` / `<input>` in `.action-bar` or `.stat-card` stacks
+  (inherits full-width form chrome → oversized controls).
+- Use default stacked `.form-group` widths for list filters.
+- Omit Clear when filters are applied, or invent a third button skin for reset.
 
 **Empty states**
 
@@ -240,6 +298,8 @@ ancestor (same template scope). Dead handlers are bugs.
 | EDL-ONBOARD-ORDER | MUST | Onboard results: Dry Run control + Apply label; status outside Apply |
 | EDL-DANGER-CLASS | MUST | `.btn-danger` defined when confirm modal uses it |
 | EDL-TOASTS | MUST | `#toasts` present in `base.html` |
+| EDL-FILTER-BAR | MUST | Decisions / Events / Ledger GET filters use `.filter-bar` (not `.action-bar`) |
+| EDL-FILTER-CSS | MUST | `base.html` defines compact `.filter-bar` control sizing |
 
 ---
 

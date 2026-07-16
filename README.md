@@ -232,7 +232,7 @@ Every path that gets a generated change into a cluster or a repo — the manual 
 
 **Attention signals:** the primary-nav gate badge and Ledger “Needs You” chips use `badge-accent` (`--color-accent`). Fleet is scoreboard-only — a quiet “N need you → Ledger” link, not a pending-ops column. Assessment Detail shows a **next-step hint** under the lifecycle stepper (pending actions always win over stage copy; the Actions link uses `?tab=actions`, not a dead Alpine click outside `x-data`); Delete is visually de-emphasized in a danger-zone slot opposite the primary Onboard action. Capabilities collapses reference catalogs (skills/checks/how-onboarding-works) with `<button>` toggles by default so activity/stats stay above the fold.
 
-**Experience Design Language (EDL):** normative portal UI contract — button hierarchy, Dry Run → Apply onboarding path, modals/a11y, badges, feedback — in [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md). Agents should load [`.cursor/rules/portal-edl.mdc`](.cursor/rules/portal-edl.mdc). Enforce with `uv run pytest tests/test_portal_edl.py -q` (also `uv run python scripts/check_portal_edl.py`).
+**Experience Design Language (EDL):** normative portal UI contract — button hierarchy, Dry Run → Apply onboarding path, modals/a11y, badges, feedback, and compact `.filter-bar` / `.filter-field` toolbars for list/log GET filters (Decisions, Events, Ledger) — in [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md). Agents should load [`.cursor/rules/portal-edl.mdc`](.cursor/rules/portal-edl.mdc). Enforce with `uv run pytest tests/test_portal_edl.py -q` (also `uv run python scripts/check_portal_edl.py`).
 
 Key pages:
 

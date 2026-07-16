@@ -49,8 +49,13 @@ def test_edl_doc_exists_with_machine_checkable_index():
     doc = (REPO_ROOT / "docs" / "portal-experience-design-language.md").read_text()
     assert "EDL-BTN-STATUS" in doc
     assert "EDL-ONBOARD-ORDER" in doc
+    assert "EDL-FILTER-BAR" in doc
+    assert "EDL-FILTER-CSS" in doc
+    assert ".filter-bar" in doc
     assert "Dry Run" in doc and "Apply" in doc
     assert "Running checks" in doc
+    assert "**Do**" in doc
+    assert "**Don't**" in doc or "**Don’t**" in doc
 
 
 def test_edl_cursor_rule_points_at_doc():
@@ -160,3 +165,25 @@ async def test_async_feedback_surfaces_present_on_key_pages(edl_client):
         assert resp.status_code == 200, path
         assert 'id="toasts"' in resp.text, path
         assert "role=\"status\"" in resp.text or 'id="toasts"' in resp.text, path
+
+
+async def test_filter_bar_pattern_on_list_pages(edl_client):
+    """EDL §6: Decisions / Events / Ledger use compact .filter-bar, not .action-bar."""
+    client, _store = edl_client
+    for path in ("/decisions", "/events", "/ledger"):
+        resp = await client.get(path)
+        assert resp.status_code == 200, path
+        html = resp.text
+        assert "filter-bar" in html, path
+        assert "filter-actions" in html, path
+        assert re.search(r"\.filter-bar\s*\{", html), path
+        assert re.search(
+            r"\.filter-bar\s+input\s*,\s*\.filter-bar\s+select\s*\{[^}]*width\s*:\s*auto",
+            html,
+            re.S,
+        ), path
+        for m in re.finditer(r'<form\b[^>]*method=["\']get["\'][^>]*>', html, re.I):
+            tag = m.group(0)
+            if "filter-bar" in tag:
+                assert "action-bar" not in tag, path
+

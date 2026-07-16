@@ -266,6 +266,20 @@ def check_file(path: Path) -> list[Violation]:
                     "EDL-BADGE-MIN", "MUST", rel, _line_of(text, m.start()),
                     f".badge font-size {m.group(1).strip()!r} is below 12px / var(--font-xs)",
                 ))
+        if not re.search(r"\.filter-bar\s*\{", text):
+            vios.append(Violation(
+                "EDL-FILTER-CSS", "MUST", rel, 1,
+                ".filter-bar CSS missing from base.html",
+            ))
+        elif not re.search(
+            r"\.filter-bar\s+input\s*,\s*\.filter-bar\s+select\s*\{[^}]*width\s*:\s*auto",
+            text,
+            re.S,
+        ):
+            vios.append(Violation(
+                "EDL-FILTER-CSS", "MUST", rel, 1,
+                ".filter-bar must override global input/select width:100% (width: auto)",
+            ))
 
     if path.name == "onboard_results.html":
         if not re.search(r"btn-label\">Dry Run<|\"Dry Run\"|>Dry Run<", text):
@@ -293,6 +307,30 @@ def check_file(path: Path) -> list[Violation]:
                     "EDL-ONBOARD-ORDER", "MUST", rel, line_no,
                     "dry-run status must be outside the Apply button",
                 ))
+
+    # Compact filter toolbar on list/log pages (EDL §6 Filters).
+    if path.name in {"decisions.html", "events.html", "ledger.html"}:
+        if not re.search(r'''class\s*=\s*["'][^"']*\bfilter-bar\b''', text):
+            vios.append(Violation(
+                "EDL-FILTER-BAR", "MUST", rel, 1,
+                'GET filter form must use class="filter-bar"',
+            ))
+        for m in re.finditer(
+            r'''<form\b[^>]*method\s*=\s*["']get["'][^>]*class\s*=\s*["']([^"']*)["']''',
+            text,
+            re.I,
+        ):
+            classes = m.group(1).split()
+            if "action-bar" in classes and "filter-bar" not in classes:
+                vios.append(Violation(
+                    "EDL-FILTER-BAR", "MUST", rel, _line_of(text, m.start()),
+                    "GET filter form must not use .action-bar; use .filter-bar",
+                ))
+        if not re.search(r'''class\s*=\s*["'][^"']*\bfilter-actions\b''', text):
+            vios.append(Violation(
+                "EDL-FILTER-BAR", "SHOULD", rel, 1,
+                "filter form should group Filter/Clear in .filter-actions",
+            ))
 
     return vios
 
