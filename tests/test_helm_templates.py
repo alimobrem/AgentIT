@@ -21,6 +21,7 @@ HELM_VARS = {
     "{{ .Values.postgres.bundled.credentials.secretName }}": "agentit-postgres-bundled-app",
     "{{ .Values.postgres.bundled.credentials.database | quote }}": '"agentit"',
     '{{ .Values.postgres.bundled.backup.schedule | default "23 */6 * * *" | quote }}': '"23 */6 * * *"',
+    '{{ .Values.agents.capabilityScout.mode | default "docs" }}': "docs",
 }
 
 

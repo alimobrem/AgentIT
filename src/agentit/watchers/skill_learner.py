@@ -413,7 +413,12 @@ class SkillLearner:
             "and a warning is logged -- that's the only case where a draft stays invisible.",
             err=True,
         )
-        await self._wait_for_portal_draft_route()
+        try:
+            await self._wait_for_portal_draft_route()
+        except KeyboardInterrupt:
+            click.echo("Skill learner stopped.", err=True)
+            await self._client.aclose()
+            return
         while True:
             try:
                 await self.research_once()

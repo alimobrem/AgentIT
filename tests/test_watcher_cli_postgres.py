@@ -111,8 +111,20 @@ async def test_drift_detect_ticks_once_against_real_postgres(pg_store):
 async def test_learn_watch_ticks_once_against_real_postgres(pg_store):
     coro = _unwrapped("learn-watch")
 
+    # `SkillLearner.run()` blocks on `_wait_for_portal_draft_route()` before
+    # its tick loop -- that method has its *own* `asyncio.sleep` (a real,
+    # unrelated-to-the-tick-loop 10s-per-attempt probe wait with no portal
+    # reachable in this test env). Patching bare `asyncio.sleep` (as this
+    # test used to) hits that probe's sleep first, not the tick loop's
+    # `sleep_with_heartbeat` -- since the probe method itself is expected
+    # (and, since a prior fix, does) treat that as a real interrupt and stop
+    # immediately rather than reach a first tick at all. Skipping the probe
+    # outright is both faster and correctly isolates "interrupt the tick
+    # loop's sleep" as this test actually intends, matching how the sibling
+    # vuln-watch test above targets `sleep_with_heartbeat` specifically.
     with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")), \
-         patch("agentit.watchers.skill_learner.asyncio.sleep", side_effect=KeyboardInterrupt):
+         patch("agentit.watchers.skill_learner.SkillLearner._wait_for_portal_draft_route", return_value=True), \
+         patch("agentit.watchers.skill_learner.sleep_with_heartbeat", side_effect=KeyboardInterrupt):
         await coro(interval=1, limit=3, llm_model=None)  # must not raise AttributeError on store.raw
 
     events = await pg_store.list_events()

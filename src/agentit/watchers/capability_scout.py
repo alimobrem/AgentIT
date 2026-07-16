@@ -241,7 +241,11 @@ class CapabilityScout:
                 "(avoids first-tick race with canary rollout)...",
                 err=True,
             )
-            await sleep_with_heartbeat(self._startup_grace_seconds)
+            try:
+                await sleep_with_heartbeat(self._startup_grace_seconds)
+            except KeyboardInterrupt:
+                click.echo("capability-scout stopped.", err=True)
+                return
             self._startup_grace_done = True
         while True:
             try:

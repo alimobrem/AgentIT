@@ -185,7 +185,10 @@ class TestAsyncRunLoop:
 
     @patch("agentit.watchers.skill_learner.sleep_with_heartbeat", side_effect=KeyboardInterrupt)
     async def test_run_ticks_once_then_stops_on_interrupt(self, mock_sleep, capsys):
-        learner, _ = _learner()
+        # startup_grace_seconds=0 skips the portal-readiness probe (no portal
+        # is reachable in this test env, so it would otherwise really sleep
+        # in 10s increments up to the default 120s grace period first).
+        learner, _ = _learner(startup_grace_seconds=0)
         with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")):
             await learner.run()
 
@@ -205,7 +208,11 @@ class TestTickRunsOnEventLoop:
     @patch("agentit.watchers.skill_learner.sleep_with_heartbeat", side_effect=KeyboardInterrupt)
     async def test_research_once_awaited_directly_and_telemetry_records(self, mock_sleep):
         async_store, store = await make_async_store()
-        learner, _ = _learner(store=async_store)
+        # Skip startup grace (default 120s) -- no portal is reachable in this
+        # test env, so `_wait_for_portal_draft_route()` would otherwise really
+        # sleep in 10s probe increments up to the full grace period before
+        # ever reaching the tick loop this test actually exercises.
+        learner, _ = _learner(store=async_store, startup_grace_seconds=0)
 
         with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")), \
              patch.object(learner, "research_once", wraps=learner.research_once) as mock_research_once:
@@ -242,7 +249,10 @@ class TestHeartbeatRefreshedDuringLongSleep:
     down to a real 900s value."""
 
     async def test_run_delegates_between_tick_sleep_to_shared_heartbeat_helper(self):
-        learner, _ = _learner()
+        # startup_grace_seconds=0 skips the portal-readiness probe (no portal
+        # is reachable in this test env, so it would otherwise really sleep
+        # in 10s increments up to the default 120s grace period first).
+        learner, _ = _learner(startup_grace_seconds=0)
         learner._interval = 12345
 
         with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")), \
