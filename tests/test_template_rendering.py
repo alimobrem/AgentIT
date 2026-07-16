@@ -226,7 +226,7 @@ class TestDeliverButtonClickAttributeIntact:
 
         parser = _ClickAttrCapture()
         parser.feed(resp.text)
-        deliver_clicks = [c for c in parser.clicks if "Confirm Delivery" in c]
+        deliver_clicks = [c for c in parser.clicks if "Confirm Apply to Cluster" in c]
         assert deliver_clicks, "no @click attribute found for the Deliver button"
 
         click = deliver_clicks[0]
@@ -236,10 +236,11 @@ class TestDeliverButtonClickAttributeIntact:
             f"(without `| forceescape`) broke out of the HTML attribute "
             f"early:\n{click!r}"
         )
-        assert "cannot be undone" in click, (
+        assert "may modify cluster resources" in click, (
             f"Deliver button's @click attribute was truncated -- it never "
-            f"reaches the tail of the JS expression:\n{click!r}"
+            f"reaches the honest Direct Apply consequence tail:\n{click!r}"
         )
+        assert "cannot be undone" not in click
         assert click.rstrip().endswith("})"), (
             f"Deliver button's @click attribute doesn't end with a "
             f"complete function call -- looks truncated:\n{click!r}"
