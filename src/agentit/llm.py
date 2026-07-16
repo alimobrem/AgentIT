@@ -74,8 +74,10 @@ _EOL_MAX_TOKENS = 1024
 # claude-sonnet-4-6 (64,000 tokens per Anthropic's published model limits) —
 # there's no reason to approach that ceiling for a handful of prose fields.
 _CAPABILITY_PROPOSAL_MAX_TOKENS = 2048
-# Full-file source generation needs more headroom than the proposal JSON.
-_CAPABILITY_FILES_MAX_TOKENS = 8192
+# Full-file source generation needs more headroom than the proposal JSON
+# (escaped newlines in JSON strings inflate token use vs raw source).
+_CAPABILITY_FILES_MAX_TOKENS = 16384
+_CAPABILITY_FILES_TIMEOUT_SECONDS = 120.0
 
 _CLASSIFY_SYSTEM = (
     "You are a security analyst reviewing source code for hardcoded secrets. "
@@ -394,8 +396,8 @@ class LLMClient:
         target file, return a full-file replacement map for those paths only.
 
         Used by L3 ``source`` / ``auto`` mode in ``capability_scout.build_source_diff``.
-        Returns ``None`` on LLM/parse failure (caller falls back to docs mode).
-        Never invents paths that weren't in ``current_files``.
+        Returns ``None`` on LLM/parse failure (caller skips the cycle — no
+        docs-only fallback). Never invents paths that weren't in ``current_files``.
         """
         user_msg = (
             "Proposal (JSON):\n"
@@ -413,12 +415,47 @@ class LLMClient:
             "Prefer creating or lightly editing small new files; if a current file is "
             "truncated, do not attempt a full rewrite — return {\"files\": {}} instead. "
             "HARD SIZE BUDGET: across all returned file contents combined, at most "
-            "3 files and 150 lines total (count every newline — same caps as "
-            "capability_scout.MAX_DIFF_FILES / MAX_DIFF_LINES). Prefer tiny new "
-            "modules + tests. Respond ONLY with valid JSON — no markdown fences. "
+            "3 files and 80 lines total (stay well under capability_scout.MAX_DIFF_LINES "
+            "so JSON-escaped output fits). Short docstrings only. "
+            "Respond ONLY with valid JSON — no markdown fences. "
             'If you cannot produce a safe change within that budget, return {"files": {}}.'
         )
-        raw = self._chat(system, user_msg, max_tokens=_CAPABILITY_FILES_MAX_TOKENS)
+        raw = self._chat(
+            system, user_msg,
+            max_tokens=_CAPABILITY_FILES_MAX_TOKENS,
+            timeout=_CAPABILITY_FILES_TIMEOUT_SECONDS,
+        )
+        parsed = self._parse_capability_files(raw, current_files)
+        if parsed is not None:
+            return parsed
+        if raw is not None:
+            logger.warning(
+                "LLM returned unparseable capability files; retrying compact: %s",
+                raw[:500],
+            )
+            retry_system = (
+                system
+                + " CRITICAL RETRY: previous reply was truncated or unparseable. "
+                "Respond with compact raw JSON only — no fences, at most 2 files and "
+                "60 lines total, minimal comments, finish the JSON object completely."
+            )
+            raw2 = self._chat(
+                retry_system, user_msg,
+                max_tokens=_CAPABILITY_FILES_MAX_TOKENS,
+                timeout=_CAPABILITY_FILES_TIMEOUT_SECONDS,
+            )
+            parsed = self._parse_capability_files(raw2, current_files)
+            if parsed is not None:
+                return parsed
+            logger.warning(
+                "LLM capability files still unparseable after retry: %s",
+                (raw2 or "")[:500],
+            )
+        return None
+
+    def _parse_capability_files(
+        self, raw: str | None, current_files: dict[str, str],
+    ) -> dict[str, str] | None:
         if raw is None:
             return None
         try:
@@ -434,7 +471,6 @@ class LLMClient:
             }
             return out or None
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-            logger.warning("LLM returned unparseable capability files payload: %s", (raw or "")[:500])
             return None
 
     def _parse_capability_proposal(self, raw: str | None) -> dict | None:
@@ -462,7 +498,13 @@ class LLMClient:
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             return None
 
-    def _chat(self, system: str, user: str, max_tokens: int = _DEFAULT_MAX_TOKENS) -> str | None:
+    def _chat(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int = _DEFAULT_MAX_TOKENS,
+        timeout: float = 60.0,
+    ) -> str | None:
         if llm_breaker.is_open:
             logger.warning("LLM circuit breaker open — skipping call")
             return None
@@ -473,10 +515,17 @@ class LLMClient:
                 system=system,
                 messages=[{"role": "user", "content": user}],
                 temperature=0.2,
-                timeout=60,
+                timeout=timeout,
             )
             llm_breaker.record_success()
-            return _strip_code_fence(resp.content[0].text)
+            text = _strip_code_fence(resp.content[0].text)
+            stop = getattr(resp, "stop_reason", None)
+            if stop and stop != "end_turn":
+                logger.warning(
+                    "LLM stop_reason=%s (len=%d) — output may be truncated",
+                    stop, len(text or ""),
+                )
+            return text
         except Exception as exc:
             llm_breaker.record_failure()
             logger.warning("LLM call failed: %s", exc)
