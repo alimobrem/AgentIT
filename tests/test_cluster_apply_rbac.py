@@ -45,14 +45,18 @@ def test_applies_yaml_files():
     assert call_args[0][1] == "test-ns"
 
 
-def test_dry_run_skips_apply():
+def test_dry_run_calls_apply_yaml_with_dry_run_flag():
+    """Dry run must be a real server-side-apply dry run against the API
+    server, not a no-op that only checks for a recognizable `kind`."""
     with patch("agentit.portal.cluster_apply.kube") as mock_kube:
         mock_kube.namespace_exists.return_value = True
         mock_kube.get_api_resources.return_value = set()
+        mock_kube.apply_yaml.return_value = {"applied": True, "error": None}
         result = apply_manifests_to_cluster([_yaml_file()], dry_run=True)
 
     assert result["applied"] == ["test.yaml"]
-    mock_kube.apply_yaml.assert_not_called()
+    mock_kube.apply_yaml.assert_called_once()
+    assert mock_kube.apply_yaml.call_args.kwargs["dry_run"] is True
 
 
 def test_skips_non_k8s_yml():
@@ -83,13 +87,19 @@ def test_captures_errors():
     assert "forbidden" in result["errors"][0]
 
 
-def test_no_apply_call_on_dry_run():
+def test_dry_run_failure_is_a_real_error_not_false_ok():
+    """A dry run that hits a real apiserver rejection must surface it as a
+    genuine error, never silently report success."""
     with patch("agentit.portal.cluster_apply.kube") as mock_kube:
         mock_kube.namespace_exists.return_value = True
         mock_kube.get_api_resources.return_value = set()
-        apply_manifests_to_cluster([_yaml_file()], dry_run=True)
+        mock_kube.apply_yaml.return_value = {"applied": False, "error": "forbidden: User cannot create"}
+        result = apply_manifests_to_cluster([_yaml_file()], dry_run=True)
 
-    mock_kube.apply_yaml.assert_not_called()
+    mock_kube.apply_yaml.assert_called_once()
+    assert result["applied"] == []
+    assert len(result["errors"]) == 1
+    assert "forbidden" in result["errors"][0]
 
 
 def test_apply_called_when_not_dry_run():

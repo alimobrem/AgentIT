@@ -256,7 +256,7 @@ def _ssa_conflict_message(exc) -> str:
 
 def apply_yaml(
     content: str, namespace: str, *,
-    field_manager: str = DEFAULT_FIELD_MANAGER, force: bool = False,
+    field_manager: str = DEFAULT_FIELD_MANAGER, force: bool = False, dry_run: bool = False,
 ) -> dict:
     """Apply a YAML manifest via real per-field-manager server-side-apply.
 
@@ -275,6 +275,15 @@ def apply_yaml(
     returns a structured, distinguishable result instead so callers can
     route the conflict to a human-reviewed gate rather than either
     failing silently or seizing ownership from another manager.
+
+    `dry_run` defaults to `False` and, when `True`, passes the Kubernetes
+    API's own `dryRun=All` query parameter through to the server-side-apply
+    call -- the apiserver validates and admission-checks the request exactly
+    as it would for a real apply (missing CRDs, RBAC denials, schema/
+    admission-webhook rejections, quota, ...) but never persists it. This
+    is what makes "Dry Run" in `cluster_apply.py` a real dry run instead of
+    only checking that a manifest has a recognizable `kind` -- see that
+    module's `apply_manifests_to_cluster()` for the caller.
 
     Returns a dict:
       - applied: True only if every document in `content` applied cleanly.
@@ -331,6 +340,7 @@ def apply_yaml(
                 resource, body=doc, name=name,
                 namespace=doc_namespace if resource.namespaced else None,
                 field_manager=field_manager, force_conflicts=force,
+                dry_run="All" if dry_run else None,
                 _request_timeout=30,
             )
         except ApiException as exc:

@@ -68,12 +68,16 @@ def test_applies_valid_k8s_yaml(_mock_kube):
 
 
 def test_dry_run_flag(_mock_kube):
+    """Dry run must be a REAL server-side-apply dry run, not just a
+    filename-recording no-op (finding: a dry run reported "32/32 OK" while
+    zero cluster was actually reachable) -- it calls kube.apply_yaml() with
+    dry_run=True instead of skipping the call entirely."""
     files = [_file("deploy.yaml", _k8s_yaml("Deployment", "app"))]
     result = apply_manifests_to_cluster(files, dry_run=True)
 
     assert result["applied"] == ["deploy.yaml"]
-    # Dry run should NOT call kube.apply_yaml
-    _mock_kube.apply_yaml.assert_not_called()
+    _mock_kube.apply_yaml.assert_called_once()
+    assert _mock_kube.apply_yaml.call_args.kwargs["dry_run"] is True
 
 
 def test_fixes_namespace_mismatch(_mock_kube):
@@ -177,10 +181,44 @@ def test_force_true_is_threaded_to_kube_apply_yaml(_mock_kube):
     assert _mock_kube.apply_yaml.call_args.kwargs["force"] is True
 
 
-def test_dry_run_never_produces_conflicts_key_growth(_mock_kube):
-    """Dry-run never calls kube.apply_yaml at all, so conflicts must stay
-    empty regardless of what a real apply would eventually report."""
+def test_dry_run_reports_conflicts_from_the_real_dry_run_call(_mock_kube):
+    """Dry-run now calls kube.apply_yaml() for real (dry_run=True) -- a
+    field-manager conflict surfaced by that call must still be routed to
+    `conflicts`, not silently dropped or lumped into `errors`."""
     files = [_file("cm.yaml", _k8s_yaml("ConfigMap", "test"))]
+    _mock_kube.apply_yaml.return_value = {
+        "applied": False, "error": "ConfigMap/test: field-manager conflict -- ...",
+        "conflict": True, "conflict_details": [{"kind": "ConfigMap", "name": "test", "namespace": "default", "message": "..."}],
+    }
     result = apply_manifests_to_cluster(files, dry_run=True)
+    assert result["applied"] == []
+    assert result["errors"] == []
+    assert len(result["conflicts"]) == 1
+    _mock_kube.apply_yaml.assert_called_once()
+    assert _mock_kube.apply_yaml.call_args.kwargs["dry_run"] is True
+
+
+def test_dry_run_happy_path_still_reports_all_ok(_mock_kube):
+    """The pre-existing "N/N OK" happy path (mocked API accepts everything)
+    must still work under the new real-dry-run call."""
+    files = [_file("cm.yaml", _k8s_yaml("ConfigMap", "test")), _file("svc.yaml", _k8s_yaml("Service", "svc"))]
+    result = apply_manifests_to_cluster(files, dry_run=True)
+    assert sorted(result["applied"]) == ["cm.yaml", "svc.yaml"]
+    assert result["errors"] == []
     assert result["conflicts"] == []
-    _mock_kube.apply_yaml.assert_not_called()
+
+
+def test_dry_run_surfaces_a_real_failure_not_false_ok(_mock_kube):
+    """A dry run that hits a real apiserver rejection (missing CRD, RBAC
+    denial, admission-webhook rejection, unreachable cluster, ...) must
+    report it as a genuine per-manifest error, never a false "OK" --
+    exactly the failure mode the live incident exposed."""
+    files = [_file("cm.yaml", _k8s_yaml("ConfigMap", "test"))]
+    _mock_kube.apply_yaml.return_value = {
+        "applied": False, "error": "ConfigMap (v1) not found on cluster: connection refused",
+        "conflict": False, "conflict_details": [],
+    }
+    result = apply_manifests_to_cluster(files, dry_run=True)
+    assert result["applied"] == []
+    assert len(result["errors"]) == 1
+    assert "connection refused" in result["errors"][0]

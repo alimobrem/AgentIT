@@ -287,6 +287,15 @@ def apply_manifests_to_cluster(
     "another manager owns this field" apart from an ordinary apply failure
     and react accordingly (e.g. route to a human-reviewed gate) instead of
     lumping both into one generic failure count.
+
+    ``dry_run`` is threaded straight through to ``kube.apply_yaml()``'s own
+    ``dry_run`` parameter -- a real server-side-apply dry run against the
+    cluster's API server (missing CRDs, RBAC denials, schema/admission-
+    webhook rejections, quota, ...) rather than only checking that a
+    manifest has a recognizable ``kind``. An unreachable cluster (or any
+    other apply failure) surfaces as a normal per-manifest entry in
+    ``errors``/``conflicts`` exactly like the real-apply path, never as a
+    false "OK".
     """
     applied: list[str] = []
     skipped: list[str] = []
@@ -341,23 +350,20 @@ def apply_manifests_to_cluster(
 
         content = yaml.dump_all(apply_docs, default_flow_style=False)
 
-        if dry_run:
+        result = kube.apply_yaml(content, namespace, force=force, dry_run=dry_run)
+        log_prefix = "Dry-run:" if dry_run else "Real apply:"
+        if result["applied"]:
             applied.append(fpath)
-            logger.info("Dry-run validated %s", fpath)
+            logger.info("%s %s applied cleanly", log_prefix, fpath)
+        elif result.get("conflict"):
+            conflicts.append({
+                "path": fpath, "error": result["error"],
+                "details": result.get("conflict_details", []),
+            })
+            logger.warning("%s field-manager conflict applying %s: %s", log_prefix, fpath, result["error"])
         else:
-            result = kube.apply_yaml(content, namespace, force=force)
-            if result["applied"]:
-                applied.append(fpath)
-                logger.info("Applied %s", fpath)
-            elif result.get("conflict"):
-                conflicts.append({
-                    "path": fpath, "error": result["error"],
-                    "details": result.get("conflict_details", []),
-                })
-                logger.warning("Field-manager conflict applying %s: %s", fpath, result["error"])
-            else:
-                errors.append(f"{fpath}: {result['error']}")
-                logger.error("Failed %s: %s", fpath, result["error"])
+            errors.append(f"{fpath}: {result['error']}")
+            logger.error("%s failed %s: %s", log_prefix, fpath, result["error"])
 
     return {
         "applied": applied,

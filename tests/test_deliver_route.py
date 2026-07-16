@@ -61,12 +61,17 @@ class TestDeliverNotRegisteredAppliesDirectly:
         assert deliveries[0]["mechanism"] == "cluster_config:direct-apply"
         assert deliveries[0]["status"] == "delivered"
 
-    async def test_dry_run_never_calls_apply_yaml(self, deliver_client, _mock_kube):
+    async def test_dry_run_calls_apply_yaml_with_dry_run_flag(self, deliver_client, _mock_kube):
+        """Dry run must be a real server-side-apply dry run against the API
+        server (finding: a dry run reported "32/32 OK" while zero cluster
+        was actually reachable), not a no-op that skips kube.apply_yaml()
+        entirely."""
         client, store, aid = deliver_client
         resp = await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "true"}, follow_redirects=False)
         assert resp.status_code == 303
         assert "dry_run=true" in resp.headers["location"]
-        _mock_kube.apply_yaml.assert_not_called()
+        _mock_kube.apply_yaml.assert_called_once()
+        assert _mock_kube.apply_yaml.call_args.kwargs["dry_run"] is True
 
 
 class TestDeliverRegisteredCommitsToInfraRepo:

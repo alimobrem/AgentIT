@@ -138,6 +138,74 @@ class TestApplyYamlConflictVsOtherFailure:
         assert result["conflict_details"] == []
 
 
+class TestApplyYamlDryRun:
+    """Regression coverage for Finding #2: dry-run must actually reach the
+    K8s API server's own dryRun=All validation, not just check that the
+    manifest has a recognizable `kind`."""
+
+    def test_dry_run_true_passes_dry_run_all_to_server_side_apply(self):
+        dyn = _mock_dynamic_client()
+        with patch("agentit.kube.dynamic_client", return_value=dyn):
+            result = kube.apply_yaml(_CM_YAML, "default", dry_run=True)
+
+        assert result["applied"] is True
+        dyn.server_side_apply.assert_called_once()
+        assert dyn.server_side_apply.call_args.kwargs["dry_run"] == "All"
+
+    def test_dry_run_false_passes_no_dry_run_query_param(self):
+        dyn = _mock_dynamic_client()
+        with patch("agentit.kube.dynamic_client", return_value=dyn):
+            kube.apply_yaml(_CM_YAML, "default", dry_run=False)
+
+        assert dyn.server_side_apply.call_args.kwargs["dry_run"] is None
+
+    def test_dry_run_surfaces_a_real_admission_rejection_as_an_error(self):
+        """A dry-run against a real apiserver can genuinely fail (e.g. an
+        admission webhook or CRD schema validation rejecting the manifest)
+        -- that must surface as a real per-manifest error, never a false
+        "OK"."""
+        rejected = ApiException(status=422, reason="Unprocessable Entity")
+        rejected.body = '{"message": "admission webhook denied the request: invalid spec"}'
+        dyn = _mock_dynamic_client(server_side_apply_side_effect=rejected)
+        with patch("agentit.kube.dynamic_client", return_value=dyn):
+            result = kube.apply_yaml(_CM_YAML, "default", dry_run=True)
+
+        assert result["applied"] is False
+        assert "admission webhook denied" in result["error"] or "Unprocessable" in result["error"]
+
+    def test_dry_run_surfaces_missing_crd_as_an_error_not_false_ok(self):
+        """A dry-run against a cluster with no reachable API / a missing
+        CRD must not silently report success -- this is exactly the
+        incident the finding describes: a dry run reporting "32/32 OK"
+        while zero cluster was actually reachable."""
+        dyn = _mock_dynamic_client(resources_get_side_effect=RuntimeError("no matches for kind"))
+        with patch("agentit.kube.dynamic_client", return_value=dyn):
+            result = kube.apply_yaml(_CM_YAML, "default", dry_run=True)
+
+        assert result["applied"] is False
+        assert "not found on cluster" in result["error"]
+        dyn.server_side_apply.assert_not_called()
+
+    def test_dry_run_unreachable_cluster_is_a_real_error_not_false_ok(self):
+        """No cluster reachable at all (e.g. connection refused) during a
+        dry run must fail informatively, never report false success."""
+        dyn = _mock_dynamic_client(server_side_apply_side_effect=RuntimeError("connection refused"))
+        with patch("agentit.kube.dynamic_client", return_value=dyn):
+            result = kube.apply_yaml(_CM_YAML, "default", dry_run=True)
+
+        assert result["applied"] is False
+        assert "connection refused" in result["error"]
+
+    def test_dry_run_happy_path_still_reports_ok_when_api_accepts_everything(self):
+        """The existing happy path (mocked API accepts everything) must
+        keep working under dry_run=True exactly like dry_run=False."""
+        dyn = _mock_dynamic_client()
+        with patch("agentit.kube.dynamic_client", return_value=dyn):
+            result = kube.apply_yaml(_CM_YAML, "default", dry_run=True)
+
+        assert result == {"applied": True, "error": None, "conflict": False, "conflict_details": []}
+
+
 class TestApplyYamlInvalidInput:
     def test_invalid_yaml_returns_error_not_conflict(self):
         dyn = _mock_dynamic_client()
