@@ -604,7 +604,7 @@ async def test_assessment_detail_lifecycle_primary_cta_after_onboard(client, _ov
 async def test_fleet_h1_not_enterprise_readiness(client, _override_store):
     store = _override_store
     await store.save(_make_report())
-    resp = await client.get("/")
+    resp = await client.get("/fleet")
     assert resp.status_code == 200
     assert "<h1>Fleet</h1>" in resp.text
     assert "Enterprise Readiness" not in resp.text
