@@ -731,6 +731,35 @@ async def test_masthead_nav_structure(client, _override_store):
     assert decisions_in_menu > dropdown_idx
 
 
+async def test_assess_progress_keeps_portal_chrome(client, _override_store):
+    """Running Assessment must keep masthead chrome (EDL §1).
+
+    Regression: hx-target="body" + hx-select=".container" swapped the
+    content container into <body>, wiping nav / Cmd+K / Events / Menu after
+    the first 2s poll.
+    """
+    store = _override_store
+    job_id = await store.create_assessment_job("https://github.com/org/progress-chrome-app")
+    await store.update_assessment_job(job_id, "assessing", "Analyzing repository...")
+    resp = await client.get(f"/assess/progress/{job_id}")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "Running Assessment" in html
+    assert "Analyzing repository..." in html
+    # Standard shell present on first paint (extends base.html).
+    assert 'id="nav-primary"' in html
+    assert "cmdk-trigger" in html
+    assert "events-bell" in html
+    assert 'class="user-menu"' in html or "user-menu-trigger" in html
+    assert 'id="main-content"' in html
+    # Poll must refresh main content only — never replace <body>.
+    assert 'hx-target="#main-content"' in html
+    assert 'hx-select="#main-content"' in html
+    assert 'hx-target="body"' not in html
+    assert 'hx-select=".container"' not in html
+    assert 'hx-trigger="every 2s"' in html
+
+
 async def test_events_page_renders(client, _override_store):
     store = _override_store
     await store.log_event("test-agent", "scan", "my-app", "high", "Found vuln")
