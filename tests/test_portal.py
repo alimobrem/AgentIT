@@ -570,6 +570,26 @@ async def test_assessment_detail_has_onboard_button(client, _override_store):
 # ------------------------------------------------------------------
 
 
+async def test_masthead_nav_structure(client, _override_store):
+    """Ledger is primary nav; Decisions is in the user/main menu; Events is
+    a bell icon + drawer (full page still at /events). No Activity dropdown."""
+    resp = await client.get("/")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "events-bell" in html
+    assert 'id="events-drawer"' in html
+    assert "eventsDrawer()" in html
+    assert "/api/events?limit=20" in html
+    assert "activity-menu" not in html
+    primary = html.split('class="links"', 1)[1].split("links-secondary", 1)[0]
+    assert 'href="/ledger"' in primary
+    assert 'href="/decisions"' not in primary
+    assert 'href="/events"' not in primary
+    dropdown_idx = html.index("user-menu-dropdown")
+    decisions_in_menu = html.index('href="/decisions"', dropdown_idx)
+    assert decisions_in_menu > dropdown_idx
+
+
 async def test_events_page_renders(client, _override_store):
     store = _override_store
     await store.log_event("test-agent", "scan", "my-app", "high", "Found vuln")
@@ -578,6 +598,17 @@ async def test_events_page_renders(client, _override_store):
     assert "Agent Activity Feed" in resp.text
     assert "test-agent" in resp.text
     assert "Found vuln" in resp.text
+
+
+async def test_api_events_returns_real_events(client, _override_store):
+    """Events drawer fetches this endpoint — must return real store rows."""
+    store = _override_store
+    await store.log_event("drawer-agent", "scan", "drawer-app", "info", "drawer visible")
+    resp = await client.get("/api/events?limit=20")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, list)
+    assert any(e.get("summary") == "drawer visible" for e in data)
 
 
 async def test_events_page_filters_by_correlation_id(client, _override_store):

@@ -120,39 +120,60 @@
     border-bottom-color: var(--color-accent);
   }
 
-  /* ── Activity Menu (nav) ───────────────────────────────────────────
-     Events, Decisions, and Ledger overlap heavily in purpose (all three
-     are "what happened" views over the same underlying data -- see
-     docs/ledger-design-spec.md) -- grouped under one primary-nav dropdown
-     instead of three separate top-level items, matching the visual weight
-     of every other primary link (bold, underline-on-active), not the
-     muted secondary-link style the user menu uses. */
-  .activity-menu { position: relative; }
-  .activity-menu-trigger {
-    display: inline-flex; align-items: center; gap: var(--space-2);
-    background: none; border: none; cursor: pointer; font-family: inherit;
-    color: var(--color-text); font-size: var(--font-md); font-weight: 600;
-    padding: var(--space-1) 0; border-bottom: 2px solid transparent;
-    transition: color 0.15s, border-color 0.15s;
+  /* ── Events Bell + Drawer (nav) ────────────────────────────────────
+     Events is a notification-style control (bell icon → slide-over panel)
+     rather than a primary-nav text link. Ledger is primary; Decisions
+     lives in the user/main menu. Full /events page remains for filters,
+     pagination, and the DLQ tab. */
+  .events-bell {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 2.25rem; height: 2.25rem; padding: 0;
+    background: none; border: 1px solid transparent; border-radius: var(--radius-md);
+    color: var(--color-muted); cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, color 0.15s;
   }
-  .activity-menu-trigger:hover, .activity-menu-trigger.nav-active {
-    color: var(--color-accent); border-bottom-color: var(--color-accent);
+  .events-bell:hover, .events-bell[aria-expanded="true"], .events-bell.nav-active {
+    color: var(--color-accent); border-color: var(--color-border); background: var(--color-surface-2);
   }
-  .activity-menu-chevron { color: inherit; font-size: var(--font-xs); transition: transform 0.15s; }
-  .activity-menu-trigger[aria-expanded="true"] .activity-menu-chevron { transform: rotate(180deg); }
-  .activity-menu-dropdown {
-    position: absolute; top: calc(100% + var(--space-3)); left: 0;
-    min-width: 10rem; background: var(--color-surface-2); border: 1px solid var(--color-border);
-    border-radius: var(--radius-md); box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-    padding: var(--space-2); z-index: 110;
+  .events-bell-icon { width: 1.15rem; height: 1.15rem; display: block; }
+  .events-drawer-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 250;
   }
-  .activity-menu-item {
-    display: flex; align-items: center; gap: var(--space-2);
-    padding: var(--space-3) var(--space-4); border-radius: var(--radius-sm);
-    color: var(--color-text); font-size: var(--font-sm); font-weight: 500; white-space: nowrap;
+  .events-drawer-panel {
+    position: fixed; top: 0; right: 0; bottom: 0; width: min(26rem, 100vw);
+    background: var(--color-surface-2); border-left: 1px solid var(--color-border);
+    box-shadow: -8px 0 32px rgba(0,0,0,0.4); z-index: 260;
+    display: flex; flex-direction: column;
   }
-  .activity-menu-item:hover { background: var(--color-surface-3); text-decoration: none; }
-  .activity-menu-item.nav-active { color: var(--color-accent); }
+  .events-drawer-header {
+    display: flex; align-items: center; justify-content: space-between; gap: var(--space-4);
+    padding: var(--space-5) var(--space-6); border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+  }
+  .events-drawer-title { font-family: var(--font-display); font-size: var(--font-lg); color: var(--color-heading); margin: 0; }
+  .events-drawer-actions { display: flex; align-items: center; gap: var(--space-3); }
+  .events-drawer-body { flex: 1; overflow-y: auto; padding: var(--space-4); }
+  .events-drawer-item {
+    display: block; padding: var(--space-4); margin-bottom: var(--space-3);
+    background: var(--color-surface); border: 1px solid var(--color-border);
+    border-radius: var(--radius-md); color: var(--color-text);
+  }
+  .events-drawer-item:hover { border-color: var(--color-link); text-decoration: none; }
+  .events-drawer-item-meta {
+    display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;
+    margin-bottom: var(--space-2); font-size: var(--font-xs); color: var(--color-muted);
+  }
+  .events-drawer-item-summary { font-size: var(--font-sm); color: var(--color-text); }
+  .events-drawer-empty { padding: var(--space-8) var(--space-5); text-align: center; color: var(--color-muted); font-size: var(--font-sm); }
+  .events-drawer-footer {
+    padding: var(--space-4) var(--space-6); border-top: 1px solid var(--color-border);
+    flex-shrink: 0; text-align: center;
+  }
+  .events-drawer-close {
+    background: none; border: none; color: var(--color-muted); font-size: var(--font-xl);
+    cursor: pointer; line-height: 1; padding: var(--space-1) var(--space-2);
+  }
+  .events-drawer-close:hover { color: var(--color-text); }
 
   /* ── Layout ────────────────────────────────────────────────────── */
   .container { max-width: 1100px; margin: 0 auto; padding: var(--space-8); }
@@ -1074,19 +1095,7 @@
     <a href="/admin-review" class="{{ 'nav-active' if request.url.path.startswith('/admin-review') }}">Admin Review
       {% if nav_admin_review_pending %}<span class="nav-badge">{{ nav_admin_review_pending }}</span>{% endif %}
     </a>
-    {% set _activity_active = request.url.path.startswith('/events') or request.url.path.startswith('/decisions') or request.url.path.startswith('/ledger') %}
-    <div class="activity-menu" x-data="{ open: false }" @keydown.escape.window="open = false">
-      <button type="button" class="activity-menu-trigger {{ 'nav-active' if _activity_active }}" @click="open = !open" :aria-expanded="open" aria-haspopup="true">
-        <span>Activity</span>
-        <span class="activity-menu-chevron" aria-hidden="true">&#9662;</span>
-      </button>
-      <div class="activity-menu-dropdown" x-show="open" x-cloak x-transition.opacity.duration.100ms
-           @click.outside.capture="open = false" @click="open = false" role="menu">
-        <a href="/events" role="menuitem" class="activity-menu-item {{ 'nav-active' if request.url.path.startswith('/events') }}">Events</a>
-        <a href="/decisions" role="menuitem" class="activity-menu-item {{ 'nav-active' if request.url.path.startswith('/decisions') }}">Decisions</a>
-        <a href="/ledger" role="menuitem" class="activity-menu-item {{ 'nav-active' if request.url.path.startswith('/ledger') }}">Ledger</a>
-      </div>
-    </div>
+    <a href="/ledger" class="{{ 'nav-active' if request.url.path.startswith('/ledger') }}">Ledger</a>
     <a href="/health" class="{{ 'nav-active' if request.url.path.startswith('/health') }}">Health</a>
     <a href="/insights" class="{{ 'nav-active' if request.url.path == '/insights' }}">Insights</a>
   </div>
@@ -1095,6 +1104,17 @@
     <span x-show="navOpen">&#10005;</span>
   </button>
   <div class="links-secondary" :class="{ 'links-open': navOpen }">
+    {# Events: notification-bell control; opens the drawer below (not a
+       primary-nav text link). Full page remains at /events. #}
+    <button type="button" class="events-bell {{ 'nav-active' if request.url.path.startswith('/events') }}"
+            @click="$dispatch('open-events-drawer')"
+            aria-label="Open events feed" aria-haspopup="dialog"
+            aria-controls="events-drawer-panel">
+      <svg class="events-bell-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+        <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+      </svg>
+    </button>
     <div class="user-menu" x-data="{ open: false }" @keydown.escape.window="open = false">
       <button type="button" class="user-menu-trigger" @click="open = !open" :aria-expanded="open" aria-haspopup="true" aria-label="Open account and settings menu">
         <span class="user-menu-avatar" aria-hidden="true">{{ (current_user[0] | upper) if is_authenticated and current_user else 'A' }}</span>
@@ -1106,6 +1126,7 @@
         <a href="/capabilities" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/capabilities' or request.url.path.startswith('/agents') }}">Capabilities</a>
         <a href="/settings" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/settings' }}">Settings</a>
         <a href="/schedules" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/schedules' }}">Schedules</a>
+        <a href="/decisions" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/decisions') }}">Decisions</a>
         {% if is_authenticated %}
         <div class="user-menu-divider"></div>
         <div class="user-menu-info">Logged in as {{ current_user }}</div>
@@ -1115,6 +1136,57 @@
     </div>
   </div>
 </nav>
+{# Events notification drawer -- real events from /api/events (same store
+   the Events page uses). "View all" links to the full /events route. #}
+<div id="events-drawer" x-data="eventsDrawer()"
+     @open-events-drawer.window="openDrawer()"
+     @keydown.escape.window="close()">
+  <div class="events-drawer-overlay" x-show="open" x-cloak
+       x-transition.opacity.duration.150ms @click="close()" aria-hidden="true"></div>
+  <aside id="events-drawer-panel" class="events-drawer-panel" x-show="open" x-cloak
+         x-transition.opacity.duration.150ms
+         role="dialog" aria-modal="true" aria-labelledby="events-drawer-title">
+    <div class="events-drawer-header">
+      <h2 id="events-drawer-title" class="events-drawer-title">Events</h2>
+      <div class="events-drawer-actions">
+        <a href="/events" class="btn btn-sm btn-outline" @click="close()">View all</a>
+        <button type="button" class="events-drawer-close" @click="close()" aria-label="Close events drawer">&times;</button>
+      </div>
+    </div>
+    <div class="events-drawer-body">
+      <p class="events-drawer-empty" x-show="loading" x-cloak>Loading events&hellip;</p>
+      <p class="events-drawer-empty" x-show="!loading && error" x-cloak x-text="error"></p>
+      <div class="events-drawer-empty" x-show="!loading && !error && events.length === 0" x-cloak>
+        <p>No events recorded yet.</p>
+      </div>
+      <template x-for="e in events" :key="e.id">
+        <a :href="e.correlation_id ? ('/events?correlation_id=' + e.correlation_id) : '/events'"
+           class="events-drawer-item" @click="close()">
+          <div class="events-drawer-item-meta">
+            <span x-text="(e.timestamp || '').slice(0, 16)"></span>
+            <span x-text="e.agent_id || '—'"></span>
+            <span class="badge"
+                  :class="{
+                    'badge-critical': e.severity === 'critical',
+                    'badge-high': e.severity === 'high',
+                    'badge-medium': e.severity === 'medium' || e.severity === 'warning',
+                    'badge-info': !e.severity || e.severity === 'info'
+                  }"
+                  x-text="e.severity || 'info'"></span>
+          </div>
+          <div class="events-drawer-item-summary">
+            <strong x-text="e.action || ''"></strong>
+            <span x-show="e.summary" x-text="' — ' + e.summary"></span>
+            <span class="text-muted" x-show="e.target_app" x-text="' · ' + e.target_app"></span>
+          </div>
+        </a>
+      </template>
+    </div>
+    <div class="events-drawer-footer">
+      <a href="/events" class="btn btn-sm" @click="close()">Open full Events page</a>
+    </div>
+  </aside>
+</div>
 <div id="nav-loading" class="nav-loading-bar"></div>
 <div id="main-content" class="container">
 {% block content %}{% endblock %}
@@ -1376,6 +1448,34 @@ function confirmModal() {
     }
   };
 }
+// Events notification drawer -- loads real events from /api/events
+// (same AssessmentStore.list_events the Events page uses). Never mocked.
+function eventsDrawer() {
+  return {
+    open: false,
+    loading: false,
+    error: '',
+    events: [],
+    async openDrawer() {
+      this.open = true;
+      this.loading = true;
+      this.error = '';
+      this.events = [];
+      try {
+        const res = await fetch('/api/events?limit=20');
+        if (!res.ok) {
+          this.error = 'Could not load events.';
+        } else {
+          this.events = await res.json();
+        }
+      } catch (e) {
+        this.error = 'Could not load events.';
+      }
+      this.loading = false;
+    },
+    close() { this.open = false; },
+  };
+}
 // Command palette (Cmd+K / Ctrl+K) -- a genuinely reusable Alpine
 // component, not a one-off: fuzzy-searches every nav destination plus
 // every real app in the fleet (fetched from /api/fleet, never mocked).
@@ -1390,12 +1490,12 @@ function commandPalette() {
     navItems: [
       { label: 'Fleet', href: '/', hint: 'All monitored apps' },
       { label: 'Admin Review', href: '/admin-review', hint: 'Cluster-admin-review gates' },
-      { label: 'Events', href: '/events', hint: 'Agent activity feed' },
-      { label: 'Dead-Letter Queue', href: '/events/dlq', hint: 'Undeliverable events' },
+      { label: 'Ledger', href: '/ledger', hint: 'Fleet-wide event/gate/delivery/decision stream' },
       { label: 'Health', href: '/health', hint: 'System health & pipelines' },
       { label: 'Insights', href: '/insights', hint: 'Fleet-wide insights' },
+      { label: 'Events', href: '/events', hint: 'Agent activity feed' },
+      { label: 'Dead-Letter Queue', href: '/events/dlq', hint: 'Undeliverable events' },
       { label: 'Decisions', href: '/decisions', hint: 'LLM decision log' },
-      { label: 'Ledger', href: '/ledger', hint: 'Fleet-wide event/gate/delivery/decision stream' },
       { label: 'Capabilities', href: '/capabilities', hint: 'Agent registry & catalog' },
       { label: 'Settings', href: '/settings', hint: 'Auto-mode & allowlist' },
       { label: 'Schedules', href: '/schedules', hint: 'Scheduled operations' },

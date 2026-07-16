@@ -226,6 +226,8 @@ Every path that gets a generated change into a cluster or a repo — the manual 
 
 `agentit portal` launches a FastAPI + Jinja2 app (htmx + Alpine.js for interactivity, no frontend framework). 98 routes.
 
+**Masthead:** primary nav is Fleet, Admin Review, Ledger, Health, Insights. **Events** is a notification-bell control that opens a slide-over drawer (real rows from `/api/events`; “View all” → full `/events` page + DLQ). **Decisions** lives under the account/main menu with Capabilities, Settings, and Schedules.
+
 Key pages:
 
 | Page | Purpose |

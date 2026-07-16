@@ -292,36 +292,40 @@ class TestNavigation:
         page.goto(url)
         expect(page.locator("nav >> text=Fleet")).to_be_visible()
         expect(page.locator("nav >> text=Admin Review")).to_be_visible()
+        expect(page.locator("nav >> text=Ledger")).to_be_visible()
         # Gates was retired as a standalone nav concept -- the 7 app-owner
         # gate types now surface via Fleet's "Needs Action" badge + each
         # app's own Actions tab; only cluster-admin-review still gets a
         # dedicated page/nav entry (Admin Review).
         assert page.locator('nav a[href="/gates"]').count() == 0
+        # Events is a bell icon (not a primary-nav text link); Decisions
+        # lives in the user/main menu -- neither is a top-level text item.
+        assert page.locator('nav .links a[href="/events"]').count() == 0
+        assert page.locator('nav .links a[href="/decisions"]').count() == 0
+        assert page.locator(".activity-menu").count() == 0
 
     def test_secondary_nav_links(self, page: Page, app_url):
         url, _, _ = app_url
         page.goto(url)
         # "Agents" and "Workflows" haven't been standalone nav items since
         # c274055 paired them into Capabilities (Registry/Catalog tabs,
-        # base.html:803) as part of the 9->7 top-level-items consolidation
+        # base.html) as part of the 9->7 top-level-items consolidation
         # docs/ui-redesign-proposal.md builds on -- check the current
-        # top-level items instead (Fleet/Admin Review are covered by
+        # top-level items instead (Fleet/Admin Review/Ledger are covered by
         # test_primary_nav_links above).
         for link in ["Health", "Insights"]:
             expect(page.locator(f"nav >> text={link}")).to_be_visible()
-        # Events/Decisions/Ledger overlap heavily in purpose (all three are
-        # "what happened" views over the same underlying data) -- grouped
-        # under one primary-nav "Activity" dropdown (base.html's
-        # .activity-menu) instead of three separate top-level items.
-        page.click(".activity-menu-trigger")
-        for link in ["Events", "Decisions", "Ledger"]:
-            expect(page.locator(f".activity-menu-dropdown >> text={link}")).to_be_visible()
-        # Capabilities/Settings/Schedules were flat secondary links until the
-        # masthead cleanup consolidated them into one user-menu dropdown
-        # (base.html's .user-menu) -- closed by default, so they're only
-        # visible once the trigger is opened.
+        # Events is a notification-bell icon that opens a drawer (real
+        # events from /api/events); full page still at /events.
+        expect(page.locator(".events-bell")).to_be_visible()
+        page.click(".events-bell")
+        expect(page.locator("#events-drawer-panel")).to_be_visible()
+        expect(page.locator("#events-drawer-panel >> text=View all")).to_be_visible()
+        page.click(".events-drawer-close")
+        # Capabilities/Settings/Schedules/Decisions live in the user/main
+        # menu (base.html's .user-menu) -- closed by default.
         page.click(".user-menu-trigger")
-        for link in ["Capabilities", "Settings", "Schedules"]:
+        for link in ["Capabilities", "Settings", "Schedules", "Decisions"]:
             expect(page.locator(f".user-menu-dropdown >> text={link}")).to_be_visible()
 
     def test_fleet_link_navigates(self, page: Page, app_url):
