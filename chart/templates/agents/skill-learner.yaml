@@ -66,7 +66,7 @@ spec:
             # restarts while awaiting manual recovery. Not the normal path --
             # see watchers/skill_learner.py's module docstring.
             - name: AGENTIT_SKILLS_DIR
-              value: /data/skills
+              value: /data
             {{- end }}
             {{- if .Values.kafka.enabled }}
             - name: AGENTIT_KAFKA_BOOTSTRAP
@@ -96,7 +96,7 @@ spec:
           volumeMounts:
             {{- if .Values.agents.skillLearner.persistence.enabled }}
             - name: skill-learner-data
-              mountPath: /data/skills
+              mountPath: /data
             {{- end }}
             {{- if .Values.gcp.credentialsSecret }}
             - name: gcp-credentials

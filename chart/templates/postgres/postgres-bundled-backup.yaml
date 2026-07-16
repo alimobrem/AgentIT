@@ -125,4 +125,64 @@ spec:
             - name: backups
               persistentVolumeClaim:
                 claimName: {{ .Release.Name }}-postgres-bundled-backups
+
+---
+# WaitForFirstConsumer storage classes leave a new PVC Pending until a pod
+# mounts it. Argo CD treats Pending PVCs as Progressing and will not run
+# PostSync hooks (or finish a sync that waits for healthy) until Bound --
+# which on a CronJob-only consumer can mean hours. This one-shot Sync hook
+# mounts the claim immediately so the PVC binds during the same sync.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-postgres-bundled-backup-pvc-bind
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: postgres-bundled-backup
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 180
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: postgres-bundled-backup
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bind
+          image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+          command: [/bin/sh, -c, "echo PVC bind probe OK; ls /backups >/dev/null"]
+          volumeMounts:
+            - name: backups
+              mountPath: /backups
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+      volumes:
+        - name: backups
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-postgres-bundled-backups
+
 {{- end }}

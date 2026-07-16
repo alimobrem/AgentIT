@@ -69,12 +69,19 @@ class EventPublisher:
         failures -- deliberately still SQLite, and deliberately unrelated
         to `AssessmentStore`/Postgres: it exists specifically so events can
         be buffered *without* depending on any network service (including
-        the primary store) being reachable. Co-located under the shared
-        `/data` PVC when mounted (see `chart/templates/pvc.yaml`), which
-        every component that publishes events still mounts."""
+        the primary store) being reachable. Prefer the shared `/data` PVC
+        when that directory is writable (portal mounts there). Some
+        watchers only mount a subdirectory (e.g. skill-learner at
+        `/data/skills`) -- `/data` then exists but is not writable, so fall
+        back to `AGENTIT_SKILLS_DIR` or cwd."""
         data_dir = Path("/data")
-        if data_dir.is_dir():
+        if data_dir.is_dir() and os.access(data_dir, os.W_OK):
             return str(data_dir / "event-buffer.db")
+        skills_dir = os.environ.get("AGENTIT_SKILLS_DIR")
+        if skills_dir:
+            skills_path = Path(skills_dir)
+            if skills_path.is_dir() and os.access(skills_path, os.W_OK):
+                return str(skills_path / "event-buffer.db")
         return "event-buffer.db"
 
     def _init_buffer_db(self) -> None:

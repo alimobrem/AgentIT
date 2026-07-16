@@ -10,6 +10,10 @@ metadata:
   labels:
     app.kubernetes.io/name: agentit
     app.kubernetes.io/instance: {{ .Release.Name }}
+  annotations:
+    # After secret-init Sync hook (wave 1) so oauth-proxy mounts a filled
+    # session_secret on first start when auth.enabled.
+    argocd.argoproj.io/sync-wave: "2"
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
