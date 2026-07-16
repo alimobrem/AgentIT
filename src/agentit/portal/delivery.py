@@ -53,6 +53,17 @@ MECHANISM_NONE = "none"
 
 _NARRATIVE_REPORT_FILENAMES = frozenset({"dependency-report.md", "cost-report.md"})
 
+# Unsubstituted image/token placeholders that must never reach a real
+# cluster or GitOps PR (agents/base.py defaults CronJob images to this).
+_UNRESOLVED_PLACEHOLDERS = ("REPLACE_WITH_AGENTIT_IMAGE",)
+
+
+def has_unresolved_placeholders(content: str | None) -> bool:
+    """True when generated file content still contains bootstrap placeholders."""
+    text = content or ""
+    return any(marker in text for marker in _UNRESOLVED_PLACEHOLDERS)
+
+
 # Human-facing mechanism descriptions surfaced at the confirmation step a
 # human must actively acknowledge before a real delivery fires (per the
 # 2026-07-14 customer-review addendum to docs/unified-apply-flow.md: a
@@ -408,6 +419,26 @@ async def route_and_deliver(
 
     excluded = groups.pop(CATEGORY_NARRATIVE_REPORT, [])
 
+    # Strip unsubstituted placeholders from every remaining category before
+    # mechanism selection so dry-run and real Deliver agree on what ships.
+    placeholder_blocked: list[dict] = []
+    for cat, fs in list(groups.items()):
+        keep: list[dict] = []
+        for f in fs:
+            if has_unresolved_placeholders(f.get("content")):
+                placeholder_blocked.append(f)
+                logger.error(
+                    "Delivery blocked: %s still contains unresolved placeholder "
+                    "(e.g. REPLACE_WITH_AGENTIT_IMAGE) -- refusing to route",
+                    f.get("path"),
+                )
+            else:
+                keep.append(f)
+        if keep:
+            groups[cat] = keep
+        else:
+            groups.pop(cat, None)
+
     registered, infra_repo_url = await is_gitops_registered(app_name, report)
 
     categories_summary: dict[str, int] = {cat: len(fs) for cat, fs in groups.items()}
@@ -415,6 +446,8 @@ async def route_and_deliver(
         categories_summary[CATEGORY_SECRET_BLOCKED] = len(blocked)
     if excluded:
         categories_summary[CATEGORY_NARRATIVE_REPORT] = len(excluded)
+    if placeholder_blocked:
+        categories_summary["placeholder_blocked"] = len(placeholder_blocked)
 
     mechanisms: dict[str, str] = {}
     outcomes: dict[str, object] = {}
@@ -475,6 +508,25 @@ async def route_and_deliver(
                 app_name=app_name, store=store, assessment_id=assessment_id,
                 actor=actor, dry_run=dry_run,
             )
+            # Mirror AutoMode: portal Deliver opens the PR; Approve & Deliver
+            # on gitops-pr-pending merges it. Without this gate the manual
+            # Assess→Generate→Deliver path had no Gate step for GitOps apps.
+            cluster_outcome = outcomes[CATEGORY_CLUSTER_CONFIG]
+            pr_url = (
+                cluster_outcome.get("pr_url")
+                if isinstance(cluster_outcome, dict) and not dry_run
+                else None
+            )
+            if pr_url and "error" not in cluster_outcome:
+                mechanism_text = confirmation_text(
+                    MECHANISM_INFRA_REPO_COMMIT, infra_repo_url=infra_repo_url,
+                )
+                gate_id = await store.create_gate(
+                    assessment_id, "gitops-pr-pending",
+                    f"{mechanism_text} PR opened: {pr_url}. "
+                    "Approving this gate merges the PR -- AgentIT never auto-merges.",
+                )
+                cluster_outcome["gate_id"] = gate_id
         else:
             result = await apply_with_verification(
                 cluster_files, namespace, dry_run,
@@ -535,5 +587,6 @@ async def route_and_deliver(
         "mechanisms": mechanisms,
         "outcomes": outcomes,
         "blocked": [f["path"] for f in blocked],
+        "placeholder_blocked": [f["path"] for f in placeholder_blocked],
         "excluded": [f["path"] for f in excluded],
     }

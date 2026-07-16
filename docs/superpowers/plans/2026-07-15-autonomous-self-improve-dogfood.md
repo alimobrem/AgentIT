@@ -226,8 +226,9 @@ Allowed change classes for v1 source autonomy (pick in order):
 ### Task 4.1: One external app, same engine shape
 
 - [x] Pick one fleet app (e.g. pinky/guestbook) already GitOps-managed — **pinky** / `managed-pinky`
-- [x] GitOps PR merged for pinky improvement ([agentit-gitops#7](https://github.com/alimobrem/agentit-gitops/pull/7); PLACEHOLDER Pod removed). Full portal Assess→Generate→Deliver replay still optional.
-- [ ] Separately, if applicable, run a skill improvement that originated from learner and was activated after scout-quality Activate checks
+- [x] GitOps PR merged for pinky improvement ([agentit-gitops#7](https://github.com/alimobrem/agentit-gitops/pull/7); PLACEHOLDER Pod removed).
+- [x] Full portal Assess → Onboard → Deliver on pinky (2026-07-16): assessment `ae0e85b707d3460c8220d949c6bc26cc` → onboard 11 files → real Deliver opened [agentit-gitops#8](https://github.com/alimobrem/agentit-gitops/pull/8) (closed without merge: unresolved `REPLACE_WITH_AGENTIT_IMAGE`). Follow-up: portal Deliver now blocks those placeholders and creates `gitops-pr-pending` so Approve & Deliver can merge a clean PR.
+- [x] Separately, run a skill that originated from learner and was activated after scout-quality Activate checks — live `skill-activated` for learner CVE drafts `cve-2018-1002105-…`, `cve-2019-5736-…`, `cve-2021-25741-…` (verify_skill passed). `skill-improvement` learner mode still needs ≥5 `skill_effectiveness` rows (table empty on dogfood cluster).
 
 ### Task 4.2: Write the milestone retrospective
 
