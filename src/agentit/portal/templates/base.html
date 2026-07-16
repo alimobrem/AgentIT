@@ -80,15 +80,16 @@
   a:hover { text-decoration: underline; }
 
   /* ── Nav ──────────────────────────────────────────────────────────
-     Three real columns so centered Cmd+K search never overlays primary
-     links: start (brand + primary) | search | end (Events + account). */
+     Left cluster (brand + primary) | right cluster (Cmd+K + Events +
+     Menu). Search MUST live in .nav-end (not a center overlay /
+     absolute-centered) so primary nav is never covered. EDL §1. */
   nav {
     background: linear-gradient(180deg, var(--color-surface), var(--color-bg));
     padding: var(--space-4) var(--space-8);
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(12rem, 20rem) minmax(0, 1fr);
+    display: flex;
     align-items: center;
-    column-gap: var(--space-5);
+    justify-content: space-between;
+    gap: var(--space-5);
     border-bottom: 1px solid var(--color-border);
     box-shadow: 0 2px 12px rgba(0,0,0,0.3);
     position: sticky;
@@ -100,7 +101,7 @@
     align-items: center;
     gap: var(--space-6);
     min-width: 0;
-    justify-self: start;
+    flex: 1 1 auto;
   }
   .nav-end {
     display: flex;
@@ -108,7 +109,8 @@
     justify-content: flex-end;
     gap: var(--space-4);
     min-width: 0;
-    justify-self: end;
+    flex: 0 1 auto;
+    margin-left: auto;
   }
   nav .logo {
     font-size: 1.4rem;
@@ -979,14 +981,13 @@
   .user-menu-item.deploy-status-link .deploy-status-badge { width: 100%; box-sizing: border-box; }
 
   /* ── Command Palette Trigger (nav) ──────────────────────────────
-     Center column of the masthead grid — stays visually centered and
-     a bit wide, but participates in layout so it cannot cover primary
-     nav links. */
+     Right-cluster control (with Events / Menu) — reasonably wide but
+     max-width constrained so it never overlays primary nav links. */
   .cmdk-trigger {
     display: inline-flex; align-items: center; justify-content: space-between;
     gap: var(--space-3);
-    width: 100%; max-width: 20rem; min-width: 0;
-    justify-self: center;
+    width: min(20rem, 28vw); max-width: 20rem; min-width: 10rem;
+    flex: 0 1 20rem;
     background: var(--color-surface-2); border: 1px solid var(--color-border);
     color: var(--color-muted); border-radius: var(--radius-md);
     padding: var(--space-2) var(--space-4); font-size: var(--font-sm); cursor: pointer;
@@ -1315,13 +1316,10 @@
 
   /* ── Responsive ────────────────────────────────────────────────── */
   @media (max-width: 1100px) {
-    nav {
-      grid-template-columns: minmax(0, 1fr) minmax(10rem, 16rem) minmax(0, 1fr);
-      column-gap: var(--space-3);
-      padding: var(--space-4) var(--space-5);
-    }
+    nav { gap: var(--space-3); padding: var(--space-4) var(--space-5); }
     nav .links { gap: var(--space-4); }
     .nav-start { gap: var(--space-4); }
+    .cmdk-trigger { width: min(16rem, 26vw); min-width: 8rem; }
   }
   @media (max-width: 768px) {
     .stat-grid { grid-template-columns: 1fr; }
@@ -1346,6 +1344,7 @@
       width: 100%;
       max-width: none;
       min-width: 0;
+      flex: none;
     }
     .nav-toggle { display: block; grid-area: toggle; margin-left: 0; }
     /* Hamburger owns the full primary stack (Ledger…Insights) plus Events
@@ -1404,7 +1403,7 @@
 <div id="events-drawer" x-data="eventsDrawer()"
      @keydown.escape.window="if (open) close()">
 <nav>
-  <div class="nav-start">
+<div class="nav-start">
     <span class="logo">AgentIT</span>
     <div id="nav-primary" class="links" :class="{ 'links-open': navOpen }">
       {# Exclusive jobs (docs/portal-experience-design-language.md §1):
@@ -1423,18 +1422,18 @@
       <a href="/insights" class="{{ 'nav-active' if request.url.path == '/insights' }}">Insights</a>
     </div>
   </div>
-  {# Cmd+K / Ctrl+K command palette trigger -- discoverable both by click
-     (mouse users see the kbd hint right here) and by the shortcut itself
-     firing from anywhere on the page (see #command-palette below). This is
-     the one persistent, always-visible shortcut hint the checklist asks
-     for at minimum (docs/ux-design-requirements.md Part 3 item 9).
-     Lives in the masthead center column (not absolute / not right-cluster)
-     so it cannot cover primary nav links. #}
-  <button type="button" class="cmdk-trigger" @click="$dispatch('open-command-palette')" aria-label="Open command palette (search navigation and apps)">
-    <span class="cmdk-trigger-label">Search&hellip;</span>
-    <span class="cmdk-kbd">&#8984;K</span>
-  </button>
   <div class="nav-end">
+    {# Cmd+K / Ctrl+K command palette trigger -- discoverable both by click
+       (mouse users see the kbd hint right here) and by the shortcut itself
+       firing from anywhere on the page (see #command-palette below). This is
+       the one persistent, always-visible shortcut hint the checklist asks
+       for at minimum (docs/ux-design-requirements.md Part 3 item 9).
+       Lives in the right cluster with Events / Menu so it cannot cover
+       primary nav links. #}
+    <button type="button" class="cmdk-trigger" @click="$dispatch('open-command-palette')" aria-label="Open command palette (search navigation and apps)">
+      <span class="cmdk-trigger-label">Search&hellip;</span>
+      <span class="cmdk-kbd">&#8984;K</span>
+    </button>
     {# Mobile: hamburger toggles primary + secondary together (see @media).
        Desktop: toggle is display:none; both stacks stay visible. #}
     <button type="button" class="nav-toggle" @click="navOpen = !navOpen"

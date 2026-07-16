@@ -21,6 +21,7 @@ Shipped pattern (do not regress):
 | Surface | Placement | Notes |
 |---|---|---|
 | **Ledger**, **Fleet**, Admin Review (when count&gt;0), Health, Insights | Primary nav (`#nav-primary`) | `/` redirects to Ledger (ops home) |
+| **Cmd+K search** (`.cmdk-trigger`) | Right masthead cluster (`.nav-end`) with Events / Menu | MUST NOT be a center overlay or absolute-centered over primary nav |
 | **Events** | Bell control → slide-over drawer | Full `/events` (+ DLQ) remains for filters/pagination — not ops home |
 | **Decisions**, Capabilities, Settings, Schedules; Admin Review when count=0 | Account / main menu | Not primary-nav text links |
 
