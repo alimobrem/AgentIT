@@ -184,7 +184,7 @@
             x-transition:leave="suppress-leave" x-transition:leave-end="suppress-leave-end">
           <span class="badge badge-{{ f.severity.name }} finding-badge">{{ f.severity.name }}</span>
           {{ f.description }}
-          {% if f.source %}<span class="badge badge-muted finding-source">{{ f.source }}</span>{% endif %}
+          {% if f.source %}<span class="badge badge-muted finding-source">{{ f.source | clean_source }}</span>{% endif %}
           {% if f.file_path %}<span class="finding-file">{{ f.file_path }}</span>{% endif %}
           {% if f.category in fixable_categories %}
           <form method="post" action="/assessments/{{ assessment_id }}/fix" class="inline-form"

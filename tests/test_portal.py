@@ -661,6 +661,39 @@ async def test_ledger_nav_link_present(client, _override_store):
     assert 'href="/ledger"' in resp.text
 
 
+# ------------------------------------------------------------------
+# Finding source badge display (masthead/UI cleanup pass)
+# ------------------------------------------------------------------
+
+
+async def test_finding_source_badge_strips_absolute_path(client, _override_store):
+    """A data-driven check's real source is an absolute filesystem path
+    (check_engine.py's source_path=str(path)) -- deployment-location-
+    dependent and not meaningful to a human reader. The rendered badge
+    must show only the checks/... portion; the hidden check_source form
+    field /api/suppress matches against must stay the exact raw value, so
+    existing suppression records keep matching unchanged."""
+    store = _override_store
+    report = _make_report("path-cleanup-app")
+    report.scores[0].findings.append(
+        Finding(
+            category="ci-pipeline",
+            severity=Severity.high,
+            description="No GitLab CI pipeline configuration found",
+            recommendation="Add a .gitlab-ci.yml",
+            source="check:/opt/app-root/src/checks/cicd/ci-pipeline.yaml",
+        )
+    )
+    aid = await store.save(report)
+
+    resp = await client.get(f"/assessments/{aid}")
+    assert resp.status_code == 200
+    assert '<span class="badge badge-muted finding-source">check:checks/cicd/ci-pipeline.yaml</span>' in resp.text
+    # The hidden suppress form field must keep the exact raw source, unchanged
+    # -- only the visible badge is cleaned up, not the value suppressions match on.
+    assert 'name="check_source" value="check:/opt/app-root/src/checks/cicd/ci-pipeline.yaml"' in resp.text
+
+
 async def test_ledger_needs_you_filter_hides_healthy_apps_by_default(client, _override_store):
     """docs/ledger-design-spec.md §2 rule 3: "Needs You" (on by default)
     shows only apps with a pending gate, a stale gate, or an unresolved SLO

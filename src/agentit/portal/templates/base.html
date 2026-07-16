@@ -1171,7 +1171,7 @@
   <div class="cmdk-panel" @click.outside.capture="close()">
     <div class="cmdk-input-row">
       <span class="cmdk-input-icon">&#8981;</span>
-      <input type="text" class="cmdk-input" x-ref="paletteInput" x-model="query" @input="computeResults()"
+      <input type="text" id="command-palette-input" name="q" class="cmdk-input" x-ref="paletteInput" x-model="query" @input="computeResults()"
              placeholder="Search navigation or apps&hellip;" autocomplete="off" spellcheck="false"
              aria-label="Search navigation or apps"
              @keydown.down.prevent="moveDown()" @keydown.up.prevent="moveUp()" @keydown.enter.prevent="selectActive()">
