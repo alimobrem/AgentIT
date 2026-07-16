@@ -11,6 +11,17 @@ class TestPlatformContext:
         assert ctx.has_api("Deployments")  # case-insensitive
         assert not ctx.has_api("foobar")
 
+    def test_has_api_sees_kinds_assigned_after_construction(self):
+        """Regression: discover_platform() sets available_kinds after init;
+        has_api() must not stay stuck on the empty post-init cache."""
+        ctx = PlatformContext()
+        assert not ctx.has_api("resourcequota")
+        ctx.available_kinds = {"ResourceQuota", "LimitRange", "Pod"}
+        assert ctx.has_api("resourcequota")
+        assert ctx.has_api("LimitRange")
+        assert ctx.has_api("pod")
+        assert not ctx.has_api("deployment")
+
     def test_has_operator(self):
         ctx = PlatformContext(installed_operators=["openshift-pipelines-operator-rh.v1.14"])
         assert ctx.has_operator("pipelines")
