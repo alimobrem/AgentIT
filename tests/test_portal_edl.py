@@ -48,14 +48,40 @@ def test_edl_static_checker_has_no_must_violations():
 def test_edl_doc_exists_with_machine_checkable_index():
     doc = (REPO_ROOT / "docs" / "portal-experience-design-language.md").read_text()
     assert "EDL-BTN-STATUS" in doc
+    assert "EDL-BTN-CLASS" in doc
     assert "EDL-ONBOARD-ORDER" in doc
     assert "EDL-FILTER-BAR" in doc
     assert "EDL-FILTER-CSS" in doc
     assert ".filter-bar" in doc
+    assert "user-menu-trigger" in doc
+    assert "events-drawer-close" in doc
     assert "Dry Run" in doc and "Apply" in doc
     assert "Running checks" in doc
     assert "**Do**" in doc
     assert "**Don't**" in doc or "**Don’t**" in doc
+
+
+def test_edl_static_checker_has_no_should_violations_for_buttons():
+    """Button hierarchy sweep: fail on SHOULD button rules too (label length / .btn)."""
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location(
+        "check_portal_edl", REPO_ROOT / "scripts" / "check_portal_edl.py"
+    )
+    assert spec and spec.loader
+    checker = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = checker
+    spec.loader.exec_module(checker)
+
+    vios = checker.check_all()
+    btn_shoulds = [
+        v for v in vios
+        if v.severity == "SHOULD" and v.rule in {"EDL-BTN-STATUS", "EDL-BTN-CLASS"}
+    ]
+    assert btn_shoulds == [], "\n".join(
+        f"{v.rule} {v.path}:{v.line}: {v.message}" for v in btn_shoulds
+    )
 
 
 def test_edl_cursor_rule_points_at_doc():

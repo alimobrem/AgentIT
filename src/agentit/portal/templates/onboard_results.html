@@ -225,7 +225,7 @@
               message: 'No successful Dry Run yet. ' + {{ delivery_confirmation | tojson | forceescape }} + ' ({{ total.count }} manifest(s).) ' + {{ _override_tail | tojson | forceescape }},
               form: $refs.overrideDeliverForm,
               opts: { confirmText: {{ _deliver_label | tojson | forceescape }}, danger: true }
-            })">Override — {{ _deliver_label }} anyway</button>
+            })">Override</button>
         </form>
       </div>
       {% endif %}
@@ -417,7 +417,7 @@
       <div class="action-bar mb-1" x-show="!editing">
         <button type="button" class="btn btn-sm btn-outline" @click="editing = true">Edit</button>
         {% if f.edited %}
-        <button type="button" class="btn btn-sm btn-outline" @click="showDiff = !showDiff" x-text="showDiff ? 'Hide Diff' : 'View Diff (vs. original)'"></button>
+        <button type="button" class="btn btn-sm btn-outline" @click="showDiff = !showDiff" x-text="showDiff ? 'Hide Diff' : 'View Diff'"></button>
         {% endif %}
       </div>
       <pre class="code-block" x-show="!editing"><code>{{ f.content }}</code></pre>

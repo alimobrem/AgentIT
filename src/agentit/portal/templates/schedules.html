@@ -132,14 +132,20 @@
             <input type="hidden" name="app_name" value="{{ s.app_name }}">
             <input type="hidden" name="job_key" value="{{ s.agent }}">
             <input type="hidden" name="enabled" value="false">
-            <button type="submit" class="btn btn-sm btn-outline">Disable</button>
+            <button type="submit" class="btn btn-sm btn-outline">
+              <span class="btn-label">Disable</span>
+              <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+            </button>
           </form>
           {% else %}
           <form method="post" action="/schedules/toggle" class="inline-form">
             <input type="hidden" name="app_name" value="{{ s.app_name }}">
             <input type="hidden" name="job_key" value="{{ s.agent }}">
             <input type="hidden" name="enabled" value="true">
-            <button type="submit" class="btn btn-sm btn-green">Enable</button>
+            <button type="submit" class="btn btn-sm btn-green">
+              <span class="btn-label">Enable</span>
+              <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+            </button>
           </form>
           {% endif %}
         {% else %}

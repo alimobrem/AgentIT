@@ -78,7 +78,10 @@
       <td>
         <form method="post" action="/settings/auto-mode-allowlist/remove" class="inline-form">
           <input type="hidden" name="pattern" value="{{ pattern }}">
-          <button type="submit" class="btn btn-sm btn-outline">Remove</button>
+          <button type="submit" class="btn btn-sm btn-outline">
+            <span class="btn-label">Remove</span>
+            <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+          </button>
         </form>
       </td>
     </tr>

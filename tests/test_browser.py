@@ -788,7 +788,7 @@ class TestSelfImprovementRunButton:
         with patch("agentit.watchers.capability_scout.CapabilityScout.research_once",
                    return_value={"outcome": "no-signal"}):
             page.goto(f"{url}/capabilities/self-improvement")
-            button = page.locator("button:has-text('Run Self-Improvement Scan')")
+            button = page.locator("button:has-text('Run Scan')")
             expect(button).to_be_visible()
             expect(button).to_be_enabled()
             button.click()
