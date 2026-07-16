@@ -96,6 +96,45 @@ class TestDriftDetectorTickTelemetry:
         await detector._maybe_auto_sync("some-app")  # auto-mode off -> returns early, no crash
 
 
+class TestAutoSyncLogged:
+    """docs/ledger-design-spec.md Phase 0: an auto-sync attempt (success or
+    failure) must be persisted via log_event(), not only a click.echo() --
+    otherwise it's invisible everywhere in the Ledger/Events/Timeline."""
+
+    @patch("agentit.watchers.drift_detector.kube.custom_objects")
+    async def test_successful_auto_sync_logs_drift_auto_synced_event(self, mock_custom_objects):
+        async_store, store = await make_async_store()
+        await store.set_setting("auto_mode", "true")
+        detector = DriftDetector(publisher=MagicMock(), interval=1, store=async_store)
+
+        await detector._maybe_auto_sync("some-app")
+
+        mock_custom_objects.return_value.patch_namespaced_custom_object.assert_called_once()
+        events = await store.list_events()
+        synced = [e for e in events if e["action"] == "drift-auto-synced"]
+        assert len(synced) == 1
+        assert synced[0]["target_app"] == "some-app"
+        assert synced[0]["severity"] == "info"
+
+    @patch("agentit.watchers.drift_detector.kube.custom_objects")
+    async def test_failed_auto_sync_logs_drift_auto_sync_failed_event(self, mock_custom_objects):
+        mock_custom_objects.return_value.patch_namespaced_custom_object.side_effect = RuntimeError(
+            "connection refused"
+        )
+        async_store, store = await make_async_store()
+        await store.set_setting("auto_mode", "true")
+        detector = DriftDetector(publisher=MagicMock(), interval=1, store=async_store)
+
+        await detector._maybe_auto_sync("some-app")  # must not raise
+
+        events = await store.list_events()
+        failed = [e for e in events if e["action"] == "drift-auto-sync-failed"]
+        assert len(failed) == 1
+        assert failed[0]["target_app"] == "some-app"
+        assert failed[0]["severity"] == "warning"
+        assert "connection refused" in failed[0]["summary"]
+
+
 class TestAsyncRunLoop:
     """Phase 3 (docs/postgres-migration-plan.md §9): run() became async def,
     with time.sleep() -> await asyncio.sleep()."""

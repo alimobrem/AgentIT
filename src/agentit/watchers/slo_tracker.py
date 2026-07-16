@@ -106,17 +106,29 @@ class SloTracker:
         repo_name = assessment["repo_name"]
         breach_names = ", ".join(s["metric_name"] for s in breaches)
 
+        rollback_summary = (
+            f"SLO breach after recent apply — consider rollback: "
+            f"kubectl argo rollouts undo {repo_name}"
+        )
         self._publisher.publish(
             TOPIC_ALERTS,
             agent_id="slo-tracker",
             action="rollback-recommended",
             target_app=repo_name,
             severity="critical",
-            summary=(
-                f"SLO breach after recent apply — consider rollback: "
-                f"kubectl argo rollouts undo {repo_name}"
-            ),
+            summary=rollback_summary,
         )
+        # Mirrors the Kafka publish above with a store-persisted event so a
+        # rollback recommendation is visible on this app's own timeline, not
+        # only to whatever's consuming TOPIC_ALERTS (docs/ledger-design-spec.md
+        # Phase 0, card type J).
+        try:
+            await self._store.log_event(
+                "slo-tracker", "rollback-recommended", repo_name, "critical",
+                rollback_summary,
+            )
+        except Exception:
+            logger.warning("Failed to log rollback-recommended event", exc_info=True)
         await self._store.create_gate(
             assessment["id"],
             "rollback-review",

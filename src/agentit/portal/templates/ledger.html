@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% from "_macros.html" import ledger_card %}
+{% block title %}Ledger - AgentIT{% endblock %}
+{% block content %}
+<h1>Ledger</h1>
+<p class="text-muted text-sm mb-1">
+  Every event, gate, delivery, and fix-review decision across the fleet, newest first.
+  Read-only — resolve a pending action from its app's own
+  <a href="/">Fleet</a> row or <a href="/admin-review">Admin Review</a>.
+</p>
+
+{% if watcher_alerts %}
+<div class="card mb-1 needs-you-banner">
+  <strong>{{ watcher_alerts | length }} watcher tick failure(s) in the last 4 hours:</strong>
+  {% for w in watcher_alerts[:5] %}
+  <span class="badge badge-danger">{{ w.agent_id }}</span>
+  {% endfor %}
+  <span class="text-muted text-sm">— see <a href="/schedules">Schedules</a> for watcher status.</span>
+</div>
+{% endif %}
+
+<form method="get" action="/ledger" class="action-bar">
+  <input type="text" name="q" value="{{ q | default('') }}" placeholder="Filter by app, title, or summary..." class="filter-input">
+  <input type="text" name="app" value="{{ app_filter | default('') }}" placeholder="App name..." class="filter-input">
+  <select name="severity">
+    <option value="">All severities</option>
+    <option value="critical" {{ 'selected' if severity_filter == 'critical' }}>Critical</option>
+    <option value="warning" {{ 'selected' if severity_filter == 'warning' }}>Warning</option>
+    <option value="info" {{ 'selected' if severity_filter == 'info' }}>Info</option>
+  </select>
+  <select name="card_type">
+    <option value="">All card types</option>
+    {% for letter in ('A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P') %}
+    <option value="{{ letter }}" {{ 'selected' if card_type_filter == letter }}>{{ letter }}</option>
+    {% endfor %}
+  </select>
+  {% if mode == 'grouped' %}
+  <input type="hidden" name="needs_you" value="{{ needs_you_filter }}">
+  {% else %}
+  <input type="hidden" name="view" value="flat">
+  {% endif %}
+  <button type="submit" class="btn btn-sm btn-outline">Filter</button>
+  {% if q or severity_filter or card_type_filter or app_filter %}<a href="/ledger" class="btn btn-sm btn-outline">Clear</a>{% endif %}
+</form>
+
+{% if mode == 'grouped' %}
+{# docs/ledger-design-spec.md §2 rules 2-3: fleet-wide default is grouped
+   by app, collapsed to one row, "Needs You" filtering to actionable apps
+   by default. #}
+<div class="action-bar mb-1">
+  {% if needs_you_filter != '0' %}
+  <span class="badge badge-warning">Needs You: {{ needs_you_count }} of {{ total_apps }} app(s)</span>
+  <a href="/ledger?needs_you=0&q={{ q|default('') }}&severity={{ severity_filter|default('') }}&card_type={{ card_type_filter|default('') }}" class="btn btn-sm btn-outline">Show all apps</a>
+  {% else %}
+  <span class="badge badge-muted">Showing all {{ total_apps }} app(s)</span>
+  <a href="/ledger?needs_you=1&q={{ q|default('') }}&severity={{ severity_filter|default('') }}&card_type={{ card_type_filter|default('') }}" class="btn btn-sm btn-outline">Needs You only</a>
+  {% endif %}
+  <a href="/ledger?view=flat" class="btn btn-sm btn-outline">View as flat stream</a>
+</div>
+
+{% if rows %}
+{% for row in rows %}
+<details class="ledger-app-row">
+  <summary>
+    <span class="ledger-app-row-summary">
+      {% if row.needs_you %}<span class="badge badge-warning">Needs You</span>{% endif %}
+      <a href="/assessments/{{ row.assessment_id }}?tab=ledger">{{ row.repo_name }}</a>
+      <span class="badge badge-muted">score {{ row.score }}</span>
+      {% if row.gitops_registered %}<span class="badge badge-info">GitOps</span>{% endif %}
+      {% if row.pending_actions_count > 0 %}<span class="badge badge-warning">{{ row.pending_actions_count }} pending</span>{% endif %}
+      {% if row.breached_slo_count > 0 %}<span class="badge badge-critical">{{ row.breached_slo_count }} SLO breach(es)</span>{% endif %}
+      {% if row.latest_card %}
+      <span class="text-muted text-sm">{{ row.latest_card.title }} — {{ row.latest_card.timestamp[:16] }}</span>
+      {% else %}
+      <span class="text-muted text-sm">no Ledger activity yet</span>
+      {% endif %}
+      <span class="text-muted text-sm">({{ row.card_count }} card(s))</span>
+    </span>
+  </summary>
+  <div class="ledger-app-row-detail">
+    {% if row.cards %}
+    <div class="timeline">
+      {% for card in row.cards %}
+      {{ ledger_card(card, link_to_app=False) }}
+      {% endfor %}
+    </div>
+    {% if row.card_count > row.cards|length %}
+    <a href="/ledger?app={{ row.repo_name }}" class="text-sm">View this app's full stream ({{ row.card_count }} cards) &rarr;</a>
+    {% endif %}
+    {% else %}
+    <p class="text-muted text-sm">No Ledger activity yet for this app.</p>
+    {% endif %}
+  </div>
+</details>
+{% endfor %}
+{% else %}
+<div class="empty-state">
+  {% if total_apps > 0 and needs_you_filter != '0' %}
+  <h3>No apps need you right now</h3>
+  <p class="text-muted">Every app is caught up — no pending gates, stale gates, or SLO breaches.</p>
+  {% else %}
+  <h3>No Ledger activity yet</h3>
+  <p class="text-muted">Assessments, gates, deliveries, and fix-review decisions across the fleet will appear here as they happen.</p>
+  {% endif %}
+</div>
+{% endif %}
+
+{% else %}
+{# Flat, chronological stream -- either a per-app drill-in (`?app=`) or an
+   explicit `?view=flat` opt-out of the grouped default. #}
+{% if cards %}
+<div class="timeline">
+  {% for card in cards %}
+  {{ ledger_card(card, link_to_app=True) }}
+  {% endfor %}
+</div>
+<div class="pagination">
+  {% if page > 1 %}
+  <a href="/ledger?view=flat&page={{ page - 1 }}&q={{ q | default('') }}&severity={{ severity_filter | default('') }}&card_type={{ card_type_filter | default('') }}&app={{ app_filter | default('') }}" class="btn btn-sm btn-outline">&larr; Previous</a>
+  {% endif %}
+  <span class="text-muted text-sm">Page {{ page }} of {{ total_pages }} ({{ total }} total)</span>
+  {% if page < total_pages %}
+  <a href="/ledger?view=flat&page={{ page + 1 }}&q={{ q | default('') }}&severity={{ severity_filter | default('') }}&card_type={{ card_type_filter | default('') }}&app={{ app_filter | default('') }}" class="btn btn-sm btn-outline">Next &rarr;</a>
+  {% endif %}
+</div>
+{% if not app_filter %}<a href="/ledger" class="text-sm">&larr; Back to grouped-by-app view</a>{% endif %}
+{% else %}
+<div class="empty-state">
+  <h3>No Ledger activity yet</h3>
+  <p class="text-muted">Assessments, gates, deliveries, and fix-review decisions across the fleet will appear here as they happen.</p>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

@@ -1,12 +1,40 @@
 # The Ledger — design spec (buildable, not philosophy)
 
-**Status: design spec, not yet implemented.** This is the next design
-artifact in the same series as `docs/ui-redesign-proposal.md` (implemented),
-`docs/next-gen-ux-concepts.md`, and `docs/ux-design-requirements.md`
-(both still proposals). Everything below is grounded in the *actual current*
-templates, routes, and `store.py` schema as of this writing — verified by
-reading them directly, not designed against an imagined backend. No code
-changes are made by this doc.
+**Status: implemented (Phase 0, Phase 1, and the §2/§4 noise-at-scale +
+rewind pieces originally sequenced as Phase 4).** `agentit/ledger.py`'s
+`get_ledger_cards()` unions `events`/`gates`/`deliveries`/fix-review
+`skill_effectiveness` rows into the card types below; a per-app **Ledger**
+tab lives on Assessment Detail (additive, alongside Actions/Timeline) and a
+fleet-wide `/ledger` page is linked from nav (additive, alongside
+Events/Decisions). The two Phase 0 gap-fills (`slo_tracker.py`'s
+`rollback-recommended` event, `drift_detector.py`'s `drift-auto-synced`/
+`drift-auto-sync-failed` events) are also in.
+
+Also shipped in this same pass, ahead of their original §5 Phase 4
+sequencing: the fleet-wide `/ledger` default is now §2 rule 2's
+grouped-by-app view (`ledger.py::group_cards_by_app()`), rule 3's "Needs
+You" filter (on by default; a fleet-wide watcher-tick-failure banner via
+`recent_watcher_failures()` since a tick isn't scoped to one app), and
+rule 4's consecutive-tick-collapsing (`_collapse_tick_events()` — a single
+`tick-failed` still breaks the collapse). §4's rewind scrubber is live at
+`/ledger/chain/<correlation_id>` (`ledger.py::get_chain_cards()`),
+read-only, reusing exactly the `list_events_by_correlation_id` query the
+Events page's own "Chain" link already ran. §1's chain-count annotation
+(`_annotate_chain_counts()`) backs the "Part of a chain (N events) —
+Replay" affordance on any card whose event row shares a `correlation_id`
+with another.
+
+Phase 2 (promoting the Ledger to the *default* view and retiring the
+now-duplicated Actions/Timeline tabs and the Events/Decisions nav slots)
+and Phase 3 (deleting the retired templates/routes) remain
+not-yet-implemented futures — deliberately: §5 sequences those *after* the
+base Ledger has real usage, and this pass didn't touch or remove any
+existing page. This is the next design artifact in the same series as
+`docs/ui-redesign-proposal.md` (implemented), `docs/next-gen-ux-concepts.md`,
+and `docs/ux-design-requirements.md` (both still proposals). Everything
+below is grounded in the *actual current* templates, routes, and
+`store.py` schema as of this writing — verified by reading them directly,
+not designed against an imagined backend.
 
 ## 0. Resolving the real tension: increment, not replacement
 

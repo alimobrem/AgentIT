@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Replay chain - AgentIT{% endblock %}
+{% block content %}
+<p class="mb-1"><a href="/ledger">&larr; Back to Ledger</a></p>
+<h1>Replay this chain</h1>
+<p class="text-muted text-sm mb-2">
+  Read-only playback of every event, gate, and delivery sharing this correlation id, in the
+  order it actually happened. This is history, not a decision point — nothing here can be
+  re-approved or re-rejected from this view.
+</p>
+
+{% if cards %}
+<div class="scrubber" x-data="{ idx: {{ cards|length - 1 }} }">
+  <input type="range" min="0" max="{{ cards|length - 1 }}" step="1" x-model.number="idx" class="scrubber-slider">
+  <div class="scrubber-ticks text-muted text-sm">
+    <span>{{ cards[0].timestamp[:16] }} (start)</span>
+    <span x-text="'Step ' + (idx + 1) + ' of {{ cards|length }}'"></span>
+    <span>{{ cards[-1].timestamp[:16] }} (latest)</span>
+  </div>
+
+  {% for card in cards %}
+  <div x-show="idx === {{ loop.index0 }}" x-cloak class="timeline-item scrubber-frame">
+    <div class="timeline-marker {% if card.severity == 'critical' %}marker-danger{% elif card.card_type in ('E', 'F') %}marker-success{% elif card.card_type == 'D' %}marker-info{% else %}marker-default{% endif %}"></div>
+    <div class="timeline-content">
+      <div class="timeline-header">
+        <span class="badge badge-muted">{{ card.card_type }}</span>
+        <span class="badge badge-{{ card.severity | default('info') }}">{{ card.title }}</span>
+        {% if card.target_app %}<span class="text-muted">{{ card.target_app }}</span>{% endif %}
+        <span class="text-muted text-sm" data-timestamp="{{ card.timestamp }}">{{ card.timestamp[:16] }}</span>
+      </div>
+      <p class="text-sm text-muted">{{ card.summary }}</p>
+      {% if card.gate_status %}<p class="text-sm">Gate status: <strong>{{ card.gate_status }}</strong></p>{% endif %}
+      {% if card.mechanism %}<p class="text-sm">Delivery mechanism: <strong>{{ card.mechanism }}</strong></p>{% endif %}
+      {% if card.attribution %}<p class="text-sm">Skill: <strong>{{ card.attribution }}</strong></p>{% endif %}
+      <p class="text-muted text-sm">Step {{ loop.index }} of {{ cards|length }} — read-only history, no actions available here.</p>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">
+  <h3>No chain found</h3>
+  <p class="text-muted">No events share this correlation id.</p>
+</div>
+{% endif %}
+{% endblock %}

@@ -921,6 +921,19 @@
   .timeline-header { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-1); }
   .timeline-content { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: var(--space-3) var(--space-4); }
 
+  /* ── Ledger: grouped-by-app rows (docs/ledger-design-spec.md §2) ─── */
+  .ledger-app-row { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: var(--space-3) var(--space-4); margin-bottom: var(--space-3); }
+  .ledger-app-row > summary { cursor: pointer; list-style: none; }
+  .ledger-app-row > summary::-webkit-details-marker { display: none; }
+  .ledger-app-row-summary { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+  .ledger-app-row-detail { margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--color-border); }
+  .needs-you-banner { border-color: var(--color-danger); }
+
+  /* ── Ledger: rewind scrubber (docs/ledger-design-spec.md §4) ──────── */
+  .scrubber-slider { width: 100%; margin: var(--space-3) 0; }
+  .scrubber-ticks { display: flex; justify-content: space-between; margin-bottom: var(--space-4); }
+  .scrubber-frame { margin-top: var(--space-3); }
+
   /* ── Agent Rate Bar (insights) ────────────────────────────────── */
   .agent-rate-bar { display: flex; align-items: center; gap: var(--space-3); }
   .agent-rate-bar .score-bar-bg { flex: 1; }
@@ -985,6 +998,7 @@
     <a href="/health" class="{{ 'nav-active' if request.url.path.startswith('/health') }}">Health</a>
     <a href="/insights" class="{{ 'nav-active' if request.url.path == '/insights' }}">Insights</a>
     <a href="/decisions" class="{{ 'nav-active' if request.url.path == '/decisions' }}">Decisions</a>
+    <a href="/ledger" class="{{ 'nav-active' if request.url.path == '/ledger' }}">Ledger</a>
   </div>
   <button class="nav-toggle" @click="navOpen = !navOpen" aria-label="Toggle menu">
     <span x-show="!navOpen">&#9776;</span>
@@ -1279,6 +1293,7 @@ function commandPalette() {
       { label: 'Health', href: '/health', hint: 'System health & pipelines' },
       { label: 'Insights', href: '/insights', hint: 'Fleet-wide insights' },
       { label: 'Decisions', href: '/decisions', hint: 'LLM decision log' },
+      { label: 'Ledger', href: '/ledger', hint: 'Fleet-wide event/gate/delivery/decision stream' },
       { label: 'Capabilities', href: '/capabilities', hint: 'Agent registry & catalog' },
       { label: 'Settings', href: '/settings', hint: 'Auto-mode & allowlist' },
       { label: 'Schedules', href: '/schedules', hint: 'Scheduled operations' },

@@ -113,6 +113,137 @@ async def events_page(request: Request, page: int = 1, per_page: int = 25,
     })
 
 
+@router.get("/ledger", response_class=HTMLResponse)
+async def ledger_page(
+    request: Request, page: int = 1, per_page: int = 25,
+    q: str = "", severity: str = "", card_type: str = "", app: str = "",
+    view: str = "", needs_you: str = "1",
+) -> HTMLResponse:
+    """Fleet-wide Ledger view (docs/ledger-design-spec.md §5 Phase 1, plus
+    the §2 noise-at-scale controls): a read-only union of events/gates/
+    deliveries/fix-reviews across every app, additive alongside
+    Events/Decisions -- neither of those pages changes.
+
+    Default rendering is §2 rule 2's grouped-by-app view (one row per app,
+    collapsed to its most-recent/most-severe card) with rule 3's "Needs
+    You" filter on by default. ``?app=`` (a grouped row's own expand link)
+    or ``?view=flat`` opts into the flat, chronological stream -- the exact
+    same shape Assessment Detail's own Ledger tab renders, just reachable
+    fleet-wide too.
+    """
+    from agentit.ledger import get_ledger_cards, group_cards_by_app, recent_watcher_failures
+    from agentit.portal.routes.fleet import _attach_pending_actions
+
+    s = await get_store()
+    all_cards = await get_ledger_cards(s, target_app=app or None, limit=2000)
+
+    # Same target_app -> assessment_id resolution events_page already does,
+    # so a fleet-wide card can link back to that app's own Assessment
+    # Detail / Ledger tab.
+    fleet = await s.get_fleet_data()
+    app_ids_by_name = {app_data["repo_name"]: app_data["id"] for app_data in fleet}
+    for c in all_cards:
+        c["assessment_id"] = c.get("assessment_id") or app_ids_by_name.get(c.get("target_app"))
+
+    # §2 rule 3's 4th signal is fleet-wide (a tick isn't scoped to one app),
+    # so it's computed once here, before any app/card-level filter narrows
+    # `all_cards` down to a single app's stream.
+    watcher_alerts = recent_watcher_failures(all_cards, hours=4)
+
+    if q:
+        ql = q.lower()
+        all_cards = [
+            c for c in all_cards
+            if ql in (c.get("target_app") or "").lower()
+            or ql in c.get("title", "").lower()
+            or ql in c.get("summary", "").lower()
+        ]
+    if severity:
+        all_cards = [c for c in all_cards if c.get("severity") == severity]
+    if card_type:
+        all_cards = [c for c in all_cards if c["card_type"] == card_type]
+
+    if app or view == "flat":
+        total = len(all_cards)
+        total_pages = max(1, (total + per_page - 1) // per_page)
+        page = max(1, min(page, total_pages))
+        start = (page - 1) * per_page
+        cards = all_cards[start:start + per_page]
+        return get_templates().TemplateResponse(request, "ledger.html", {
+            "mode": "flat", "cards": cards, "page": page, "total_pages": total_pages,
+            "per_page": per_page, "total": total,
+            "q": q, "severity_filter": severity, "card_type_filter": card_type,
+            "app_filter": app, "watcher_alerts": watcher_alerts,
+        })
+
+    # §2 rule 2: fleet-wide default is grouped by app, collapsed to one row
+    # each -- same fields fleet.html already computes (score, GitOps badge,
+    # pending-action count), plus that app's own most-recent Ledger card.
+    # Same enrichment call `home()` makes (one cached Argo CD list, not one
+    # live kube call per app) -- only needed here in the grouped branch,
+    # since the flat stream above never renders a GitOps badge.
+    from agentit.portal.routes.fleet import _enrich_fleet_with_cluster_status
+    loop = asyncio.get_running_loop()
+    fleet = await asyncio.to_thread(_enrich_fleet_with_cluster_status, fleet, s, loop)
+    await _attach_pending_actions(fleet, s)
+    stale_gate_ids = {g["id"] for g in await s.get_stale_gates(hours=4)}
+    all_gates = await s.list_all_gates()
+    stale_repo_urls = {g["repo_url"] for g in all_gates if g["id"] in stale_gate_ids and g.get("repo_url")}
+
+    cards_by_app = group_cards_by_app(all_cards)
+    card_filter_active = bool(q or severity or card_type)
+    rows = []
+    for a in fleet:
+        slos = await s.list_slos(a["id"])
+        breached_count = sum(1 for sl in slos if sl.get("status") == "breached")
+        app_cards = cards_by_app.get(a["repo_name"], [])
+        if card_filter_active and not app_cards:
+            continue
+        row_needs_you = (
+            a.get("pending_actions_count", 0) > 0
+            or a["repo_url"] in stale_repo_urls
+            or breached_count > 0
+        )
+        rows.append({
+            "repo_name": a["repo_name"],
+            "assessment_id": a["id"],
+            "score": a["latest_score"],
+            "gitops_registered": a.get("gitops_registered", False),
+            "pending_actions_count": a.get("pending_actions_count", 0),
+            "breached_slo_count": breached_count,
+            "needs_you": row_needs_you,
+            "latest_card": app_cards[0] if app_cards else None,
+            "card_count": len(app_cards),
+            "cards": app_cards[:10],
+        })
+
+    total_apps = len(rows)
+    if needs_you != "0":
+        rows = [r for r in rows if r["needs_you"]]
+    rows.sort(key=lambda r: (r["latest_card"]["timestamp"] if r["latest_card"] else ""), reverse=True)
+
+    return get_templates().TemplateResponse(request, "ledger.html", {
+        "mode": "grouped", "rows": rows, "total_apps": total_apps,
+        "needs_you_count": len(rows), "needs_you_filter": needs_you,
+        "q": q, "severity_filter": severity, "card_type_filter": card_type,
+        "app_filter": app, "watcher_alerts": watcher_alerts,
+    })
+
+
+@router.get("/ledger/chain/{correlation_id}", response_class=HTMLResponse)
+async def ledger_chain_page(request: Request, correlation_id: str) -> HTMLResponse:
+    """The rewind scrubber (docs/ledger-design-spec.md §4 -- the non-
+    speculative "replay history" half only). Read-only: every card here
+    already happened, so none of them render action buttons."""
+    from agentit.ledger import get_chain_cards
+
+    s = await get_store()
+    cards = await get_chain_cards(s, correlation_id)
+    return get_templates().TemplateResponse(request, "ledger_chain.html", {
+        "cards": cards, "correlation_id": correlation_id,
+    })
+
+
 @router.get("/events/dlq", response_class=HTMLResponse)
 async def dlq_page(request: Request) -> HTMLResponse:
     """Show dead-lettered messages from the events store."""

@@ -205,9 +205,23 @@ class DriftDetector:
                 body={"operation": {"sync": {"revision": "HEAD"}}},
             )
             click.echo(f"[drift-detect] Sync triggered for {app_name}", err=True)
+            try:
+                await self._store.log_event(
+                    "drift-detector", "drift-auto-synced", app_name, "info",
+                    f"Auto-synced {app_name} after detected drift",
+                )
+            except Exception:
+                logger.warning("Failed to log drift-auto-synced event", exc_info=True)
         except Exception as exc:
             logger.warning("Auto-sync failed for %s: %s", app_name, exc)
             click.echo(f"[drift-detect] Sync failed: {str(exc)[:100]}", err=True)
+            try:
+                await self._store.log_event(
+                    "drift-detector", "drift-auto-sync-failed", app_name, "warning",
+                    f"Auto-sync failed for {app_name}: {str(exc)[:200]}",
+                )
+            except Exception:
+                logger.warning("Failed to log drift-auto-sync-failed event", exc_info=True)
 
     async def run(self) -> None:
         """Main loop: detect drift, sleep.
