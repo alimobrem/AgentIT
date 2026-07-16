@@ -11,10 +11,11 @@
 <p class="text-muted">Skills, checks, agents, and automation — everything AgentIT can do.</p>
 
 <div class="action-bar mb-1">
-  <form method="post" action="/capabilities/learn" class="inline-form">
-    <button type="submit" class="btn btn-outline btn-sm">
+  <form method="post" action="/capabilities/learn" class="inline-form" x-data>
+    <button type="submit" class="btn btn-outline btn-sm"
+      @click="showToast('Researching &amp; drafting skills\u2026 this can take up to 3 minutes \u2014 please don\u2019t close this tab.', 'info', 8000)">
       <span class="btn-label">Research CVEs &amp; Generate Skills</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Researching &amp; drafting skills&hellip; (can take up to 3 minutes, please don't close this tab)</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Researching&hellip;</span>
     </button>
   </form>
   <span class="text-muted text-sm">

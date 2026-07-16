@@ -2212,6 +2212,20 @@ async def test_capabilities_page_has_learn_button(client):
     assert "Research CVEs" in resp.text
 
 
+async def test_capabilities_learn_button_uses_toast_not_verbose_label(client):
+    """The "can take up to 3 minutes, please don't close this tab" caveat
+    belongs in a dismissible toast fired on click (showToast(...) in the
+    button's @click), not crammed into the button's own visible loading-
+    state label -- that stays a short "Researching..." regardless of state."""
+    resp = await client.get("/capabilities")
+    assert resp.status_code == 200
+    assert "showToast(" in resp.text
+    assert "can take up to 3 minutes" in resp.text  # present, but inside the toast trigger below
+    indicator = resp.text.split('class="htmx-indicator spinner-wrap"', 1)[1][:150]
+    assert "can take up to 3 minutes" not in indicator
+    assert "Researching" in indicator
+
+
 async def test_capabilities_catalog_collapses_use_buttons(client):
     """New Capabilities collapses are real <button> toggles (keyboard /
     AT), not clickable <h2> headings."""

@@ -1715,6 +1715,15 @@ function toastManager() {
     }
   };
 }
+// Small reusable wrapper so a plain @click can fire a toast without every
+// call site repeating the getElementById + Alpine.$data boilerplate --
+// e.g. a long-running action's "this can take a few minutes" caveat,
+// which belongs in a dismissible notification, not crammed into the
+// triggering button's own label/loading text.
+function showToast(message, type, duration) {
+  var tm = document.getElementById('toasts');
+  if (tm && Alpine.$data(tm)) Alpine.$data(tm).show(message, type, duration);
+}
 // Auto-show toasts from URL params. Must wait for 'alpine:initialized' (fires
 // once ALL components on the page have been initialized), not 'alpine:init'
 // (fires *before* any x-data component is initialized -- that event exists
