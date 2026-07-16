@@ -703,6 +703,46 @@
   .nav-toggle { display: none; background: none; border: none; color: var(--color-text); font-size: 1.5rem; cursor: pointer; }
   .nav-badge { background: var(--color-accent); color: #fff; font-size: var(--font-xs); padding: 1px 6px; border-radius: var(--radius-pill); margin-left: 4px; }
 
+  /* ── User Menu (nav) ──────────────────────────────────────────────
+     Consolidates what used to be flat Capabilities/Settings/account-
+     status links into one dropdown, so the masthead reads as one compact
+     control instead of a growing list of loose text links. */
+  .user-menu { position: relative; }
+  .user-menu-trigger {
+    display: inline-flex; align-items: center; gap: var(--space-2);
+    background: none; border: 1px solid transparent; border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-3); cursor: pointer;
+    color: var(--color-text); font-size: var(--font-sm); font-family: inherit;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .user-menu-trigger:hover, .user-menu-trigger[aria-expanded="true"] {
+    border-color: var(--color-border); background: var(--color-surface-2);
+  }
+  .user-menu-avatar {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.6rem; height: 1.6rem; border-radius: 50%;
+    background: var(--color-surface-3); color: var(--color-heading);
+    font-family: var(--font-mono); font-size: var(--font-xs); font-weight: 700;
+    flex-shrink: 0;
+  }
+  .user-menu-label { color: var(--color-muted); max-width: 10rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .user-menu-chevron { color: var(--color-muted); font-size: var(--font-xs); transition: transform 0.15s; }
+  .user-menu-trigger[aria-expanded="true"] .user-menu-chevron { transform: rotate(180deg); }
+  .user-menu-dropdown {
+    position: absolute; top: calc(100% + var(--space-2)); right: 0;
+    min-width: 12rem; background: var(--color-surface-2); border: 1px solid var(--color-border);
+    border-radius: var(--radius-md); box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    padding: var(--space-2); z-index: 110;
+  }
+  .user-menu-item {
+    display: block; padding: var(--space-3) var(--space-4); border-radius: var(--radius-sm);
+    color: var(--color-text); font-size: var(--font-sm); white-space: nowrap;
+  }
+  .user-menu-item:hover { background: var(--color-surface-3); text-decoration: none; }
+  .user-menu-item.nav-active { color: var(--color-accent); }
+  .user-menu-divider { height: 1px; background: var(--color-border); margin: var(--space-2) 0; }
+  .user-menu-info { padding: var(--space-2) var(--space-4); color: var(--color-muted); font-size: var(--font-xs); }
+
   /* ── Command Palette Trigger (nav) ────────────────────────────── */
   .cmdk-trigger {
     display: inline-flex; align-items: center; gap: var(--space-3);
@@ -956,8 +996,14 @@
     .card-grid { grid-template-columns: 1fr; }
     nav { flex-wrap: wrap; gap: var(--space-4); padding: var(--space-4); }
     .nav-toggle { display: block; margin-left: auto; }
-    .links-secondary { display: none; flex-direction: column; width: 100%; }
-    .links-secondary.links-open { display: flex; }
+    /* Pre-existing bug, surfaced (not introduced) by the user-menu work:
+       the desktop rule is `nav .links-secondary { display: flex; ... }`
+       (specificity 0-1-1), which beats a bare `.links-secondary { display:
+       none }` here (0-1-0) regardless of source order -- so this toggle
+       never actually hid anything on mobile. Match the ancestor selector
+       so this override actually wins. */
+    nav .links-secondary { display: none; flex-direction: column; width: 100%; align-items: flex-start; }
+    nav .links-secondary.links-open { display: flex; }
     .container { padding: var(--space-5); }
     .dimension-row { flex-direction: column; align-items: stretch; }
     .dimension-label { width: auto; }
@@ -1005,12 +1051,24 @@
     <span x-show="navOpen">&#10005;</span>
   </button>
   <div class="links-secondary" :class="{ 'links-open': navOpen }">
-    <a href="/capabilities" class="{{ 'nav-active' if request.url.path == '/capabilities' or request.url.path.startswith('/agents') }}">Capabilities</a>
-    <a href="/settings" class="{{ 'nav-active' if request.url.path == '/settings' or request.url.path == '/schedules' }}">Settings</a>
-    {% if is_authenticated %}
-    <span class="nav-user">Logged in as {{ current_user }}</span>
-    <a href="{{ oauth_sign_out_path }}">Logout</a>
-    {% endif %}
+    <div class="user-menu" x-data="{ open: false }" @keydown.escape.window="open = false">
+      <button type="button" class="user-menu-trigger" @click="open = !open" :aria-expanded="open" aria-haspopup="true" aria-label="Open account and settings menu">
+        <span class="user-menu-avatar" aria-hidden="true">{{ (current_user[0] | upper) if is_authenticated and current_user else 'A' }}</span>
+        <span class="user-menu-label">{{ current_user if is_authenticated and current_user else 'Menu' }}</span>
+        <span class="user-menu-chevron" aria-hidden="true">&#9662;</span>
+      </button>
+      <div class="user-menu-dropdown" x-show="open" x-cloak x-transition.opacity.duration.100ms
+           @click.outside.capture="open = false" @click="open = false" role="menu">
+        <a href="/capabilities" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/capabilities' or request.url.path.startswith('/agents') }}">Capabilities</a>
+        <a href="/settings" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/settings' }}">Settings</a>
+        <a href="/schedules" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/schedules' }}">Schedules</a>
+        {% if is_authenticated %}
+        <div class="user-menu-divider"></div>
+        <div class="user-menu-info">Logged in as {{ current_user }}</div>
+        <a href="{{ oauth_sign_out_path }}" role="menuitem" class="user-menu-item">Logout</a>
+        {% endif %}
+      </div>
+    </div>
   </div>
 </nav>
 <div id="nav-loading" class="nav-loading-bar"></div>

@@ -307,8 +307,15 @@ class TestNavigation:
         # docs/ui-redesign-proposal.md builds on -- check the current
         # top-level items instead (Fleet/Admin Review are covered by
         # test_primary_nav_links above).
-        for link in ["Events", "Health", "Insights", "Decisions", "Capabilities", "Settings"]:
+        for link in ["Events", "Health", "Insights", "Decisions"]:
             expect(page.locator(f"nav >> text={link}")).to_be_visible()
+        # Capabilities/Settings/Schedules were flat secondary links until the
+        # masthead cleanup consolidated them into one user-menu dropdown
+        # (base.html's .user-menu) -- closed by default, so they're only
+        # visible once the trigger is opened.
+        page.click(".user-menu-trigger")
+        for link in ["Capabilities", "Settings", "Schedules"]:
+            expect(page.locator(f".user-menu-dropdown >> text={link}")).to_be_visible()
 
     def test_fleet_link_navigates(self, page: Page, app_url):
         url, _, _ = app_url
