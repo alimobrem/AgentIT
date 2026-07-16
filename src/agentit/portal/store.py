@@ -888,6 +888,36 @@ class AssessmentStore:
 
     # ── Fleet ──────────────────────────────────────────────────────────
 
+    async def repo_urls_with_onboarding(self) -> set[str]:
+        """Repo URLs that have at least one onboarding_results row (any assessment).
+
+        Used so Fleet can offer a single "Refresh Onboard" CTA for apps that
+        already generated manifests — re-assess alone would drop lifecycle
+        back to assessed and force a second Onboard click.
+        """
+        rows = await self._pool.fetch(
+            """
+            SELECT DISTINCT a.repo_url
+            FROM onboarding_results o
+            JOIN assessments a ON a.id = o.assessment_id
+            """
+        )
+        return {r["repo_url"] for r in rows}
+
+    async def repo_has_onboarding(self, repo_url: str) -> bool:
+        """True if any historical assessment of this repo was onboarded."""
+        row = await self._pool.fetchrow(
+            """
+            SELECT 1
+            FROM onboarding_results o
+            JOIN assessments a ON a.id = o.assessment_id
+            WHERE a.repo_url = $1
+            LIMIT 1
+            """,
+            repo_url,
+        )
+        return row is not None
+
     async def get_fleet_data(self) -> list[dict]:
         """Return one row per unique repo_url with latest assessment + trend."""
         rows = await self._pool.fetch(
@@ -906,6 +936,7 @@ class AssessmentStore:
             """
         )
 
+        ever_onboarded = await self.repo_urls_with_onboarding()
         fleet: list[dict] = []
         for r in rows:
             report = AssessmentReport.model_validate_json(r["report_json"])
@@ -929,6 +960,9 @@ class AssessmentStore:
                 # always-current source), not this specific assessment's
                 # own `report_json`.
                 "infra_repo_url": r["app_infra_repo_url"],
+                # Prior onboard of any assessment for this repo — drives
+                # Fleet's chained "Refresh Onboard" CTA.
+                "ever_onboarded": r["repo_url"] in ever_onboarded,
             })
         return fleet
 
@@ -1351,15 +1385,23 @@ class AssessmentStore:
 
     # ── Assessment Jobs ──────────────────────────────────────────────────
 
-    async def create_assessment_job(self, repo_url: str) -> str:
-        """Create a tracking job for an async assessment run."""
+    async def create_assessment_job(
+        self, repo_url: str, continue_onboard: bool = False,
+    ) -> str:
+        """Create a tracking job for an async assessment run.
+
+        When ``continue_onboard`` is True, ``steps_completed`` starts with
+        ``["continue_onboard"]`` so ``assess_progress`` can chain into
+        onboarding after the scorecard is saved (Fleet "Refresh Onboard").
+        """
         job_id = uuid.uuid4().hex
         now = _now()
+        steps = '["continue_onboard"]' if continue_onboard else "[]"
         await self._pool.execute(
             """INSERT INTO remediation_jobs
                 (id, assessment_id, status, current_step, steps_completed, error, created_at, updated_at)
-            VALUES ($1, $2, 'assessing', $3, '[]'::jsonb, '', $4, $5)""",
-            job_id, "", repo_url[:200], now, now,
+            VALUES ($1, $2, 'assessing', $3, $4::jsonb, '', $5, $6)""",
+            job_id, "", repo_url[:200], steps, now, now,
         )
         return job_id
 
@@ -1374,6 +1416,24 @@ class AssessmentStore:
             WHERE id = $5""",
             status, step, assessment_id, now, job_id,
         )
+
+    async def claim_continue_onboard(self, job_id: str) -> bool:
+        """Atomically claim a continue_onboard flag on an assessment job.
+
+        Returns True once — later polls of ``/assess/progress`` return False
+        so we do not start duplicate onboarding jobs from htmx's 2s refresh.
+        """
+        now = _now()
+        result = await self._pool.execute(
+            """
+            UPDATE remediation_jobs
+            SET steps_completed = '[]'::jsonb, updated_at = $1
+            WHERE id = $2
+              AND steps_completed @> '["continue_onboard"]'::jsonb
+            """,
+            now, job_id,
+        )
+        return _affected(result) > 0
 
     # ── Remediation Jobs ──────────────────────────────────────────────────
 

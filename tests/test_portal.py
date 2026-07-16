@@ -6,7 +6,7 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -1547,6 +1547,67 @@ async def test_dashboard_uses_design_system_classes(client, _override_store):
     assert "css-app" in resp.text
     assert "<table>" in resp.text
     assert "Re-assess" in resp.text
+
+
+async def test_fleet_refresh_onboard_cta_when_ever_onboarded(client, _override_store):
+    """Previously onboarded apps get one primary Refresh Onboard CTA on Fleet."""
+    store = _override_store
+    old_id = await store.save(_make_report_scored("refresh-me", 55))
+    await store.save_onboarding(old_id, [{
+        "category": "hardening", "path": "deploy.yaml",
+        "content": "kind: Deployment\n", "description": "deploy",
+    }])
+    # New assessment (as Re-assess would create) — lifecycle back to assessed,
+    # but fleet still knows this repo was onboarded before.
+    await store.save(_make_report_scored("refresh-me", 60))
+    resp = await client.get("/fleet")
+    assert "Refresh Onboard" in resp.text
+    assert 'name="continue_onboard" value="1"' in resp.text
+    # Never-onboarded sibling still uses plain Re-assess.
+    await store.save(_make_report_scored("fresh-only", 70))
+    resp2 = await client.get("/fleet")
+    assert "Re-assess" in resp2.text
+    assert "Refresh Onboard" in resp2.text
+
+
+async def test_assess_progress_chains_to_onboard_when_continue_flag(
+    client, _override_store,
+):
+    """Completed assess job with continue_onboard redirects into onboard progress."""
+    store = _override_store
+    aid = await store.save(_make_report_scored("chain-app", 50))
+    job_id = await store.create_assessment_job(
+        "https://github.com/org/chain-app", continue_onboard=True,
+    )
+    await store.update_assessment_job(
+        job_id, "completed", "Assessment complete", assessment_id=aid,
+    )
+    with patch(
+        "agentit.portal.routes.assessments._run_onboarding_job",
+        new=AsyncMock(return_value=None),
+    ):
+        resp = await client.get(f"/assess/progress/{job_id}", follow_redirects=False)
+    assert resp.status_code == 303
+    loc = resp.headers["location"]
+    assert f"/assessments/{aid}/onboard/progress/" in loc
+    # Second poll must not start another onboard job.
+    resp2 = await client.get(f"/assess/progress/{job_id}", follow_redirects=False)
+    assert resp2.status_code == 303
+    assert resp2.headers["location"] == f"/assessments/{aid}"
+
+
+async def test_assessment_detail_prior_onboarded_hint(client, _override_store):
+    store = _override_store
+    old_id = await store.save(_make_report_scored("prior-onboard", 40))
+    await store.save_onboarding(old_id, [{
+        "category": "hardening", "path": "a.yaml",
+        "content": "x", "description": "d",
+    }])
+    new_id = await store.save(_make_report_scored("prior-onboard", 45))
+    resp = await client.get(f"/assessments/{new_id}")
+    assert "New scorecard after re-assess" in resp.text
+    assert "Refresh Onboard" in resp.text
+    assert "Onboard This App" in resp.text
 
 
 async def test_fleet_uses_design_system_classes(client, _override_store):

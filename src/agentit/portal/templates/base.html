@@ -1680,7 +1680,8 @@
             <div class="cmdk-item-hint" x-text="r.hint"></div>
           </div>
           <div class="cmdk-item-actions" x-show="r.type === 'app'">
-            <button type="button" class="btn btn-sm btn-outline" @click.stop="reassess(r)">Re-assess</button>
+            <button type="button" class="btn btn-sm btn-outline" @click.stop="reassess(r)"
+                    x-text="r.everOnboarded ? 'Refresh Onboard' : 'Re-assess'"></button>
           </div>
         </div>
       </template>
@@ -2136,6 +2137,7 @@ function commandPalette() {
           hint: 'Score ' + Math.round(m.a.latest_score || 0) + '/100 · ' + (m.a.criticality || ''),
           href: '/assessments/' + m.a.id,
           repoUrl: m.a.repo_url, criticality: m.a.criticality,
+          everOnboarded: !!m.a.ever_onboarded,
         }));
       this.results = navMatches.concat(appMatches);
       this.activeIndex = 0;
@@ -2144,18 +2146,20 @@ function commandPalette() {
       this.close();
       window.location.href = r.href;
     },
-    // Real "re-assess an app" action, right from the palette -- the exact
-    // same /assess endpoint the Fleet table's own per-row "Re-assess"
-    // button posts to (fleet.html), via fetch() so the CSRF header this
-    // route requires is attached (getCsrfCookie() is defined globally,
-    // above) the same way htmx attaches it for boosted form submits.
+    // Same /assess endpoint as Fleet — posts continue_onboard=1 when the
+    // app was previously onboarded so assess→onboard chains (Refresh Onboard).
     async reassess(r) {
       this.close();
       try {
+        const body = {
+          repo_url: r.repoUrl || '',
+          criticality: r.criticality || 'medium',
+        };
+        if (r.everOnboarded) body.continue_onboard = '1';
         const res = await fetch('/assess', {
           method: 'POST',
           headers: { 'X-CSRF-Token': getCsrfCookie(), 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({ repo_url: r.repoUrl || '', criticality: r.criticality || 'medium' }),
+          body: new URLSearchParams(body),
         });
         window.location.href = res.url || '/';
       } catch (e) {

@@ -108,10 +108,19 @@ async def assess_submit(
     repo_url: str = Form(...),
     criticality: str = Form("medium"),
     infra_repo_url: str = Form(""),
+    continue_onboard: str = Form(""),
 ):
     infra = infra_repo_url.strip() or None
     s = await get_store()
-    job_id = await s.create_assessment_job(repo_url)
+    # Fleet "Refresh Onboard" posts continue_onboard=1 so assess_progress
+    # chains into onboard after the new scorecard is saved — avoids the
+    # Re-assess → assessed → Onboard again two-click trap for apps that
+    # already generated manifests once.
+    # Direct callers (tests/test_assess_submit_postgres.py) bypass FastAPI
+    # Form injection, so the default may still be a Form() object — coerce.
+    continue_flag = continue_onboard if isinstance(continue_onboard, str) else ""
+    chain = continue_flag.strip().lower() in ("1", "true", "yes", "on")
+    job_id = await s.create_assessment_job(repo_url, continue_onboard=chain)
     # The work below runs in a background thread (long clone+assess pipeline)
     # via a plain `threading.Thread`, not `asyncio.to_thread` -- unlike
     # `to_thread` (awaited by the caller before the request finishes), this
@@ -184,14 +193,29 @@ async def assess_submit(
 
 
 @router.get("/assess/progress/{job_id}", response_class=HTMLResponse)
-async def assess_progress(request: Request, job_id: str):
+async def assess_progress(
+    request: Request, job_id: str, background_tasks: BackgroundTasks,
+):
     s = await get_store()
     job = await s.get_remediation_job(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
 
     if job["status"] == "completed" and job.get("assessment_id"):
-        return RedirectResponse(url=f"/assessments/{job['assessment_id']}", status_code=303)
+        assessment_id = job["assessment_id"]
+        # Atomically claim continue_onboard so the htmx 2s poll cannot
+        # start two onboarding jobs for the same completed assess.
+        if hasattr(s, "claim_continue_onboard") and await s.claim_continue_onboard(job_id):
+            onboard_job_id = await s.create_remediation_job(assessment_id)
+            base_url = _get_trusted_base_url(request)
+            background_tasks.add_task(
+                _run_onboarding_job, onboard_job_id, assessment_id, base_url,
+            )
+            return RedirectResponse(
+                url=f"/assessments/{assessment_id}/onboard/progress/{onboard_job_id}",
+                status_code=303,
+            )
+        return RedirectResponse(url=f"/assessments/{assessment_id}", status_code=303)
 
     return get_templates().TemplateResponse(request, "assess_progress.html", {
         "job": job, "job_id": job_id,
@@ -327,6 +351,12 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     else:
         lifecycle_stage = "assessed"
 
+    # True when an older assessment of this repo already onboarded — so a
+    # fresh "assessed" stage after Re-assess is a refresh, not first-time.
+    prior_onboarded = False
+    if lifecycle_stage == "assessed" and hasattr(s, "repo_has_onboarding"):
+        prior_onboarded = await s.repo_has_onboarding(report.repo_url)
+
     suppressions = await s.get_suppressions(report.repo_name)
 
     # A genuine, real milestone (docs/ux-design-requirements.md checklist
@@ -357,6 +387,7 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "trend": trend,
             "score_history": score_history,
             "lifecycle_stage": lifecycle_stage,
+            "prior_onboarded": prior_onboarded,
             "suppressions": suppressions,
             "celebrate_first_perfect_score": celebrate_first_perfect_score,
             "recently_resolved_actions_count": recently_resolved_actions_count,

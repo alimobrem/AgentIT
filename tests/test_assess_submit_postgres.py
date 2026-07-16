@@ -65,7 +65,8 @@ async def test_assess_submit_completes_against_real_postgres():
          patch.object(assessments, "run_assessment", return_value=report), \
          patch.object(assessments, "_auto_create_infra_repo", return_value=None):
         response = await assessments.assess_submit(
-            request=None, repo_url=report.repo_url, criticality="medium", infra_repo_url="",
+            request=None, repo_url=report.repo_url, criticality="medium",
+            infra_repo_url="", continue_onboard="",
         )
 
         assert response.status_code == 303
