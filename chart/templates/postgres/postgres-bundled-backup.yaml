@@ -132,6 +132,13 @@ spec:
 # PostSync hooks (or finish a sync that waits for healthy) until Bound --
 # which on a CronJob-only consumer can mean hours. This one-shot Sync hook
 # mounts the claim immediately so the PVC binds during the same sync.
+#
+# hook-delete-policy includes BeforeHookCreation so a Failed/DeadlineExceeded
+# Job is replaced on the next sync instead of permanently blocking Argo
+# (HookSucceeded alone left a failed Job in place until a human deleted it).
+# backoffLimit/activeDeadlineSeconds match the pg-backup CronJob above:
+# this namespace's ResourceQuota is often fully claimed by concurrent Tekton
+# PipelineRun pods, which can transiently block scheduling this probe.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -144,10 +151,10 @@ metadata:
   annotations:
     argocd.argoproj.io/hook: Sync
     argocd.argoproj.io/sync-wave: "0"
-    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
 spec:
-  backoffLimit: 2
-  activeDeadlineSeconds: 180
+  backoffLimit: 4
+  activeDeadlineSeconds: 300
   template:
     metadata:
       labels:

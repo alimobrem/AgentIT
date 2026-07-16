@@ -17,6 +17,7 @@ HELM_VARS = {
     "{{ .Release.Name }}": "agentit",
     "{{ .Release.Service }}": "Helm",
     "{{ .Chart.Name }}": "agentit",
+    "{{ .Values.image.tag | quote }}": '"test-image-tag"',
     "{{ .Values.postgres.bundled.image | quote }}": '"registry.redhat.io/rhel9/postgresql-15@sha256:06aeada2ca417445bc4fb711729e65a02ee78421a09c862cbd136ebdd51d7cfa"',
     "{{ .Values.postgres.bundled.credentials.secretName }}": "agentit-postgres-bundled-app",
     "{{ .Values.postgres.bundled.credentials.database | quote }}": '"agentit"',
@@ -157,6 +158,15 @@ class TestTektonPipeline:
             assert not wd.endswith("/agentit"), (
                 f"workingDir must not end with '/agentit', got: {wd}"
             )
+
+    def test_run_tests_sidecar_emits_empty_compute_resources(self):
+        """Regression: Tekton always serializes sidecar computeResources as
+        {} on Get; without matching that in the chart, Pipeline/agentit-ci
+        stays OutOfSync forever under Argo CD."""
+        doc = _load(self.TEMPLATE)
+        run_tests = next(t for t in doc["spec"]["tasks"] if t["name"] == "run-tests")
+        sidecars = run_tests["taskSpec"]["sidecars"]
+        assert sidecars[0]["computeResources"] == {}
 
     def test_pipeline_has_workspaces(self):
         doc = _load(self.TEMPLATE)
@@ -432,10 +442,27 @@ class TestPostgresBundledBackup:
         job = by_kind["Job"]
         annotations = job["metadata"]["annotations"]
         assert annotations["argocd.argoproj.io/hook"] == "Sync"
-        assert annotations["argocd.argoproj.io/hook-delete-policy"] == "HookSucceeded"
+        policy = annotations["argocd.argoproj.io/hook-delete-policy"]
+        # BeforeHookCreation is required so a Failed/DeadlineExceeded Job
+        # is replaced on the next sync instead of permanently blocking Argo.
+        assert "BeforeHookCreation" in policy
+        assert "HookSucceeded" in policy
         volumes = job["spec"]["template"]["spec"]["volumes"]
         claim_names = {v["persistentVolumeClaim"]["claimName"] for v in volumes if "persistentVolumeClaim" in v}
         assert claim_names == {by_kind["PersistentVolumeClaim"]["metadata"]["name"]}
+
+    def test_pvc_bind_job_tolerates_quota_contention(self):
+        """Regression guard: this namespace's ResourceQuota is routinely
+        near its limits.cpu ceiling from concurrent Tekton PipelineRun task
+        pods, which can transiently block scheduling this probe's pod. The
+        Job's deadline/retry budget must stay generous enough (matching the
+        CronJob's own activeDeadlineSeconds) to wait that out instead of
+        failing the whole Argo CD sync on every CI burst."""
+        by_kind = self._docs()
+        job_spec = by_kind["Job"]["spec"]
+        cronjob_spec = by_kind["CronJob"]["spec"]["jobTemplate"]["spec"]
+        assert job_spec["activeDeadlineSeconds"] >= cronjob_spec["activeDeadlineSeconds"]
+        assert job_spec["backoffLimit"] >= 3
 
 
 class TestArgoCDApplicationParams:
@@ -468,6 +495,24 @@ class TestArgoCDApplicationParams:
         params = self._params()
         if params.get("postgres.bundled.backup.enabled") == "true":
             assert params.get("postgres.bundled.enabled") == "true"
+
+    def test_pipeline_ignore_differences_cover_tekton_normalization(self):
+        """Regression: Pipeline/agentit-ci stayed OutOfSync because Tekton
+        round-trips taskSpec.metadata/spec and empty sidecar
+        computeResources. ignoreDifferences must cover those fields so the
+        Application can be Synced without ignoring real task-script drift."""
+        doc = yaml.safe_load(self.APPLICATION_YAML.read_text())
+        pipeline_ignores = [
+            d for d in doc["spec"]["ignoreDifferences"]
+            if d.get("kind") == "Pipeline" and d.get("group") == "tekton.dev"
+        ]
+        assert len(pipeline_ignores) == 1
+        exprs = set(pipeline_ignores[0].get("jqPathExpressions") or [])
+        assert ".spec.tasks[].taskSpec.metadata" in exprs
+        assert ".spec.tasks[].taskSpec.spec" in exprs
+        assert ".spec.tasks[].taskSpec.sidecars[].computeResources" in exprs
+        assert ".spec.finally[].taskSpec.metadata" in exprs
+        assert ".spec.finally[].taskSpec.spec" in exprs
 
 
 class TestPostgresBundledNetworkPolicy:
@@ -954,6 +999,17 @@ class TestCapabilityScoutDeployment:
         secret_ref = env_by_name["GITHUB_TOKEN"]["valueFrom"]["secretKeyRef"]
         assert secret_ref["name"] == "github-token"
         assert secret_ref["optional"] is True
+
+    def test_build_env_tracks_image_tag(self):
+        """Regression: live scout pods once kept orphan AGENTIT_IMAGE_TAG /
+        GIT_REVISION values that lagged the container image after Argo
+        updated image.tag. These must be chart-owned from .Values.image.tag."""
+        doc = _load(self.TEMPLATE)
+        container = doc["spec"]["template"]["spec"]["containers"][0]
+        env_by_name = {e["name"]: e.get("value") for e in container["env"] if "name" in e}
+        assert env_by_name["AGENTIT_GIT_COMMIT"] == "test-image-tag"
+        assert env_by_name["AGENTIT_IMAGE_TAG"] == "test-image-tag"
+        assert env_by_name["GIT_REVISION"] == "test-image-tag"
 
     def test_no_persistence_volume(self):
         """Deliberately stateless -- unlike skill-learner, this watcher
