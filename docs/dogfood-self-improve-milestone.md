@@ -24,6 +24,7 @@
 | L5 GitOps PR | [agentit-gitops#7](https://github.com/alimobrem/agentit-gitops/pull/7) — remove PLACEHOLDER `security-context` Pod causing `InvalidImageName` / ImagePullBackOff |
 | L5 portal click-path | Assess `ae0e85b707d3460c8220d949c6bc26cc` → onboard 11 files → Deliver opened [agentit-gitops#8](https://github.com/alimobrem/agentit-gitops/pull/8) (closed: unresolved placeholders). Scout draft [#32](https://github.com/alimobrem/AgentIT/pull/32) closed as duplicate of shipped `scan_doc_gaps`. |
 | Learner → Activate | Live `skill-activated` events for learner CVE drafts (verify_skill); Capabilities Activate path exercised on cluster |
+| skill-improvement mode | [#42](https://github.com/alimobrem/AgentIT/pull/42) unblocked platform `has_api` + discovery auth; live `learning-run` `mode=skill-improvement` drafted `resourcequota-scoped` from flagged `resourcequota` (5 rejects); Activate + `loop_health` 100% |
 
 ## Metrics moved
 
@@ -43,5 +44,4 @@
 - Human merge of AgentIT self-improve PRs (by design through L4+).
 - Occasional Application CR param patch when git `application.yaml` is not the live App-of-Apps source.
 - Human merge of a *clean* pinky GitOps PR after placeholders are resolved (Approve & Deliver on `gitops-pr-pending` once the fix is deployed).
-- `skill-improvement` learner mode (vs CVE sweep) needs real `skill_effectiveness` history (≥5 outcomes / skill).
 - Rotate / refresh `oc` token when it expires (operator action; not automated here).
