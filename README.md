@@ -226,9 +226,9 @@ Every path that gets a generated change into a cluster or a repo — the manual 
 
 `agentit portal` launches a FastAPI + Jinja2 app (htmx + Alpine.js for interactivity, no frontend framework). 98 routes.
 
-**Masthead:** primary nav is Fleet, Admin Review, Ledger, Health, Insights. **Events** is a notification-bell control that opens a slide-over drawer (real rows from `/api/events`; “View all” → full `/events` page + DLQ). **Decisions** lives under the account/main menu with Capabilities, Settings, and Schedules.
+**Masthead:** primary nav is Fleet, Admin Review, Ledger, Health, Insights. **Events** is a notification-bell control that opens a slide-over drawer (real rows from `/api/events`; one “View all” CTA → full `/events` page + DLQ). The bell and drawer share Alpine scope (`aria-expanded`, focus into the panel on open, restore to the bell on close, Tab trap while open). **Decisions** lives under the account/main menu with Capabilities, Settings, and Schedules.
 
-**Attention signals:** pending-gate counts (Fleet) and Ledger “Needs You” badges use `badge-accent` (`--color-accent`) so they stay distinct from medium-severity finding badges. Assessment Detail shows a **next-step hint** under the lifecycle stepper (pending actions always win over stage copy); Delete is visually de-emphasized in a danger-zone slot opposite the primary Onboard action. Capabilities collapses reference catalogs (skills/checks/how-onboarding-works) by default so activity/stats stay above the fold.
+**Attention signals:** pending-gate counts (Fleet and Ledger app rows) and Ledger “Needs You” badges use `badge-accent` (`--color-accent`) so they stay distinct from medium-severity finding badges. Assessment Detail shows a **next-step hint** under the lifecycle stepper (pending actions always win over stage copy; the Actions link uses `?tab=actions`, not a dead Alpine click outside `x-data`); Delete is visually de-emphasized in a danger-zone slot opposite the primary Onboard action. Capabilities collapses reference catalogs (skills/checks/how-onboarding-works) with `<button>` toggles by default so activity/stats stay above the fold.
 
 Key pages:
 

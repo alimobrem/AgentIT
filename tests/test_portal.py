@@ -581,6 +581,15 @@ async def test_masthead_nav_structure(client, _override_store):
     assert "eventsDrawer()" in html
     assert "/api/events?limit=20" in html
     assert "activity-menu" not in html
+    # Bell shares Alpine scope with the drawer (aria-expanded + focus restore).
+    assert ':aria-expanded="open"' in html
+    assert 'x-ref="bellBtn"' in html
+    assert 'x-ref="closeBtn"' in html
+    assert 'x-ref="drawerPanel"' in html
+    # Single "View all" CTA (footer), not duplicated in the header.
+    drawer = html.split('id="events-drawer-panel"', 1)[1].split("id=\"nav-loading\"", 1)[0]
+    assert drawer.count(">View all<") == 1
+    assert "Open full Events page" not in drawer
     primary = html.split('class="links"', 1)[1].split("links-secondary", 1)[0]
     assert 'href="/ledger"' in primary
     assert 'href="/decisions"' not in primary
@@ -721,6 +730,13 @@ async def test_next_step_hint_prioritizes_pending_actions_over_stage(client, _ov
     assert resp.status_code == 200
     assert "1</strong> pending action" in resp.text
     assert "Ready to onboard" not in resp.text
+    # Regression: the hint sits outside the tab strip's x-data, so an
+    # Alpine @click="tab = 'actions'" is a dead handler. Must be a real
+    # ?tab=actions href (same convention as Fleet's pending badge).
+    hint = resp.text.split('class="next-step-hint"', 1)[1].split("</div>", 1)[0]
+    assert f'href="/assessments/{aid}?tab=actions"' in hint
+    assert "@click.prevent=\"tab = 'actions'\"" not in hint
+    assert "@click=\"tab = 'actions'\"" not in hint
 
 
 # ------------------------------------------------------------------
@@ -2196,6 +2212,15 @@ async def test_capabilities_page_has_learn_button(client):
     assert "Research CVEs" in resp.text
 
 
+async def test_capabilities_catalog_collapses_use_buttons(client):
+    """New Capabilities collapses are real <button> toggles (keyboard /
+    AT), not clickable <h2> headings."""
+    resp = await client.get("/capabilities")
+    assert resp.status_code == 200
+    assert 'type="button" class="section-title collapse-toggle"' in resp.text
+    assert resp.text.count('type="button" class="section-title collapse-toggle"') >= 3
+
+
 async def test_capabilities_learn_without_llm_shows_error(client, _override_store):
     with patch("agentit.portal.routes.capabilities.get_llm_client", return_value=None):
         resp = await client.post("/capabilities/learn", follow_redirects=False)
@@ -2731,6 +2756,21 @@ async def test_capability_run_detail_shows_live_pr_status(client, _override_stor
     assert resp.status_code == 200
     assert "open" in resp.text
     assert "https://github.com/org/agentit/pull/9" in resp.text
+    # External PR hrefs go through the safe_url filter (javascript: etc. → #).
+    assert 'href="https://github.com/org/agentit/pull/9"' in resp.text
+    assert 'href="{{ pr_url }}"' not in resp.text
+
+
+async def test_ledger_pending_count_uses_badge_accent(client, _override_store):
+    """Pending-action counts on Ledger rows are attention signals — same
+    badge-accent as Fleet's Needs Action badge, not badge-warning."""
+    store = _override_store
+    aid = await store.save(_make_report("ledger-pending-badge"))
+    await store.create_gate(aid, "auto-mode-review", "needs review")
+    resp = await client.get("/ledger?needs_you=0")
+    assert resp.status_code == 200
+    assert 'class="badge badge-accent">1 pending</span>' in resp.text
+    assert 'class="badge badge-warning">1 pending</span>' not in resp.text
 
 
 # ── Agent registry cleanup (agent_registry_cleanup) ───────────────────

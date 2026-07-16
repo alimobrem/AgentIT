@@ -656,6 +656,17 @@
     gap: var(--space-2);
     user-select: none;
   }
+  /* Reset native <button> chrome when used as a collapse toggle (Capabilities
+     catalogs) so it still reads as a section title, not a form control. */
+  button.collapse-toggle {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    width: 100%;
+    text-align: left;
+    color: inherit;
+  }
   .collapse-toggle::before {
     content: '▸';
     font-size: var(--font-sm);
@@ -1102,7 +1113,13 @@
 </head>
 <body hx-boost="true">
 <a href="#main-content" class="skip-link">Skip to content</a>
-<nav x-data="{ navOpen: false }">
+{# Shell wraps masthead + Events drawer so the bell and panel share one
+   Alpine scope (aria-expanded, focus restore). Overlay/panel stay siblings
+   of <nav> (not inside .links-secondary) so mobile display:none on the
+   secondary links never hides a fixed drawer. #}
+<div id="events-drawer" x-data="eventsDrawer()"
+     @keydown.escape.window="if (open) close()">
+<nav>
   <span class="logo">AgentIT</span>
   <div id="deploy-status" class="deploy-status" hx-get="/api/deploy-status" hx-trigger="load, every 15s" hx-swap="innerHTML">
     <span class="deploy-status-badge deploy-status-idle" role="status" aria-live="polite"
@@ -1139,7 +1156,9 @@
     {# Events: notification-bell control; opens the drawer below (not a
        primary-nav text link). Full page remains at /events. #}
     <button type="button" class="events-bell {{ 'nav-active' if request.url.path.startswith('/events') }}"
-            @click="$dispatch('open-events-drawer')"
+            x-ref="bellBtn"
+            @click="openDrawer()"
+            :aria-expanded="open"
             aria-label="Open events feed" aria-haspopup="dialog"
             aria-controls="events-drawer-panel">
       <svg class="events-bell-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1169,20 +1188,17 @@
   </div>
 </nav>
 {# Events notification drawer -- real events from /api/events (same store
-   the Events page uses). "View all" links to the full /events route. #}
-<div id="events-drawer" x-data="eventsDrawer()"
-     @open-events-drawer.window="openDrawer()"
-     @keydown.escape.window="close()">
+   the Events page uses). Single "View all" CTA (footer) → full /events. #}
   <div class="events-drawer-overlay" x-show="open" x-cloak
        x-transition.opacity.duration.150ms @click="close()" aria-hidden="true"></div>
-  <aside id="events-drawer-panel" class="events-drawer-panel" x-show="open" x-cloak
+  <aside id="events-drawer-panel" class="events-drawer-panel" x-ref="drawerPanel"
+         x-show="open" x-cloak
          x-transition.opacity.duration.150ms
          role="dialog" aria-modal="true" aria-labelledby="events-drawer-title">
     <div class="events-drawer-header">
       <h2 id="events-drawer-title" class="events-drawer-title">Events</h2>
       <div class="events-drawer-actions">
-        <a href="/events" class="btn btn-sm btn-outline" @click="close()">View all</a>
-        <button type="button" class="events-drawer-close" @click="close()" aria-label="Close events drawer">&times;</button>
+        <button type="button" class="events-drawer-close" x-ref="closeBtn" @click="close()" aria-label="Close events drawer">&times;</button>
       </div>
     </div>
     <div class="events-drawer-body">
@@ -1215,7 +1231,7 @@
       </template>
     </div>
     <div class="events-drawer-footer">
-      <a href="/events" class="btn btn-sm" @click="close()">Open full Events page</a>
+      <a href="/events" class="btn btn-sm" @click="close()">View all</a>
     </div>
   </aside>
 </div>
@@ -1482,17 +1498,28 @@ function confirmModal() {
 }
 // Events notification drawer -- loads real events from /api/events
 // (same AssessmentStore.list_events the Events page uses). Never mocked.
+// Focus pattern mirrors confirmModal / commandPalette: move focus into
+// the dialog on open, restore the trigger on close, trap Tab while open.
 function eventsDrawer() {
   return {
+    navOpen: false,
     open: false,
     loading: false,
     error: '',
     events: [],
+    _returnFocus: null,
+    _trapHandler: null,
     async openDrawer() {
+      if (this.open) return;
+      this._returnFocus = document.activeElement;
       this.open = true;
       this.loading = true;
       this.error = '';
       this.events = [];
+      this.$nextTick(() => {
+        this._installTrap();
+        if (this.$refs.closeBtn) this.$refs.closeBtn.focus();
+      });
       try {
         const res = await fetch('/api/events?limit=20');
         if (!res.ok) {
@@ -1505,7 +1532,52 @@ function eventsDrawer() {
       }
       this.loading = false;
     },
-    close() { this.open = false; },
+    close() {
+      if (!this.open) return;
+      this.open = false;
+      this._removeTrap();
+      const target = (this._returnFocus && typeof this._returnFocus.focus === 'function')
+        ? this._returnFocus
+        : this.$refs.bellBtn;
+      this._returnFocus = null;
+      this.$nextTick(() => { if (target) target.focus(); });
+    },
+    _focusable() {
+      const root = this.$refs.drawerPanel;
+      if (!root) return [];
+      // getClientRects (not offsetParent): position:fixed nodes often have
+      // a null offsetParent even when visible.
+      return Array.from(root.querySelectorAll(
+        'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])'
+      )).filter(function(el) {
+        return el.getClientRects().length > 0;
+      });
+    },
+    _installTrap() {
+      this._removeTrap();
+      const self = this;
+      this._trapHandler = function(e) {
+        if (!self.open || e.key !== 'Tab') return;
+        const nodes = self._focusable();
+        if (!nodes.length) return;
+        const first = nodes[0];
+        const last = nodes[nodes.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      };
+      document.addEventListener('keydown', this._trapHandler);
+    },
+    _removeTrap() {
+      if (this._trapHandler) {
+        document.removeEventListener('keydown', this._trapHandler);
+        this._trapHandler = null;
+      }
+    },
   };
 }
 // Command palette (Cmd+K / Ctrl+K) -- a genuinely reusable Alpine

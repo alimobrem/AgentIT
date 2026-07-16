@@ -317,11 +317,20 @@ class TestNavigation:
             expect(page.locator(f"nav >> text={link}")).to_be_visible()
         # Events is a notification-bell icon that opens a drawer (real
         # events from /api/events); full page still at /events.
-        expect(page.locator(".events-bell")).to_be_visible()
-        page.click(".events-bell")
+        bell = page.locator(".events-bell")
+        expect(bell).to_be_visible()
+        expect(bell).to_have_attribute("aria-expanded", "false")
+        bell.click()
         expect(page.locator("#events-drawer-panel")).to_be_visible()
+        expect(bell).to_have_attribute("aria-expanded", "true")
         expect(page.locator("#events-drawer-panel >> text=View all")).to_be_visible()
+        # Focus moves into the dialog on open (close control), then returns
+        # to the bell on close -- same pattern as confirm modal / Cmd+K.
+        expect(page.locator(".events-drawer-close")).to_be_focused()
         page.click(".events-drawer-close")
+        expect(page.locator("#events-drawer-panel")).to_be_hidden()
+        expect(bell).to_be_focused()
+        expect(bell).to_have_attribute("aria-expanded", "false")
         # Capabilities/Settings/Schedules/Decisions live in the user/main
         # menu (base.html's .user-menu) -- closed by default.
         page.click(".user-menu-trigger")

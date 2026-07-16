@@ -89,7 +89,11 @@
   {% if pending_actions %}
   <span class="next-step-icon" aria-hidden="true">&#9679;</span>
   <strong>{{ pending_actions|length }}</strong> pending action{{ 's' if pending_actions|length != 1 }} need{{ '' if pending_actions|length != 1 else 's' }} your review —
-  <a href="#" @click.prevent="tab = 'actions'">see the Actions tab below</a>.
+  {# Real ?tab=actions href — this hint sits outside the tab strip's
+     x-data, so an Alpine @click="tab = 'actions'" would be a dead handler
+     (see base.html's dead-button detector). Fleet's pending badge already
+     uses the same query-param convention. #}
+  <a href="/assessments/{{ assessment_id }}?tab=actions">see the Actions tab below</a>.
   {% elif lifecycle_stage == "assessed" %}
   <span class="next-step-icon" aria-hidden="true">&#9679;</span>
   Ready to onboard — click <strong>Onboard This App</strong> below to generate manifests for the findings on this page.

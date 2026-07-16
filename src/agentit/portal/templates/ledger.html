@@ -66,7 +66,7 @@
       {% if row.needs_you %}<span class="badge badge-accent">Needs You</span>{% endif %}
       <a href="/assessments/{{ row.assessment_id }}?tab=ledger">{{ row.repo_name }}</a>
       <span class="badge badge-muted">score {{ row.score }}</span>
-      {% if row.pending_actions_count > 0 %}<span class="badge badge-warning">{{ row.pending_actions_count }} pending</span>{% endif %}
+      {% if row.pending_actions_count > 0 %}<span class="badge badge-accent">{{ row.pending_actions_count }} pending</span>{% endif %}
       {% if row.breached_slo_count > 0 %}<span class="badge badge-critical">{{ row.breached_slo_count }} SLO breach(es)</span>{% endif %}
       {% if row.latest_card %}
       <span class="text-muted text-sm">{{ row.latest_card.title }} — {{ row.latest_card.timestamp[:16] }}</span>

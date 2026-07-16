@@ -55,7 +55,7 @@
       <td><span class="badge badge-success">{{ m.state }}</span></td>
       <td class="text-sm">
         {% if m.pr_url %}
-        <a href="{{ m.pr_url }}" target="_blank" rel="noopener">{{ m.pr_url.split('/')[-1] }}</a>
+        <a href="{{ m.pr_url | safe_url }}" target="_blank" rel="noopener">{{ m.pr_url.split('/')[-1] }}</a>
         {% else %}—{% endif %}
       </td>
       <td class="text-sm text-muted">{{ (m.merged_at or m.recorded_at or "—")[:19] }}</td>
@@ -91,7 +91,7 @@
       </td>
       <td class="text-sm">
         {% if o.pr_url %}
-        <a href="{{ o.pr_url }}" target="_blank" rel="noopener">#{{ o.pr_url.split('/')[-1] }}</a>
+        <a href="{{ o.pr_url | safe_url }}" target="_blank" rel="noopener">#{{ o.pr_url.split('/')[-1] }}</a>
         {% else %}—{% endif %}
       </td>
     </tr>

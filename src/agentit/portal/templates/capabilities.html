@@ -141,9 +141,9 @@
    activity/stats above isn't forced to scroll past every skill/check
    table every time. #}
 <div x-data="{ open: false }">
-<h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
+<button type="button" class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
   Skills by Domain ({{ total_skills }})
-</h2>
+</button>
 <div class="collapse-body" x-show="open" x-transition>
 
 {% for domain, domain_skills in skills_by_domain.items()|sort %}
@@ -204,9 +204,9 @@
 </div>
 
 <div x-data="{ open: false }">
-<h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
+<button type="button" class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
   Assessment Checks ({{ total_checks }})
-</h2>
+</button>
 <div class="collapse-body" x-show="open" x-transition>
 
 {% for dimension, dim_checks in checks_by_dimension.items()|sort %}
@@ -275,9 +275,9 @@
    unlike the activity/stats sections above), so collapsed by default for
    the same reason Skills by Domain/Assessment Checks are above. #}
 <div x-data="{ open: false }">
-<h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
+<button type="button" class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
   How Onboarding Works
-</h2>
+</button>
 <div class="collapse-body" x-show="open" x-transition>
 
 <h3 class="section-title">Onboarding Pipeline</h3>
