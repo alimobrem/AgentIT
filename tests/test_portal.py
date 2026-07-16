@@ -3039,6 +3039,23 @@ async def test_self_improvement_tab_shows_run_history(client, _override_store):
     assert "Automatic (24h watcher)" in resp.text
 
 
+async def test_self_improvement_tab_attributes_manual_run_correctly(client, _override_store):
+    """Confirmed live (browser QA): clicking "Run Scan" produced a run row
+    mislabeled "Automatic (24h watcher)" -- the manual trigger must render
+    as "Manual", distinct from a real watcher tick."""
+    store = _override_store
+    await store.log_event(
+        "capability-scout", "capability-run", None, "warning",
+        "No proposal this cycle — insufficient real signal (1 data point(s), need 5).",
+        details={"trigger": "manual", "evidence": "", "doc_anchor": None, "gate_results": [], "pr_url": None},
+    )
+
+    resp = await client.get("/capabilities/self-improvement")
+    assert resp.status_code == 200
+    assert "Manual" in resp.text
+    assert "Automatic (24h watcher)" not in resp.text
+
+
 async def test_self_improvement_tab_shows_watcher_heartbeat(client, _override_store):
     await _override_store.agent_heartbeat("capability-scout")
     resp = await client.get("/capabilities/self-improvement")

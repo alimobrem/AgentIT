@@ -261,7 +261,7 @@ async def _get_capability_run_history(s, limit: int = 15) -> list[dict]:
         runs.append({
             "event_id": ev.get("id"),
             "timestamp": ev.get("timestamp"),
-            "trigger": "Automatic (24h watcher)",
+            "trigger": "Manual" if details.get("trigger") == "manual" else "Automatic (24h watcher)",
             "considered": details.get("evidence") or details.get("doc_anchor") or "—",
             "severity": ev.get("severity", "info"),
             "summary": ev.get("summary", ""),
@@ -393,7 +393,7 @@ async def self_improvement_run_route(request: Request):
     scout = CapabilityScout(publisher=get_publisher(), store=s, repo_dir=Path.cwd())
 
     try:
-        result = await with_timeout(scout.research_once(), timeout=180)
+        result = await with_timeout(scout.research_once(trigger="manual"), timeout=180)
     except Exception as exc:
         log.exception("Manual capability-scout run failed")
         return RedirectResponse(

@@ -60,10 +60,17 @@ class CapabilityScout:
         self._startup_grace_done = False
         self._mode = (mode or "docs").strip().lower()
 
-    async def research_once(self) -> dict:
+    async def research_once(self, trigger: str = "watcher") -> dict:
         """One capability-scout cycle. Always logs exactly one
         ``capability-run`` event before returning, whatever the outcome.
+
+        ``trigger`` records who kicked this cycle off ("watcher" for the
+        24h tick, "manual" for the portal's Run Scan button) so the
+        Self-Improvement Runs table can attribute it correctly instead of
+        always showing "Automatic (24h watcher)" -- confirmed live: a
+        manual Run Scan click produced a run row mislabeled as automatic.
         """
+        self._current_trigger = trigger
         from agentit.capability_scout import (
             MIN_SIGNAL_ROWS,
             build_diff,
@@ -281,6 +288,7 @@ class CapabilityScout:
         if self._store is None:
             return
         from agentit.capability_scout import CAPABILITY_RUN_ACTION
+        details = {**details, "trigger": getattr(self, "_current_trigger", "watcher")}
         try:
             await self._store.log_event(
                 "capability-scout", CAPABILITY_RUN_ACTION, None, severity, summary, details=details,
