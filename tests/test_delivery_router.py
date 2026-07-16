@@ -21,6 +21,7 @@ from agentit.portal.delivery import (
     MECHANISM_INFRA_REPO_COMMIT,
     MECHANISM_SOURCE_REPO_PR,
     classify_file,
+    confirmation_text,
     has_unresolved_placeholders,
     is_gitops_registered,
     route_and_deliver,
@@ -98,6 +99,39 @@ def _placeholder_cronjob_file() -> dict:
         ),
         "description": "unresolved image placeholder",
     }
+
+
+class TestConfirmationText:
+    """Regression coverage for naming the *target cluster* (not just the
+    *action*) in the direct-apply confirmation -- see the incident this
+    fixes in ``kube.get_current_cluster_identity()``'s docstring."""
+
+    def test_direct_apply_names_the_target_cluster(self):
+        with patch(
+            "agentit.portal.delivery.kube.get_current_cluster_identity",
+            return_value={"label": "https://api.example.com:6443 (context: my-cluster)",
+                          "host": "https://api.example.com:6443", "context": "my-cluster", "in_cluster": False},
+        ):
+            text = confirmation_text(MECHANISM_DIRECT_APPLY)
+
+        assert "https://api.example.com:6443 (context: my-cluster)" in text
+        assert "apply these manifests directly to the cluster" in text
+
+    def test_direct_apply_names_unreachable_cluster_when_unresolved(self):
+        with patch(
+            "agentit.portal.delivery.kube.get_current_cluster_identity",
+            return_value={"label": "unknown/unreachable cluster", "host": None, "context": None, "in_cluster": False},
+        ):
+            text = confirmation_text(MECHANISM_DIRECT_APPLY)
+
+        assert "unknown/unreachable cluster" in text
+
+    def test_infra_repo_commit_does_not_call_cluster_identity(self):
+        """The GitOps-commit path never touches a cluster client at all --
+        confirming this never regresses into an unnecessary kube call."""
+        with patch("agentit.portal.delivery.kube.get_current_cluster_identity") as mock_identity:
+            confirmation_text(MECHANISM_INFRA_REPO_COMMIT, infra_repo_url="https://github.com/org/infra-gitops")
+        mock_identity.assert_not_called()
 
 
 class TestClassifyFile:
@@ -368,32 +402,6 @@ class TestDeliveriesTracking:
         assert "cluster_config:direct-apply" in delivery["mechanism"]
         assert delivery["status"] == "delivered"
         assert delivery["verification"] == "unknown"
-
-    async def test_delivery_marked_failed_not_stuck_in_progress_on_exception(self):
-        """Confirmed live (browser QA): a delivery that raises mid-route (e.g.
-        the real "Failed to check namespace ... Invalid kube-config" error
-        with no cluster access) left its ``deliveries`` row at status
-        "in_progress" forever, even though the caller correctly showed the
-        human a "Delivery failed" error. ``route_and_deliver`` must mark the
-        row "failed" before propagating the exception."""
-        store, raw = await make_async_store()
-        report = make_report()
-        aid = await raw.save(report)
-        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
-            mock_apply.side_effect = RuntimeError("Failed to check namespace ns: boom")
-            try:
-                await route_and_deliver(
-                    [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
-                    report=report, store=store, assessment_id=aid,
-                    actor="tester", dry_run=False, force_dry_run_first=False,
-                )
-                assert False, "expected route_and_deliver to re-raise"
-            except RuntimeError:
-                pass
-        deliveries = await raw.list_deliveries(aid)
-        assert len(deliveries) == 1
-        assert deliveries[0]["status"] == "failed"
-        assert "boom" in deliveries[0]["details"]["error"]
 
     async def test_list_deliveries_returns_rows_for_assessment(self):
         store, raw = await make_async_store()

@@ -87,12 +87,23 @@ def confirmation_text(mechanism: str, *, infra_repo_url: str | None = None) -> s
     portal's unified "Deliver" action. Reused verbatim by both the dry-run
     preview *and* the point-of-no-return confirmation dialog, so the two
     can never say different things about the same decision.
+
+    For the direct-apply path, this names the *target cluster* (API server
+    host, or in-cluster) alongside the *action* -- ``kube.get_client()``
+    resolves silently to whatever cluster the ambient kubeconfig/in-cluster
+    config happens to point at, with no prior visibility to the human
+    approving the apply. Naming it here (still synchronous --
+    ``kube.get_current_cluster_identity()`` never makes a live call to the
+    API server, just reads back the already-resolved client config) is
+    real safety signal a human needs before a destructive action, not
+    cosmetic.
     """
     base = MECHANISM_DESCRIPTIONS.get(mechanism, mechanism)
     if mechanism == MECHANISM_INFRA_REPO_COMMIT and infra_repo_url:
         return f"AgentIT will: commit to `{infra_repo_url}` and open a PR -- this app is GitOps-registered via a live Argo CD Application. A human must merge; AgentIT will never auto-merge."
     if mechanism == MECHANISM_DIRECT_APPLY:
-        return "AgentIT will: apply these manifests directly to the cluster -- no GitOps registration was found for this app."
+        cluster_label = kube.get_current_cluster_identity()["label"]
+        return f"AgentIT will: apply these manifests directly to the cluster ({cluster_label}) -- no GitOps registration was found for this app."
     return f"AgentIT will: {base}"
 
 

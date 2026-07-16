@@ -11,6 +11,7 @@ class KubeError(Exception):
 
 _client_cache = None
 _client_cache_time: float = 0
+_client_cache_source: str | None = None
 _CLIENT_TTL = 600  # 10 minutes
 
 
@@ -20,7 +21,7 @@ def get_client():
     Cached with a 10-minute TTL so bound service-account tokens (which rotate
     hourly) are picked up after expiry.
     """
-    global _client_cache, _client_cache_time
+    global _client_cache, _client_cache_time, _client_cache_source
     now = _time.monotonic()
     if _client_cache is not None and (now - _client_cache_time) < _CLIENT_TTL:
         return _client_cache
@@ -28,11 +29,76 @@ def get_client():
 
     try:
         config.load_incluster_config()
+        _client_cache_source = "in-cluster"
     except config.ConfigException:
         config.load_kube_config()
+        _client_cache_source = "kubeconfig"
     _client_cache = client
     _client_cache_time = now
     return client
+
+
+def get_current_cluster_identity() -> dict:
+    """Best-effort, side-effect-free identification of whichever cluster
+    ``get_client()`` currently resolves to -- read back from the already-
+    resolved client configuration, never a live call to the API server
+    itself, so this is always safe to call from a request path even when
+    the target cluster turns out to be completely unreachable.
+
+    Exists so a human sees *where* (not just *what*) before approving a
+    destructive action -- see ``portal/delivery.py``'s ``confirmation_text()``,
+    which surfaces this in the direct-apply confirmation message. Fixes the
+    incident where a customer-review agent expected zero cluster access
+    after ``unset KUBECONFIG`` and instead silently hit whatever cluster the
+    ambient kubeconfig happened to point at, with no on-screen indication of
+    which cluster that was.
+
+    Returns a dict:
+      - "label": a short human-readable string, safe to interpolate
+        directly into a confirmation message, e.g.
+        ``"https://api.example.com:6443 (context: my-cluster)"``,
+        ``"in-cluster (this pod's own cluster)"``, or
+        ``"unknown/unreachable cluster"`` when nothing could be resolved.
+      - "host": the API server URL, or ``None``.
+      - "context": the active kubeconfig context name, or ``None`` -- always
+        ``None`` for in-cluster config (no context concept) or when it
+        couldn't be determined.
+      - "in_cluster": ``True`` only when resolved via in-cluster config.
+    """
+    try:
+        get_client()
+    except Exception as exc:
+        logger.warning("Could not resolve current cluster identity (no reachable cluster?): %s", exc)
+        return {"label": "unknown/unreachable cluster", "host": None, "context": None, "in_cluster": False}
+
+    in_cluster = _client_cache_source == "in-cluster"
+
+    host = None
+    try:
+        from kubernetes import client as _client
+        host = _client.Configuration.get_default_copy().host
+    except Exception as exc:
+        logger.debug("Could not read API host from client configuration: %s", exc)
+
+    context_name = None
+    if not in_cluster:
+        try:
+            from kubernetes import config as _config
+            _, active_context = _config.list_kube_config_contexts()
+            context_name = (active_context or {}).get("name")
+        except Exception as exc:
+            logger.debug("Could not read active kubeconfig context: %s", exc)
+
+    if in_cluster:
+        label = "in-cluster (this pod's own cluster)"
+    elif host and context_name:
+        label = f"{host} (context: {context_name})"
+    elif host:
+        label = host
+    else:
+        label = "unknown/unreachable cluster"
+
+    return {"label": label, "host": host, "context": context_name, "in_cluster": in_cluster}
 
 
 _dynamic_client_cache = None

@@ -117,6 +117,60 @@ class TestGetApiResources:
                 kube.get_api_resources()
 
 
+class TestGetCurrentClusterIdentity:
+    """Regression coverage for the incident where a customer-review agent
+    expected zero cluster access after `unset KUBECONFIG` and instead
+    silently hit whatever cluster the ambient kubeconfig pointed at, with
+    no on-screen indication of which cluster that was."""
+
+    def test_returns_host_and_context_when_kubeconfig_resolves(self):
+        with patch("agentit.kube.get_client", return_value=MagicMock()), \
+             patch("agentit.kube._client_cache_source", "kubeconfig"), \
+             patch("kubernetes.client.Configuration.get_default_copy") as mock_get_default, \
+             patch("kubernetes.config.list_kube_config_contexts", return_value=([], {"name": "my-cluster-context"})):
+            mock_get_default.return_value.host = "https://api.example.com:6443"
+            identity = kube.get_current_cluster_identity()
+
+        assert identity["host"] == "https://api.example.com:6443"
+        assert identity["context"] == "my-cluster-context"
+        assert identity["in_cluster"] is False
+        assert identity["label"] == "https://api.example.com:6443 (context: my-cluster-context)"
+
+    def test_labels_in_cluster_config_distinctly(self):
+        with patch("agentit.kube.get_client", return_value=MagicMock()), \
+             patch("agentit.kube._client_cache_source", "in-cluster"), \
+             patch("kubernetes.client.Configuration.get_default_copy") as mock_get_default:
+            mock_get_default.return_value.host = "https://172.30.0.1:443"
+            identity = kube.get_current_cluster_identity()
+
+        assert identity["in_cluster"] is True
+        assert identity["context"] is None
+        assert identity["label"] == "in-cluster (this pod's own cluster)"
+
+    def test_degrades_gracefully_when_no_cluster_reachable(self):
+        """No kubeconfig at all (e.g. KUBECONFIG points at a nonexistent
+        path and no in-cluster config either) -- get_client() raises. Must
+        return a clear unknown/unreachable indicator, never raise."""
+        with patch("agentit.kube.get_client", side_effect=RuntimeError("no configuration found")):
+            identity = kube.get_current_cluster_identity()
+
+        assert identity == {"label": "unknown/unreachable cluster", "host": None, "context": None, "in_cluster": False}
+
+    def test_degrades_gracefully_when_host_lookup_fails(self):
+        """A resolved client whose Configuration still can't produce a host
+        (defensive edge case) must fall back to the unknown label rather
+        than raising or reporting a blank host as if it were legitimate."""
+        with patch("agentit.kube.get_client", return_value=MagicMock()), \
+             patch("agentit.kube._client_cache_source", "kubeconfig"), \
+             patch("kubernetes.client.Configuration.get_default_copy", side_effect=RuntimeError("no default config")), \
+             patch("kubernetes.config.list_kube_config_contexts", side_effect=RuntimeError("no kubeconfig file")):
+            identity = kube.get_current_cluster_identity()
+
+        assert identity["host"] is None
+        assert identity["context"] is None
+        assert identity["label"] == "unknown/unreachable cluster"
+
+
 class TestRolloutUndo:
     def test_aborts_argo_rollout_when_present(self):
         """For Argo Rollouts-managed apps, rollout_undo must patch the
