@@ -224,7 +224,12 @@ class TestOnboardResultsWarnsBeforeDryRun:
         assert "dryDone: true" in html
         # Label depends on is_gitops_registered() at GET time (Argo may be
         # unreachable in unit tests); unlock is what matters for the P0.
-        assert "Commit & Open PR" in html or "Apply to Cluster" in html
+        # Jinja escapes "&" as "&amp;" in rendered HTML text/attrs.
+        assert (
+            "Commit &amp; Open PR" in html
+            or "Commit & Open PR" in html
+            or "Apply to Cluster" in html
+        )
         assert not re.search(
             r'data-action="apply"[^>]*\sdisabled(?:\s|=|>)', html, re.I,
         ), "Deliver CTA still has static disabled after GitOps dry run"
