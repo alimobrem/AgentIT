@@ -226,8 +226,15 @@ class TestDeliverButtonClickAttributeIntact:
 
         parser = _ClickAttrCapture()
         parser.feed(resp.text)
-        deliver_clicks = [c for c in parser.clicks if "Confirm Apply to Cluster" in c]
-        assert deliver_clicks, "no @click attribute found for the Deliver button"
+        # Soft-gate: primary Apply has no @click until Dry Run; override
+        # confirm still carries the full mechanism + consequence text.
+        # Note: Jinja tojson emits the em dash as \\u2014, so match on
+        # "Override" + mechanism label rather than a literal "—".
+        deliver_clicks = [
+            c for c in parser.clicks
+            if "Override" in c and "Apply to Cluster" in c
+        ]
+        assert deliver_clicks, "no @click attribute found for the Override Apply button"
 
         click = deliver_clicks[0]
         assert "AgentIT will:" in click, (
@@ -241,6 +248,7 @@ class TestDeliverButtonClickAttributeIntact:
             f"reaches the honest Direct Apply consequence tail:\n{click!r}"
         )
         assert "cannot be undone" not in click
+        assert "modifies production" not in click
         assert click.rstrip().endswith("})"), (
             f"Deliver button's @click attribute doesn't end with a "
             f"complete function call -- looks truncated:\n{click!r}"

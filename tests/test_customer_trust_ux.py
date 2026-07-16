@@ -75,8 +75,13 @@ class TestHonestDeliverConfirm:
 
         parser = _ClickAttrCapture()
         parser.feed(text)
-        clicks = [c for c in parser.clicks if "Confirm Apply to Cluster" in c]
-        assert clicks, "expected Apply to Cluster confirm @click"
+        # Soft-gate: primary Apply has no @click until Dry Run; override
+        # confirm still carries the honest Direct Apply consequence text.
+        clicks = [
+            c for c in parser.clicks
+            if "Override" in c and "Apply to Cluster" in html_lib.unescape(c)
+        ]
+        assert clicks, "expected Override Apply to Cluster confirm @click"
         click = html_lib.unescape(clicks[0])
         assert "namespace direct-ns-app" in click
         assert "may modify cluster resources" in click
@@ -102,14 +107,18 @@ class TestHonestDeliverConfirm:
 
         parser = _ClickAttrCapture()
         parser.feed(text)
+        # Soft-gate: check override confirm (primary unlocked only after Dry Run).
         clicks = [
             c for c in parser.clicks
-            if "Confirm Commit" in c and "Open PR" in html_lib.unescape(c)
+            if "Override" in c and "Open PR" in html_lib.unescape(c)
         ]
-        assert clicks, "expected GitOps confirm @click"
-        click = html_lib.unescape(clicks[0])
+        assert clicks, "expected Override Commit & Open PR confirm @click"
+        click = html_lib.unescape(clicks[0]).encode("utf-8").decode("unicode_escape")
         assert "opens a pull request" in click.lower() or "open a PR" in click
-        assert "does not mutate the cluster" in click
+        assert (
+            "does not mutate the cluster" in click
+            or "cluster is not mutated" in click
+        )
         assert "cannot be undone" not in click
         assert "modifies production" not in click
 
