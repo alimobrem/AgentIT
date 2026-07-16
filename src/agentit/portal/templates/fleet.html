@@ -96,7 +96,7 @@
       <td class="{% if r.critical_count > 0 %}text-danger text-bold{% endif %}">{{ r.critical_count }}</td>
       <td>
         {% if r.pending_actions_count %}
-          <a href="/assessments/{{ r.id }}?tab=actions" class="badge badge-medium" title="Go to Actions tab">{{ r.pending_actions_count }} pending</a>
+          <a href="/assessments/{{ r.id }}?tab=actions" class="badge badge-accent" title="Go to Actions tab">{{ r.pending_actions_count }} pending</a>
         {% else %}
           <span class="text-muted text-sm">&mdash;</span>
         {% endif %}

@@ -133,7 +133,18 @@
 </div>
 {% endif %}
 
-<h2>Skills by Domain</h2>
+{# Skills by Domain / Assessment Checks are reference-catalog data (45
+   skills across 14 domains, 20 checks across 7 dimensions as of this
+   writing) -- collapsed by default, matching the same collapse-toggle/
+   collapse-body pattern assessment_detail.html's Findings/Remediation
+   Plan sections already use, so a returning user checking recent
+   activity/stats above isn't forced to scroll past every skill/check
+   table every time. #}
+<div x-data="{ open: false }">
+<h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
+  Skills by Domain ({{ total_skills }})
+</h2>
+<div class="collapse-body" x-show="open" x-transition>
 
 {% for domain, domain_skills in skills_by_domain.items()|sort %}
 <h3 class="section-title">{{ domain }}</h3>
@@ -189,7 +200,14 @@
 </table>
 {% endfor %}
 
-<h2>Assessment Checks</h2>
+</div>
+</div>
+
+<div x-data="{ open: false }">
+<h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
+  Assessment Checks ({{ total_checks }})
+</h2>
+<div class="collapse-body" x-show="open" x-transition>
 
 {% for dimension, dim_checks in checks_by_dimension.items()|sort %}
 <h3 class="section-title">{{ dimension }}</h3>
@@ -216,6 +234,9 @@
   </tbody>
 </table>
 {% endfor %}
+
+</div>
+</div>
 
 <h2>Skill Activity</h2>
 
@@ -250,7 +271,16 @@
 </div>
 {% endif %}
 
-<h2 class="section-title">Onboarding Pipeline</h2>
+{# Reference/how-it-works material -- static (doesn't change run to run,
+   unlike the activity/stats sections above), so collapsed by default for
+   the same reason Skills by Domain/Assessment Checks are above. #}
+<div x-data="{ open: false }">
+<h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
+  How Onboarding Works
+</h2>
+<div class="collapse-body" x-show="open" x-transition>
+
+<h3 class="section-title">Onboarding Pipeline</h3>
 <div class="pipeline-flow mb-2">
   <div class="pipeline-step">
     <div class="pipeline-step-number">1</div>
@@ -284,7 +314,7 @@
 </div>
 
 {% if agents %}
-<h2 class="section-title">Onboarding Agents ({{ agents|length }})</h2>
+<h3 class="section-title">Onboarding Agents ({{ agents|length }})</h3>
 <p class="text-muted mb-1">Each agent reads the assessment report and generates manifests for its domain.</p>
 <table>
   <thead>
@@ -303,7 +333,7 @@
 {% endif %}
 
 {% if watchers %}
-<h2 class="section-title">Long-Lived Watchers</h2>
+<h3 class="section-title">Long-Lived Watchers</h3>
 <p class="text-muted mb-1">Continuously monitor managed apps after onboarding.</p>
 <table>
   <thead>
@@ -322,7 +352,7 @@
 {% endif %}
 
 {% if fix_categories %}
-<h2 class="section-title">Auto-Fix Capabilities ({{ fix_categories|length }})</h2>
+<h3 class="section-title">Auto-Fix Capabilities ({{ fix_categories|length }})</h3>
 <p class="text-muted mb-1">Findings in these categories can be fixed automatically. Click "Fix" on any finding in an assessment detail page.</p>
 <table>
   <thead>
@@ -339,5 +369,8 @@
   </tbody>
 </table>
 {% endif %}
+
+</div>
+</div>
 
 {% endblock %}

@@ -334,6 +334,15 @@
   .badge-danger   { background: var(--color-danger); color: #fff; }
   .badge-warning  { background: var(--color-warning); color: var(--color-bg); }
   .badge-muted    { background: var(--color-border); color: var(--color-muted); }
+  /* "Needs your attention" badges (pending gate counts, "Needs You" fleet
+     filters) -- kept visually distinct from severity badges (badge-medium/
+     -warning, both --color-warning) by using --color-accent, the one color
+     this file's own convention reserves exclusively for that signal (see
+     this file's :root comment). Fleet's "N pending" badge and the Ledger's
+     "Needs You" badges previously used badge-medium/-warning here, which
+     accidentally made a routine medium-severity finding and an actionable
+     pending gate look identical -- this is the one class either should use. */
+  .badge-accent   { background: var(--color-accent); color: #fff; box-shadow: var(--glow-accent); }
 
   /* ── Buttons ───────────────────────────────────────────────────── */
   .btn {
@@ -985,6 +994,29 @@
     margin-bottom: 18px;
   }
   .connector-done { background: var(--color-success); }
+
+  /* ── Next-Step Hint (Assessment Detail) ────────────────────────────
+     Ties the lifecycle stepper directly to the one action that actually
+     moves the app forward -- visual hierarchy: a pending action (accent,
+     needs-attention color per this file's own convention) always reads
+     as more urgent than a routine "here's what to do next" (muted border,
+     text color), which in turn reads as more urgent than "nothing to do"
+     (success color, checkmark). */
+  .next-step-hint {
+    display: flex; align-items: baseline; gap: var(--space-3);
+    padding: var(--space-4) var(--space-5); margin-bottom: var(--space-6);
+    background: var(--color-surface-2); border-left: 3px solid var(--color-border);
+    border-radius: var(--radius-sm); font-size: var(--font-sm); color: var(--color-text);
+  }
+  .next-step-icon { color: var(--color-accent); font-size: var(--font-xs); flex-shrink: 0; }
+  .next-step-icon-done { color: var(--color-success); font-size: var(--font-md); }
+
+  /* ── Danger Zone (destructive actions) ─────────────────────────────
+     A destructive action shouldn't sit at the same visual weight as the
+     routine primary action right next to it -- pushed to the opposite
+     end of the action bar with a quiet separator, matching the
+     "de-emphasized until needed" pattern GitHub's own danger-zone uses. */
+  .action-bar .danger-zone { margin-left: auto; padding-left: var(--space-5); border-left: 1px solid var(--color-border); }
 
   .filter-input { max-width: 300px; }
   .pagination { display: flex; align-items: center; justify-content: center; gap: var(--space-5); margin-top: var(--space-5); padding: var(--space-5) 0; }

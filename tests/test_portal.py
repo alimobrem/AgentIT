@@ -693,6 +693,37 @@ async def test_ledger_nav_link_present(client, _override_store):
 
 
 # ------------------------------------------------------------------
+# Next-step hint (visual hierarchy pass): ties the lifecycle stepper to
+# the actual action that moves the app forward, pending actions win
+# regardless of stage.
+# ------------------------------------------------------------------
+
+
+async def test_next_step_hint_prompts_onboarding_when_freshly_assessed(client, _override_store):
+    store = _override_store
+    aid = await store.save(_make_report("fresh-app"))
+    resp = await client.get(f"/assessments/{aid}")
+    assert resp.status_code == 200
+    assert "Ready to onboard" in resp.text
+    assert "next-step-hint" in resp.text
+    hint = resp.text.split('class="next-step-hint"', 1)[1].split("</div>", 1)[0]
+    assert "pending action" not in hint
+
+
+async def test_next_step_hint_prioritizes_pending_actions_over_stage(client, _override_store):
+    """A pending gate is the most urgent thing regardless of lifecycle
+    stage -- must win even for a freshly-assessed app that hasn't been
+    onboarded yet (e.g. a gate created via the per-finding Fix flow)."""
+    store = _override_store
+    aid = await store.save(_make_report("gated-app"))
+    await store.create_gate(aid, "auto-mode-review", "needs review")
+    resp = await client.get(f"/assessments/{aid}")
+    assert resp.status_code == 200
+    assert "1</strong> pending action" in resp.text
+    assert "Ready to onboard" not in resp.text
+
+
+# ------------------------------------------------------------------
 # Finding source badge display (masthead/UI cleanup pass)
 # ------------------------------------------------------------------
 
