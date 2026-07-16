@@ -101,6 +101,13 @@ async def get_store():
 
 _nav_gate_badges_cache: dict = {"pending_actions": 0, "admin_review": 0, "ts": 0.0}
 _NAV_GATE_BADGES_CACHE_TTL = 20  # seconds
+# Double-checked locking, mirroring get_store() above: the `await
+# store.list_gates(...)` below is a genuine yield point, so without a lock,
+# multiple concurrent requests can all see a stale cache, all refresh, and
+# interleave their 3-key writes into a torn read for a third caller. This is
+# async-only (never invoked via asyncio.to_thread), so an `asyncio.Lock` --
+# not a `threading.Lock` -- is the correct primitive here.
+_nav_gate_badges_lock = asyncio.Lock()
 
 
 async def get_nav_gate_badge_counts(store: object) -> dict[str, int]:
@@ -110,20 +117,27 @@ async def get_nav_gate_badge_counts(store: object) -> dict[str, int]:
             "pending_actions": _nav_gate_badges_cache["pending_actions"],
             "admin_review": _nav_gate_badges_cache["admin_review"],
         }
-    try:
-        gates = await store.list_gates(status="pending")
-    except Exception:
-        log.debug("Failed to refresh nav gate badge counts", exc_info=True)
-        gates = []
+    async with _nav_gate_badges_lock:
+        now = _time.monotonic()
+        if now - _nav_gate_badges_cache["ts"] < _NAV_GATE_BADGES_CACHE_TTL:
+            return {
+                "pending_actions": _nav_gate_badges_cache["pending_actions"],
+                "admin_review": _nav_gate_badges_cache["admin_review"],
+            }
+        try:
+            gates = await store.list_gates(status="pending")
+        except Exception:
+            log.debug("Failed to refresh nav gate badge counts", exc_info=True)
+            gates = []
 
-    from agentit.portal.delivery import ADMIN_REVIEW_GATE_TYPE
-    admin_review = sum(1 for g in gates if g.get("gate_type") == ADMIN_REVIEW_GATE_TYPE)
-    pending_actions = len(gates) - admin_review
+        from agentit.portal.delivery import ADMIN_REVIEW_GATE_TYPE
+        admin_review = sum(1 for g in gates if g.get("gate_type") == ADMIN_REVIEW_GATE_TYPE)
+        pending_actions = len(gates) - admin_review
 
-    _nav_gate_badges_cache["pending_actions"] = pending_actions
-    _nav_gate_badges_cache["admin_review"] = admin_review
-    _nav_gate_badges_cache["ts"] = now
-    return {"pending_actions": pending_actions, "admin_review": admin_review}
+        _nav_gate_badges_cache["pending_actions"] = pending_actions
+        _nav_gate_badges_cache["admin_review"] = admin_review
+        _nav_gate_badges_cache["ts"] = now
+        return {"pending_actions": pending_actions, "admin_review": admin_review}
 
 
 # ── Event publishing ──────────────────────────────────────────────────

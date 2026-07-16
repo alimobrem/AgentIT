@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import threading
 import time
 
 from fastapi import APIRouter, HTTPException, Request
@@ -31,6 +32,12 @@ _DEPLOY_STATUS_K8S_TIMEOUT = 2
 _DEPLOY_STATUS_DEADLINE = 3.0
 _DEPLOY_STATUS_CACHE_TTL = 20.0
 _deploy_status_cache: dict = {"data": None, "ts": 0.0}
+# `_get_deploy_status_bounded` runs in a real OS thread (via
+# `asyncio.to_thread`), so concurrent pollers can genuinely interleave the
+# read-check-write below at the bytecode level -- an `asyncio.Lock` would
+# not help here since it only excludes other coroutines on the same event
+# loop thread, not other OS threads.
+_deploy_status_cache_lock = threading.Lock()
 
 
 # ── Internal helpers ──────────────────────────────────────────────────
@@ -143,24 +150,27 @@ def _degraded_deploy_status(errors: list[str] | None = None) -> dict:
 
 
 def _get_fresh_cached_deploy_status() -> dict | None:
-    cached = _deploy_status_cache["data"]
-    if cached is None:
-        return None
-    if (time.monotonic() - _deploy_status_cache["ts"]) >= _DEPLOY_STATUS_CACHE_TTL:
-        return None
-    return cached
+    with _deploy_status_cache_lock:
+        cached = _deploy_status_cache["data"]
+        if cached is None:
+            return None
+        if (time.monotonic() - _deploy_status_cache["ts"]) >= _DEPLOY_STATUS_CACHE_TTL:
+            return None
+        return cached
 
 
 def _get_last_good_deploy_status() -> dict | None:
-    return _deploy_status_cache["data"]
+    with _deploy_status_cache_lock:
+        return _deploy_status_cache["data"]
 
 
 def _store_deploy_status_cache(status: dict) -> None:
     """Cache last-good only (no errors) so degraded polls can fall back."""
     if status.get("errors") or status.get("degraded"):
         return
-    _deploy_status_cache["data"] = status
-    _deploy_status_cache["ts"] = time.monotonic()
+    with _deploy_status_cache_lock:
+        _deploy_status_cache["data"] = status
+        _deploy_status_cache["ts"] = time.monotonic()
 
 
 def _get_deploy_status_bounded(include_commit_info: bool = False) -> dict:

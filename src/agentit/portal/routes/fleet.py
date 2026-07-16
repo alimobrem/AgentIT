@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -19,6 +20,12 @@ router = APIRouter()
 
 _argo_cache: dict = {"data": {}, "ts": 0}
 _ARGO_CACHE_TTL = 60  # seconds
+# `_enrich_fleet_with_cluster_status` runs in a real OS thread (via
+# `asyncio.to_thread`, not just an asyncio task), so concurrent callers can
+# genuinely interleave the read-check-write below at the bytecode level --
+# an `asyncio.Lock` would not help here since it only excludes other
+# coroutines on the same event loop thread, not other OS threads.
+_argo_cache_lock = threading.Lock()
 
 
 def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None) -> list[dict]:
@@ -41,9 +48,13 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
         return _asyncio.run_coroutine_threadsafe(result, _loop).result(timeout=30)
 
     now = _t.monotonic()
-    if _argo_cache["data"] and (now - _argo_cache["ts"]) < _ARGO_CACHE_TTL:
-        argo_status = _argo_cache["data"]
-    else:
+    with _argo_cache_lock:
+        if _argo_cache["data"] and (now - _argo_cache["ts"]) < _ARGO_CACHE_TTL:
+            argo_status = _argo_cache["data"]
+        else:
+            argo_status = None
+
+    if argo_status is None:
         argo_status = {}
         try:
             items = kube.list_custom_resources("argoproj.io", "v1alpha1", "applications", namespace="openshift-gitops")
@@ -60,8 +71,9 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
                 }
         except Exception:
             log.debug("Failed to fetch Argo CD apps for fleet enrichment", exc_info=True)
-        _argo_cache["data"] = argo_status
-        _argo_cache["ts"] = now
+        with _argo_cache_lock:
+            _argo_cache["data"] = argo_status
+            _argo_cache["ts"] = now
 
     from agentit.portal.delivery import gitops_application_name
 

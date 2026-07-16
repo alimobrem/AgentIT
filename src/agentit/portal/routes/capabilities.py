@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time as _time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,22 +28,31 @@ router = APIRouter()
 _skills_cache: dict = {"data": None, "ts": 0}
 _checks_cache: dict = {"data": None, "ts": 0}
 _CACHE_TTL = 60  # seconds
+# `threading.Lock` (not `asyncio.Lock`) so this stays correct regardless of
+# whether these disk-reading helpers are ever called synchronously (as
+# today) or offloaded to a worker thread via `asyncio.to_thread` (as
+# fleet.py/health.py's own TTL caches already are) -- a plain `threading.Lock`
+# works fine either way, without requiring these to become `async def`.
+_skills_cache_lock = threading.Lock()
+_checks_cache_lock = threading.Lock()
 
 
 def _cached_skills():
-    if _skills_cache["data"] is None or _time.monotonic() - _skills_cache["ts"] > _CACHE_TTL:
-        from agentit.skill_engine import load_all_skills
-        _skills_cache["data"] = load_all_skills(Path("skills"))
-        _skills_cache["ts"] = _time.monotonic()
-    return _skills_cache["data"]
+    with _skills_cache_lock:
+        if _skills_cache["data"] is None or _time.monotonic() - _skills_cache["ts"] > _CACHE_TTL:
+            from agentit.skill_engine import load_all_skills
+            _skills_cache["data"] = load_all_skills(Path("skills"))
+            _skills_cache["ts"] = _time.monotonic()
+        return _skills_cache["data"]
 
 
 def _cached_checks():
-    if _checks_cache["data"] is None or _time.monotonic() - _checks_cache["ts"] > _CACHE_TTL:
-        from agentit.check_engine import load_checks
-        _checks_cache["data"] = load_checks(Path("checks"))
-        _checks_cache["ts"] = _time.monotonic()
-    return _checks_cache["data"]
+    with _checks_cache_lock:
+        if _checks_cache["data"] is None or _time.monotonic() - _checks_cache["ts"] > _CACHE_TTL:
+            from agentit.check_engine import load_checks
+            _checks_cache["data"] = load_checks(Path("checks"))
+            _checks_cache["ts"] = _time.monotonic()
+        return _checks_cache["data"]
 
 
 # ── Agents ────────────────────────────────────────────────────────────
