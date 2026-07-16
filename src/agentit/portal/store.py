@@ -1272,24 +1272,34 @@ class AssessmentStore:
 
         Identical ``(metric_name, target_value)`` rows from repeated
         onboarding (before default-SLO seeding skipped existing metrics)
-        are collapsed to the newest row so Fleet / per-app SLO pages do
-        not show each metric N times. Distinct targets for the same
-        metric_name are preserved (Add-SLO multi-threshold use case).
+        are collapsed to the newest assessment that owns that identity,
+        so Fleet / per-app SLO pages do not show each metric N times.
+        Multiple rows with the same identity on a *single* assessment
+        (Add-SLO / progress-bar fixtures) are preserved.
         """
         rows = await self._pool.fetch(
             """
-            SELECT * FROM (
-                SELECT DISTINCT ON (slos.metric_name, slos.target_value) slos.*
+            WITH scoped AS (
+                SELECT slos.*, assessments.assessed_at
                 FROM slos
                 INNER JOIN assessments ON slos.assessment_id = assessments.id
                 WHERE assessments.repo_url = (
                     SELECT repo_url FROM assessments WHERE id = $1
                 )
-                ORDER BY slos.metric_name, slos.target_value,
-                         COALESCE(slos.updated_at, slos.created_at) DESC,
-                         slos.created_at DESC
-            ) deduped
-            ORDER BY metric_name
+            ),
+            newest AS (
+                SELECT metric_name, target_value, MAX(assessed_at) AS max_at
+                FROM scoped
+                GROUP BY metric_name, target_value
+            )
+            SELECT s.id, s.assessment_id, s.metric_name, s.target_value,
+                   s.current_value, s.status, s.created_at, s.updated_at
+            FROM scoped s
+            INNER JOIN newest n
+              ON s.metric_name = n.metric_name
+             AND s.target_value = n.target_value
+             AND s.assessed_at = n.max_at
+            ORDER BY s.metric_name
             """,
             assessment_id,
         )

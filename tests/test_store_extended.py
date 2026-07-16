@@ -583,7 +583,7 @@ class TestSlosTable:
         assessment. Seeding dedup lives in
         `FleetOrchestrator._create_default_slos()`; `list_slos()` only
         collapses identical ``(metric_name, target_value)`` pairs across
-        historical assessments (see
+        *different* assessments (see
         ``test_list_slos_collapses_identical_rows_across_reassessments``).
         """
         store = await make_store()
@@ -593,13 +593,28 @@ class TestSlosTable:
 
         assert len(await store.list_slos(aid)) == 2
 
+    async def test_list_slos_keeps_same_identity_rows_on_one_assessment(self):
+        """Same ``(metric_name, target_value)`` twice on one assessment
+        (progress-bar direction fixture) must not be collapsed — only
+        cross-assessment historical copies are deduped."""
+        store = await make_store()
+        aid = await store.save(make_report(repo_name="slo-same-assessment"))
+        a = await store.save_slo(aid, "error_rate", 0.5)
+        b = await store.save_slo(aid, "error_rate", 0.5)
+        await store.update_slo(a, 0.05, "met")
+        await store.update_slo(b, 5.0, "breached")
+
+        slos = await store.list_slos(aid)
+        assert len(slos) == 2
+        assert {s["id"] for s in slos} == {a, b}
+
     async def test_list_slos_collapses_identical_rows_across_reassessments(self):
         """Fleet SLOs regression: before default-SLO seeding skipped
         existing metrics, each re-onboard inserted another full set of
         the same ``(metric_name, target_value)`` under a new
         assessment_id. ``list_slos()`` is repo_url-scoped, so those
         historical copies all surfaced — N of each metric on
-        ``/fleet/slos``. Collapse identical pairs to the newest row.
+        ``/fleet/slos``. Keep only the newest assessment's copy.
         """
         store = await make_store()
         assessment_ids: list[str] = []
