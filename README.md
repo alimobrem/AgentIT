@@ -232,6 +232,8 @@ Every path that gets a generated change into a cluster or a repo — the manual 
 
 **Attention signals:** pending-gate counts (Fleet and Ledger app rows) and Ledger “Needs You” badges use `badge-accent` (`--color-accent`) so they stay distinct from medium-severity finding badges. Assessment Detail shows a **next-step hint** under the lifecycle stepper (pending actions always win over stage copy; the Actions link uses `?tab=actions`, not a dead Alpine click outside `x-data`); Delete is visually de-emphasized in a danger-zone slot opposite the primary Onboard action. Capabilities collapses reference catalogs (skills/checks/how-onboarding-works) with `<button>` toggles by default so activity/stats stay above the fold.
 
+**Experience Design Language (EDL):** normative portal UI contract — button hierarchy, Dry Run → Apply onboarding path, modals/a11y, badges, feedback — in [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md). Agents should load [`.cursor/rules/portal-edl.mdc`](.cursor/rules/portal-edl.mdc). Enforce with `uv run pytest tests/test_portal_edl.py -q` (also `uv run python scripts/check_portal_edl.py`).
+
 Key pages:
 
 | Page | Purpose |
@@ -403,10 +405,20 @@ See the full deployment topology diagram: [`docs/architecture.md#deployment-topo
 uv run pytest -q
 ```
 
+Portal EDL conformance (static template walk + key-page HTML assertions):
+
+```bash
+uv run pytest tests/test_portal_edl.py -q
+uv run python scripts/check_portal_edl.py
+```
+
+Asserts MUST rules from [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md): no status badges inside `<button>`, Dry Run → Apply with status outside Apply, modals `role="dialog"` + Escape, `pr_url|safe_url`, badge ≥12px, Events bell/drawer IA, `#toasts` / `.btn-danger` present.
+
 2,000+ tests across 100 test files (grows continuously; the counts below are a representative breakdown, not an exact partition — verify current totals with `pytest --collect-only`, since this table isn't regenerated on every commit):
 
 | Suite | Tests | What it covers |
 |---|---|---|
+| Portal EDL | ~8 | Experience Design Language MUST rules (`tests/test_portal_edl.py` + `scripts/check_portal_edl.py`) |
 | Unit tests | ~600 | Analyzers, agents, orchestrator conflict/gate logic, portal routes, the Postgres store, Helm templates |
 | LLM evals | 17 | Safety classification, fix review quality, generation correctness, learning agent, architecture summary |
 | Browser tests | 61 | Playwright end-to-end tests for all portal pages, Admin Review/Fleet-badge/Actions-tab UI, retired-route 404s, accessibility |
@@ -537,6 +549,7 @@ AgentIT/
 │   ├── kafka-hardening-plan.md     # TLS/SASL + multi-broker Kafka -- not started (plan only)
 │   ├── unified-apply-flow.md       # route_and_deliver() design -- implemented
 │   ├── ui-redesign-proposal.md     # Admin Review/Fleet-badge/Actions-tab IA -- implemented
+│   ├── portal-experience-design-language.md  # Portal EDL (normative) -- enforced by test_portal_edl
 │   ├── self-improvement-for-agentit.md  # capability-scout design -- implemented (v1 detail differs, see status line)
 │   ├── ledger-design-spec.md       # Next unified-activity-feed proposal, not yet built
 │   ├── ux-design-requirements.md   # UX research checklist + stack recommendation, not yet built
@@ -544,6 +557,7 @@ AgentIT/
 │   ├── agent-removal-readiness.md  # Dated readiness audit backing the 9-agent removal (historical)
 │   ├── code-review-2026-07-12.md   # Dated point-in-time code review (historical)
 │   └── session-status-2026-07-13.md  # Dated session handoff snapshot (historical)
+├── scripts/check_portal_edl.py     # Static EDL MUST/SHOULD walker for portal templates
 ├── Containerfile                   # UBI9 Python 3.12, HEALTHCHECK, non-root
 └── tests/                          # 2,000+ tests across 100 files -- see "Testing" above
 ```

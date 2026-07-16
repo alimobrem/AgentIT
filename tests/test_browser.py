@@ -293,6 +293,27 @@ class TestModals:
         expect(page.locator("#assess-modal select[name='criticality']")).to_be_visible()
         expect(page.locator("#assess-modal button[type='submit']")).to_be_visible()
 
+    def test_edl_assess_modal_dialog_role_and_escape(self, page: Page, app_url):
+        """EDL §5: assess overlay is a dialog and Escape dismisses it."""
+        url, _, _ = app_url
+        page.goto(url)
+        page.click("text=Assess New Repo")
+        modal = page.locator("#assess-modal")
+        expect(modal).to_have_class(re.compile("open"))
+        expect(modal).to_have_attribute("role", "dialog")
+        expect(modal).to_have_attribute("aria-modal", "true")
+        page.keyboard.press("Escape")
+        expect(modal).not_to_have_class(re.compile("open"))
+
+    def test_edl_confirm_modal_dialog_semantics(self, page: Page, app_url):
+        """EDL §5: shared confirm modal exposes dialog role + labelled title."""
+        url, _, _ = app_url
+        page.goto(url)
+        confirm = page.locator("#confirm-modal")
+        expect(confirm).to_have_attribute("role", "dialog")
+        expect(confirm).to_have_attribute("aria-modal", "true")
+        expect(confirm).to_have_attribute("aria-labelledby", "confirm-modal-title")
+
 
 # ── Navigation Tests ─────────────────────────────────────────────────
 
