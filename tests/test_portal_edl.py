@@ -137,7 +137,13 @@ async def test_onboard_results_dry_run_apply_status_outside_button(edl_client):
     assert resp.status_code == 200
     html = resp.text
     assert "Dry Run" in html
-    assert "Apply to Cluster" in html or "Commit & Open PR" in html or ">Apply<" in html
+    assert (
+        "Apply to Cluster" in html
+        or "Commit & Open PR" in html
+        or re.search(r">\s*Apply\s*<", html)
+        or re.search(r">\s*Open PR\s*<", html)
+        or "_deliver_label" in html
+    )
     assert "No dry run yet" in html
     # No button may contain the status chip.
     for m in re.finditer(r"<button\b[^>]*>[\s\S]*?</button>", html, re.I):

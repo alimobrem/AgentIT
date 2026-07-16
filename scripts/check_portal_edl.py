@@ -273,7 +273,16 @@ def check_file(path: Path) -> list[Violation]:
                 "EDL-ONBOARD-ORDER", "MUST", rel, 1,
                 "Dry Run control missing from onboard results action bar",
             ))
-        if not re.search(r"Apply to Cluster|Commit & Open PR|>Apply<|>Open PR<", text):
+        # Labels may be inline ("Apply to Cluster") or via Jinja
+        # `{% set _deliver_label = "Open PR" if … else "Apply" %}`.
+        if not re.search(
+            r'Apply to Cluster|Commit & Open PR|'
+            r'_deliver_label\s*=\s*["\']Open PR["\']|'
+            r'_deliver_label\s*=\s*["\']Apply["\']|'
+            r'>Apply<|>Open PR<|'
+            r'btn-label\">\{\{\s*_deliver_label',
+            text,
+        ):
             vios.append(Violation(
                 "EDL-ONBOARD-ORDER", "MUST", rel, 1,
                 "Apply step label missing (Apply / Open PR / Apply to Cluster / Commit & Open PR)",
