@@ -22,10 +22,25 @@ class PlatformContext:
     _lower_kinds: set[str] = field(default_factory=set, repr=False)
 
     def __post_init__(self) -> None:
+        self._sync_lower_kinds()
+
+    def _sync_lower_kinds(self) -> None:
+        """Keep the case-insensitive lookup set aligned with ``available_kinds``.
+
+        ``discover_platform()`` constructs an empty ``PlatformContext`` then
+        assigns ``available_kinds`` afterward. Without this sync (or reading
+        ``available_kinds`` directly), ``has_api()`` stayed stuck on the empty
+        post-init set and silently rejected every skill on the live cluster —
+        leaving ``skill_effectiveness`` empty forever.
+        """
         self._lower_kinds = {k.lower() for k in self.available_kinds}
 
     def has_api(self, kind: str) -> bool:
         """Check if a K8s resource kind is available on this cluster."""
+        # Re-sync when available_kinds was assigned after construction
+        # (dataclass field assignment does not re-run ``__post_init__``).
+        if len(self._lower_kinds) != len(self.available_kinds):
+            self._sync_lower_kinds()
         return kind.lower() in self._lower_kinds
 
     def api_version_for(self, kind: str) -> str | None:
@@ -128,6 +143,7 @@ def discover_platform(namespace: str = "") -> PlatformContext:
         # Available kinds
         try:
             ctx.available_kinds = kube.get_api_resources()
+            ctx._sync_lower_kinds()
         except Exception as exc:
             logger.debug("Failed to list API resources: %s", exc)
 

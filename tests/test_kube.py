@@ -66,6 +66,10 @@ class TestGetApiResources:
         assert "replicaset" in resources
         assert "ingress" in resources
         assert "networkpolicy" in resources
+        # In-cluster discovery must pass BearerToken; without it call_api
+        # runs as system:anonymous and named groups 403 (live dogfood bug).
+        for call in api_client_mock.call_api.call_args_list:
+            assert call.kwargs.get("auth_settings") == ["BearerToken"]
 
     def test_one_group_failure_does_not_abort_the_rest(self):
         """A single named API group failing discovery must not prevent the

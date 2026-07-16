@@ -369,8 +369,15 @@ def get_api_resources() -> set[str]:
             if not version:
                 continue
             try:
+                # auth_settings is required: without BearerToken, call_api
+                # hits the apiserver as system:anonymous even when
+                # load_incluster_config() succeeded (typed clients still
+                # authenticate). That previously left only core v1 kinds
+                # (~26) in the set, so SkillEngine gated out HPA /
+                # NetworkPolicy / Deployment skills on every onboard.
                 resp = api_client.call_api(
                     f"/apis/{group.name}/{version}", "GET",
+                    auth_settings=["BearerToken"],
                     _return_http_data_only=True, _preload_content=False,
                     _request_timeout=10,
                 )
