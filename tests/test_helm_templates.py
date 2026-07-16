@@ -437,6 +437,19 @@ class TestPostgresBundledBackup:
         claim_names = {v["persistentVolumeClaim"]["claimName"] for v in volumes if "persistentVolumeClaim" in v}
         assert claim_names == {by_kind["PersistentVolumeClaim"]["metadata"]["name"]}
 
+    def test_pvc_bind_job_tolerates_quota_contention(self):
+        """Regression guard: this namespace's ResourceQuota is routinely
+        near its limits.cpu ceiling from concurrent Tekton PipelineRun task
+        pods, which can transiently block scheduling this probe's pod. The
+        Job's deadline/retry budget must stay generous enough (matching the
+        CronJob's own activeDeadlineSeconds) to wait that out instead of
+        failing the whole Argo CD sync on every CI burst."""
+        by_kind = self._docs()
+        job_spec = by_kind["Job"]["spec"]
+        cronjob_spec = by_kind["CronJob"]["spec"]["jobTemplate"]["spec"]
+        assert job_spec["activeDeadlineSeconds"] >= cronjob_spec["activeDeadlineSeconds"]
+        assert job_spec["backoffLimit"] >= 3
+
 
 class TestArgoCDApplicationParams:
     """Regression: `postgres.backend` (the historical SQLite/Postgres
