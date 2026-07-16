@@ -11,6 +11,7 @@ from agentit.ledger import (
     group_cards_by_app,
     recent_watcher_failures,
 )
+from agentit.llm_decisions import build_secret_classify_events
 from conftest import make_async_store, make_report
 
 
@@ -67,6 +68,41 @@ class TestEventCards:
         cards = await get_ledger_cards(async_store)
 
         assert any(c["card_type"] == "K" for c in cards)
+
+    async def test_auto_mode_decision_is_card_type_c(self):
+        async_store, store = await make_async_store()
+        await store.log_event(
+            "auto-mode", "decision", "app1", "info", "AUTO-APPLY: LLM classified as safe (0.95): fine",
+        )
+
+        cards = await get_ledger_cards(async_store)
+
+        c_cards = [c for c in cards if c["card_type"] == "C"]
+        assert len(c_cards) == 1
+        assert c_cards[0]["target_app"] == "app1"
+
+    async def test_secret_classify_decision_is_also_card_type_c(self):
+        """Regression: docs/ledger-design-spec.md §3 claims the Decisions
+        page's per-row log is "Absorbed as card types C and G", but
+        secret-classify (a real, already-persisted decision type -- see
+        llm_decisions.DECISION_TYPE_SECRET_CLASSIFY) had no entry at all in
+        `_EVENT_ACTION_TO_CARD_TYPE`, so every real classify_secret verdict
+        silently vanished from the Ledger instead of showing up as card C
+        alongside the auto-mode decisions it's absorbed with."""
+        async_store, store = await make_async_store()
+        for ev in build_secret_classify_events(
+            [{"file_path": "config.py", "secret_type": "api_key", "is_secret": True,
+              "confidence": 0.9, "reason": "Looks like a real API key", "kept": True}],
+            target_app="app1",
+        ):
+            await store.log_event(**ev)
+
+        cards = await get_ledger_cards(async_store)
+
+        c_cards = [c for c in cards if c["card_type"] == "C"]
+        assert len(c_cards) == 1
+        assert c_cards[0]["target_app"] == "app1"
+        assert c_cards[0]["title"] == "secret-classify"
 
 
 class TestGateCards:
