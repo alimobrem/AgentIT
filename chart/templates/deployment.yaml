@@ -215,6 +215,15 @@ spec:
             {{- end }}
             - --openshift-sar={{ $sar | toJson }}
             - --skip-provider-button=true
+            # /healthz is already unauthenticated-by-design (routes/health.py
+            # returns just {"status": "ok"}/503, and it's already exempt from
+            # CSRF and rate-limiting -- see csrf.py/rate_limit.py) and
+            # kubelet's own liveness/readiness probes already reach it
+            # in-pod, bypassing this proxy entirely. Without this flag,
+            # synthetic-probe-cronjob.yaml's *external* probe against the
+            # public Route hit the OAuth login redirect (302) instead of the
+            # app, and reported the portal as permanently down.
+            - --skip-auth-regex=^/healthz$
           volumeMounts:
             - name: proxy-tls
               mountPath: /etc/tls/private

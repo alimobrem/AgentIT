@@ -23,6 +23,25 @@ _SYNCED_ARGO_APP = {
 }
 
 
+class TestFetchArgoAppsNamespace:
+    @patch("agentit.watchers.drift_detector.kube.list_custom_resources")
+    def test_fetch_argo_apps_scopes_to_openshift_gitops_namespace(self, mock_list):
+        """Regression: live bug where this call omitted namespace= entirely,
+        which makes the kubernetes client issue a cluster-scoped list --
+        403s even for an SA correctly granted the namespace-scoped
+        `-argocd-read` Role rbac.yaml binds only in openshift-gitops (the
+        same namespace every other Argo Application lookup in this repo
+        already scopes to: health.py, fleet.py, delivery.py)."""
+        mock_list.return_value = [_SYNCED_ARGO_APP]
+        detector = _detector()
+
+        detector._fetch_argo_apps()
+
+        mock_list.assert_called_once_with(
+            "argoproj.io", "v1alpha1", "applications", namespace="openshift-gitops",
+        )
+
+
 class TestApiDriftWarnings:
     @patch("agentit.watchers.drift_detector.kube.list_custom_resources")
     async def test_detect_once_does_not_crash_with_deprecated_apis(self, mock_list):
