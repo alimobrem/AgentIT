@@ -369,6 +369,32 @@ class TestDeliveriesTracking:
         assert delivery["status"] == "delivered"
         assert delivery["verification"] == "unknown"
 
+    async def test_delivery_marked_failed_not_stuck_in_progress_on_exception(self):
+        """Confirmed live (browser QA): a delivery that raises mid-route (e.g.
+        the real "Failed to check namespace ... Invalid kube-config" error
+        with no cluster access) left its ``deliveries`` row at status
+        "in_progress" forever, even though the caller correctly showed the
+        human a "Delivery failed" error. ``route_and_deliver`` must mark the
+        row "failed" before propagating the exception."""
+        store, raw = await make_async_store()
+        report = make_report()
+        aid = await raw.save(report)
+        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_apply.side_effect = RuntimeError("Failed to check namespace ns: boom")
+            try:
+                await route_and_deliver(
+                    [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
+                    report=report, store=store, assessment_id=aid,
+                    actor="tester", dry_run=False, force_dry_run_first=False,
+                )
+                assert False, "expected route_and_deliver to re-raise"
+            except RuntimeError:
+                pass
+        deliveries = await raw.list_deliveries(aid)
+        assert len(deliveries) == 1
+        assert deliveries[0]["status"] == "failed"
+        assert "boom" in deliveries[0]["details"]["error"]
+
     async def test_list_deliveries_returns_rows_for_assessment(self):
         store, raw = await make_async_store()
         report = make_report()
