@@ -172,6 +172,74 @@ class TestResolveBuildMode:
         ) == "docs"
 
 
+class TestRewriteOversizedSourceTargets:
+    def test_keeps_small_and_new_files(self, tmp_path):
+        from agentit.capability_scout import rewrite_oversized_source_targets
+
+        skill = tmp_path / "skills" / "security"
+        skill.mkdir(parents=True)
+        (skill / "small.md").write_text("tiny\n", encoding="utf-8")
+        out = rewrite_oversized_source_targets(
+            ["skills/security/small.md", "tests/test_new.py"],
+            tmp_path,
+            title="Add widget",
+        )
+        assert out == ["skills/security/small.md", "tests/test_new.py"]
+
+    def test_replaces_oversized_existing_with_sibling(self, tmp_path):
+        from agentit.capability_scout import (
+            MAX_DIFF_LINES,
+            rewrite_oversized_source_targets,
+            sibling_module_path,
+        )
+
+        big = tmp_path / "src" / "agentit"
+        big.mkdir(parents=True)
+        (big / "capability_scout.py").write_text(
+            "\n".join(f"line_{i}" for i in range(MAX_DIFF_LINES + 20)) + "\n",
+            encoding="utf-8",
+        )
+        out = rewrite_oversized_source_targets(
+            ["src/agentit/capability_scout.py", "tests/test_stack_signature_detection.py"],
+            tmp_path,
+            title="Add cross-onboarding stack-signature detector",
+        )
+        sibling = sibling_module_path("Add cross-onboarding stack-signature detector")
+        assert sibling in out
+        assert "src/agentit/capability_scout.py" not in out
+        assert "tests/test_stack_signature_detection.py" in out
+
+    def test_build_diff_rewrites_oversized_before_llm(self, tmp_path):
+        from agentit.capability_scout import MAX_DIFF_LINES, build_diff, sibling_module_path
+
+        src = tmp_path / "src" / "agentit"
+        src.mkdir(parents=True)
+        (src / "capability_scout.py").write_text(
+            "\n".join(f"x{i}" for i in range(MAX_DIFF_LINES + 5)) + "\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "tests").mkdir()
+        sibling = sibling_module_path("Add stack signature detector")
+        llm = MagicMock()
+        llm.generate_capability_files.return_value = {
+            sibling: "def detect():\n    return []\n",
+            "tests/test_stack_signature_detection.py": "def test_detect():\n    assert True\n",
+        }
+        proposal = _proposal(
+            title="Add stack signature detector",
+            target_files=[
+                "src/agentit/capability_scout.py",
+                "tests/test_stack_signature_detection.py",
+            ],
+        )
+        diff = build_diff(proposal, mode="auto", repo_dir=tmp_path, llm_client=llm)
+        assert set(diff) == {sibling, "tests/test_stack_signature_detection.py"}
+        # LLM was asked for the rewritten targets, not the oversized module.
+        called_targets = llm.generate_capability_files.call_args[0][1]
+        assert "src/agentit/capability_scout.py" not in called_targets
+        assert sibling in called_targets
+
+
 class TestBuildSourceDiff:
     def test_build_diff_source_mode_uses_llm_file_map(self, tmp_path):
         from agentit.capability_scout import build_diff

@@ -150,8 +150,14 @@ class CapabilityScout:
         gate_result = await asyncio.to_thread(run_safety_gates, proposal, diff, self._repo_dir, self._max_open_prs)
 
         if not gate_result["passed"]:
-            failed = [g["name"] for g in gate_result["gates"] if not g["passed"]]
-            click.echo(f"[capability-scout] Proposal '{proposal['title']}' gate-blocked: {', '.join(failed)}", err=True)
+            failed = [g for g in gate_result["gates"] if not g["passed"]]
+            failed_names = [g["name"] for g in failed]
+            details_txt = "; ".join(f"{g['name']}: {g.get('detail', '')}" for g in failed)
+            click.echo(
+                f"[capability-scout] Proposal '{proposal['title']}' gate-blocked: "
+                f"{', '.join(failed_names)} ({details_txt})",
+                err=True,
+            )
             severity, summary, details = describe_capability_run(evidence, proposal, gate_result, None)
             details["build_mode"] = effective_mode
             await self._log_run(severity, summary, details)

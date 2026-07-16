@@ -290,13 +290,81 @@ def load_target_file_contents(repo_dir: Path, target_files: list[str]) -> dict[s
     return out
 
 
+def sibling_module_path(title: str) -> str:
+    """Derive a short ``src/agentit/<feature>.py`` path from a proposal title.
+
+    Used when an oversized existing module is stripped from ``target_files`` so
+    source mode can still land a small new module instead of a full rewrite.
+    """
+    slug = slugify(title or "feature").replace("-", "_")
+    for prefix in ("add_", "fix_", "implement_", "create_", "track_", "build_"):
+        if slug.startswith(prefix):
+            slug = slug[len(prefix) :]
+            break
+    slug = (slug[:48].rstrip("_") or "feature")
+    return f"src/agentit/{slug}.py"
+
+
+def rewrite_oversized_source_targets(
+    target_files: list[str],
+    repo_dir: Path,
+    *,
+    title: str = "",
+) -> list[str]:
+    """Drop existing targets that already exceed ``MAX_DIFF_LINES``.
+
+    Full-file LLM rewrites of those modules always fail the size gate. Keep
+    small/new files; when any oversized path was dropped, insert one new
+    sibling module under ``src/agentit/`` so the cycle can still produce a
+    reviewable executable diff.
+    """
+    kept: list[str] = []
+    dropped_oversized = False
+    for path in target_files:
+        normalized = path.replace("\\", "/")
+        full = repo_dir / normalized
+        if full.is_file():
+            try:
+                n_lines = full.read_text(encoding="utf-8").count("\n") + 1
+            except OSError:
+                n_lines = 0
+            if n_lines > MAX_DIFF_LINES:
+                logger.info(
+                    "Rewriting oversized source target %s (%d lines > %d) → new sibling",
+                    normalized,
+                    n_lines,
+                    MAX_DIFF_LINES,
+                )
+                dropped_oversized = True
+                continue
+        kept.append(normalized)
+    if dropped_oversized:
+        sibling = sibling_module_path(title)
+        if sibling not in kept:
+            kept.insert(0, sibling)
+    # Dedupe preserving order
+    seen: set[str] = set()
+    out: list[str] = []
+    for path in kept:
+        if path not in seen:
+            seen.add(path)
+            out.append(path)
+    return out
+
+
 def build_source_diff(proposal: dict, repo_dir: Path, llm_client: object) -> dict[str, str]:
     """Ask the LLM for full-file replacements for eligible target_files only.
 
     Drops any path the LLM returns that wasn't in the proposal's target set
     or isn't source-allowlisted — never widen scope mid-cycle.
     """
-    targets = [p.replace("\\", "/") for p in (proposal.get("target_files") or [])]
+    raw_targets = [p.replace("\\", "/") for p in (proposal.get("target_files") or [])]
+    targets = rewrite_oversized_source_targets(
+        raw_targets, Path(repo_dir), title=str(proposal.get("title") or ""),
+    )
+    # Keep proposal metadata aligned with what we actually ask the LLM to write.
+    if targets != raw_targets:
+        proposal["target_files"] = targets
     if not paths_eligible_for_source(targets):
         return {}
     current = load_target_file_contents(repo_dir, targets)
@@ -317,6 +385,16 @@ def build_source_diff(proposal: dict, repo_dir: Path, llm_client: object) -> dic
             logger.warning("Dropping LLM path outside source allowlist: %s", normalized)
             continue
         cleaned[normalized] = str(content)
+    # Soft reject oversize patches here so we fail closed before gates burn a cycle
+    # on a known-bad full-file rewrite (caller treats {} as source-generation-failed).
+    total_lines = sum(c.count("\n") + 1 for c in cleaned.values())
+    if cleaned and (len(cleaned) > MAX_DIFF_FILES or total_lines > MAX_DIFF_LINES):
+        logger.warning(
+            "capability-scout source generation over size cap (%d files, %d lines) — discarding",
+            len(cleaned),
+            total_lines,
+        )
+        return {}
     return cleaned
 
 

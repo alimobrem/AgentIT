@@ -151,7 +151,10 @@ _CAPABILITY_PROPOSAL_SYSTEM = (
     "complete proposal.\n"
     "5. Prefer NEW small modules (e.g. src/agentit/<feature>.py + "
     "tests/test_<feature>.py, or a small skills/checks file) over rewriting a large "
-    "existing module — full-file rewrites of big files fail the source generator.\n\n"
+    "existing module — full-file rewrites of big files fail the source generator. "
+    "Never list an existing file that is already large (e.g. capability_scout.py, "
+    "llm.py, portal routes) in target_files; always invent a new sibling module path "
+    "instead. The combined source you would write must fit in ≤3 files and ≤150 lines.\n\n"
     'Respond ONLY with valid JSON: {"has_proposal": bool, "title": str, '
     '"gap_description": str, "evidence": str, "target_files": [str], '
     '"change_summary": str, "risk": "low"|"medium"|"high", "test_plan": str}. '
@@ -409,8 +412,11 @@ class LLMClient:
             "Only edit skills/, checks/, tests/, or src/agentit/ files you were given. "
             "Prefer creating or lightly editing small new files; if a current file is "
             "truncated, do not attempt a full rewrite — return {\"files\": {}} instead. "
-            "Respond ONLY with valid JSON — no markdown fences. "
-            'If you cannot produce a safe change, return {"files": {}}.'
+            "HARD SIZE BUDGET: across all returned file contents combined, at most "
+            "3 files and 150 lines total (count every newline — same caps as "
+            "capability_scout.MAX_DIFF_FILES / MAX_DIFF_LINES). Prefer tiny new "
+            "modules + tests. Respond ONLY with valid JSON — no markdown fences. "
+            'If you cannot produce a safe change within that budget, return {"files": {}}.'
         )
         raw = self._chat(system, user_msg, max_tokens=_CAPABILITY_FILES_MAX_TOKENS)
         if raw is None:
