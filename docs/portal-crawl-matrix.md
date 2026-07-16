@@ -1,58 +1,61 @@
 # Portal crawl matrix (live OAuth + in-cluster)
 
-**When:** 2026-07-16  
+**When:** 2026-07-16 (initial crawl) · **Updated:** post-#65 / #62 / #66 gap pass  
 **Portal:** https://agentit-agentit.apps.aws-jb-acsacm-1.dev05.red-chesterfield.com  
 **Session:** Playwright MCP as `kube:admin` (founder OAuth session available)  
-**Deployed commit during crawl:** mixed (`99763e4` → `49d6f02`); main advanced mid-crawl.
+**Deployed commit during initial crawl:** mixed (`99763e4` → `49d6f02`); main advanced mid-crawl.  
+**Live re-check (gap pass):** pinky still on older image (`72d8b28…`); Argo reported Deploy failed / Degraded — **deploy lag**, not missing main fixes.
 
 Feedback columns follow EDL §3 (busy / success / error / empty / confirm).
 
 | Page | Control | Result | Class | Fix |
 | ---- | ------- | ------ | ----- | --- |
-| Fleet (`/`, live still Fleet-home) | Assess New Repo modal | **Pass** | — | — |
+| Fleet (`/`, live still Fleet-home until deploy) | Assess New Repo modal | **Pass** | — | — |
 | Fleet | Delete × → typed confirm | **Pass** (Cancel focused, confirm disabled until name) | — | — |
 | Fleet | Re-assess | **Pass*** (spinner markup present; not long-run timed) | — | — |
-| Fleet | Needs Action column | **Fail** (IA: competes with Ledger; fixed in #55, deploy lag) | wrong page / IA | #55 on main |
-| Masthead | Cmd+K search vs Fleet/Admin/Ledger links | **Fail** (search overlaps primary nav — screenshot) | a11y / layout | [#56](https://github.com/alimobrem/AgentIT/pull/56) open |
-| Assessment Detail | Register for GitOps → confirm → Register | **Fail** (POST returns `?error=…` but **no banner/toast**; button unchanged) | silent fail / missing feedback | **this PR** |
-| Assessment Detail | Findings Fix → confirm → Generate Fix | **Pass** (landed onboard-results `fix_generated=1`) | — | busy indicator still weak on live; #59 merged |
-| Assessment Detail | Remediation Plan Fix (bare submit) | **Fail** on older deploy (no confirm) | dead click / missing confirm | #59 merged |
+| Fleet | Needs Action column | **Pass** on main (#55); **Fail** on live deploy lag | wrong page / IA | #55 on main |
+| Masthead | Cmd+K vs primary nav | **Pass** on main — search in **right** cluster (#64, restored #65). #61 briefly centered; #56 closed as superseded. | a11y / layout | #64/#65 |
+| Assessment Detail | Register for GitOps → confirm → Register | **Pass** on main (#62): flash banner + URL toasts after htmx-boost + infra URL field | silent fail | #62 |
+| Assessment Detail | Findings Fix → confirm → Generate Fix | **Pass** (landed onboard-results `fix_generated=1`) | — | #59 |
+| Assessment Detail | Remediation Plan Fix (bare submit) | **Pass** on main | dead click / missing confirm | #59 |
 | Assessment Detail | Onboard This App | **Pass*** (htmx-indicator present) | — | — |
-| Onboard Results | Dry Run / Apply / Per-Agent PRs / Download | **Pass*** (controls present; Apply still showed status-in-button on old deploy) | feedback (EDL) | #45 on main |
-| Onboard Results | Register for GitOps | N/A (not shown when already in onboard flow) | — | — |
+| Onboard Results | Dry Run / Apply / Per-Agent PRs / Download | **Pass*** | feedback (EDL) | #45 |
 | Admin Review | Approve & Deliver | **Pass** (empty queue; empty copy OK) | — | — |
-| Health | Summary cards (Platform/Pods/…) | **Fail** on live (divs, not links) | dead click | #54 on main (deploy lag) |
+| Health | Summary cards (Platform/Pods/…) | **Pass** on main (`a.stat-card` links, #54); **Fail** on live (still `div`s) | dead click | #54 — **needs deploy** |
 | Health | Pod / pipeline row links | **Pass** | — | — |
-| Capabilities | Skill Activity rows | **Fail** (App+Timestamp only; Skill/Outcome blank) | empty data / wrong fields | #57 merged (deploy lag) |
-| Capabilities | Activate / Research CVEs | **Pass*** (present; Activate lacks busy) | missing busy (medium) | follow-up |
-| Events | Filter form | **Fail** on live (`action-bar` not `.filter-bar`) | layout | #58 merged |
+| Capabilities | Skill Activity rows | **Pass** on main (#57 field map + skip incomplete); **Fail** on live (blank Skill/Outcome) | empty data | #57 — **needs deploy** |
+| Capabilities | Activate / Research CVEs | **Pass*** (Activate still weak busy) | missing busy (medium) | follow-up |
+| Events | Filter form | **Pass** on main (`.filter-bar`, #58) | layout | #58 |
 | Events | DLQ link | **Pass** | — | — |
 | Decisions | Page load / filters | **Pass*** | — | — |
 | Settings | Page load | **Pass*** | — | — |
-| Ledger | Nav link | **Pass** | — | — |
-| Insights | Page load | Not fully click-tested charts | needs human eyes | — |
-| Schedules | Create / Save / Disable (confirm present) | **Pass*** (page loads; Delete confirm wired) | — | — |
-| Cmd+K | Command palette | **Pass** (opens; nav + apps listed) | — | — |
-| Mobile hamburger | Nav drawer | Not tested at mobile viewport | needs human eyes | — |
-| Events drawer | Bell → slide-over | Not fully exercised | needs human eyes | — |
+| Ledger | Nav link / Needs You | **Pass** | — | — |
+| Insights | Stat cards / agent / skill rows | **Pass** after gap pass — deep links to Fleet, remediations, Ledger Needs You, Events, `/agents/{name}`, skill history | dead click | this PR |
+| Insights | Rate bars (charts) | **Pass*** (visual only; no interactive filters on this page) | — | — |
+| Schedules | Create / Save / Disable | **Pass*** | — | — |
+| Cmd+K | Command palette | **Pass** (opens; nav + apps listed); right-cluster placement on main | — | #65 |
+| Mobile hamburger | Toggle primary + secondary | **Pass** (live + browser test): Ledger…Insights + Events + account | — | covered |
+| Events drawer | Esc, focus trap, severity badge | **Pass** (live Esc/trap/badges; trap also handles Esc; `_badgeClass` for warning/unknown) | a11y | this PR |
 
 \*Pass\* = control opens/submits with expected confirm or navigation; long async busy/success not fully timed in this pass.
 
-## High-severity feedback gaps (this PR)
+## Resolved since initial crawl (on `main`)
 
-1. **Register for GitOps silent failure** — live POST to Spoon-Knife returned  
-   `?error=Could+not+auto-create+a+GitOps+infra+repo…` with **zero** visible alert/toast.  
-   Root causes: (a) htmx-boost body swap does not re-fire `alpine:initialized` for URL toasts;  
-   (b) Assessment Detail had no server-rendered flash banners;  
-   (c) auto-create failed for third-party owners (`octocat/…`) without reuse of token-user `agentit-gitops`.
-2. **Masthead overlap** — tracked in #56 (do not duplicate).
-3. **Skill Activity blank** — fixed in #57; pinky still shows blanks until deploy catches main.
+| Gap | PRs |
+| --- | --- |
+| Register for GitOps silent `?error=` | #62 |
+| Masthead Cmd+K overlap / placement | #64 right → #61 center (brief) → **#65 right** (founder intent). #56 closed superseded. |
+| Skill Activity blank columns | #57 |
+| Health summary cards not links | #54 |
+| Events filter-bar layout | #58 |
+| Findings Fix during onboarding | #59 |
+| Insights dead rollups / row links | this PR |
+| Crawl matrix doc | #66 + this PR |
 
-## Needs human OAuth eyes (not claimed done)
+## Still needs human eyes / deploy
 
-- Mid-width masthead after #56 merges (1024–1100px): click Fleet/Admin/Ledger under search.
-- Full Dry Run → Apply → Approve & Deliver on a real gate (destructive; confirm copy).
-- Events drawer focus trap + Esc; mobile hamburger.
-- Capabilities Activate busy/success; Self-Improvement scan end-to-end.
-- Insights chart filters and deep links.
-- Post-deploy re-crawl of Register for GitOps with optional infra URL field + error banner.
+1. **Pinky deploy** — Argo Degraded; live still lacks #54/#57/#62/#65 UI. Re-crawl Register toast, Health `a.stat-card`, Skill Activity after sync.
+2. Mid-width masthead (~1024–1100px) with **right-side** search: confirm Ledger…Insights fully clickable.
+3. Full Dry Run → Apply → Approve & Deliver on a real gate (destructive).
+4. Capabilities Activate busy/success; Self-Improvement scan end-to-end.
+5. Insights has **no chart filters** by design (aggregate tables + rate bars only) — do not expect filter controls.

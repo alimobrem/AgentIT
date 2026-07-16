@@ -665,6 +665,9 @@ async def test_masthead_nav_structure(client, _override_store):
     assert "Open full Events page" not in drawer
     assert "Run an assessment from Fleet" in drawer
     assert "events-drawer-empty-hint" in drawer
+    assert "_badgeClass" in html
+    # Esc is handled both by Alpine @keydown.escape.window and the trap.
+    assert "e.key === 'Escape'" in html
     primary = html.split('id="nav-primary"', 1)[1].split("links-secondary", 1)[0]
     assert 'href="/ledger"' in primary
     assert 'href="/fleet"' in primary
@@ -942,6 +945,26 @@ async def test_insights_page_shows_fleet_wide_feedback(client, _override_store):
     resp = await client.get("/insights")
     assert resp.status_code == 200
     assert "not needed here" in resp.text
+
+
+async def test_insights_stat_cards_and_rows_deep_link(client, _override_store):
+    """Crawl gap: Insights had zero in-page links — rollups and rows must
+    deep-link to Fleet / Ledger / Events / agent + skill history."""
+    store = _override_store
+    await store.register_agent("hardening", "security")
+    await store.save_agent_run("hardening", "local", "success")
+    for _ in range(5):
+        await store.record_skill_outcome("netpol-skill", "app-a", "rejected", "too broad")
+    resp = await client.get("/insights")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'href="/fleet"' in html
+    assert 'href="/fleet/remediations"' in html
+    assert 'href="/ledger?needs_you=1"' in html
+    assert 'href="/events"' in html
+    assert 'href="/agents/hardening"' in html
+    assert 'href="/capabilities/skills/netpol-skill/history"' in html
+    assert "Skills Needing Review" in html
 
 
 async def test_insights_page_shows_check_compliance(client, _override_store):
