@@ -29,7 +29,7 @@
 {% endif %}
 {% if request.query_params.get('dry_run_summary') %}
 <div class="alert alert-info">
-  <strong>Dry run complete — nothing was delivered.</strong> Would deliver via: {{ request.query_params.get('dry_run_summary') }}. Click "Commit &amp; Open PR" / "Apply to Cluster" above to actually deliver.
+  <strong>Dry run complete — nothing was delivered.</strong> Would deliver via: {{ request.query_params.get('dry_run_summary') }}. Click Apply / Open PR above to actually deliver.
 </div>
 {% endif %}
 {% if request.query_params.get('edited') %}
@@ -128,36 +128,90 @@
   <strong>{{ delivery_confirmation }}</strong>
 </div>
 
-<div class="action-bar">
-  <form method="post" action="/assessments/{{ assessment_id }}/deliver" class="inline-form">
-    <input type="hidden" name="dry_run" value="true">
-    <button type="submit" class="btn btn-outline">
-      <span class="btn-label">Dry Run</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Running&hellip;</span>
-    </button>
-  </form>
-  <form method="post" action="/assessments/{{ assessment_id }}/deliver" class="inline-form"
-        x-data x-ref="deliverForm">
-    <button type="button" class="btn btn-green btn-lg"
-      @click="$dispatch('show-confirm', {
-        title: 'Confirm Delivery',
-        message: {{ delivery_confirmation | tojson | forceescape }} + ' ({{ total.count }} manifest(s).) This modifies production resources and cannot be undone.',
-        form: $refs.deliverForm,
-        opts: { confirmText: 'Deliver Now', danger: false }
-      })">
-      {% if not apply_results %}
-      <span class="badge badge-warning" title="No Dry Run has been performed yet for this onboarding -- consider running Dry Run first to preview what will happen.">&#9888; No dry run yet</span>
+{# Primary path is a vertical Dry Run → Apply stack with a connector so
+   order of operations is obvious. Status chips live beside/below the step
+   (never inside the CTA). Secondary actions sit aside. Shared Alpine busy
+   state mirrors portal-wide btn-loading / aria-busy / disabled-while-running. #}
+{% set _dry_done = apply_results and apply_results.get('dry_run') and not apply_results.get('errors') %}
+{% set _delivered = apply_results and not apply_results.get('dry_run') and not apply_results.get('errors') %}
+{% set _dry_failed = apply_results and apply_results.get('dry_run') and apply_results.get('errors') %}
+{% set _deliver_label = "Open PR" if gitops_registered else "Apply" %}
+<div class="delivery-actions" x-data="{ busy: '' }">
+  <div class="delivery-primary" role="group" aria-label="Delivery steps">
+    <div class="delivery-step">
+      <div class="delivery-step-row">
+        <span class="delivery-step-num {% if _dry_done or _delivered %}is-done{% elif not apply_results %}is-active{% endif %}" aria-hidden="true">1</span>
+        <form method="post" action="/assessments/{{ assessment_id }}/deliver" class="inline-form"
+              @submit="busy = 'dry-run'">
+          <input type="hidden" name="dry_run" value="true">
+          <button type="submit" class="btn btn-outline" data-action="dry-run"
+                  :disabled="busy !== ''" :aria-busy="busy === 'dry-run'"
+                  :class="{ 'btn-loading': busy === 'dry-run', 'submitting': busy === 'dry-run' }">
+            <span class="btn-label">Dry Run</span>
+            <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Working&hellip;</span>
+          </button>
+        </form>
+      </div>
+      {% if _dry_done %}
+      <div class="delivery-step-status">
+        <span class="badge badge-low">Dry run passed</span>
+      </div>
+      {% elif _dry_failed %}
+      <div class="delivery-step-status">
+        <span class="badge badge-critical">Dry run failed</span>
+        <span>Fix errors in the Apply Report below, then retry.</span>
+      </div>
       {% endif %}
-      {{ "Commit & Open PR" if gitops_registered else "Apply to Cluster" }}
-    </button>
-  </form>
-  <form method="post" action="/assessments/{{ assessment_id }}/create-agent-prs" class="inline-form">
-    <button type="submit" class="btn btn-outline btn-sm">
-      <span class="btn-label">Per-Agent PRs</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
-    </button>
-  </form>
-  <a href="/api/assessments/{{ assessment_id }}/manifests/download" class="btn btn-outline" hx-boost="false">Download</a>
+    </div>
+
+    <div class="delivery-connector" aria-hidden="true"></div>
+
+    <div class="delivery-step">
+      <div class="delivery-step-row">
+        <span class="delivery-step-num {% if _delivered %}is-done{% elif _dry_done %}is-active{% endif %}" aria-hidden="true">2</span>
+        <form method="post" action="/assessments/{{ assessment_id }}/deliver" class="inline-form"
+              x-ref="deliverForm" @submit="busy = 'apply'">
+          <button type="button" class="btn btn-green" data-action="apply"
+                  :disabled="busy !== ''" :aria-busy="busy === 'apply'"
+                  :class="{ 'btn-loading': busy === 'apply', 'submitting': busy === 'apply' }"
+            @click="$dispatch('show-confirm', {
+              title: 'Confirm Delivery',
+              message: {{ delivery_confirmation | tojson | forceescape }} + ' ({{ total.count }} manifest(s).) This modifies production resources and cannot be undone.',
+              form: $refs.deliverForm,
+              opts: { confirmText: 'Deliver Now', danger: false }
+            })">
+            <span class="btn-label">{{ _deliver_label }}</span>
+            <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Working&hellip;</span>
+          </button>
+        </form>
+      </div>
+      <div class="delivery-step-status">
+        {% if not apply_results %}
+        <span class="badge badge-warning" title="No Dry Run has been performed yet for this onboarding -- consider running Dry Run first to preview what will happen.">No dry run yet</span>
+        <span>Run Dry Run before applying.</span>
+        {% elif _delivered %}
+        <span class="badge badge-low">Delivered</span>
+        {% elif _dry_done %}
+        <span>Ready to deliver.</span>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="delivery-secondary" role="group" aria-label="Secondary actions">
+    <form method="post" action="/assessments/{{ assessment_id }}/create-agent-prs" class="inline-form"
+          @submit="busy = 'prs'">
+      <button type="submit" class="btn btn-outline" data-action="prs"
+              :disabled="busy !== ''" :aria-busy="busy === 'prs'"
+              :class="{ 'btn-loading': busy === 'prs', 'submitting': busy === 'prs' }">
+        <span class="btn-label">Per-Agent PRs</span>
+        <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Working&hellip;</span>
+      </button>
+    </form>
+    <a href="/api/assessments/{{ assessment_id }}/manifests/download" class="btn btn-outline" hx-boost="false"
+       :class="{ 'btn-loading': busy !== '' }" :aria-disabled="busy !== ''"
+       @click="if (busy !== '') $event.preventDefault()">Download</a>
+  </div>
 </div>
 
 {# ── Delivery history -- what was routed, which mechanism, status, verification #}
