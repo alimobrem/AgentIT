@@ -865,6 +865,22 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
     delivery_confirmation = confirmation_text(delivery_mechanism, infra_repo_url=infra_repo_url)
     deliveries = await s.list_deliveries(assessment_id) if hasattr(s, "list_deliveries") else []
 
+    # Unlock Commit / Per-Agent when a successful dry-run is persisted, the
+    # flash query still carries dry_run_summary (redirect / hx-boost), or a
+    # real delivery already completed (keep Override hidden).
+    apply_dry_ok = bool(
+        apply_results
+        and apply_results.get("dry_run")
+        and not apply_results.get("errors")
+    )
+    delivered_ok = bool(
+        apply_results
+        and not apply_results.get("dry_run")
+        and not apply_results.get("errors")
+    )
+    dry_run_flash = bool(request.query_params.get("dry_run_summary")) and not request.query_params.get("error")
+    dry_run_done = delivered_ok or apply_dry_ok or dry_run_flash
+
     return get_templates().TemplateResponse(
         request,
         "onboard_results.html",
@@ -880,6 +896,7 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
             "delivery_mechanism": delivery_mechanism,
             "delivery_confirmation": delivery_confirmation,
             "deliveries": deliveries,
+            "dry_run_done": dry_run_done,
         },
     )
 
@@ -995,6 +1012,31 @@ async def deliver(request: Request, assessment_id: str):
         params.append(f"dry_run_summary={quote(' + '.join(dry_run_previews))}")
     if outcomes.get("cicd_shared_namespace"):
         params.append("cicd_gate=true")
+
+    # GitOps / PR dry-runs never hit save_apply_results() (direct-apply only).
+    # Persist a dry-run row so onboard_results step rail dry_run_done stays
+    # true after redirect / hx-boost — not only while dry_run_summary is in
+    # the URL flash.
+    already_persisted = isinstance(cluster_outcome, dict) and "applied" in cluster_outcome
+    if dry_run and dry_run_previews and not errors and not already_persisted:
+        preview_files = [
+            {"path": path, "purpose": f"dry-run via {o.get('mechanism', cat)}"}
+            for cat, o in outcomes.items()
+            if isinstance(o, dict) and o.get("dry_run") and "files" in o
+            for path in o["files"]
+        ]
+        await s.save_apply_results(
+            assessment_id,
+            {
+                "applied": [],
+                "skipped": [],
+                "errors": [],
+                "repo_files": preview_files,
+            },
+            namespace,
+            dry_run=True,
+        )
+
     return RedirectResponse(
         url=f"/assessments/{assessment_id}/onboard-results?{'&'.join(params)}",
         status_code=303,
