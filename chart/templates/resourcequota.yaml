@@ -8,11 +8,14 @@ metadata:
     app.kubernetes.io/instance: {{ .Release.Name }}
 spec:
   hard:
-    requests.cpu: "6"
-    requests.memory: 12Gi
-    limits.cpu: "12"
-    limits.memory: 24Gi
-    pods: "40"
+    # Raised from 6/12/40 after live dogfood: concurrent Tekton affinity-assistants
+    # + canary Rollout pods hit limits.cpu=12 and ProgressDeadlineExceeded (stable
+    # stuck on stale image while notify had already advanced image.tag).
+    requests.cpu: "10"
+    requests.memory: 16Gi
+    limits.cpu: "20"
+    limits.memory: 32Gi
+    pods: "60"
 ---
 apiVersion: v1
 kind: LimitRange
