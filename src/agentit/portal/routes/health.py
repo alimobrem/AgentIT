@@ -146,6 +146,8 @@ def _get_deploy_status(include_commit_info: bool = False) -> dict:
             r for r in runs
             if r.get("metadata", {}).get("labels", {}).get("tekton.dev/pipeline") == "agentit-ci"
         ]
+        # list_custom_resources order is not guaranteed -- pick newest by time.
+        ci_runs.sort(key=lambda r: r.get("metadata", {}).get("creationTimestamp") or "")
         latest_run = ci_runs[-1] if ci_runs else None
     except Exception:
         log.warning("Failed to list agentit-ci PipelineRuns for deploy status", exc_info=True)
@@ -175,6 +177,11 @@ def _get_deploy_status(include_commit_info: bool = False) -> dict:
         if is_running:
             status["state"] = "deploying"
             status["stage"] = next((t["name"] for t in tasks if t["status"] != "Succeeded"), "starting")
+        elif reason in ("Cancelled", "PipelineRunCancelled"):
+            # Cancelled runs are operator/capacity noise (concurrent CI cancelled
+            # to free the node), not a deploy failure. Surface the run but leave
+            # state idle so Argo/Rollout decide the real outcome.
+            pass
         elif reason not in ("Succeeded", "Completed"):
             status["state"] = "failed"
             status["reason"] = f"CI pipeline {reason}"
@@ -194,23 +201,34 @@ def _get_deploy_status(include_commit_info: bool = False) -> dict:
         health_status = health.get("status", "Unknown")
         params = agentit_app.get("spec", {}).get("source", {}).get("helm", {}).get("parameters", [])
         image_tag = next((p.get("value", "") for p in params if p.get("name") == "image.tag"), "")
+        op_phase = (agentit_app.get("status", {}).get("operationState") or {}).get("phase", "")
         status["argo"] = {
             "sync": sync_status,
             "health": health_status,
             "health_message": health.get("message", ""),
             "image_tag": image_tag,
             "repo_url": agentit_app.get("spec", {}).get("source", {}).get("repoURL", ""),
+            "operation_phase": op_phase,
         }
         if status["state"] != "deploying":
-            if health_status == "Degraded":
+            # Active sync/hook work is "deploying", not Failed -- Degraded is
+            # often transient (PDB SyncFailed while a Job matched the selector,
+            # or a Sync hook Pending) while operationState is still Running.
+            if op_phase == "Running" or health_status in ("Progressing", "Suspended"):
+                # Suspended = canary pause step (Rollout), still an in-flight deploy.
+                status["state"] = "deploying"
+                if op_phase == "Running":
+                    status["stage"] = "syncing"
+                elif health_status == "Suspended":
+                    status["stage"] = "canary pause"
+                else:
+                    status["stage"] = "rolling out"
+            elif health_status == "Degraded":
                 status["state"] = "failed"
                 status["reason"] = status["argo"]["health_message"] or "Argo CD reports the agentit Application as Degraded"
             elif sync_status != "Synced":
                 status["state"] = "deploying"
                 status["stage"] = "syncing"
-            elif health_status == "Progressing":
-                status["state"] = "deploying"
-                status["stage"] = "rolling out"
 
     # Resolved outcome: once the latest PipelineRun succeeded and nothing is
     # actively deploying/failed, check whether this running instance's own

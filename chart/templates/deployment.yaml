@@ -49,6 +49,7 @@ spec:
       labels:
         app.kubernetes.io/name: agentit
         app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: portal
     spec:
       affinity:
         podAntiAffinity:

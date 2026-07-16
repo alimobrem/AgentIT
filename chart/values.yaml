@@ -135,6 +135,13 @@ postgres:
     # default — see docs/postgres-migration-plan.md's "Backup/retention"
     # section for what's covered and what isn't.
     backup:
+      # One-shot Sync-hook Job that mounts the backups PVC so WaitForFirstConsumer
+      # claims bind during the same Argo sync. Default false: once the PVC is
+      # Bound, recreating the hook on every sync can block Argo (Pending Job on
+      # a zone-pinned RWO volume when the only eligible node is CPU-full) and
+      # surfaces as Application Degraded / Health "deploy Failed". Set true
+      # only when first enabling backups if the PVC stays Pending.
+      pvcBindHook: false
       enabled: false
       schedule: "23 */6 * * *"
       retentionCount: 8
