@@ -8,17 +8,28 @@
 ], request) }}
 <h1>Events</h1>
 <p class="text-muted text-sm mb-1">Bell feed + DLQ — filters and pagination. Ops home is <a href="/ledger">Ledger</a>.</p>
-<form method="get" action="/events" class="action-bar">
-  <input type="text" name="q" value="{{ q | default('') }}" placeholder="Filter by agent, action, or app..." class="filter-input">
-  <select name="severity">
-    <option value="">All severities</option>
-    <option value="critical" {{ 'selected' if severity_filter == 'critical' }}>Critical</option>
-    <option value="warning" {{ 'selected' if severity_filter == 'warning' }}>Warning</option>
-    <option value="info" {{ 'selected' if severity_filter == 'info' }}>Info</option>
-  </select>
-  <button type="submit" class="btn btn-sm btn-outline">Filter</button>
-  {% if q or severity_filter or correlation_id_filter %}<a href="/events" class="btn btn-sm btn-outline">Clear</a>{% endif %}
-</form>
+<details class="filter-panel" open>
+  <summary class="filter-panel-summary btn btn-sm btn-outline">Filters</summary>
+  <form method="get" action="/events" class="filter-bar" role="search" aria-label="Filter events">
+    <div class="filter-field filter-field-wide">
+      <label for="filter-events-q">Search</label>
+      <input type="text" id="filter-events-q" name="q" value="{{ q | default('') }}" placeholder="Agent, action, or app…" class="filter-input">
+    </div>
+    <div class="filter-field">
+      <label for="filter-events-severity">Severity</label>
+      <select id="filter-events-severity" name="severity">
+        <option value="">All severities</option>
+        <option value="critical" {{ 'selected' if severity_filter == 'critical' }}>Critical</option>
+        <option value="warning" {{ 'selected' if severity_filter == 'warning' }}>Warning</option>
+        <option value="info" {{ 'selected' if severity_filter == 'info' }}>Info</option>
+      </select>
+    </div>
+    <div class="filter-actions">
+      <button type="submit" class="btn btn-sm btn-outline">Filter</button>
+      {% if q or severity_filter or correlation_id_filter %}<a href="/events" class="btn btn-sm btn-outline">Clear</a>{% endif %}
+    </div>
+  </form>
+</details>
 {% if correlation_id_filter %}
 <p class="text-muted text-sm">Showing chain <code>{{ correlation_id_filter }}</code> only — <a href="/events">clear</a>.</p>
 {% endif %}

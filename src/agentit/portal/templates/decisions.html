@@ -86,22 +86,33 @@
 {% endif %}
 
 <h2 class="section-title">Decision Log</h2>
-<form method="get" action="/decisions" class="action-bar">
-  <select name="decision_type">
-    <option value="">All decision types</option>
-    {% for dt in decision_types %}
-    <option value="{{ dt }}" {{ 'selected' if decision_type_filter == dt }}>{{ dt }}</option>
-    {% endfor %}
-  </select>
-  <select name="attribution">
-    <option value="">All agents/skills</option>
-    {% for a in attributions %}
-    <option value="{{ a }}" {{ 'selected' if attribution_filter == a }}>{{ a }}</option>
-    {% endfor %}
-  </select>
-  <button type="submit" class="btn btn-sm btn-outline">Filter</button>
-  {% if decision_type_filter or attribution_filter %}<a href="/decisions" class="btn btn-sm btn-outline">Clear</a>{% endif %}
-</form>
+<details class="filter-panel" open>
+  <summary class="filter-panel-summary btn btn-sm btn-outline">Filters</summary>
+  <form method="get" action="/decisions" class="filter-bar" role="search" aria-label="Filter decisions">
+    <div class="filter-field">
+      <label for="filter-decision-type">Decision type</label>
+      <select id="filter-decision-type" name="decision_type">
+        <option value="">All decision types</option>
+        {% for dt in decision_types %}
+        <option value="{{ dt }}" {{ 'selected' if decision_type_filter == dt }}>{{ dt }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="filter-field">
+      <label for="filter-attribution">Agent / skill</label>
+      <select id="filter-attribution" name="attribution">
+        <option value="">All agents/skills</option>
+        {% for a in attributions %}
+        <option value="{{ a }}" {{ 'selected' if attribution_filter == a }}>{{ a }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="filter-actions">
+      <button type="submit" class="btn btn-sm btn-outline">Filter</button>
+      {% if decision_type_filter or attribution_filter %}<a href="/decisions" class="btn btn-sm btn-outline">Clear</a>{% endif %}
+    </div>
+  </form>
+</details>
 
 {% if decisions %}
 <table>

@@ -20,29 +20,46 @@
 </div>
 {% endif %}
 
-<form method="get" action="/ledger" class="action-bar">
-  <input type="text" name="q" value="{{ q | default('') }}" placeholder="Filter by app, title, or summary..." class="filter-input">
-  <input type="text" name="app" value="{{ app_filter | default('') }}" placeholder="App name..." class="filter-input">
-  <select name="severity">
-    <option value="">All severities</option>
-    <option value="critical" {{ 'selected' if severity_filter == 'critical' }}>Critical</option>
-    <option value="warning" {{ 'selected' if severity_filter == 'warning' }}>Warning</option>
-    <option value="info" {{ 'selected' if severity_filter == 'info' }}>Info</option>
-  </select>
-  <select name="card_type">
-    <option value="">All card types</option>
-    {% for letter in ('A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P') %}
-    <option value="{{ letter }}" {{ 'selected' if card_type_filter == letter }}>{{ letter }}</option>
-    {% endfor %}
-  </select>
-  {% if mode == 'grouped' %}
-  <input type="hidden" name="needs_you" value="{{ needs_you_filter }}">
-  {% else %}
-  <input type="hidden" name="view" value="flat">
-  {% endif %}
-  <button type="submit" class="btn btn-sm btn-outline">Filter</button>
-  {% if q or severity_filter or card_type_filter or app_filter %}<a href="/ledger" class="btn btn-sm btn-outline">Clear</a>{% endif %}
-</form>
+<details class="filter-panel" open>
+  <summary class="filter-panel-summary btn btn-sm btn-outline">Filters</summary>
+  <form method="get" action="/ledger" class="filter-bar" role="search" aria-label="Filter ledger">
+    <div class="filter-field filter-field-wide">
+      <label for="filter-ledger-q">Search</label>
+      <input type="text" id="filter-ledger-q" name="q" value="{{ q | default('') }}" placeholder="App, title, or summary…" class="filter-input">
+    </div>
+    <div class="filter-field">
+      <label for="filter-ledger-app">App</label>
+      <input type="text" id="filter-ledger-app" name="app" value="{{ app_filter | default('') }}" placeholder="App name…">
+    </div>
+    <div class="filter-field">
+      <label for="filter-ledger-severity">Severity</label>
+      <select id="filter-ledger-severity" name="severity">
+        <option value="">All severities</option>
+        <option value="critical" {{ 'selected' if severity_filter == 'critical' }}>Critical</option>
+        <option value="warning" {{ 'selected' if severity_filter == 'warning' }}>Warning</option>
+        <option value="info" {{ 'selected' if severity_filter == 'info' }}>Info</option>
+      </select>
+    </div>
+    <div class="filter-field">
+      <label for="filter-ledger-card-type">Card type</label>
+      <select id="filter-ledger-card-type" name="card_type">
+        <option value="">All card types</option>
+        {% for letter in ('A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P') %}
+        <option value="{{ letter }}" {{ 'selected' if card_type_filter == letter }}>{{ letter }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    {% if mode == 'grouped' %}
+    <input type="hidden" name="needs_you" value="{{ needs_you_filter }}">
+    {% else %}
+    <input type="hidden" name="view" value="flat">
+    {% endif %}
+    <div class="filter-actions">
+      <button type="submit" class="btn btn-sm btn-outline">Filter</button>
+      {% if q or severity_filter or card_type_filter or app_filter %}<a href="/ledger" class="btn btn-sm btn-outline">Clear</a>{% endif %}
+    </div>
+  </form>
+</details>
 
 {% if mode == 'grouped' %}
 {# docs/ledger-design-spec.md §2 rules 2-3: fleet-wide default is grouped
