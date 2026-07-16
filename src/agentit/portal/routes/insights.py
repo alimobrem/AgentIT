@@ -281,4 +281,12 @@ async def dlq_dismiss_all():
 @router.get("/api/events")
 async def api_events(limit: int = 50, target_app: str | None = None):
     s = await get_store()
-    return JSONResponse(await s.list_events(limit=limit, target_app=target_app))
+    events = await s.list_events(limit=limit, target_app=target_app)
+    # Enrich with assessment_id (same fleet lookup as the Events page) so
+    # the masthead drawer can deep-link to Assessment Actions / Ledger
+    # Needs You instead of only correlation filters.
+    fleet = await s.get_fleet_data()
+    app_ids_by_name = {app_data["repo_name"]: app_data["id"] for app_data in fleet}
+    for e in events:
+        e["assessment_id"] = app_ids_by_name.get(e.get("target_app"))
+    return JSONResponse(events)

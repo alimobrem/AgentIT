@@ -97,16 +97,26 @@
 {# ── Primary Actions ─────────────────────────────────────────────── #}
 {% set total = namespace(count=0) %}
 {% for cat, files in grouped.items() %}{% set total.count = total.count + files|length %}{% endfor %}
+{% set _deliver_label = "Commit & Open PR" if gitops_registered else "Apply to Cluster" %}
+{# Confirm tails are mechanism-honest: GitOps only opens a PR (cluster
+   unchanged until merge); Direct Apply names the target namespace. Never
+   claim "cannot be undone / modifies production" on the PR path. #}
+{% set _deliver_ns = report.repo_name.lower().replace('_', '-').replace('.', '-') %}
+{% if gitops_registered %}
+{% set _confirm_tail = 'This opens a pull request in the infra repo. It does not mutate the cluster until a human merges the PR.' %}
+{% else %}
+{% set _confirm_tail = 'This applies manifests to namespace ' ~ _deliver_ns ~ ' and may modify cluster resources.' %}
+{% endif %}
 
 {% if not apply_results %}
 <div class="step-guide">
   <span class="step-guide-icon">&#x2460;</span>
-  <span class="step-guide-text"><strong>Start with a Dry Run</strong> to preview what will happen, then Deliver.</span>
+  <span class="step-guide-text"><strong>Start with a Dry Run</strong> to preview what will happen, then {{ _deliver_label }}.</span>
 </div>
 {% elif apply_results and apply_results.get('dry_run') and not apply_results.get('errors') %}
 <div class="step-guide">
   <span class="step-guide-icon">&#x2705;</span>
-  <span class="step-guide-text"><strong>Dry run passed.</strong> You can now Deliver.</span>
+  <span class="step-guide-text"><strong>Dry run passed.</strong> You can now {{ _deliver_label }}.</span>
 </div>
 {% elif apply_results and not apply_results.get('dry_run') and not apply_results.get('errors') %}
 {# Moment of joy (docs/ux-design-requirements.md checklist #9): reserved
@@ -136,7 +146,6 @@
 {% set _dry_done = apply_results and apply_results.get('dry_run') and not apply_results.get('errors') %}
 {% set _delivered = apply_results and not apply_results.get('dry_run') and not apply_results.get('errors') %}
 {% set _dry_failed = apply_results and apply_results.get('dry_run') and apply_results.get('errors') %}
-{% set _deliver_label = "Open PR" if gitops_registered else "Apply" %}
 <div class="delivery-actions" x-data="{ busy: '' }">
   <div class="delivery-primary" role="group" aria-label="Delivery steps">
     <div class="delivery-step">
@@ -176,10 +185,10 @@
                   :disabled="busy !== ''" :aria-busy="busy === 'apply'"
                   :class="{ 'btn-loading': busy === 'apply', 'submitting': busy === 'apply' }"
             @click="$dispatch('show-confirm', {
-              title: 'Confirm Delivery',
-              message: {{ delivery_confirmation | tojson | forceescape }} + ' ({{ total.count }} manifest(s).) This modifies production resources and cannot be undone.',
+              title: {{ ('Confirm ' ~ _deliver_label) | tojson | forceescape }},
+              message: {{ delivery_confirmation | tojson | forceescape }} + ' ({{ total.count }} manifest(s).) ' + {{ _confirm_tail | tojson | forceescape }},
               form: $refs.deliverForm,
-              opts: { confirmText: 'Deliver Now', danger: false }
+              opts: { confirmText: {{ _deliver_label | tojson | forceescape }}, danger: false }
             })">
             <span class="btn-label">{{ _deliver_label }}</span>
             <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Working&hellip;</span>

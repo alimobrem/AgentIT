@@ -104,15 +104,16 @@ class TestEveryPageLoads:
         url, aid, _ = app_url
         page.goto(f"{url}/assessments/{aid}/onboard-results")
         expect(page.locator("h1")).to_contain_text("Onboarding")
-        # Vertical Dry Run → Apply path; short labels; status outside CTAs.
+        # Vertical Dry Run → Apply path; mechanism labels; status outside CTAs.
         expect(page.locator(".delivery-actions")).to_be_visible()
         expect(page.locator(".delivery-primary")).to_be_visible()
         expect(page.locator(".delivery-connector")).to_be_attached()
         expect(page.locator(".delivery-secondary")).to_be_visible()
         dry_run = page.locator(".delivery-primary button", has_text="Dry Run")
-        apply_btn = page.locator(".delivery-primary button", has_text="Apply")
+        apply_btn = page.locator(".delivery-primary button[data-action='apply']")
         expect(dry_run).to_be_visible()
         expect(apply_btn).to_be_visible()
+        expect(apply_btn).to_contain_text("Apply to Cluster")
         expect(apply_btn).not_to_contain_text("No dry run yet")
         expect(page.locator(".delivery-step-status", has_text="No dry run yet")).to_be_visible()
         expect(page.locator(".delivery-secondary button", has_text="Per-Agent PRs")).to_be_visible()
@@ -395,7 +396,7 @@ class TestNavigation:
         expect(page.locator("#nav-secondary .user-menu-trigger")).to_be_visible()
 
     def test_events_bell_badge_from_real_events(self, page: Page, app_url):
-        """Unread/critical badge uses /api/events + last-seen; hide when zero."""
+        """Severity-gated unread badge: critical/high only; info never re-badges."""
         url, _, _ = app_url
         # First visit with no last-seen: critical/high from the live API
         # badge the bell. Route a real-shaped payload so the assertion is
@@ -403,7 +404,7 @@ class TestNavigation:
         page.route("**/api/events**", lambda route: route.fulfill(
             status=200,
             content_type="application/json",
-            body='[{"id":"1","timestamp":"2099-01-01T00:00:00+00:00","severity":"critical","action":"alert","summary":"badge test","agent_id":"t","target_app":"a"}]',
+            body='[{"id":"1","timestamp":"2099-01-01T00:00:00+00:00","severity":"critical","action":"alert","summary":"badge test","agent_id":"t","target_app":"a","assessment_id":"aid-1"}]',
         ))
         page.goto(url)
         page.evaluate("() => localStorage.removeItem('agentit.events.lastSeenAt')")
@@ -417,9 +418,37 @@ class TestNavigation:
         # Opening the drawer marks last-seen and clears the badge.
         bell.click()
         expect(page.locator("#events-drawer-panel")).to_be_visible()
+        item = page.locator(".events-drawer-item").first
+        expect(item).to_have_attribute("href", "/assessments/aid-1?tab=actions")
         page.click(".events-drawer-close")
         expect(badge).to_be_hidden()
         expect(bell).to_have_attribute("aria-label", "Open events feed")
+        # After last-seen: newer info/noise must NOT re-badge; newer critical does.
+        page.unroute("**/api/events**")
+        page.route("**/api/events**", lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=(
+                '[{"id":"2","timestamp":"2099-06-01T00:00:00+00:00","severity":"info",'
+                '"action":"chatter","summary":"noise","agent_id":"t","target_app":"a"},'
+                '{"id":"3","timestamp":"2099-06-02T00:00:00+00:00","severity":"high",'
+                '"action":"alert","summary":"actionable","agent_id":"t","target_app":"a"}]'
+            ),
+        ))
+        page.reload()
+        expect(badge).to_be_visible()
+        expect(badge).to_have_text("1")
+        page.unroute("**/api/events**")
+        page.route("**/api/events**", lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=(
+                '[{"id":"4","timestamp":"2099-07-01T00:00:00+00:00","severity":"info",'
+                '"action":"chatter","summary":"still noise","agent_id":"t","target_app":"a"}]'
+            ),
+        ))
+        page.reload()
+        expect(badge).to_be_hidden()
 
     def test_assessment_detail_back_link(self, page: Page, app_url):
         url, aid, _ = app_url
