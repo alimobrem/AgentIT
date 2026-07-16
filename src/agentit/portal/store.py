@@ -935,8 +935,24 @@ class AssessmentStore:
     # ── Gates ────────────────────────────────────────────────────────────
 
     async def create_gate(self, assessment_id: str, gate_type: str, summary: str) -> str:
+        """Create a pending gate, or return the existing one for this app.
+
+        Dedupes by ``repo_url`` + ``gate_type`` (not exact ``assessment_id``):
+        gates are app-scoped facts that outlive a single assessment
+        (docs/architecture.md). Without the join, re-assess + SLO tracker
+        (which iterates every historical assessment) left N pending
+        ``rollback-review`` rows of the same type on Actions.
+        """
         existing = await self._pool.fetchrow(
-            "SELECT id FROM gates WHERE assessment_id = $1 AND gate_type = $2 AND status = 'pending'",
+            """
+            SELECT gates.id FROM gates
+            INNER JOIN assessments ON gates.assessment_id = assessments.id
+            WHERE assessments.repo_url = (SELECT repo_url FROM assessments WHERE id = $1)
+              AND gates.gate_type = $2
+              AND gates.status = 'pending'
+            ORDER BY gates.created_at DESC
+            LIMIT 1
+            """,
             assessment_id, gate_type,
         )
         if existing:

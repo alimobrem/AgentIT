@@ -192,6 +192,19 @@ class TestGates:
         id2 = await store.create_gate(assessment_id, "security", "needs review")
         assert id1 == id2
 
+    async def test_create_gate_dedupes_pending_across_assessments_of_same_app(self, store):
+        """Gates are app-scoped: a second assessment of the same repo_url
+        must not create a second pending gate of the same type (Actions
+        tab ×N / SLO-tracker rollback-review triples)."""
+        old_id = await store.save(_make_report("repo-dedupe-gates"))
+        id1 = await store.create_gate(old_id, "rollback-review", "breach on v1")
+        new_id = await store.save(_make_report("repo-dedupe-gates"))
+        assert new_id != old_id
+        id2 = await store.create_gate(new_id, "rollback-review", "breach on v2")
+        assert id1 == id2
+        gates = await store.list_gates_for_assessment(new_id, status="pending")
+        assert len([g for g in gates if g["gate_type"] == "rollback-review"]) == 1
+
     async def test_resolve_gate(self, store):
         assessment_id = await store.save(_make_report())
         gate_id = await store.create_gate(assessment_id, "security", "needs review")
