@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Onboarding... - AgentIT{% endblock %}
 {% block content %}
-<p class="mb-1"><a href="/assessments/{{ assessment_id }}">&larr; Assessment</a></p>
+<p class="mb-1"><a href="/assessments/{{ assessment_id }}" data-nav="back-to-assessment" hx-boost="false">&larr; Assessment</a></p>
 <h1>Onboarding</h1>
 {# Real step-level streaming via htmx's documented SSE extension (checklist
    #8) -- reuses the events table + remediation_jobs tracking as the source,
