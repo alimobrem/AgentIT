@@ -65,17 +65,24 @@ hide the badge when count is zero.
 **MUST** keep labels short: `{verb}` or `{verb} {noun}` (e.g. `Dry Run`,
 `Fix`, `Apply`). Prefer ≤ 3 words.
 
+**SHOULD [check]** visible button labels (`.btn-label` when present, else
+button text) stay ≤ 3 words and ≤ 48 characters. Long mechanism copy belongs
+in a toast, confirm modal, or sibling status region — not the CTA.
+
 **MUST [check]** never put **status / warning copy inside a `<button>`**
 (including nested `.badge` chips such as “No dry run yet”). Put status in a
 sibling chip, banner, or `role="status"` region.
 
-**MUST [check]** interactive controls that look like buttons use `.btn` (or a
+**SHOULD [check]** interactive controls that look like buttons use `.btn` (or a
 documented icon control: `.events-bell`, `.nav-toggle`, `.modal-close`,
-`.cmdk-trigger`, `.collapse-toggle`, `.toast-close`). Do not invent ad-hoc
-button skins with hard-coded hex colors.
+`.cmdk-trigger`, `.collapse-toggle`, `.toast-close`, `.user-menu-trigger`,
+`.events-drawer-close`). Do not invent ad-hoc button skins with hard-coded hex
+colors.
 
 **SHOULD** disabled-while-running: set `disabled` + `aria-busy="true"` (and/or
-`.btn-loading`) on the control that started the async work.
+`.btn-loading`) on the control that started the async work. `base.html` applies
+this globally on form `submit` / htmx requests; long-running CTAs SHOULD also
+include a `.htmx-indicator` spinner so `.btn-loading` has a named verb to show.
 
 ---
 
@@ -286,8 +293,9 @@ ancestor (same template scope). Dead handlers are bugs.
 
 | ID | Severity | Checker / test |
 |---|---|---|
-| EDL-BTN-STATUS | MUST | No `.badge` / long warning text inside `<button>` |
-| EDL-BTN-CLASS | SHOULD | Submit/action `<button>` uses `.btn` |
+| EDL-BTN-STATUS | MUST | No `.badge` / status-warning text inside `<button>` |
+| EDL-BTN-STATUS | SHOULD | Visible label ≤ 3 words / ≤ 48 chars |
+| EDL-BTN-CLASS | SHOULD | Interactive `<button>` uses `.btn` (or documented icon control) |
 | EDL-CLICK-XDATA | MUST | `@click` has `[x-data]` ancestor in template |
 | EDL-SAFE-URL | MUST | `href` with `pr_url` uses `\| safe_url` |
 | EDL-NO-NATIVE-CONFIRM | MUST | No `window.confirm(` / `confirm('` / `confirm("` |

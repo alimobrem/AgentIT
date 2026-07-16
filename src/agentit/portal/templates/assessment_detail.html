@@ -433,7 +433,10 @@
               <input type="hidden" name="app_name" value="{{ report.repo_name }}">
               <input type="hidden" name="check_source" value="{{ sup.check_source }}">
               <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
-              <button type="submit" class="btn btn-sm btn-outline">Unsuppress</button>
+              <button type="submit" class="btn btn-sm btn-outline">
+                <span class="btn-label">Unsuppress</span>
+                <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+              </button>
             </form>
           </td>
         </tr>

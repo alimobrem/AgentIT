@@ -669,7 +669,7 @@ class TestSelfImprovementRunButton:
         resp = await client.get("/capabilities/self-improvement")
         assert resp.status_code == 200
         assert '/capabilities/self-improvement/run' in resp.text
-        assert "Run Self-Improvement Scan" in resp.text
+        assert "Run Scan" in resp.text
 
     async def test_run_route_reports_no_llm_when_unavailable(self, ui_client):
         client, _store = ui_client

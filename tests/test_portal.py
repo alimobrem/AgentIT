@@ -355,7 +355,8 @@ async def test_onboard_results_page(client, _override_store):
     # Soft-gate: primary Apply disabled until Dry Run succeeds; override remains.
     assert 'data-action="apply"' in resp.text
     assert "disabled" in resp.text
-    assert "Override — Apply to Cluster anyway" in resp.text
+    assert 'data-action="apply-override"' in resp.text
+    assert ">Override<" in resp.text or "Override</button>" in resp.text
 
 
 async def test_api_manifests(client, _override_store):
@@ -2306,7 +2307,7 @@ async def test_capabilities_page_has_learn_button(client):
     resp = await client.get("/capabilities")
     assert resp.status_code == 200
     assert '/capabilities/learn' in resp.text
-    assert "Research CVEs" in resp.text
+    assert "Research Skills" in resp.text
 
 
 async def test_capabilities_skill_activity_uses_skill_effectiveness_fields(

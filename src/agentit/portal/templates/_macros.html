@@ -100,7 +100,10 @@
       <button type="button" class="btn btn-outline" @click="showReason = true" x-show="!showReason">Reject</button>
       <div x-show="showReason" class="gate-reject-row">
         <input type="text" name="reason" placeholder="Why? (helps agents learn)" class="gate-reject-input">
-        <button type="submit" class="btn btn-danger-outline">Confirm Reject</button>
+        <button type="submit" class="btn btn-danger-outline">
+          <span class="btn-label">Confirm Reject</span>
+          <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+        </button>
         <button type="button" class="btn btn-outline btn-sm" @click="showReason = false">Cancel</button>
       </div>
     </form>

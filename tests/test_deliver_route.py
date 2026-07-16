@@ -159,10 +159,10 @@ class TestOnboardResultsWarnsBeforeDryRun:
         assert "NO DRY RUN YET" not in resp.text
         assert "Apply to Cluster" in resp.text
         assert "Deliver Now" not in resp.text
-        assert "Override — Apply to Cluster anyway" in resp.text
+        assert 'data-action="apply-override"' in resp.text
+        assert "Override</button>" in resp.text or ">Override<" in resp.text
         # Primary Apply carries a disabled attribute while ungated.
         assert 'data-action="apply"' in resp.text
-        assert 'data-action="apply-override"' in resp.text
 
     async def test_warning_badge_gone_after_a_dry_run(self, deliver_client, _mock_kube):
         client, _store, aid = deliver_client
@@ -172,10 +172,8 @@ class TestOnboardResultsWarnsBeforeDryRun:
         assert resp.status_code == 200
         assert "No dry run yet" not in resp.text
         assert "Dry run passed" in resp.text
-        assert "Override —" not in resp.text
+        assert 'data-action="apply-override"' not in resp.text
         assert "confirmText: " in resp.text or "Apply to Cluster" in resp.text
-        # Unlocked primary: no static disabled on the apply button markup path.
-        assert "Override — Apply to Cluster anyway" not in resp.text
 
     async def test_warning_badge_gone_after_a_real_delivery(self, deliver_client, _mock_kube):
         client, _store, aid = deliver_client

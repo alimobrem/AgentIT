@@ -24,7 +24,7 @@ Feedback columns follow EDL §3 (busy / success / error / empty / confirm).
 | Health | Summary cards (Platform/Pods/…) | **Pass** on main (`a.stat-card` links, #54); **Fail** on live (still `div`s) | dead click | #54 — **needs deploy** |
 | Health | Pod / pipeline row links | **Pass** | — | — |
 | Capabilities | Skill Activity rows | **Pass** on main (#57 field map + skip incomplete); **Fail** on live (blank Skill/Outcome) | empty data | #57 — **needs deploy** |
-| Capabilities | Activate / Research CVEs | **Pass*** (Activate still weak busy) | missing busy (medium) | follow-up |
+| Capabilities | Activate / Research Skills | **Pass** (busy via global submit + indicators) | — | — |
 | Events | Filter form | **Pass** on main (`.filter-bar`, #58) | layout | #58 |
 | Events | DLQ link | **Pass** | — | — |
 | Decisions | Page load / filters | **Pass*** | — | — |

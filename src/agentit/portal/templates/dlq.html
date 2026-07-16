@@ -53,7 +53,10 @@
       </button>
     </form>
     <form method="post" action="/events/dlq/{{ msg.id }}/dismiss" class="inline-form">
-      <button type="submit" class="btn btn-sm btn-outline">Dismiss</button>
+      <button type="submit" class="btn btn-sm btn-outline">
+        <span class="btn-label">Dismiss</span>
+        <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+      </button>
     </form>
   </div>
 </div>

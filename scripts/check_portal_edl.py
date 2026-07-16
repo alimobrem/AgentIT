@@ -31,6 +31,19 @@ _STATUS_IN_BTN = re.compile(
     re.I,
 )
 
+# Documented icon / chrome controls that intentionally omit `.btn`
+# (docs/portal-experience-design-language.md §2).
+_ICON_BTN_CLASSES = frozenset({
+    "events-bell",
+    "nav-toggle",
+    "modal-close",
+    "cmdk-trigger",
+    "collapse-toggle",
+    "toast-close",
+    "user-menu-trigger",
+    "events-drawer-close",
+})
+
 _NATIVE_CONFIRM = re.compile(
     r"""(?:window\.confirm\s*\(|(?<![\w.])confirm\s*\(\s*['"])""",
 )
@@ -160,6 +173,18 @@ def check_file(path: Path) -> list[Violation]:
             ))
 
     for line_no, open_attrs, inner in _iter_buttons(text):
+        open_classes = " ".join(
+            re.findall(r"""class\s*=\s*["']([^"']*)["']""", open_attrs, re.I)
+        )
+        open_tokens = set(open_classes.split())
+        is_icon = bool(open_tokens & _ICON_BTN_CLASSES)
+        has_btn = any(t == "btn" or t.startswith("btn-") for t in open_tokens)
+        if not has_btn and not is_icon:
+            vios.append(Violation(
+                "EDL-BTN-CLASS", "SHOULD", rel, line_no,
+                "interactive <button> should use class=\"btn\" (or a documented icon control)",
+            ))
+
         # Discrete `.badge` / `badge-*` classes only — not `events-bell-badge`.
         nested_status_badge = False
         for class_attr in re.findall(r"""class\s*=\s*["']([^"']*)["']""", inner, re.I):
@@ -173,25 +198,50 @@ def check_file(path: Path) -> list[Violation]:
                 "status badge must not be nested inside <button>; place beside the control",
             ))
             continue
-        plain = re.sub(r"<[^>]+>", " ", inner)
-        plain = re.sub(r"\{\{.*?\}\}", " ", plain, flags=re.S)
-        plain = re.sub(r"\{%.*?%\}", " ", plain, flags=re.S)
+        # Prefer visible .btn-label text for length / status checks.
+        label_bits = re.findall(
+            r"""class\s*=\s*["'][^"']*\bbtn-label\b[^"']*["'][^>]*>([^<]*)""",
+            inner,
+            re.I,
+        )
+        if label_bits:
+            plain = " ".join(label_bits)
+        else:
+            plain = re.sub(r"<[^>]+>", " ", inner)
+            plain = re.sub(r"\{\{.*?\}\}", " ", plain, flags=re.S)
+            plain = re.sub(r"\{%.*?%\}", " ", plain, flags=re.S)
+            plain = re.sub(r"\s+", " ", plain).strip()
+            if "htmx-indicator" in inner or "spinner" in inner:
+                plain = re.sub(
+                    r"(Running|Assessing|Saving|Working|Researching|Generating|Adding).*$",
+                    "",
+                    plain,
+                    flags=re.I,
+                ).strip()
+        plain = re.sub(r"&[a-zA-Z]+;", " ", plain)
         plain = re.sub(r"\s+", " ", plain).strip()
-        if "htmx-indicator" in inner or "spinner" in inner:
-            plain = re.sub(r"(Running|Assessing|Saving|Working).*$", "", plain, flags=re.I).strip()
-        # Icon-only notification/menu controls (aria-label / events-bell).
-        if "aria-label" in open_attrs or ":aria-label" in open_attrs or "events-bell" in open_attrs:
+        # Documented icon/chrome controls skip label-length rules.
+        if is_icon or "aria-label" in open_attrs or ":aria-label" in open_attrs:
             continue
         if _STATUS_IN_BTN.search(plain):
             vios.append(Violation(
                 "EDL-BTN-STATUS", "MUST", rel, line_no,
                 f"status/warning copy inside button: {plain[:80]!r}",
             ))
-        elif len(plain) > 48:
-            vios.append(Violation(
-                "EDL-BTN-STATUS", "SHOULD", rel, line_no,
-                f"button label is long ({len(plain)} chars); prefer ≤3 words: {plain[:80]!r}",
-            ))
+            continue
+        # ≤3 words for visible labels (EDL §2); ignore Alpine x-text bindings.
+        if "x-text" not in open_attrs and plain and "{{" not in plain:
+            words = [w for w in re.split(r"\s+", plain) if w and w not in {"&", "—", "-"}]
+            if len(words) > 3:
+                vios.append(Violation(
+                    "EDL-BTN-STATUS", "SHOULD", rel, line_no,
+                    f"button label has {len(words)} words; prefer ≤3: {plain[:80]!r}",
+                ))
+            elif len(plain) > 48:
+                vios.append(Violation(
+                    "EDL-BTN-STATUS", "SHOULD", rel, line_no,
+                    f"button label is long ({len(plain)} chars); prefer ≤3 words: {plain[:80]!r}",
+                ))
 
     # Macros may document caller-provided Alpine scope (see client_tab_nav).
     if path.name != "_macros.html":

@@ -14,7 +14,7 @@
   <form method="post" action="/capabilities/learn" class="inline-form" x-data>
     <button type="submit" class="btn btn-outline btn-sm"
       @click="showToast('Researching &amp; drafting skills\u2026 this can take up to 3 minutes \u2014 please don\u2019t close this tab.', 'info', 8000)">
-      <span class="btn-label">Research CVEs &amp; Generate Skills</span>
+      <span class="btn-label">Research Skills</span>
       <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Researching&hellip;</span>
     </button>
   </form>
@@ -130,7 +130,7 @@
 </table>
 {% else %}
 <div class="empty-state">
-  <p>No learning agent runs recorded yet. Click "Research CVEs &amp; Generate Skills" above, or wait for the skill-learner watcher's next tick.</p>
+  <p>No learning agent runs recorded yet. Click "Research Skills" above, or wait for the skill-learner watcher's next tick.</p>
 </div>
 {% endif %}
 
@@ -172,7 +172,10 @@
           <span class="badge badge-info">draft</span>
           <form method="post" action="/capabilities/skills/activate" class="inline-form">
             <input type="hidden" name="skill_path" value="{{ skill.file_path }}">
-            <button type="submit" class="btn btn-sm btn-outline">Activate</button>
+            <button type="submit" class="btn btn-sm btn-outline">
+              <span class="btn-label">Activate</span>
+              <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+            </button>
           </form>
         {% else %}
           <span class="badge badge-muted">{{ skill.status }}</span>
