@@ -777,6 +777,13 @@ class TestFixButtonVisibility:
             ])],
         )
         aid = store.save(report)
+        # Per-finding Fix is post-onboard only; seed onboarding so the button
+        # is eligible to render (registry still gates which categories).
+        store.save_onboarding(aid, [
+            {"category": "security", "path": "test.yaml",
+             "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test",
+             "description": "test file"},
+        ])
 
         page.goto(f"{url}/assessments/{aid}")
         page.click(".tab-nav >> text=Findings")
@@ -786,6 +793,58 @@ class TestFixButtonVisibility:
 
         unmatched_item = page.locator(".finding-item", has_text="Browser test: unmatched finding")
         assert unmatched_item.locator("button:has-text('Fix')").count() == 0
+
+    def test_fix_button_hidden_pre_onboard_with_next_step_copy(self, page: Page, app_url):
+        """Pre-onboard Findings must not ship a Fix control — Onboard This App
+        is the generation path; Fix appears only after onboarding."""
+        from agentit.models import DimensionScore, Finding, Severity
+
+        url, _, store = app_url
+        report = make_report(
+            repo_name="browser-pre-onboard-fix-hidden",
+            scores=[DimensionScore(dimension="security", score=30, max_score=100, findings=[
+                Finding(category="network", severity=Severity.high,
+                        description="Pre-onboard finding: no NetworkPolicy",
+                        recommendation="Add one"),
+            ])],
+        )
+        aid = store.save(report)
+
+        page.goto(f"{url}/assessments/{aid}")
+        page.click(".tab-nav >> text=Findings")
+
+        item = page.locator(".finding-item", has_text="Pre-onboard finding: no NetworkPolicy")
+        expect(item).to_be_visible()
+        assert item.locator("button:has-text('Fix')").count() == 0
+        expect(page.locator("text=use Onboard This App")).to_be_visible()
+
+    def test_fix_button_opens_confirm_modal(self, page: Page, app_url):
+        """Post-onboard Fix must open the shared confirm modal (not a silent no-op)."""
+        from agentit.models import DimensionScore, Finding, Severity
+
+        url, _, store = app_url
+        report = make_report(
+            repo_name="browser-fix-confirm-app",
+            scores=[DimensionScore(dimension="security", score=30, max_score=100, findings=[
+                Finding(category="network", severity=Severity.high,
+                        description="Confirm test: no NetworkPolicy", recommendation="Add one"),
+            ])],
+        )
+        aid = store.save(report)
+        store.save_onboarding(aid, [
+            {"category": "security", "path": "test.yaml",
+             "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test",
+             "description": "test file"},
+        ])
+
+        page.goto(f"{url}/assessments/{aid}")
+        page.click(".tab-nav >> text=Findings")
+        page.locator(".finding-item", has_text="Confirm test: no NetworkPolicy").locator(
+            "button:has-text('Fix')"
+        ).click()
+        expect(page.locator("#confirm-modal")).to_have_class(re.compile("open"))
+        expect(page.locator("#confirm-modal button:has-text('Generate Fix')")).to_be_visible()
+        expect(page.locator("#confirm-modal button:has-text('Cancel')")).to_be_focused()
 
 
 # ── UX Requirements: Confirm Modal Focus + Type-to-Confirm (#1, #2) ──────

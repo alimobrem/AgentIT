@@ -138,6 +138,42 @@ class TestFixFindingIsPureGeneration:
         assert "Review below, then Apply to Cluster" in resp.text
 
 
+# ── 1b. Per-finding Fix is post-onboard only ─────────────────────────────
+
+
+class TestFixHiddenDuringOnboarding:
+    """Pre-onboard Assessment Detail must not ship per-finding Fix — Onboard
+    This App is the generation path. After onboarding, Fix returns with
+    shared confirm + busy indicator (EDL)."""
+
+    async def test_findings_fix_hidden_when_assessed(self, ui_client):
+        client, store = ui_client
+        aid = await store.save(_report_with_network_finding(repo_name="pre-onboard-app"))
+
+        resp = await client.get(f"/assessments/{aid}")
+        assert resp.status_code == 200
+        assert "Onboard This App" in resp.text
+        assert f'action="/assessments/{aid}/fix"' not in resp.text
+        assert "use <strong>Onboard This App</strong> above" in resp.text
+        assert "btn-label\">Fix</span>" not in resp.text
+
+    async def test_findings_fix_shown_after_onboard_with_confirm(self, ui_client):
+        client, store = ui_client
+        aid = await store.save(_report_with_network_finding(repo_name="post-onboard-app"))
+        await store.save_onboarding(aid, [
+            {"category": "security", "path": "np.yaml",
+             "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test",
+             "description": "test"},
+        ])
+
+        resp = await client.get(f"/assessments/{aid}")
+        assert resp.status_code == 200
+        assert f'action="/assessments/{aid}/fix"' in resp.text
+        assert "Generate Fix" in resp.text
+        assert "htmx-indicator" in resp.text
+        assert "use <strong>Onboard This App</strong> above" not in resp.text
+
+
 # ── 2. Remediation Plan table's Fix button uses the shared category set ──
 
 
@@ -181,6 +217,12 @@ class TestRemediationPlanFixButtonUsesCategory:
             ),
         ]
         aid = await store.save(report)
+        # Fix is hidden pre-onboard; seed onboarding so the button renders.
+        await store.save_onboarding(aid, [
+            {"category": "security", "path": "cm.yaml",
+             "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test",
+             "description": "test"},
+        ])
 
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
@@ -188,6 +230,9 @@ class TestRemediationPlanFixButtonUsesCategory:
         # *category* ("container"), never the *dimension* ("security").
         assert 'name="category" value="container"' in resp.text
         assert 'name="category" value="security"' not in resp.text
+        # EDL: Remediation Plan Fix must use shared confirm, never bare submit.
+        assert "show-confirm" in resp.text
+        assert 'Generate Fix' in resp.text
 
     async def test_remediation_plan_no_fix_button_for_unregistered_category(self, ui_client):
         """A category with no FIX_REGISTRY entry (exact or substring) must
@@ -208,6 +253,11 @@ class TestRemediationPlanFixButtonUsesCategory:
             ),
         ]
         aid = await store.save(report)
+        await store.save_onboarding(aid, [
+            {"category": "ha_dr", "path": "cm.yaml",
+             "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test",
+             "description": "test"},
+        ])
 
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
