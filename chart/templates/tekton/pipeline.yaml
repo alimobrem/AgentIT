@@ -124,7 +124,7 @@ spec:
     # Smoke-tests the actual image build-image just produced by running a
     # container from it and checking the exact tools/dirs capability-scout's
     # own safety gates and self-fix flow need at runtime -- gh, a real .git
-    # checkout, pytest, tests/, and chart/. Each of these was previously
+    # checkout, pytest, tests/, chart/, and docs/. Each of these was previously
     # discovered missing one at a time, live, only when a watcher pod
     # happened to need it (see Containerfile's comments for each fix) --
     # this task fails the pipeline loudly and immediately instead, before
@@ -157,6 +157,9 @@ spec:
                 [ -n "$(ls -A tests)" ]
                 echo "chart/ exists (capability-scout's safety gates need it):"
                 test -d chart
+                echo "docs/ exists (capability-scout scan_doc_gaps needs it):"
+                test -d docs
+                [ -n "$(ls docs/*.md 2>/dev/null)" ]
                 echo "git and gh CLIs are present:"
                 git --version
                 gh --version

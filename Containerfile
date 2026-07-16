@@ -59,6 +59,12 @@ COPY checks/ checks/
 # every real cycle, regardless of the actual proposal being tested.
 COPY tests/ tests/
 COPY chart/ chart/
+# capability_scout.scan_doc_gaps() greps Path("docs")/*.md for "Known gap" /
+# "Deliberately deferred" / etc. (see gather_evidence). Without shipping
+# docs/, docs_dir.is_dir() is False every cycle and doc_gaps is always [] --
+# the highest-precision evidence signal is silently zeroed. Same WORKDIR
+# (/opt/app-root/src) the portal and capability-scout share.
+COPY docs/ docs/
 COPY Containerfile ./Containerfile
 
 # Real git history + origin remote so capability_scout.py / self-fix

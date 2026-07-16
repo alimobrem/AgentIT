@@ -458,6 +458,17 @@ class TestContainerfileShipsWhatTestsPassGateNeeds:
             "inside the tests-pass gate"
         )
 
+    def test_copies_the_docs_directory_into_the_image(self):
+        """Regression test: scan_doc_gaps() defaults to Path("docs") under
+        WORKDIR. Without shipping docs/, is_dir() is False and doc_gaps is
+        always [] -- capability-scout loses its highest-precision signal
+        every cycle."""
+        content = self._containerfile_text()
+        assert "COPY docs/ docs/" in content, (
+            "Containerfile must COPY docs/ docs/ or capability_scout."
+            "scan_doc_gaps() always returns [] in the running image"
+        )
+
     def test_makes_git_directories_group_writable(self):
         """Regression test: COPY .git ./.git lands owned by root with mode
         755 (group has read+execute but not write), which blocks git from
