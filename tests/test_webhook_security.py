@@ -286,6 +286,41 @@ class TestWebhookDedup:
         resp2 = await client.post("/api/webhook/assess", json=payload)
         assert resp2.json().get("status") == "duplicate"
 
+    @patch("agentit.portal.routes.webhooks.clone_assess_cleanup")
+    async def test_concurrent_identical_deliveries_run_pipeline_once(self, mock_assess, portal_client):
+        """Regression guard for the check-then-act webhook dedup race
+        (Priority 1a): two genuinely concurrent, identical deliveries must
+        not both execute the full (slow) assessment pipeline. Before the
+        fix, `webhook_already_processed()` (a SELECT) ran up front but
+        `mark_webhook_processed()` (the INSERT) only ran after the whole
+        pipeline finished, so two near-simultaneous requests could both
+        pass the SELECT before either INSERT landed. `clone_assess_cleanup`
+        sleeps briefly here to widen that race window the way the real,
+        multi-second clone-and-scan pipeline would.
+        """
+        import asyncio
+        import time
+
+        def _slow_assess(*args, **kwargs):
+            time.sleep(0.3)
+            return make_report()
+
+        mock_assess.side_effect = _slow_assess
+        client, _, _ = portal_client
+        payload = {"repo_url": "https://github.com/t/concurrent-dedup", "criticality": "low"}
+
+        resp1, resp2 = await asyncio.gather(
+            client.post("/api/webhook/assess", json=payload),
+            client.post("/api/webhook/assess", json=payload),
+        )
+
+        assert mock_assess.call_count == 1
+        results = [resp1.json(), resp2.json()]
+        duplicates = [r for r in results if r.get("status") == "duplicate"]
+        completed = [r for r in results if "assessment_id" in r]
+        assert len(duplicates) == 1
+        assert len(completed) == 1
+
 
 class TestWebhookValidation:
     async def test_assess_missing_repo_url(self, portal_client):

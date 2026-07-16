@@ -476,6 +476,34 @@ class TestWebhookDedup:
         # ON CONFLICT DO NOTHING must not raise on a repeat delivery id.
         await store.mark_webhook_processed("delivery-1")
 
+    async def test_claim_webhook_first_caller_wins(self, store):
+        assert await store.claim_webhook("delivery-claim-1") is True
+        assert await store.webhook_already_processed("delivery-claim-1") is True
+
+    async def test_claim_webhook_second_caller_loses(self, store):
+        assert await store.claim_webhook("delivery-claim-2") is True
+        assert await store.claim_webhook("delivery-claim-2") is False
+
+    async def test_claim_webhook_atomic_under_real_concurrency(self, store):
+        """Regression guard for the check-then-act webhook dedup race: fire
+        many genuinely concurrent claims for the *same* delivery_id (real
+        asyncpg connections from the pool, not a mocked sequential call)
+        and assert exactly one wins. Before this fix, callers used
+        `webhook_already_processed()` (a SELECT) then, much later,
+        `mark_webhook_processed()` (an INSERT) as two separate round trips
+        -- concurrent callers could both pass the SELECT before either
+        INSERT landed. `claim_webhook()` collapses both into one
+        INSERT ... ON CONFLICT DO NOTHING RETURNING, so the database's own
+        PRIMARY KEY constraint -- not caller-side timing -- decides the
+        single winner."""
+        import asyncio
+
+        results = await asyncio.gather(
+            *(store.claim_webhook("delivery-race") for _ in range(20))
+        )
+        assert results.count(True) == 1
+        assert results.count(False) == 19
+
 
 class TestSuppressedChecks:
     async def test_suppress_and_unsuppress(self, store):

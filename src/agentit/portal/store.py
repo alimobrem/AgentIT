@@ -1569,6 +1569,24 @@ class AssessmentStore:
             delivery_id, _now(),
         )
 
+    async def claim_webhook(self, delivery_id: str) -> bool:
+        """Atomically claim a webhook delivery for processing.
+
+        Unlike `webhook_already_processed()` + `mark_webhook_processed()`
+        (a check-then-act pair with a race window between the two round
+        trips), this does the check-and-mark as a single INSERT relying on
+        `processed_webhooks.delivery_id`'s PRIMARY KEY constraint: only one
+        concurrent caller for a given delivery_id can ever get a row back
+        from `RETURNING`. Callers must call this *before* doing any of the
+        delivery's real work, and only proceed if it returns True.
+        """
+        row = await self._pool.fetchrow(
+            "INSERT INTO processed_webhooks (delivery_id, processed_at) VALUES ($1, $2) "
+            "ON CONFLICT (delivery_id) DO NOTHING RETURNING delivery_id",
+            delivery_id, _now(),
+        )
+        return row is not None
+
     # ── Agent Feedback ──────────────────────────────────────────────────
 
     async def record_feedback(

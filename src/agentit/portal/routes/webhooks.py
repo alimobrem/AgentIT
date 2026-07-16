@@ -77,7 +77,7 @@ async def webhook_assess(request: Request):
 
     delivery_id = _get_delivery_id(request, body)
     s = await get_store()
-    if await s.webhook_already_processed(delivery_id):
+    if not await s.claim_webhook(delivery_id):
         return JSONResponse({"status": "duplicate", "delivery_id": delivery_id})
 
     repo_url = body.get("repo_url")
@@ -110,7 +110,6 @@ async def webhook_assess(request: Request):
                   {"assessment_id": assessment_id, "score": report.overall_score},
                   correlation_id=assessment_id,
                   extra_topic=TOPIC_ASSESSMENTS)
-    await s.mark_webhook_processed(delivery_id)
     return JSONResponse({"assessment_id": assessment_id, "overall_score": report.overall_score})
 
 
@@ -131,7 +130,7 @@ async def webhook_github_push(request: Request):
 
     delivery_id = _get_delivery_id(request, body)
     s_dedup = await get_store()
-    if await s_dedup.webhook_already_processed(delivery_id):
+    if not await s_dedup.claim_webhook(delivery_id):
         return JSONResponse({"status": "duplicate", "delivery_id": delivery_id})
 
     ref = body.get("ref", "")
@@ -225,7 +224,6 @@ async def webhook_github_push(request: Request):
         await s.log_event("change-analysis", "impact-analyzed", managed["repo_name"],
                            "info", impact.summary())
 
-        await s_dedup.mark_webhook_processed(delivery_id)
         return JSONResponse({
             "status": "assessed",
             "repo": managed["repo_name"],
@@ -253,7 +251,7 @@ async def webhook_onboard(request: Request):
 
     delivery_id = _get_delivery_id(request, body)
     s = await get_store()
-    if await s.webhook_already_processed(delivery_id):
+    if not await s.claim_webhook(delivery_id):
         return JSONResponse({"status": "duplicate", "delivery_id": delivery_id})
 
     log.info("webhook_onboard received event: %s", body.get("eventId", "unknown"))
@@ -300,7 +298,6 @@ async def webhook_onboard(request: Request):
                                f"Building image: {build_result['image_ref']}")
 
     log.info("webhook_onboard completed for %s: %d files, build=%s", assessment_id, len(files), build_status)
-    await s.mark_webhook_processed(delivery_id)
     return JSONResponse({
         "assessment_id": assessment_id,
         "repo_url": report.repo_url,
@@ -357,7 +354,7 @@ async def webhook_finding(request: Request):
 
     delivery_id = _get_delivery_id(request, body)
     s = await get_store()
-    if await s.webhook_already_processed(delivery_id):
+    if not await s.claim_webhook(delivery_id):
         return JSONResponse({"status": "duplicate", "delivery_id": delivery_id})
 
     app_name = body.get("app_name", "unknown")
@@ -374,7 +371,6 @@ async def webhook_finding(request: Request):
     fleet = await s.get_fleet_data()
     app = next((a for a in fleet if a["repo_name"] == app_name), None)
     if not app:
-        await s.mark_webhook_processed(delivery_id)
         return JSONResponse({"status": "accepted", "action": "alert-only", "reason": f"app '{app_name}' not in fleet"})
 
     # RemediationDispatcher/AutoMode are now genuinely async -- await them
@@ -385,7 +381,6 @@ async def webhook_finding(request: Request):
 
     if result.get("error") and not result["files"]:
         await s.log_event("dispatcher", "no-fix-available", app_name, "warning", result["error"])
-        await s.mark_webhook_processed(delivery_id)
         return JSONResponse({"status": "accepted", "action": "alert-only", "reason": result["error"]})
 
     from agentit.automode import AutoMode
@@ -407,7 +402,6 @@ async def webhook_finding(request: Request):
         )
         await s.log_event("dispatcher", auto_result["action"], app_name, "info",
                            f"Auto-mode {auto_result['action']} for {category}: {auto_result['reason']}")
-        await s.mark_webhook_processed(delivery_id)
         return JSONResponse({
             "status": "accepted",
             "action": auto_result["action"],
@@ -423,7 +417,6 @@ async def webhook_finding(request: Request):
         )
         await s.log_event("dispatcher", "gated", app_name, "info",
                            f"Fix for {category} gated for review (gate {gate_id})")
-        await s.mark_webhook_processed(delivery_id)
         return JSONResponse({
             "status": "accepted",
             "action": "gated",
@@ -432,7 +425,6 @@ async def webhook_finding(request: Request):
             "agent": result["agent"],
         })
 
-    await s.mark_webhook_processed(delivery_id)
     return JSONResponse({"status": "accepted", "action": "alert-only"})
 
 
