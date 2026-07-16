@@ -117,7 +117,7 @@ kafka:
 postgres:
   bundled:
     enabled: true
-    image: registry.redhat.io/rhel9/postgresql-15@sha256:06aeada2ca417445bc4fb711729e65a02ee78421a09c862cbd136ebdd51d7cfa
+    image: registry.redhat.io/rhel9/postgresql-15@sha256:1088684afe943cc44594ed56c2de7d48f4f6fb6f1ffce8311236d094c50cd14c
     storageSize: 10Gi
     # storageClassName: gp3-csi
     credentials:
