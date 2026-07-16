@@ -365,6 +365,7 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
 
 
 @router.post("/assessments/{assessment_id}/register-gitops", response_model=None)
+# CI re-trigger marker for Register feedback PR
 async def register_gitops(request: Request, assessment_id: str):
     """Lightweight GitOps registration for an already-assessed app --
     the nudge action docs/ui-redesign-proposal.md §4 recommends for
