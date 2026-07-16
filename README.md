@@ -413,7 +413,7 @@ uv run pytest tests/test_portal_edl.py -q
 uv run python scripts/check_portal_edl.py
 ```
 
-Asserts MUST rules from [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md): no status badges inside `<button>`, Dry Run → Apply with status outside Apply, modals `role="dialog"` + Escape, `pr_url|safe_url`, badge ≥12px, Events bell/drawer IA, `#toasts` / `.btn-danger` present. Also asserts button SHOULD rules: ≤3-word labels and `.btn` (or documented icon control) on interactive `<button>`s.
+Asserts MUST rules from [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md): no status badges inside `<button>`, Dry Run → deliver choice with status outside CTAs, modals `role="dialog"` + Escape, `pr_url|safe_url`, badge ≥12px, Events bell/drawer IA, `#toasts` / `.btn-danger` present. Also asserts button SHOULD rules: ≤3-word labels and `.btn` (or documented icon control) on interactive `<button>`s. GitOps dry-run unlock coverage in `tests/test_deliver_route.py` accepts HTML-escaped `Commit &amp; Open PR`.
 
 2,000+ tests across 100 test files (grows continuously; the counts below are a representative breakdown, not an exact partition — verify current totals with `pytest --collect-only`, since this table isn't regenerated on every commit):
 
