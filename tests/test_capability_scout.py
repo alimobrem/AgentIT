@@ -5,11 +5,13 @@ docs/self-improvement-for-agentit.md and tests/test_capability_scout_watcher.py
 for the watcher class itself."""
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from agentit.capability_scout import (
+    CAPABILITY_OUTCOME_ACTION,
     CAPABILITY_RUN_ACTION,
     MAX_DIFF_FILES,
     MAX_DIFF_LINES,
@@ -24,13 +26,18 @@ from agentit.capability_scout import (
     describe_capability_run,
     filter_actionable_doc_gaps,
     gather_evidence,
+    outcome_from_pr_status,
+    parse_reject_reason,
     proposal_already_implemented,
+    proposal_blocked_by_outcome,
+    rank_doc_gaps,
     recent_capability_titles,
     render_proposal_doc,
     run_safety_gates,
     run_test_suite,
     scan_doc_gaps,
     slugify,
+    sync_proposal_outcomes,
 )
 from conftest import make_async_store
 
@@ -147,6 +154,199 @@ class TestFilterActionableDocGaps:
         ])
         assert "Add stack-signature detector" in titles[0]
         assert "Wire tick-failure alerts" in titles
+
+    def test_skips_tick_failure_classifier_when_module_present(self, tmp_path):
+        src = tmp_path / "src" / "agentit"
+        src.mkdir(parents=True)
+        (src / "tick_failure_classifier.py").write_text("def classify(e):\n    return {}\n", encoding="utf-8")
+        gaps = [{
+            "file": "docs/x.md",
+            "line_no": 1,
+            "anchor": "Known gap",
+            "text": "Known gap: tick-failure classifier for permission-denied hints",
+        }]
+        assert filter_actionable_doc_gaps(gaps, repo_dir=tmp_path) == []
+
+
+# ── L4 proposal outcomes ────────────────────────────────────────────────────
+
+
+class TestProposalOutcomes:
+    def test_parse_reject_reason_from_label(self):
+        assert parse_reject_reason(
+            labels=["agentit:reject-reason:wontfix", "bug"],
+            body="nope",
+        ) == "wontfix"
+
+    def test_parse_reject_reason_from_body_convention(self):
+        assert parse_reject_reason(
+            labels=[],
+            body="Closed.\n\nagentit:reject-reason:needs-rework\n",
+        ) == "needs-rework"
+
+    def test_outcome_from_pr_status_merged(self):
+        out = outcome_from_pr_status({
+            "state": "merged",
+            "merged_at": "2026-07-16T12:00:00Z",
+            "html_url": "https://github.com/o/r/pull/20",
+            "labels": [],
+            "title": "Add stack-signature detector",
+            "body": "",
+        })
+        assert out["state"] == "merged"
+        assert out["pr_url"] == "https://github.com/o/r/pull/20"
+
+    def test_outcome_from_pr_status_closed_with_wontfix(self):
+        out = outcome_from_pr_status({
+            "state": "closed",
+            "merged_at": "",
+            "html_url": "https://github.com/o/r/pull/9",
+            "labels": ["agentit:reject-reason:wontfix"],
+            "title": "Rewrite store",
+            "body": "",
+        })
+        assert out["state"] == "closed"
+        assert out["reject_reason"] == "wontfix"
+
+    def test_outcome_from_pr_status_open_not_stale_returns_none(self):
+        assert outcome_from_pr_status({
+            "state": "open",
+            "merged_at": "",
+            "html_url": "https://github.com/o/r/pull/11",
+            "labels": [],
+            "title": "WIP",
+            "body": "",
+            "created_at": "2026-07-15T12:00:00Z",
+        }, now="2026-07-16T12:00:00Z") is None
+
+    def test_outcome_from_pr_status_open_stale(self):
+        out = outcome_from_pr_status({
+            "state": "open",
+            "merged_at": "",
+            "html_url": "https://github.com/o/r/pull/11",
+            "labels": [],
+            "title": "Stale proposal",
+            "body": "",
+            "created_at": "2026-06-01T12:00:00Z",
+        }, now="2026-07-16T12:00:00Z")
+        assert out["state"] == "stale"
+
+    def test_filter_skips_merged_gap_titles(self, tmp_path):
+        gaps = [{
+            "file": "docs/x.md",
+            "line_no": 1,
+            "anchor": "Documented future idea",
+            "text": "Documented future idea (not built): stack-signature detection logic",
+        }, {
+            "file": "docs/y.md",
+            "line_no": 2,
+            "anchor": "Known gap",
+            "text": "Known gap: predictive fast-forward view on the ledger",
+        }]
+        outcomes = [{
+            "state": "merged",
+            "title": "Add stack-signature detector",
+            "slug": "add-stack-signature-detector",
+            "pr_url": "https://github.com/o/r/pull/20",
+        }]
+        kept = filter_actionable_doc_gaps(gaps, repo_dir=tmp_path, outcomes=outcomes)
+        assert len(kept) == 1
+        assert "fast-forward" in kept[0]["text"]
+
+    def test_rank_prefers_untried_over_wontfix(self):
+        gaps = [
+            {"text": "Known gap: rewrite entire portal", "file": "a.md", "line_no": 1},
+            {"text": "Known gap: predictive fast-forward view", "file": "b.md", "line_no": 2},
+        ]
+        outcomes = [{
+            "state": "closed",
+            "reject_reason": "wontfix",
+            "title": "Rewrite entire portal",
+            "slug": "rewrite-entire-portal",
+            "recorded_at": "2026-07-10T00:00:00+00:00",
+        }]
+        ranked = rank_doc_gaps(gaps, outcomes)
+        assert "fast-forward" in ranked[0]["text"]
+
+    def test_proposal_blocked_by_merged_or_wontfix(self):
+        outcomes = [
+            {"state": "merged", "title": "Add stack-signature detector", "slug": "add-stack-signature-detector"},
+            {
+                "state": "closed", "reject_reason": "wontfix",
+                "title": "Rewrite store layer", "slug": "rewrite-store-layer",
+                "recorded_at": "2026-07-10T00:00:00+00:00",
+            },
+        ]
+        assert proposal_blocked_by_outcome(
+            {"title": "Add stack-signature detector"}, outcomes,
+        )
+        assert proposal_blocked_by_outcome(
+            {"title": "Rewrite store layer"}, outcomes, now="2026-07-16T00:00:00+00:00",
+        )
+        assert not proposal_blocked_by_outcome(
+            {"title": "Add ledger predictive fast forward"}, outcomes,
+        )
+
+    async def test_sync_proposal_outcomes_logs_merged_once(self):
+        async_store, raw_store = await make_async_store()
+        await raw_store.log_event(
+            "capability-scout", CAPABILITY_RUN_ACTION, None, "info",
+            "Opened proposal PR: Add stack-signature detector (https://github.com/o/r/pull/20)",
+            details={
+                "title": "Add stack-signature detector",
+                "pr_url": "https://github.com/o/r/pull/20",
+            },
+        )
+
+        def _status(url):
+            return {
+                "state": "merged",
+                "merged_at": "2026-07-16T12:00:00Z",
+                "html_url": url,
+                "labels": [],
+                "title": "Add stack-signature detector",
+                "body": "",
+                "created_at": "2026-07-15T12:00:00Z",
+            }
+
+        first = await sync_proposal_outcomes(async_store, get_status=_status)
+        assert len(first) == 1
+        assert first[0]["state"] == "merged"
+        second = await sync_proposal_outcomes(async_store, get_status=_status)
+        assert second == []
+        rows = await raw_store.list_events_by_action(CAPABILITY_OUTCOME_ACTION)
+        assert len(rows) == 1
+        details = rows[0].get("details") or json.loads(rows[0].get("details_json") or "{}")
+        assert details["pr_url"] == "https://github.com/o/r/pull/20"
+
+    async def test_gather_evidence_includes_outcomes_and_cites_merges(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "gap.md").write_text(
+            "Known gap: predictive fast-forward view on the ledger.\n", encoding="utf-8",
+        )
+        async_store, raw_store = await make_async_store()
+        for i in range(6):
+            await raw_store.record_feedback(f"app-{i}", "hardening", f"cat-{i}", "rejected")
+        await raw_store.log_event(
+            "capability-scout", CAPABILITY_OUTCOME_ACTION, None, "info",
+            "Proposal merged: Add stack-signature detector",
+            details={
+                "state": "merged",
+                "title": "Add stack-signature detector",
+                "slug": "add-stack-signature-detector",
+                "pr_url": "https://github.com/o/r/pull/20",
+                "reject_reason": "",
+            },
+        )
+        evidence = await gather_evidence(async_store, repo_dir=tmp_path)
+        assert evidence["proposal_outcomes"]
+        assert evidence["cited_merges"]
+        assert evidence["cited_merges"][0]["pr_url"] == "https://github.com/o/r/pull/20"
+        severity, _summary, details = describe_capability_run(evidence, None, None, None)
+        assert details["cited_merges"]
+        assert details["proposal_outcomes"]
 
 
 # ── gather_evidence ─────────────────────────────────────────────────────────

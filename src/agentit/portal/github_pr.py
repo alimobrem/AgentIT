@@ -60,6 +60,10 @@ def get_pr_status(pr_url: str) -> dict:
                 "state": state,
                 "merged_at": data.get("merged_at", ""),
                 "html_url": data.get("html_url", pr_url),
+                "title": data.get("title", ""),
+                "body": data.get("body") or "",
+                "labels": [lbl.get("name", "") for lbl in (data.get("labels") or [])],
+                "created_at": data.get("created_at", ""),
             }
 
         if "/compare/" in pr_url:
@@ -79,13 +83,26 @@ def get_pr_status(pr_url: str) -> dict:
                     "state": state,
                     "merged_at": pr.get("merged_at", ""),
                     "html_url": pr.get("html_url", pr_url),
+                    "title": pr.get("title", ""),
+                    "body": pr.get("body") or "",
+                    "labels": [lbl.get("name", "") for lbl in (pr.get("labels") or [])],
+                    "created_at": pr.get("created_at", ""),
                 }
-            return {"state": "unknown", "merged_at": "", "html_url": pr_url}
+            return {
+                "state": "unknown", "merged_at": "", "html_url": pr_url,
+                "title": "", "body": "", "labels": [], "created_at": "",
+            }
 
-        return {"state": "unknown", "merged_at": "", "html_url": pr_url}
+        return {
+            "state": "unknown", "merged_at": "", "html_url": pr_url,
+            "title": "", "body": "", "labels": [], "created_at": "",
+        }
     except Exception:
         logger.warning("Failed to check PR status for %s", pr_url, exc_info=True)
-        return {"state": "unknown", "merged_at": "", "html_url": pr_url}
+        return {
+            "state": "unknown", "merged_at": "", "html_url": pr_url,
+            "title": "", "body": "", "labels": [], "created_at": "",
+        }
 
 
 def get_commit_info(repo_url: str, sha: str) -> dict:

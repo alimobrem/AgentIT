@@ -159,8 +159,13 @@ _CAPABILITY_PROPOSAL_SYSTEM = (
     "instead. The combined source you would write must fit in ≤3 files and ≤150 lines.\n"
     "6. Never re-propose a capability whose module basename already appears in "
     "evidence.existing_modules, or whose title overlaps evidence.recent_proposal_titles "
-    "(including stack-signature / stack_signature_detector — already shipped). "
-    "Prefer a different actionable doc gap, tick-failure, skill, or check signal.\n\n"
+    "(including stack-signature / stack_signature_detector and tick-failure / "
+    "tick_failure_classifier — already shipped). Prefer a different actionable doc "
+    "gap, tick-failure, skill, or check signal.\n"
+    "7. Honor evidence.proposal_outcomes and evidence.cited_merges: never re-propose a "
+    "title/slug that was merged or closed as wontfix; prefer gaps that have not been "
+    "tried, or that were closed for a remediable reason (not wontfix). If "
+    "evidence.fix_regression_only is true, propose only a narrow regression fix.\n\n"
     'Respond ONLY with valid JSON: {"has_proposal": bool, "title": str, '
     '"gap_description": str, "evidence": str, "target_files": [str], '
     '"change_summary": str, "risk": "low"|"medium"|"high", "test_plan": str}. '

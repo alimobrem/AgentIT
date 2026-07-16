@@ -15,15 +15,25 @@ docs/self-improvement-for-agentit.md for the full design.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 CAPABILITY_RUN_ACTION = "capability-run"
+CAPABILITY_OUTCOME_ACTION = "capability-outcome"
+
+# L4: closed-as-wontfix titles stay deprioritized / blocked this long.
+OUTCOME_COOLDOWN_DAYS = 30
+# Open self-improve PRs older than this are recorded as stale once.
+STALE_PR_DAYS = 14
+REJECT_REASON_PREFIX = "agentit:reject-reason:"
 
 # Direct, mechanical enforcement of this project's own "keep changes
 # minimal" convention (see llm.py's system prompt) — not a new philosophy,
@@ -98,20 +108,117 @@ def list_existing_src_modules(repo_dir: Path | None = None) -> list[str]:
     return sorted(p.name for p in src.glob("*.py") if p.is_file())
 
 
+def _parse_iso(ts: str | None) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _now_utc(now: str | datetime | None = None) -> datetime:
+    if now is None:
+        return datetime.now(timezone.utc)
+    if isinstance(now, datetime):
+        return now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    parsed = _parse_iso(str(now))
+    return parsed or datetime.now(timezone.utc)
+
+
+def parse_reject_reason(labels: list[str] | None, body: str | None = None) -> str:
+    """Extract ``agentit:reject-reason:…`` from PR labels or body text."""
+    for label in labels or []:
+        text = str(label or "")
+        if text.lower().startswith(REJECT_REASON_PREFIX):
+            return text[len(REJECT_REASON_PREFIX):].strip()
+    body_text = str(body or "")
+    for line in body_text.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith(REJECT_REASON_PREFIX):
+            return stripped[len(REJECT_REASON_PREFIX):].strip()
+    return ""
+
+
+def outcome_from_pr_status(
+    status: dict,
+    *,
+    now: str | datetime | None = None,
+) -> dict | None:
+    """Map a ``get_pr_status`` payload to a durable outcome, or None if still open."""
+    state = str(status.get("state") or "unknown")
+    pr_url = str(status.get("html_url") or status.get("pr_url") or "")
+    title = str(status.get("title") or "")
+    reject_reason = parse_reject_reason(status.get("labels") or [], status.get("body") or "")
+    base = {
+        "state": state,
+        "pr_url": pr_url,
+        "title": title,
+        "slug": slugify(title) if title else "",
+        "reject_reason": reject_reason,
+        "merged_at": str(status.get("merged_at") or ""),
+    }
+    if state == "merged":
+        base["state"] = "merged"
+        return base
+    if state == "closed":
+        base["state"] = "closed"
+        return base
+    if state == "open":
+        created = _parse_iso(str(status.get("created_at") or ""))
+        if created is not None:
+            age_days = (_now_utc(now) - created).total_seconds() / 86400.0
+            if age_days >= STALE_PR_DAYS:
+                base["state"] = "stale"
+                return base
+    return None
+
+
+def _title_matches_gap(title: str, gap_text: str) -> bool:
+    title_l = (title or "").lower()
+    gap_l = (gap_text or "").lower()
+    if not title_l or not gap_l:
+        return False
+    if title_l in gap_l or gap_l in title_l:
+        return True
+    # Token overlap on meaningful words (skip tiny connectors).
+    title_tokens = {t for t in re.split(r"[^a-z0-9]+", title_l) if len(t) >= 4}
+    gap_tokens = {t for t in re.split(r"[^a-z0-9]+", gap_l) if len(t) >= 4}
+    if not title_tokens:
+        return False
+    overlap = title_tokens & gap_tokens
+    return len(overlap) >= max(2, min(3, len(title_tokens) // 2))
+
+
+def _shipped_module_phrases() -> list[tuple[tuple[str, ...], str]]:
+    """(phrase variants, module basename) for already-merged L3 capabilities."""
+    return [
+        (("stack signature", "stack-signature", "stack_signature"), "stack_signature_detector.py"),
+        (("tick failure", "tick-failure", "tick_failure"), "tick_failure_classifier.py"),
+    ]
+
+
 def filter_actionable_doc_gaps(
     gaps: list[dict],
     *,
     repo_dir: Path | None = None,
     recent_titles: list[str] | None = None,
+    outcomes: list[dict] | None = None,
 ) -> list[dict]:
     """Drop doc-gap hits that are meta, already shipped, or already in-tree.
 
-    Prevents L3 dogfood from re-proposing the same capability after a merge
+    Prevents L3/L4 dogfood from re-proposing the same capability after a merge
     (e.g. stack-signature detector) when the docs still quote the old
-    "not built" wording, or when the module is already present on disk.
+    "not built" wording, when the module is already present on disk, or when
+    a prior ``capability-outcome`` recorded merge/wontfix for that title.
     """
     existing = set(list_existing_src_modules(repo_dir))
     recent_blob = " ".join(recent_titles or []).lower()
+    merged_or_wontfix = [
+        o for o in (outcomes or [])
+        if o.get("state") == "merged"
+        or (o.get("state") == "closed" and str(o.get("reject_reason") or "").lower() == "wontfix")
+    ]
     out: list[dict] = []
     for gap in gaps:
         text = str(gap.get("text") or "")
@@ -125,21 +232,77 @@ def filter_actionable_doc_gaps(
         # Section headers / "matches our Known gap convention" prose, not gaps.
         if lower.lstrip().startswith("#") or " convention" in lower:
             continue
-        if "stack signature" in lower or "stack-signature" in lower:
-            if "stack_signature_detector.py" in existing:
-                continue
-            if "stack signature" in recent_blob or "stack-signature" in recent_blob:
-                continue
+        skip = False
+        for phrases, module in _shipped_module_phrases():
+            if any(p in lower for p in phrases):
+                if module in existing or any(p in recent_blob for p in phrases):
+                    skip = True
+                    break
+        if skip:
+            continue
+        if any(_title_matches_gap(str(o.get("title") or ""), text) for o in merged_or_wontfix):
+            continue
         out.append(gap)
     return out
+
+
+def rank_doc_gaps(gaps: list[dict], outcomes: list[dict] | None = None) -> list[dict]:
+    """Prefer untried gaps; deprioritize recent wontfix titles; boost remediable rejects."""
+    outcomes = outcomes or []
+    wontfix = [
+        o for o in outcomes
+        if o.get("state") == "closed" and str(o.get("reject_reason") or "").lower() == "wontfix"
+    ]
+    remediable = [
+        o for o in outcomes
+        if o.get("state") == "closed" and str(o.get("reject_reason") or "").lower() not in ("", "wontfix")
+    ]
+    tried_titles = [str(o.get("title") or "") for o in outcomes if o.get("state") in ("merged", "closed", "stale")]
+
+    def _score(gap: dict) -> tuple[int, int]:
+        text = str(gap.get("text") or "")
+        # Lower sort key = higher priority.
+        if any(_title_matches_gap(str(o.get("title") or ""), text) for o in wontfix):
+            return (3, 0)
+        if any(_title_matches_gap(t, text) for t in tried_titles):
+            # Remediable prior reject: still try, but after never-tried gaps.
+            if any(_title_matches_gap(str(o.get("title") or ""), text) for o in remediable):
+                return (1, 0)
+            return (2, 0)
+        return (0, 0)
+
+    return sorted(gaps, key=_score)
+
+
+def _event_details(event: dict | None) -> dict:
+    """Parse store event details — rows expose ``details_json``, not ``details``.
+
+    Mirrors ``routes/capabilities.py`` / ``llm_decisions.py``; accepts an
+    already-parsed ``details`` dict for unit-test fixtures.
+    """
+    if not event:
+        return {}
+    details = event.get("details")
+    if isinstance(details, dict):
+        return details
+    raw = event.get("details_json")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
 
 
 def recent_capability_titles(events: list[dict] | None) -> list[str]:
     """Extract proposal titles from recent ``capability-run`` event rows."""
     titles: list[str] = []
     for event in events or []:
-        details = event.get("details") if isinstance(event.get("details"), dict) else {}
-        title = (details or {}).get("title") or ""
+        details = _event_details(event)
+        title = details.get("title") or ""
         if not title:
             summary = str(event.get("summary") or "")
             for prefix in ("Opened proposal PR: ", "Proposal '", "Proposal "):
@@ -152,19 +315,170 @@ def recent_capability_titles(events: list[dict] | None) -> list[str]:
     return titles[:20]
 
 
+def proposal_outcomes_from_events(events: list[dict] | None) -> list[dict]:
+    """Normalize ``capability-outcome`` event rows into outcome dicts."""
+    out: list[dict] = []
+    for event in events or []:
+        details = _event_details(event)
+        if not details:
+            continue
+        row = {
+            "state": str(details.get("state") or ""),
+            "title": str(details.get("title") or ""),
+            "slug": str(details.get("slug") or slugify(str(details.get("title") or ""))),
+            "pr_url": str(details.get("pr_url") or ""),
+            "reject_reason": str(details.get("reject_reason") or ""),
+            "merged_at": str(details.get("merged_at") or ""),
+            "recorded_at": str(event.get("timestamp") or details.get("recorded_at") or ""),
+        }
+        if row["state"] and row["pr_url"]:
+            out.append(row)
+    return out
+
+
+def cited_merges(outcomes: list[dict] | None, *, limit: int = 5) -> list[dict]:
+    """Recent merged outcomes suitable for citing in the next run's details JSON."""
+    merges = [o for o in (outcomes or []) if o.get("state") == "merged"]
+    return merges[:limit]
+
+
 def proposal_already_implemented(proposal: dict, repo_dir: Path | None = None) -> bool:
-    """True when the proposal's sibling module (or stack-signature) already exists."""
+    """True when the proposal's sibling module (or a known shipped L3 module) exists."""
     repo_dir = repo_dir or Path(".")
     title = str(proposal.get("title") or "")
     sibling = sibling_module_path(title)
     if (repo_dir / sibling).is_file():
         return True
     lower = title.lower()
-    if ("stack signature" in lower or "stack-signature" in lower) and (
-        repo_dir / "src/agentit/stack_signature_detector.py"
-    ).is_file():
-        return True
+    for phrases, module in _shipped_module_phrases():
+        if any(p in lower for p in phrases) and (repo_dir / "src" / "agentit" / module).is_file():
+            return True
     return False
+
+
+def proposal_blocked_by_outcome(
+    proposal: dict,
+    outcomes: list[dict] | None,
+    *,
+    now: str | datetime | None = None,
+) -> bool:
+    """True when a recent merge or wontfix outcome covers this proposal title."""
+    title = str(proposal.get("title") or "")
+    if not title:
+        return False
+    slug = slugify(title)
+    now_dt = _now_utc(now)
+    for outcome in outcomes or []:
+        o_title = str(outcome.get("title") or "")
+        o_slug = str(outcome.get("slug") or slugify(o_title))
+        same = slug == o_slug or _title_matches_gap(o_title, title) or _title_matches_gap(title, o_title)
+        if not same:
+            continue
+        if outcome.get("state") == "merged":
+            return True
+        if outcome.get("state") == "closed" and str(outcome.get("reject_reason") or "").lower() == "wontfix":
+            recorded = _parse_iso(str(outcome.get("recorded_at") or outcome.get("merged_at") or ""))
+            if recorded is None:
+                return True
+            age_days = (now_dt - recorded).total_seconds() / 86400.0
+            if age_days <= OUTCOME_COOLDOWN_DAYS:
+                return True
+    return False
+
+
+def last_merge_broke_ci(outcomes: list[dict] | None, run_events: list[dict] | None) -> bool:
+    """True when a recent merge is followed by a tests-pass gate failure."""
+    merges = [o for o in (outcomes or []) if o.get("state") == "merged"]
+    if not merges:
+        return False
+    latest_merge = merges[0]
+    merge_ts = _parse_iso(str(latest_merge.get("recorded_at") or latest_merge.get("merged_at") or ""))
+    for event in run_events or []:
+        details = _event_details(event)
+        gates = details.get("gate_results") or []
+        failed_tests = any(
+            isinstance(g, dict) and g.get("name") == "tests-pass" and not g.get("passed")
+            for g in gates
+        )
+        if not failed_tests:
+            continue
+        event_ts = _parse_iso(str(event.get("timestamp") or ""))
+        if merge_ts is None or event_ts is None or event_ts >= merge_ts:
+            return True
+    return False
+
+
+def collect_tracked_prs(run_events: list[dict] | None) -> list[dict]:
+    """PRs opened by prior capability-run cycles (url + title)."""
+    tracked: list[dict] = []
+    seen: set[str] = set()
+    for event in run_events or []:
+        details = _event_details(event)
+        pr_url = str(details.get("pr_url") or "")
+        if not pr_url or pr_url in seen:
+            continue
+        seen.add(pr_url)
+        tracked.append({
+            "pr_url": pr_url,
+            "title": str(details.get("title") or ""),
+        })
+    return tracked
+
+
+async def sync_proposal_outcomes(
+    store: object | None,
+    *,
+    get_status=None,
+    now: str | datetime | None = None,
+) -> list[dict]:
+    """Poll open self-improve PRs and log new ``capability-outcome`` events.
+
+    Idempotent per ``pr_url``: already-recorded outcomes are skipped. Returns
+    only newly recorded outcome dicts.
+    """
+    if store is None:
+        return []
+    if get_status is None:
+        from agentit.portal.github_pr import get_pr_status as get_status
+
+    run_events = await _safe_call(store, "list_events_by_action", CAPABILITY_RUN_ACTION, limit=50)
+    prior = proposal_outcomes_from_events(
+        await _safe_call(store, "list_events_by_action", CAPABILITY_OUTCOME_ACTION, limit=100),
+    )
+    already = {o["pr_url"] for o in prior if o.get("pr_url")}
+    newly: list[dict] = []
+    for tracked in collect_tracked_prs(run_events):
+        pr_url = tracked["pr_url"]
+        if pr_url in already:
+            continue
+        try:
+            status = await asyncio.to_thread(get_status, pr_url)
+        except Exception:
+            logger.warning("capability-scout: failed to poll PR status for %s", pr_url, exc_info=True)
+            continue
+        if not isinstance(status, dict):
+            continue
+        # Prefer title from the original propose event when GitHub omits it.
+        if not status.get("title") and tracked.get("title"):
+            status = {**status, "title": tracked["title"]}
+        outcome = outcome_from_pr_status(status, now=now)
+        if outcome is None:
+            continue
+        outcome["recorded_at"] = _now_utc(now).isoformat()
+        summary = (
+            f"Proposal {outcome['state']}: {outcome.get('title') or pr_url}"
+            + (f" ({outcome['reject_reason']})" if outcome.get("reject_reason") else "")
+        )
+        try:
+            await store.log_event(
+                "capability-scout", CAPABILITY_OUTCOME_ACTION, None, "info", summary, details=outcome,
+            )
+        except Exception:
+            logger.warning("Failed to log capability-outcome for %s", pr_url, exc_info=True)
+            continue
+        newly.append(outcome)
+        already.add(pr_url)
+    return newly
 
 
 async def _safe_call(store: object, method_name: str, *args, default=None, **kwargs):
@@ -186,19 +500,35 @@ async def gather_evidence(store: object | None, repo_dir: Path | None = None) ->
     here is invented; every field comes straight from a real store query or
     a real grep of this repo's own docs. ``signal_count`` is how the caller
     decides whether there's enough real data to ground a proposal at all.
+
+    L4: includes prior ``capability-outcome`` rows (merged/closed/stale) so
+    the LLM and filters prefer open gaps and cite recent merges.
     """
     repo_dir = repo_dir or Path(".")
     recent_titles: list[str] = []
+    recent_events: list[dict] = []
+    outcomes: list[dict] = []
     if store is not None:
         recent_events = await _safe_call(
             store, "list_events_by_action", CAPABILITY_RUN_ACTION, limit=20,
         )
         recent_titles = recent_capability_titles(recent_events)
+        outcomes = proposal_outcomes_from_events(
+            await _safe_call(store, "list_events_by_action", CAPABILITY_OUTCOME_ACTION, limit=50),
+        )
 
-    doc_gaps = filter_actionable_doc_gaps(
-        scan_doc_gaps(), repo_dir=repo_dir, recent_titles=recent_titles,
+    doc_gaps = rank_doc_gaps(
+        filter_actionable_doc_gaps(
+            scan_doc_gaps(),
+            repo_dir=repo_dir,
+            recent_titles=recent_titles,
+            outcomes=outcomes,
+        ),
+        outcomes,
     )
     existing_modules = list_existing_src_modules(repo_dir)
+    merges = cited_merges(outcomes)
+    fix_regression_only = last_merge_broke_ci(outcomes, recent_events)
 
     if store is None:
         return {
@@ -212,6 +542,9 @@ async def gather_evidence(store: object | None, repo_dir: Path | None = None) ->
             "tick_failures": [],
             "existing_modules": existing_modules,
             "recent_proposal_titles": recent_titles,
+            "proposal_outcomes": outcomes,
+            "cited_merges": merges,
+            "fix_regression_only": fix_regression_only,
             "signal_count": len(doc_gaps),
         }
 
@@ -223,9 +556,21 @@ async def gather_evidence(store: object | None, repo_dir: Path | None = None) ->
     loop_health = await _safe_call(store, "get_loop_health", default={})
     tick_failures = await _safe_call(store, "list_events_by_action", "tick-failed", limit=20)
 
+    # Prefer previously rejected finding categories (remediable human signal)
+    # ahead of low-volume noise when ranking evidence for the LLM.
+    if isinstance(rejection_stats, list):
+        rejection_stats = sorted(
+            rejection_stats,
+            key=lambda r: (
+                -int(r.get("rejected") or r.get("rejection_count") or r.get("count") or 0),
+                str(r.get("finding_category") or r.get("category") or ""),
+            ),
+        )
+
     signal_count = (
         len(doc_gaps) + len(rejection_stats) + len(agent_stats)
         + len(check_compliance) + len(low_effectiveness_skills) + len(tick_failures)
+        + len(outcomes)
     )
 
     return {
@@ -239,6 +584,9 @@ async def gather_evidence(store: object | None, repo_dir: Path | None = None) ->
         "tick_failures": tick_failures,
         "existing_modules": existing_modules,
         "recent_proposal_titles": recent_titles,
+        "proposal_outcomes": outcomes,
+        "cited_merges": merges,
+        "fix_regression_only": fix_regression_only,
         "signal_count": signal_count,
     }
 
@@ -731,6 +1079,10 @@ def describe_capability_run(
         "doc_anchor": doc_anchor,
         "gate_results": (gate_result or {}).get("gates", []),
         "pr_url": pr_url,
+        # L4: cite prior merge/close outcomes so the next cycle is auditable.
+        "proposal_outcomes": evidence.get("proposal_outcomes") or [],
+        "cited_merges": evidence.get("cited_merges") or [],
+        "fix_regression_only": bool(evidence.get("fix_regression_only")),
     }
     if error:
         details["error"] = error

@@ -38,7 +38,7 @@
 | **L1** | Real evidence → one grounded proposal | Scout logs evidence; LLM returns parseable `has_proposal` or honest no-op |
 | **L2** | Gates → draft PR | Doc-proposal PR opens; CI runs; visible on Self-Improvement tab |
 | **L3** | Human merges executable change | Source (or skill) diff PR merged with minimal rewrite; CI green |
-| **L4** | Outcome feeds next cycle | Merge/close recorded; next cycle prefers open gaps / prior rejects |
+| **L4** | Outcome feeds next cycle | Merge/close recorded; next cycle prefers open gaps / prior rejects — **met 2026-07-16** |
 | **L5** | Same loop on another app | One non-AgentIT app gets a merged improvement via the same engine shape |
 
 ---
@@ -199,23 +199,25 @@ Allowed change classes for v1 source autonomy (pick in order):
 
 **Files:** store (`store.py` / `store_pg.py`), webhook or poll job
 
-- [ ] On each open `agentit/self-improve/*` PR, poll `get_pr_status` from portal maintenance or scout tick
-- [ ] Log `capability-outcome` event: merged | closed | stale
-- [ ] Store reason if closed (label or PR comment convention: `agentit:reject-reason:…`)
+- [x] On each open `agentit/self-improve/*` PR, poll `get_pr_status` from portal maintenance or scout tick
+- [x] Log `capability-outcome` event: merged | closed | stale
+- [x] Store reason if closed (label or PR comment convention: `agentit:reject-reason:…`)
 
 ### Task 3.2: Feed outcomes into next `gather_evidence`
 
-- [ ] Prefer unresolved doc gaps and previously rejected categories
-- [ ] Deprioritize titles/slugs closed as `wontfix` in last N days
-- [ ] If last merge broke CI (detect via subsequent failed runs), force next cycle to “fix regression only” mode
+- [x] Prefer unresolved doc gaps and previously rejected categories
+- [x] Deprioritize titles/slugs closed as `wontfix` in last N days
+- [x] If last merge broke CI (detect via subsequent failed runs), force next cycle to “fix regression only” mode
 
 ### Task 3.3: Skill-learner ↔ scout contract
 
-- [ ] skill-learner drafts stay in catalog Activate path (other-apps loop)
-- [ ] scout may propose skill fixes when effectiveness is low — but one owner per artifact (no double PRs)
-- [ ] Document the split in README Self-improvement sections
+- [x] skill-learner drafts stay in catalog Activate path (other-apps loop)
+- [x] scout may propose skill fixes when effectiveness is low — but one owner per artifact (no double PRs)
+- [x] Document the split in README Self-improvement sections
 
 **Phase 3 exit:** A closed PR changes the next cycle’s proposal; a merged PR is cited as evidence in a later run’s details JSON.
+
+**Status (2026-07-16):** L4 code path shipped — `sync_proposal_outcomes()` + outcome-aware `gather_evidence()` / filters; each `capability-run` details JSON cites `cited_merges` / `proposal_outcomes`.
 
 ---
 

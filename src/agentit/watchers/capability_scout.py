@@ -70,9 +70,23 @@ class CapabilityScout:
             describe_capability_run,
             gather_evidence,
             proposal_already_implemented,
+            proposal_blocked_by_outcome,
             resolve_build_mode,
             run_safety_gates,
+            sync_proposal_outcomes,
         )
+
+        # L4: persist merge/close/stale outcomes before ranking the next gap.
+        try:
+            newly = await sync_proposal_outcomes(self._store)
+            if newly:
+                click.echo(
+                    f"[capability-scout] Recorded {len(newly)} proposal outcome(s): "
+                    + ", ".join(f"{o.get('state')}:{o.get('title') or o.get('pr_url')}" for o in newly),
+                    err=True,
+                )
+        except Exception:
+            logger.warning("capability-scout: sync_proposal_outcomes failed", exc_info=True)
 
         evidence = await gather_evidence(self._store, repo_dir=self._repo_dir)
 
@@ -128,6 +142,17 @@ class CapabilityScout:
             details["outcome"] = "already-implemented"
             await self._log_run(severity, summary, details)
             return {"outcome": "already-implemented"}
+
+        if proposal_blocked_by_outcome(proposal, evidence.get("proposal_outcomes") or []):
+            click.echo(
+                f"[capability-scout] Skipping proposal '{proposal.get('title')}' "
+                "(recent merge or wontfix outcome).",
+                err=True,
+            )
+            severity, summary, details = describe_capability_run(evidence, proposal, None, None)
+            details["outcome"] = "outcome-blocked"
+            await self._log_run(severity, summary, details)
+            return {"outcome": "outcome-blocked"}
 
         resolved_mode = resolve_build_mode(proposal, self._mode)
         click.echo(
