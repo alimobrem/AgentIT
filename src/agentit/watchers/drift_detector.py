@@ -128,7 +128,16 @@ class DriftDetector:
     def _fetch_argo_apps(self) -> dict | None:
         """List Argo CD Application resources via the kubernetes client."""
         try:
-            items = kube.list_custom_resources("argoproj.io", "v1alpha1", "applications")
+            # Namespaced list against openshift-gitops, not a cluster-scoped
+            # list -- matches the namespace-scoped Role rbac.yaml grants
+            # (`-argocd-read`, bound only in openshift-gitops) and the same
+            # namespace= every other Argo Application lookup in this repo
+            # already uses (health.py, fleet.py, delivery.py). Omitting it
+            # here made this the one call site trying a cluster-scoped
+            # list, which 403s even for an otherwise-correctly-privileged SA.
+            items = kube.list_custom_resources(
+                "argoproj.io", "v1alpha1", "applications", namespace="openshift-gitops",
+            )
         except kube.KubeError as exc:
             logger.warning("Failed to fetch Argo apps: %s", exc)
             return None

@@ -19,6 +19,10 @@ spec:
         app: {{ .Release.Name }}-vuln-watcher
         app.kubernetes.io/component: agent
     spec:
+      # Without this, the pod runs as the namespace's bare `default` SA
+      # (no custom RBAC at all) instead of the `{{ .Release.Name }}` SA
+      # that rbac.yaml actually grants fleet-wide/cluster read access to.
+      serviceAccountName: {{ .Release.Name }}
       securityContext:
         runAsNonRoot: true
         seccompProfile:

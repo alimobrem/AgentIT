@@ -636,6 +636,46 @@ class TestOauthProxySecret:
         assert "randAlphaNum" not in raw
 
 
+class TestOauthProxyHealthzBypass:
+    """Regression guard for a live bug: without --skip-auth-regex, the
+    oauth-proxy sidecar redirected the *external* synthetic probe's request
+    to /healthz (302 to the OAuth login page) instead of reaching the app,
+    so synthetic-probe-cronjob.yaml always reported the portal as down. Raw
+    text check (not full YAML parse) since deployment.yaml's SAR line uses
+    a `{{ $sar | toJson }}` expression this test file's Helm-var stripping
+    doesn't attempt to evaluate."""
+    TEMPLATE = CHART_DIR / "deployment.yaml"
+
+    def test_skips_auth_for_healthz_only(self):
+        raw = self.TEMPLATE.read_text()
+        assert "--skip-auth-regex=^/healthz$" in raw
+
+
+class TestSyntheticProbeCertCheck:
+    """Regression guard for a live bug: ubi-minimal (this Job's probe image)
+    doesn't ship an `openssl` CLI, so the old `command -v openssl` guard
+    always failed and CERT_DAYS stayed "null" on every run -- which, because
+    the portal's route_cert_expiry_days Gauge starts at 0 until first
+    `.set()`, read as a permanent "0 days remaining" and fired
+    AgentITCertExpiringCritical for real, against a certificate that
+    actually had ~14 months left."""
+    TEMPLATE = CHART_DIR / "synthetic-probe-cronjob.yaml"
+
+    def test_does_not_shell_out_to_openssl(self):
+        """Checks the actual probe invocation, not this template's own
+        explanatory comment (which legitimately still mentions `openssl`
+        by name to explain why it's no longer used)."""
+        raw = self.TEMPLATE.read_text()
+        assert "openssl s_client" not in raw
+        assert "openssl x509 -noout" not in raw
+        assert "command -v openssl >/dev/null" not in raw
+
+    def test_extracts_expiry_from_curl_verbose_output(self):
+        raw = self.TEMPLATE.read_text()
+        assert "expire date:" in raw
+        assert "curl -sk -o /dev/null -v" in raw
+
+
 class TestInternalWebhookTokenSecret:
     TEMPLATE = CHART_DIR / "internal-webhook-token-secret.yaml"
 
@@ -970,6 +1010,37 @@ class TestSkillLearnerDeployment:
         command = container["livenessProbe"]["exec"]["command"][-1]
         assert "-lt 900" in command
         assert "172800" not in command
+
+
+# ---------------------------------------------------------------------------
+# All watcher agent Deployments must run as the `agentit` SA, not the
+# namespace's bare `default` SA -- see rbac.yaml, which grants that SA
+# fleet-wide pod read access and read access to Argo CD Applications in
+# openshift-gitops specifically so these watchers can use it. Regression
+# guard for a live bug: these five Deployments omitted serviceAccountName
+# entirely, so slo-tracker and drift-detector were 403ing on every tick.
+# ---------------------------------------------------------------------------
+
+class TestAgentDeploymentsUseTheAgentitServiceAccount:
+    AGENT_TEMPLATES = [
+        CHART_DIR / "agents" / "vuln-watcher.yaml",
+        CHART_DIR / "agents" / "slo-tracker.yaml",
+        CHART_DIR / "agents" / "drift-detector.yaml",
+        CHART_DIR / "agents" / "skill-learner.yaml",
+        CHART_DIR / "agents" / "capability-scout.yaml",
+    ]
+
+    def test_all_agent_deployments_set_service_account_name(self):
+        for template in self.AGENT_TEMPLATES:
+            doc = _load(template)
+            pod_spec = doc["spec"]["template"]["spec"]
+            assert pod_spec.get("serviceAccountName") == "agentit", (
+                f"{template.name}: expected serviceAccountName 'agentit' "
+                f"(the release name), got {pod_spec.get('serviceAccountName')!r} "
+                "-- without it this pod runs as the namespace's unprivileged "
+                "'default' SA instead of the one rbac.yaml actually grants "
+                "fleet-wide/Argo CD read access to."
+            )
 
 
 # ---------------------------------------------------------------------------

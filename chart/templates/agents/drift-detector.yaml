@@ -19,6 +19,11 @@ spec:
         app: {{ .Release.Name }}-drift-detector
         app.kubernetes.io/component: agent
     spec:
+      # Without this, the pod runs as the namespace's bare `default` SA
+      # (no custom RBAC at all) instead of the `{{ .Release.Name }}` SA
+      # that rbac.yaml's -argocd-read Role actually grants read access to
+      # Argo CD Applications in openshift-gitops to.
+      serviceAccountName: {{ .Release.Name }}
       securityContext:
         runAsNonRoot: true
         seccompProfile:
