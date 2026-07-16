@@ -1687,6 +1687,11 @@ document.body.addEventListener('htmx:afterSettle', function(e) {
     // exact htmx-boost interaction (alpinejs/alpine discussion #4485).
     Alpine.destroyTree(document.body);
     Alpine.initTree(document.body);
+    // alpine:initialized only fires once per full page load. Boosted POST
+    // redirects (Register for GitOps, Deliver, Delete, ...) land ?error=
+    // /?success= on the new URL with a swapped body, and without this the
+    // flash toasts never appear -- the click looks like a no-op.
+    showUrlParamToasts();
   } else if (e.detail.target && e.detail.target.querySelector('[x-data]')) {
     Alpine.initTree(e.detail.target);
   }
@@ -2077,14 +2082,22 @@ function showToast(message, type, duration) {
 // Using 'alpine:init' here meant Alpine.$data(tm) could intermittently be
 // undefined/not-yet-bound depending on init timing, causing
 // "Alpine.$data(...).show is not a function".
-document.addEventListener('alpine:initialized', function() {
+// Also re-invoked from htmx:afterSettle after boosted redirects (see call
+// above) because alpine:initialized does not re-fire when
+// Alpine.destroyTree/initTree rebinds a swapped body.
+function showUrlParamToasts() {
   var params = new URLSearchParams(window.location.search);
   var tm = document.getElementById('toasts');
-  if (params.get('error') && Alpine.$data(tm) && !document.querySelector('.alert-error')) Alpine.$data(tm).show(params.get('error'), 'error');
-  if (params.get('warning') && Alpine.$data(tm) && !document.querySelector('.alert-warn')) Alpine.$data(tm).show(params.get('warning'), 'warning');
-  if ((params.get('success') || params.get('pr_url')) && Alpine.$data(tm) && !document.querySelector('.alert-success')) Alpine.$data(tm).show(params.get('success') || 'Operation successful', 'success');
-  if (params.get('purged') && Alpine.$data(tm)) Alpine.$data(tm).show('Purged ' + params.get('purged') + ' stale rows', 'success');
-});
+  if (!tm || !window.Alpine || !Alpine.$data(tm)) return;
+  var data = Alpine.$data(tm);
+  if (params.get('error') && !document.querySelector('.alert-error')) data.show(params.get('error'), 'error');
+  if (params.get('warning') && !document.querySelector('.alert-warn')) data.show(params.get('warning'), 'warning');
+  if ((params.get('success') || params.get('pr_url')) && !document.querySelector('.alert-success')) {
+    data.show(params.get('success') || 'Operation successful', 'success');
+  }
+  if (params.get('purged')) data.show('Purged ' + params.get('purged') + ' stale rows', 'success');
+}
+document.addEventListener('alpine:initialized', showUrlParamToasts);
 // Relative timestamps
 function relativeTime(iso) {
   var d = new Date(iso);

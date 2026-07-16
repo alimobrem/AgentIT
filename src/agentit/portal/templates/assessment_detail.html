@@ -17,18 +17,44 @@
   {% endif %}
 </p>
 
+{% if request.query_params.get('error') %}
+<div class="alert alert-error mb-2" role="alert">{{ request.query_params.get('error') }}</div>
+{% endif %}
+{% if request.query_params.get('warning') %}
+{% for w in request.query_params.get('warning').split('|') %}
+<div class="alert alert-warn mb-2" role="status">{{ w }}</div>
+{% endfor %}
+{% endif %}
+{% if request.query_params.get('success') %}
+<div class="alert alert-success mb-2" role="status">{{ request.query_params.get('success') }}</div>
+{% endif %}
+
 {% if not gitops_registered and not infra_repo_url %}
-<div x-data="{ dismissed: false }" x-show="!dismissed" x-cloak class="alert alert-info mb-2">
+{# Parent x-data owns dismissed + busy; form only has x-ref (same pattern as
+   Findings Fix) so $refs.registerGitopsForm resolves in the button scope.
+   Optional infra_repo_url covers third-party app owners where auto-create
+   under the app's GitHub org/user is not allowed for our token. #}
+<div x-data="{ dismissed: false, busy: false }" x-show="!dismissed" x-cloak class="alert alert-info mb-2">
   <span class="text-sm">Not GitOps-registered. Apps under Argo CD get PR review + drift protection automatically.</span>
-  <form method="post" action="/assessments/{{ assessment_id }}/register-gitops" class="inline-form"
-        x-data x-ref="registerGitopsForm">
-    <button type="button" class="btn btn-sm btn-outline"
+  <form method="post" action="/assessments/{{ assessment_id }}/register-gitops" class="inline-form register-gitops-form"
+        x-ref="registerGitopsForm" @submit="busy = true">
+    <div class="form-group">
+      <label class="form-label" for="register-infra-repo-url">GitOps infra repo <span class="text-muted text-xs">(optional)</span></label>
+      <input type="url" id="register-infra-repo-url" name="infra_repo_url"
+             placeholder="https://github.com/org/agentit-gitops">
+    </div>
+    <button type="button" class="btn btn-sm btn-outline" data-action="register-gitops"
+      :disabled="busy" :aria-busy="busy"
+      :class="{ 'btn-loading': busy, 'submitting': busy }"
       @click="$dispatch('show-confirm', {
         title: 'Register for GitOps',
-        message: 'Register this app for GitOps delivery? Future Fix/Onboard deliveries will commit to an infra repo and open a PR instead of applying directly to the cluster.',
+        message: 'Register this app for GitOps delivery? Future Fix/Onboard deliveries will commit to an infra repo and open a PR instead of applying directly to the cluster. Leave the infra repo blank to auto-create agentit-gitops under your GitHub account.',
         form: $refs.registerGitopsForm,
         opts: { confirmText: 'Register', danger: false }
-      })">Register for GitOps</button>
+      })">
+      <span class="btn-label">Register for GitOps</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Working&hellip;</span>
+    </button>
   </form>
   <button type="button" class="btn btn-sm btn-outline" @click="dismissed = true">Dismiss</button>
 </div>

@@ -385,7 +385,10 @@ async def register_gitops(request: Request, assessment_id: str):
         infra_repo_url = await asyncio.to_thread(_auto_create_infra_repo, report.repo_url)
         if infra_repo_url is None:
             return RedirectResponse(
-                url=f"/assessments/{assessment_id}?error={quote('Could not auto-create a GitOps infra repo — check GitHub token permissions')}",
+                url=(
+                    f"/assessments/{assessment_id}?error="
+                    f"{quote('Could not auto-create a GitOps infra repo — paste an infra repo URL in the Register form (or check GITHUB_TOKEN permissions) and try again.')}"
+                ),
                 status_code=303,
             )
 
