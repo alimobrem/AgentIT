@@ -12,3 +12,9 @@ spec:
     matchLabels:
       app.kubernetes.io/name: {{ .Chart.Name }}
       app.kubernetes.io/instance: {{ .Release.Name }}
+      # Narrow to portal Rollout/Deployment pods. Broader release labels also
+      # matched Job pods (e.g. postgres-bundled-backup*), and the PDB
+      # controller then reports SyncFailed ("jobs.batch does not implement
+      # the scale subresource"), which Argo surfaces as Application Degraded
+      # and the Health page maps to deploy Failed.
+      app.kubernetes.io/component: portal

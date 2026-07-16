@@ -419,3 +419,52 @@ async def test_nav_badge_present_on_every_page(client):
     resp = await client.get("/")
     assert 'id="deploy-status"' in resp.text
     assert "/api/deploy-status" in resp.text
+
+
+def test_deploy_status_cancelled_pipeline_is_not_failed():
+    """Cancelled CI (capacity / concurrency) must not pin the Health badge to Failed."""
+    with patch("agentit.portal.routes.health.kube") as mock_kube:
+        mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
+            [_pipelinerun("Cancelled", "False")] if "tekton" in group else [_argo_app("Synced", "Healthy")]
+        )
+        status = _get_deploy_status()
+    assert status["state"] == "idle"
+    assert status["pipeline"]["reason"] == "Cancelled"
+
+
+def test_deploy_status_picks_newest_pipelinerun_by_creation_timestamp():
+    older = _pipelinerun("Failed", "False", revision="oldrev" + "0" * 34)
+    older["metadata"]["name"] = "agentit-ci-older"
+    older["metadata"]["creationTimestamp"] = "2026-07-16T10:00:00Z"
+    newer = _pipelinerun("Succeeded", "True", revision="newrev" + "0" * 34)
+    newer["metadata"]["name"] = "agentit-ci-newer"
+    newer["metadata"]["creationTimestamp"] = "2026-07-16T12:00:00Z"
+    with patch("agentit.portal.routes.health.kube") as mock_kube:
+        mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
+            [newer, older] if "tekton" in group else [_argo_app("Synced", "Healthy")]
+        )
+        status = _get_deploy_status()
+    assert status["pipeline"]["name"] == "agentit-ci-newer"
+    assert status["state"] == "idle"
+
+
+def test_deploy_status_argo_operation_running_is_deploying_not_failed():
+    app = _argo_app("Synced", "Degraded", health_message="hook waiting")
+    app["status"]["operationState"] = {"phase": "Running", "message": "waiting for hook"}
+    with patch("agentit.portal.routes.health.kube") as mock_kube:
+        mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
+            [] if "tekton" in group else [app]
+        )
+        status = _get_deploy_status()
+    assert status["state"] == "deploying"
+    assert status["stage"] == "syncing"
+
+
+def test_deploy_status_argo_suspended_is_deploying_canary_pause():
+    with patch("agentit.portal.routes.health.kube") as mock_kube:
+        mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
+            [] if "tekton" in group else [_argo_app("Synced", "Suspended")]
+        )
+        status = _get_deploy_status()
+    assert status["state"] == "deploying"
+    assert status["stage"] == "canary pause"

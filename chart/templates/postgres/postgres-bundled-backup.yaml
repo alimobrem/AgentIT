@@ -127,6 +127,7 @@ spec:
                 claimName: {{ .Release.Name }}-postgres-bundled-backups
 
 ---
+{{- if .Values.postgres.bundled.backup.pvcBindHook }}
 # WaitForFirstConsumer storage classes leave a new PVC Pending until a pod
 # mounts it. Argo CD treats Pending PVCs as Progressing and will not run
 # PostSync hooks (or finish a sync that waits for healthy) until Bound --
@@ -192,4 +193,5 @@ spec:
           persistentVolumeClaim:
             claimName: {{ .Release.Name }}-postgres-bundled-backups
 
+{{- end }}
 {{- end }}
