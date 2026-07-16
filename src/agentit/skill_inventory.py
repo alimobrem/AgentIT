@@ -89,7 +89,35 @@ def diff_snapshots(previous: InventorySnapshot | None, current: InventorySnapsho
     )
 
 
-def diff_and_log_inventory_changes(
+def _events_for_diff(diff: InventoryDiff) -> list[dict]:
+    """Pure helper shared by the sync/async variants below -- the exact set
+    of `log_event(...)` kwargs to emit for a given diff, independent of
+    whether the caller then calls them synchronously or `await`s them."""
+    events = []
+    for domain, name in diff.skills_added:
+        events.append(dict(
+            agent_id="skill-inventory", action="skill-added", target_app=None,
+            severity="info", summary=f"New skill added: {domain}/{name}",
+        ))
+    for domain, name in diff.skills_removed:
+        events.append(dict(
+            agent_id="skill-inventory", action="skill-removed", target_app=None,
+            severity="warning", summary=f"Skill removed: {domain}/{name}",
+        ))
+    for dimension, name in diff.checks_added:
+        events.append(dict(
+            agent_id="skill-inventory", action="check-added", target_app=None,
+            severity="info", summary=f"New check added: {dimension}/{name}",
+        ))
+    for dimension, name in diff.checks_removed:
+        events.append(dict(
+            agent_id="skill-inventory", action="check-removed", target_app=None,
+            severity="warning", summary=f"Check removed: {dimension}/{name}",
+        ))
+    return events
+
+
+async def diff_and_log_inventory_changes(
     store,
     skills_dir: Path = Path("skills"),
     checks_dir: Path = Path("checks"),
@@ -108,38 +136,20 @@ def diff_and_log_inventory_changes(
     this runs after the feature ships.
     """
     current = take_snapshot(skills_dir, checks_dir)
-    last = store.get_last_skill_inventory_snapshot()
+    last = await store.get_last_skill_inventory_snapshot()
     previous = InventorySnapshot.from_dict(last) if last is not None else None
 
     diff = diff_snapshots(previous, current)
 
     if previous is None:
-        store.save_skill_inventory_snapshot(current.to_dict())
+        await store.save_skill_inventory_snapshot(current.to_dict())
         return InventoryDiff()
 
     if not diff.has_changes:
         return diff
 
-    for domain, name in diff.skills_added:
-        store.log_event(
-            agent_id="skill-inventory", action="skill-added", target_app=None,
-            severity="info", summary=f"New skill added: {domain}/{name}",
-        )
-    for domain, name in diff.skills_removed:
-        store.log_event(
-            agent_id="skill-inventory", action="skill-removed", target_app=None,
-            severity="warning", summary=f"Skill removed: {domain}/{name}",
-        )
-    for dimension, name in diff.checks_added:
-        store.log_event(
-            agent_id="skill-inventory", action="check-added", target_app=None,
-            severity="info", summary=f"New check added: {dimension}/{name}",
-        )
-    for dimension, name in diff.checks_removed:
-        store.log_event(
-            agent_id="skill-inventory", action="check-removed", target_app=None,
-            severity="warning", summary=f"Check removed: {dimension}/{name}",
-        )
+    for event in _events_for_diff(diff):
+        await store.log_event(**event)
 
-    store.save_skill_inventory_snapshot(current.to_dict())
+    await store.save_skill_inventory_snapshot(current.to_dict())
     return diff

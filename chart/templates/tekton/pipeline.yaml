@@ -48,10 +48,35 @@ spec:
       taskSpec:
         workspaces:
           - name: source
+        # Postgres is the only supported store (see
+        # docs/postgres-migration-plan.md) -- nearly the whole suite needs
+        # a real instance now, not just an opt-in subset, so this Task runs
+        # one as a Tekton Sidecar (shares the step containers' network
+        # namespace/localhost, the standard Tekton pattern for a
+        # test-support service) instead of relying on SQLite's
+        # zero-infrastructure convenience.
+        sidecars:
+          - name: postgres
+            image: registry.redhat.io/rhel9/postgresql-15@sha256:06aeada2ca417445bc4fb711729e65a02ee78421a09c862cbd136ebdd51d7cfa
+            env:
+              - name: POSTGRESQL_USER
+                value: agentit_test
+              - name: POSTGRESQL_PASSWORD
+                value: agentit_test
+              - name: POSTGRESQL_DATABASE
+                value: agentit_test
+            readinessProbe:
+              exec:
+                command: ["pg_isready", "-U", "agentit_test"]
+              periodSeconds: 3
+              failureThreshold: 20
         steps:
           - name: test
             image: registry.access.redhat.com/ubi9/python-312:latest
             workingDir: $(workspaces.source.path)
+            env:
+              - name: AGENTIT_TEST_PG_DSN
+                value: postgresql://agentit_test:agentit_test@localhost:5432/agentit_test
             computeResources:
               requests:
                 memory: 256Mi
@@ -96,10 +121,56 @@ spec:
         - name: source
           workspace: source
 
+    # Smoke-tests the actual image build-image just produced by running a
+    # container from it and checking the exact tools/dirs capability-scout's
+    # own safety gates and self-fix flow need at runtime -- gh, a real .git
+    # checkout, pytest, tests/, and chart/. Each of these was previously
+    # discovered missing one at a time, live, only when a watcher pod
+    # happened to need it (see Containerfile's comments for each fix) --
+    # this task fails the pipeline loudly and immediately instead, before
+    # notify-argocd ever promotes the broken tag to the live Rollout.
+    - name: smoke-test-image
+      retries: 1
+      timeout: "5m0s"
+      runAfter: [build-image]
+      taskSpec:
+        params:
+          - name: image
+            type: string
+        steps:
+          - name: smoke-test
+            image: $(params.image)
+            computeResources:
+              requests:
+                memory: 128Mi
+                cpu: 100m
+              limits:
+                memory: 256Mi
+            command: ["/bin/sh", "-c"]
+            args:
+              - |
+                set -eu
+                echo "pytest is present:"
+                python -m pytest --version
+                echo "tests/ exists and is non-empty:"
+                test -d tests
+                [ -n "$(ls -A tests)" ]
+                echo "chart/ exists (capability-scout's safety gates need it):"
+                test -d chart
+                echo "git and gh CLIs are present:"
+                git --version
+                gh --version
+                echo "/opt/app-root/src is a real, valid git checkout:"
+                git -C /opt/app-root/src status
+                echo "Image smoke test passed."
+      params:
+        - name: image
+          value: $(params.image-ref):$(params.revision)
+
     - name: notify-argocd
       retries: 1
       timeout: "2m0s"
-      runAfter: [run-tests, build-image]
+      runAfter: [run-tests, smoke-test-image]
       taskSpec:
         params:
           - name: revision

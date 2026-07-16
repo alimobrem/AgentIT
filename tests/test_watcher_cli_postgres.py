@@ -1,36 +1,30 @@
 """End-to-end proof that the 4 watcher CLI commands (`vuln-watch`,
-`slo-track`, `drift-detect`, `learn-watch`) genuinely support the async
-Postgres-backed store directly -- the real blocker found and rolled back
-during the cutover attempt documented in docs/postgres-migration-plan.md's
-"real cutover attempted and rolled back" section (``store.raw``, which
-``store_pg.AssessmentStore`` deliberately does not have).
+`slo-track`, `drift-detect`, `learn-watch`) genuinely support the real,
+async, Postgres-backed store directly -- the real blocker found and rolled
+back during a since-superseded cutover attempt (`store.raw`, which
+`AssessmentStore` deliberately does not have) -- see
+docs/postgres-migration-plan.md for that history.
 
-Each test below sets ``AGENTIT_DB_BACKEND=postgres``/``AGENTIT_DB_DSN`` and
-invokes the *actual* CLI coroutine (unwrapped from the `@_run_async`/Click
-plumbing via `.__wrapped__`, since `_run_async`'s own `asyncio.run()` can't
-be nested inside pytest-asyncio's already-running loop) end to end: real
-``create_store()`` construction against a real Postgres container, real
+Each test below invokes the *actual* CLI coroutine (unwrapped from the
+`@_run_async`/Click plumbing via `.__wrapped__`, since `_run_async`'s own
+`asyncio.run()` can't be nested inside pytest-asyncio's already-running
+loop) end to end: real `create_store()` construction against the real,
+session-shared Postgres instance (tests/conftest.py), real
 watcher/`EventConsumer` construction with that store (no `.raw`), one real
 tick, and real reads/writes verified afterward against the same database
 via a second, independent connection -- not just "it didn't raise
 AttributeError".
-
-Requires a real Postgres instance; gated the same way as
-``tests/test_store_pg.py`` (``--run-postgres-tests``, reusing its
-``postgres_dsn``/container-lifecycle fixture).
 """
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from agentit.cli import main
-from agentit.portal import store_pg
-from test_store_pg import postgres_dsn  # noqa: F401 -- reused fixture, see module docstring
-
-pytestmark = pytest.mark.postgres
+from agentit.portal.store import AssessmentStore
+from conftest import make_store
 
 
 def _unwrapped(command_name: str):
@@ -42,31 +36,19 @@ def _unwrapped(command_name: str):
 
 
 @pytest.fixture
-async def pg_store(postgres_dsn, monkeypatch):
-    """Point AGENTIT_DB_BACKEND/AGENTIT_DB_DSN at the real container for the
-    CLI command under test, and hand back an independent, truncated-table
-    connection (mirroring test_store_pg.py's own `store` fixture) for
-    verifying what the CLI command actually wrote."""
-    monkeypatch.setenv("AGENTIT_DB_BACKEND", "postgres")
+async def pg_store(postgres_dsn, monkeypatch) -> AssessmentStore:
+    """Point `AGENTIT_DB_DSN` at the real instance so the CLI command
+    under test's own (unmocked) `create_store()` call resolves to the same
+    database, then return the shared, truncated store as an independent
+    verifier connection for confirming what the command actually wrote."""
     monkeypatch.setenv("AGENTIT_DB_DSN", postgres_dsn)
-
-    verifier = await store_pg.AssessmentStore.create(postgres_dsn, min_size=1, max_size=3)
-    async with verifier._pool.acquire() as conn:
-        await conn.execute(
-            "TRUNCATE assessments, onboarding_results, events, gates, remediations, "
-            "agent_registry, slos, apply_results, settings, remediation_jobs, "
-            "scheduled_operations, processed_webhooks, agent_feedback, "
-            "skill_effectiveness, suppressed_checks, skill_inventory_snapshots, "
-            "agent_runs, check_results CASCADE"
-        )
-    yield verifier
-    await verifier.close()
+    return await make_store()
 
 
 async def test_vuln_watch_ticks_once_against_real_postgres(pg_store):
     coro = _unwrapped("vuln-watch")
 
-    with patch("agentit.watchers.vuln_watcher.asyncio.sleep", side_effect=KeyboardInterrupt):
+    with patch("agentit.watchers.vuln_watcher.sleep_with_heartbeat", side_effect=KeyboardInterrupt):
         await coro(interval=1)  # must not raise AttributeError on store.raw
 
     events = await pg_store.list_events()

@@ -65,12 +65,12 @@ async def test_research_once_no_llm_logs_learning_run_event_when_store_present()
     """Every tick must leave a durable trace -- including the LLM-unavailable
     case, which previously logged nothing to the store at all (only a
     stderr echo, invisible once the pod's logs roll over)."""
-    async_store, store = make_async_store()
+    async_store, store = await make_async_store()
     learner, _ = _learner(store=async_store)
     with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")):
         await learner.research_once()
 
-    events = store.list_events_by_action("learning-run")
+    events = await store.list_events_by_action("learning-run")
     assert len(events) == 1
     assert events[0]["agent_id"] == "skill-learner"
     assert events[0]["severity"] == "error"
@@ -101,10 +101,10 @@ async def test_research_once_prioritizes_flagged_skill_over_cve_sweep(tmp_path):
         encoding="utf-8",
     )
 
-    async_store, store = make_async_store()
+    async_store, store = await make_async_store()
     for _ in range(4):
-        store.record_skill_outcome("network-policy", "app-a", "rejected", "wrong")
-    store.record_skill_outcome("network-policy", "app-b", "rejected", "wrong")
+        await store.record_skill_outcome("network-policy", "app-a", "rejected", "wrong")
+    await store.record_skill_outcome("network-policy", "app-b", "rejected", "wrong")
 
     learner, publisher = _learner(store=async_store, skills_dir=skills_dir)
 
@@ -126,9 +126,9 @@ async def test_research_once_prioritizes_flagged_skill_over_cve_sweep(tmp_path):
     assert saved == ["network-policy-v2"]
     assert skipped == []
 
-    events = store.list_events()
+    events = await store.list_events()
     assert any(e["action"] == "skill-improvement-drafted" for e in events)
-    learning_runs = store.list_events_by_action("learning-run")
+    learning_runs = await store.list_events_by_action("learning-run")
     assert len(learning_runs) == 1
     assert learning_runs[0]["severity"] == "info"
 
@@ -136,7 +136,7 @@ async def test_research_once_prioritizes_flagged_skill_over_cve_sweep(tmp_path):
 async def test_research_once_falls_back_to_cve_sweep_when_nothing_flagged():
     """No low-effectiveness skills -> the existing CVE-sweep behavior runs
     exactly as before."""
-    async_store, store = make_async_store()
+    async_store, store = await make_async_store()
     learner, publisher = _learner(store=async_store)
 
     with patch("agentit.llm.LLMClient", return_value=object()), \
@@ -153,7 +153,7 @@ async def test_research_once_falls_back_to_cve_sweep_when_nothing_flagged():
     mock_cves.assert_called_once()
     assert saved == ["cve-2099-00009"]
 
-    learning_runs = store.list_events_by_action("learning-run")
+    learning_runs = await store.list_events_by_action("learning-run")
     assert len(learning_runs) == 1
     assert learning_runs[0]["agent_id"] == "skill-learner"
     assert learning_runs[0]["severity"] == "info"
@@ -168,8 +168,8 @@ def test_learn_watch_cli_options_registered():
     assert "--limit" in result.output
 
 
-def test_accepts_optional_store_for_tick_telemetry():
-    async_store, _raw = make_async_store()
+async def test_accepts_optional_store_for_tick_telemetry():
+    async_store, _raw = await make_async_store()
     learner, _ = _learner(store=async_store)
     assert learner._store is async_store
 
@@ -183,7 +183,7 @@ class TestAsyncRunLoop:
     """Phase 3 (docs/postgres-migration-plan.md §9): run() became async def,
     with time.sleep() -> await asyncio.sleep()."""
 
-    @patch("agentit.watchers.skill_learner.asyncio.sleep", side_effect=KeyboardInterrupt)
+    @patch("agentit.watchers.skill_learner.sleep_with_heartbeat", side_effect=KeyboardInterrupt)
     async def test_run_ticks_once_then_stops_on_interrupt(self, mock_sleep, capsys):
         learner, _ = _learner()
         with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")):
@@ -202,9 +202,9 @@ class TestTickRunsOnEventLoop:
     ``asyncio.to_thread`` internally, and record_tick telemetry must still
     fire afterwards."""
 
-    @patch("agentit.watchers.skill_learner.asyncio.sleep", side_effect=KeyboardInterrupt)
+    @patch("agentit.watchers.skill_learner.sleep_with_heartbeat", side_effect=KeyboardInterrupt)
     async def test_research_once_awaited_directly_and_telemetry_records(self, mock_sleep):
-        async_store, store = make_async_store()
+        async_store, store = await make_async_store()
         learner, _ = _learner(store=async_store)
 
         with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")), \
@@ -212,7 +212,7 @@ class TestTickRunsOnEventLoop:
             await learner.run()
 
         mock_research_once.assert_called_once_with()
-        events = store.list_events()
+        events = await store.list_events()
         assert any(e["action"] == "tick-complete" for e in events)
 
     async def test_llm_client_init_dispatched_via_to_thread(self):
@@ -229,16 +229,41 @@ class TestTickRunsOnEventLoop:
         assert mock_to_thread.call_count >= 1
 
 
+class TestHeartbeatRefreshedDuringLongSleep:
+    """Regression test for the same liveness-probe crash-loop shape
+    vuln_watcher.py hit (see its test_vuln_watcher.py counterpart): this
+    watcher's own ``--interval`` defaults to 86400s (24h), touching
+    /tmp/heartbeat only once per tick previously required loosening
+    chart/templates/agents/skill-learner.yaml's liveness probe threshold to
+    172800s (48h) as a stopgap. The real fix: ``run()`` now delegates its
+    between-tick sleep to the same shared ``agentit.watchers.sleep_with_heartbeat``
+    helper vuln_watcher.py uses (see test_watchers_init.py for the chunking
+    behavior itself), so the chart's probe threshold could be tightened back
+    down to a real 900s value."""
+
+    async def test_run_delegates_between_tick_sleep_to_shared_heartbeat_helper(self):
+        learner, _ = _learner()
+        learner._interval = 12345
+
+        with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")), \
+             patch(
+                 "agentit.watchers.skill_learner.sleep_with_heartbeat", side_effect=KeyboardInterrupt,
+             ) as mock_sleep:
+            await learner.run()
+
+        mock_sleep.assert_called_once_with(12345)
+
+
 class TestConstructionAcceptsAsyncStoreDirectly:
     """The real bug fixed here: cli.py used to hand SkillLearner
     `store.raw` because `research_once` called every store method
     unawaited. Now the store is genuinely awaited throughout, so a store
     constructed via `create_store()`'s own facade must work end to end."""
 
-    async def test_research_once_works_against_create_store_facade(self, tmp_path):
-        from agentit.portal.store_factory import create_store
+    async def test_research_once_works_against_create_store_facade(self, tmp_path, postgres_dsn):
+        from agentit.portal.store import create_store
 
-        store = await create_store(":memory:")
+        store = await create_store(postgres_dsn, min_size=1, max_size=2)
         learner, _ = _learner(store=store, skills_dir=tmp_path / "skills")
 
         with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")):
@@ -273,14 +298,15 @@ class TestCrossPodVisibility:
         assert kwargs["json"] == {"content": "---\nname: cve-2099-00050\n---\nbody", "domain": "security"}
 
     async def test_submit_draft_to_portal_sends_internal_token_when_configured(self, monkeypatch):
+        """The token header is now attached once, at client construction,
+        via the shared `internal_webhook_client` helper -- not rebuilt
+        per-call -- so the client itself must already carry it (matches the
+        assertion style of `test_internal_webhook_client.py` and
+        `RemediationLoop`'s own regression test)."""
         monkeypatch.setenv("AGENTIT_INTERNAL_WEBHOOK_TOKEN", "s3cr3t-token")
         learner, _ = _learner()
-        learner._client.post = AsyncMock(return_value=httpx.Response(200, json={"name": "x"}))
 
-        await learner._submit_draft_to_portal("content", "security")
-
-        _, kwargs = learner._client.post.call_args
-        assert kwargs["headers"]["X-Internal-Webhook-Token"] == "s3cr3t-token"
+        assert learner._client.headers["X-Internal-Webhook-Token"] == "s3cr3t-token"
 
     async def test_submit_draft_to_portal_returns_none_on_non_200(self):
         learner, _ = _learner()
@@ -335,6 +361,22 @@ class TestCrossPodVisibility:
 
         assert name is None
         learner._client.post.assert_called_once()
+
+    async def test_wait_for_portal_draft_route_ready_on_non_404(self):
+        """GET returning 405 (route exists, method not allowed) means the
+        stable Service is serving a portal that knows skill-draft — safe to
+        start researching."""
+        learner, _ = _learner(startup_grace_seconds=30, startup_probe_interval=1)
+        learner._client.get = AsyncMock(return_value=httpx.Response(405, text="method not allowed"))
+
+        assert await learner._wait_for_portal_draft_route() is True
+        learner._client.get.assert_called_once()
+
+    async def test_wait_for_portal_draft_route_times_out_on_persistent_404(self):
+        learner, _ = _learner(startup_grace_seconds=0, startup_probe_interval=1)
+        learner._client.get = AsyncMock(return_value=httpx.Response(404, text="not found"))
+
+        assert await learner._wait_for_portal_draft_route() is False
 
     async def test_save_draft_prefers_portal_over_local_disk(self, tmp_path):
         learner, _ = _learner(skills_dir=tmp_path / "skills")

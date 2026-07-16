@@ -141,89 +141,91 @@ class TestDiffSnapshots:
 class TestStorePersistence:
     """save_skill_inventory_snapshot() / get_last_skill_inventory_snapshot()."""
 
-    def test_no_snapshot_saved_yet_returns_none(self) -> None:
-        store = make_store()
-        assert store.get_last_skill_inventory_snapshot() is None
+    async def test_no_snapshot_saved_yet_returns_none(self) -> None:
+        store = await make_store()
+        assert await store.get_last_skill_inventory_snapshot() is None
 
-    def test_save_and_retrieve_snapshot(self) -> None:
-        store = make_store()
+    async def test_save_and_retrieve_snapshot(self) -> None:
+        store = await make_store()
         snap = InventorySnapshot(skills=frozenset({("security", "netpol-basic")}))
-        store.save_skill_inventory_snapshot(snap.to_dict())
+        await store.save_skill_inventory_snapshot(snap.to_dict())
 
-        loaded = store.get_last_skill_inventory_snapshot()
+        loaded = await store.get_last_skill_inventory_snapshot()
         assert loaded is not None
         restored = InventorySnapshot.from_dict(loaded)
         assert restored == snap
         assert "created_at" in loaded
 
-    def test_get_last_returns_most_recent_of_several(self) -> None:
-        store = make_store()
+    async def test_get_last_returns_most_recent_of_several(self) -> None:
+        store = await make_store()
         first = InventorySnapshot(skills=frozenset({("security", "a")}))
         second = InventorySnapshot(skills=frozenset({("security", "a"), ("security", "b")}))
-        store.save_skill_inventory_snapshot(first.to_dict())
-        store.save_skill_inventory_snapshot(second.to_dict())
+        await store.save_skill_inventory_snapshot(first.to_dict())
+        await store.save_skill_inventory_snapshot(second.to_dict())
 
-        loaded = store.get_last_skill_inventory_snapshot()
+        loaded = await store.get_last_skill_inventory_snapshot()
         assert InventorySnapshot.from_dict(loaded) == second
 
 
 class TestDiffAndLogInventoryChanges:
     """The end-to-end helper wired into `_background_maintenance()`."""
 
-    def test_first_run_seeds_baseline_without_logging_events(self, tmp_path: Path) -> None:
+    async def test_first_run_seeds_baseline_without_logging_events(self, tmp_path: Path) -> None:
         skills_dir = tmp_path / "skills"
         checks_dir = tmp_path / "checks"
         _write_skill(skills_dir, "netpol-basic", domain="security")
-        store = make_store()
+        store = await make_store()
 
-        diff = diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
+        diff = await diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
 
         assert not diff.has_changes
-        assert store.list_events_by_agent("skill-inventory") == []
-        assert store.get_last_skill_inventory_snapshot() is not None
+        assert await store.list_events_by_agent("skill-inventory") == []
+        assert await store.get_last_skill_inventory_snapshot() is not None
 
-    def test_added_skill_logs_skill_added_event(self, tmp_path: Path) -> None:
+    async def test_added_skill_logs_skill_added_event(self, tmp_path: Path) -> None:
         skills_dir = tmp_path / "skills"
         checks_dir = tmp_path / "checks"
         _write_skill(skills_dir, "netpol-basic", domain="security")
-        store = make_store()
+        store = await make_store()
 
-        diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
+        await diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
 
         _write_skill(skills_dir, "cve-2099-1", domain="security")
-        diff = diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
+        diff = await diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
 
         assert diff.skills_added == [("security", "cve-2099-1")]
-        events = store.list_events_by_agent("skill-inventory")
+        events = await store.list_events_by_agent("skill-inventory")
         assert len(events) == 1
         assert events[0]["action"] == "skill-added"
         assert "cve-2099-1" in events[0]["summary"]
 
-    def test_removed_check_logs_check_removed_event(self, tmp_path: Path) -> None:
+    async def test_removed_check_logs_check_removed_event(self, tmp_path: Path) -> None:
         skills_dir = tmp_path / "skills"
         checks_dir = tmp_path / "checks"
         _write_check(checks_dir, "has-readiness-probe", dimension="reliability")
-        store = make_store()
+        store = await make_store()
 
-        diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
+        await diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
 
         (checks_dir / "has-readiness-probe.yaml").unlink()
-        diff = diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
+        diff = await diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
 
         assert diff.checks_removed == [("reliability", "has-readiness-probe")]
-        events = store.list_events_by_agent("skill-inventory")
+        events = await store.list_events_by_agent("skill-inventory")
         assert len(events) == 1
         assert events[0]["action"] == "check-removed"
         assert events[0]["severity"] == "warning"
 
-    def test_no_changes_logs_no_events(self, tmp_path: Path) -> None:
+    async def test_no_changes_logs_no_events(self, tmp_path: Path) -> None:
         skills_dir = tmp_path / "skills"
         checks_dir = tmp_path / "checks"
         _write_skill(skills_dir, "netpol-basic", domain="security")
-        store = make_store()
+        store = await make_store()
 
-        diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
-        diff = diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
+        await diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
+        diff = await diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
 
         assert not diff.has_changes
-        assert store.list_events_by_agent("skill-inventory") == []
+        assert await store.list_events_by_agent("skill-inventory") == []
+
+

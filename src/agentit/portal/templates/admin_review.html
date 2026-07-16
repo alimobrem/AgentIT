@@ -2,6 +2,18 @@
 {% block title %}Admin Review - AgentIT{% endblock %}
 {% block content %}
 <h1>Admin Review</h1>
+{% if request.query_params.get('gate_approved') %}
+<div class="alert alert-success">
+  Gate approved{% if request.query_params.get('applied') %} — {{ request.query_params.get('applied') }} manifest(s) applied{% endif %}.
+  {# One-after-another approval flow (docs/ux-design-requirements.md
+     checklist #12): landing back here (instead of onboard-results) means
+     another cluster-admin-review gate was still pending -- it's the next
+     actionable item, shown right below. #}
+</div>
+{% endif %}
+{% if request.query_params.get('success') %}
+<div class="alert alert-success">{{ request.query_params.get('success') }}</div>
+{% endif %}
 <p class="text-muted">
   CI/CD manifests that target a shared operator namespace (<code>openshift-gitops</code>,
   <code>openshift-pipelines</code>, etc.) need elevated RBAC this service account doesn't have
@@ -14,7 +26,11 @@
 
 {% if not pending %}
 <div class="empty-state">
-  <p>No pending gates. All clear.</p>
+  {% if recently_resolved_count %}
+  <p>No pending gates. {{ recently_resolved_count }} resolved in the last 24 hours — see below.</p>
+  {% else %}
+  <p>No pending gates. All clear — nothing has needed elevated review in the last 24 hours.</p>
+  {% endif %}
 </div>
 {% else %}
 {% from "_macros.html" import gate_card %}

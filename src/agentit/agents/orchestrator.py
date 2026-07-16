@@ -128,8 +128,7 @@ class FleetOrchestrator:
     - Decide auto-approve vs. human gate based on risk
     - Track overall onboarding status
 
-    ``store`` must be an async-compatible store (``store_factory.AsyncSQLiteStore``
-    or ``store_pg.AssessmentStore``) -- every store call is ``await``ed. The
+    ``store`` is an ``AssessmentStore`` -- every store call is ``await``ed. The
     3 surviving Python agents' ``.run()`` methods stay synchronous (per
     ``agents/base.py``'s existing contract) and are invoked via
     ``asyncio.to_thread`` at their one call site in ``_run_agents_local``;
@@ -272,9 +271,14 @@ class FleetOrchestrator:
             # run_all() is a synchronous, potentially slow call (it may make
             # several sequential LLM requests, one per matched skill) --
             # narrowly wrapped in to_thread so it doesn't block the event
-            # loop for however long that takes.
+            # loop for however long that takes. It still needs to reach the
+            # (genuinely async) store's rejection-count/human-override
+            # lookups from inside that worker thread, so it's handed this
+            # coroutine's own event loop to bridge those calls back onto
+            # (see SkillEngine.run_all's docstring).
             skill_files = await asyncio.to_thread(
                 engine.run_all, self.report, store=self._store, llm_client=llm_client,
+                loop=asyncio.get_running_loop(),
             )
             skill_covered_domains = engine.covered_domains(skill_files)
 
@@ -858,17 +862,39 @@ class FleetOrchestrator:
     }
 
     async def _create_default_slos(self) -> None:
-        """Create default SLOs based on app criticality after release agent runs."""
+        """Create default SLOs based on app criticality after release agent runs.
+
+        Skips any metric that already has an SLO for this assessment --
+        `run()` calls this unconditionally every time, so a re-onboard
+        (re-assess + onboard again) re-ran this with no uniqueness check
+        and inserted a second full set of the same 3 default metrics on
+        top of the existing ones. Confirmed live: apps onboarded more than
+        once ended up with 6 SLO rows instead of 3 (each metric listed
+        twice with identical targets), inflating the Fleet-Wide SLOs
+        page's "Total SLOs" stat. `save_slo()` itself stays a plain
+        insert -- manually-added SLOs (the Add SLO form) may legitimately
+        track more than one threshold for the same metric_name.
+        """
         if self._store is None or self._assessment_id is None:
             return
         slo_set = self._SLO_DEFAULTS.get(self.report.criticality, self._SLO_DEFAULTS["medium"])
+        try:
+            existing_metrics = {s["metric_name"] for s in await self._store.list_slos(self._assessment_id)}
+        except Exception as exc:
+            logger.warning("Failed to list existing SLOs before seeding defaults: %s", exc)
+            existing_metrics = set()
+        created = 0
         for metric, target in slo_set:
+            if metric in existing_metrics:
+                continue
             try:
                 await self._store.save_slo(self._assessment_id, metric, target)
+                created += 1
             except Exception as exc:
                 logger.warning("Failed to create SLO %s: %s", metric, exc)
-        await self._log_event("release", "slos-created",
-                        f"Created {len(slo_set)} default SLOs for {self.report.criticality} criticality")
+        if created:
+            await self._log_event("release", "slos-created",
+                            f"Created {created} default SLO(s) for {self.report.criticality} criticality")
 
     async def _record_remediations(self, agent_name: str, files: list) -> None:
         """Record each generated file as a remediation in the store."""

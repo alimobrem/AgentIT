@@ -1,19 +1,18 @@
-"""Integration tests for the async Postgres store (Phase 2 of
-docs/postgres-migration-plan.md).
+"""Integration tests for ``AssessmentStore`` (``portal/store.py``) --
+the one and only supported store. Postgres is not a backend option among
+several; it is the store, so these tests run unconditionally (no
+opt-in flag) using the real, session-shared Postgres instance
+``tests/conftest.py`` provides (auto-started via podman/docker if
+``AGENTIT_TEST_PG_DSN`` isn't set) -- see that module's docstring for the
+full session-scoped-container-and-pool rationale.
 
-Requires a real Postgres instance — there is no async in-memory Postgres
-equivalent (see plan §8). Skipped by default; opt in with
-``--run-postgres-tests`` plus a reachable ``AGENTIT_TEST_PG_DSN`` (or a local
-``podman``/``docker`` on PATH, in which case a throw-away container is
-started and torn down automatically for the test session).
+Formerly ``test_store_pg.py``, from when ``store_pg.py`` was a separate,
+not-yet-wired-in async counterpart to a synchronous SQLite ``store.py`` --
+see docs/postgres-migration-plan.md for that history.
 """
 
 from __future__ import annotations
 
-import os
-import shutil
-import subprocess
-import time
 import uuid
 from datetime import datetime, timezone
 
@@ -28,18 +27,8 @@ from agentit.models import (
     Severity,
     StackInfo,
 )
-from agentit.portal.store_pg import AssessmentStore
-
-pytestmark = pytest.mark.postgres
-
-_CONTAINER_NAME = f"agentit-pg-test-{uuid.uuid4().hex[:8]}"
-
-
-def _container_runtime() -> str | None:
-    for candidate in ("podman", "docker"):
-        if shutil.which(candidate):
-            return candidate
-    return None
+from agentit.portal.store import AssessmentStore, create_store
+from conftest import make_store
 
 
 def _make_report(repo_name: str = "test-app") -> AssessmentReport:
@@ -66,68 +55,37 @@ def _make_report(repo_name: str = "test-app") -> AssessmentReport:
     )
 
 
-@pytest.fixture(scope="session")
-def postgres_dsn():
-    """Session-scoped DSN, either from AGENTIT_TEST_PG_DSN or a throw-away
-    container started via podman/docker."""
-    env_dsn = os.environ.get("AGENTIT_TEST_PG_DSN")
-    if env_dsn:
-        yield env_dsn
-        return
-
-    runtime = _container_runtime()
-    if runtime is None:
-        pytest.skip("no AGENTIT_TEST_PG_DSN and no podman/docker on PATH")
-
-    port = 55433
-    subprocess.run([runtime, "rm", "-f", _CONTAINER_NAME], capture_output=True)
-    result = subprocess.run(
-        [
-            runtime, "run", "-d", "--name", _CONTAINER_NAME,
-            "-e", "POSTGRES_USER=agentit_test",
-            "-e", "POSTGRES_PASSWORD=agentit_test",
-            "-e", "POSTGRES_DB=agentit_test",
-            "-p", f"{port}:5432",
-            "postgres:16-alpine",
-        ],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        pytest.skip(f"could not start Postgres via {runtime}: {result.stderr.strip()}")
-
-    dsn = f"postgresql://agentit_test:agentit_test@localhost:{port}/agentit_test"
-    try:
-        for _ in range(30):
-            check = subprocess.run(
-                [runtime, "exec", _CONTAINER_NAME, "pg_isready", "-U", "agentit_test"],
-                capture_output=True,
-            )
-            if check.returncode == 0:
-                break
-            time.sleep(1)
-        else:
-            pytest.skip("Postgres container did not become ready in time")
-        yield dsn
-    finally:
-        subprocess.run([runtime, "rm", "-f", _CONTAINER_NAME], capture_output=True)
-
-
 @pytest.fixture
-async def store(postgres_dsn):
-    """Fresh AssessmentStore per test, with all tables truncated first for
-    isolation (mirrors the ':memory:' isolation the SQLite fixture gets for
-    free — see plan §8)."""
-    s = await AssessmentStore.create(postgres_dsn, min_size=1, max_size=3)
-    async with s._pool.acquire() as conn:
-        await conn.execute(
-            "TRUNCATE assessments, onboarding_results, events, gates, remediations, "
-            "agent_registry, slos, apply_results, settings, remediation_jobs, "
-            "scheduled_operations, processed_webhooks, agent_feedback, "
-            "skill_effectiveness, suppressed_checks, skill_inventory_snapshots, "
-            "agent_runs, check_results CASCADE"
-        )
-    yield s
-    await s.close()
+async def store():
+    """The session-shared ``AssessmentStore`` from ``tests/conftest.py``,
+    with every table truncated first for isolation -- see that module's
+    docstring for why this is a shared session-scoped pool rather than a
+    fresh one per test."""
+    return await make_store()
+
+
+class TestCreate:
+    async def test_create_returns_assessment_store(self, postgres_dsn):
+        s = await AssessmentStore.create(postgres_dsn, min_size=1, max_size=2)
+        try:
+            assert isinstance(s, AssessmentStore)
+        finally:
+            await s.close()
+
+    async def test_create_raises_without_dsn(self, monkeypatch):
+        monkeypatch.delenv("AGENTIT_DB_DSN", raising=False)
+        with pytest.raises(ValueError):
+            await AssessmentStore.create(dsn=None)
+
+    async def test_create_store_function_delegates_to_assessment_store_create(self, postgres_dsn):
+        """``create_store()`` (used by every real caller -- cli.py, the
+        watchers, portal/helpers.py) is a thin wrapper -- verify it
+        genuinely delegates rather than duplicating construction logic."""
+        s = await create_store(postgres_dsn, min_size=1, max_size=2)
+        try:
+            assert isinstance(s, AssessmentStore)
+        finally:
+            await s.close()
 
 
 class TestSettings:
@@ -176,6 +134,28 @@ class TestAssessments:
         rows = await store.list_all()
         assert len(rows) == 2
         assert isinstance(rows[0]["assessed_at"], str)
+
+    async def test_save_carries_forward_infra_repo_url_from_prior_assessment(self, store):
+        """Postgres counterpart of the sqlite ``store.py`` regression test --
+        re-assessing an already-GitOps-registered app must not lose
+        ``infra_repo_url`` just because the new report didn't set it."""
+        aid1 = await store.save(_make_report("pinky"))
+        await store.set_infra_repo_url(aid1, "https://github.com/org/infra")
+
+        aid2 = await store.save(_make_report("pinky"))
+        fetched = await store.get(aid2)
+        assert fetched.infra_repo_url == "https://github.com/org/infra"
+
+    async def test_save_does_not_override_explicit_infra_repo_url(self, store):
+        aid1 = await store.save(_make_report("pinky"))
+        await store.set_infra_repo_url(aid1, "https://github.com/org/old-infra")
+
+        report2 = _make_report("pinky")
+        report2.infra_repo_url = "https://github.com/org/new-infra"
+        aid2 = await store.save(report2)
+
+        fetched = await store.get(aid2)
+        assert fetched.infra_repo_url == "https://github.com/org/new-infra"
 
     async def test_delete_cascades(self, store):
         assessment_id = await store.save(_make_report())
@@ -226,6 +206,28 @@ class TestGates:
         await store.resolve_gate(gate_id, "approved", "alice")
         assert await store.resolve_gate(gate_id, "rejected", "bob") is False
 
+    async def test_list_gates_includes_repo_url_for_fleet_attribution(self, store):
+        """`fleet.py::_attach_pending_actions` keys gate counts by
+        `repo_url`, not `assessment_id` -- `list_gates()` must surface
+        `repo_url` on every row for that to work (parity with store.py)."""
+        assessment_id = await store.save(_make_report("repo-y"))
+        await store.create_gate(assessment_id, "security", "needs review")
+        gates = await store.list_gates(status="pending")
+        assert gates[0]["repo_url"] == "https://github.com/org/repo-y"
+
+    async def test_gate_from_old_assessment_visible_after_reassessment(self, store):
+        """Orphaned-gate-attribution regression (parity with store.py): a
+        gate created against an app's OLD assessment_id must still be
+        visible from `list_gates_for_assessment()` called with that same
+        app's CURRENT (re-assessed) assessment_id."""
+        old_id = await store.save(_make_report("repo-x"))
+        gate_id = await store.create_gate(old_id, "security", "needs review")
+        new_id = await store.save(_make_report("repo-x"))
+        assert new_id != old_id
+
+        gates = await store.list_gates_for_assessment(new_id, status="pending")
+        assert [g["id"] for g in gates] == [gate_id]
+
 
 class TestSlos:
     async def test_save_list_update_delete(self, store):
@@ -247,6 +249,53 @@ class TestSlos:
         other_id = await store.save(_make_report("other-app"))
         slo_id = await store.save_slo(assessment_id, "availability", 99.9)
         assert await store.delete_slo(slo_id, other_id) is False
+
+    async def test_slo_from_old_assessment_visible_after_reassessment(self, store):
+        """Postgres counterpart of the sqlite `store.py` regression test --
+        same orphaned-SLO-attribution shape as gates."""
+        old_id = await store.save(_make_report("repo-x"))
+        slo_id = await store.save_slo(old_id, "availability", 99.9)
+        new_id = await store.save(_make_report("repo-x"))
+        assert new_id != old_id
+
+        slos = await store.list_slos(new_id)
+        assert [s["id"] for s in slos] == [slo_id]
+
+    async def test_delete_slo_from_old_assessment_via_new_assessment_id(self, store):
+        old_id = await store.save(_make_report("repo-y"))
+        slo_id = await store.save_slo(old_id, "availability", 99.9)
+        new_id = await store.save(_make_report("repo-y"))
+
+        assert await store.delete_slo(slo_id, new_id) is True
+        assert await store.list_slos(new_id) == []
+
+
+class TestApps:
+    """The `apps` table -- see docs/architecture.md's "Data model:
+    assessments vs. apps" section for the full rationale."""
+
+    async def test_save_creates_an_apps_row(self, store):
+        await store.save(_make_report("new-app"))
+        row = await store._pool.fetchrow(
+            "SELECT * FROM apps WHERE repo_url = $1", "https://github.com/org/new-app",
+        )
+        assert row is not None
+        assert row["repo_name"] == "new-app"
+        assert row["infra_repo_url"] is None
+
+    async def test_set_infra_repo_url_updates_apps_row_even_for_a_non_latest_assessment(self, store):
+        old_id = await store.save(_make_report("stale-tab-app"))
+        new_id = await store.save(_make_report("stale-tab-app"))
+        assert new_id != old_id
+
+        assert await store.set_infra_repo_url(old_id, "https://github.com/org/infra") is True
+
+        fleet_row = next(
+            r for r in await store.get_fleet_data()
+            if r["repo_url"] == "https://github.com/org/stale-tab-app"
+        )
+        assert fleet_row["id"] == new_id
+        assert fleet_row["infra_repo_url"] == "https://github.com/org/infra"
 
 
 class TestRemediations:
@@ -425,10 +474,8 @@ class TestExportAll:
         data = await store.export_all()
         assert "assessments" in data
         assert len(data["assessments"]) == 1
-        # All 18 tables (16 from the plan's original §4 list, plus the
-        # self-observability agent_runs/check_results tables) must be
-        # represented.
-        from agentit.portal.store_pg import _ALL_TABLES
+        # Every table export_all() knows about must be represented.
+        from agentit.portal.store import _ALL_TABLES
         assert set(data.keys()) == set(_ALL_TABLES)
 
 
@@ -537,6 +584,50 @@ class TestAgentRuns:
         assert [r["status"] for r in by_assessment] == ["success", "failed"]  # ascending
 
 
+class TestGetAgentStats:
+    """`get_agent_stats()` must read the structured, authoritative
+    `agent_runs` table exclusively -- never fall back to a `LIKE
+    '%complete%'`/`LIKE '%failed%'` heuristic over raw `events.action`
+    strings, which double/under-counts runs (a real, previously-live bug --
+    see docs/architecture.md and CLAUDE.md's note on `get_agent_stats()`).
+    Migrated from the retired cross-backend `tests/test_store_parity.py`
+    now that there is only one backend to test against.
+    """
+
+    async def test_matches_agent_runs_ignoring_misleading_events(self, store):
+        agent_name = "vuln-watcher"
+
+        # Structured, authoritative agent_runs rows: 3 runs, 2 success, 1
+        # failure. This is the only data get_agent_stats() should count.
+        for status in ("success", "success", "failed"):
+            await store.save_agent_run(agent_name, mode="scheduled", status=status, duration_ms=100)
+
+        # Misleading raw events for the SAME agent, deliberately shaped so
+        # a `LIKE '%complete%'`/`LIKE '%failed%'` heuristic over
+        # `events.action` would compute *different* totals/success-rate
+        # than the true agent_runs-derived numbers above: 4 unrelated
+        # 'onboarding-complete' actions (would count as 4 successes under
+        # that heuristic, vs. the real 2) and one action matching neither
+        # pattern (padding total_events to 5, vs. the real 3). Neither
+        # should affect get_agent_stats() -- if it regressed to reading
+        # `events` instead of `agent_runs`, this test would see
+        # 5/4/0/100.0 instead of 3/2/1/66.7.
+        for action in ("onboarding-complete", "onboarding-complete", "onboarding-complete",
+                       "onboarding-complete", "watcher-tick"):
+            await store.log_event(agent_name, action, None, "info", "noise")
+
+        stats = await store.get_agent_stats(agent_name)
+        assert len(stats) == 1
+        row = stats[0]
+        assert row["total_events"] == 3
+        assert row["successes"] == 2
+        assert row["failures"] == 1
+        assert row["success_rate"] == 66.7
+
+    async def test_no_runs_returns_empty_list(self, store):
+        assert await store.get_agent_stats("no-such-agent") == []
+
+
 class TestCheckResults:
     async def test_save_and_get_check_compliance(self, store):
         assessment_id = await store.save(_make_report())
@@ -589,3 +680,45 @@ class TestDbStats:
         stats = await store.get_db_stats()
         assert stats["row_counts"]["assessments"] == 1
         assert stats["size_bytes"] > 0
+
+
+class TestBackgroundMaintenanceAsyncHelpers:
+    """`app.py::_background_maintenance()`'s three helper calls, exercised
+    against a real Postgres-backed store -- regression guard for the bug
+    where that loop handed these a nonexistent `.raw` (this class's
+    `AssessmentStore` has none, by design) instead of genuinely `await`ing
+    them directly."""
+
+    async def test_refresh_db_metrics(self, store):
+        from agentit.portal.metrics import refresh_db_metrics
+
+        await store.save(_make_report())
+        await refresh_db_metrics(store)  # must not raise
+
+    async def test_prune_stale_agents_and_log(self, store):
+        from agentit.agent_registry_cleanup import prune_stale_agents_and_log
+
+        await store.register_agent("chaos", "chaos")
+        await store.register_agent("cost", "cost")
+
+        pruned = await prune_stale_agents_and_log(store)
+
+        assert pruned == ["chaos"]
+        remaining = {a["agent_name"] for a in await store.list_agents()}
+        assert remaining == {"cost"}
+
+    async def test_diff_and_log_inventory_changes(self, store, tmp_path):
+        from agentit.skill_inventory import diff_and_log_inventory_changes
+
+        skills_dir = tmp_path / "skills"
+        checks_dir = tmp_path / "checks"
+        domain_dir = skills_dir / "security"
+        domain_dir.mkdir(parents=True)
+        (domain_dir / "netpol-basic.md").write_text(
+            "---\nname: netpol-basic\ndomain: security\nversion: 1\n"
+            "triggers: [test]\noutputs: [NetworkPolicy]\n---\nbody\n"
+        )
+
+        first = await diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
+        assert not first.has_changes
+        assert await store.get_last_skill_inventory_snapshot() is not None

@@ -43,10 +43,10 @@ import os
 from pathlib import Path
 
 import click
-import httpx
 
 from agentit.events import EventPublisher
-from agentit.watchers import record_tick
+from agentit.internal_webhook_client import internal_webhook_client
+from agentit.watchers import record_tick, sleep_with_heartbeat
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,8 @@ class SkillLearner:
         timeout: int = 30,
         draft_retry_attempts: int = 3,
         draft_retry_delay: int = 20,
+        startup_grace_seconds: int = 120,
+        startup_probe_interval: int = 10,
     ) -> None:
         self._publisher = publisher
         self._llm_model = llm_model
@@ -78,9 +80,16 @@ class SkillLearner:
         self._skills_dir = skills_dir or Path("skills")
         self._store = store
         self._portal_url = portal_url.rstrip("/")
-        self._client = httpx.AsyncClient(timeout=timeout)
+        # `internal_webhook_client` attaches the X-Internal-Webhook-Token
+        # header once, at construction -- the same shared helper
+        # `RemediationLoop` uses for the identical "separate watcher pod
+        # calling back into the portal" problem, so there's structurally
+        # only one way to make this call correctly.
+        self._client = internal_webhook_client(timeout=timeout)
         self._draft_retry_attempts = draft_retry_attempts
         self._draft_retry_delay = draft_retry_delay
+        self._startup_grace_seconds = startup_grace_seconds
+        self._startup_probe_interval = startup_probe_interval
 
     async def research_once(self) -> tuple[list[str], list[str]]:
         """Research low-effectiveness skills first, falling back to a generic
@@ -242,11 +251,13 @@ class SkillLearner:
     async def _submit_draft_to_portal(self, content: str, domain: str) -> str | None:
         """POST a drafted skill to ``/api/webhook/skill-draft`` so it lands
         in the portal's own process instead of this pod's isolated
-        filesystem. Mirrors the ``AGENTIT_PORTAL_URL`` +
-        ``X-Internal-Webhook-Token`` pattern ``RemediationLoop`` already
-        uses for the same "separate watcher pod calling back into the
-        portal" problem. Returns the saved skill's name, or ``None`` if the
-        portal couldn't be reached or rejected the draft this cycle.
+        filesystem. ``self._client`` already carries the
+        ``X-Internal-Webhook-Token`` header from construction (via the
+        shared ``internal_webhook_client`` helper -- the same one
+        ``RemediationLoop`` uses for the same "separate watcher pod calling
+        back into the portal" problem). Returns the saved skill's name, or
+        ``None`` if the portal couldn't be reached or rejected the draft
+        this cycle.
 
         Retries specifically on HTTP 404 (not other statuses): confirmed
         root cause of a real incident is that ``AGENTIT_PORTAL_URL`` points
@@ -264,17 +275,11 @@ class SkillLearner:
         that skew instead of silently losing the draft to the PVC fallback
         in ``_save_draft`` below.
         """
-        headers = {}
-        token = os.environ.get("AGENTIT_INTERNAL_WEBHOOK_TOKEN")
-        if token:
-            headers["X-Internal-Webhook-Token"] = token
-
         for attempt in range(1, self._draft_retry_attempts + 1):
             try:
                 resp = await self._client.post(
                     f"{self._portal_url}/api/webhook/skill-draft",
                     json={"content": content, "domain": domain},
-                    headers=headers,
                 )
             except Exception as exc:
                 logger.warning(
@@ -336,6 +341,50 @@ class SkillLearner:
             logger.warning("Failed to fetch low-effectiveness skills", exc_info=True)
             return []
 
+    async def _wait_for_portal_draft_route(self) -> bool:
+        """Block the first research tick until ``/api/webhook/skill-draft`` is
+        reachable as something other than HTML 404.
+
+        Root cause of a repeated live incident: this watcher and the portal
+        roll out together under Argo Rollouts canary. ``AGENTIT_PORTAL_URL``
+        points at the *stable* Service, which stays on the old ReplicaSet
+        until the canary fully promotes -- so a brand-new skill-learner pod
+        can POST drafts into an old portal that 404s the route for minutes,
+        silently parking CVE skills on the learner PVC only. Probing with
+        GET (expects 405 Method Not Allowed once the route exists, or 401
+        if token auth is required for GET-less paths) avoids that first-tick
+        race. Proceeds after ``startup_grace_seconds`` even if still 404 so
+        a genuinely missing route doesn't hang the watcher forever.
+        """
+        import time
+
+        url = f"{self._portal_url}/api/webhook/skill-draft"
+        deadline = time.monotonic() + self._startup_grace_seconds
+        click.echo(
+            f"[skill-learn] Waiting up to {self._startup_grace_seconds}s for portal "
+            f"skill-draft route at {url} (avoids mid-canary 404s)...",
+            err=True,
+        )
+        while time.monotonic() < deadline:
+            Path("/tmp/heartbeat").touch()
+            try:
+                resp = await self._client.get(url)
+                if resp.status_code != 404:
+                    click.echo(
+                        f"[skill-learn] Portal skill-draft route ready (HTTP {resp.status_code}).",
+                        err=True,
+                    )
+                    return True
+            except Exception as exc:
+                logger.warning("Portal skill-draft probe failed: %s", exc)
+            await asyncio.sleep(self._startup_probe_interval)
+        click.echo(
+            f"[skill-learn] Portal skill-draft route still 404 after "
+            f"{self._startup_grace_seconds}s — proceeding anyway (per-draft retries still apply).",
+            err=True,
+        )
+        return False
+
     async def run(self) -> None:
         """Main loop: research, sleep.
 
@@ -344,6 +393,16 @@ class SkillLearner:
         would just add a redundant thread hop), since its own blocking
         LLM/file-system calls are already narrowly wrapped in
         ``asyncio.to_thread`` internally.
+
+        Sleeps between ticks via ``watchers.sleep_with_heartbeat`` (the same
+        helper ``vuln_watcher.py`` uses), touching ``/tmp/heartbeat`` every
+        ``HEARTBEAT_REFRESH_SECONDS`` instead of only once per full
+        ``--interval`` (86400s/24h default) -- a plain ``asyncio.sleep``
+        here left the liveness probe's staleness check stale for up to 24h,
+        which previously had to be papered over by loosening the probe's
+        threshold to 172800s (chart/templates/agents/skill-learner.yaml) --
+        see this fix's history for why that threshold is back down to a
+        real value now that the heartbeat is genuinely kept fresh.
         """
         click.echo(f"Starting skill learner (interval={self._interval}s)...", err=True)
         click.echo(
@@ -354,6 +413,7 @@ class SkillLearner:
             "and a warning is logged -- that's the only case where a draft stays invisible.",
             err=True,
         )
+        await self._wait_for_portal_draft_route()
         while True:
             try:
                 await self.research_once()
@@ -368,7 +428,7 @@ class SkillLearner:
                 await record_tick(self._store, "skill-learner", success=False, error=str(exc))
 
             try:
-                await asyncio.sleep(self._interval)
+                await sleep_with_heartbeat(self._interval)
             except KeyboardInterrupt:
                 click.echo("Skill learner stopped.", err=True)
                 break

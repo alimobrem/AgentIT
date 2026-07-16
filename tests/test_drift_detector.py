@@ -75,8 +75,8 @@ class TestApiDriftWarnings:
 
 
 class TestDriftDetectorTickTelemetry:
-    def test_accepts_optional_store_for_tick_telemetry(self):
-        async_store, _raw = make_async_store()
+    async def test_accepts_optional_store_for_tick_telemetry(self):
+        async_store, _raw = await make_async_store()
         detector = DriftDetector(publisher=MagicMock(), interval=1, store=async_store)
         assert detector._store is async_store
 
@@ -90,8 +90,8 @@ class TestDriftDetectorTickTelemetry:
         even when the detector already had one -- it should reuse the injected
         store when present. ``self._store`` is now the async store directly,
         no more `.raw`/`AsyncSQLiteStore.wrap` bridge inside `_maybe_auto_sync`."""
-        async_store, raw_store = make_async_store()
-        raw_store.set_setting("auto_mode", "false")
+        async_store, raw_store = await make_async_store()
+        await raw_store.set_setting("auto_mode", "false")
         detector = DriftDetector(publisher=MagicMock(), interval=1, store=async_store)
         await detector._maybe_auto_sync("some-app")  # auto-mode off -> returns early, no crash
 
@@ -126,7 +126,7 @@ class TestTickRunsOffEventLoop:
     @patch("agentit.watchers.drift_detector.asyncio.sleep", side_effect=KeyboardInterrupt)
     @patch("agentit.watchers.drift_detector.kube.list_custom_resources", return_value=None)
     async def test_detect_once_narrowly_wraps_blocking_kube_call_and_telemetry_records(self, mock_list, mock_sleep):
-        async_store, raw_store = make_async_store()
+        async_store, raw_store = await make_async_store()
         detector = DriftDetector(publisher=MagicMock(), interval=1, store=async_store)
 
         with patch(
@@ -135,7 +135,7 @@ class TestTickRunsOffEventLoop:
             await detector.run()
 
         mock_to_thread.assert_any_call(detector._fetch_argo_apps)
-        events = raw_store.list_events()
+        events = await raw_store.list_events()
         assert any(e["action"] == "tick-complete" for e in events)
 
 
@@ -146,10 +146,10 @@ class TestConstructionAcceptsAsyncStoreDirectly:
     via `create_store()`'s own facade must work end to end."""
 
     @patch("agentit.watchers.drift_detector.kube.list_custom_resources", return_value=None)
-    async def test_detect_once_works_against_create_store_facade(self, mock_list):
-        from agentit.portal.store_factory import create_store
+    async def test_detect_once_works_against_create_store_facade(self, mock_list, postgres_dsn):
+        from agentit.portal.store import create_store
 
-        store = await create_store(":memory:")
+        store = await create_store(postgres_dsn, min_size=1, max_size=2)
         await store.set_setting("auto_mode", "false")
         detector = DriftDetector(publisher=MagicMock(), interval=1, store=store)
         result = await detector.detect_once()  # must not raise AttributeError/TypeError

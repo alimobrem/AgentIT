@@ -1,6 +1,7 @@
 """Skill engine — loads Markdown skill definitions, matches them to findings, renders templates."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -298,6 +299,7 @@ class SkillEngine:
         *,
         store: object | None = None,
         llm_client: object | None = None,
+        loop: object | None = None,
     ) -> list[GeneratedFile]:
         """Match skills to the report and generate all files.
 
@@ -320,39 +322,41 @@ class SkillEngine:
 
         This method itself stays synchronous (it's invoked via
         ``asyncio.to_thread`` from the one async production call site,
-        ``FleetOrchestrator.run()``) -- ``store`` is used through its
-        ``.raw`` synchronous handle (the same bridge ``store_factory.py``
-        documents for other genuinely-synchronous call sites run this way).
-        A Postgres-backed store has no ``.raw`` and this feature is simply
-        skipped for it today (``AGENTIT_DB_BACKEND`` is unset everywhere in
-        production, so this only affects the not-yet-activated Postgres
-        path -- see docs/postgres-migration-plan.md).
+        ``FleetOrchestrator.run()``) -- ``store``'s coroutine methods are
+        bridged back onto ``loop`` (the event loop that constructed the
+        store, captured by the caller before dispatching to a worker
+        thread) via ``asyncio.run_coroutine_threadsafe``, the same pattern
+        ``EventConsumer._persist_dead_letter`` uses for the identical
+        constraint.
         """
-        raw_store = getattr(store, "raw", None) if store is not None else None
+        def _bridge(result):
+            if not asyncio.iscoroutine(result):
+                return result
+            return asyncio.run_coroutine_threadsafe(result, loop).result(timeout=30)
 
         matched = self.match(report)
         all_files: list[GeneratedFile] = []
         for skill in matched:
-            if raw_store is not None:
+            if store is not None:
                 try:
-                    if raw_store.get_rejection_count(report.repo_name, skill.domain) >= 3:
+                    if _bridge(store.get_rejection_count(report.repo_name, skill.domain)) >= 3:
                         logger.info(
                             "Skipping skill %s -- domain '%s' rejected 3+ times for %s",
                             skill.name, skill.domain, report.repo_name,
                         )
-                        raw_store.log_event(
+                        _bridge(store.log_event(
                             "skill-engine", "skipped-rejected", report.repo_name, "info",
                             f"Skipping skill {skill.name} -- domain '{skill.domain}' rejected 3+ times",
-                        )
+                        ))
                         continue
                 except Exception:
                     logger.warning("get_rejection_count lookup failed for %s/%s",
                                    report.repo_name, skill.domain, exc_info=True)
 
             human_override = None
-            if raw_store is not None:
+            if store is not None:
                 try:
-                    human_override = raw_store.get_human_override(report.repo_name, skill.domain)
+                    human_override = _bridge(store.get_human_override(report.repo_name, skill.domain))
                 except Exception:
                     logger.warning("get_human_override lookup failed for %s/%s",
                                    report.repo_name, skill.domain, exc_info=True)

@@ -1,9 +1,9 @@
 """Proof that `POST /assess`'s background-thread assessment pipeline
-(`assess_submit`'s `_run()`) genuinely supports the Postgres-backed store --
-the exact live bug fixed in this pass: `store_pg.AssessmentStore` has no
-`.raw`, so `assess_submit` used to fail every submission with a fail-loud
-500 (see docs/postgres-migration-plan.md and the commit that fixed this)
-the instant `AGENTIT_DB_BACKEND=postgres`.
+(`assess_submit`'s `_run()`) genuinely supports the real, async,
+Postgres-backed store -- a real live bug once fixed here: `AssessmentStore`
+has no `.raw`, so `assess_submit` used to fail every submission with a
+fail-loud 500 the instant the (now-removed) `AGENTIT_DB_BACKEND=postgres`
+switch was flipped (see docs/postgres-migration-plan.md for that history).
 
 Calls the route coroutine directly (bypassing FastAPI's routing/Form
 machinery, `request` is unused by `assess_submit`'s body) so the whole test
@@ -15,10 +15,6 @@ persistent uvicorn event loop for the whole process) far more faithfully
 than a `TestClient` not used as a context manager, which tears its own
 event loop down after every individual request and therefore can't
 exercise this specific bridge -- see assess_submit's own comments.
-
-Requires a real Postgres instance; gated the same way as
-tests/test_store_pg.py (`--run-postgres-tests`, reusing its `postgres_dsn`
-fixture).
 """
 from __future__ import annotations
 
@@ -27,17 +23,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from agentit.models import (
     ArchitectureInfo, AssessmentReport, DimensionScore, Finding,
     Language, Severity, StackInfo,
 )
-from agentit.portal import store_pg
 from agentit.portal.routes import assessments
-from test_store_pg import postgres_dsn  # noqa: F401 -- reused fixture, see module docstring
-
-pytestmark = pytest.mark.postgres
+from conftest import make_store
 
 
 def _make_report(repo_name: str = "pg-assess-app") -> AssessmentReport:
@@ -56,28 +47,11 @@ def _make_report(repo_name: str = "pg-assess-app") -> AssessmentReport:
     )
 
 
-@pytest.fixture
-async def pg_store(postgres_dsn):
-    """Real, independent `store_pg.AssessmentStore` built on *this test's*
-    running event loop -- the same loop `assess_submit` will capture."""
-    store = await store_pg.AssessmentStore.create(postgres_dsn, min_size=1, max_size=5)
-    async with store._pool.acquire() as conn:
-        await conn.execute(
-            "TRUNCATE assessments, onboarding_results, events, gates, remediations, "
-            "agent_registry, slos, apply_results, settings, remediation_jobs, "
-            "scheduled_operations, processed_webhooks, agent_feedback, "
-            "skill_effectiveness, suppressed_checks, skill_inventory_snapshots, "
-            "agent_runs, check_results CASCADE"
-        )
-    yield store
-    await store.close()
-
-
-async def test_assess_submit_completes_against_real_postgres(pg_store):
-    """`assess_submit` must not 500 under the Postgres backend, and its
-    background thread must actually run the clone+assess pipeline to
-    completion and persist a real, queryable assessment -- not just "the
-    coroutine didn't raise"."""
+async def test_assess_submit_completes_against_real_postgres():
+    """`assess_submit` must not 500, and its background thread must
+    actually run the clone+assess pipeline to completion and persist a
+    real, queryable assessment -- not just "the coroutine didn't raise"."""
+    pg_store = await make_store()
     report = _make_report()
 
     # The background thread `assess_submit` spawns keeps running well after

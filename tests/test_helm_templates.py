@@ -213,6 +213,46 @@ class TestTektonPipeline:
         for task in doc["spec"]["tasks"]:
             assert "timeout" in task, f"Task {task['name']} missing timeout"
 
+    def test_smoke_test_image_runs_after_build_before_argocd_notify(self):
+        """The image smoke test must gate promotion: it runs after
+        build-image produces the real tag, and notify-argocd (which patches
+        the live Argo CD Application to that tag) must wait on it -- so a
+        broken image (missing pytest/tests/chart/git/gh, discovered live and
+        one at a time this session) can never reach the deployed Rollout."""
+        doc = _load(self.TEMPLATE)
+        tasks = {t["name"]: t for t in doc["spec"]["tasks"]}
+        assert "smoke-test-image" in tasks
+        smoke = tasks["smoke-test-image"]
+        assert "build-image" in smoke["runAfter"]
+        assert "smoke-test-image" in tasks["notify-argocd"]["runAfter"]
+
+    def test_smoke_test_image_checks_every_regressed_tool(self):
+        """Each of these was discovered missing from the deployed image one
+        at a time, live: gh, a real .git checkout, pytest, tests/, chart/."""
+        doc = _load(self.TEMPLATE)
+        tasks = {t["name"]: t for t in doc["spec"]["tasks"]}
+        script = "\n".join(tasks["smoke-test-image"]["taskSpec"]["steps"][0]["args"])
+        for expected in (
+            "python -m pytest --version",
+            "test -d tests",
+            "test -d chart",
+            "git --version",
+            "gh --version",
+            "git -C /opt/app-root/src status",
+        ):
+            assert expected in script, f"smoke-test-image script missing check: {expected!r}"
+
+    def test_smoke_test_image_uses_the_just_built_image(self):
+        """Must run the freshly-built tag, not some other/older image, so
+        the check is meaningful against this exact commit's build."""
+        doc = _load(self.TEMPLATE)
+        tasks = {t["name"]: t for t in doc["spec"]["tasks"]}
+        smoke = tasks["smoke-test-image"]
+        step = smoke["taskSpec"]["steps"][0]
+        assert step["image"] == "$(params.image)"
+        param_values = {p["name"]: p["value"] for p in smoke["params"]}
+        assert param_values["image"] == "$(params.image-ref):$(params.revision)"
+
     def test_pipeline_has_finally_block(self):
         doc = _load(self.TEMPLATE)
         assert "finally" in doc["spec"], "Pipeline missing 'finally' block"
@@ -372,6 +412,38 @@ class TestPostgresBundledBackup:
         args = "\n".join(container["args"])
         assert "pg_dump" in args
         assert "agentit-postgres-bundled" in args
+
+
+class TestArgoCDApplicationParams:
+    """Regression: `postgres.backend` (the historical SQLite/Postgres
+    selector) is gone -- Postgres is the only supported store, not a flag
+    on the app side -- so this file must never reintroduce it. The bundled
+    instance's own backup coverage still needs both
+    `postgres.bundled.enabled` and `postgres.bundled.backup.enabled` set
+    together, since the backup CronJob's own `{{- if }}` gate
+    (postgres-bundled-backup.yaml) requires both. See
+    docs/postgres-migration-plan.md's "Backup/retention" section."""
+    APPLICATION_YAML = Path(__file__).resolve().parent.parent / "argocd" / "application.yaml"
+
+    def _params(self) -> dict:
+        doc = yaml.safe_load(self.APPLICATION_YAML.read_text())
+        return {p["name"]: p["value"] for p in doc["spec"]["source"]["helm"]["parameters"]}
+
+    def test_no_postgres_backend_param(self):
+        params = self._params()
+        assert "postgres.backend" not in params, (
+            "postgres.backend is a removed, now-meaningless parameter -- "
+            "Postgres is the only supported store, not a selectable backend"
+        )
+
+    def test_backup_requires_bundled_instance_enabled(self):
+        """The backup CronJob's own {{- if }} gate (postgres-bundled-backup.yaml)
+        requires postgres.bundled.enabled too -- if that ever gets disabled
+        while backup.enabled stays 'true' in application.yaml, the backup flag
+        would silently do nothing."""
+        params = self._params()
+        if params.get("postgres.bundled.backup.enabled") == "true":
+            assert params.get("postgres.bundled.enabled") == "true"
 
 
 class TestPostgresBundledNetworkPolicy:
@@ -795,6 +867,35 @@ class TestWatcherNetworkPolicies:
             ]
             assert len(dns_rules) == 1, name
             assert "ports" not in dns_rules[0], name
+
+
+# ---------------------------------------------------------------------------
+# skill-learner Deployment (chart/templates/agents/skill-learner.yaml)
+# ---------------------------------------------------------------------------
+
+class TestSkillLearnerDeployment:
+    """Regression test for the liveness-probe crash-loop shape vuln-watcher
+    also hit: skill-learner's 24h tick interval touched /tmp/heartbeat only
+    once per tick, which previously had to be papered over by loosening
+    this probe's threshold to 172800s (48h). Now that watchers/skill_learner.py's
+    run() loop refreshes the heartbeat every HEARTBEAT_REFRESH_SECONDS via
+    the shared agentit.watchers.sleep_with_heartbeat helper (same fix
+    vuln-watcher.yaml's probe already relies on), the threshold must be
+    back down to a real, fast-detecting value -- not silently
+    re-loosened."""
+    TEMPLATE = CHART_DIR / "agents" / "skill-learner.yaml"
+
+    def test_parseable(self):
+        doc = _load(self.TEMPLATE)
+        assert doc["kind"] == "Deployment"
+        assert doc["metadata"]["name"] == "agentit-skill-learner"
+
+    def test_liveness_probe_threshold_matches_vuln_watcher(self):
+        doc = _load(self.TEMPLATE)
+        container = doc["spec"]["template"]["spec"]["containers"][0]
+        command = container["livenessProbe"]["exec"]["command"][-1]
+        assert "-lt 900" in command
+        assert "172800" not in command
 
 
 # ---------------------------------------------------------------------------

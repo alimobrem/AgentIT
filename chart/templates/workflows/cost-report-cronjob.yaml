@@ -46,8 +46,21 @@ spec:
                   cpu: 500m
                   memory: 512Mi
               env:
-                - name: AGENTIT_DB_PATH
-                  value: /data/agentit.db
+                # Postgres is the only supported store -- always-on, not a
+                # flag. `watch --rescan` calls into the store, so this Job
+                # needs the same DSN wiring every other component gets.
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.postgres.bundled.credentials.secretName }}
+                      key: username
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.postgres.bundled.credentials.secretName }}
+                      key: password
+                - name: AGENTIT_DB_DSN
+                  value: "postgresql://$(PGUSER):$(PGPASSWORD)@{{ .Release.Name }}-postgres-bundled.{{ .Release.Namespace }}.svc:5432/{{ .Values.postgres.bundled.credentials.database }}"
                 {{- range $key, $value := .Values.env }}
                 {{- if $value }}
                 - name: {{ $key }}

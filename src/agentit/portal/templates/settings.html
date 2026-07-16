@@ -10,12 +10,12 @@
 
 <div class="stat-grid">
   <div class="stat-card">
-    <div class="stat-label">Auto-Mode</div>
+    <div class="stat-label">Allowlist Scope</div>
     <div class="stat-value">
-      {% if auto_mode %}
-        <span class="text-success">ON</span>
+      {% if auto_mode_allowlist %}
+        <span class="text-success">{{ auto_mode_allowlist | length }} pattern(s)</span>
       {% else %}
-        <span class="text-muted">OFF</span>
+        <span class="text-muted">None yet</span>
       {% endif %}
     </div>
   </div>
@@ -30,68 +30,31 @@
     </div>
   </div>
   <div class="stat-card">
-    <div class="stat-label">Mode</div>
-    <div class="stat-value text-sm">
+    <div class="stat-label">Global Fallback Toggle</div>
+    <div class="stat-value">
       {% if auto_mode %}
-        Agents detect, classify, and auto-apply safe changes. Destructive actions gate for human review.
+        <span class="text-success">ON</span>
       {% else %}
-        Human-in-the-loop. All actions require manual approval.
+        <span class="text-muted">OFF</span>
       {% endif %}
     </div>
   </div>
 </div>
 
-<h2 class="section-title">Auto-Mode</h2>
-<p class="text-muted mb-2">
-  When enabled, agents automatically assess, onboard, and apply manifests for monitored apps.
-  The LLM reviews every action — destructive operations are always gated for human approval.
-</p>
-
-<div class="action-bar mb-2">
-  {% if auto_mode %}
-  <form method="post" action="/settings/auto-mode" class="inline-form">
-    <input type="hidden" name="value" value="false">
-    <button type="submit" class="btn btn-outline">
-      <span class="btn-label">Disable Auto-Mode</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
-    </button>
-  </form>
-  {% else %}
-  <form method="post" action="/settings/auto-mode" class="inline-form"
-        x-data x-ref="enableAutoMode">
-    <input type="hidden" name="value" value="true">
-    <button type="button" class="btn btn-green"
-      @click="$dispatch('show-confirm', {
-        title: 'Enable Auto-Mode',
-        message: 'Enable auto-mode? Agents will automatically apply safe changes to your clusters.',
-        form: $refs.enableAutoMode,
-        opts: { confirmText: 'Enable', danger: false }
-      })">
-      <span class="btn-label">Enable Auto-Mode</span>
-    </button>
-  </form>
-  {% endif %}
-</div>
-
-{% if auto_mode %}
-<div class="alert alert-warn mb-2">
-  Auto-mode is active. Safe changes (adding NetworkPolicies, ConfigMaps, ServiceMonitors) will be
-  applied automatically. Destructive changes (deleting resources, modifying RBAC, scaling to zero)
-  will be flagged by the LLM and queued in Gates for your review.
-  {% if not llm_available %}
-  <strong>Warning:</strong> LLM is unavailable — all actions will be gated (fail-closed).
-  {% endif %}
-</div>
-{% endif %}
-
-<h2 class="section-title">Auto-Mode Allowlist</h2>
+{# Allowlist is the primary, meaningful control -- shown first. A single
+   global boolean is never the front door for extending trust to a scoped
+   capability (docs/ux-design-requirements.md Part 3 item 5): the
+   per-(namespace, kind) allowlist is what a human should actually see and
+   reason about, with the coarse global toggle below demoted to a fallback
+   for when no allowlist has been configured yet. #}
+<h2 class="section-title">Auto-Mode Allowlist <span class="badge badge-info" title="The primary control -- scope trust to specific resources instead of an all-or-nothing switch">Recommended</span></h2>
 <p class="text-muted mb-1">
-  Scope auto-mode to specific (namespace, resource-kind) combinations instead of the whole-batch
-  ON/OFF toggle above. With no allowlist entries, auto-mode's behavior is unchanged (everything the
-  decision matrix above approves gets applied). Once you add at least one entry, only manifests
-  matching an entry (namespace and kind both support <code>*</code> as a wildcard, e.g.
-  <code>*/ConfigMap</code>) are auto-applied — anything else in the same batch is gated for manual
-  review instead of blocking the whole batch.
+  Scope auto-mode to specific (namespace, resource-kind) combinations. This is the control you should
+  actually use to extend trust incrementally — start with one low-risk pattern (e.g.
+  <code>*/ConfigMap</code>) and add more only as you build confidence. Namespace and kind both support
+  <code>*</code> as a wildcard. Once at least one entry exists, only manifests matching an entry are
+  auto-applied — anything else in the same batch is gated for manual review instead of blocking the
+  whole batch.
 </p>
 <p class="text-muted mb-2">
   <strong>{{ rbac_shaped_kinds | join(', ') }}</strong> can never be allowlisted here, regardless of
@@ -123,7 +86,11 @@
   </tbody>
 </table>
 {% else %}
-<p class="text-muted mb-2">No allowlist entries configured — auto-mode's whole-batch ON/OFF behavior is unaffected.</p>
+<p class="text-muted mb-2">
+  No allowlist entries configured yet — with none set, the global fallback toggle below (if ON)
+  applies its whole-batch ON/OFF behavior unscoped. Add an entry below to start scoping trust
+  instead of relying on that coarse switch.
+</p>
 {% endif %}
 
 <form method="post" action="/settings/auto-mode-allowlist/add" class="form-narrow mb-2">
@@ -140,6 +107,53 @@
     <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
   </button>
 </form>
+
+<h2 class="section-title">Global Fallback Toggle</h2>
+<p class="text-muted mb-2">
+  A coarse, whole-batch ON/OFF switch — everything the decision matrix below approves gets applied,
+  with no per-(namespace, kind) scoping. Prefer the allowlist above for extending trust incrementally;
+  use this only as a fallback (e.g. while you're still building out an allowlist) or to fully disable
+  auto-mode. The LLM reviews every action either way — destructive operations are always gated for
+  human approval regardless of this toggle.
+</p>
+
+<div class="action-bar mb-2">
+  {% if auto_mode %}
+  <form method="post" action="/settings/auto-mode" class="inline-form">
+    <input type="hidden" name="value" value="false">
+    <button type="submit" class="btn btn-outline">
+      <span class="btn-label">Disable Global Fallback</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+    </button>
+  </form>
+  {% else %}
+  <form method="post" action="/settings/auto-mode" class="inline-form"
+        x-data x-ref="enableAutoMode">
+    <input type="hidden" name="value" value="true">
+    <button type="button" class="btn btn-green"
+      @click="$dispatch('show-confirm', {
+        title: 'Enable Global Fallback Toggle',
+        message: 'Enable the whole-batch auto-mode fallback? Without allowlist entries scoping it, agents will automatically apply every change the decision matrix approves, cluster-wide.',
+        form: $refs.enableAutoMode,
+        opts: { confirmText: 'Enable', danger: false }
+      })">
+      <span class="btn-label">Enable Global Fallback</span>
+    </button>
+  </form>
+  {% endif %}
+</div>
+
+{% if auto_mode %}
+<div class="alert alert-warn mb-2">
+  The global fallback toggle is active. Safe changes (adding NetworkPolicies, ConfigMaps, ServiceMonitors) will be
+  applied automatically. Destructive changes (deleting resources, modifying RBAC, scaling to zero)
+  will be flagged by the LLM and queued for your review on that app's Actions tab (or Admin Review,
+  for cluster-wide changes).
+  {% if not llm_available %}
+  <strong>Warning:</strong> LLM is unavailable — all actions will be gated (fail-closed).
+  {% endif %}
+</div>
+{% endif %}
 
 <h2 class="section-title">Decision Matrix</h2>
 <table>

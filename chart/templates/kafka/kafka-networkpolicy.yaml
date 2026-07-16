@@ -1,0 +1,74 @@
+# NetworkPolicy for the Kafka broker/controller pods (KafkaNodePool
+# "agentit-pool" in kafka-cluster.yaml), per docs/kafka-hardening-plan.md
+# item #4. Today, with no NetworkPolicy of its own, any pod in the namespace
+# that can resolve agentit-kafka-kafka-bootstrap.agentit.svc can reach the
+# broker -- this scopes ingress to exactly this app's own pods (portal + the
+# 4 watchers that actually talk to Kafka) plus Strimzi's own in-cluster
+# components for the same cluster (entity-operator, kafka-exporter, and any
+# future inter-broker/controller-quorum traffic if replicas is ever raised
+# above 1), instead of the implicit allow-all-in-cluster gap.
+#
+# Mirrors chart/templates/networkpolicy-agents.yaml's existing convention:
+# explicit podSelector/ports rules, one rule per peer group.
+#
+# CAVEAT (flagged for the human reviewer, not verified against a live
+# cluster by this pass): the `strimzi.io/cluster: agentit-kafka` peer
+# selector below is reused from networkpolicy-agents.yaml's own egress rule
+# (already relied on there for the watchers to reach the broker), so it's
+# known to match the broker pods themselves. Whether it also matches
+# entity-operator/kafka-exporter pods on THIS cluster's actual Strimzi
+# version has not been independently re-verified here -- confirm on a
+# non-prod namespace (or during the coordinated cutover window) that
+# entity-operator connectivity survives before relying on this in
+# production, per the plan doc's "getting it wrong silently is easy and
+# expensive to debug live" caution.
+{{- if and .Values.kafka.enabled .Values.kafka.auth.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-kafka-broker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-kafka
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      strimzi.io/cluster: agentit-kafka
+  policyTypes:
+    - Ingress
+  ingress:
+    # Strimzi's own in-cluster components for this Kafka cluster
+    # (entity-operator, kafka-exporter, and self -- inter-broker/controller
+    # traffic if replicas is ever raised above 1). No `ports` restriction,
+    # same "peer selector, no ports key" idiom networkpolicy-agents.yaml
+    # uses for DNS, since Strimzi's own components need more than just the
+    # client listener ports (replication, JMX/metrics, etc).
+    - from:
+        - podSelector:
+            matchLabels:
+              strimzi.io/cluster: agentit-kafka
+    # This app's own pods: the portal Deployment + the 4 watchers that set
+    # AGENTIT_KAFKA_BOOTSTRAP (capability-scout excluded -- it never does).
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}
+        - podSelector:
+            matchLabels:
+              app: {{ .Release.Name }}-vuln-watcher
+        - podSelector:
+            matchLabels:
+              app: {{ .Release.Name }}-slo-tracker
+        - podSelector:
+            matchLabels:
+              app: {{ .Release.Name }}-drift-detector
+        - podSelector:
+            matchLabels:
+              app: {{ .Release.Name }}-skill-learner
+      ports:
+        - protocol: TCP
+          port: 9092
+        - protocol: TCP
+          port: {{ .Values.kafka.auth.tlsPort | default 9093 }}
+{{- end }}

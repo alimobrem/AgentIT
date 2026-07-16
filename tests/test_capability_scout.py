@@ -89,9 +89,9 @@ class TestScanDocGaps:
 class TestGatherEvidence:
     async def test_aggregates_real_store_signal(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
-        async_store, raw_store = make_async_store()
-        raw_store.record_feedback("app-a", "hardening", "network-policy", "rejected")
-        raw_store.record_feedback("app-b", "hardening", "network-policy", "rejected")
+        async_store, raw_store = await make_async_store()
+        await raw_store.record_feedback("app-a", "hardening", "network-policy", "rejected")
+        await raw_store.record_feedback("app-b", "hardening", "network-policy", "rejected")
 
         evidence = await gather_evidence(async_store)
 

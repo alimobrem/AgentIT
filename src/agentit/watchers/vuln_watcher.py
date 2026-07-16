@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
 
@@ -10,19 +9,9 @@ import click
 
 from agentit.consumer import EventConsumer
 from agentit.events import EventPublisher, TOPIC_ALERTS, TOPIC_EVENTS
-from agentit.watchers import record_tick
+from agentit.watchers import record_tick, sleep_with_heartbeat
 
 logger = logging.getLogger(__name__)
-
-# Touch /tmp/heartbeat at least this often while sleeping between ticks, so
-# the liveness probe's staleness check (900s in chart/templates/agents/
-# vuln-watcher.yaml) reflects "is the process alive", not "did a tick just
-# finish". Without this, any tick that completes (success or failure) is
-# followed by a sleep of up to `--interval` (21600s/6h default) with nothing
-# refreshing the heartbeat, so kubelet SIGKILLs the container ~15-19 minutes
-# into every single sleep, forever -- see the incident writeup for the full
-# postgres-tick-timestamp evidence.
-_HEARTBEAT_REFRESH_SECONDS = 300
 
 
 class VulnWatcher:
@@ -59,13 +48,10 @@ class VulnWatcher:
     async def check_fleet(self) -> None:
         """Scan the fleet for apps with critical/high findings and alert or remediate.
 
-        ``self._store`` is the async-compatible store handed in by
-        ``cli.py``'s ``vuln_watch`` command (``AsyncSQLiteStore`` or
-        ``store_pg.AssessmentStore`` -- never the raw sync store, see
-        docs/postgres-migration-plan.md), so every store call here is
-        `await`ed directly. ``AutoMode``/``RemediationLoop`` are also
-        genuinely async, so they're constructed with that same store
-        object -- no bridging facade needed.
+        ``self._store`` is the ``AssessmentStore`` handed in by ``cli.py``'s
+        ``vuln_watch`` command, so every store call here is `await`ed
+        directly. ``AutoMode``/``RemediationLoop`` are also genuinely
+        async, so they're constructed with that same store object.
         """
         fleet = await self._store.get_fleet_data()
         click.echo(f"[vuln-watch] Monitoring {len(fleet)} apps", err=True)
@@ -140,21 +126,7 @@ class VulnWatcher:
                 await record_tick(self._store, "vuln-watcher", success=False, error=str(exc))
 
             try:
-                await self._sleep_with_heartbeat(self._interval)
+                await sleep_with_heartbeat(self._interval)
             except KeyboardInterrupt:
                 click.echo("Vulnerability watcher stopped.", err=True)
                 break
-
-    async def _sleep_with_heartbeat(self, seconds: int) -> None:
-        """Sleep for ``seconds``, touching ``/tmp/heartbeat`` at least every
-        ``_HEARTBEAT_REFRESH_SECONDS`` instead of only once before/after the
-        whole sleep. See ``_HEARTBEAT_REFRESH_SECONDS``'s comment for why
-        this matters whenever ``self._interval`` exceeds the liveness
-        probe's staleness window.
-        """
-        remaining = seconds
-        while remaining > 0:
-            chunk = min(remaining, _HEARTBEAT_REFRESH_SECONDS)
-            await asyncio.sleep(chunk)
-            Path("/tmp/heartbeat").touch()
-            remaining -= chunk

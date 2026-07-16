@@ -12,7 +12,7 @@ import logging
 import os
 from typing import TYPE_CHECKING
 
-import httpx
+from agentit.internal_webhook_client import internal_webhook_client
 
 if TYPE_CHECKING:
     from agentit.portal.store import AssessmentStore
@@ -99,8 +99,8 @@ class RemediationLoop:
     Each method returns a result dict with the outcome. The loop can
     be triggered by any watcher agent when it detects an issue.
 
-    ``store`` must be an async-compatible store (``AsyncSQLiteStore`` or
-    ``store_pg.AssessmentStore``) -- every store call below is ``await``ed.
+    ``store`` is an ``AssessmentStore`` -- every store call below is
+    ``await``ed.
     """
 
     def __init__(
@@ -114,7 +114,18 @@ class RemediationLoop:
         self._store = store
         self._publisher = publisher
         self._timeout = timeout
-        self._client = httpx.AsyncClient(timeout=timeout)
+        # _assess/_onboard/_auto_apply below call back into the portal's
+        # /api/webhook/* routes, which are `verify_internal_token`-gated
+        # (routes/webhooks.py) exactly like every other cross-pod caller in
+        # this codebase (skill_learner.py's _submit_draft_to_portal, the
+        # Tekton pipeline, the backup-status CronJob). `internal_webhook_client`
+        # attaches the required token header consistently -- this client
+        # previously built its own headers by hand and shipped without the
+        # header entirely for a while, causing every trigger() call whose
+        # _assess() reached a portal enforcing the token to 401 before ever
+        # getting past step 1, confirmed live via repeated "loop-failed"
+        # events with "Missing or invalid internal webhook token".
+        self._client = internal_webhook_client(timeout=timeout)
 
     async def _log(self, action: str, target: str, severity: str, summary: str) -> None:
         logger.info("[loop] %s %s: %s", action, target, summary)

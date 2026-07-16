@@ -31,8 +31,7 @@ def _default_skills_dir() -> Path:
 
 
 class RemediationDispatcher:
-    """``store`` must be an async-compatible store (``AsyncSQLiteStore`` or
-    ``store_pg.AssessmentStore``) -- every store call below is ``await``ed.
+    """``store`` is an ``AssessmentStore`` -- every store call below is ``await``ed.
     ``lookup()`` (registry.py) and the skill engine's template-mode
     ``generate()`` are pure/CPU-bound with no I/O, so they stay plain sync
     calls made directly from these async methods -- there's no blocking

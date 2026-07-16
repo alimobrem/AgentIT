@@ -25,11 +25,10 @@ def app_url(tmp_path_factory):
     from agentit.models import DimensionScore, Finding, Severity
     from agentit.portal.app import app
     from agentit.portal.store import AssessmentStore
-    from agentit.portal.store_factory import AsyncSQLiteStore
     from conftest import make_report
 
     store = AssessmentStore(":memory:")
-    async_store = AsyncSQLiteStore.wrap(store)
+    async_store = store
     # A real assessment always scores all 7 analyzer dimensions (see
     # analyzers/*.py's dimension= literals) -- make_report()'s single-dimension
     # default is fine for unit tests that don't care about score breakdown,
@@ -651,3 +650,229 @@ class TestFixButtonVisibility:
 
         unmatched_item = page.locator(".finding-item", has_text="Browser test: unmatched finding")
         assert unmatched_item.locator("button:has-text('Fix')").count() == 0
+
+
+# ── UX Requirements: Confirm Modal Focus + Type-to-Confirm (#1, #2) ──────
+#
+# docs/ux-design-requirements.md checklist #2: Cancel must receive default
+# focus on every confirm, destructive or not (a reflexive Enter must never
+# fire the guarded action). #1: type-to-confirm is reserved for the two
+# highest-blast-radius actions in the app (Delete App, cluster-admin-review
+# gate approval) -- both genuinely interaction-level, so covered here rather
+# than only asserting markup presence in the TestClient-level tests.
+
+
+class TestConfirmModalFocusAndTypeToConfirm:
+    def test_cancel_receives_default_focus_on_open(self, page: Page, app_url):
+        """A routine (non-destructive) confirm -- Register for GitOps --
+        must ALSO default-focus Cancel, not just destructive ones."""
+        url, aid, _ = app_url
+        page.goto(f"{url}/assessments/{aid}")
+        page.click("button:has-text('Delete')")
+        expect(page.locator("#confirm-modal")).to_have_class(re.compile("open"))
+        expect(page.locator("#confirm-modal button:has-text('Cancel')")).to_be_focused()
+
+    def test_reflexive_enter_does_not_fire_destructive_action(self, page: Page, app_url):
+        """With Cancel focused, pressing Enter must dismiss/no-op, never
+        submit the guarded destructive form."""
+        url, aid, _ = app_url
+        page.goto(f"{url}/assessments/{aid}")
+        page.click("button:has-text('Delete')")
+        cancel_btn = page.locator("#confirm-modal button:has-text('Cancel')")
+        expect(page.locator("#confirm-modal")).to_have_class(re.compile("open"))
+        expect(cancel_btn).to_be_focused()
+        # Locator.press() (unlike the global page.keyboard.press()) targets
+        # this specific element directly rather than depending on which
+        # page/tab the OS-level input focus happens to be on -- the more
+        # deterministic way to assert "pressing Enter while Cancel is
+        # focused" in an automated, possibly-multi-page browser session.
+        cancel_btn.press("Enter")
+        # The modal closed (Cancel's own handler ran) and we're still on
+        # the assessment page -- a fired delete would have redirected to "/".
+        expect(page.locator("#confirm-modal")).not_to_have_class(re.compile("open"))
+        assert f"/assessments/{aid}" in page.url
+
+    def test_delete_app_requires_typing_exact_name(self, page: Page, app_url):
+        url, _, store = app_url
+        aid = store.save(make_report(repo_name="type-confirm-app"))
+        page.goto(url)
+        row = page.locator("tr", has_text="type-confirm-app")
+        row.locator("button[aria-label='Delete type-confirm-app']").click()
+
+        expect(page.locator("#confirm-modal")).to_have_class(re.compile("open"))
+        confirm_btn = page.locator("#confirm-modal button", has_text="I understand, delete this app")
+        expect(confirm_btn).to_be_visible()
+        expect(confirm_btn).to_be_disabled()
+
+        type_input = page.locator("#type-confirm-input")
+        expect(type_input).to_be_visible()
+        type_input.fill("wrong-name")
+        expect(confirm_btn).to_be_disabled()
+
+        type_input.fill("type-confirm-app")
+        expect(confirm_btn).to_be_enabled()
+
+    def test_delete_app_confirm_actually_deletes_once_enabled(self, page: Page, app_url):
+        url, _, store = app_url
+        aid = store.save(make_report(repo_name="type-confirm-delete-app"))
+        page.goto(url)
+        row = page.locator("tr", has_text="type-confirm-delete-app")
+        row.locator("button[aria-label='Delete type-confirm-delete-app']").click()
+
+        page.locator("#type-confirm-input").fill("type-confirm-delete-app")
+        page.locator("#confirm-modal button", has_text="I understand, delete this app").click()
+
+        expect(page.locator("#confirm-modal")).not_to_have_class(re.compile("open"))
+        page.wait_for_url(re.compile(r"^" + re.escape(url) + r"/?$"))
+        assert store.get(aid) is None
+
+    def test_ordinary_confirm_has_no_type_to_confirm_input(self, page: Page, app_url):
+        """A routine confirm (Reject via the Actions tab's Dismiss button)
+        must never show the type-to-confirm input -- overusing it cheapens
+        the pattern (checklist #1's own warning)."""
+        url, _, store = app_url
+        aid = store.save(make_report(repo_name="browser-ordinary-gate-app"))
+        store.create_gate(aid, "auto-mode-review", "Browser test: ordinary gate")
+        page.goto(f"{url}/assessments/{aid}?tab=actions")
+        gate_card = page.locator(".card", has_text="Browser test: ordinary gate")
+        gate_card.locator("button:has-text('Dismiss')").click()
+        expect(page.locator("#confirm-modal")).to_have_class(re.compile("open"))
+        expect(page.locator("#type-confirm-input")).not_to_be_visible()
+
+
+# ── UX Requirements: Command Palette (#4, #5) ────────────────────────────
+
+
+class TestCommandPalette:
+    def test_shortcut_hint_visible_in_nav(self, page: Page, app_url):
+        url, _, _ = app_url
+        page.goto(url)
+        expect(page.locator(".cmdk-trigger")).to_be_visible()
+        expect(page.locator(".cmdk-trigger")).to_contain_text("K")
+
+    def test_ctrl_k_opens_palette_from_any_page(self, page: Page, app_url):
+        url, _, _ = app_url
+        page.goto(f"{url}/settings")
+        expect(page.locator("#command-palette")).not_to_have_class(re.compile("open"))
+        page.keyboard.press("Control+k")
+        expect(page.locator("#command-palette")).to_have_class(re.compile("open"))
+        expect(page.locator("#command-palette input")).to_be_focused()
+
+    def test_click_trigger_opens_palette(self, page: Page, app_url):
+        url, _, _ = app_url
+        page.goto(url)
+        page.click(".cmdk-trigger")
+        expect(page.locator("#command-palette")).to_have_class(re.compile("open"))
+
+    def test_escape_closes_palette(self, page: Page, app_url):
+        url, _, _ = app_url
+        page.goto(url)
+        page.keyboard.press("Control+k")
+        expect(page.locator("#command-palette")).to_have_class(re.compile("open"))
+        page.keyboard.press("Escape")
+        expect(page.locator("#command-palette")).not_to_have_class(re.compile("open"))
+
+    def test_search_filters_nav_items(self, page: Page, app_url):
+        url, _, _ = app_url
+        page.goto(url)
+        page.keyboard.press("Control+k")
+        page.locator("#command-palette input").fill("admin")
+        results = page.locator("#command-palette .cmdk-item")
+        expect(results.first).to_contain_text("Admin Review")
+
+    def test_search_finds_real_fleet_app_and_navigates(self, page: Page, app_url):
+        url, _, store = app_url
+        store.save(make_report(repo_name="palette-findable-app"))
+        page.goto(url)
+        page.keyboard.press("Control+k")
+        page.locator("#command-palette input").fill("palette-findable-app")
+        result = page.locator("#command-palette .cmdk-item", has_text="palette-findable-app")
+        expect(result).to_be_visible()
+        result.click()
+        page.wait_for_url(re.compile(r".*/assessments/.*"))
+        expect(page.locator("h1")).to_contain_text("palette-findable-app")
+
+    def test_enter_key_opens_top_result(self, page: Page, app_url):
+        url, _, _ = app_url
+        page.goto(f"{url}/settings")
+        page.keyboard.press("Control+k")
+        page.locator("#command-palette input").fill("events")
+        page.keyboard.press("Enter")
+        page.wait_for_url(re.compile(r".*/events.*"))
+
+
+# ── UX Requirements: Optimistic Suppress (#7) ────────────────────────────
+
+
+class TestOptimisticSuppress:
+    def test_suppress_hides_finding_immediately(self, page: Page, app_url):
+        from agentit.models import DimensionScore, Finding, Severity
+
+        url, _, store = app_url
+        report = make_report(
+            repo_name="browser-optimistic-suppress-app",
+            scores=[DimensionScore(dimension="security", score=30, max_score=100, findings=[
+                Finding(category="secrets", severity=Severity.high,
+                        description="Browser test: suppress me", recommendation="n/a",
+                        source="trivy"),
+            ])],
+        )
+        aid = store.save(report)
+
+        page.goto(f"{url}/assessments/{aid}")
+        page.click(".tab-nav >> text=Findings")
+        item = page.locator(".finding-item", has_text="Browser test: suppress me")
+        expect(item).to_be_visible()
+
+        item.locator("button:has-text('Suppress')").click()
+        item.locator("input[name='reason']").fill("handled externally")
+        item.locator("button:has-text('Confirm')").click()
+
+        # Optimistic: hidden immediately, without a full-page navigation
+        # (the URL never changes -- a full boosted-redirect reload would
+        # change it back to /assessments/{aid} with no ?tab, losing the
+        # Findings-tab context).
+        expect(item).not_to_be_visible(timeout=2000)
+        assert page.url == f"{url}/assessments/{aid}"
+
+        # The real, underlying suppression genuinely persisted server-side
+        # (not just a client-side illusion) -- suppress_check() is a
+        # forward-looking record (it stops the check firing on FUTURE
+        # assessments; it doesn't rewrite this already-completed report's
+        # stored findings), so this is the correct way to verify the real
+        # outcome, not by expecting THIS historical finding to vanish on
+        # reload.
+        assert store.get_suppressions("browser-optimistic-suppress-app")
+
+    def test_suppress_failure_reconciles_by_restoring_the_finding(self, page: Page, app_url):
+        """If the real request fails, the optimistically-hidden finding
+        must come back -- the prediction reconciles with reality, it never
+        just silently stays wrong (Vercel's optimistic-UI principle, bounded
+        by this app's own fail-closed posture)."""
+        from agentit.models import DimensionScore, Finding, Severity
+
+        url, _, store = app_url
+        report = make_report(
+            repo_name="browser-optimistic-suppress-fail-app",
+            scores=[DimensionScore(dimension="security", score=30, max_score=100, findings=[
+                Finding(category="secrets", severity=Severity.high,
+                        description="Browser test: suppress failure", recommendation="n/a",
+                        source="trivy"),
+            ])],
+        )
+        aid = store.save(report)
+
+        page.goto(f"{url}/assessments/{aid}")
+        page.click(".tab-nav >> text=Findings")
+        item = page.locator(".finding-item", has_text="Browser test: suppress failure")
+
+        with page.route("**/api/suppress", lambda route: route.fulfill(status=500, body="error")):
+            item.locator("button:has-text('Suppress')").click()
+            item.locator("input[name='reason']").fill("handled externally")
+            item.locator("button:has-text('Confirm')").click()
+            # Reconciliation: back to visible after the failed request.
+            expect(item).to_be_visible(timeout=2000)
+        # A visible error toast, per CLAUDE.md's "errors must always be
+        # visible to the user" -- reusing base.html's existing global
+        # htmx:responseError toast handler, not a bespoke one.
+        expect(page.locator(".toast-error")).to_be_visible()

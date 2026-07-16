@@ -5,15 +5,15 @@ detail): `portal/metrics.py::get_build_info()`/`set_build_info()`,
 
 Mirrors the mocking convention already used for `/health` and friends in
 test_portal.py: `patch("agentit.portal.routes.health.kube")` so no test
-makes a real cluster round trip, and `prime_csrf`/`TestClient(app)` for the
-route-level tests.
+makes a real cluster round trip, and `prime_csrf`/an `httpx.AsyncClient`
+(ASGI transport) for the route-level tests.
 """
 from __future__ import annotations
 
 from unittest.mock import patch
 
 import pytest
-from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from agentit.portal import github_pr
 from agentit.portal.app import app
@@ -24,10 +24,10 @@ from conftest import prime_csrf
 
 
 @pytest.fixture
-def client():
-    c = TestClient(app)
-    prime_csrf(c)
-    return c
+async def client():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True) as c:
+        await prime_csrf(c)
+        yield c
 
 
 # ── portal/metrics.py: build info cache ────────────────────────────────
@@ -331,24 +331,24 @@ def test_deploy_status_excludes_commit_info_by_default():
 # ── Routes: ambient badge + Health page detail ─────────────────────────
 
 
-def test_deploy_status_badge_route_idle(client):
+async def test_deploy_status_badge_route_idle(client):
     with patch("agentit.portal.routes.health.kube") as mock_kube:
         mock_kube.list_custom_resources.return_value = []
-        resp = client.get("/api/deploy-status")
+        resp = await client.get("/api/deploy-status")
 
     assert resp.status_code == 200
     assert "deploy-status-badge" in resp.text
     assert 'role="status"' in resp.text
 
 
-def test_deploy_status_badge_route_deploying(client):
+async def test_deploy_status_badge_route_deploying(client):
     running_pr = _pipelinerun("Running", "Unknown", task_names=["build-image"])
     with patch("agentit.portal.routes.health.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [running_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
         mock_kube.get_custom_resource.side_effect = _taskrun_get_custom_resource({"build-image": "Running"})
-        resp = client.get("/api/deploy-status")
+        resp = await client.get("/api/deploy-status")
 
     assert resp.status_code == 200
     assert "Deploying" in resp.text
@@ -356,7 +356,7 @@ def test_deploy_status_badge_route_deploying(client):
     assert "deploy-status-deploying" in resp.text
 
 
-def test_deploy_status_badge_never_calls_github(client):
+async def test_deploy_status_badge_never_calls_github(client):
     """The ambient/frequently-polled badge must stay cheap -- no GitHub API
     call on every 15s poll."""
     running_pr = _pipelinerun("Running", "Unknown")
@@ -365,21 +365,21 @@ def test_deploy_status_badge_never_calls_github(client):
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [running_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
-        client.get("/api/deploy-status")
+        await client.get("/api/deploy-status")
 
     mock_commit_info.assert_not_called()
 
 
-def test_health_page_shows_deployment_status_section(client):
+async def test_health_page_shows_deployment_status_section(client):
     with patch("agentit.portal.routes.health.kube") as mock_kube:
         mock_kube.list_custom_resources.return_value = []
-        resp = client.get("/health")
+        resp = await client.get("/health")
 
     assert resp.status_code == 200
     assert "Deployment Status" in resp.text
 
 
-def test_health_page_deployment_status_shows_pipeline_stepper(client):
+async def test_health_page_deployment_status_shows_pipeline_stepper(client):
     running_pr = _pipelinerun("Running", "Unknown", task_names=["git-clone", "run-tests"])
     with patch("agentit.portal.routes.health.kube") as mock_kube, \
          patch("agentit.portal.routes.health.github_pr.get_commit_info") as mock_commit_info:
@@ -390,32 +390,32 @@ def test_health_page_deployment_status_shows_pipeline_stepper(client):
             {"git-clone": "Succeeded", "run-tests": "Running"}
         )
         mock_commit_info.return_value = {"message": "feat: add ambient deploy status"}
-        resp = client.get("/health")
+        resp = await client.get("/health")
 
     assert resp.status_code == 200
     assert "run-tests" in resp.text
     assert "feat: add ambient deploy status" in resp.text
 
 
-def test_health_page_deployment_status_reports_pipeline_failure():
+async def test_health_page_deployment_status_reports_pipeline_failure():
     """The Health page's detail section must not silently show 'Idle' when
     the underlying PipelineRun actually failed."""
-    c = TestClient(app)
-    prime_csrf(c)
+    c = AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True)
+    await prime_csrf(c)
     failed_pr = _pipelinerun("Failed", "False")
     with patch("agentit.portal.routes.health.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [failed_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
-        resp = c.get("/health")
+        resp = await c.get("/health")
 
     assert resp.status_code == 200
     assert "Failed" in resp.text
 
 
-def test_nav_badge_present_on_every_page(client):
+async def test_nav_badge_present_on_every_page(client):
     """The ambient indicator lives in base.html's nav, so it must render on
     any page, not just /health."""
-    resp = client.get("/")
+    resp = await client.get("/")
     assert 'id="deploy-status"' in resp.text
     assert "/api/deploy-status" in resp.text

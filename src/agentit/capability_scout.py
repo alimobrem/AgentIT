@@ -286,18 +286,40 @@ def run_test_suite(repo_dir: Path) -> tuple[bool, str]:
     Stripping them forces the same clean, fast ConfigException-driven
     fallback CI already gets.
 
-    The same problem, same shape, hits ``AGENTIT_DB_BACKEND=postgres`` (set
-    on this watcher's own Deployment so it can share the real fleet's
-    store): ``store_factory.create_store()`` reads that env var directly,
-    so any test that doesn't explicitly monkeypatch it (most don't need
-    to -- CI never sets it, so the sqlite default just applies) silently
-    gets a live connection to the *real* shared Postgres instead of its
-    own isolated fixture. Confirmed live: ``test_watch_rescan_iterates_the_fleet``
-    saw the real fleet's actual apps instead of its one fixture app, and a
-    concurrent real-Postgres-pool contention error
-    (``asyncpg... cannot perform operation: another operation is in
-    progress``) hit other tests sharing that same live pool under
-    full-suite load. Stripped for the same reason as the kube vars above."""
+    The same problem, same shape, hits ``AGENTIT_DB_DSN`` (set on this
+    watcher's own Deployment so it can talk to the real fleet's shared
+    Postgres instance): ``store.create_store()`` reads that env var
+    directly, so a test run that doesn't strip it would connect to the
+    *real* shared Postgres instead of the test suite's own dedicated
+    ``AGENTIT_TEST_PG_DSN``-backed instance (see
+    ``tests/conftest.py``/``docs/postgres-migration-plan.md``'s testing
+    section). Confirmed live, before this stripping existed:
+    ``test_watch_rescan_iterates_the_fleet`` saw the real fleet's actual
+    apps instead of its one fixture app, and a concurrent real-Postgres-
+    pool contention error (``asyncpg... cannot perform operation: another
+    operation is in progress``) hit other tests sharing that same live
+    pool under full-suite load. Stripped for the same reason as the kube
+    vars above -- the test suite's own fixtures set up their isolated
+    Postgres instance independently of these vars, so stripping them here
+    only removes the risk of accidentally reaching production, it doesn't
+    remove the test suite's ability to run.
+
+    **Known follow-up gap, not fixed here**: this pod has neither
+    podman/docker (so ``tests/conftest.py``'s auto-start fallback can't
+    help) nor an ``AGENTIT_TEST_PG_DSN`` of its own wired into its
+    Deployment env -- unlike CI (a GitHub Actions ``services:`` block / a
+    Tekton ``Sidecar``, see ``.github/workflows/tests.yml``/
+    ``chart/templates/tekton/pipeline.yaml``), so this safety gate's test
+    run will currently fail to acquire a Postgres instance at all inside
+    the live capability-scout pod. Deliberately NOT fixed by pointing this
+    at the live bundled instance's own database -- test fixtures `TRUNCATE`
+    every table, which would be a real, severe data-loss bug if aimed at
+    production data. The correct fix is a small, dedicated Postgres
+    instance (or a distinct, human-provisioned database on the bundled
+    one) wired into this watcher's own Deployment via a new, explicit
+    ``AGENTIT_TEST_PG_DSN`` value -- flagged here for whoever picks it up
+    next rather than guessed at under this pass's time constraints.
+    """
     import os
 
     env = {**os.environ, "KUBECONFIG": "/tmp/nonexistent-path"}

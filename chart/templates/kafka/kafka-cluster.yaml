@@ -35,10 +35,32 @@ spec:
         port: 9092
         type: internal
         tls: false
+      {{- /* Additive TLS+SASL/SCRAM-SHA-512 listener, per
+      docs/kafka-hardening-plan.md -- alongside (not replacing) the plaintext
+      listener above, so existing unauthenticated producers/consumers are
+      unaffected until they're deliberately migrated. Strimzi generates the
+      broker/cluster CA itself for `tls: true`; per-user SCRAM credentials
+      come from the KafkaUser CRs in kafka-users.yaml. */}}
+      {{- if .Values.kafka.auth.enabled }}
+      - name: tls
+        port: {{ .Values.kafka.auth.tlsPort | default 9093 }}
+        type: internal
+        tls: true
+        authentication:
+          type: scram-sha-512
+      {{- end }}
     config:
       offsets.topic.replication.factor: 1
       transaction.state.log.replication.factor: 1
       transaction.state.log.min.isr: 1
   entityOperator:
     topicOperator: {}
+    {{- /* User Operator reconciles the KafkaUser CRs in kafka-users.yaml
+    (SCRAM credential + Secret generation, ACL enforcement) -- without it,
+    those CRs would just sit there unreconciled with no Secret ever created.
+    Gated the same as the rest of the auth bundle so kafka.enabled=true
+    without kafka.auth.enabled keeps today's exact entityOperator shape. */}}
+    {{- if .Values.kafka.auth.enabled }}
+    userOperator: {}
+    {{- end }}
 {{- end }}

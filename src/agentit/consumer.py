@@ -23,13 +23,11 @@ class EventConsumer:
 
     ``consume()`` is a genuinely synchronous, blocking loop -- ``kafka-
     python`` has no async client, so ``for msg in self._consumer`` blocks
-    the calling thread for as long as the loop runs (per
-    docs/postgres-migration-plan.md, this is one of the few call sites
-    that stays synchronous by design, not an oversight). ``store``,
-    however, is now the async-compatible store (``AsyncSQLiteStore`` or
-    ``store_pg.AssessmentStore`` -- never the raw sync store) that every
-    other caller in this codebase uses. To let ``_dead_letter`` genuinely
-    `await` that store's methods from inside a synchronous call stack,
+    the calling thread for as long as the loop runs (this is one of the
+    few call sites that stays synchronous by design, not an oversight).
+    ``store``, however, is the same ``AssessmentStore`` every other caller
+    in this codebase uses. To let ``_dead_letter`` genuinely `await` that
+    store's methods from inside a synchronous call stack,
     ``EventConsumer`` captures the event loop that constructed it (via
     ``asyncio.get_running_loop()``) and schedules the store write back
     onto that *same* loop with ``asyncio.run_coroutine_threadsafe`` --
@@ -80,6 +78,9 @@ class EventConsumer:
 
         try:
             from kafka import KafkaConsumer
+
+            from agentit.events import kafka_security_kwargs
+
             self._consumer = KafkaConsumer(
                 *topics,
                 bootstrap_servers=self._bootstrap,
@@ -88,6 +89,7 @@ class EventConsumer:
                 enable_auto_commit=False,
                 value_deserializer=lambda v: json.loads(v.decode("utf-8")),
                 consumer_timeout_ms=5000,
+                **kafka_security_kwargs(),
             )
             logger.info("Kafka consumer connected: topics=%s group=%s", topics, group_id)
         except Exception as exc:

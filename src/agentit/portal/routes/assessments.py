@@ -8,7 +8,7 @@ import shutil
 import zipfile
 from urllib.parse import quote
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.responses import StreamingResponse
 
@@ -119,37 +119,26 @@ async def assess_submit(
     # request coroutine can't stick around to `await` anything on its
     # behalf.
     #
-    # Sqlite: `s.raw` hands back a genuinely synchronous, thread-safe store
-    # handle with no event-loop dependency at all -- every call in `_run()`
-    # below just calls straight through it, exactly as before this fix.
-    #
-    # Postgres: `store_pg.AssessmentStore` has no `.raw` on purpose (see
-    # docs/postgres-migration-plan.md §7 -- handing a synchronous-only
-    # consumer a Postgres-backed store is exactly the silent partial-cutover
-    # that must fail loudly instead). Its coroutine methods are bridged back
-    # onto *this* coroutine's event loop via `asyncio.run_coroutine_threadsafe`
-    # -- the exact pattern `EventConsumer._persist_dead_letter` established
-    # in commit 7533309 for the same underlying constraint: an `asyncpg`
-    # connection pool is bound to the event loop that created it and can't
-    # be driven from a different thread's loop. This only works as long as
-    # that loop stays alive for the duration of the background thread (true
-    # for the portal's real, persistent uvicorn event loop; a test harness
-    # that tears its loop down per-request must exercise this path with its
-    # own long-lived loop -- see tests/test_watcher_cli_postgres.py's pattern).
-    raw = s.raw if hasattr(s, "raw") else None
-    loop = asyncio.get_running_loop() if raw is None else None
-    store = raw if raw is not None else s
+    # `AssessmentStore`'s `asyncpg` connection pool is bound to the event
+    # loop that created it and can't be driven from a different thread's
+    # loop, so every store call made from this background thread is
+    # scheduled back onto *this* coroutine's event loop via
+    # `asyncio.run_coroutine_threadsafe` -- the same pattern
+    # `EventConsumer._persist_dead_letter` uses for the identical
+    # constraint. This only works as long as that loop stays alive for the
+    # duration of the background thread (true for the portal's real,
+    # persistent uvicorn event loop; a test harness that tears its loop
+    # down per-request must exercise this path with its own long-lived loop
+    # -- see tests/test_watcher_cli_postgres.py's pattern).
+    loop = asyncio.get_running_loop()
+    store = s
 
     import threading
 
-    def _bridge(result):
-        """Sqlite: `result` is already the real value (`store` is `raw`, a
-        plain sync call) -- passthrough. Postgres: `result` is the
-        coroutine `store.<method>(...)` constructed but not yet run --
-        schedule it onto `loop` and block this worker thread until done."""
-        if raw is not None or not asyncio.iscoroutine(result):
-            return result
-        return asyncio.run_coroutine_threadsafe(result, loop).result(timeout=60)
+    def _bridge(coro):
+        """Schedule a coroutine `store.<method>(...)` call onto `loop` and
+        block this worker thread until it completes."""
+        return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=60)
 
     def _run():
         try:
@@ -298,6 +287,21 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     for g in pending_actions:
         g["delivery_confirmation"] = await gate_delivery_confirmation(s, g)
 
+    # Real, specific empty-state copy for the Actions tab (docs/ux-design-
+    # requirements.md checklist #10) -- how many of THIS app's gates were
+    # actually resolved recently, instead of a bare "nothing here".
+    recently_resolved_actions_count = 0
+    if not pending_actions and hasattr(s, "list_gates_for_assessment"):
+        all_app_gates = await s.list_gates_for_assessment(assessment_id)
+        from datetime import datetime, timedelta, timezone
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        recently_resolved_actions_count = sum(
+            1 for g in all_app_gates
+            if g["gate_type"] != ADMIN_REVIEW_GATE_TYPE
+            and g["status"] in ("approved", "rejected", "expired", "cancelled")
+            and (g.get("resolved_at") or g.get("created_at") or "") >= cutoff
+        )
+
     gitops_registered, infra_repo_url = await is_gitops_registered(report.repo_name, report)
 
     timeline = await s.get_assessment_timeline(assessment_id) if hasattr(s, 'get_assessment_timeline') else []
@@ -320,6 +324,14 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
 
     suppressions = await s.get_suppressions(report.repo_name)
 
+    # A genuine, real milestone (docs/ux-design-requirements.md checklist
+    # #9) -- the FIRST time this app reaches a perfect score, never on
+    # every routine assessment that happens to already be at 100. Derived
+    # entirely from this app's own real score history, never fabricated.
+    celebrate_first_perfect_score = report.overall_score >= 100 and not any(
+        h["overall_score"] >= 100 for h in score_history if h["id"] != assessment_id
+    )
+
     return get_templates().TemplateResponse(
         request,
         "assessment_detail.html",
@@ -340,6 +352,8 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "score_history": score_history,
             "lifecycle_stage": lifecycle_stage,
             "suppressions": suppressions,
+            "celebrate_first_perfect_score": celebrate_first_perfect_score,
+            "recently_resolved_actions_count": recently_resolved_actions_count,
         },
     )
 
@@ -526,66 +540,197 @@ async def onboarding_history(request: Request, assessment_id: str) -> HTMLRespon
     })
 
 
+async def _run_onboarding_job(job_id: str, assessment_id: str, base_url: str) -> None:
+    """Background body of onboarding -- runs after ``onboard_submit`` has
+    already redirected the human to the real-time progress page below.
+
+    Real, determinate, per-stage progress (docs/ux-design-requirements.md
+    Part 3 item 11/checklist #6): each stage transition is a genuine
+    checkpoint this function actually reaches, written via the SAME
+    ``remediation_jobs`` job-tracking mechanism ``assess_submit()`` already
+    uses for assessment progress (``create_remediation_job``/
+    ``update_remediation_job``/``get_remediation_job`` -- no new store
+    method, no new table). The per-agent breakdown shown on the progress
+    page comes from the real events ``FleetOrchestrator._log_event()``
+    already writes live, per agent, via ``list_events_by_correlation_id()``
+    -- not fabricated here.
+
+    Uses its own store handle (not the request-scoped one) since this
+    coroutine keeps running after the request/response cycle that started
+    it (via FastAPI's ``BackgroundTasks``, which awaits it on the same
+    event loop after the response is sent -- no cross-thread store
+    bridging needed, unlike ``assess_submit()``'s CLI-shared thread path).
+    """
+    s = await get_store()
+    try:
+        report = await s.get(assessment_id)
+        if report is None:
+            await s.update_remediation_job(job_id, "failed", "Assessment not found", error="Assessment not found")
+            return
+        await s.update_remediation_job(job_id, "running", "Running onboarding agents...")
+        files, orch_summary = await with_timeout(_run_onboarding(report, assessment_id, s))
+
+        from agentit.portal.metrics import onboardings_total as _ot
+        _ot.labels(status="success").inc()
+        await s.update_remediation_job(job_id, "saving", "Saving generated manifests...")
+        await s.save_onboarding(assessment_id, files, orchestration=orch_summary)
+
+        publish_event("onboarding-complete", report.repo_name,
+                       f"Generated {len(files)} manifests",
+                       {"assessment_id": assessment_id, "file_count": len(files)},
+                       correlation_id=assessment_id, agent_id="onboarding")
+
+        # Trigger image build only if a Containerfile was generated
+        warnings = []
+        has_containerfile = any(
+            f["path"].lower() in ("containerfile", "dockerfile") for f in files
+        )
+        if has_containerfile:
+            await s.update_remediation_job(job_id, "running", "Triggering container image build...")
+            from agentit.image_builder import build_app_image
+            build_result = await asyncio.to_thread(build_app_image, report.repo_url, report.repo_name)
+            if "error" in build_result:
+                log.warning("Image build trigger failed for %s: %s", report.repo_name, build_result["error"])
+                await s.log_event("image-builder", "build-failed", report.repo_name, "warning",
+                                   f"Image build failed: {build_result['error'][:200]}")
+                warnings.append(f"Image build failed: {build_result['error'][:100]}")
+            else:
+                log.info("Image build triggered: %s → %s", report.repo_name, build_result.get("image_ref"))
+                await s.log_event("image-builder", "build-triggered", report.repo_name, "info",
+                                   f"Building image: {build_result.get('image_ref')}")
+
+        await s.update_remediation_job(job_id, "running", "Registering re-assessment webhook...")
+        from agentit.portal.github_pr import ensure_webhook
+        webhook_url = base_url + "/api/webhook/github-push"
+        hook_result = await asyncio.to_thread(ensure_webhook, report.repo_url, webhook_url)
+        if "error" in hook_result:
+            log.warning("Webhook registration failed for %s: %s", report.repo_name, hook_result["error"])
+            warnings.append(f"Auto-reassessment webhook not registered: {hook_result['error'][:100]}")
+        elif hook_result.get("created"):
+            await s.log_event("portal", "webhook-registered", report.repo_name,
+                               "info", "GitHub push webhook registered for auto-reassessment")
+
+        # Warnings (image build / webhook registration failures) are already
+        # persisted as real events above (visible on this app's Timeline
+        # tab and the global Events page) -- not re-threaded through the
+        # job's `error` column, which is reserved for a genuine failure.
+        _ = warnings
+        await s.update_remediation_job(job_id, "completed", "Onboarding complete")
+    except Exception as exc:
+        log.exception("Onboarding failed for %s", assessment_id)
+        from agentit.portal.metrics import onboardings_total as _ot
+        _ot.labels(status="error").inc()
+        detail = getattr(exc, "detail", None) or str(exc)
+        await s.update_remediation_job(
+            job_id, "failed",
+            f"Onboarding failed: {str(detail)[:180]}",
+            error=f"Onboarding failed: {str(detail)[:180]} — no manifests were generated. "
+                  f"Check the repository is reachable and agents/skills ran cleanly, then retry Onboard.",
+        )
+
+
 @router.post("/assessments/{assessment_id}/onboard", response_model=None)
-async def onboard_submit(request: Request, assessment_id: str):
+async def onboard_submit(request: Request, assessment_id: str, background_tasks: BackgroundTasks):
+    """Kicks off onboarding as a background job and immediately redirects to
+    a real-time progress page (docs/ux-design-requirements.md checklist #6)
+    instead of blocking the request for however long agent orchestration
+    takes -- mirrors ``assess_submit()``'s existing job-tracking pattern.
+    """
     s = await get_store()
     report = await s.get(assessment_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
 
-    try:
-        files, orch_summary = await with_timeout(_run_onboarding(report, assessment_id, s))
-    except HTTPException:
-        raise
-    except Exception:
-        log.exception("Onboarding failed for %s", assessment_id)
-        from agentit.portal.metrics import onboardings_total as _ot
-        _ot.labels(status="error").inc()
+    job_id = await s.create_remediation_job(assessment_id)
+    base_url = _get_trusted_base_url(request)
+    background_tasks.add_task(_run_onboarding_job, job_id, assessment_id, base_url)
+    return RedirectResponse(
+        url=f"/assessments/{assessment_id}/onboard/progress/{job_id}", status_code=303,
+    )
+
+
+@router.get("/assessments/{assessment_id}/onboard/progress/{job_id}", response_class=HTMLResponse)
+async def onboard_progress(request: Request, assessment_id: str, job_id: str):
+    """Real-time onboarding progress page -- htmx SSE-driven (checklist #8),
+    with a per-agent step list sourced from the real events
+    ``FleetOrchestrator`` already logs live (``list_events_by_correlation_id``),
+    never a fabricated percentage."""
+    s = await get_store()
+    job = await s.get_remediation_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] == "completed":
+        return RedirectResponse(url=f"/assessments/{assessment_id}/onboard-results", status_code=303)
+    if job["status"] == "failed":
+        # No manifests exist to show (the failure happened before or during
+        # generation) -- onboard-results would 404 on a missing onboarding
+        # row, so land back on Assessment Detail, where errors are always
+        # surfaced (CLAUDE.md's "Errors must always be visible to the user").
         return RedirectResponse(
-            url=f"/assessments/{assessment_id}?error={quote('Onboarding failed — check server logs')}",
+            url=f"/assessments/{assessment_id}?error={quote(job.get('error') or 'Onboarding failed')}",
             status_code=303,
         )
-    from agentit.portal.metrics import onboardings_total as _ot
-    _ot.labels(status="success").inc()
-    await s.save_onboarding(assessment_id, files, orchestration=orch_summary)
+    agent_steps = await _onboard_agent_steps(s, assessment_id)
+    return get_templates().TemplateResponse(request, "onboard_progress.html", {
+        "job": job, "job_id": job_id, "assessment_id": assessment_id, "agent_steps": agent_steps,
+    })
 
-    publish_event("onboarding-complete", report.repo_name,
-                   f"Generated {len(files)} manifests",
-                   {"assessment_id": assessment_id, "file_count": len(files)},
-                   correlation_id=assessment_id, agent_id="onboarding")
 
-    # Trigger image build only if a Containerfile was generated
-    warnings = []
-    has_containerfile = any(
-        f["path"].lower() in ("containerfile", "dockerfile") for f in files
-    )
-    if has_containerfile:
-        from agentit.image_builder import build_app_image
-        build_result = await asyncio.to_thread(build_app_image, report.repo_url, report.repo_name)
-        if "error" in build_result:
-            log.warning("Image build trigger failed for %s: %s", report.repo_name, build_result["error"])
-            await s.log_event("image-builder", "build-failed", report.repo_name, "warning",
-                               f"Image build failed: {build_result['error'][:200]}")
-            warnings.append(f"Image build failed: {build_result['error'][:100]}")
-        else:
-            log.info("Image build triggered: %s → %s", report.repo_name, build_result.get("image_ref"))
-            await s.log_event("image-builder", "build-triggered", report.repo_name, "info",
-                               f"Building image: {build_result.get('image_ref')}")
+async def _onboard_agent_steps(store: object, assessment_id: str) -> list[dict]:
+    """Real per-agent onboarding steps for this assessment, derived from the
+    events ``FleetOrchestrator._log_event()`` already writes live (agent
+    name + completed/failed/job-created/timeout action) -- reused as-is,
+    never a second, parallel notification mechanism."""
+    events = await store.list_events_by_correlation_id(assessment_id)
+    steps = []
+    seen = set()
+    for e in events:
+        agent = e.get("agent_id", "")
+        action = e.get("action", "")
+        if agent in ("portal", "image-builder", "onboarding") or not agent:
+            continue
+        key = (agent, action)
+        if key in seen:
+            continue
+        seen.add(key)
+        steps.append({"agent": agent, "action": action, "summary": e.get("summary", "")})
+    return steps
 
-    from agentit.portal.github_pr import ensure_webhook
-    webhook_url = _get_trusted_base_url(request) + "/api/webhook/github-push"
-    hook_result = await asyncio.to_thread(ensure_webhook, report.repo_url, webhook_url)
-    if "error" in hook_result:
-        log.warning("Webhook registration failed for %s: %s", report.repo_name, hook_result["error"])
-        warnings.append(f"Auto-reassessment webhook not registered: {hook_result['error'][:100]}")
-    elif hook_result.get("created"):
-        await s.log_event("portal", "webhook-registered", report.repo_name,
-                           "info", "GitHub push webhook registered for auto-reassessment")
 
-    redirect_url = f"/assessments/{assessment_id}/onboard-results"
-    if warnings:
-        redirect_url += f"?warning={quote('|'.join(warnings))}"
-    return RedirectResponse(url=redirect_url, status_code=303)
+@router.get("/assessments/{assessment_id}/onboard/progress/{job_id}/stream")
+async def onboard_progress_stream(assessment_id: str, job_id: str):
+    """htmx's documented SSE extension (hx-ext="sse") as the transport for
+    real step-level onboarding progress (checklist #8) -- reuses the same
+    events table + remediation_jobs tracking every other progress signal in
+    this app already relies on, rather than a parallel notification
+    mechanism. Polls server-side every second (cheap local store reads) and
+    pushes an HTML fragment per tick; closes the stream once the job reaches
+    a terminal state so the client's EventSource naturally disconnects.
+    """
+    async def _events():
+        s = await get_store()
+        templates = get_templates()
+        deadline = asyncio.get_event_loop().time() + 600  # 10 min safety cap
+        while True:
+            job = await s.get_remediation_job(job_id)
+            if job is None:
+                break
+            agent_steps = await _onboard_agent_steps(s, assessment_id)
+            html = templates.get_template("_onboard_progress_fragment.html").render(
+                job=job, agent_steps=agent_steps, assessment_id=assessment_id,
+            )
+            # SSE framing: every line of the payload must be its own "data:"
+            # line per the spec -- a bare multi-line payload silently
+            # truncates to its first line on the client.
+            payload = "\n".join(f"data: {line}" for line in html.splitlines())
+            yield f"event: progress\n{payload}\n\n"
+            if job["status"] in ("completed", "failed") or asyncio.get_event_loop().time() > deadline:
+                break
+            await asyncio.sleep(1)
+
+    return StreamingResponse(_events(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+    })
 
 
 @router.post("/assessments/{assessment_id}/onboard-results/edit-file", response_model=None)
@@ -797,10 +942,14 @@ async def deliver(request: Request, assessment_id: str):
             actor=get_current_user(request), dry_run=dry_run,
             force_dry_run_first=False,
         )
-    except Exception:
+    except Exception as exc:
         log.exception("Delivery failed for assessment %s", assessment_id)
+        detail = getattr(exc, "detail", None) or str(exc)
         return RedirectResponse(
-            url=f"/assessments/{assessment_id}/onboard-results?error={quote('Delivery failed — check server logs')}",
+            url=(
+                f"/assessments/{assessment_id}/onboard-results?error="
+                f"{quote(f'Delivery failed: {str(detail)[:180]}. Nothing was applied — fix the issue above, then retry Deliver.')}"
+            ),
             status_code=303,
         )
 
@@ -888,7 +1037,18 @@ async def record_feedback_endpoint(request: Request):
 
 @router.post("/api/suppress")
 async def suppress_check_endpoint(request: Request):
-    """Suppress a check for a specific app — it won't fire on future assessments."""
+    """Suppress a check for a specific app — it won't fire on future assessments.
+
+    A genuinely reversible, low-stakes action (a later "Unsuppress" click
+    undoes it; nothing cluster-side is touched) -- the Findings tab's
+    Suppress button (assessment_detail.html) now calls this via htmx and
+    optimistically hides the finding the instant it's submitted, reconciling
+    only if this actually fails (docs/ux-design-requirements.md checklist
+    #7). An htmx-originated call therefore returns a small JSON ack instead
+    of the old full-page redirect -- no swap needed since the client
+    already reflects the outcome; any other (non-htmx) caller keeps the
+    original redirect-back-to-assessment behavior.
+    """
     form = await request.form()
     app_name = str(form.get("app_name", ""))
     check_source = str(form.get("check_source", ""))
@@ -898,6 +1058,8 @@ async def suppress_check_endpoint(request: Request):
         raise HTTPException(status_code=400, detail="app_name and check_source required")
     s = await get_store()
     await s.suppress_check(app_name, check_source, reason)
+    if request.headers.get("HX-Request") == "true":
+        return JSONResponse({"status": "suppressed", "app_name": app_name, "check_source": check_source})
     if assessment_id:
         return RedirectResponse(f"/assessments/{assessment_id}", status_code=303)
     return {"status": "suppressed", "app_name": app_name, "check_source": check_source}

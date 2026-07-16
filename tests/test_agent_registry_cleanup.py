@@ -48,77 +48,79 @@ class TestGetKnownAgentNames:
 
 
 class TestPruneStaleAgentsAndLog:
-    def test_prunes_stale_rows_and_logs_event(self) -> None:
-        store = make_store()
+    async def test_prunes_stale_rows_and_logs_event(self) -> None:
+        store = await make_store()
         for name in ("chaos", "cicd", "security"):
-            store.register_agent(name, name)
-        store.register_agent("cost", "cost")
+            await store.register_agent(name, name)
+        await store.register_agent("cost", "cost")
 
-        pruned = prune_stale_agents_and_log(store)
+        pruned = await prune_stale_agents_and_log(store)
 
         assert sorted(pruned) == ["chaos", "cicd", "security"]
-        remaining = {a["agent_name"] for a in store.list_agents()}
+        remaining = {a["agent_name"] for a in await store.list_agents()}
         assert remaining == {"cost"}
 
-        events = store.list_events_by_agent("agent-registry")
+        events = await store.list_events_by_agent("agent-registry")
         assert len(events) == 1
         assert events[0]["action"] == "agent-registry-pruned"
         assert events[0]["severity"] == "warning"
         assert "chaos" in events[0]["summary"]
 
-    def test_preserves_legitimate_agents_and_watchers(self) -> None:
+    async def test_preserves_legitimate_agents_and_watchers(self) -> None:
         """The 3 surviving Python agents plus the 4 watchers must never be
         pruned, even if they're the only rows in the registry."""
-        store = make_store()
-        store.register_agent("cost", "cost")
-        store.register_agent("dependency", "dependency")
-        store.register_agent("codechange", "codechange")
-        store.agent_heartbeat("vuln-watcher")
-        store.agent_heartbeat("slo-tracker")
-        store.agent_heartbeat("drift-detector")
-        store.agent_heartbeat("skill-learner")
+        store = await make_store()
+        await store.register_agent("cost", "cost")
+        await store.register_agent("dependency", "dependency")
+        await store.register_agent("codechange", "codechange")
+        await store.agent_heartbeat("vuln-watcher")
+        await store.agent_heartbeat("slo-tracker")
+        await store.agent_heartbeat("drift-detector")
+        await store.agent_heartbeat("skill-learner")
 
-        pruned = prune_stale_agents_and_log(store)
+        pruned = await prune_stale_agents_and_log(store)
 
         assert pruned == []
-        assert store.list_events_by_agent("agent-registry") == []
-        remaining = {a["agent_name"] for a in store.list_agents()}
+        assert await store.list_events_by_agent("agent-registry") == []
+        remaining = {a["agent_name"] for a in await store.list_agents()}
         assert remaining == {
             "cost", "dependency", "codechange",
             "vuln-watcher", "slo-tracker", "drift-detector", "skill-learner",
         }
 
-    def test_no_stale_rows_logs_no_event(self) -> None:
-        store = make_store()
-        store.register_agent("cost", "cost")
+    async def test_no_stale_rows_logs_no_event(self) -> None:
+        store = await make_store()
+        await store.register_agent("cost", "cost")
 
-        pruned = prune_stale_agents_and_log(store)
+        pruned = await prune_stale_agents_and_log(store)
 
         assert pruned == []
-        assert store.list_events_by_agent("agent-registry") == []
+        assert await store.list_events_by_agent("agent-registry") == []
 
-    def test_mixed_stale_and_legitimate_prunes_only_stale(self) -> None:
+    async def test_mixed_stale_and_legitimate_prunes_only_stale(self) -> None:
         """Regression check for the exact real-world scenario this was
         built for: 9 removed Python agents mixed in the registry alongside
         the 3 surviving agents and the 4 watchers."""
-        store = make_store()
+        store = await make_store()
         removed = ["chaos", "cicd", "compliance", "hardening", "incident",
                    "infrastructure", "observability", "release", "retirement"]
         for name in removed:
-            store.register_agent(name, name)
-        store.register_agent("cost", "cost")
-        store.register_agent("dependency", "dependency")
-        store.register_agent("codechange", "codechange")
-        store.agent_heartbeat("vuln-watcher")
-        store.agent_heartbeat("slo-tracker")
-        store.agent_heartbeat("drift-detector")
-        store.agent_heartbeat("skill-learner")
+            await store.register_agent(name, name)
+        await store.register_agent("cost", "cost")
+        await store.register_agent("dependency", "dependency")
+        await store.register_agent("codechange", "codechange")
+        await store.agent_heartbeat("vuln-watcher")
+        await store.agent_heartbeat("slo-tracker")
+        await store.agent_heartbeat("drift-detector")
+        await store.agent_heartbeat("skill-learner")
 
-        pruned = prune_stale_agents_and_log(store)
+        pruned = await prune_stale_agents_and_log(store)
 
         assert sorted(pruned) == sorted(removed)
-        remaining = {a["agent_name"] for a in store.list_agents()}
+        remaining = {a["agent_name"] for a in await store.list_agents()}
         assert remaining == {
             "cost", "dependency", "codechange",
             "vuln-watcher", "slo-tracker", "drift-detector", "skill-learner",
         }
+
+

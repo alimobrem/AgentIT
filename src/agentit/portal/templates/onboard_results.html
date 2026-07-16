@@ -109,9 +109,14 @@
   <span class="step-guide-text"><strong>Dry run passed.</strong> You can now Deliver.</span>
 </div>
 {% elif apply_results and not apply_results.get('dry_run') and not apply_results.get('errors') %}
-<div class="step-guide">
-  <span class="step-guide-icon">&#x2705;</span>
-  <span class="step-guide-text"><strong>Delivered successfully.</strong></span>
+{# Moment of joy (docs/ux-design-requirements.md checklist #9): reserved
+   for a genuinely clean MULTI-manifest delivery (>= 3 applied, zero
+   errors) -- not every routine single-fix Deliver, which would gamify a
+   real production action the checklist explicitly warns against. #}
+{% set _multi_clean = apply_results.applied and apply_results.applied|length >= 3 %}
+<div class="step-guide {% if _multi_clean %}celebrate{% endif %}">
+  <span class="step-guide-icon">{% if _multi_clean %}&#127881;{% else %}&#x2705;{% endif %}</span>
+  <span class="step-guide-text"><strong>{% if _multi_clean %}Delivered successfully -- all {{ apply_results.applied|length }} manifests applied clean.{% else %}Delivered successfully.{% endif %}</strong></span>
 </div>
 {% endif %}
 
@@ -140,6 +145,9 @@
         form: $refs.deliverForm,
         opts: { confirmText: 'Deliver Now', danger: false }
       })">
+      {% if not apply_results %}
+      <span class="badge badge-warning" title="No Dry Run has been performed yet for this onboarding -- consider running Dry Run first to preview what will happen.">&#9888; No dry run yet</span>
+      {% endif %}
       {{ "Commit & Open PR" if gitops_registered else "Apply to Cluster" }}
     </button>
   </form>

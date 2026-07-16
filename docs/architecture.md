@@ -7,6 +7,7 @@ This doc covers how AgentIT is put together: the system components, the assessme
 - [System overview](#system-overview)
 - [Cluster access (`kube.py`)](#cluster-access-kubepy)
 - [Assessment pipeline](#assessment-pipeline)
+- [Data model: assessments vs. apps](#data-model-assessments-vs-apps)
 - [Skill engine & check engine](#skill-engine--check-engine)
 - [Self-improvement loop](#self-improvement-loop)
 - [Autonomous remediation loop](#autonomous-remediation-loop)
@@ -42,7 +43,7 @@ graph TB
         DriftDetector["API Drift Detector\nsnapshot comparison"]
         Delivery["delivery.py\nroute_and_deliver() -- one router for\nevery apply/PR/gate path"]
         CapScout["capability_scout.py\nself-improvement of AgentIT's OWN\ncode -- separate from the skills loop"]
-        Store[("AssessmentStore\n19 tables\nSQLite (local default) or\nasyncpg/Postgres (live-cluster default)")]
+        Store[("AssessmentStore\n19 tables\nPostgres/asyncpg (the only\nsupported store)")]
     end
 
     subgraph Cluster["OpenShift Cluster"]
@@ -163,6 +164,24 @@ gate-approve, `AutoMode`, `DriftDetector`) now funnels through this one
 router — see "Unified apply flow" in the README and
 `docs/unified-apply-flow.md` (marked implemented) for the full taxonomy of
 what gets routed where and why.
+
+## Data model: assessments vs. apps
+
+`store.py` persists two conceptually different kinds of data, and keeping them straight matters:
+
+- **Assessment-scoped**: genuinely tied to one specific run -- `overall_score`, `report_json` (scores/findings), `onboarding_results`, `apply_results`, `remediations`, `deliveries`, `agent_runs`, `check_results`. A fresh `save()` correctly creates a brand-new row for each of these; there's no "carry forward" bug possible because there's nothing to carry -- each run's own data is what should be shown for that run.
+- **App-scoped**: a fact about the APP that outlives any single assessment -- `infra_repo_url` (is this app GitOps-registered, and where), pending gates (a still-open approval doesn't stop being open just because the app was re-assessed), SLO definitions (a threshold set once at onboarding, meant to persist across every future re-assessment).
+
+Two real bugs this session had the exact same root shape: `infra_repo_url` and pending-gate visibility were both stored/queried as if scoped to a single `assessment_id`, when they're actually app-level facts, keyed by `repo_url`, that persist across many assessments over time. A third (SLO definitions going invisible on the SLOs page/`fleet_slos()`/the post-delivery SLO-watch tail the moment an app is re-assessed) was found and fixed the same session, once the pattern was recognized.
+
+**The decision made here: introduce a real `apps` table for genuinely scalar app-level facts, and a documented, reusable `repo_url`-join convention for app-level *collections*.**
+
+- **`apps`** (keyed by `repo_url`) is the single, always-current source for facts that are exactly one value per app -- today just `infra_repo_url`. `save()` and `set_infra_repo_url()` both upsert into it (`_upsert_app()`); `_last_known_infra_repo_url()` and `get_fleet_data()` both read from it directly, an O(1) lookup instead of the original fix's O(history) `report_json` scan across every past assessment (which also needed backend-specific JSON syntax -- `json_extract` vs `->>` -- to keep in parity, exactly the kind of thing that's already drifted once this session for `get_agent_stats()`/`export_all()`). A one-time backfill (`INSERT OR IGNORE ... SELECT ... FROM assessments GROUP BY repo_url`, same "most recent non-null value wins" logic the original fix used) populates `apps` from any pre-existing `assessments` history on first startup with this code; it's a no-op on every subsequent startup once every app has a row.
+- **Gates and SLOs stay in their own tables** (`gates`, `slos`), each still keyed by `assessment_id` (so a specific gate/SLO can still be traced back to when/why it was created) -- but `list_gates_for_assessment()`/`list_slos()`/`delete_slo()` all resolve the *app* a query is really about via a `repo_url` subquery/join back through `assessments`, not an exact `assessment_id` match. This is the reusable convention: any per-app collection that's created under one assessment but must stay visible/actionable across every later re-assessment of that same app uses this join shape.
+
+**Why not put gates/SLOs in (or under) `apps` too?** They're genuine *collections* (many gates, many SLOs, per app) with their own lifecycle (created, resolved/expired, deleted) -- moving them under `apps` wouldn't remove the need for a join, it would just move the join target from `assessments` to `apps`, no simpler. The `repo_url`-join is already the right shape for "this collection item belongs to app X regardless of which assessment created it"; `apps` is the right shape for "this app has exactly one current value of fact Y". Using each for what it's actually good at, rather than forcing everything into one new table, is the more honest data model.
+
+**Known, deliberately-not-fixed gap: `criticality`.** It has the same app-vs-assessment shape (a business-criticality tag that should persist across re-assessments) but a fix analogous to `infra_repo_url`'s isn't safe to make the same way: `infra_repo_url` had a `None` sentinel throughout its whole call chain (`AssessmentReport.infra_repo_url: str | None`) that cleanly distinguished "not supplied, carry forward" from "explicitly supplied, don't." `criticality: str` has no such sentinel -- every caller (the assess form, every webhook handler, `runner.run_assessment`) already defaults a missing value to `"medium"` before it ever reaches `store.save()`, so `store.py` alone can't tell "the human explicitly chose medium" apart from "nothing was known, so it defaulted to medium." Fixing this properly would mean making `criticality` optional end-to-end through `models.py`, `runner.py`, every webhook handler, and every template that reads `report.criticality` directly -- a much larger, separate change, not something to smuggle into a store-layer schema migration. Flagged here so the next person who touches criticality doesn't have to rediscover this.
 
 ## Skill engine & check engine
 
@@ -378,7 +397,7 @@ graph LR
         DriftDetector["drift-detector"]
         SkillLearner["skill-learner"]
         CapabilityScout["capability-scout\n(opt-in, default off)"]
-        PgBundled["Postgres (bundled,\nnon-operator)\nlive default backend"]
+        PgBundled["Postgres (bundled,\nnon-operator)\nthe only store, always-on"]
     end
 
     AppYaml -->|"watched by"| ArgoCD
@@ -389,7 +408,7 @@ graph LR
     Chart --> Pipeline & BackupCron
     Chart --> VulnWatcher & SloTracker & DriftDetector & SkillLearner & CapabilityScout
     Chart --> PgBundled
-    Rollout & VulnWatcher & SloTracker & DriftDetector & SkillLearner -->|"AGENTIT_DB_BACKEND=postgres"| PgBundled
+    Rollout & VulnWatcher & SloTracker & DriftDetector & SkillLearner -->|"AGENTIT_DB_DSN"| PgBundled
 ```
 
 ### Authentication (`auth.enabled`)

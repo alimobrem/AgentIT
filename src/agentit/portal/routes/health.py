@@ -240,10 +240,14 @@ def _get_deploy_status(include_commit_info: bool = False) -> dict:
     return status
 
 
-def _get_cluster_health(store=None) -> dict:
+def _get_cluster_health(store=None, loop=None) -> dict:
     """Runs off the event loop via ``asyncio.to_thread`` at every call site,
-    so ``store`` must already be a synchronous handle (``(await
-    get_store()).raw``), not the async facade itself."""
+    so ``store``'s coroutine methods need bridging back onto ``loop`` (the
+    event loop that constructed the store) via
+    ``asyncio.run_coroutine_threadsafe`` -- the same pattern
+    ``EventConsumer._persist_dead_letter`` uses for the identical
+    constraint (an ``asyncpg`` pool is bound to its creating loop and can't
+    be driven from a different thread's loop)."""
     from agentit import kube
 
     import os
@@ -259,7 +263,10 @@ def _get_cluster_health(store=None) -> dict:
     managed_names = {"agentit"}
     try:
         if store is not None:
-            for app_data in store.get_fleet_data():
+            fleet_data = store.get_fleet_data()
+            if asyncio.iscoroutine(fleet_data):
+                fleet_data = asyncio.run_coroutine_threadsafe(fleet_data, loop).result(timeout=30)
+            for app_data in fleet_data:
                 managed_names.add(app_data["repo_name"].lower().replace("_", "-").replace(".", "-"))
     except Exception:
         log.debug("Failed to load fleet for health check", exc_info=True)
@@ -415,19 +422,11 @@ def _get_cluster_health(store=None) -> dict:
 # ── Routes ────────────────────────────────────────────────────────────
 
 
-async def _sync_store_handle():
-    """Resolve the async store singleton, returning its synchronous handle
-    for use inside ``asyncio.to_thread`` workers (see module docstring on
-    ``_get_cluster_health``). Returns ``None`` for the postgres backend
-    (no ``.raw`` yet) rather than guessing."""
-    s = await get_store()
-    return s.raw if hasattr(s, "raw") else None
-
-
 @router.get("/health", response_class=HTMLResponse)
 async def health_page(request: Request) -> HTMLResponse:
-    store = await _sync_store_handle()
-    data = await asyncio.to_thread(_get_cluster_health, store)
+    store = await get_store()
+    loop = asyncio.get_running_loop()
+    data = await asyncio.to_thread(_get_cluster_health, store, loop)
     data["deploy_status"] = await asyncio.to_thread(_get_deploy_status, True)
     return get_templates().TemplateResponse(request, "health.html", data)
 
@@ -533,10 +532,7 @@ async def pipeline_detail_page(request: Request, pipeline_name: str) -> HTMLResp
 async def healthz():
     try:
         s = await get_store()
-        if hasattr(s, "get_setting"):
-            await s.get_setting("__healthz_probe__")
-        else:
-            s._conn.execute("SELECT 1")
+        await s.get_setting("__healthz_probe__")
     except Exception as exc:
         return JSONResponse({"status": "unhealthy", "error": str(exc)}, status_code=503)
     return {"status": "ok"}
@@ -544,29 +540,26 @@ async def healthz():
 
 @router.get("/readyz")
 async def readyz():
-    import os
-    backend = os.environ.get("AGENTIT_DB_BACKEND", "sqlite").strip().lower()
     try:
         s = await get_store()
-        if hasattr(s, "get_setting"):
-            await s.get_setting("__readyz_probe__")
-        else:
-            s._conn.execute("SELECT 1")
+        await s.get_setting("__readyz_probe__")
     except Exception as exc:
-        return JSONResponse({"status": "not ready", "backend": backend, "error": str(exc)}, status_code=503)
+        return JSONResponse({"status": "not ready", "backend": "postgres", "error": str(exc)}, status_code=503)
+    import os
     if os.environ.get("AGENTIT_KAFKA_BOOTSTRAP"):
         from agentit.events import get_publisher
         pub = get_publisher()
         if not pub.kafka_enabled:
-            return JSONResponse({"status": "not ready", "backend": backend, "error": "kafka publisher not connected"}, status_code=503)
-    return {"status": "ready", "backend": backend}
+            return JSONResponse({"status": "not ready", "backend": "postgres", "error": "kafka publisher not connected"}, status_code=503)
+    return {"status": "ready", "backend": "postgres"}
 
 
 @router.get("/api/health")
 async def api_health():
     import os
-    store = await _sync_store_handle()
-    data = await asyncio.to_thread(_get_cluster_health, store)
+    store = await get_store()
+    loop = asyncio.get_running_loop()
+    data = await asyncio.to_thread(_get_cluster_health, store, loop)
     body = {
         "argo_synced": data["argo_synced"],
         "pods_running": data["pods_running"],

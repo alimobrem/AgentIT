@@ -399,6 +399,38 @@ def test_strip_code_fence_leaves_already_invalid_text_untouched():
     assert _strip_code_fence(garbage) == garbage
 
 
+def test_strip_code_fence_unclosed_truncated_json_fence():
+    """Live failure: model opens ```json then hits max_tokens mid-object."""
+    from agentit.llm import _strip_code_fence
+
+    truncated = '```json\n{"has_proposal": true, "title": "x", "evidence": "huge...'
+    assert _strip_code_fence(truncated).startswith('{"has_proposal"')
+    assert not _strip_code_fence(truncated).startswith("```")
+
+
+def test_propose_capability_improvement_retries_after_unparseable():
+    """First reply truncated/fenced junk; second compact JSON succeeds."""
+    bad = '```json\n{"has_proposal": true, "title": "cut off...'
+    good = {
+        "has_proposal": True,
+        "title": "Retry worked",
+        "gap_description": "g",
+        "evidence": "e",
+        "target_files": ["tests/test_x.py"],
+        "change_summary": "c",
+        "risk": "low",
+        "test_plan": "p",
+    }
+    client = _make_client(MagicMock(side_effect=[
+        _mock_response(bad),
+        _mock_response(json.dumps(good)),
+    ]))
+    result = client.propose_capability_improvement({"doc_gaps": [{"file": "x", "line_no": 1}]})
+    assert result is not None
+    assert result["title"] == "Retry worked"
+    assert client._client.messages.create.call_count == 2
+
+
 def test_propose_capability_improvement_strips_json_tagged_fence():
     """The exact live bug: model wraps the proposal in a ```json fence."""
     proposal_payload = {

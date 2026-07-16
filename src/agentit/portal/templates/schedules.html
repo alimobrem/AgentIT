@@ -96,7 +96,9 @@
   <tbody>
     {% for s in schedules %}
     <tr>
-      <td class="text-bold">{{ s.app_name }}</td>
+      <td class="text-bold">
+        {% if s.app_id %}<a href="/assessments/{{ s.app_id }}">{{ s.app_name }}</a>{% else %}{{ s.app_name }}{% endif %}
+      </td>
       <td>{{ s.job_name }}</td>
       <td>
         {% if s.source == 'onboarding' %}

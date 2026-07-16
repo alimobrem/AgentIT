@@ -1,0 +1,161 @@
+# KafkaUser CRs (Strimzi User Operator) -- one per real producer/consumer
+# identity this app has, per docs/kafka-hardening-plan.md. Each gets
+# SCRAM-SHA-512 auth and an ACL scoped to exactly the topics/consumer groups
+# that identity actually uses in code (see the TOPIC_* constants and
+# EventPublisher/EventConsumer call sites in src/agentit/events.py,
+# consumer.py, and watchers/*.py) -- not a blanket grant.
+#
+# Strimzi auto-provisions a Secret per KafkaUser (named after the KafkaUser,
+# containing `user`/`password`/`sasl.jaas.config`), which is what
+# src/agentit/events.py's EventPublisher / consumer.py's EventConsumer read
+# via AGENTIT_KAFKA_SASL_USERNAME/_PASSWORD once a future chart change wires
+# those into each Deployment's env (see values.yaml's kafka.auth comment --
+# that env wiring is deliberately NOT part of this pass).
+#
+# capability-scout is intentionally excluded: it never sets
+# AGENTIT_KAFKA_BOOTSTRAP (chart/templates/agents/capability-scout.yaml has
+# no such env block), so it has no real Kafka identity to provision.
+{{- if and .Values.kafka.enabled .Values.kafka.auth.enabled }}
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: agentit-portal
+  namespace: {{ .Release.Namespace }}
+  labels:
+    strimzi.io/cluster: agentit-kafka
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  authentication:
+    type: scram-sha-512
+  authorization:
+    type: simple
+    acls:
+      # portal/helpers.py::publish_event() -> TOPIC_EVENTS; assessments.py /
+      # webhooks.py -> TOPIC_ASSESSMENTS.
+      - resource:
+          type: topic
+          name: agentit-events
+          patternType: literal
+        operations: [Write, Describe]
+      - resource:
+          type: topic
+          name: agentit-assessments
+          patternType: literal
+        operations: [Write, Describe]
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: agentit-vuln-watcher
+  namespace: {{ .Release.Namespace }}
+  labels:
+    strimzi.io/cluster: agentit-kafka
+    app.kubernetes.io/name: {{ .Chart.Name }}-vuln-watcher
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  authentication:
+    type: scram-sha-512
+  authorization:
+    type: simple
+    acls:
+      # watchers/vuln_watcher.py: consumes agentit-events (group
+      # agentit-vuln-watcher, see cli.py's vuln_watch()), publishes
+      # TOPIC_EVENTS (cve-check-triggered) and TOPIC_ALERTS
+      # (critical-findings-detected / remediation-failed).
+      - resource:
+          type: topic
+          name: agentit-events
+          patternType: literal
+        operations: [Read, Write, Describe]
+      - resource:
+          type: topic
+          name: agentit-alerts
+          patternType: literal
+        operations: [Write, Describe]
+      - resource:
+          type: group
+          name: agentit-vuln-watcher
+          patternType: literal
+        operations: [Read]
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: agentit-slo-tracker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    strimzi.io/cluster: agentit-kafka
+    app.kubernetes.io/name: {{ .Chart.Name }}-slo-tracker
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  authentication:
+    type: scram-sha-512
+  authorization:
+    type: simple
+    acls:
+      # watchers/slo_tracker.py: consumes agentit-events (group
+      # agentit-slo-tracker, see cli.py's slo_track()), publishes
+      # TOPIC_ALERTS (slo-breach / rollback-recommended).
+      - resource:
+          type: topic
+          name: agentit-events
+          patternType: literal
+        operations: [Read, Describe]
+      - resource:
+          type: topic
+          name: agentit-alerts
+          patternType: literal
+        operations: [Write, Describe]
+      - resource:
+          type: group
+          name: agentit-slo-tracker
+          patternType: literal
+        operations: [Read]
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: agentit-drift-detector
+  namespace: {{ .Release.Namespace }}
+  labels:
+    strimzi.io/cluster: agentit-kafka
+    app.kubernetes.io/name: {{ .Chart.Name }}-drift-detector
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  authentication:
+    type: scram-sha-512
+  authorization:
+    type: simple
+    acls:
+      # watchers/drift_detector.py: publish-only (drift-detected,
+      # api-removed, skill-deprecated) -- never constructs an EventConsumer.
+      - resource:
+          type: topic
+          name: agentit-events
+          patternType: literal
+        operations: [Write, Describe]
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: agentit-skill-learner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    strimzi.io/cluster: agentit-kafka
+    app.kubernetes.io/name: {{ .Chart.Name }}-skill-learner
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  authentication:
+    type: scram-sha-512
+  authorization:
+    type: simple
+    acls:
+      # watchers/skill_learner.py: publish-only (skills-generated) -- never
+      # constructs an EventConsumer.
+      - resource:
+          type: topic
+          name: agentit-events
+          patternType: literal
+        operations: [Write, Describe]
+{{- end }}

@@ -192,6 +192,39 @@ def _secret_classify_decisions(store, limit: int, loop=None) -> list[dict]:
     return decisions
 
 
+def _humanize_capability_evidence(text: str) -> str:
+    """Guard against a raw JSON dump ever surfacing as "reasoning" text.
+
+    `details["evidence"]` is normally the LLM's own free-text citation
+    (e.g. "README.md:42 — Documented future idea"), but it's still LLM
+    output -- nothing prevents it (or an older/legacy event's differently-
+    shaped `details_json`) from being (or containing) a serialized dict
+    like the real signal rows `gather_evidence()` feeds the LLM (e.g. one
+    of `store.get_agent_stats()`'s own per-agent dicts: `{"agent":
+    "remediation-loop", "total_events": 36, ...}`), confirmed live on the
+    Decisions page -- every other decision type here (auto-mode-classify,
+    secret-classify) always renders a plain sentence. If `text` parses as
+    a JSON object/array, reformat it as "key: value" pairs (recursing into
+    list items) instead of ever showing raw braces/quotes; otherwise it's
+    already prose and is returned unchanged.
+    """
+    stripped = (text or "").strip()
+    if not stripped or stripped[0] not in "{[":
+        return text or ""
+    try:
+        parsed = json.loads(stripped)
+    except (TypeError, ValueError):
+        return text or ""
+    if isinstance(parsed, dict):
+        return ", ".join(f"{k}: {v}" for k, v in parsed.items())
+    if isinstance(parsed, list):
+        return "; ".join(
+            _humanize_capability_evidence(json.dumps(item)) if isinstance(item, (dict, list)) else str(item)
+            for item in parsed
+        )
+    return str(parsed)
+
+
 def _capability_proposal_decisions(store, limit: int, loop=None) -> list[dict]:
     """`events` rows (action='capability-run') → decisions attributed to the
     `capability-scout` component -- every cycle becomes a decision, whether
@@ -223,7 +256,7 @@ def _capability_proposal_decisions(store, limit: int, loop=None) -> list[dict]:
             "attribution_kind": "component",
             "target_app": "agentit",
             "outcome": outcome,
-            "reason": details.get("evidence") or r.get("summary", ""),
+            "reason": _humanize_capability_evidence(details.get("evidence") or r.get("summary", "")),
         })
     return decisions
 

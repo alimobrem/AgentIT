@@ -17,12 +17,12 @@ from conftest import make_store, make_report
 # ── Events ──────────────────────────────────────────────────────────────
 
 
-def test_log_and_list_events():
-    store = make_store()
-    eid = store.log_event("bot", "deploy", "my-app", "info", "deployed v1")
+async def test_log_and_list_events():
+    store = await make_store()
+    eid = await store.log_event("bot", "deploy", "my-app", "info", "deployed v1")
     assert eid
 
-    events = store.list_events()
+    events = await store.list_events()
     assert len(events) == 1
     assert events[0]["agent_id"] == "bot"
     assert events[0]["action"] == "deploy"
@@ -30,20 +30,20 @@ def test_log_and_list_events():
     assert events[0]["summary"] == "deployed v1"
 
     # filter by target_app
-    store.log_event("bot", "scan", "other-app", "warning", "drift detected")
-    filtered = store.list_events(target_app="other-app")
+    await store.log_event("bot", "scan", "other-app", "warning", "drift detected")
+    filtered = await store.list_events(target_app="other-app")
     assert len(filtered) == 1
     assert filtered[0]["target_app"] == "other-app"
 
     # all events
-    assert len(store.list_events()) == 2
+    assert len(await store.list_events()) == 2
 
 
 # ── Assessment history ──────────────────────────────────────────────────
 
 
-def test_list_history_returns_multiple_assessments():
-    store = make_store()
+async def test_list_history_returns_multiple_assessments():
+    store = await make_store()
     r1 = make_report(repo_name="test-repo", scores=[DimensionScore(
         dimension="security", score=40, max_score=100,
         findings=[Finding(category="test", severity=Severity.low,
@@ -56,18 +56,18 @@ def test_list_history_returns_multiple_assessments():
                           description="minor", recommendation="fix")],
     )])
     r2.assessed_at = datetime(2025, 2, 1, tzinfo=timezone.utc)
-    store.save(r1)
-    store.save(r2)
+    await store.save(r1)
+    await store.save(r2)
 
-    history = store.list_history("https://github.com/org/test-repo")
+    history = await store.list_history("https://github.com/org/test-repo")
     assert len(history) == 2
     # ordered ascending by date
     assert history[0]["overall_score"] == 40.0
     assert history[1]["overall_score"] == 60.0
 
 
-def test_get_trend_shows_delta():
-    store = make_store()
+async def test_get_trend_shows_delta():
+    store = await make_store()
     r1 = make_report(repo_name="test-repo", scores=[DimensionScore(
         dimension="security", score=40, max_score=100,
         findings=[Finding(category="test", severity=Severity.low,
@@ -80,67 +80,275 @@ def test_get_trend_shows_delta():
                           description="minor", recommendation="fix")],
     )])
     r2.assessed_at = datetime(2025, 2, 1, tzinfo=timezone.utc)
-    store.save(r1)
-    store.save(r2)
+    await store.save(r1)
+    await store.save(r2)
 
-    trend = store.get_trend("https://github.com/org/test-repo")
+    trend = await store.get_trend("https://github.com/org/test-repo")
     assert trend["current_score"] == 70.0
     assert trend["previous_score"] == 40.0
     assert trend["delta"] == 30.0
     assert trend["assessments_count"] == 2
 
     # empty repo
-    empty = store.get_trend("https://github.com/org/nonexistent")
+    empty = await store.get_trend("https://github.com/org/nonexistent")
     assert empty["assessments_count"] == 0
     assert empty["delta"] is None
+
+
+async def test_save_carries_forward_infra_repo_url_from_prior_assessment():
+    """A re-assessment (``save()``) of an already-GitOps-registered app
+    must not lose ``infra_repo_url`` just because the new report didn't
+    explicitly set it -- see delivery.py's "registered but no infra_repo_url
+    is known" refusal path this closes."""
+    store = await make_store()
+    r1 = make_report(repo_name="pinky")
+    r1.assessed_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    aid1 = await store.save(r1)
+    await store.set_infra_repo_url(aid1, "https://github.com/org/infra")
+
+    r2 = make_report(repo_name="pinky")  # fresh report, infra_repo_url unset
+    r2.assessed_at = datetime(2025, 2, 1, tzinfo=timezone.utc)
+    assert r2.infra_repo_url is None
+    aid2 = await store.save(r2)
+
+    saved = await store.get(aid2)
+    assert saved.infra_repo_url == "https://github.com/org/infra"
+
+
+async def test_save_does_not_override_explicit_infra_repo_url():
+    """If the new report already carries its own ``infra_repo_url`` (e.g.
+    supplied via the assess form), that explicit value wins over whatever
+    an earlier assessment had -- carry-forward only fills in a gap, it
+    never overwrites a value the caller actually provided."""
+    store = await make_store()
+    r1 = make_report(repo_name="pinky")
+    r1.assessed_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    aid1 = await store.save(r1)
+    await store.set_infra_repo_url(aid1, "https://github.com/org/old-infra")
+
+    r2 = make_report(repo_name="pinky")
+    r2.assessed_at = datetime(2025, 2, 1, tzinfo=timezone.utc)
+    r2.infra_repo_url = "https://github.com/org/new-infra"
+    aid2 = await store.save(r2)
+
+    saved = await store.get(aid2)
+    assert saved.infra_repo_url == "https://github.com/org/new-infra"
+
+
+async def test_save_leaves_infra_repo_url_none_when_never_set():
+    """A brand-new app with no registration history at all still gets
+    ``infra_repo_url is None`` -- carry-forward has nothing to find, and
+    must not fabricate a value."""
+    store = await make_store()
+    r1 = make_report(repo_name="never-registered")
+    aid1 = await store.save(r1)
+
+    saved = await store.get(aid1)
+    assert saved.infra_repo_url is None
+
+
+# ── apps table (app-vs-assessment data model) ──────────────────────────
+
+
+class TestAppsTable:
+    """The `apps` table is the single, always-current source of app-level
+    facts (currently just `infra_repo_url`) that used to be re-derived by
+    scanning `assessments.report_json` history on every `save()` -- see
+    docs/architecture.md's "Data model: assessments vs. apps" section.
+    """
+
+    async def test_save_creates_an_apps_row(self):
+        store = await make_store()
+        await store.save(make_report(repo_name="new-app", repo_url="https://github.com/org/new-app"))
+        row = await store._pool.fetchrow(
+            "SELECT * FROM apps WHERE repo_url = $1", "https://github.com/org/new-app",
+        )
+        assert row is not None
+        assert row["repo_name"] == "new-app"
+        assert row["infra_repo_url"] is None
+
+    async def test_set_infra_repo_url_updates_apps_row_even_for_a_non_latest_assessment(self):
+        """Closes a gap the pre-`apps`-table fix still had: registering
+        against an assessment_id that ISN'T the app's latest one (e.g. a
+        stale browser tab pointed at an older Assessment Detail page) must
+        still make the app show up as registered on `get_fleet_data()`,
+        which only ever looks at the latest assessment row -- not just on
+        the specific (now-stale) assessment that was registered.
+        """
+        store = await make_store()
+        old_report = make_report(repo_name="stale-tab-app")
+        old_report.assessed_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        old_id = await store.save(old_report)
+
+        new_report = make_report(repo_name="stale-tab-app")
+        new_report.assessed_at = datetime(2025, 2, 1, tzinfo=timezone.utc)
+        new_id = await store.save(new_report)
+        assert new_id != old_id
+
+        # Register against the OLD (no longer latest) assessment_id.
+        assert await store.set_infra_repo_url(old_id, "https://github.com/org/infra") is True
+
+        fleet_row = next(
+            r for r in await store.get_fleet_data() if r["repo_url"] == "https://github.com/org/stale-tab-app"
+        )
+        assert fleet_row["id"] == new_id  # still keyed to the latest assessment
+        assert fleet_row["infra_repo_url"] == "https://github.com/org/infra"  # but registration is visible
+
+    async def test_apps_table_backfilled_from_existing_assessments_on_reopen(self, postgres_dsn):
+        """A database that predates the `apps` table (assessments + a
+        registration already recorded in `report_json`, but no `apps` row
+        yet) must get that history backfilled the next time `create()` runs
+        SCHEMA_SQL against it (e.g. a second replica/pod connecting to the
+        same instance) -- using the same "most recent non-null value wins"
+        logic `_last_known_infra_repo_url()` used before `apps` existed.
+        """
+        from agentit.portal.store import AssessmentStore
+
+        store1 = await make_store()  # truncated fresh by the shared fixture
+        r1 = make_report(repo_name="legacy-app")
+        aid1 = await store1.save(r1)
+        await store1.set_infra_repo_url(aid1, "https://github.com/org/legacy-infra")
+
+        # Simulate a pre-`apps`-table database: drop the row `save()`/
+        # `set_infra_repo_url()` already wrote, so the next `create()`'s
+        # SCHEMA_SQL backfill has real history to reconstruct from.
+        await store1._pool.execute("DELETE FROM apps")
+
+        store2 = await AssessmentStore.create(postgres_dsn, min_size=1, max_size=2)
+        try:
+            assert await store2._last_known_infra_repo_url(
+                "https://github.com/org/legacy-app"
+            ) == "https://github.com/org/legacy-infra"
+        finally:
+            await store2.close()
+
+    async def test_apps_backfill_is_a_no_op_once_already_populated(self, postgres_dsn):
+        """The `WHERE repo_url NOT IN (SELECT repo_url FROM apps)` guard
+        must not let a second `create()`/backfill pass clobber a row a
+        caller has since updated (e.g. re-registered with a new URL)."""
+        from agentit.portal.store import AssessmentStore
+
+        store1 = await make_store()
+        aid = await store1.save(make_report(repo_name="reopen-app"))
+        await store1.set_infra_repo_url(aid, "https://github.com/org/first-infra")
+
+        store2 = await AssessmentStore.create(postgres_dsn, min_size=1, max_size=2)
+        try:
+            assert await store2._last_known_infra_repo_url(
+                "https://github.com/org/reopen-app"
+            ) == "https://github.com/org/first-infra"
+        finally:
+            await store2.close()
 
 
 # ── Gates ────────────────────────────────────────────────────────────────
 
 
-def test_create_and_resolve_gate():
-    store = make_store()
-    aid = store.save(make_report())
-    gid = store.create_gate(aid, "security", "Critical vuln found")
+async def test_create_and_resolve_gate():
+    store = await make_store()
+    aid = await store.save(make_report())
+    gid = await store.create_gate(aid, "security", "Critical vuln found")
     assert gid
 
-    gates = store.list_gates()
+    gates = await store.list_gates()
     assert len(gates) == 1
     assert gates[0]["gate_type"] == "security"
     assert gates[0]["status"] == "pending"
 
-    ok = store.resolve_gate(gid, "approved", "alice")
+    ok = await store.resolve_gate(gid, "approved", "alice")
     assert ok is True
 
     # pending list is now empty
-    assert store.list_gates(status="pending") == []
-    approved = store.list_gates(status="approved")
+    assert await store.list_gates(status="pending") == []
+    approved = await store.list_gates(status="approved")
     assert len(approved) == 1
     assert approved[0]["resolved_by"] == "alice"
 
     # resolving again returns False (already resolved)
-    assert store.resolve_gate(gid, "rejected", "bob") is False
+    assert await store.resolve_gate(gid, "rejected", "bob") is False
 
 
-def test_list_gates_filters_by_status():
-    store = make_store()
-    aid = store.save(make_report())
-    g1 = store.create_gate(aid, "compliance", "Missing SBOM")
-    g2 = store.create_gate(aid, "security", "No network policy")
+async def test_list_gates_filters_by_status():
+    store = await make_store()
+    aid = await store.save(make_report())
+    g1 = await store.create_gate(aid, "compliance", "Missing SBOM")
+    g2 = await store.create_gate(aid, "security", "No network policy")
 
-    store.resolve_gate(g1, "approved", "carol")
+    await store.resolve_gate(g1, "approved", "carol")
 
-    assert len(store.list_gates(status="pending")) == 1
-    assert len(store.list_gates(status="approved")) == 1
-    assert store.list_gates(status="pending")[0]["id"] == g2
+    assert len(await store.list_gates(status="pending")) == 1
+    assert len(await store.list_gates(status="approved")) == 1
+    assert (await store.list_gates(status="pending"))[0]["id"] == g2
+
+
+async def test_list_gates_includes_repo_url_for_fleet_attribution():
+    """`fleet.py::_attach_pending_actions` keys gate counts by `repo_url`,
+    not `assessment_id` -- `list_gates()` must surface `repo_url` on every
+    row for that to work."""
+    store = await make_store()
+    aid = await store.save(make_report(repo_name="repo-y"))
+    await store.create_gate(aid, "security", "needs review")
+    gates = await store.list_gates(status="pending")
+    assert gates[0]["repo_url"] == "https://github.com/org/repo-y"
+
+
+async def test_gate_from_old_assessment_visible_after_reassessment():
+    """Orphaned-gate-attribution regression: a gate created against an
+    app's OLD assessment_id must still be visible/actionable from the
+    Actions tab of that SAME app's CURRENT (re-assessed) assessment_id --
+    `gates.assessment_id` is a FK to a specific historical assessment, but
+    `get_fleet_data()` (and the Assessment Detail page) always key off the
+    latest one.
+    """
+    store = await make_store()
+    old_report = make_report(repo_name="repo-x")
+    old_report.assessed_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    old_id = await store.save(old_report)
+    gate_id = await store.create_gate(old_id, "security", "needs review")
+
+    new_report = make_report(repo_name="repo-x")
+    new_report.assessed_at = datetime(2025, 2, 1, tzinfo=timezone.utc)
+    new_id = await store.save(new_report)
+    assert new_id != old_id
+
+    # Old exact-match behavior (pre-fix) would return [] here.
+    gates = await store.list_gates_for_assessment(new_id, status="pending")
+    assert [g["id"] for g in gates] == [gate_id]
+
+    # get_fleet_data()'s row for this repo is keyed to the newest assessment.
+    fleet = [r for r in await store.get_fleet_data() if r["repo_url"] == "https://github.com/org/repo-x"]
+    assert len(fleet) == 1
+    assert fleet[0]["id"] == new_id
+
+
+async def test_gate_from_old_assessment_counted_in_fleet_needs_action_badge():
+    """Same regression as above, exercised through the actual query
+    `fleet.py::_attach_pending_actions` runs (`list_gates()` keyed by
+    `repo_url`), not just `list_gates_for_assessment()`."""
+    store = await make_store()
+    old_report = make_report(repo_name="repo-z")
+    old_report.assessed_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    old_id = await store.save(old_report)
+    await store.create_gate(old_id, "security", "needs review")
+
+    new_report = make_report(repo_name="repo-z")
+    new_report.assessed_at = datetime(2025, 2, 1, tzinfo=timezone.utc)
+    new_id = await store.save(new_report)
+
+    pending_gates = await store.list_gates(status="pending")
+    repo_urls_with_pending_gates = {g["repo_url"] for g in pending_gates}
+    assert "https://github.com/org/repo-z" in repo_urls_with_pending_gates
+
+    fleet_row = next(r for r in await store.get_fleet_data() if r["repo_url"] == "https://github.com/org/repo-z")
+    assert fleet_row["id"] == new_id  # confirms the badge lookup can't key off assessment_id
 
 
 # ── Severity enum regression ───────────────────────────────────────────
 
 
-def test_fleet_data_counts_critical_findings_correctly():
+async def test_fleet_data_counts_critical_findings_correctly():
     """Regression: severity comparison must use Severity enum, not raw ints."""
-    store = make_store()
+    store = await make_store()
     report = AssessmentReport(
         repo_url="https://github.com/org/sev-test",
         repo_name="sev-test",
@@ -170,8 +378,8 @@ def test_fleet_data_counts_critical_findings_correctly():
         summary="test",
         remediation_plan=[],
     )
-    store.save(report)
-    fleet = store.get_fleet_data()
+    await store.save(report)
+    fleet = await store.get_fleet_data()
     assert len(fleet) == 1
     assert fleet[0]["critical_count"] == 2  # 1 critical + 1 high
 
@@ -180,83 +388,83 @@ def test_fleet_data_counts_critical_findings_correctly():
 
 
 class TestRemediationsTable:
-    def test_save_and_list(self):
-        store = make_store()
-        aid = store.save(make_report())
-        rid = store.save_remediation(aid, "security", "Fix RBAC")
-        rems = store.list_remediations(aid)
+    async def test_save_and_list(self):
+        store = await make_store()
+        aid = await store.save(make_report())
+        rid = await store.save_remediation(aid, "security", "Fix RBAC")
+        rems = await store.list_remediations(aid)
         assert len(rems) == 1
         assert rems[0]["agent_name"] == "security"
         assert rems[0]["status"] == "generated"
         assert rems[0]["id"] == rid
 
-    def test_complete(self):
-        store = make_store()
-        aid = store.save(make_report())
-        rid = store.save_remediation(aid, "security", "Fix RBAC")
-        assert store.complete_remediation(rid) is True
-        rems = store.list_remediations(aid)
+    async def test_complete(self):
+        store = await make_store()
+        aid = await store.save(make_report())
+        rid = await store.save_remediation(aid, "security", "Fix RBAC")
+        assert await store.complete_remediation(rid) is True
+        rems = await store.list_remediations(aid)
         assert rems[0]["status"] == "completed"
         assert rems[0]["completed_at"] is not None
 
-    def test_complete_idempotent(self):
-        store = make_store()
-        aid = store.save(make_report())
-        rid = store.save_remediation(aid, "cicd", "Add pipeline")
-        store.complete_remediation(rid)
-        assert store.complete_remediation(rid) is False
+    async def test_complete_idempotent(self):
+        store = await make_store()
+        aid = await store.save(make_report())
+        rid = await store.save_remediation(aid, "cicd", "Add pipeline")
+        await store.complete_remediation(rid)
+        assert await store.complete_remediation(rid) is False
 
-    def test_delete(self):
-        store = make_store()
-        aid = store.save(make_report())
-        rid = store.save_remediation(aid, "security", "Fix RBAC")
-        assert store.delete_remediation(rid, aid) is True
-        assert store.list_remediations(aid) == []
+    async def test_delete(self):
+        store = await make_store()
+        aid = await store.save(make_report())
+        rid = await store.save_remediation(aid, "security", "Fix RBAC")
+        assert await store.delete_remediation(rid, aid) is True
+        assert await store.list_remediations(aid) == []
 
-    def test_delete_wrong_assessment_returns_false(self):
-        store = make_store()
-        aid = store.save(make_report())
-        other_aid = store.save(make_report(repo_name="other-app"))
-        rid = store.save_remediation(aid, "security", "Fix RBAC")
-        assert store.delete_remediation(rid, other_aid) is False
-        assert len(store.list_remediations(aid)) == 1
+    async def test_delete_wrong_assessment_returns_false(self):
+        store = await make_store()
+        aid = await store.save(make_report())
+        other_aid = await store.save(make_report(repo_name="other-app"))
+        rid = await store.save_remediation(aid, "security", "Fix RBAC")
+        assert await store.delete_remediation(rid, other_aid) is False
+        assert len(await store.list_remediations(aid)) == 1
 
 
 # ── Agent Registry ─────────────────────────────────────────────────────
 
 
 class TestAgentRegistryTable:
-    def test_register_and_list(self):
-        store = make_store()
-        aid = store.register_agent("security", "hardening", "network,rbac")
-        agents = store.list_agents()
+    async def test_register_and_list(self):
+        store = await make_store()
+        aid = await store.register_agent("security", "hardening", "network,rbac")
+        agents = await store.list_agents()
         assert len(agents) == 1
         assert agents[0]["agent_name"] == "security"
         assert agents[0]["category"] == "hardening"
         assert agents[0]["status"] == "active"
 
-    def test_heartbeat(self):
-        store = make_store()
-        store.register_agent("observability", "monitoring")
-        assert store.agent_heartbeat("observability") is True
+    async def test_heartbeat(self):
+        store = await make_store()
+        await store.register_agent("observability", "monitoring")
+        assert await store.agent_heartbeat("observability") is True
 
-    def test_heartbeat_upserts_unregistered_agent(self):
+    async def test_heartbeat_upserts_unregistered_agent(self):
         """Long-lived watchers (vuln-watcher, slo-tracker, ...) never call
         register_agent -- agent_heartbeat must create the row itself so their
         "last seen" actually shows up on the Agents/Schedules pages."""
-        store = make_store()
-        assert store.agent_heartbeat("vuln-watcher") is True
-        agents = store.list_agents()
+        store = await make_store()
+        assert await store.agent_heartbeat("vuln-watcher") is True
+        agents = await store.list_agents()
         assert any(a["agent_name"] == "vuln-watcher" for a in agents)
         watcher = next(a for a in agents if a["agent_name"] == "vuln-watcher")
         assert watcher["category"] == "watcher"
         assert watcher["last_heartbeat"] is not None
 
-    def test_register_replaces_existing(self):
-        store = make_store()
-        store.register_agent("security", "hardening", "v1")
-        store.register_agent("security", "hardening", "v2")
-        agents = store.list_agents()
+    async def test_register_replaces_existing(self):
+        store = await make_store()
+        await store.register_agent("security", "hardening", "v1")
+        await store.register_agent("security", "hardening", "v2")
+        agents = await store.list_agents()
         assert len(agents) == 1
         assert agents[0]["capabilities"] == "v2"
 
@@ -266,56 +474,56 @@ class TestPruneStaleAgents:
     longer known to the codebase (e.g. the 9 Python agents removed in favor
     of skills-only generation)."""
 
-    def test_removes_names_outside_known_set(self):
-        store = make_store()
-        store.register_agent("security", "hardening")
-        store.register_agent("cost", "cost")
+    async def test_removes_names_outside_known_set(self):
+        store = await make_store()
+        await store.register_agent("security", "hardening")
+        await store.register_agent("cost", "cost")
 
-        pruned = store.prune_stale_agents(known_names={"cost"})
+        pruned = await store.prune_stale_agents(known_names={"cost"})
 
         assert pruned == ["security"]
-        remaining = {a["agent_name"] for a in store.list_agents()}
+        remaining = {a["agent_name"] for a in await store.list_agents()}
         assert remaining == {"cost"}
 
-    def test_preserves_all_known_names(self):
-        store = make_store()
+    async def test_preserves_all_known_names(self):
+        store = await make_store()
         known = {"cost", "dependency", "codechange", "vuln-watcher",
                   "slo-tracker", "drift-detector", "skill-learner"}
         for name in known:
-            store.register_agent(name, "test")
+            await store.register_agent(name, "test")
 
-        pruned = store.prune_stale_agents(known_names=known)
+        pruned = await store.prune_stale_agents(known_names=known)
 
         assert pruned == []
-        remaining = {a["agent_name"] for a in store.list_agents()}
+        remaining = {a["agent_name"] for a in await store.list_agents()}
         assert remaining == known
 
-    def test_no_stale_rows_returns_empty_list(self):
-        store = make_store()
-        store.register_agent("cost", "cost")
-        assert store.prune_stale_agents(known_names={"cost"}) == []
+    async def test_no_stale_rows_returns_empty_list(self):
+        store = await make_store()
+        await store.register_agent("cost", "cost")
+        assert await store.prune_stale_agents(known_names={"cost"}) == []
 
-    def test_prunes_multiple_stale_rows_at_once(self):
-        store = make_store()
+    async def test_prunes_multiple_stale_rows_at_once(self):
+        store = await make_store()
         for name in ("chaos", "cicd", "compliance", "hardening", "incident",
                      "infrastructure", "observability", "release", "retirement"):
-            store.register_agent(name, name)
-        store.register_agent("cost", "cost")
+            await store.register_agent(name, name)
+        await store.register_agent("cost", "cost")
 
         known = {"cost", "dependency", "codechange", "vuln-watcher",
                   "slo-tracker", "drift-detector", "skill-learner"}
-        pruned = store.prune_stale_agents(known_names=known)
+        pruned = await store.prune_stale_agents(known_names=known)
 
         assert len(pruned) == 9
-        remaining = {a["agent_name"] for a in store.list_agents()}
+        remaining = {a["agent_name"] for a in await store.list_agents()}
         assert remaining == {"cost"}
 
-    def test_heartbeat_only_watcher_also_pruned_if_unknown(self):
+    async def test_heartbeat_only_watcher_also_pruned_if_unknown(self):
         """Rows created via agent_heartbeat() (never register_agent()) are
         pruned the same way as rows created via register_agent()."""
-        store = make_store()
-        store.agent_heartbeat("some-removed-watcher")
-        pruned = store.prune_stale_agents(known_names={"vuln-watcher"})
+        store = await make_store()
+        await store.agent_heartbeat("some-removed-watcher")
+        pruned = await store.prune_stale_agents(known_names={"vuln-watcher"})
         assert pruned == ["some-removed-watcher"]
 
 
@@ -323,50 +531,114 @@ class TestPruneStaleAgents:
 
 
 class TestSlosTable:
-    def test_save_and_list(self):
-        store = make_store()
-        aid = store.save(make_report())
-        sid = store.save_slo(aid, "availability", 99.9)
-        slos = store.list_slos(aid)
+    async def test_save_and_list(self):
+        store = await make_store()
+        aid = await store.save(make_report())
+        sid = await store.save_slo(aid, "availability", 99.9)
+        slos = await store.list_slos(aid)
         assert len(slos) == 1
         assert slos[0]["metric_name"] == "availability"
         assert slos[0]["target_value"] == 99.9
         assert slos[0]["status"] == "unknown"
         assert slos[0]["id"] == sid
 
-    def test_update_slo(self):
-        store = make_store()
-        aid = store.save(make_report())
-        sid = store.save_slo(aid, "error_rate", 0.1)
-        assert store.update_slo(sid, 0.05, "met") is True
-        slos = store.list_slos(aid)
+    async def test_update_slo(self):
+        store = await make_store()
+        aid = await store.save(make_report())
+        sid = await store.save_slo(aid, "error_rate", 0.1)
+        assert await store.update_slo(sid, 0.05, "met") is True
+        slos = await store.list_slos(aid)
         assert slos[0]["current_value"] == 0.05
         assert slos[0]["status"] == "met"
         assert slos[0]["updated_at"] is not None
 
-    def test_multiple_slos_per_assessment(self):
-        store = make_store()
-        aid = store.save(make_report())
-        store.save_slo(aid, "availability", 99.9)
-        store.save_slo(aid, "latency_p99", 200.0)
-        store.save_slo(aid, "error_rate", 0.1)
-        slos = store.list_slos(aid)
+    async def test_multiple_slos_per_assessment(self):
+        store = await make_store()
+        aid = await store.save(make_report())
+        await store.save_slo(aid, "availability", 99.9)
+        await store.save_slo(aid, "latency_p99", 200.0)
+        await store.save_slo(aid, "error_rate", 0.1)
+        slos = await store.list_slos(aid)
         assert len(slos) == 3
 
-    def test_delete(self):
-        store = make_store()
-        aid = store.save(make_report())
-        sid = store.save_slo(aid, "availability", 99.9)
-        assert store.delete_slo(sid, aid) is True
-        assert store.list_slos(aid) == []
+    async def test_delete(self):
+        store = await make_store()
+        aid = await store.save(make_report())
+        sid = await store.save_slo(aid, "availability", 99.9)
+        assert await store.delete_slo(sid, aid) is True
+        assert await store.list_slos(aid) == []
 
-    def test_delete_wrong_assessment_returns_false(self):
-        store = make_store()
-        aid = store.save(make_report())
-        other_aid = store.save(make_report(repo_name="other-app"))
-        sid = store.save_slo(aid, "availability", 99.9)
-        assert store.delete_slo(sid, other_aid) is False
-        assert len(store.list_slos(aid)) == 1
+    async def test_delete_wrong_assessment_returns_false(self):
+        store = await make_store()
+        aid = await store.save(make_report())
+        other_aid = await store.save(make_report(repo_name="other-app"))
+        sid = await store.save_slo(aid, "availability", 99.9)
+        assert await store.delete_slo(sid, other_aid) is False
+        assert len(await store.list_slos(aid)) == 1
+
+    async def test_save_slo_still_allows_multiple_rows_per_metric_name(self):
+        """`save_slo()` itself stays a plain insert -- the Add-SLO form and
+        the progress-bar-direction test both rely on being able to track
+        more than one threshold for the same metric_name on one
+        assessment. The dedup fix for duplicate *default* SLOs belongs at
+        the seeding call site (`FleetOrchestrator._create_default_slos()`),
+        not in this generic store primitive -- see test_orchestrator.py's
+        `TestDefaultSlosDedup`."""
+        store = await make_store()
+        aid = await store.save(make_report())
+        await store.save_slo(aid, "availability", 99.5)
+        await store.save_slo(aid, "availability", 99.9)
+
+        assert len(await store.list_slos(aid)) == 2
+
+    async def test_slo_from_old_assessment_visible_after_reassessment(self):
+        """Orphaned-SLO-attribution regression, same shape as gates: an SLO
+        created against an app's OLD assessment_id (typically at onboarding
+        time, via `FleetOrchestrator._create_default_slos()`) must still be
+        visible from `list_slos()` called with that SAME app's CURRENT
+        (re-assessed) assessment_id -- `slos.assessment_id` is a FK to
+        whichever assessment existed when the SLO was created, but
+        `get_fleet_data()`/`fleet_slos()` always key off the latest one.
+        """
+        store = await make_store()
+        old_report = make_report(repo_name="slo-repo-x")
+        old_report.assessed_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        old_id = await store.save(old_report)
+        slo_id = await store.save_slo(old_id, "availability", 99.9)
+
+        new_report = make_report(repo_name="slo-repo-x")
+        new_report.assessed_at = datetime(2025, 2, 1, tzinfo=timezone.utc)
+        new_id = await store.save(new_report)
+        assert new_id != old_id
+
+        # Old exact-match behavior (pre-fix) would return [] here.
+        slos = await store.list_slos(new_id)
+        assert [s["id"] for s in slos] == [slo_id]
+
+    async def test_delete_slo_from_old_assessment_via_current_assessment_id(self):
+        """An SLO made visible on the current assessment's SLOs page purely
+        because it was carried forward (see the test above) must also be
+        deletable from that same page -- `delete_slo()` gets the identical
+        repo_url-scoping fix as `list_slos()`, not just an exact
+        `assessment_id` match on the SLO's own (older) FK value."""
+        store = await make_store()
+        old_id = await store.save(make_report(repo_name="slo-repo-y"))
+        slo_id = await store.save_slo(old_id, "availability", 99.9)
+        new_id = await store.save(make_report(repo_name="slo-repo-y"))
+
+        assert await store.delete_slo(slo_id, new_id) is True
+        assert await store.list_slos(new_id) == []
+
+    async def test_delete_slo_for_a_different_app_still_returns_false(self):
+        """The repo_url-based scoping fix must not widen `delete_slo()` into
+        deleting SLOs that genuinely belong to a different app."""
+        store = await make_store()
+        aid = await store.save(make_report(repo_name="slo-repo-mine"))
+        other_aid = await store.save(make_report(repo_name="slo-repo-other"))
+        slo_id = await store.save_slo(aid, "availability", 99.9)
+
+        assert await store.delete_slo(slo_id, other_aid) is False
+        assert len(await store.list_slos(aid)) == 1
 
 
 # ── Orchestrator wiring ────────────────────────────────────────────────
@@ -383,14 +655,13 @@ class TestOrchestratorStoreWiring:
         output is, via FleetOrchestrator._record_remediations()).
         """
         from agentit.agents.orchestrator import FleetOrchestrator
-        from agentit.portal.store_factory import AsyncSQLiteStore
         import tempfile
         from pathlib import Path
 
-        store = make_store()
-        async_store = AsyncSQLiteStore.wrap(store)
+        store = await make_store()
+        async_store = store
         report = make_report(criticality="high")
-        aid = store.save(report)
+        aid = await store.save(report)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             orch = FleetOrchestrator(
@@ -399,7 +670,7 @@ class TestOrchestratorStoreWiring:
             )
             result = await orch.run()
 
-        rems = store.list_remediations(aid)
+        rems = await store.list_remediations(aid)
         assert len(rems) > 0
         agent_names_in_rems = {r["agent_name"] for r in rems}
         assert agent_names_in_rems & {"cost", "dependency", "codechange"}
@@ -412,14 +683,13 @@ class TestOrchestratorStoreWiring:
         cost/dependency/codechange are the ones left to register.
         """
         from agentit.agents.orchestrator import FleetOrchestrator
-        from agentit.portal.store_factory import AsyncSQLiteStore
         import tempfile
         from pathlib import Path
 
-        store = make_store()
-        async_store = AsyncSQLiteStore.wrap(store)
+        store = await make_store()
+        async_store = store
         report = make_report()
-        aid = store.save(report)
+        aid = await store.save(report)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             orch = FleetOrchestrator(
@@ -428,7 +698,7 @@ class TestOrchestratorStoreWiring:
             )
             await orch.run()
 
-        agents = store.list_agents()
+        agents = await store.list_agents()
         agent_names = {a["agent_name"] for a in agents}
         for core in ("cost", "dependency", "codechange"):
             assert core in agent_names, f"{core} not registered"
@@ -436,14 +706,13 @@ class TestOrchestratorStoreWiring:
     async def test_no_remediations_without_assessment_id(self):
         """Orchestrator skips remediation recording when assessment_id is None."""
         from agentit.agents.orchestrator import FleetOrchestrator
-        from agentit.portal.store_factory import AsyncSQLiteStore
         import tempfile
         from pathlib import Path
 
-        store = make_store()
-        async_store = AsyncSQLiteStore.wrap(store)
+        store = await make_store()
+        async_store = store
         report = make_report()
-        store.save(report)
+        await store.save(report)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             orch = FleetOrchestrator(
@@ -459,14 +728,13 @@ class TestOrchestratorStoreWiring:
     async def test_slos_created_on_onboard(self):
         """Orchestrator creates default SLOs after release agent runs."""
         from agentit.agents.orchestrator import FleetOrchestrator
-        from agentit.portal.store_factory import AsyncSQLiteStore
         import tempfile
         from pathlib import Path
 
-        store = make_store()
-        async_store = AsyncSQLiteStore.wrap(store)
+        store = await make_store()
+        async_store = store
         report = make_report()
-        aid = store.save(report)
+        aid = await store.save(report)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             orch = FleetOrchestrator(
@@ -475,7 +743,7 @@ class TestOrchestratorStoreWiring:
             )
             await orch.run()
 
-        slos = store.list_slos(aid)
+        slos = await store.list_slos(aid)
         assert len(slos) == 3
         metric_names = {s["metric_name"] for s in slos}
         assert "availability" in metric_names
@@ -490,129 +758,96 @@ class TestOrchestratorStoreWiring:
 
 
 class TestApplyResultsTable:
-    def test_save_and_get_apply_results_fresh_db(self):
+    async def test_save_and_get_apply_results_fresh_db(self):
         """Regression: a brand-new DB must create apply_results with
         repo_files_json already in the CREATE TABLE statement, so
         save_apply_results (which always writes that column) doesn't fail
         with 'table apply_results has no column named repo_files_json'."""
-        store = make_store()
-        aid = store.save(make_report())
-        store.save_apply_results(
+        store = await make_store()
+        aid = await store.save(make_report())
+        await store.save_apply_results(
             aid,
             {"applied": ["a.yaml"], "skipped": [], "errors": [], "repo_files": ["a.yaml"]},
             namespace="test-ns",
             dry_run=False,
         )
-        result = store.get_apply_results(aid)
+        result = await store.get_apply_results(aid)
         assert result is not None
         assert result["applied"] == ["a.yaml"]
         assert result["repo_files"] == ["a.yaml"]
         assert result["namespace"] == "test-ns"
 
-    def test_migration_idempotent_on_existing_db(self, tmp_path):
-        """Regression: re-opening a DB that already has repo_files_json
-        (e.g. a second AssessmentStore() in the same process, or a pod
-        restart) must not raise -- the ALTER TABLE must tolerate the
-        column already existing."""
-        db_path = str(tmp_path / "test.db")
-        from agentit.portal.store import AssessmentStore as Store
+    async def test_create_is_idempotent_when_called_again_against_the_same_database(self, postgres_dsn):
+        """Regression, Postgres-shaped: re-running `AssessmentStore.create()`
+        (SCHEMA_SQL's `CREATE TABLE IF NOT EXISTS`/`ADD COLUMN IF NOT
+        EXISTS`) against a database that already has every column/table
+        (e.g. a second replica pod, or a restart) must not raise -- unlike
+        the SQLite-era version of this test, there is no hand-rolled
+        try/except OperationalError migration dance to regress here;
+        Postgres's own `IF NOT EXISTS` clauses make this natively safe, and
+        this test is the regression guard that keeps it that way."""
+        from agentit.portal.store import AssessmentStore
 
-        store1 = Store(db_path=db_path)
-        aid = store1.save(make_report())
-        store1.save_apply_results(
+        store1 = await make_store()
+        aid = await store1.save(make_report())
+        await store1.save_apply_results(
             aid, {"applied": [], "skipped": [], "errors": [], "repo_files": []},
             namespace="ns", dry_run=True,
         )
 
-        # Re-opening simulates a restart against the same on-disk DB --
-        # must not raise "duplicate column name: repo_files_json".
-        store2 = Store(db_path=db_path)
-        result = store2.get_apply_results(aid)
-        assert result is not None
-
-    def test_migration_adds_column_to_legacy_schema(self, tmp_path):
-        """Regression: a genuinely pre-existing DB whose apply_results table
-        predates repo_files_json (old CREATE TABLE, no ALTER yet applied)
-        must be migrated in-place when AssessmentStore opens it."""
-        import sqlite3
-
-        db_path = str(tmp_path / "legacy.db")
-        conn = sqlite3.connect(db_path)
-        conn.execute(
-            """
-            CREATE TABLE apply_results (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                assessment_id TEXT NOT NULL,
-                namespace TEXT NOT NULL,
-                dry_run INTEGER NOT NULL DEFAULT 0,
-                applied_json TEXT NOT NULL DEFAULT '[]',
-                skipped_json TEXT NOT NULL DEFAULT '[]',
-                errors_json TEXT NOT NULL DEFAULT '[]',
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.commit()
-        conn.close()
-
-        from agentit.portal.store import AssessmentStore as Store
-
-        store = Store(db_path=db_path)
-        aid = store.save(make_report())
-        store.save_apply_results(
-            aid, {"applied": ["x.yaml"], "skipped": [], "errors": [], "repo_files": ["x.yaml"]},
-            namespace="ns", dry_run=False,
-        )
-        result = store.get_apply_results(aid)
-        assert result is not None
-        assert result["repo_files"] == ["x.yaml"]
+        store2 = await AssessmentStore.create(postgres_dsn, min_size=1, max_size=2)  # must not raise
+        try:
+            result = await store2.get_apply_results(aid)
+            assert result is not None
+        finally:
+            await store2.close()
 
 
 class TestOnboardingHistory:
-    def test_list_onboardings(self):
-        store = make_store()
-        aid = store.save(make_report())
-        store.save_onboarding(aid, [
+    async def test_list_onboardings(self):
+        store = await make_store()
+        aid = await store.save(make_report())
+        await store.save_onboarding(aid, [
             {"category": "security", "path": "rbac.yaml", "content": "x", "description": "d"},
         ], orchestration={"recommendation": "READY", "auto_approve": False})
-        store.save_onboarding(aid, [
+        await store.save_onboarding(aid, [
             {"category": "security", "path": "rbac.yaml", "content": "x", "description": "d"},
             {"category": "cicd", "path": "pipeline.yaml", "content": "y", "description": "p"},
         ], orchestration={"recommendation": "AUTO-APPROVED", "auto_approve": True})
 
-        history = store.list_onboardings(aid)
+        history = await store.list_onboardings(aid)
         assert len(history) == 2
         assert history[0]["file_count"] == 2  # most recent first
         assert history[1]["file_count"] == 1
 
-    def test_list_onboardings_empty(self):
-        store = make_store()
-        aid = store.save(make_report())
-        assert store.list_onboardings(aid) == []
+    async def test_list_onboardings_empty(self):
+        store = await make_store()
+        aid = await store.save(make_report())
+        assert await store.list_onboardings(aid) == []
 
 
 # ── Fleet-wide feedback (Insights page) ──────────────────────────────────
 
 
 class TestGetAllFeedback:
-    def test_get_all_feedback_returns_feedback_across_apps(self):
+    async def test_get_all_feedback_returns_feedback_across_apps(self):
         """Regression: get_feedback_for_app("") filters on app_name = '' and
         always returns nothing -- get_all_feedback is the fleet-wide fix."""
-        store = make_store()
-        store.record_feedback("app-a", "security", "network-policy", "approved")
-        store.record_feedback("app-b", "compliance", "sbom", "rejected", human_reason="not needed")
+        store = await make_store()
+        await store.record_feedback("app-a", "security", "network-policy", "approved")
+        await store.record_feedback("app-b", "compliance", "sbom", "rejected", human_reason="not needed")
 
-        feedback = store.get_all_feedback()
+        feedback = await store.get_all_feedback()
         assert len(feedback) == 2
         assert {f["app_name"] for f in feedback} == {"app-a", "app-b"}
         # get_feedback_for_app("") remains the old (broken for this use case) behavior
-        assert store.get_feedback_for_app("") == []
+        assert await store.get_feedback_for_app("") == []
 
-    def test_get_all_feedback_respects_limit_and_order(self):
-        store = make_store()
+    async def test_get_all_feedback_respects_limit_and_order(self):
+        store = await make_store()
         for i in range(5):
-            store.record_feedback(f"app-{i}", "security", "cat", "approved")
-        feedback = store.get_all_feedback(limit=3)
+            await store.record_feedback(f"app-{i}", "security", "cat", "approved")
+        feedback = await store.get_all_feedback(limit=3)
         assert len(feedback) == 3
         # most recent first
         assert feedback[0]["app_name"] == "app-4"
@@ -623,64 +858,64 @@ class TestFleetWideRejectionStats:
     aggregate (docs/self-improvement-for-agentit.md), unlike
     get_rejection_count() which is scoped to one app + one category."""
 
-    def test_aggregates_rejection_rate_per_category_across_apps(self):
-        store = make_store()
-        store.record_feedback("app-a", "security", "network-policy", "rejected")
-        store.record_feedback("app-b", "security", "network-policy", "rejected")
-        store.record_feedback("app-c", "security", "network-policy", "approved")
-        store.record_feedback("app-a", "compliance", "sbom", "approved")
+    async def test_aggregates_rejection_rate_per_category_across_apps(self):
+        store = await make_store()
+        await store.record_feedback("app-a", "security", "network-policy", "rejected")
+        await store.record_feedback("app-b", "security", "network-policy", "rejected")
+        await store.record_feedback("app-c", "security", "network-policy", "approved")
+        await store.record_feedback("app-a", "compliance", "sbom", "approved")
 
-        stats = store.get_fleet_wide_rejection_stats()
+        stats = await store.get_fleet_wide_rejection_stats()
         by_category = {s["finding_category"]: s for s in stats}
         assert by_category["network-policy"]["total"] == 3
         assert by_category["network-policy"]["rejected"] == 2
         assert by_category["network-policy"]["rejection_rate"] == round(2 / 3 * 100, 1)
         assert by_category["sbom"]["rejected"] == 0
 
-    def test_sorted_by_rejected_count_descending(self):
-        store = make_store()
-        store.record_feedback("app-a", "security", "low-rejects", "rejected")
+    async def test_sorted_by_rejected_count_descending(self):
+        store = await make_store()
+        await store.record_feedback("app-a", "security", "low-rejects", "rejected")
         for _ in range(3):
-            store.record_feedback("app-a", "security", "high-rejects", "rejected")
+            await store.record_feedback("app-a", "security", "high-rejects", "rejected")
 
-        stats = store.get_fleet_wide_rejection_stats()
+        stats = await store.get_fleet_wide_rejection_stats()
         assert stats[0]["finding_category"] == "high-rejects"
 
-    def test_respects_limit(self):
-        store = make_store()
+    async def test_respects_limit(self):
+        store = await make_store()
         for i in range(5):
-            store.record_feedback("app-a", "security", f"cat-{i}", "rejected")
-        assert len(store.get_fleet_wide_rejection_stats(limit=2)) == 2
+            await store.record_feedback("app-a", "security", f"cat-{i}", "rejected")
+        assert len(await store.get_fleet_wide_rejection_stats(limit=2)) == 2
 
-    def test_empty_when_no_feedback(self):
-        store = make_store()
-        assert store.get_fleet_wide_rejection_stats() == []
+    async def test_empty_when_no_feedback(self):
+        store = await make_store()
+        assert await store.get_fleet_wide_rejection_stats() == []
 
 
 class TestGetEvent:
     """get_event() -- single-row lookup by primary key, backing the
     Self-Improvement tab's per-run drill-through page."""
 
-    def test_returns_the_matching_event(self):
-        store = make_store()
-        eid = store.log_event("capability-scout", "capability-run", None, "info", "proposed something")
-        event = store.get_event(eid)
+    async def test_returns_the_matching_event(self):
+        store = await make_store()
+        eid = await store.log_event("capability-scout", "capability-run", None, "info", "proposed something")
+        event = await store.get_event(eid)
         assert event is not None
         assert event["id"] == eid
         assert event["summary"] == "proposed something"
 
-    def test_returns_none_for_unknown_id(self):
-        store = make_store()
-        assert store.get_event("does-not-exist") is None
+    async def test_returns_none_for_unknown_id(self):
+        store = await make_store()
+        assert await store.get_event("does-not-exist") is None
 
 
 # ── Dead-letter queue republish ──────────────────────────────────────────
 
 
 class TestRetryDlqMessage:
-    def test_retry_republishes_to_original_topic(self):
-        store = make_store()
-        eid = store.log_event(
+    async def test_retry_republishes_to_original_topic(self):
+        store = await make_store()
+        eid = await store.log_event(
             "event-consumer", "dead-letter", "my-app", "error",
             "Dead-lettered from agentit-events: boom",
             details={
@@ -694,72 +929,72 @@ class TestRetryDlqMessage:
             },
         )
 
-        assert store.retry_dlq_message(eid) is True
+        assert await store.retry_dlq_message(eid) is True
 
-        events = store.list_events(limit=10)
+        events = await store.list_events(limit=10)
         retry_event = next(e for e in events if e["action"] == "dlq-retry")
         assert "republished to agentit-events" in retry_event["summary"]
         # original dead-letter row is relabelled, not duplicated
-        assert store.list_dlq_messages() == []
+        assert await store.list_dlq_messages() == []
 
-    def test_retry_falls_back_to_relabel_when_no_original_topic(self):
+    async def test_retry_falls_back_to_relabel_when_no_original_topic(self):
         """Rows written before original_topic tracking existed (or a Kafka
         failure) must still mark the row retried instead of silently no-op'ing."""
-        store = make_store()
-        eid = store.log_event(
+        store = await make_store()
+        eid = await store.log_event(
             "event-consumer", "dead-letter", "my-app", "error", "old-style row",
             details={"original_message": {"foo": "bar"}, "error": "boom"},
         )
-        assert store.retry_dlq_message(eid) is True
-        events = store.list_events(limit=10)
+        assert await store.retry_dlq_message(eid) is True
+        events = await store.list_events(limit=10)
         retry_event = next(e for e in events if e["action"] == "dlq-retry")
         assert "relabelled only" in retry_event["summary"]
 
-    def test_retry_unknown_event_returns_false(self):
-        store = make_store()
-        assert store.retry_dlq_message("nonexistent") is False
+    async def test_retry_unknown_event_returns_false(self):
+        store = await make_store()
+        assert await store.retry_dlq_message("nonexistent") is False
 
 
 # ── Agent Runs ────────────────────────────────────────────────────────────
 
 
 class TestAgentRuns:
-    def test_save_and_list_agent_runs(self):
-        store = make_store()
-        store.save_agent_run("security", "local", "success", duration_ms=1200, resource_tier="standard")
-        store.save_agent_run("security", "local", "error", duration_ms=50, error="boom")
+    async def test_save_and_list_agent_runs(self):
+        store = await make_store()
+        await store.save_agent_run("security", "local", "success", duration_ms=1200, resource_tier="standard")
+        await store.save_agent_run("security", "local", "error", duration_ms=50, error="boom")
 
-        runs = store.list_agent_runs("security")
+        runs = await store.list_agent_runs("security")
         assert len(runs) == 2
         assert runs[0]["status"] == "error"  # most recent first
         assert runs[1]["status"] == "success"
         assert runs[1]["duration_ms"] == 1200
 
-    def test_get_agent_stats_uses_agent_runs_not_events(self):
+    async def test_get_agent_stats_uses_agent_runs_not_events(self):
         """Regression: get_agent_stats previously LIKE-matched event `action`
         strings ('%complete%'/'%failed%'), which double-counted unrelated
         events. It must now be derived purely from agent_runs."""
-        store = make_store()
+        store = await make_store()
         # An unrelated event containing "complete" must not be counted.
-        store.log_event("security", "onboarding-complete", "app", "info", "noise")
-        store.save_agent_run("security", "local", "success", duration_ms=100)
-        store.save_agent_run("security", "local", "success", duration_ms=200)
-        store.save_agent_run("security", "local", "error", duration_ms=50)
+        await store.log_event("security", "onboarding-complete", "app", "info", "noise")
+        await store.save_agent_run("security", "local", "success", duration_ms=100)
+        await store.save_agent_run("security", "local", "success", duration_ms=200)
+        await store.save_agent_run("security", "local", "error", duration_ms=50)
 
-        stats = store.get_agent_stats("security")
+        stats = await store.get_agent_stats("security")
         assert len(stats) == 1
         assert stats[0]["total_events"] == 3
         assert stats[0]["successes"] == 2
         assert stats[0]["failures"] == 1
         assert stats[0]["success_rate"] == round(2 / 3 * 100, 1)
 
-    def test_list_agent_runs_for_assessment(self):
-        store = make_store()
-        aid = store.save(make_report())
-        store.save_agent_run("security", "local", "success", assessment_id=aid)
-        store.save_agent_run("cicd", "local", "success", assessment_id="other-assessment")
+    async def test_list_agent_runs_for_assessment(self):
+        store = await make_store()
+        aid = await store.save(make_report())
+        await store.save_agent_run("security", "local", "success", assessment_id=aid)
+        await store.save_agent_run("cicd", "local", "success", assessment_id="other-assessment")
 
-        runs = store.list_agent_runs_for_assessment(aid)
+        runs = await store.list_agent_runs_for_assessment(aid)
         assert len(runs) == 1
         assert runs[0]["agent_name"] == "security"
 
@@ -768,46 +1003,46 @@ class TestAgentRuns:
 
 
 class TestCheckResults:
-    def test_save_and_get_check_compliance(self):
-        store = make_store()
-        aid = store.save(make_report())
-        store.save_check_results(aid, [
+    async def test_save_and_get_check_compliance(self):
+        store = await make_store()
+        aid = await store.save(make_report())
+        await store.save_check_results(aid, [
             {"check_name": "has-network-policy", "dimension": "security", "passed": True},
             {"check_name": "has-network-policy", "dimension": "security", "passed": False},
             {"check_name": "has-sbom", "dimension": "compliance", "passed": True},
         ])
 
-        compliance = store.get_check_compliance()
+        compliance = await store.get_check_compliance()
         by_name = {c["check_name"]: c for c in compliance}
         assert by_name["has-network-policy"]["passes"] == 1
         assert by_name["has-network-policy"]["total"] == 2
         assert by_name["has-network-policy"]["pass_rate"] == 50.0
         assert by_name["has-sbom"]["pass_rate"] == 100.0
 
-    def test_save_check_results_noop_on_empty_list(self):
-        store = make_store()
-        aid = store.save(make_report())
-        store.save_check_results(aid, [])
-        assert store.get_check_compliance() == []
+    async def test_save_check_results_noop_on_empty_list(self):
+        store = await make_store()
+        aid = await store.save(make_report())
+        await store.save_check_results(aid, [])
+        assert await store.get_check_compliance() == []
 
 
 # ── Correlation IDs ───────────────────────────────────────────────────────
 
 
 class TestCorrelationId:
-    def test_log_event_persists_correlation_id(self):
-        store = make_store()
-        store.log_event("orchestrator", "completed", "app", "info", "done", correlation_id="chain-1")
-        store.log_event("orchestrator", "completed", "app", "info", "unrelated", correlation_id="chain-2")
+    async def test_log_event_persists_correlation_id(self):
+        store = await make_store()
+        await store.log_event("orchestrator", "completed", "app", "info", "done", correlation_id="chain-1")
+        await store.log_event("orchestrator", "completed", "app", "info", "unrelated", correlation_id="chain-2")
 
-        chain = store.list_events_by_correlation_id("chain-1")
+        chain = await store.list_events_by_correlation_id("chain-1")
         assert len(chain) == 1
         assert chain[0]["summary"] == "done"
 
-    def test_save_sets_correlation_id_to_assessment_id(self):
-        store = make_store()
-        aid = store.save(make_report())
-        chain = store.list_events_by_correlation_id(aid)
+    async def test_save_sets_correlation_id_to_assessment_id(self):
+        store = await make_store()
+        aid = await store.save(make_report())
+        chain = await store.list_events_by_correlation_id(aid)
         assert len(chain) == 1
         assert chain[0]["action"] == "assessment-complete"
 
@@ -815,32 +1050,24 @@ class TestCorrelationId:
 # ── DB stats / metrics ────────────────────────────────────────────────────
 
 
-class TestGetDbStats:
-    def test_get_db_stats_returns_row_counts(self):
-        store = make_store()
-        store.save(make_report())
-        stats = store.get_db_stats()
-        assert stats["row_counts"]["assessments"] == 1
-        assert stats["size_bytes"] == 0  # :memory: has no file size
-
-    def test_get_db_stats_with_real_file(self, tmp_path):
-        from agentit.portal.store import AssessmentStore
-        db_path = tmp_path / "test.db"
-        store = AssessmentStore(db_path=str(db_path))
-        stats = store.get_db_stats()
-        assert stats["size_bytes"] > 0
+# Row-count + size_bytes coverage for get_db_stats() lives in
+# tests/test_store.py's TestDbStats -- the SQLite-era versions here
+# (":memory: has no file size" / a real on-disk file's size) were
+# inherently SQLite-file-shaped assumptions that don't translate to a
+# connection-pool-backed Postgres store (see store.py's get_db_stats()
+# docstring: `pg_database_size()` is the real equivalent).
 
 
 # ── Active gates gauge ─────────────────────────────────────────────────────
 
 
 class TestActiveGatesMetric:
-    def test_create_and_resolve_gate_updates_gauge(self):
+    async def test_create_and_resolve_gate_updates_gauge(self):
         from agentit.portal.metrics import active_gates
-        store = make_store()
-        aid = store.save(make_report())
-        gate_id = store.create_gate(aid, "security-review", "review needed")
+        store = await make_store()
+        aid = await store.save(make_report())
+        gate_id = await store.create_gate(aid, "security-review", "review needed")
         assert active_gates._value.get() == 1.0
 
-        store.resolve_gate(gate_id, "approved", "tester")
+        await store.resolve_gate(gate_id, "approved", "tester")
         assert active_gates._value.get() == 0.0

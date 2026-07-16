@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from agentit.models import (
     ArchitectureInfo,
@@ -18,7 +18,6 @@ from agentit.models import (
     StackInfo,
 )
 from agentit.portal.app import app, get_store
-from agentit.portal.store_factory import AsyncSQLiteStore
 from conftest import make_store, prime_csrf
 
 
@@ -109,12 +108,12 @@ def _make_report_with_findings(repo_name: str = "error-repo") -> AssessmentRepor
 
 
 @pytest.fixture(autouse=True)
-def _override_store():
+async def _override_store():
     """Patch get_store, and image_builder.build_app_image (see test_portal.py's
     identical fixture for why: onboarding here would otherwise shell out to a
     real `oc apply` against whatever cluster the local kubeconfig points to)."""
-    test_store = make_store()
-    async_store = AsyncSQLiteStore.wrap(test_store)
+    test_store = await make_store()
+    async_store = test_store
     with patch("agentit.portal.app.get_store", return_value=async_store), \
          patch("agentit.portal.routes.webhooks.get_store", return_value=async_store), \
          patch("agentit.portal.routes.health.get_store", return_value=async_store), \
@@ -133,10 +132,10 @@ def _override_store():
 
 
 @pytest.fixture
-def client():
-    c = TestClient(app)
-    prime_csrf(c)
-    return c
+async def client():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True) as c:
+        await prime_csrf(c)
+        yield c
 
 
 # ------------------------------------------------------------------
@@ -144,7 +143,7 @@ def client():
 # ------------------------------------------------------------------
 
 
-def test_onboard_agent_crash_returns_partial(client, _override_store):
+async def test_onboard_agent_crash_returns_partial(client, _override_store):
     """When one agent (CostOptimizationAgent) raises, others still produce files.
 
     HardeningAgent (and security/observability/cicd/compliance generally)
@@ -154,18 +153,20 @@ def test_onboard_agent_crash_returns_partial(client, _override_store):
     """
     store = _override_store
     report = _make_report_with_findings()
-    aid = store.save(report)
+    aid = await store.save(report)
 
     with patch(
         "agentit.agents.cost.CostOptimizationAgent.run",
         side_effect=RuntimeError("simulated crash"),
     ):
-        resp = client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
+        resp = await client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
 
     assert resp.status_code == 303
-    assert f"/assessments/{aid}/onboard-results" in resp.headers["location"]
+    # Onboard now runs as a background job with a real-time progress page
+    # (docs/ux-design-requirements.md checklist #6/#8).
+    assert f"/assessments/{aid}/onboard/progress/" in resp.headers["location"]
 
-    files = store.get_onboarding(aid)
+    files = await store.get_onboarding(aid)
     assert files is not None
     assert len(files) > 0, "Other agents/skills should still produce files despite cost agent crash"
 
@@ -180,17 +181,17 @@ def test_onboard_agent_crash_returns_partial(client, _override_store):
 # ------------------------------------------------------------------
 
 
-def test_webhook_onboard_failure_returns_500(client, _override_store):
+async def test_webhook_onboard_failure_returns_500(client, _override_store):
     """POST /api/webhook/onboard returns 500 when _run_onboarding raises."""
     store = _override_store
     report = _make_report_with_findings()
-    aid = store.save(report)
+    aid = await store.save(report)
 
     with patch(
         "agentit.portal.routes.webhooks.run_onboarding",
         side_effect=Exception("agent crashed"),
     ):
-        resp = client.post(
+        resp = await client.post(
             "/api/webhook/onboard",
             json={"correlationId": aid},
         )
@@ -207,22 +208,22 @@ def test_webhook_onboard_failure_returns_500(client, _override_store):
 # ------------------------------------------------------------------
 
 
-def test_store_concurrent_saves(_override_store):
+async def test_store_concurrent_saves(_override_store):
     """Two reports with different repo_names coexist in the same store."""
     store = _override_store
     report_a = _make_report_with_findings("repo-alpha")
     report_b = _make_report_with_findings("repo-beta")
 
-    aid_a = store.save(report_a)
-    aid_b = store.save(report_b)
+    aid_a = await store.save(report_a)
+    aid_b = await store.save(report_b)
 
-    all_assessments = store.list_all()
+    all_assessments = await store.list_all()
     assert len(all_assessments) == 2
     names = {a["repo_name"] for a in all_assessments}
     assert names == {"repo-alpha", "repo-beta"}
 
-    got_a = store.get(aid_a)
-    got_b = store.get(aid_b)
+    got_a = await store.get(aid_a)
+    got_b = await store.get(aid_b)
     assert got_a is not None
     assert got_b is not None
     assert got_a.repo_name == "repo-alpha"
@@ -234,13 +235,13 @@ def test_store_concurrent_saves(_override_store):
 # ------------------------------------------------------------------
 
 
-def test_store_event_logging_on_assessment(_override_store):
-    """store.save() dual-writes an event with action containing 'assessment'."""
+async def test_store_event_logging_on_assessment(_override_store):
+    """await store.save() dual-writes an event with action containing 'assessment'."""
     store = _override_store
     report = _make_report_with_findings("event-repo")
-    store.save(report)
+    await store.save(report)
 
-    events = store.list_events()
+    events = await store.list_events()
     assert len(events) > 0
 
     assessment_events = [e for e in events if "assessment" in e["action"]]
@@ -255,11 +256,11 @@ def test_store_event_logging_on_assessment(_override_store):
 # ------------------------------------------------------------------
 
 
-def _poll_assess_progress(client, job_id: str, max_wait: float = 5.0) -> str:
+async def _poll_assess_progress(client, job_id: str, max_wait: float = 5.0) -> str:
     """Poll /assess/progress/{job_id} until it redirects to /assessments/{id}."""
     deadline = time.monotonic() + max_wait
     while time.monotonic() < deadline:
-        resp = client.get(f"/assess/progress/{job_id}", follow_redirects=False)
+        resp = await client.get(f"/assess/progress/{job_id}", follow_redirects=False)
         if resp.status_code == 303:
             loc = resp.headers["location"]
             if "/assessments/" in loc:
@@ -268,20 +269,20 @@ def _poll_assess_progress(client, job_id: str, max_wait: float = 5.0) -> str:
     raise TimeoutError(f"Assessment job {job_id} did not complete within {max_wait}s")
 
 
-def test_portal_llm_unavailable(client, _override_store):
+async def test_portal_llm_unavailable(client, _override_store):
     """Assessment completes successfully when LLM client is None."""
     report = _make_report_with_findings("no-llm-repo")
 
     with patch("agentit.portal.routes.assessments.get_llm_client", return_value=None), \
          patch("agentit.portal.routes.assessments.clone_repo", return_value=Path("/tmp/fake")), \
          patch("agentit.portal.routes.assessments.run_assessment", return_value=report):
-        resp = client.post(
+        resp = await client.post(
             "/assess",
             data={"repo_url": "https://github.com/org/no-llm-repo", "criticality": "medium"},
             follow_redirects=False,
         )
         assert resp.status_code == 303
         job_id = resp.headers["location"].split("/assess/progress/")[1]
-        assessment_id = _poll_assess_progress(client, job_id)
+        assessment_id = await _poll_assess_progress(client, job_id)
 
     assert assessment_id  # non-empty means it completed

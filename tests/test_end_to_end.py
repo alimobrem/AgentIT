@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from agentit.models import (
     ArchitectureInfo,
@@ -19,7 +19,6 @@ from agentit.models import (
 )
 from agentit.platform_context import PlatformContext
 from agentit.portal.app import app, get_store
-from agentit.portal.store_factory import AsyncSQLiteStore
 from conftest import make_store, prime_csrf
 
 # Discovery returning an empty context (no k8s_version, no available_kinds)
@@ -32,12 +31,12 @@ from conftest import make_store, prime_csrf
 _NO_CLUSTER = PlatformContext()
 
 
-def _poll_assess_progress(client, job_id: str, max_wait: float = 5.0) -> str:
+async def _poll_assess_progress(client, job_id: str, max_wait: float = 5.0) -> str:
     """Poll /assess/progress/{job_id} until it redirects to /assessments/{id}.
     Returns the assessment_id."""
     deadline = time.monotonic() + max_wait
     while time.monotonic() < deadline:
-        resp = client.get(f"/assess/progress/{job_id}", follow_redirects=False)
+        resp = await client.get(f"/assess/progress/{job_id}", follow_redirects=False)
         if resp.status_code == 303:
             loc = resp.headers["location"]
             if "/assessments/" in loc:
@@ -122,12 +121,12 @@ def _make_report_with_findings(repo_name: str = "e2e-repo") -> AssessmentReport:
 
 
 @pytest.fixture(autouse=True)
-def _override_store():
+async def _override_store():
     """Patch get_store, and image_builder.build_app_image (see test_portal.py's
     identical fixture for why: onboarding here would otherwise shell out to a
     real `oc apply` against whatever cluster the local kubeconfig points to)."""
-    test_store = make_store()
-    async_store = AsyncSQLiteStore.wrap(test_store)
+    test_store = await make_store()
+    async_store = test_store
     with patch("agentit.portal.app.get_store", return_value=async_store), \
          patch("agentit.portal.routes.webhooks.get_store", return_value=async_store), \
          patch("agentit.portal.routes.health.get_store", return_value=async_store), \
@@ -146,10 +145,10 @@ def _override_store():
 
 
 @pytest.fixture
-def client():
-    c = TestClient(app)
-    prime_csrf(c)
-    return c
+async def client():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True) as c:
+        await prime_csrf(c)
+        yield c
 
 
 # ------------------------------------------------------------------
@@ -157,7 +156,7 @@ def client():
 # ------------------------------------------------------------------
 
 
-def test_assess_onboard_flow(client, _override_store):
+async def test_assess_onboard_flow(client, _override_store):
     """POST /assess -> async progress -> redirect to detail -> POST onboard -> redirect -> GET results shows manifests."""
     store = _override_store
     report = _make_report_with_findings("flow-repo")
@@ -165,7 +164,7 @@ def test_assess_onboard_flow(client, _override_store):
     # Step 1: assess with mocked clone/run — now async via background thread
     with patch("agentit.portal.routes.assessments.clone_repo", return_value=Path("/tmp/fake")), \
          patch("agentit.portal.routes.assessments.run_assessment", return_value=report):
-        resp = client.post(
+        resp = await client.post(
             "/assess",
             data={"repo_url": "https://github.com/org/flow-repo", "criticality": "high"},
             follow_redirects=False,
@@ -174,18 +173,26 @@ def test_assess_onboard_flow(client, _override_store):
         location = resp.headers["location"]
         assert "/assess/progress/" in location
         job_id = location.split("/assess/progress/")[1]
-        assessment_id = _poll_assess_progress(client, job_id)
+        assessment_id = await _poll_assess_progress(client, job_id)
 
     # Step 2: onboard — pin platform discovery so this test's outcome
     # doesn't depend on whatever cluster happens to be reachable at test
     # time (see FleetOrchestrator.run()'s platform=None fallback).
     with patch("agentit.platform_context.discover_platform", return_value=_NO_CLUSTER):
-        resp = client.post(f"/assessments/{assessment_id}/onboard", follow_redirects=False)
+        resp = await client.post(f"/assessments/{assessment_id}/onboard", follow_redirects=False)
     assert resp.status_code == 303
-    assert f"/assessments/{assessment_id}/onboard-results" in resp.headers["location"]
+    # Onboard now runs as a background job with a real-time progress page
+    # (docs/ux-design-requirements.md checklist #6/#8) -- the immediate
+    # redirect target is the progress page, which itself redirects on to
+    # onboard-results once the (by-now-completed, per TestClient's
+    # background-task-before-return semantics) job is done.
+    assert f"/assessments/{assessment_id}/onboard/progress/" in resp.headers["location"]
+    progress_resp = await client.get(resp.headers["location"], follow_redirects=False)
+    assert progress_resp.status_code == 303
+    assert f"/assessments/{assessment_id}/onboard-results" in progress_resp.headers["location"]
 
     # Step 3: view results — manifests are shown
-    resp = client.get(f"/assessments/{assessment_id}/onboard-results")
+    resp = await client.get(f"/assessments/{assessment_id}/onboard-results")
     assert resp.status_code == 200
     # security/observability are now skill-only domains (see
     # docs/agent-removal-readiness.md) -- generated manifests are grouped
@@ -198,17 +205,17 @@ def test_assess_onboard_flow(client, _override_store):
 # ------------------------------------------------------------------
 
 
-def test_onboard_generates_files_for_all_dimensions(client, _override_store):
+async def test_onboard_generates_files_for_all_dimensions(client, _override_store):
     """Findings in security, observability, cicd, compliance -> manifests cover all four."""
     store = _override_store
     report = _make_report_with_findings()
-    aid = store.save(report)
+    aid = await store.save(report)
 
     # Pin platform discovery — see comment in test_assess_onboard_flow.
     with patch("agentit.platform_context.discover_platform", return_value=_NO_CLUSTER):
-        client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
+        await client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
 
-    resp = client.get(f"/api/assessments/{aid}/manifests")
+    resp = await client.get(f"/api/assessments/{aid}/manifests")
     assert resp.status_code == 200
     data = resp.json()
     # security/observability/cicd/compliance are now skill-only domains
@@ -228,15 +235,15 @@ def test_onboard_generates_files_for_all_dimensions(client, _override_store):
 # ------------------------------------------------------------------
 
 
-def test_onboard_does_not_auto_create_gate(client, _override_store):
+async def test_onboard_does_not_auto_create_gate(client, _override_store):
     """POST onboard should NOT auto-create a gate — gates are only for risky actions."""
     store = _override_store
     report = _make_report_with_findings("gate-repo")
-    aid = store.save(report)
+    aid = await store.save(report)
 
-    client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
+    await client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
 
-    pending = store.list_gates(status="pending")
+    pending = await store.list_gates(status="pending")
     gate_aids = [g["assessment_id"] for g in pending]
     assert aid not in gate_aids
 
@@ -246,11 +253,11 @@ def test_onboard_does_not_auto_create_gate(client, _override_store):
 # ------------------------------------------------------------------
 
 
-def test_webhook_onboard_full_flow(client, _override_store):
+async def test_webhook_onboard_full_flow(client, _override_store):
     """POST /api/webhook/onboard with correlationId -> 200 with files_generated count."""
     store = _override_store
     report = _make_report_with_findings("webhook-e2e")
-    aid = store.save(report)
+    aid = await store.save(report)
 
     fake_files = [
         {"category": "security", "path": "netpol.yaml", "description": "netpol.yaml",
@@ -263,7 +270,7 @@ def test_webhook_onboard_full_flow(client, _override_store):
         "auto_approve": False, "gates": [],
     }
     with patch("agentit.portal.routes.webhooks.run_onboarding", return_value=(fake_files, fake_summary)):
-        resp = client.post(
+        resp = await client.post(
             "/api/webhook/onboard",
             json={"correlationId": aid},
         )
@@ -280,12 +287,12 @@ def test_webhook_onboard_full_flow(client, _override_store):
 # ------------------------------------------------------------------
 
 
-def test_assess_error_shows_progress(client):
+async def test_assess_error_shows_progress(client):
     """When run_assessment raises, the progress page shows the error."""
     with patch("agentit.portal.routes.assessments.clone_repo", return_value=Path("/tmp/fake")), \
          patch("agentit.portal.routes.assessments.run_assessment", side_effect=RuntimeError("clone failed: repo not found")), \
          patch("agentit.portal.routes.assessments._auto_create_infra_repo", return_value=None):
-        resp = client.post(
+        resp = await client.post(
             "/assess",
             data={"repo_url": "https://github.com/org/bad-repo", "criticality": "medium"},
             follow_redirects=False,
@@ -296,7 +303,7 @@ def test_assess_error_shows_progress(client):
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             time.sleep(0.3)
-            resp = client.get(f"/assess/progress/{job_id}")
+            resp = await client.get(f"/assess/progress/{job_id}")
             if "Could not clone" in resp.text or "clone failed" in resp.text:
                 break
     assert "clone" in resp.text.lower()
@@ -307,29 +314,29 @@ def test_assess_error_shows_progress(client):
 # ------------------------------------------------------------------
 
 
-def test_reassess_from_dashboard(client, _override_store):
+async def test_reassess_from_dashboard(client, _override_store):
     """Save a report, POST /assess with the same repo_url -> async progress -> redirect to a new assessment."""
     store = _override_store
     original = _make_report_with_findings("reassess-repo")
-    original_aid = store.save(original)
+    original_aid = await store.save(original)
 
     new_report = _make_report_with_findings("reassess-repo")
     new_report.assessed_at = datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
 
     with patch("agentit.portal.routes.assessments.clone_repo", return_value=Path("/tmp/fake")), \
          patch("agentit.portal.routes.assessments.run_assessment", return_value=new_report):
-        resp = client.post(
+        resp = await client.post(
             "/assess",
             data={"repo_url": "https://github.com/org/reassess-repo", "criticality": "high"},
             follow_redirects=False,
         )
         assert resp.status_code == 303
         job_id = resp.headers["location"].split("/assess/progress/")[1]
-        new_aid = _poll_assess_progress(client, job_id)
+        new_aid = await _poll_assess_progress(client, job_id)
 
     # New assessment created, different from the original
     assert new_aid != original_aid
 
     # Both assessments exist
-    assert store.get(original_aid) is not None
-    assert store.get(new_aid) is not None
+    assert await store.get(original_aid) is not None
+    assert await store.get(new_aid) is not None

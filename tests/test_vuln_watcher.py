@@ -4,15 +4,14 @@ alongside Phase 3 of docs/postgres-migration-plan.md §9, which converted
 """
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import MagicMock, patch
 
-from agentit.watchers.vuln_watcher import _HEARTBEAT_REFRESH_SECONDS, VulnWatcher
+from agentit.watchers.vuln_watcher import VulnWatcher
 from conftest import make_async_store
 
 
-def _watcher(store=None, consumer=None) -> VulnWatcher:
-    async_store, _raw = store or make_async_store()
+async def _watcher(store=None, consumer=None) -> VulnWatcher:
+    async_store, _raw = store or await make_async_store()
     return VulnWatcher(
         publisher=MagicMock(),
         store=async_store,
@@ -22,7 +21,7 @@ def _watcher(store=None, consumer=None) -> VulnWatcher:
 
 
 async def test_check_fleet_with_empty_fleet_is_a_noop():
-    watcher = _watcher()
+    watcher = await _watcher()
     await watcher.check_fleet()  # must not raise, even with no tracked apps
 
 
@@ -30,11 +29,11 @@ class TestAsyncRunLoop:
     """Phase 3 (docs/postgres-migration-plan.md §9): run() became async def,
     with time.sleep() -> await asyncio.sleep()."""
 
-    @patch("agentit.watchers.vuln_watcher.asyncio.sleep", side_effect=KeyboardInterrupt)
+    @patch("agentit.watchers.vuln_watcher.sleep_with_heartbeat", side_effect=KeyboardInterrupt)
     async def test_run_ticks_once_then_stops_on_interrupt(self, mock_sleep, capsys):
         consumer = MagicMock()
         consumer.poll_once.return_value = []
-        watcher = _watcher(consumer=consumer)
+        watcher = await _watcher(consumer=consumer)
         await watcher.run()
 
         captured = capsys.readouterr()
@@ -53,12 +52,12 @@ class TestTickRunsOnEventLoop:
     now the async store directly (no more `.raw`/`AsyncSQLiteStore.wrap`
     bridge inside `check_fleet` itself)."""
 
-    @patch("agentit.watchers.vuln_watcher.asyncio.sleep", side_effect=KeyboardInterrupt)
+    @patch("agentit.watchers.vuln_watcher.sleep_with_heartbeat", side_effect=KeyboardInterrupt)
     async def test_check_fleet_awaited_directly_and_telemetry_records(self, mock_sleep):
-        async_store, raw_store = make_async_store()
+        async_store, raw_store = await make_async_store()
         consumer = MagicMock()
         consumer.poll_once.return_value = []
-        watcher = _watcher(store=(async_store, raw_store), consumer=consumer)
+        watcher = await _watcher(store=(async_store, raw_store), consumer=consumer)
 
         with patch.object(
             watcher, "check_fleet", wraps=watcher.check_fleet,
@@ -66,7 +65,7 @@ class TestTickRunsOnEventLoop:
             await watcher.run()
 
         mock_check_fleet.assert_called_once_with()
-        events = raw_store.list_events()
+        events = await raw_store.list_events()
         assert any(e["action"] == "tick-complete" for e in events)
 
 
@@ -80,51 +79,25 @@ class TestHeartbeatRefreshedDuringLongSleep:
     live via `oc describe pod` (24 restarts, all "failed liveness probe")
     and postgres tick-complete timestamps exactly 20 minutes apart. The
     fix: refresh the heartbeat periodically during the sleep, not just
-    before/after it.
+    before/after it -- now implemented once, shared, in
+    ``agentit.watchers.sleep_with_heartbeat`` (see test_watchers_init.py for
+    the chunking behavior itself); this class only confirms ``run()``
+    actually delegates its between-tick sleep to that shared helper with
+    the watcher's own interval, instead of a bare ``asyncio.sleep``.
     """
 
-    async def test_sleep_touches_heartbeat_multiple_times_for_long_interval(self):
+    async def test_run_delegates_between_tick_sleep_to_shared_heartbeat_helper(self):
         consumer = MagicMock()
         consumer.poll_once.return_value = []
-        watcher = _watcher(consumer=consumer)
-        watcher._interval = _HEARTBEAT_REFRESH_SECONDS * 2 + 100
+        watcher = await _watcher(consumer=consumer)
+        watcher._interval = 12345
 
-        sleep_calls: list[int] = []
+        with patch(
+            "agentit.watchers.vuln_watcher.sleep_with_heartbeat", side_effect=KeyboardInterrupt,
+        ) as mock_sleep:
+            await watcher.run()
 
-        async def fake_sleep(seconds):
-            sleep_calls.append(seconds)
-
-        touch_count = 0
-
-        def fake_touch(self):
-            nonlocal touch_count
-            touch_count += 1
-
-        with patch("agentit.watchers.vuln_watcher.asyncio.sleep", side_effect=fake_sleep), \
-             patch("agentit.watchers.vuln_watcher.Path.touch", fake_touch):
-            await watcher._sleep_with_heartbeat(watcher._interval)
-
-        # Chunked into 300s + 300s + 100s, heartbeat touched after each chunk.
-        assert sleep_calls == [_HEARTBEAT_REFRESH_SECONDS, _HEARTBEAT_REFRESH_SECONDS, 100]
-        assert touch_count == 3
-
-    @patch("agentit.watchers.vuln_watcher.asyncio.sleep", side_effect=KeyboardInterrupt)
-    async def test_short_interval_still_stops_on_interrupt(self, mock_sleep):
-        """Existing single-chunk behavior (interval < refresh window) is
-        preserved -- this is the same scenario `test_run_ticks_once_then_
-        stops_on_interrupt` covers end-to-end via run()."""
-        consumer = MagicMock()
-        consumer.poll_once.return_value = []
-        watcher = _watcher(consumer=consumer)
-        watcher._interval = 1
-
-        try:
-            await watcher._sleep_with_heartbeat(1)
-            assert False, "expected KeyboardInterrupt to propagate"
-        except KeyboardInterrupt:
-            pass
-
-        mock_sleep.assert_called_once_with(1)
+        mock_sleep.assert_called_once_with(12345)
 
 
 class TestConstructionAcceptsAsyncStoreDirectly:
@@ -136,9 +109,9 @@ class TestConstructionAcceptsAsyncStoreDirectly:
     reusing an async store constructed via `create_store()`'s own facade,
     not a hand-rolled stub."""
 
-    async def test_check_fleet_works_against_create_store_facade(self):
-        from agentit.portal.store_factory import create_store
+    async def test_check_fleet_works_against_create_store_facade(self, postgres_dsn):
+        from agentit.portal.store import create_store
 
-        store = await create_store(":memory:")
+        store = await create_store(postgres_dsn, min_size=1, max_size=2)
         watcher = VulnWatcher(publisher=MagicMock(), store=store, consumer=MagicMock(), interval=1)
         await watcher.check_fleet()  # must not raise AttributeError/TypeError

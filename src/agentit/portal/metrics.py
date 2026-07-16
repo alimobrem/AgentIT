@@ -158,15 +158,20 @@ def refresh_circuit_breaker_gauge() -> None:
         circuit_breaker_open.labels(name=name).set(1 if state["open"] else 0)
 
 
-def refresh_db_metrics(store) -> None:
-    """Set DB size/row-count and event-buffer-backlog gauges from a store instance."""
-    stats = store.get_db_stats()
+def _set_db_stat_gauges(stats: dict) -> None:
     db_size_bytes.set(stats["size_bytes"])
     for table, count in stats["row_counts"].items():
         db_rows_total.labels(table=table).set(count)
 
     from agentit.events import get_publisher
     event_buffer_backlog.set(get_publisher().get_buffer_backlog())
+
+
+async def refresh_db_metrics(store) -> None:
+    """Set DB size/row-count and event-buffer-backlog gauges from the store's
+    real `get_db_stats()`. See `app.py::_background_maintenance`, the only
+    production caller."""
+    _set_db_stat_gauges(await store.get_db_stats())
 
 
 def instrument_app(app):

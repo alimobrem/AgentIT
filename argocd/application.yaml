@@ -25,6 +25,22 @@ spec:
           value: "true"
         - name: kafka.enabled
           value: "true"
+        # NOTE: kafka.auth.enabled is deliberately left off here. Enabling it
+        # adds a TLS+SASL/SCRAM listener, KafkaUser CRs, and a Kafka broker
+        # NetworkPolicy (chart/templates/kafka/*.yaml) alongside today's live,
+        # unauthenticated single-broker Kafka -- but does NOT by itself move
+        # any producer/consumer off plaintext (that env-var wiring into
+        # deployment.yaml/agents/*.yaml is still pending, see
+        # docs/kafka-hardening-plan.md). Turning this on for real needs a
+        # coordinated cutover, same shape as the historical SQLite-to-
+        # Postgres cutover documented in docs/postgres-migration-plan.md §7:
+        # the existing plaintext
+        # producers/consumers and the new SASL_SSL ones can't both be "the"
+        # bootstrap at once without either a dual-listener transition window
+        # or a single all-Deployments-at-once switch. Once that wiring and a
+        # coordinated cutover plan exist, uncomment:
+        #   - name: kafka.auth.enabled
+        #     value: "true"
         - name: argoEvents.enabled
           value: "true"
         - name: env.ANTHROPIC_VERTEX_PROJECT_ID
@@ -55,23 +71,36 @@ spec:
         # checks before a human ever sees it.
         - name: agents.capabilityScout.enabled
           value: "true"
+        # Dogfood milestone: hourly cycles (was 86400). Restore to 86400 after
+        # L3 proof — see docs/superpowers/plans/2026-07-15-autonomous-self-improve-dogfood.md
         - name: agents.capabilityScout.interval
-          value: "86400"
+          value: "3600"
+        # OpenShift oauth-proxy in front of the portal Route — required for
+        # dogfood (privileged automation console must not stay open). See
+        # docs/deployment.md#authentication.
+        - name: auth.enabled
+          value: "true"
         - name: monitoring.enabled
           value: "true"
         # Stands up AgentIT's own bundled, non-operator Postgres instance
-        # (Deployment+PVC+Service+Secret) live in the agentit namespace.
+        # (Deployment+PVC+Service+Secret) live in the agentit namespace --
+        # explicit here even though it now matches the chart's own default
+        # (`postgres.bundled.enabled: true`), so this file stays the
+        # single source of truth for what's actually running live.
+        # Postgres itself is no longer a flag on the app side at all --
+        # every Deployment/CronJob gets AGENTIT_DB_DSN unconditionally
+        # (see docs/postgres-migration-plan.md for the full history of the
+        # SQLite-to-Postgres cutover this parameter used to gate; that doc
+        # is now marked historically-complete/superseded).
         - name: postgres.bundled.enabled
           value: "true"
-        # Coordinated cutover (docs/postgres-migration-plan.md section 7):
-        # flips AGENTIT_DB_BACKEND=postgres (plus the AGENTIT_DB_DSN built
-        # from the bundled Secret) across all 5 Deployments in a single
-        # sync. All 3 blockers found in the first attempt (Secret password
-        # drift, watcher store.raw incompatibility, watcher NetworkPolicy
-        # DNS blocking) are fixed and verified -- see
-        # docs/postgres-migration-plan.md for the full history.
-        - name: postgres.backend
-          value: "postgres"
+        # pg_dump-based backup CronJob for the bundled Postgres instance
+        # above (chart/templates/postgres/postgres-bundled-backup.yaml) --
+        # the real disaster-recovery backup coverage for the only store
+        # this app has. See docs/postgres-migration-plan.md's
+        # "Backup/retention" section.
+        - name: postgres.bundled.backup.enabled
+          value: "true"
         # AgentIT is now registered in its own fleet (chart/templates/tekton/
         # pipeline.yaml's register-self-in-fleet task, run on every CI build) --
         # this turns on the one fleet-wide capability with no always-on

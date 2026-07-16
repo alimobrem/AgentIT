@@ -36,11 +36,7 @@ spec:
             - name: AGENTIT_KAFKA_BOOTSTRAP
               value: {{ .Values.kafka.bootstrapServers }}
             {{- end }}
-            - name: AGENTIT_DB_PATH
-              value: /data/agentit.db
-            - name: AGENTIT_DB_BACKEND
-              value: {{ .Values.postgres.backend | default "sqlite" | quote }}
-            {{- if eq (.Values.postgres.backend | default "sqlite") "postgres" }}
+            # Postgres is the only supported store -- always-on, not a flag.
             - name: PGUSER
               valueFrom:
                 secretKeyRef:
@@ -53,9 +49,19 @@ spec:
                   key: password
             - name: AGENTIT_DB_DSN
               value: "postgresql://$(PGUSER):$(PGPASSWORD)@{{ .Release.Name }}-postgres-bundled.{{ .Release.Namespace }}.svc:5432/{{ .Values.postgres.bundled.credentials.database }}"
-            {{- end }}
             - name: AGENTIT_PORTAL_URL
               value: http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc:8080
+            # RemediationLoop (remediation_loop.py) calls back into the
+            # portal's verify_internal_token-gated /api/webhook/* routes
+            # from this pod -- same pattern as skill-learner.yaml below.
+            # This was missing entirely, so every _assess() call 401'd
+            # once the portal started enforcing the token.
+            - name: AGENTIT_INTERNAL_WEBHOOK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agentit-internal-webhook-token
+                  key: token
+                  optional: true
           volumeMounts:
             - name: data
               mountPath: /data

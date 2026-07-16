@@ -72,7 +72,14 @@
           <div class="score-bar-bg">
             <div class="score-bar-fill {% if a.success_rate >= 90 %}score-green{% elif a.success_rate >= 70 %}score-yellow{% else %}score-red{% endif %}" style="--pct: {{ a.success_rate }}%;"></div>
           </div>
-          <span class="text-sm">{{ a.success_rate }}%</span>
+          {# The bar fill's own severity color is invisible at very low
+             percentages (width: var(--pct) means a 0% row renders a
+             literal 0px-wide colored fill -- indistinguishable from any
+             other row at a glance, confirmed live: a 0%-success agent
+             looked identical to a 100%-success one). Color the label
+             text too so the worst performers are visible regardless of
+             bar width. #}
+          <span class="text-sm {% if a.success_rate >= 90 %}text-success{% elif a.success_rate >= 70 %}text-warning{% else %}text-danger{% endif %}">{{ a.success_rate }}%</span>
         </div>
       </td>
       <td><span data-timestamp="{{ a.last_seen }}">{{ a.last_seen[:16] if a.last_seen else '—' }}</span></td>

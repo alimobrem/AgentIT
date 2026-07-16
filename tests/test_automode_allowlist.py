@@ -160,10 +160,10 @@ class TestExecuteAllowlistIntegration:
     async def test_no_allowlist_configured_applies_everything_unchanged(self):
         """Purely additive: no `auto_mode_allowlist` setting -> identical to
         pre-allowlist behavior (single apply call covering every file)."""
-        s, raw = make_async_store()
-        raw.set_setting("auto_mode", "true")
+        s, raw = await make_async_store()
+        await raw.set_setting("auto_mode", "true")
         report = make_report(criticality="low", summary="test")
-        aid = raw.save(report)
+        aid = await raw.save(report)
         engine = await self._make_engine_with_safe_llm(s)
 
         files = [_cm_file(), _crb_file()]
@@ -177,11 +177,11 @@ class TestExecuteAllowlistIntegration:
         assert len(first_call.args[0]) == 2
 
     async def test_partial_allowlist_splits_batch_applies_allowed_gates_denied(self):
-        s, raw = make_async_store()
-        raw.set_setting("auto_mode", "true")
-        raw.set_setting("auto_mode_allowlist", '["*/ConfigMap"]')
+        s, raw = await make_async_store()
+        await raw.set_setting("auto_mode", "true")
+        await raw.set_setting("auto_mode_allowlist", '["*/ConfigMap"]')
         report = make_report(criticality="low", summary="test")
-        aid = raw.save(report)
+        aid = await raw.save(report)
         engine = await self._make_engine_with_safe_llm(s)
 
         cm = _cm_file(path="cm.yaml")
@@ -195,17 +195,17 @@ class TestExecuteAllowlistIntegration:
         for call in mock_apply.call_args_list:
             paths = {f["path"] for f in call.args[0]}
             assert "crb.yaml" not in paths
-        gates = raw.list_gates(status="pending")
+        gates = await raw.list_gates(status="pending")
         scope_gates = [g for g in gates if g["gate_type"] == "auto-mode-scope-review"]
         assert len(scope_gates) == 1
         assert "crb.yaml" in scope_gates[0]["summary"]
 
     async def test_all_denied_gates_whole_batch_without_calling_apply(self):
-        s, raw = make_async_store()
-        raw.set_setting("auto_mode", "true")
-        raw.set_setting("auto_mode_allowlist", '["*/ConfigMap"]')
+        s, raw = await make_async_store()
+        await raw.set_setting("auto_mode", "true")
+        await raw.set_setting("auto_mode_allowlist", '["*/ConfigMap"]')
         report = make_report(criticality="low", summary="test")
-        aid = raw.save(report)
+        aid = await raw.save(report)
         engine = await self._make_engine_with_safe_llm(s)
 
         crb = _crb_file()
@@ -215,15 +215,15 @@ class TestExecuteAllowlistIntegration:
         assert result["action"] == "gated"
         assert "allowlist scope" in result["reason"]
         mock_apply.assert_not_called()
-        gates = raw.list_gates(status="pending")
+        gates = await raw.list_gates(status="pending")
         assert any(g["gate_type"] == "auto-mode-scope-review" for g in gates)
 
     async def test_rbac_shaped_kind_gated_even_with_blanket_wildcard_allowlist(self):
-        s, raw = make_async_store()
-        raw.set_setting("auto_mode", "true")
-        raw.set_setting("auto_mode_allowlist", '["*/*"]')
+        s, raw = await make_async_store()
+        await raw.set_setting("auto_mode", "true")
+        await raw.set_setting("auto_mode_allowlist", '["*/*"]')
         report = make_report(criticality="low", summary="test")
-        aid = raw.save(report)
+        aid = await raw.save(report)
         engine = await self._make_engine_with_safe_llm(s)
 
         secret = _secret_file()

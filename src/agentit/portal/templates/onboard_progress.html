@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Onboarding... - AgentIT{% endblock %}
+{% block content %}
+<p class="mb-1"><a href="/assessments/{{ assessment_id }}">&larr; Assessment</a></p>
+<h1>Onboarding</h1>
+{# Real step-level streaming via htmx's documented SSE extension (checklist
+   #8) -- reuses the events table + remediation_jobs tracking as the source,
+   no parallel notification mechanism. Falls back gracefully: if the
+   EventSource never connects (e.g. a proxy stripping SSE), the initial
+   server-rendered fragment below still shows the job's state as of page
+   load, and re-visiting this URL re-renders current state. #}
+<div hx-ext="sse" sse-connect="/assessments/{{ assessment_id }}/onboard/progress/{{ job_id }}/stream" sse-swap="progress" hx-swap="innerHTML">
+  {% include "_onboard_progress_fragment.html" %}
+</div>
+{% endblock %}

@@ -31,13 +31,34 @@ def _gate_redirect_target(gate: dict) -> str:
     mostly redirect straight to that app's onboard-results -- see below).
     Cluster-admin-review gates are cross-app and resolved from Admin
     Review; every other gate type is per-app and resolved from that app's
-    own Assessment Detail page."""
+    own Assessment Detail Actions tab -- lands with ``?tab=actions`` so
+    the NEXT pending gate in that same queue is immediately visible
+    instead of dropping the reviewer back on the Overview tab
+    (docs/ux-design-requirements.md checklist #12: "redirect to the next
+    actionable item, not back to the same page")."""
     if gate.get("gate_type") == ADMIN_REVIEW_GATE_TYPE:
         return "/admin-review"
     assessment_id = gate.get("assessment_id")
     if assessment_id:
-        return f"/assessments/{assessment_id}"
+        return f"/assessments/{assessment_id}?tab=actions"
     return "/admin-review"
+
+
+async def _admin_review_redirect_after_resolve(store: object, applied: int | None = None) -> str | None:
+    """After resolving a cluster-admin-review gate: if another one is
+    still pending, jump straight back to the Admin Review queue (the next
+    actionable item, matching checklist #12) instead of onboard-results --
+    a reviewer working through several pending elevated-review gates in a
+    row never has to manually navigate back. Returns ``None`` once the
+    queue is genuinely empty, so the caller falls through to its normal
+    onboard-results redirect (showing the delivery outcome instead)."""
+    remaining = await store.list_gates(status="pending")
+    if any(g.get("gate_type") == ADMIN_REVIEW_GATE_TYPE for g in remaining):
+        params = "gate_approved=true"
+        if applied is not None:
+            params += f"&applied={applied}"
+        return f"/admin-review?{params}"
+    return None
 
 
 @router.get("/gates")
@@ -70,10 +91,22 @@ async def admin_review_page(request: Request):
         g["stale"] = g["id"] in stale_ids
         g["delivery_confirmation"] = await gate_delivery_confirmation(s, g)
     resolved.sort(key=lambda g: g.get("resolved_at") or g.get("created_at", ""), reverse=True)
+
+    # Real, specific empty-state copy (docs/ux-design-requirements.md
+    # checklist #10) instead of a bare "all clear" -- how many of THIS
+    # gate type were actually resolved in the last 24h, sourced from the
+    # same `resolved` list already computed above, never fabricated.
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    recently_resolved_count = sum(
+        1 for g in resolved if (g.get("resolved_at") or g.get("created_at") or "") >= cutoff
+    )
+
     return get_templates().TemplateResponse(request, "admin_review.html", {
         "pending": pending, "resolved": resolved[:20],
         "stale_count": sum(1 for g in pending if g["id"] in stale_ids),
         "expired_count": expired_count,
+        "recently_resolved_count": recently_resolved_count,
     })
 
 
@@ -105,7 +138,7 @@ async def resolve_gate(request: Request, gate_id: str):
                 f"Rollback approved for assessment {assessment_id} — manual intervention required",
             )
             return RedirectResponse(
-                url=f"/assessments/{assessment_id}?success=Rollback+approved.+Review+the+deployment+and+roll+back+manually+or+via+Argo+Rollouts.",
+                url=f"/assessments/{assessment_id}?tab=actions&success=Rollback+approved.+Review+the+deployment+and+roll+back+manually+or+via+Argo+Rollouts.",
                 status_code=303,
             )
 
@@ -168,16 +201,26 @@ async def resolve_gate(request: Request, gate_id: str):
                         resource=f"assessment:{assessment_id}",
                         allow_operator_namespaces=True,
                     )
-                except Exception:
+                except Exception as exc:
                     log.exception("Elevated apply failed for gate %s (assessment %s)", gate_id, assessment_id)
                     return RedirectResponse(
-                        url=f"/assessments/{assessment_id}/onboard-results?error={quote('Elevated apply failed — gate remains pending')}",
+                        url=(
+                            f"/assessments/{assessment_id}/onboard-results?error="
+                            f"{quote(f'Elevated apply failed: {str(exc)[:150]}. The gate remains pending — fix the issue and re-approve, or Reject with a reason.')}"
+                        ),
                         status_code=303,
                     )
                 await s.resolve_gate(gate_id, status, resolved_by)
                 applied = len(results["applied"])
+                # Redirect to the NEXT pending cluster-admin-review gate (if
+                # any) rather than always landing on this app's own
+                # onboard-results -- a reviewer working through several
+                # elevated-review gates in a row shouldn't have to
+                # manually navigate back each time (docs/ux-design-
+                # requirements.md checklist #12).
+                next_url = await _admin_review_redirect_after_resolve(s, applied=applied)
                 return RedirectResponse(
-                    url=f"/assessments/{assessment_id}/onboard-results?applied={applied}&gate_approved=true",
+                    url=next_url or f"/assessments/{assessment_id}/onboard-results?applied={applied}&gate_approved=true",
                     status_code=303,
                 )
 
@@ -209,10 +252,13 @@ async def resolve_gate(request: Request, gate_id: str):
                         resource=f"assessment:{assessment_id}",
                         force=True,
                     )
-                except Exception:
+                except Exception as exc:
                     log.exception("Forced apply failed for gate %s (assessment %s)", gate_id, assessment_id)
                     return RedirectResponse(
-                        url=f"/assessments/{assessment_id}/onboard-results?error={quote('Forced apply failed — gate remains pending')}",
+                        url=(
+                            f"/assessments/{assessment_id}/onboard-results?error="
+                            f"{quote(f'Forced apply failed: {str(exc)[:150]}. The gate remains pending — fix the issue and re-approve, or Reject with a reason.')}"
+                        ),
                         status_code=303,
                     )
                 await s.resolve_gate(gate_id, status, resolved_by)
@@ -236,10 +282,13 @@ async def resolve_gate(request: Request, gate_id: str):
                     report=report, store=s, assessment_id=assessment_id,
                     actor=str(resolved_by), dry_run=False, force_dry_run_first=False,
                 )
-            except Exception:
+            except Exception as exc:
                 log.exception("Delivery failed for gate %s (assessment %s)", gate_id, assessment_id)
                 return RedirectResponse(
-                    url=f"/assessments/{assessment_id}/onboard-results?error={quote('Delivery failed — gate remains pending')}",
+                    url=(
+                        f"/assessments/{assessment_id}/onboard-results?error="
+                        f"{quote(f'Delivery failed: {str(exc)[:150]}. The gate remains pending — fix the issue and re-approve, or Reject with a reason.')}"
+                    ),
                     status_code=303,
                 )
             await s.resolve_gate(gate_id, status, resolved_by)

@@ -137,7 +137,7 @@ Long-lived watchers (deployed as separate pods):
 | **drift-detector** | 10m | Argo CD sync monitoring, API drift detection, auto-deprecation of affected skills, reports still-in-use deprecated APIs (`PlatformContext.deprecated_apis`) |
 | **skill-learner** | 24h | Researches CVEs via LLM, drafts new skills for human review — opt-in via `agents.skillLearner.enabled` (chart default: disabled; enabled on the live deployment via `argocd/application.yaml`), requires an LLM connection |
 
-Every watcher records real tick telemetry after each loop iteration — a `tick-complete`/`tick-failed` event plus an `AssessmentStore.agent_heartbeat()` call (`agentit/watchers/__init__.py::record_tick`) — so "last seen" on the **Agents** and **Schedules** pages reflects an actual heartbeat instead of a static "—". A Prometheus gauge, `agentit_watcher_last_success_timestamp{watcher=...}`, backs an `AgentITWatcherStale` alert (one rule per watcher, threshold = 2x its expected interval) in the chart's `PrometheusRule`.
+Every watcher records real tick telemetry after each loop iteration — a `tick-complete`/`tick-failed` event plus an `AssessmentStore.agent_heartbeat()` call (`agentit/watchers/__init__.py::record_tick`) — so "last seen" on the **Agents** and **Schedules** pages reflects an actual heartbeat instead of a static "—". A Prometheus gauge, `agentit_watcher_last_success_timestamp{watcher=...}`, backs an `AgentITWatcherStale` alert (one rule per watcher, threshold = 2x its expected interval) in the chart's `PrometheusRule`. The liveness probe's own `/tmp/heartbeat` file is kept fresh independently of `record_tick` — `vuln-watcher`/`skill-learner`'s tick intervals (6h/24h) far exceed the probe's 900s staleness window, so `run()` sleeps between ticks via a shared `agentit.watchers.sleep_with_heartbeat` helper that touches the file every 300s instead of only once per full tick, avoiding a restart loop.
 
 ## Self-improvement loop
 
@@ -179,9 +179,14 @@ The loop above (`skill-learner`) improves what AgentIT *generates for other apps
 GitHub's own PR UI stays the surface for reviewing the actual code diff; the portal is where a human sees what the loop considered and why.
 
 ```bash
-# Long-lived watcher (24h default) -- mirrors `learn-watch`
+# Long-lived watcher (24h default; dogfood may use 1h via Helm) -- mirrors `learn-watch`
 uv run agentit propose-watch --interval 86400 --max-open-prs 1
+
+# One-shot cycle for dogfood / debugging (no startup grace, no loop)
+uv run agentit propose-once --max-open-prs 1
 ```
+
+See [`docs/superpowers/plans/2026-07-15-autonomous-self-improve-dogfood.md`](docs/superpowers/plans/2026-07-15-autonomous-self-improve-dogfood.md) for the L0→L5 dogfood milestone plan (substrate → source PRs → outcome loop).
 
 ## Unified apply flow
 
@@ -204,7 +209,7 @@ Every path that gets a generated change into a cluster or a repo — the manual 
 
 **AutoMode's terminal action** (`should_auto_apply()`'s safety classification is completely unchanged) now depends on that registration check: not registered → the exact same direct-apply behavior as before. Registered → AutoMode still autonomously commits and opens a PR (it already trusts its own safety classification enough to skip human review for a direct apply), but creates a `gitops-pr-pending` gate instead of finishing — a human must merge the PR; **AgentIT never auto-merges**, matching this project's own "Argo CD is the sole deployer" stance for its own deployment.
 
-**Every delivery is tracked** in a new `deliveries` table (`store.py`/`store_pg.py`, kept in parity, same as every other table) — what was routed, which mechanism was chosen, delivery status, and verification outcome. Direct applies and GitOps commits with an actual SLO already being tracked for that assessment get the same 60-second SLO-watch tail (generalized out of `RemediationLoop` into `remediation_loop.verify_slos()`/`rollback_action()`) run in the background; `DriftDetector`'s existing ~10-minute Argo poll closes the loop for GitOps deliveries specifically once it observes the committed revision synced (Argo sync isn't synchronous, so this can't happen inline).
+**Every delivery is tracked** in a new `deliveries` table (`store.py`, same as every other table) — what was routed, which mechanism was chosen, delivery status, and verification outcome. Direct applies and GitOps commits with an actual SLO already being tracked for that assessment get the same 60-second SLO-watch tail (generalized out of `RemediationLoop` into `remediation_loop.verify_slos()`/`rollback_action()`) run in the background; `DriftDetector`'s existing ~10-minute Argo poll closes the loop for GitOps deliveries specifically once it observes the committed revision synced (Argo sync isn't synchronous, so this can't happen inline).
 
 **Point-of-no-return confirmation.** A dynamically-labeled single "Deliver" button (`onboard_results.html`) replaces the old independent "Apply to Cluster"/"Create PR" buttons — the mechanism is no longer a human's choice for cluster/app config. Both that button and every gate's "Approve & Deliver" button (on Assessment Detail's Actions tab, Fleet, or Admin Review — see "Web portal" below) show the exact same "AgentIT will: ..." statement (`delivery.confirmation_text()`) twice: once as page-level preview text, and again inside the un-skippable confirm modal a human must actively acknowledge immediately before the real delivery fires — never only on an earlier, easy-to-click-through dry-run screen.
 
@@ -220,8 +225,8 @@ Key pages:
 
 | Page | Purpose |
 |---|---|
-| **Fleet** | Dashboard of all managed apps with scores, lifecycle stage, a GitOps-registration badge ("GitOps" vs. "Direct apply") next to the existing sync-status badge, and a "Needs Action" pending-gate count per app (own nav-bar badge for the fleet-wide total) |
-| **Assessment Detail** | 7-dimension scores, lifecycle stepper, score trend + a rendered score-history table with deltas, a GitOps-registration badge + a dismissible "Register for GitOps" nudge for unregistered apps, a 4th **Actions** tab showing that app's own pending gates (Approve & Deliver / Reject / Dismiss), timeline, remediation items |
+| **Fleet** | Dashboard of all managed apps with scores, lifecycle stage, a GitOps-registration badge ("GitOps" vs. "Direct apply") next to the existing sync-status badge, and a "Needs Action" pending-gate count per app (own nav-bar badge for the fleet-wide total) — counted by the app's `repo_url`, not its current `assessment_id`, so a gate created against an older assessment of the same app still counts here after a re-assessment (`fleet.py::_attach_pending_actions`) |
+| **Assessment Detail** | 7-dimension scores, lifecycle stepper, score trend + a rendered score-history table with deltas, a GitOps-registration badge + a dismissible "Register for GitOps" nudge for unregistered apps, a 4th **Actions** tab showing that app's own pending gates (Approve & Deliver / Reject / Dismiss) across **every** historical assessment of this app, not just the current one (`AssessmentStore.list_gates_for_assessment()` joins by `repo_url`), timeline, remediation items |
 | **Admin Review** | Narrow, cross-app queue for the one gate type that's genuinely a different audience than an app owner: `cluster-admin-review` (CI/CD manifests targeting a shared operator namespace this service account can't apply to without elevated RBAC). Every other gate type (`auto-mode-review`, `dry-run-failed`, `gitops-pr-pending`, `auto-mode-scope-review`, `rollback-review`, `cluster-conflict-review`, and per-finding `finding-{category}` gates) is per-app and lives on that app's own Assessment Detail Actions tab + a Fleet row badge instead — see "Unified apply flow" above for what each gate type means and how approving it resolves. Approving funnels through the unified delivery router (`route_and_deliver()`) for ordinary gates; `gitops-pr-pending` gates merge a PR instead of re-delivering, `cluster-admin-review` gates apply directly into a shared operator namespace, `cluster-conflict-review` gates force-reapply after a server-side-apply field-manager conflict. `/gates` redirects here for any stale bookmark. |
 | **Insights** | Fleet stats, agent performance (from real `agent_runs` records), low-effectiveness skills, fleet-wide check compliance (pass rate per data-driven check across every recorded assessment), and fleet-wide learning feedback |
 | **Decisions** | Audit of every real LLM *decision* point (fix-review, auto-mode classify — not just LLM-generated content), attributed by the agent or skill that triggered it, with the LLM's actual reasoning and a per-agent/skill approve/reject/gate breakdown. See `llm_decisions.py` for exactly what's covered and what isn't. |
@@ -251,18 +256,18 @@ See [`docs/deployment.md`](docs/deployment.md) for the full incident writeup the
 
 ### Self-observability
 
-AgentIT's own SQLite store and `/metrics` endpoint are the source of truth for "what is the platform actually doing", not just what it can do:
+AgentIT's own Postgres store and `/metrics` endpoint are the source of truth for "what is the platform actually doing", not just what it can do:
 
 - **`agent_runs` table** — `FleetOrchestrator` writes one structured row (agent, mode, status, duration, resource tier, error, assessment_id) per agent execution, local or Kubernetes-Job. `AssessmentStore.get_agent_stats()` and the new `list_agent_runs()` read from this table instead of pattern-matching event `action` strings, so the Agents/Insights pages reflect real run history.
 - **`check_results` table** — every data-driven check run during an assessment (`check_engine.run_checks_by_dimension_with_status`) is snapshotted pass/fail, keyed by assessment. `get_check_compliance()` aggregates this into a fleet-wide pass-rate view on the Insights page.
 - **`correlation_id` on events** — `AssessmentStore.log_event()` accepts a `correlation_id` (populated with the `assessment_id` by `save()`, `save_onboarding()`, and `FleetOrchestrator`), matching the same id already used for Kafka's `correlationId`. The Events page's new "Chain" column links straight to `/events?correlation_id=...` to trace an assess → onboard → apply run end to end.
-- **DLQ end-to-end** — `EventConsumer._dead_letter()` now persists to the SQLite `events` table (not just the Kafka `agentit-dlq` topic) so `/events/dlq` actually shows failures, and `retry_dlq_message()` republishes the original message to its original topic via the Kafka producer instead of only relabelling the row.
+- **DLQ end-to-end** — `EventConsumer._dead_letter()` now persists to the `events` table (not just the Kafka `agentit-dlq` topic) so `/events/dlq` actually shows failures, and `retry_dlq_message()` republishes the original message to its original topic via the Kafka producer instead of only relabelling the row.
 - **Circuit breaker visibility** — `portal/helpers.py::get_circuit_breaker_states()` exposes live LLM/Kubernetes breaker state, shown on the Health page and set on the `agentit_circuit_breaker_open{name=...}` gauge every time `/health` is polled.
 - **Ambient deploy-status indicator** — a compact badge in `base.html`'s nav, present on every page, shows the running version/commit (`portal/metrics.py::get_build_info()`, an in-memory read of the `agentit_build` metric — no per-request I/O) and switches to a live "Deploying · &lt;stage&gt;" state, polled via htmx (`GET /api/deploy-status`, every 15s) from `_get_deploy_status()` in `routes/health.py`. That function combines the running build with the live `agentit-ci` PipelineRun (which Tekton task is currently running, via the same `kube.list_custom_resources("tekton.dev", ...)` helper the Health page already used) and the live `agentit` Argo CD `Application`'s sync/health (same RBAC as the existing Argo-reading code — no new grants needed): a PipelineRun actually running, or Argo out-of-sync/`Progressing`, shows "Deploying"; a failed PipelineRun or `Degraded` Application health shows "Deploy failed" with the real reason; otherwise it's a calm, idle badge. The Health page's "Deployment Status" section reuses the same function (`include_commit_info=True`) to add a stage-by-stage task stepper, the commit message being deployed (`portal/github_pr.py::get_commit_info()`), and — once a deploy is no longer in progress — whether this instance actually ended up running the new version or rolled back (compared against its own live `AGENTIT_GIT_COMMIT`, now wired in `chart/templates/deployment.yaml` from `.Values.image.tag`, the same value the CI pipeline pins to the deployed commit SHA). No field is ever fabricated: an unreachable PipelineRun/Argo/GitHub API surfaces via the badge/panel's `errors`/`reason` fields instead of silently looking idle.
-- **Prometheus gauges actually set** — `agentit_active_gates` updates on every gate create/resolve/expire; `agentit_build` is populated once at startup (package version + `AGENTIT_GIT_COMMIT`/`AGENTIT_IMAGE_TAG`, now real live values — see the deploy-status indicator above); `agentit_db_size_bytes` / `agentit_db_rows_total{table=...}` / `agentit_event_buffer_backlog` refresh every 5 minutes from the portal's background maintenance loop; `agentit_watcher_last_success_timestamp{watcher=...}` backs the `AgentITWatcherStale` alert described above; `agentit_synthetic_probe_up` / `agentit_route_cert_expiry_days` / `agentit_backup_last_status{target=...}` / `agentit_secret_check_status{secret=...}` (see "Operating AgentIT on itself" above) are all set via internal webhooks from CronJobs, not from in-process code.
+- **Prometheus gauges actually set** — `agentit_active_gates` updates on every gate create/resolve/expire; `agentit_build` is populated once at startup (package version + `AGENTIT_GIT_COMMIT`/`AGENTIT_IMAGE_TAG`, now real live values — see the deploy-status indicator above); `agentit_db_size_bytes` / `agentit_db_rows_total{table=...}` / `agentit_event_buffer_backlog` refresh every 5 minutes from the portal's background maintenance loop (via async helpers -- `refresh_db_metrics()`/`diff_and_log_inventory_changes()`/`prune_stale_agents_and_log()`); `agentit_watcher_last_success_timestamp{watcher=...}` backs the `AgentITWatcherStale` alert described above; `agentit_synthetic_probe_up` / `agentit_route_cert_expiry_days` / `agentit_backup_last_status{target=...}` / `agentit_secret_check_status{secret=...}` (see "Operating AgentIT on itself" above) are all set via internal webhooks from CronJobs, not from in-process code.
 - **Audit log** — `agentit/audit.py::audit_log()` is now wired into every privileged action call site: apply-to-cluster (manual and auto-mode's own auto-apply — both go through the shared `cluster_apply.apply_with_verification()` helper below), gate approve/reject, auto-mode toggle, and data purge.
 
-Deferred by design (see [`docs/architecture.md`](docs/architecture.md) if you want to pick this up): distributed tracing (OpenTelemetry spans across the Kafka event chain) and a unified Kafka→SQLite ingestion path (today, watchers and the portal write to the shared `AssessmentStore` directly rather than all events flowing through one consumer) — both are real architectural additions, not incremental fixes, and are intentionally out of scope until the above is stable.
+Deferred by design (see [`docs/architecture.md`](docs/architecture.md) if you want to pick this up): distributed tracing (OpenTelemetry spans across the Kafka event chain) and a unified Kafka→store ingestion path (today, watchers and the portal write to the shared `AssessmentStore` directly rather than all events flowing through one consumer) — both are real architectural additions, not incremental fixes, and are intentionally out of scope until the above is stable.
 
 ## Getting started
 
@@ -330,7 +335,7 @@ uv run agentit portal --port 8080
 # open http://localhost:8080
 ```
 
-**For local use, the portal still defaults to a local SQLite file** (`agentit.db` by default) — no external database required to get started on a laptop. **On the live OpenShift deployment, Postgres is now the default, active backend**: `AGENTIT_DB_BACKEND=postgres` is set across all 5 Deployments (portal ×2, vuln-watcher, slo-tracker, drift-detector, skill-learner), talking to AgentIT's own bundled, non-operator Postgres instance (`postgres.bundled.enabled`, deployed in-namespace, no external dependency or entitlement). `portal/store_pg.py` is the full async `asyncpg` counterpart to `store.py`, schema and all, and every store caller in the codebase (CLI, watchers, and the portal — `app.py`, `routes/*.py`, `helpers.py`, `FleetOrchestrator`/`AutoMode`/`RemediationDispatcher`/`RemediationLoop`, all genuinely `async def` throughout) goes through the `store_factory.create_store()` async access pattern, selectable per-deployment via `AGENTIT_DB_BACKEND` (`sqlite` default for local/dev, `postgres` for the live cluster). See [`docs/postgres-migration-plan.md`](docs/postgres-migration-plan.md) for the full migration history — including the two real cutover attempts, the 5 bugs found and fixed along the way, and what's left for the (now purely infra-cleanup) SQLite-removal phase — and the `postgres.bundled.enabled` chart flag below for the bundled-Postgres instance AgentIT deploys and maintains itself (no operator).
+**Postgres is the only supported store — for local use too, not just the live cluster.** There is no more SQLite code path. Point `AGENTIT_DB_DSN` at any reachable Postgres instance (e.g. `postgresql://agentit:agentit@localhost:5432/agentit`, or run one via `podman run -d -e POSTGRES_USER=agentit -e POSTGRES_PASSWORD=agentit -e POSTGRES_DB=agentit -p 5432:5432 postgres:16-alpine`); the schema is created automatically on first connection. On the live OpenShift deployment, AgentIT deploys and maintains its own bundled, non-operator Postgres instance (`postgres.bundled.enabled`, on by default, in-namespace, no external dependency or entitlement) and every Deployment/CronJob gets `AGENTIT_DB_DSN` wired in automatically. `portal/store.py`'s `AssessmentStore` is fully async (`asyncpg`) throughout, and every store caller in the codebase (CLI, watchers, the portal, `FleetOrchestrator`/`AutoMode`/`RemediationDispatcher`/`RemediationLoop`) `await`s it directly. See [`docs/postgres-migration-plan.md`](docs/postgres-migration-plan.md) (now marked historically-complete/superseded) for the full migration history — including the two real cutover attempts and the bugs found and fixed along the way — for how this cutover happened. A one-time `agentit migrate-sqlite-to-postgres` command exists for anyone with real data in a legacy local SQLite file to import into Postgres.
 
 ## Configuration
 
@@ -345,7 +350,7 @@ All configuration is via environment variables (no config file). Nothing here be
 | `ANTHROPIC_VERTEX_PROJECT_ID` + `CLOUD_ML_REGION` | `llm.py` | Use Claude via Vertex AI instead of the direct API |
 | `AGENTIT_LLM_MODEL` | `llm.py` | Override LLM model (default from env) |
 | `GITHUB_TOKEN` | `portal/github_pr.py` | Required for PR creation, infra-repo management, webhook registration |
-| `AGENTIT_DB_PATH` | `portal/store.py` | SQLite file path (default `agentit.db`) |
+| `AGENTIT_DB_DSN` | `portal/store.py` | Postgres connection string (required — Postgres is the only supported store) |
 | `AGENTIT_KAFKA_BOOTSTRAP` | `events.py`, `consumer.py` | Kafka bootstrap servers; publisher/consumer no-op gracefully if unset |
 | `AGENTIT_AUTO_MODE` | `automode.py` | `1`/`true`/`on` to enable autonomous apply (also togglable at runtime via `/settings`) |
 | `AGENTIT_PORTAL_URL` | `remediation_loop.py` | Base URL the remediation loop calls back into (default `http://localhost:8080`) |
@@ -363,7 +368,7 @@ AgentIT deploys itself the same way it onboards other apps — via the Helm char
 - Change a secret: `oc create secret` on-cluster, then reference it via a Helm parameter. Never in Git.
 - Never `helm upgrade` manually or `oc edit` the `Rollout`.
 
-Key `chart/values.yaml` feature flags: `rollout.enabled` (canary via Argo Rollouts), `kafka.enabled` / `argoEvents.enabled` (event-driven loop), `tektonCI.enabled` (build pipeline), `cronJobs.cveScan.enabled`, `agents.{vulnWatcher,sloTracker,driftDetector}.enabled`, `monitoring.enabled` (ServiceMonitor + PrometheusRule + Grafana dashboard — chart default: disabled; **enabled on the live deployment via `argocd/application.yaml`**, so AgentIT scrapes and alerts on its own `/metrics`), `postgres.bundled.enabled` (AgentIT's own bundled, non-operator Postgres instance backing the live default `postgres.backend`, see [`docs/postgres-migration-plan.md`](docs/postgres-migration-plan.md)), and `auth.enabled` (OpenShift `oauth-proxy` sidecar in front of the portal — see [Security notes](#security-notes) and [`docs/deployment.md#authentication`](docs/deployment.md#authentication)).
+Key `chart/values.yaml` feature flags: `rollout.enabled` (canary via Argo Rollouts), `kafka.enabled` / `argoEvents.enabled` (event-driven loop), `tektonCI.enabled` (build pipeline), `cronJobs.cveScan.enabled`, `agents.{vulnWatcher,sloTracker,driftDetector}.enabled`, `monitoring.enabled` (ServiceMonitor + PrometheusRule + Grafana dashboard — chart default: disabled; **enabled on the live deployment via `argocd/application.yaml`**, so AgentIT scrapes and alerts on its own `/metrics`), `postgres.bundled.enabled` (AgentIT's own bundled, non-operator Postgres instance — the only store, not a backend option, see [`docs/postgres-migration-plan.md`](docs/postgres-migration-plan.md)), and `auth.enabled` (OpenShift `oauth-proxy` sidecar in front of the portal — see [Security notes](#security-notes) and [`docs/deployment.md#authentication`](docs/deployment.md#authentication)).
 
 The chart includes: NetworkPolicy, ResourceQuota, LimitRange, PodDisruptionBudget, anti-affinity, backup CronJob, dedicated ServiceAccount (not `default`), and a self-assess step in the CI pipeline.
 
@@ -381,7 +386,7 @@ uv run pytest -q
 
 | Suite | Tests | What it covers |
 |---|---|---|
-| Unit tests | ~600 | Analyzers, agents, orchestrator conflict/gate logic, portal routes, SQLite store, Helm templates |
+| Unit tests | ~600 | Analyzers, agents, orchestrator conflict/gate logic, portal routes, the Postgres store, Helm templates |
 | LLM evals | 17 | Safety classification, fix review quality, generation correctness, learning agent, architecture summary |
 | Browser tests | 61 | Playwright end-to-end tests for all portal pages, Admin Review/Fleet-badge/Actions-tab UI, retired-route 404s, accessibility |
 | Performance tests | 22 | Response time assertions on portal endpoints |
@@ -479,15 +484,15 @@ AgentIT/
 │       │   ├── webhooks.py         # /api/webhook/* (internal-token-gated) + GitHub push
 │       │   ├── health.py           # /health, /healthz, /readyz, platform drift
 │       │   └── schedules.py        # Watcher/cron schedule management
-│       ├── store.py                # SQLite persistence (18+ tables: assessments, events, gates,
-│       │                           #   SLOs, remediations, skill_effectiveness, agent_feedback,
-│       │                           #   deliveries, processed_webhooks)
-│       ├── store_pg.py             # Async Postgres counterpart to store.py (asyncpg) — schema +
-│       │                           #   all methods ported and tested; the live/active backend on
-│       │                           #   the OpenShift deployment (AGENTIT_DB_BACKEND=postgres)
-│       ├── store_factory.py        # create_store(): async store access for every caller (CLI,
-│       │                           #   watchers, portal) — sqlite (local/dev default) or postgres
-│       │                           #   (live-cluster default), per AGENTIT_DB_BACKEND
+│       ├── store.py                # AssessmentStore -- the only supported store, fully async
+│       │                           #   (asyncpg/Postgres, 19+ tables: assessments, apps (app-level
+│       │                           #   facts like infra_repo_url that persist across
+│       │                           #   re-assessments -- see docs/architecture.md's "Data model"
+│       │                           #   section), events, gates, SLOs, remediations,
+│       │                           #   skill_effectiveness, agent_feedback, deliveries,
+│       │                           #   processed_webhooks)
+│       ├── migrate_sqlite.py       # One-time `agentit migrate-sqlite-to-postgres` import for anyone
+│       │                           #   with real data in a legacy local SQLite file
 │       ├── helpers.py              # CircuitBreaker, clone_assess_cleanup, safe_url, async get_store()
 │       ├── cluster_apply.py        # oc/kubectl apply with pre-flight checks
 │       ├── delivery.py             # Unified apply flow: classify + route_and_deliver()
@@ -505,8 +510,8 @@ AgentIT/
 │   │                               #   historical records; see each file's own status line
 │   ├── architecture.md             # System diagrams, pipeline, event loop, agent fleet (living)
 │   ├── deployment.md               # GitOps operational rules + incident writeups (living + historical)
-│   ├── postgres-migration-plan.md  # SQLite → Postgres/asyncpg migration history; Postgres is now
-│   │                               #   the live default backend on the OpenShift deployment (living)
+│   ├── postgres-migration-plan.md  # SQLite → Postgres/asyncpg migration history (historical --
+│   │                               #   superseded now that Postgres is the only supported store)
 │   ├── kafka-hardening-plan.md     # TLS/SASL + multi-broker Kafka -- not started (plan only)
 │   ├── unified-apply-flow.md       # route_and_deliver() design -- implemented
 │   ├── ui-redesign-proposal.md     # Admin Review/Fleet-badge/Actions-tab IA -- implemented

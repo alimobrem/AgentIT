@@ -178,16 +178,18 @@ class DriftDetector:
     async def _maybe_auto_sync(self, app_name: str) -> None:
         """If auto-mode is enabled, patch the Application to trigger a sync.
 
-        ``self._store`` is the async-compatible store handed in by
-        ``cli.py``'s ``drift_detect`` command (or ``None`` when this
-        detector was constructed without one, e.g. some tests) -- no
-        bridging facade needed since ``AutoMode`` is genuinely async too.
+        ``self._store`` is the ``AssessmentStore`` handed in by ``cli.py``'s
+        ``drift_detect`` command. Without one (e.g. a detector constructed
+        without a store, as some tests do), there's no settings table to
+        check ``auto_mode`` against, so auto-sync is skipped entirely rather
+        than guessing/constructing a throwaway store.
         """
-        from agentit.automode import AutoMode
-        from agentit.portal.store_factory import AsyncSQLiteStore
+        if self._store is None:
+            return
 
-        store = self._store if self._store is not None else AsyncSQLiteStore()
-        auto = AutoMode(store=store, publisher=self._publisher)
+        from agentit.automode import AutoMode
+
+        auto = AutoMode(store=self._store, publisher=self._publisher)
         if not await auto.is_enabled():
             return
 

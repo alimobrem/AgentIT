@@ -37,14 +37,14 @@ def _proposal(**overrides) -> dict:
 
 async def test_research_once_no_llm_logs_error_event(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    async_store, store = make_async_store()
+    async_store, store = await make_async_store()
     scout, publisher = _scout(store=async_store)
 
     with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")):
         result = await scout.research_once()
 
     assert result == {"outcome": "no-llm"}
-    events = store.list_events_by_action("capability-run")
+    events = await store.list_events_by_action("capability-run")
     assert len(events) == 1
     assert events[0]["severity"] == "error"
     assert "no credentials" in events[0]["summary"]
@@ -53,14 +53,14 @@ async def test_research_once_no_llm_logs_error_event(tmp_path, monkeypatch):
 
 async def test_research_once_insufficient_signal_logs_no_signal_event(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    async_store, store = make_async_store()
+    async_store, store = await make_async_store()
     scout, publisher = _scout(store=async_store)
 
     with patch("agentit.llm.LLMClient", return_value=object()):
         result = await scout.research_once()
 
     assert result == {"outcome": "no-signal"}
-    events = store.list_events_by_action("capability-run")
+    events = await store.list_events_by_action("capability-run")
     assert len(events) == 1
     assert events[0]["severity"] == "warning"
     publisher.publish.assert_not_called()
@@ -68,9 +68,9 @@ async def test_research_once_insufficient_signal_logs_no_signal_event(tmp_path, 
 
 async def test_research_once_llm_declines_to_propose(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    async_store, store = make_async_store()
+    async_store, store = await make_async_store()
     for i in range(6):
-        store.record_feedback(f"app-{i}", "hardening", f"cat-{i}", "rejected")
+        await store.record_feedback(f"app-{i}", "hardening", f"cat-{i}", "rejected")
     scout, publisher = _scout(store=async_store)
 
     mock_llm = MagicMock()
@@ -79,16 +79,38 @@ async def test_research_once_llm_declines_to_propose(tmp_path, monkeypatch):
         result = await scout.research_once()
 
     assert result == {"outcome": "no-proposal"}
-    events = store.list_events_by_action("capability-run")
+    events = await store.list_events_by_action("capability-run")
     assert len(events) == 1
+    publisher.publish.assert_not_called()
+
+
+async def test_research_once_unparseable_proposal_is_parse_error(tmp_path, monkeypatch):
+    """None from propose_capability_improvement must not look like an honest
+    'nothing to propose' — that hid live JSON/fence truncation failures."""
+    monkeypatch.chdir(tmp_path)
+    async_store, store = await make_async_store()
+    for i in range(6):
+        await store.record_feedback(f"app-{i}", "hardening", f"cat-{i}", "rejected")
+    scout, publisher = _scout(store=async_store)
+
+    mock_llm = MagicMock()
+    mock_llm.propose_capability_improvement.return_value = None
+    with patch("agentit.llm.LLMClient", return_value=mock_llm):
+        result = await scout.research_once()
+
+    assert result == {"outcome": "parse-error"}
+    events = await store.list_events_by_action("capability-run")
+    assert len(events) == 1
+    assert events[0]["severity"] == "error"
+    assert "unparseable" in events[0]["summary"].lower() or "unparseable" in str(events[0].get("details")).lower()
     publisher.publish.assert_not_called()
 
 
 async def test_research_once_gate_blocked_when_no_test_plan(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    async_store, store = make_async_store()
+    async_store, store = await make_async_store()
     for i in range(6):
-        store.record_feedback(f"app-{i}", "hardening", f"cat-{i}", "rejected")
+        await store.record_feedback(f"app-{i}", "hardening", f"cat-{i}", "rejected")
     scout, publisher = _scout(store=async_store)
 
     mock_llm = MagicMock()
@@ -99,7 +121,7 @@ async def test_research_once_gate_blocked_when_no_test_plan(tmp_path, monkeypatc
         result = await scout.research_once()
 
     assert result == {"outcome": "gate-blocked"}
-    events = store.list_events_by_action("capability-run")
+    events = await store.list_events_by_action("capability-run")
     assert len(events) == 1
     assert events[0]["severity"] == "warning"
     publisher.publish.assert_not_called()
@@ -107,9 +129,9 @@ async def test_research_once_gate_blocked_when_no_test_plan(tmp_path, monkeypatc
 
 async def test_research_once_opens_pr_and_logs_proposed_event(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    async_store, store = make_async_store()
+    async_store, store = await make_async_store()
     for i in range(6):
-        store.record_feedback(f"app-{i}", "hardening", f"cat-{i}", "rejected")
+        await store.record_feedback(f"app-{i}", "hardening", f"cat-{i}", "rejected")
     scout, publisher = _scout(store=async_store, repo_dir=tmp_path)
 
     mock_llm = MagicMock()
@@ -122,7 +144,7 @@ async def test_research_once_opens_pr_and_logs_proposed_event(tmp_path, monkeypa
         result = await scout.research_once()
 
     assert result == {"outcome": "proposed", "pr_url": "https://github.com/org/agentit/pull/9"}
-    events = store.list_events_by_action("capability-run")
+    events = await store.list_events_by_action("capability-run")
     assert len(events) == 1
     assert events[0]["severity"] == "info"
     publisher.publish.assert_called_once()
@@ -136,9 +158,9 @@ async def test_research_once_opens_pr_and_logs_proposed_event(tmp_path, monkeypa
 
 async def test_research_once_pr_creation_failure_logs_error(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    async_store, store = make_async_store()
+    async_store, store = await make_async_store()
     for i in range(6):
-        store.record_feedback(f"app-{i}", "hardening", f"cat-{i}", "rejected")
+        await store.record_feedback(f"app-{i}", "hardening", f"cat-{i}", "rejected")
     scout, publisher = _scout(store=async_store, repo_dir=tmp_path)
 
     mock_llm = MagicMock()
@@ -150,7 +172,7 @@ async def test_research_once_pr_creation_failure_logs_error(tmp_path, monkeypatc
         result = await scout.research_once()
 
     assert result == {"outcome": "pr-failed"}
-    events = store.list_events_by_action("capability-run")
+    events = await store.list_events_by_action("capability-run")
     assert events[0]["severity"] == "error"
     publisher.publish.assert_not_called()
 
@@ -163,8 +185,8 @@ def test_propose_watch_cli_options_registered():
     assert "--max-open-prs" in result.output
 
 
-def test_accepts_optional_store_for_tick_telemetry():
-    async_store, _raw = make_async_store()
+async def test_accepts_optional_store_for_tick_telemetry():
+    async_store, _raw = await make_async_store()
     scout, _ = _scout(store=async_store)
     assert scout._store is async_store
 
@@ -190,7 +212,7 @@ class TestAsyncRunLoop:
 class TestTickRunsOnEventLoopAndRecordsTelemetry:
     @patch("agentit.watchers.capability_scout.asyncio.sleep", side_effect=KeyboardInterrupt)
     async def test_research_once_awaited_directly_and_telemetry_records(self, mock_sleep):
-        async_store, store = make_async_store()
+        async_store, store = await make_async_store()
         scout, _ = _scout(store=async_store)
 
         with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")), \
@@ -198,5 +220,5 @@ class TestTickRunsOnEventLoopAndRecordsTelemetry:
             await scout.run()
 
         mock_research_once.assert_called_once_with()
-        events = store.list_events()
+        events = await store.list_events()
         assert any(e["action"] == "tick-complete" for e in events)

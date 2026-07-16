@@ -24,10 +24,26 @@ _CODE_FENCE_RE = re.compile(r"^```[a-zA-Z0-9_+-]*\s*(.*?)\s*```$", re.DOTALL)
 
 
 def _strip_code_fence(raw: str) -> str:
-    """Strip a leading/trailing markdown code fence from an LLM response, if present."""
+    """Strip a leading/trailing markdown code fence from an LLM response, if present.
+
+    Also handles *truncated* fences (opening ``` with no closing ```) — a real
+    live failure mode when the model wraps a long capability proposal in
+    `````json`` and then hits the max_tokens ceiling mid-object. Without this,
+    ``json.loads`` sees the opening fence and fails even though the interior
+    might still be recoverable on a retry with a tighter prompt.
+    """
     text = raw.strip()
     match = _CODE_FENCE_RE.match(text)
-    return match.group(1).strip() if match else text
+    if match:
+        return match.group(1).strip()
+    if text.startswith("```"):
+        first_nl = text.find("\n")
+        if first_nl != -1:
+            body = text[first_nl + 1 :]
+            if body.rstrip().endswith("```"):
+                body = body.rstrip()[:-3]
+            return body.strip()
+    return text
 
 # _chat()'s default output budget — enough for the small, fixed-shape JSON
 # responses most callers expect (a couple of scalar fields plus a one-sentence
@@ -343,6 +359,29 @@ class LLMClient:
         """
         user_msg = _CAPABILITY_PROPOSAL_USER.format(evidence=json.dumps(evidence, default=str))
         raw = self._chat(_CAPABILITY_PROPOSAL_SYSTEM, user_msg, max_tokens=_CAPABILITY_PROPOSAL_MAX_TOKENS)
+        parsed = self._parse_capability_proposal(raw)
+        if parsed is not None:
+            return parsed
+        # One retry with a tighter instruction — the live failure mode was a
+        # fenced, truncated JSON blob (evidence field too long). Ask for
+        # compact output and no fences rather than inventing a proposal.
+        if raw is not None:
+            logger.warning("LLM returned unparseable capability proposal; retrying compact: %s", raw[:500])
+            retry_system = (
+                _CAPABILITY_PROPOSAL_SYSTEM
+                + " CRITICAL RETRY: previous reply was unparseable. Respond with "
+                "compact raw JSON only — no markdown fences, keep evidence under "
+                "400 characters, do not truncate mid-object."
+            )
+            raw2 = self._chat(retry_system, user_msg, max_tokens=_CAPABILITY_PROPOSAL_MAX_TOKENS)
+            parsed = self._parse_capability_proposal(raw2)
+            if parsed is not None:
+                return parsed
+            logger.warning("LLM capability proposal still unparseable after retry: %s", (raw2 or "")[:500])
+        return None
+
+    def _parse_capability_proposal(self, raw: str | None) -> dict | None:
+        """Parse a capability-scout proposal payload. Returns None on failure."""
         if raw is None:
             return None
         try:
@@ -364,7 +403,6 @@ class LLMClient:
                 "test_plan": str(parsed.get("test_plan", "")),
             }
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-            logger.warning("LLM returned unparseable capability proposal: %s", raw)
             return None
 
     def _chat(self, system: str, user: str, max_tokens: int = _DEFAULT_MAX_TOKENS) -> str | None:

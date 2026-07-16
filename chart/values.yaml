@@ -60,29 +60,63 @@ cronJobs:
 kafka:
   enabled: false
   bootstrapServers: agentit-kafka-kafka-bootstrap.agentit.svc:9092
-
-# Bundled (non-operator) Postgres: a single Deployment+PVC+Service+Secret
-# using the RHEL9-based image OpenShift's own `postgresql` ImageStream ships
-# (registry.redhat.io/rhel9/postgresql-15), already pullable via this
-# cluster's global pull secret — no operator, no OLM Subscription, no extra
-# entitlements needed. This is the only Postgres path this chart ships; an
-# earlier CloudNativePG-operator-based HA design was tried and abandoned
-# (blocked on paid EDB/Red Hat Marketplace entitlements that were never
-# provisioned) — see docs/postgres-migration-plan.md for that history.
-# `bundled.enabled` only stands up the standalone instance — it does not by
-# itself change what the app talks to. `backend` below is the actual
-# AGENTIT_DB_BACKEND cutover switch (see docs/postgres-migration-plan.md §7):
-# "sqlite" (default) or "postgres". Threaded into all 5 Deployments (portal +
-# vuln-watcher + slo-tracker + drift-detector + skill-learner) identically by
-# their templates — must only ever be changed as a single coordinated value
-# for all 5 at once, never per-component, and only once `bundled.enabled` is
-# also true. AGENTIT_DB_DSN (built from bundled.credentials + the bundled
-# Service's DNS name) is threaded alongside it automatically when this is
-# "postgres" — there is no separate values key for the DSN itself.
-postgres:
-  backend: sqlite
-  bundled:
+  # TLS + SASL/SCRAM-SHA-512 hardening (docs/kafka-hardening-plan.md).
+  # Additive: adds a second listener (tlsPort, tls: true, SASL/SCRAM auth) to
+  # the Kafka CR alongside the existing plaintext listener, one KafkaUser
+  # (Strimzi auto-provisions a Secret) per real producer/consumer identity
+  # this app has (portal + the 4 watchers that actually touch Kafka --
+  # vuln-watcher, slo-tracker, drift-detector, skill-learner; capability-scout
+  # never sets AGENTIT_KAFKA_BOOTSTRAP so it's excluded), and a NetworkPolicy
+  # scoping broker pod ingress to this app's own pods (+ Strimzi's own
+  # in-cluster components, so entity-operator/replication keep working).
+  # Default OFF -- does not change the existing plaintext listener/behavior
+  # for anyone not opting in; the plaintext listener is never removed by this
+  # flag alone. `src/agentit/events.py`'s `EventPublisher` and
+  # `src/agentit/consumer.py`'s `EventConsumer` only add SASL_SSL kwargs to
+  # the kafka-python client when AGENTIT_KAFKA_SASL_USERNAME/_PASSWORD are
+  # actually set in the pod's env -- this flag alone does NOT wire those env
+  # vars into any Deployment template (that's the still-pending Phase 3 "flip
+  # the switch" work — see docs/kafka-hardening-plan.md). Turning this on for
+  # real needs a coordinated cutover, same shape as
+  # docs/postgres-migration-plan.md §7: existing plaintext producers/
+  # consumers and the new SASL_SSL ones can't both be "the" bootstrap at
+  # once without either a dual-listener transition window or a single
+  # all-Deployments-at-once switch.
+  auth:
     enabled: false
+    tlsPort: 9093
+    # SASL/SCRAM-SHA-512 bootstrap address (the TLS listener above), separate
+    # from `bootstrapServers` (the existing plaintext one) so both can be
+    # wired independently during a transition.
+    bootstrapServers: agentit-kafka-kafka-bootstrap.agentit.svc:9093
+
+# Postgres is the ONLY supported store -- not a backend option among
+# several, not a flag on the app side. Every Deployment/CronJob that talks
+# to the store gets AGENTIT_DB_DSN unconditionally (see deployment.yaml,
+# agents/*.yaml, workflows/*.yaml) -- there is no more SQLite code path,
+# `AGENTIT_DB_PATH` env var, or `postgres.backend` selector to flip. See
+# docs/postgres-migration-plan.md for the full history of how this cutover
+# happened (that doc is now marked historically-complete/superseded).
+#
+# `bundled.enabled` (default true) is a genuinely separate, still-real
+# choice: whether THIS chart deploys its own single-instance, non-operator
+# Postgres (a Deployment+PVC+Service+Secret using the RHEL9-based image
+# OpenShift's own `postgresql` ImageStream ships --
+# registry.redhat.io/rhel9/postgresql-15, already pullable via this
+# cluster's global pull secret, no operator/OLM Subscription/extra
+# entitlements needed -- an earlier CloudNativePG-operator-based HA design
+# was tried and abandoned, blocked on paid EDB/Red Hat Marketplace
+# entitlements that were never provisioned; see docs/postgres-migration-
+# plan.md for that history) versus pointing every component at an
+# externally-managed Postgres instead. Setting this to `false` does NOT
+# make Postgres optional for the app -- it only stops this chart from
+# standing up its own instance; you must then pre-create a Secret named
+# `bundled.credentials.secretName` (same `username`/`password` keys) in
+# this namespace, pointing at whatever Postgres you're bringing yourself,
+# and this chart's Deployments will use it exactly the same way.
+postgres:
+  bundled:
+    enabled: true
     image: registry.redhat.io/rhel9/postgresql-15@sha256:06aeada2ca417445bc4fb711729e65a02ee78421a09c862cbd136ebdd51d7cfa
     storageSize: 10Gi
     # storageClassName: gp3-csi
@@ -97,10 +131,9 @@ postgres:
       limits:
         cpu: "1"
         memory: 1Gi
-    # pg_dump-based backup CronJob, mirroring the existing SQLite
-    # `.Values.backup`/db-backup-cronjob.yaml pattern below. Disabled by
-    # default — see docs/postgres-migration-plan.md's "Backup/retention" gap
-    # for what's covered and what isn't.
+    # pg_dump-based backup CronJob for the bundled instance. Disabled by
+    # default — see docs/postgres-migration-plan.md's "Backup/retention"
+    # section for what's covered and what isn't.
     backup:
       enabled: false
       schedule: "23 */6 * * *"
@@ -153,11 +186,6 @@ agents:
     enabled: false
     interval: 86400   # 24 hours
     maxOpenPRs: 1      # only open a new proposal PR if fewer than this many agentit/self-improve/* PRs are already open
-
-backup:
-  enabled: false
-  storageSize: 2Gi
-  # storageClassName: gp3-csi
 
 rbac:
   # Cross-namespace apply is the core "Apply to Cluster" feature: onboarding a

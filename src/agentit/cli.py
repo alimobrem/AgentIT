@@ -12,7 +12,7 @@ import click
 
 from agentit.cloner import CloneError, clone_repo
 from agentit.models import AssessmentReport
-from agentit.portal.store_factory import create_store
+from agentit.portal.store import create_store
 from agentit.reporter import render_json_report, render_terminal_report
 from agentit.runner import run_assessment
 
@@ -90,7 +90,9 @@ def main() -> None:
       drift-detect   Start drift detector
       learn-watch    Start skill learner (periodic CVE research)
       propose-watch  Start capability-scout (proposes changes to AgentIT itself)
+      propose-once   Run one capability-scout cycle (dogfood / debug)
       orchestrate    Run full orchestration (low-level)
+      migrate-sqlite-to-postgres  One-time import of legacy local SQLite data
     """
     from agentit.logging_config import configure_logging
     configure_logging()
@@ -534,6 +536,32 @@ async def propose_watch(interval: int, llm_model: str | None, max_open_prs: int)
     await scout.run()
 
 
+@main.command("propose-once")
+@click.option("--llm-model", default=None, help="Claude model to use.")
+@click.option("--max-open-prs", default=1, type=int, help="Max concurrent open agentit/self-improve/* PRs.")
+@_run_async
+async def propose_once(llm_model: str | None, max_open_prs: int) -> None:
+    """Run a single capability-scout cycle (dogfood / debugging).
+
+    Same research→gate→draft-PR path as ``propose-watch``, without the
+    long-lived loop or startup grace — use this to exercise L1/L2 during
+    the autonomous self-improve dogfood milestone without waiting for the
+    hourly/daily tick.
+    """
+    from agentit.events import get_publisher
+    from agentit.watchers.capability_scout import CapabilityScout
+
+    store = await create_store()
+    scout = CapabilityScout(
+        publisher=get_publisher(), llm_model=llm_model,
+        store=store, max_open_prs=max_open_prs, startup_grace_seconds=0,
+    )
+    result = await scout.research_once()
+    click.echo(f"[propose-once] outcome={result.get('outcome')}" + (
+        f" pr={result['pr_url']}" if result.get("pr_url") else ""
+    ))
+
+
 @main.command("run-agent")
 @click.argument("agent_name")
 @click.option("--report", "report_path", required=True, type=click.Path(exists=True))
@@ -652,7 +680,15 @@ async def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bo
     from agentit.remediation.dispatcher import RemediationDispatcher
     from agentit.remediation.registry import lookup
 
-    store = await create_store(":memory:")
+    # Previously used a throwaway `:memory:` SQLite store here (so a
+    # self-fix run's assessment/dispatch bookkeeping didn't pollute the
+    # real fleet DB), then conditionally re-opened the *real* store below
+    # only if AGENTIT_DB_PATH was set, purely to persist skill outcomes.
+    # Postgres has no `:memory:` equivalent, and now that Postgres is the
+    # only backend, `agentit self-assess` already persists its own runs to
+    # the real store unconditionally -- so self-fix does the same, using
+    # one store throughout, rather than a two-store special case.
+    store = await create_store()
 
     click.echo("Step 1: Assessing...", err=True)
     try:
@@ -781,33 +817,30 @@ async def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bo
 
             click.echo(f"\n  Approved: {len(approved_files)}, Rejected: {len(rejected)}", err=True)
 
-            import os
-            db_path = os.environ.get('AGENTIT_DB_PATH')
-            if db_path:
-                eff_store = await create_store(db_path)
-                for finding, fix_file in generated:
-                    outcome = 'approved' if fix_file in approved_files else 'rejected'
-                    # Prefer the exact skill name SkillEngine.generate() sets
-                    # (fix_file.skill_name) -- deriving it from the path
-                    # (stripping just ".yaml") was wrong for skill-generated
-                    # files, since the path is "{app_name}-{skill.name}.yaml"
-                    # and this recorded "app_name-skill_name" as the skill
-                    # name, never aggregating across apps. Only Python-agent
-                    # (dispatcher) files fall back to the old heuristics --
-                    # they carry no skill_name.
-                    skill_name = fix_file.skill_name or fix_file.path.replace('.yaml', '')
-                    if not fix_file.skill_name and fix_file.description and "'" in fix_file.description:
-                        parts = fix_file.description.split("'")
-                        if len(parts) >= 2:
-                            skill_name = parts[1]
-                    reason = review_reasons.get(id(fix_file), '')
-                    await eff_store.record_skill_outcome(skill_name, report.repo_name, outcome, reason)
-                    await eff_store.log_event(
-                        skill_name, f"fix-{outcome}", report.repo_name,
-                        "info" if outcome == "approved" else "warning",
-                        reason or f"Fix {outcome} (no reason captured)",
-                    )
-                click.echo(f'  Effectiveness recorded to {db_path}', err=True)
+            for finding, fix_file in generated:
+                outcome = 'approved' if fix_file in approved_files else 'rejected'
+                # Prefer the exact skill name SkillEngine.generate() sets
+                # (fix_file.skill_name) -- deriving it from the path
+                # (stripping just ".yaml") was wrong for skill-generated
+                # files, since the path is "{app_name}-{skill.name}.yaml"
+                # and this recorded "app_name-skill_name" as the skill
+                # name, never aggregating across apps. Only Python-agent
+                # (dispatcher) files fall back to the old heuristics --
+                # they carry no skill_name.
+                skill_name = fix_file.skill_name or fix_file.path.replace('.yaml', '')
+                if not fix_file.skill_name and fix_file.description and "'" in fix_file.description:
+                    parts = fix_file.description.split("'")
+                    if len(parts) >= 2:
+                        skill_name = parts[1]
+                reason = review_reasons.get(id(fix_file), '')
+                await store.record_skill_outcome(skill_name, report.repo_name, outcome, reason)
+                await store.log_event(
+                    skill_name, f"fix-{outcome}", report.repo_name,
+                    "info" if outcome == "approved" else "warning",
+                    reason or f"Fix {outcome} (no reason captured)",
+                )
+            if generated:
+                click.echo('  Effectiveness recorded.', err=True)
 
             if not approved_files:
                 click.echo("\nNo fixes approved by LLM.", err=True)
@@ -1114,3 +1147,53 @@ def activate_skill(skill_path: str) -> None:
     updated = content.replace("status: draft", "status: active", 1)
     path.write_text(updated, encoding="utf-8")
     click.echo(f"Activated: {skill_path}", err=True)
+
+
+@main.command("migrate-sqlite-to-postgres")
+@click.option(
+    "--sqlite-path", default="agentit.db", type=click.Path(exists=True),
+    help="Path to the legacy SQLite database file (default: ./agentit.db).",
+)
+@click.option(
+    "--dsn", default=None,
+    help="Postgres DSN to migrate into. Defaults to AGENTIT_DB_DSN if unset.",
+)
+@_run_async
+async def migrate_sqlite_to_postgres_cmd(sqlite_path: str, dsn: str | None) -> None:
+    """One-time migration for local SQLite data from before Postgres became
+    the only supported store.
+
+    Postgres is the only backend this codebase talks to now -- the live
+    cluster deployment already runs Postgres exclusively and never had any
+    SQLite data to migrate. This command exists purely for local
+    development / test use: if you have a real `agentit.db` file with
+    assessments/events/feedback history you want to keep, this copies every
+    row into your Postgres instance so nothing is lost. If your local data
+    is disposable, you don't need this at all -- just delete the file and
+    let Postgres start fresh (its schema is created automatically on first
+    connection).
+
+    Safe to re-run: every insert uses `ON CONFLICT ... DO NOTHING` against
+    each table's real primary key, so rows already migrated on a previous
+    (or partial/interrupted) run are silently skipped rather than
+    duplicated or erroring.
+    """
+    import os
+
+    from agentit.migrate_sqlite import format_summary, migrate_sqlite_to_postgres
+
+    resolved_dsn = dsn or os.environ.get("AGENTIT_DB_DSN")
+    if not resolved_dsn:
+        click.echo(
+            "No Postgres DSN provided. Pass --dsn or set AGENTIT_DB_DSN.", err=True,
+        )
+        sys.exit(1)
+
+    def _progress(table: str, inserted: int, total: int) -> None:
+        if total:
+            click.echo(f"  {table}: {inserted}/{total} row(s) migrated", err=True)
+
+    click.echo(f"Migrating {sqlite_path} -> Postgres...", err=True)
+    counts = await migrate_sqlite_to_postgres(Path(sqlite_path), resolved_dsn, on_progress=_progress)
+    click.echo("", err=True)
+    click.echo(format_summary(counts), err=True)

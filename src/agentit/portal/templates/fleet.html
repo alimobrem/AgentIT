@@ -96,7 +96,7 @@
       <td class="{% if r.critical_count > 0 %}text-danger text-bold{% endif %}">{{ r.critical_count }}</td>
       <td>
         {% if r.pending_actions_count %}
-          <span class="badge badge-medium">{{ r.pending_actions_count }} pending</span>
+          <a href="/assessments/{{ r.id }}?tab=actions" class="badge badge-medium" title="Go to Actions tab">{{ r.pending_actions_count }} pending</a>
         {% else %}
           <span class="text-muted text-sm">&mdash;</span>
         {% endif %}
@@ -113,12 +113,18 @@
           </form>
           <form method="post" action="/assessments/{{ r.id }}/delete" class="inline-form"
                 x-data x-ref="deleteForm{{ r.id }}">
+            {# Type-to-confirm: Delete App is one of only two actions in the
+               whole app reserved for this heaviest friction pattern (the
+               other is the cluster-admin-review gate approval) -- it
+               irreversibly removes the app's entire history (assessments,
+               onboarding, gates, remediations, SLOs), the widest blast
+               radius any single-click action in the fleet table has. #}
             <button type="button" class="btn btn-sm btn-danger-outline" aria-label="Delete {{ r.repo_name }}"
               @click="$dispatch('show-confirm', {
                 title: 'Delete App',
-                message: 'Delete ' + {{ r.repo_name | tojson | forceescape }} + ' and all related data?',
+                message: 'Delete ' + {{ r.repo_name | tojson | forceescape }} + ' and ALL related data (assessments, onboarding, gates, remediations, SLOs)? This cannot be undone.',
                 form: $refs.deleteForm{{ r.id }},
-                opts: { confirmText: 'Delete', danger: true }
+                opts: { confirmText: 'I understand, delete this app', danger: true, typeToConfirm: {{ r.repo_name | tojson | forceescape }} }
               })">×</button>
           </form>
         </div>

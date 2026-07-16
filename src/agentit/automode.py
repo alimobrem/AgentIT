@@ -16,8 +16,8 @@ _CONFIDENCE_THRESHOLD = 0.8
 # Extends the single global on/off `auto_mode` setting (above) with an
 # optional, additive scoping layer stored under its own key in the exact
 # same `settings` table `get_setting`/`set_setting` already read and write
-# (see `portal/store.py`/`store_pg.py` -- no schema change needed, this is
-# just another JSON-encoded value under a new key). Empty/missing/unparseable
+# (see `portal/store.py` -- no schema change needed, this is just another
+# JSON-encoded value under a new key). Empty/missing/unparseable
 # is treated as "no allowlist configured" -- `should_auto_apply()`'s global
 # gate keeps deciding the whole batch exactly as it did before this existed,
 # so an operator who has never touched this setting sees zero behavior
@@ -199,8 +199,7 @@ class AutoMode:
     this layer is a no-op and the matrix above is the whole story, exactly
     as before it existed.
 
-    ``store`` must be an async-compatible store (``store_factory.AsyncSQLiteStore``
-    or ``store_pg.AssessmentStore``) — every store call below is ``await``ed.
+    ``store`` is an ``AssessmentStore`` — every store call below is ``await``ed.
     ``llm_client`` (``agentit.llm.LLMClient``) stays a synchronous object;
     its one blocking network call (``classify_action``) is dispatched via
     ``asyncio.to_thread`` at the call site in ``should_auto_apply`` rather

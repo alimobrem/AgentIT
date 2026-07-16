@@ -78,7 +78,12 @@ async def agents_page(request: Request) -> HTMLResponse:
         "agents": agents,
         "total": len(agents),
         "active": active,
-        "last_heartbeat": last_hb[:19] if last_hb != "—" else "—",
+        # Full ISO timestamp (not pre-sliced) so the stat card can use the
+        # same `data-timestamp` relative-time rendering the table's own
+        # "Last Heartbeat" column already uses below -- previously this
+        # rendered as a raw ISO string while the table cell for the exact
+        # same data correctly showed "26m ago".
+        "last_heartbeat": last_hb,
         "agent_stats": agent_stats,
     })
 

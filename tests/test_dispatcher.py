@@ -6,10 +6,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from agentit.portal.app import app, get_store
-from agentit.portal.store_factory import AsyncSQLiteStore
 from agentit.remediation.base_image import patch_base_image
 from agentit.remediation.dispatcher import RemediationDispatcher
 from agentit.remediation.registry import lookup
@@ -82,8 +81,8 @@ class TestPatchBaseImage:
 
 class TestDispatcher:
     @pytest.fixture
-    def store(self):
-        return make_async_store()
+    async def store(self):
+        return await make_async_store()
 
     async def test_dispatch_unknown_category(self, store):
         async_store, _raw = store
@@ -107,7 +106,7 @@ class TestDispatcher:
                         description="No NetworkPolicy", recommendation="Add one"),
             ]),
         ])
-        aid = raw.save(report)
+        aid = await raw.save(report)
         dispatcher = RemediationDispatcher(async_store)
         result = await dispatcher.dispatch(aid, "network")
         assert result["error"] is None
@@ -124,7 +123,7 @@ class TestDispatcher:
                         description="No SBOM", recommendation="Add SBOM"),
             ]),
         ])
-        aid = raw.save(report)
+        aid = await raw.save(report)
         dispatcher = RemediationDispatcher(async_store)
         result = await dispatcher.dispatch(aid, "sbom")
         assert result["error"] is None
@@ -136,9 +135,9 @@ class TestDispatcher:
 
 
 @pytest.fixture
-def _override_store():
-    test_store = make_store()
-    async_store = AsyncSQLiteStore.wrap(test_store)
+async def _override_store():
+    test_store = await make_store()
+    async_store = test_store
     with patch("agentit.portal.app.get_store", return_value=async_store), \
          patch("agentit.portal.routes.webhooks.get_store", return_value=async_store), \
          patch("agentit.portal.routes.health.get_store", return_value=async_store), \
@@ -148,16 +147,16 @@ def _override_store():
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True)
 
 
 class TestFindingWebhook:
-    def test_rejects_missing_category(self, client, _override_store):
-        resp = client.post("/api/webhook/finding", json={"app_name": "test"})
+    async def test_rejects_missing_category(self, client, _override_store):
+        resp = await client.post("/api/webhook/finding", json={"app_name": "test"})
         assert resp.status_code == 400
 
-    def test_alert_only_for_unknown_app(self, client, _override_store):
-        resp = client.post("/api/webhook/finding", json={
+    async def test_alert_only_for_unknown_app(self, client, _override_store):
+        resp = await client.post("/api/webhook/finding", json={
             "app_name": "no-such-app",
             "category": "network",
             "description": "test",
@@ -165,7 +164,7 @@ class TestFindingWebhook:
         assert resp.status_code == 200
         assert resp.json()["action"] == "alert-only"
 
-    def test_gates_fix_when_automode_off(self, client, _override_store):
+    async def test_gates_fix_when_automode_off(self, client, _override_store):
         from agentit.models import DimensionScore, Finding, Severity
         store = _override_store
         report = make_report(
@@ -175,8 +174,8 @@ class TestFindingWebhook:
                         description="No NetworkPolicy", recommendation="Add one"),
             ])],
         )
-        store.save(report)
-        resp = client.post("/api/webhook/finding", json={
+        await store.save(report)
+        resp = await client.post("/api/webhook/finding", json={
             "app_name": "gated-app",
             "category": "network",
             "description": "Missing NetworkPolicy",

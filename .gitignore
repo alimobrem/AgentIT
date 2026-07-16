@@ -11,6 +11,9 @@ build/
 *.db-shm
 *.db-wal
 event-buffer.db*
+# Runtime state written by api_drift_detector.py -- local cache, not
+# something to commit (analogous to the *.db files above).
+.agentit-api-snapshot.json
 .env
 .env.*
 secrets/

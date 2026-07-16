@@ -4,13 +4,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 import agentit.remediation.base_image as _base_image_module
 from agentit.analyzers.security import SecurityAnalyzer
 from agentit.models import DimensionScore, Finding, Severity
 from agentit.portal.app import app, get_store
-from agentit.portal.store_factory import AsyncSQLiteStore
 from conftest import make_report, make_store
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -127,9 +126,9 @@ class TestBaseImagePatch:
 
 class TestCVEWebhook:
     @pytest.fixture(autouse=True)
-    def _override_store(self):
-        test_store = make_store()
-        async_store = AsyncSQLiteStore.wrap(test_store)
+    async def _override_store(self):
+        test_store = await make_store()
+        async_store = test_store
         with patch("agentit.portal.app.get_store", return_value=async_store), \
              patch("agentit.portal.routes.webhooks.get_store", return_value=async_store), \
              patch("agentit.portal.routes.health.get_store", return_value=async_store), \
@@ -138,11 +137,11 @@ class TestCVEWebhook:
 
     @pytest.fixture()
     def client(self):
-        return TestClient(app)
+        return AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True)
 
-    def test_finding_webhook_logs_event(self, client: TestClient, _override_store) -> None:
+    async def test_finding_webhook_logs_event(self, client, _override_store) -> None:
         store = _override_store
-        resp = client.post(
+        resp = await client.post(
             "/api/webhook/finding",
             json={
                 "app_name": "test",
@@ -153,16 +152,16 @@ class TestCVEWebhook:
             },
         )
         assert resp.status_code == 200
-        events = store.list_events(limit=50)
+        events = await store.list_events(limit=50)
         finding_events = [e for e in events if e["action"] == "finding-received"]
         assert len(finding_events) >= 1, (
             f"Expected a finding-received event, got actions: {[e['action'] for e in events]}"
         )
 
-    def test_finding_webhook_returns_alert_only_for_unknown_app(
-        self, client: TestClient, _override_store,
+    async def test_finding_webhook_returns_alert_only_for_unknown_app(
+        self, client, _override_store,
     ) -> None:
-        resp = client.post(
+        resp = await client.post(
             "/api/webhook/finding",
             json={
                 "app_name": "nonexistent",
@@ -175,8 +174,8 @@ class TestCVEWebhook:
         data = resp.json()
         assert data["action"] == "alert-only"
 
-    def test_finding_webhook_auto_mode_decision_attributed_to_real_agent(
-        self, client: TestClient, _override_store,
+    async def test_finding_webhook_auto_mode_decision_attributed_to_real_agent(
+        self, client, _override_store,
     ) -> None:
         """webhook_finding already knows which agent (dispatcher's result["agent"])
         generated the fix — the auto-mode decision it triggers should be logged
@@ -186,8 +185,8 @@ class TestCVEWebhook:
             repo_name="netpol-app",
             scores=[_score_with_finding("security", "network", "Missing NetworkPolicy")],
         )
-        store.save(report)
-        store.set_setting("auto_mode", "true")
+        await store.save(report)
+        await store.set_setting("auto_mode", "true")
 
         fake_llm = type("FakeLLM", (), {
             "classify_action": staticmethod(lambda **kw: {
@@ -196,7 +195,7 @@ class TestCVEWebhook:
         })()
 
         with patch("agentit.portal.routes.webhooks.get_llm_client", return_value=fake_llm):
-            resp = client.post(
+            resp = await client.post(
                 "/api/webhook/finding",
                 json={
                     "app_name": "netpol-app",
@@ -207,7 +206,7 @@ class TestCVEWebhook:
             )
         assert resp.status_code == 200
 
-        decision_events = store.list_events_by_action("decision")
+        decision_events = await store.list_events_by_action("decision")
         assert len(decision_events) == 1
         # HardeningAgent was removed once skills covered its domain (see
         # docs/agent-removal-readiness.md) -- the dispatcher now attributes

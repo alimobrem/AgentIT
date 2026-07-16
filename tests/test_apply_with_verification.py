@@ -32,7 +32,7 @@ class TestManualModeNoForcedDryRun:
     "just do what the human asked" behavior."""
 
     async def test_dry_run_true_makes_single_dry_run_call(self):
-        store, _raw = make_async_store()
+        store, _raw = await make_async_store()
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": ["x.yaml"], "skipped": [], "errors": []}
             result = await apply_with_verification(
@@ -50,7 +50,7 @@ class TestManualModeNoForcedDryRun:
     async def test_dry_run_false_applies_directly_no_dry_run_first(self):
         """No automatic dry-run-first sequencing: dry_run=False makes exactly
         one real-apply call, never a preceding dry-run call."""
-        store, _raw = make_async_store()
+        store, _raw = await make_async_store()
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": ["x.yaml"], "skipped": [], "errors": []}
             result = await apply_with_verification(
@@ -67,9 +67,9 @@ class TestManualModeNoForcedDryRun:
         assert result["dry_run_failed"] is False
 
     async def test_dry_run_true_never_records_skill_outcomes(self):
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        raw.save(report)
+        await raw.save(report)
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply, \
              patch("agentit.portal.cluster_apply.record_skill_outcomes") as mock_record:
             mock_apply.return_value = {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": []}
@@ -87,9 +87,9 @@ class TestManualModeNoForcedDryRun:
         outcomes for whatever *did* succeed, even if other files in the same
         batch errored -- ``record_outcomes_on_partial_failure`` defaults to
         True to preserve this."""
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        raw.save(report)
+        await raw.save(report)
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply, \
              patch("agentit.portal.cluster_apply.record_skill_outcomes") as mock_record:
             mock_apply.return_value = {
@@ -110,7 +110,7 @@ class TestManualModeNoForcedDryRun:
         assert args[4] == "approved"
 
     async def test_audit_log_called_for_every_call_dry_or_real(self, caplog):
-        store, _raw = make_async_store()
+        store, _raw = await make_async_store()
         for dry_run in (True, False):
             with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
                 mock_apply.return_value = {"applied": ["x.yaml"], "skipped": [], "errors": []}
@@ -129,7 +129,7 @@ class TestManualModeNoForcedDryRun:
             caplog.clear()
 
     async def test_audit_log_outcome_partial_on_errors(self, caplog):
-        store, _raw = make_async_store()
+        store, _raw = await make_async_store()
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": [], "skipped": [], "errors": ["boom"]}
             with caplog.at_level(logging.INFO, logger="agentit.audit"):
@@ -145,7 +145,7 @@ class TestManualModeNoForcedDryRun:
         assert audit_records[0].outcome == "partial"
 
     async def test_exception_from_apply_is_audited_then_reraised(self, caplog):
-        store, _raw = make_async_store()
+        store, _raw = await make_async_store()
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.side_effect = RuntimeError("cluster unreachable")
             with caplog.at_level(logging.INFO, logger="agentit.audit"):
@@ -168,9 +168,9 @@ class TestAutoModeForcedDryRunFirst:
     This is AutoMode's own always-on safety behavior."""
 
     async def test_dry_run_called_first_then_real_apply(self):
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        raw.save(report)
+        await raw.save(report)
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": ["x.yaml"], "skipped": [], "errors": []}
             result = await apply_with_verification(
@@ -192,9 +192,9 @@ class TestAutoModeForcedDryRunFirst:
     async def test_dry_run_failure_gates_before_real_apply(self):
         """If the forced first dry-run reports errors, the real apply is
         never attempted at all."""
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        raw.save(report)
+        await raw.save(report)
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": [], "skipped": [], "errors": ["forbidden"]}
             result = await apply_with_verification(
@@ -215,9 +215,9 @@ class TestAutoModeForcedDryRunFirst:
         """AutoMode's pre-refactor behavior: if the real apply (after passing
         the dry-run gate) has any errors, no skill outcome is recorded at
         all -- even for files that did succeed."""
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        raw.save(report)
+        await raw.save(report)
         call_results = [
             {"applied": [], "skipped": [], "errors": []},  # dry-run: clean
             {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": ["other: boom"]},  # real apply: partial
@@ -238,9 +238,9 @@ class TestAutoModeForcedDryRunFirst:
         assert result["errors"] == ["other: boom"]
 
     async def test_clean_real_apply_records_skill_outcomes(self):
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        raw.save(report)
+        await raw.save(report)
         call_results = [
             {"applied": [], "skipped": [], "errors": []},
             {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": []},
@@ -266,9 +266,9 @@ class TestAutoModeForcedDryRunFirst:
     async def test_audit_log_gap_closed_dry_run_failure(self, caplog):
         """Real gap fix: AutoMode previously never called audit_log() at
         all. Now the dry-run-gate branch is audited too."""
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        raw.save(report)
+        await raw.save(report)
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": [], "skipped": [], "errors": ["forbidden"]}
             with caplog.at_level(logging.INFO, logger="agentit.audit"):
@@ -289,9 +289,9 @@ class TestAutoModeForcedDryRunFirst:
     async def test_audit_log_gap_closed_successful_auto_apply(self, caplog):
         """Real gap fix: a clean auto-applied real apply now leaves an audit
         trail too (previously none at all for AutoMode)."""
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        raw.save(report)
+        await raw.save(report)
         call_results = [
             {"applied": [], "skipped": [], "errors": []},
             {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": []},
@@ -328,9 +328,9 @@ class TestConflictVsOtherFailureDistinction:
     async def test_dry_run_conflict_gates_before_real_apply(self):
         """A conflict surfaced during AutoMode's forced dry-run must gate
         exactly like a dry-run error -- the real apply is never attempted."""
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        raw.save(report)
+        await raw.save(report)
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = self._conflict_result()
             result = await apply_with_verification(
@@ -347,9 +347,9 @@ class TestConflictVsOtherFailureDistinction:
         assert result["conflicts"]
 
     async def test_real_apply_conflict_does_not_count_as_error(self):
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        raw.save(report)
+        await raw.save(report)
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = self._conflict_result(applied=["ok.yaml"])
             result = await apply_with_verification(
@@ -364,7 +364,7 @@ class TestConflictVsOtherFailureDistinction:
         assert len(result["conflicts"]) == 1
 
     async def test_audit_log_outcome_is_conflict_not_partial_or_success(self, caplog):
-        store, _raw = make_async_store()
+        store, _raw = await make_async_store()
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = self._conflict_result()
             with caplog.at_level(logging.INFO, logger="agentit.audit"):
@@ -383,7 +383,7 @@ class TestConflictVsOtherFailureDistinction:
         """`force` defaults to False and, left at that default, is never
         passed through at all -- matching `allow_operator_namespaces`'s
         existing "byte-for-byte identical mocked calls" convention."""
-        store, _raw = make_async_store()
+        store, _raw = await make_async_store()
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": ["x.yaml"], "skipped": [], "errors": []}
             await apply_with_verification(
@@ -396,7 +396,7 @@ class TestConflictVsOtherFailureDistinction:
         mock_apply.assert_called_once_with([_skill_file()], "ns", False)
 
     async def test_force_true_is_threaded_through(self):
-        store, _raw = make_async_store()
+        store, _raw = await make_async_store()
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": ["x.yaml"], "skipped": [], "errors": []}
             await apply_with_verification(

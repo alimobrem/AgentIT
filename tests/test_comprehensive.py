@@ -324,8 +324,8 @@ class TestDataModels:
 
 
 class TestPortalStore:
-    def test_store_save_and_get_roundtrip(self):
-        store = make_store()
+    async def test_store_save_and_get_roundtrip(self):
+        store = await make_store()
         report = make_report(
             repo_name="test-repo",
             scores=[
@@ -345,62 +345,62 @@ class TestPortalStore:
             ],
             languages=[Language(name="go", file_count=5, percentage=100.0)],
         )
-        aid = store.save(report)
+        aid = await store.save(report)
         assert aid
 
-        restored = store.get(aid)
+        restored = await store.get(aid)
         assert restored is not None
         assert restored.repo_name == "test-repo"
         assert restored.scores[0].score == 42
         assert len(restored.scores[0].findings) == 1
 
-    def test_store_list_all_ordering(self):
-        store = make_store()
+    async def test_store_list_all_ordering(self):
+        store = await make_store()
         r1 = make_report(repo_name="first")
         r1.assessed_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
         r2 = make_report(repo_name="second")
         r2.assessed_at = datetime(2026, 7, 1, tzinfo=timezone.utc)
-        store.save(r1)
-        store.save(r2)
+        await store.save(r1)
+        await store.save(r2)
 
-        items = store.list_all()
+        items = await store.list_all()
         assert len(items) == 2
         # newest first (DESC)
         assert items[0]["repo_name"] == "second"
         assert items[1]["repo_name"] == "first"
 
-    def test_store_delete(self):
-        store = make_store()
-        aid = store.save(make_report())
-        assert store.get(aid) is not None
+    async def test_store_delete(self):
+        store = await make_store()
+        aid = await store.save(make_report())
+        assert await store.get(aid) is not None
 
-        ok = store.delete(aid)
+        ok = await store.delete(aid)
         assert ok is True
-        assert store.get(aid) is None
+        assert await store.get(aid) is None
 
-    def test_store_event_logging(self):
-        store = make_store()
-        store.log_event("agent-a", "scan", "app1", "info", "Scanned app1")
-        store.log_event("agent-b", "deploy", "app2", "warning", "Deployed app2")
-        store.log_event("agent-a", "remediate", "app1", "info", "Fixed secrets")
+    async def test_store_event_logging(self):
+        store = await make_store()
+        await store.log_event("agent-a", "scan", "app1", "info", "Scanned app1")
+        await store.log_event("agent-b", "deploy", "app2", "warning", "Deployed app2")
+        await store.log_event("agent-a", "remediate", "app1", "info", "Fixed secrets")
 
-        events = store.list_events()
+        events = await store.list_events()
         assert len(events) >= 3
 
-    def test_store_gate_lifecycle(self):
-        store = make_store()
-        aid = store.save(make_report())
-        gid = store.create_gate(aid, "deploy", "Approve deploy?")
+    async def test_store_gate_lifecycle(self):
+        store = await make_store()
+        aid = await store.save(make_report())
+        gid = await store.create_gate(aid, "deploy", "Approve deploy?")
 
-        pending = store.list_gates(status="pending")
+        pending = await store.list_gates(status="pending")
         assert len(pending) == 1
         assert pending[0]["status"] == "pending"
 
-        ok = store.resolve_gate(gid, "approved", "admin")
+        ok = await store.resolve_gate(gid, "approved", "admin")
         assert ok is True
 
-        assert store.list_gates(status="pending") == []
-        resolved = store.list_gates(status="approved")
+        assert await store.list_gates(status="pending") == []
+        resolved = await store.list_gates(status="approved")
         assert len(resolved) == 1
         assert resolved[0]["resolved_by"] == "admin"
 

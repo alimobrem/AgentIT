@@ -61,6 +61,11 @@ async def schedules_page(request: Request) -> HTMLResponse:
     s = await get_store()
     fleet = await s.get_fleet_data()
     schedules: list[dict] = []
+    # repo_name -> latest assessment id, used to link "App Name" to that
+    # app's Assessment Detail page wherever a real assessment_id can be
+    # resolved (every other page -- Fleet, Remediations, Decisions --
+    # already does this; Schedules didn't).
+    app_ids_by_name = {app_data["repo_name"]: app_data["id"] for app_data in fleet}
 
     for app_data in fleet:
         aid = app_data["id"]
@@ -95,6 +100,7 @@ async def schedules_page(request: Request) -> HTMLResponse:
 
             schedules.append({
                 "app_name": app_data["repo_name"],
+                "app_id": aid,
                 "job_name": desc,
                 "schedule": cron,
                 "human_schedule": _CRON_HUMAN.get(cron, cron),
@@ -109,6 +115,10 @@ async def schedules_page(request: Request) -> HTMLResponse:
         schedules.append({
             "id": ms["id"],
             "app_name": ms["app_name"],
+            # Manual schedules take a free-text app_name with no
+            # guaranteed matching assessment -- only link when one really
+            # resolves, never fabricate a target.
+            "app_id": app_ids_by_name.get(ms["app_name"]),
             "job_name": ms["job_name"],
             "schedule": ms["schedule"],
             "human_schedule": _CRON_HUMAN.get(ms["schedule"], ms["schedule"]),

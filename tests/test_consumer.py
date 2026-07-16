@@ -111,6 +111,43 @@ class TestEventConsumer:
 
         mock_store.log_event.assert_not_awaited()
 
+    # ── SASL_SSL/SCRAM-SHA-512 credential wiring (docs/kafka-hardening-plan.md) ──
+
+    def test_connects_plaintext_without_sasl_credentials(self, monkeypatch) -> None:
+        """No AGENTIT_KAFKA_SASL_USERNAME/_PASSWORD -> KafkaConsumer gets no
+        security kwargs at all -- today's exact plaintext behavior for every
+        existing deployment."""
+        monkeypatch.setenv("AGENTIT_KAFKA_BOOTSTRAP", "localhost:9092")
+        monkeypatch.delenv("AGENTIT_KAFKA_SASL_USERNAME", raising=False)
+        monkeypatch.delenv("AGENTIT_KAFKA_SASL_PASSWORD", raising=False)
+        mock_kafka_consumer_cls = MagicMock()
+
+        with patch.dict("sys.modules", {"kafka": MagicMock(KafkaConsumer=mock_kafka_consumer_cls)}):
+            EventConsumer(topics=["agentit-events"], group_id="agentit-vuln-watcher")
+
+        _, call_kwargs = mock_kafka_consumer_cls.call_args
+        assert call_kwargs["bootstrap_servers"] == "localhost:9092"
+        assert "security_protocol" not in call_kwargs
+        assert "sasl_mechanism" not in call_kwargs
+
+    def test_connects_sasl_ssl_with_sasl_credentials(self, monkeypatch) -> None:
+        """When the KafkaUser-Secret-sourced SASL env vars ARE set, the
+        consumer is configured for SASL_SSL/SCRAM-SHA-512 instead of
+        plaintext."""
+        monkeypatch.setenv("AGENTIT_KAFKA_BOOTSTRAP", "agentit-kafka-kafka-bootstrap.agentit.svc:9093")
+        monkeypatch.setenv("AGENTIT_KAFKA_SASL_USERNAME", "agentit-vuln-watcher")
+        monkeypatch.setenv("AGENTIT_KAFKA_SASL_PASSWORD", "s3cr3t")
+        mock_kafka_consumer_cls = MagicMock()
+
+        with patch.dict("sys.modules", {"kafka": MagicMock(KafkaConsumer=mock_kafka_consumer_cls)}):
+            EventConsumer(topics=["agentit-events"], group_id="agentit-vuln-watcher")
+
+        _, call_kwargs = mock_kafka_consumer_cls.call_args
+        assert call_kwargs["security_protocol"] == "SASL_SSL"
+        assert call_kwargs["sasl_mechanism"] == "SCRAM-SHA-512"
+        assert call_kwargs["sasl_plain_username"] == "agentit-vuln-watcher"
+        assert call_kwargs["sasl_plain_password"] == "s3cr3t"
+
     def test_poll_once_with_mock_consumer(self) -> None:
         consumer = EventConsumer.__new__(EventConsumer)
         consumer._topics = ["test"]

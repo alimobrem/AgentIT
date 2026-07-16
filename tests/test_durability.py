@@ -11,17 +11,17 @@ from conftest import make_report, make_store
 
 
 class TestWebhookDedup:
-    def test_mark_and_check_processed(self):
-        store = make_store()
-        assert not store.webhook_already_processed("delivery-123")
-        store.mark_webhook_processed("delivery-123")
-        assert store.webhook_already_processed("delivery-123")
+    async def test_mark_and_check_processed(self):
+        store = await make_store()
+        assert not await store.webhook_already_processed("delivery-123")
+        await store.mark_webhook_processed("delivery-123")
+        assert await store.webhook_already_processed("delivery-123")
 
-    def test_duplicate_mark_is_noop(self):
-        store = make_store()
-        store.mark_webhook_processed("delivery-456")
-        store.mark_webhook_processed("delivery-456")  # no error
-        assert store.webhook_already_processed("delivery-456")
+    async def test_duplicate_mark_is_noop(self):
+        store = await make_store()
+        await store.mark_webhook_processed("delivery-456")
+        await store.mark_webhook_processed("delivery-456")  # no error
+        assert await store.webhook_already_processed("delivery-456")
 
 
 class TestCircuitBreaker:
@@ -108,12 +108,16 @@ class TestEventBufferBacklog:
 
 
 class TestRefreshDbMetrics:
-    def test_refresh_db_metrics_sets_gauges_without_raising(self):
+    async def test_refresh_db_metrics_sets_gauges_without_raising(self):
+        """Exercised via `app.py::_background_maintenance` against the real
+        store -- regression guard for the bug where that loop fell back to
+        handing this helper a nonexistent `.raw` instead of genuinely
+        awaiting it."""
         from agentit.portal.metrics import refresh_db_metrics
 
-        store = make_store()
-        store.save(make_report())
-        refresh_db_metrics(store)  # must not raise even with no Kafka configured
+        store = await make_store()
+        await store.save(make_report())
+        await refresh_db_metrics(store)  # must not raise even with no Kafka configured
 
 
 class TestRemediationThreadLimits:
@@ -123,9 +127,9 @@ class TestRemediationThreadLimits:
 
 
 class TestDataExport:
-    def test_export_all_returns_tables(self):
-        store = make_store()
-        data = store.export_all()
+    async def test_export_all_returns_tables(self):
+        store = await make_store()
+        data = await store.export_all()
         assert "assessments" in data
         assert "events" in data
         assert "gates" in data
@@ -133,18 +137,18 @@ class TestDataExport:
 
 
 class TestHealthProbes:
-    def test_healthz(self):
-        from starlette.testclient import TestClient
+    async def test_healthz(self):
+        from httpx import ASGITransport, AsyncClient
         from agentit.portal.app import app
-        client = TestClient(app)
-        resp = client.get("/healthz")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True) as client:
+            resp = await client.get("/healthz")
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
 
-    def test_readyz(self):
-        from starlette.testclient import TestClient
+    async def test_readyz(self):
+        from httpx import ASGITransport, AsyncClient
         from agentit.portal.app import app
-        client = TestClient(app)
-        resp = client.get("/readyz")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True) as client:
+            resp = await client.get("/readyz")
         assert resp.status_code == 200
         assert resp.json()["status"] == "ready"

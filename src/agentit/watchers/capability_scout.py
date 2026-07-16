@@ -47,6 +47,7 @@ class CapabilityScout:
         store: object | None = None,
         repo_dir: Path | None = None,
         max_open_prs: int = 1,
+        startup_grace_seconds: int = 90,
     ) -> None:
         self._publisher = publisher
         self._llm_model = llm_model
@@ -54,6 +55,8 @@ class CapabilityScout:
         self._store = store
         self._repo_dir = repo_dir or Path.cwd()
         self._max_open_prs = max_open_prs
+        self._startup_grace_seconds = startup_grace_seconds
+        self._startup_grace_done = False
 
     async def research_once(self) -> dict:
         """One capability-scout cycle. Always logs exactly one
@@ -88,7 +91,24 @@ class CapabilityScout:
             return {"outcome": "no-signal"}
 
         proposal = await asyncio.to_thread(llm_client.propose_capability_improvement, evidence)
-        if not proposal or not proposal.get("has_proposal"):
+        # None = LLM call failed or JSON unparseable after retry — distinct from
+        # an honest {"has_proposal": false}. Collapsing them made live parse
+        # failures look like "nothing worth proposing."
+        if proposal is None:
+            click.echo(
+                "[capability-scout] LLM returned unparseable/empty capability proposal "
+                "this cycle (parse-error).",
+                err=True,
+            )
+            severity, summary, details = describe_capability_run(
+                evidence, None, None, None,
+                error="unparseable or empty LLM capability proposal",
+            )
+            details["outcome"] = "parse-error"
+            await self._log_run(severity, summary, details)
+            return {"outcome": "parse-error"}
+
+        if not proposal.get("has_proposal"):
             click.echo("[capability-scout] LLM found no evidence-grounded proposal this cycle.", err=True)
             severity, summary, details = describe_capability_run(evidence, proposal, None, None)
             await self._log_run(severity, summary, details)
@@ -182,8 +202,25 @@ class CapabilityScout:
             logger.warning("Failed to log capability-run event", exc_info=True)
 
     async def run(self) -> None:
-        """Main loop: research, sleep."""
+        """Main loop: optional startup grace, then research, sleep.
+
+        Startup grace avoids racing an in-flight Argo Rollouts canary on the
+        same commit that just enabled/redeployed this watcher — git/`gh`/
+        pytest gates need a settled pod + credentials, and dogfood cadence
+        is ruined when the first tick fails for environmental reasons that
+        clear 90s later.
+        """
+        from agentit.watchers import sleep_with_heartbeat
+
         click.echo(f"Starting capability-scout (interval={self._interval}s)...", err=True)
+        if self._startup_grace_seconds > 0 and not self._startup_grace_done:
+            click.echo(
+                f"[capability-scout] Startup grace {self._startup_grace_seconds}s "
+                "(avoids first-tick race with canary rollout)...",
+                err=True,
+            )
+            await sleep_with_heartbeat(self._startup_grace_seconds)
+            self._startup_grace_done = True
         while True:
             try:
                 await self.research_once()
@@ -198,7 +235,7 @@ class CapabilityScout:
                 await record_tick(self._store, "capability-scout", success=False, error=str(exc))
 
             try:
-                await asyncio.sleep(self._interval)
+                await sleep_with_heartbeat(self._interval)
             except KeyboardInterrupt:
                 click.echo("capability-scout stopped.", err=True)
                 break

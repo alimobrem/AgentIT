@@ -65,14 +65,13 @@ def get_circuit_breaker_states() -> dict[str, dict[str, object]]:
 
 # ── Store singleton ───────────────────────────────────────────────────
 #
-# ``get_store()`` is async -- Phase 3 of docs/postgres-migration-plan.md.
-# The singleton is created lazily (not at import time) since pool/connection
-# setup is itself async; a lock guards against two concurrent requests both
-# racing to create it on first use. Sized per the plan's §5 Portal row
-# (min_size=5, max_size=20) -- only meaningful once AGENTIT_DB_BACKEND is
-# ever flipped to "postgres" (still unset/"sqlite" everywhere today; see
-# store_factory.py and the plan's §7 for why that switch must stay a single,
-# coordinated, all-components-at-once cutover rather than happening here).
+# ``get_store()`` is async -- it's the only way any caller (portal, CLI,
+# watchers) ever gets an ``AssessmentStore``. The singleton is created
+# lazily (not at import time) since pool creation is itself async; a lock
+# guards against two concurrent requests both racing to create it on first
+# use. Sized for the portal's concurrency profile (min_size=5, max_size=20)
+# -- see docs/postgres-migration-plan.md for the historical pool-sizing
+# rationale per component.
 
 _store: object | None = None
 _store_lock = asyncio.Lock()
@@ -83,7 +82,7 @@ async def get_store():
     if _store is None:
         async with _store_lock:
             if _store is None:
-                from agentit.portal.store_factory import create_store
+                from agentit.portal.store import create_store
                 _store = await create_store(min_size=5, max_size=20)
     return _store
 

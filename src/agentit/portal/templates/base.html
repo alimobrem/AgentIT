@@ -9,6 +9,11 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/htmx.org@2.0.4" integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+" crossorigin="anonymous"></script>
+{# htmx's own documented SSE extension (hx-ext="sse" / sse-connect / sse-swap)
+   -- real server-push updates with no websocket/SPA investment, per
+   docs/ux-design-requirements.md Part 2's portability note. Used by
+   onboard_progress.html for real step-level onboarding progress. #}
+<script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js" integrity="sha384-fw+eTlCc7suMV/1w/7fr2/PmwElUIt5i82bi+qTiLXvjRXZ2/FkiTNA/w0MhXnGI" crossorigin="anonymous"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js" integrity="sha384-X9kJyAubVxnP0hcA+AMMs21U445qsnqhnUF8EBlEpP3a42Kh/JwWjlv2ZcvGfphb" crossorigin="anonymous"></script>
 <style>
   /* ── Design Tokens ─────────────────────────────────────────────── */
@@ -16,7 +21,16 @@
     --color-bg:         #1a1a2e;
     --color-surface:    #16213e;
     --color-border:     #0f3460;
+    /* --color-accent is reserved EXCLUSIVELY for "needs your attention"
+       signals (a pending gate, nav-active/current-location, a low-
+       confidence classification) -- docs/ux-design-requirements.md
+       checklist #16/Part 3 item 30. Plain links, headings, and decorative
+       chrome use --color-link/--color-heading instead, so the one signal
+       that should stand out never has to compete with page furniture that
+       happens to reuse the same red. */
     --color-accent:     #e94560;
+    --color-link:       #5aa9e6;
+    --color-heading:    #d8dee9;
     --color-text:       #e0e0e0;
     --color-muted:      #888;
     --color-success:    #2ecc71;
@@ -62,7 +76,7 @@
     line-height: 1.6;
     min-height: 100vh;
   }
-  a { color: var(--color-accent); text-decoration: none; }
+  a { color: var(--color-link); text-decoration: none; }
   a:hover { text-decoration: underline; }
 
   /* ── Nav ────────────────────────────────────────────────────────── */
@@ -108,8 +122,8 @@
 
   /* ── Layout ────────────────────────────────────────────────────── */
   .container { max-width: 1100px; margin: 0 auto; padding: var(--space-8); }
-  h1 { color: var(--color-accent); margin-bottom: var(--space-7); font-family: var(--font-display); font-weight: 700; font-size: 1.6rem; letter-spacing: -0.5px; }
-  h2 { font-family: var(--font-display); font-size: 1.15rem; color: var(--color-accent); margin: var(--space-7) 0 var(--space-4); letter-spacing: -0.3px; }
+  h1 { color: var(--color-heading); margin-bottom: var(--space-7); font-family: var(--font-display); font-weight: 700; font-size: 1.6rem; letter-spacing: -0.5px; }
+  h2 { font-family: var(--font-display); font-size: 1.15rem; color: var(--color-heading); margin: var(--space-7) 0 var(--space-4); letter-spacing: -0.3px; }
 
   /* ── Stat Grid (portfolio summary) ─────────────────────────────── */
   .stat-grid {
@@ -513,7 +527,7 @@
 
   /* ── Section Titles ────────────────────────────────────────────── */
   .section-title {
-    color: var(--color-accent);
+    color: var(--color-heading);
     margin: var(--space-7) 0 var(--space-4);
     text-transform: capitalize;
   }
@@ -689,6 +703,49 @@
   .nav-toggle { display: none; background: none; border: none; color: var(--color-text); font-size: 1.5rem; cursor: pointer; }
   .nav-badge { background: var(--color-accent); color: #fff; font-size: var(--font-xs); padding: 1px 6px; border-radius: var(--radius-pill); margin-left: 4px; }
 
+  /* ── Command Palette Trigger (nav) ────────────────────────────── */
+  .cmdk-trigger {
+    display: inline-flex; align-items: center; gap: var(--space-3);
+    background: var(--color-surface-2); border: 1px solid var(--color-border);
+    color: var(--color-muted); border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-4); font-size: var(--font-sm); cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .cmdk-trigger:hover { border-color: var(--color-accent); color: var(--color-text); }
+  .cmdk-kbd {
+    font-family: var(--font-mono); font-size: var(--font-xs);
+    background: var(--color-border); color: var(--color-text);
+    padding: 1px 6px; border-radius: var(--radius-sm); border: 1px solid rgba(255,255,255,0.1);
+  }
+
+  /* ── Command Palette ──────────────────────────────────────────── */
+  .cmdk-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 400;
+    display: none; justify-content: center; align-items: flex-start; padding-top: 12vh;
+  }
+  .cmdk-overlay.open { display: flex; }
+  .cmdk-panel {
+    background: var(--color-surface-2); border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg); width: 100%; max-width: 560px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5); overflow: hidden;
+  }
+  .cmdk-input-row { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-5); border-bottom: 1px solid var(--color-border); }
+  .cmdk-input-icon { color: var(--color-muted); font-family: var(--font-mono); }
+  .cmdk-input { border: none; background: transparent; font-size: var(--font-lg); padding: 0; }
+  .cmdk-input:focus { outline: none; }
+  .cmdk-results { max-height: 50vh; overflow-y: auto; padding: var(--space-2); }
+  .cmdk-group-label { font-size: var(--font-xs); text-transform: uppercase; letter-spacing: 0.5px; color: var(--color-muted); padding: var(--space-3) var(--space-4) var(--space-1); }
+  .cmdk-item {
+    display: flex; align-items: center; justify-content: space-between; gap: var(--space-3);
+    padding: var(--space-3) var(--space-4); border-radius: var(--radius-md); cursor: pointer;
+  }
+  .cmdk-item-active, .cmdk-item:hover { background: var(--color-surface-3); }
+  .cmdk-item-label { color: var(--color-text); font-weight: 600; }
+  .cmdk-item-hint { color: var(--color-muted); font-size: var(--font-xs); }
+  .cmdk-item-actions { display: flex; gap: var(--space-2); }
+  .cmdk-empty { padding: var(--space-6); text-align: center; color: var(--color-muted); font-size: var(--font-sm); }
+  .cmdk-footer { padding: var(--space-3) var(--space-5); border-top: 1px solid var(--color-border); font-size: var(--font-xs); color: var(--color-muted); display: flex; gap: var(--space-5); }
+
   /* ── Skip Link ─────────────────────────────────────────────────── */
   .skip-link { position: absolute; left: -9999px; top: 0; z-index: 999; padding: var(--space-3) var(--space-5); background: var(--color-accent); color: #fff; border-radius: 0 0 var(--radius-md) 0; }
   .skip-link:focus { left: 0; }
@@ -699,6 +756,14 @@
   .modal-actions { justify-content: flex-end; margin-top: var(--space-5); }
   [x-cloak] { display: none !important; }
 
+  /* ── Type-to-Confirm (blast-radius-scaled friction) ──────────────── */
+  .type-confirm-group { margin-top: var(--space-2); margin-bottom: var(--space-2); }
+  .type-confirm-label { font-size: var(--font-sm); color: var(--color-text); margin-bottom: var(--space-1); display: block; }
+  .type-confirm-label code { color: var(--color-warning); }
+  .type-confirm-input { border-color: var(--color-warning); }
+  .type-confirm-hint { font-size: var(--font-xs); color: var(--color-muted); margin-top: var(--space-1); display: block; }
+  .btn[disabled], .btn:disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
+
   /* ── Toast Notifications ──────────────────────────────────────── */
   .toast-container { position: fixed; top: 70px; right: 20px; z-index: 300; display: flex; flex-direction: column; gap: 8px; }
   .toast { padding: var(--space-3) var(--space-5); border-radius: var(--radius-md); color: #fff; font-size: var(--font-sm); display: flex; align-items: center; gap: var(--space-3); min-width: 280px; max-width: 420px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.1); }
@@ -707,6 +772,38 @@
   .toast-warning { background: var(--color-warning); color: #1a1a2e; }
   .toast-error { background: var(--color-danger); }
   .toast-close { background: none; border: none; color: inherit; cursor: pointer; font-size: 1.2rem; margin-left: auto; }
+  /* Real (previously-referenced-but-undefined) toast motion, short and
+     purposeful per the checklist's 100-300ms motion guidance. */
+  @keyframes toast-slide-in { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: translateX(0); } }
+  @keyframes toast-slide-out { from { opacity: 1; } to { opacity: 0; } }
+  .toast-enter { animation: toast-slide-in 0.2s ease-out; }
+  .toast-leave { animation: toast-slide-out 0.2s ease-in; }
+
+  /* ── Optimistic-UI Fade (checklist #7 -- Suppress finding) ────────── */
+  .suppress-leave { transition: opacity 0.2s ease, transform 0.2s ease; }
+  .suppress-leave-end { opacity: 0; transform: translateX(-8px); }
+
+  /* ── Moments of Joy (checklist #9 -- tied to real milestones only) ── */
+  @keyframes celebrate-pulse {
+    0% { transform: scale(1); }
+    40% { transform: scale(1.08); text-shadow: 0 0 24px currentColor; }
+    100% { transform: scale(1); }
+  }
+  .celebrate { animation: celebrate-pulse 0.3s ease-out; }
+
+  /* ── Respect prefers-reduced-motion EVERYWHERE, including Alpine's own
+     inline-style-driven x-transition durations -- a stylesheet
+     `!important` declaration overrides a non-important inline style per
+     the CSS spec, so this one rule neutralizes every x-transition, CSS
+     animation, and transition in the app, existing or new. ── */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
 
   /* ── Hero CTA ──────────────────────────────────────────────────── */
   .hero-cta {
@@ -829,7 +926,7 @@
   .agent-rate-bar .score-bar-bg { flex: 1; }
 
   /* ── Section Toggle (details/summary) ──────────────────────────── */
-  .section-toggle { cursor: pointer; font-family: var(--font-display); color: var(--color-accent); margin: var(--space-7) 0 var(--space-4); }
+  .section-toggle { cursor: pointer; font-family: var(--font-display); color: var(--color-heading); margin: var(--space-7) 0 var(--space-4); }
 
   /* ── Scrollbar (Webkit) ─────────────────────────────────────────── */
   ::-webkit-scrollbar { width: 8px; }
@@ -868,6 +965,15 @@
       <span class="deploy-status-text">v{{ build_info.version | default('unknown') }}{% if build_info.commit and build_info.commit != 'unknown' %} &middot; <code>{{ build_info.commit[:7] }}</code>{% endif %}</span>
     </span>
   </div>
+  {# Cmd+K / Ctrl+K command palette trigger -- discoverable both by click
+     (mouse users see the kbd hint right here) and by the shortcut itself
+     firing from anywhere on the page (see #command-palette below). This is
+     the one persistent, always-visible shortcut hint the checklist asks
+     for at minimum (docs/ux-design-requirements.md Part 3 item 9). #}
+  <button type="button" class="cmdk-trigger" @click="$dispatch('open-command-palette')" aria-label="Open command palette (search navigation and apps)">
+    <span>Search&hellip;</span>
+    <span class="cmdk-kbd">&#8984;K</span>
+  </button>
   <div class="links">
     <a href="/" class="{{ 'nav-active' if request.url.path == '/' or request.url.path.startswith('/assessments') or request.url.path == '/fleet' }}">Fleet
       {% if nav_pending_actions %}<span class="nav-badge">{{ nav_pending_actions }}</span>{% endif %}
@@ -907,9 +1013,74 @@
   <div class="modal" @click.outside.capture="cancel()">
     <h3 x-text="title" class="modal-title"></h3>
     <p x-text="message" class="modal-message"></p>
+    {# Type-to-confirm: reserved for the highest-blast-radius actions only
+       (cluster-admin-review gate approval, Delete App) -- see _macros.html's
+       gate_card() and fleet.html's Delete button. Never applied to routine
+       per-finding Fix/Deliver confirmations (GitHub Primer: "match friction
+       to blast radius" / "using it for routine actions cheapens it"). The
+       Confirm button stays disabled until the typed value matches exactly. #}
+    <div class="type-confirm-group" x-show="typedConfirmTarget" x-cloak>
+      <label class="type-confirm-label" for="type-confirm-input">
+        Type <code x-text="typedConfirmTarget"></code> to confirm
+      </label>
+      <input type="text" id="type-confirm-input" x-ref="typeConfirmInput" x-model="typedValue"
+             autocomplete="off" spellcheck="false" class="type-confirm-input"
+             @keydown.enter.prevent="proceed()">
+      <span class="type-confirm-hint">This is a wide-blast-radius action — typing the exact name proves you mean it.</span>
+    </div>
     <div class="action-bar modal-actions">
-      <button class="btn btn-outline" @click="cancel()">Cancel</button>
-      <button class="btn" :class="dangerClass" @click="proceed()" x-text="confirmText"></button>
+      <button class="btn btn-outline" x-ref="cancelBtn" @click="cancel()">Cancel</button>
+      <button class="btn" :class="dangerClass" @click="proceed()"
+              :disabled="typedConfirmTarget && typedValue !== typedConfirmTarget"
+              :title="(typedConfirmTarget && typedValue !== typedConfirmTarget) ? ('Type &quot;' + typedConfirmTarget + '&quot; exactly to enable this button') : ''"
+              x-text="confirmText"></button>
+    </div>
+  </div>
+</div>
+<!-- Command Palette -->
+{# Genuinely reusable Alpine component (not a one-off): fuzzy-searches every
+   nav destination + every app in the fleet from any page, Cmd+K/Ctrl+K
+   triggered. Fleet apps are fetched from the real /api/fleet endpoint (no
+   mock data), lazily and cached for the session. See commandPalette() below
+   for the fuzzy-match + fetch logic. #}
+<div id="command-palette" x-data="commandPalette()" :class="{ 'open': open }" class="cmdk-overlay"
+     @keydown.window="handleGlobalKeydown($event)"
+     @open-command-palette.window="openPalette()"
+     @keydown.escape.window="close()" role="dialog" aria-modal="true" aria-label="Command palette">
+  {# .capture: same fix as the confirm modal above -- without it, the
+     trigger button's own click (which dispatches open-command-palette,
+     synchronously setting open=true) also counts as an "outside" click
+     once it finishes bubbling, instantly re-closing the palette it just
+     opened. #}
+  <div class="cmdk-panel" @click.outside.capture="close()">
+    <div class="cmdk-input-row">
+      <span class="cmdk-input-icon">&#8981;</span>
+      <input type="text" class="cmdk-input" x-ref="paletteInput" x-model="query" @input="computeResults()"
+             placeholder="Search navigation or apps&hellip;" autocomplete="off" spellcheck="false"
+             aria-label="Search navigation or apps"
+             @keydown.down.prevent="moveDown()" @keydown.up.prevent="moveUp()" @keydown.enter.prevent="selectActive()">
+    </div>
+    <div class="cmdk-results">
+      <template x-if="results.length === 0">
+        <div class="cmdk-empty" x-text="apps === null ? 'Loading…' : 'No matches for &quot;' + query + '&quot;'"></div>
+      </template>
+      <template x-for="(r, idx) in results" :key="r.type + r.href">
+        <div class="cmdk-item" :class="{ 'cmdk-item-active': idx === activeIndex }"
+             @mouseenter="activeIndex = idx" @click="go(r)">
+          <div>
+            <div class="cmdk-item-label" x-text="r.label"></div>
+            <div class="cmdk-item-hint" x-text="r.hint"></div>
+          </div>
+          <div class="cmdk-item-actions" x-show="r.type === 'app'">
+            <button type="button" class="btn btn-sm btn-outline" @click.stop="reassess(r)">Re-assess</button>
+          </div>
+        </div>
+      </template>
+    </div>
+    <div class="cmdk-footer">
+      <span><span class="cmdk-kbd">&uarr;&darr;</span> navigate</span>
+      <span><span class="cmdk-kbd">&#8629;</span> open</span>
+      <span><span class="cmdk-kbd">esc</span> close</span>
     </div>
   </div>
 </div>
@@ -1013,6 +1184,18 @@ document.body.addEventListener('htmx:timeout', function() {
     Alpine.$data(tm).show('Request timed out. Please try again.', 'warning');
   }
 });
+document.body.addEventListener('htmx:sendError', function() {
+  // Genuine network-level failure (request never reached the server) --
+  // distinct from htmx:responseError (a real HTTP error response). Any
+  // optimistic UI that predicted success (e.g. the Suppress action's
+  // instant hide) reconciles via its own local @htmx:send-error listener;
+  // this just makes sure the failure is never silent.
+  completeLoading();
+  var tm = document.getElementById('toasts');
+  if (tm && Alpine.$data(tm)) {
+    Alpine.$data(tm).show('Network error — request could not be sent. Please try again.', 'error');
+  }
+});
 document.body.addEventListener('htmx:beforeSwap', function(e) {
   if (e.detail.xhr.status >= 400 && e.detail.xhr.status < 500) {
     e.detail.shouldSwap = false;
@@ -1042,6 +1225,12 @@ function confirmModal() {
     message: '',
     confirmText: 'Confirm',
     dangerClass: 'btn-green',
+    // Type-to-confirm (opts.typeToConfirm): set to the exact string the user
+    // must type before Confirm enables -- reserved for wide-blast-radius
+    // actions only (see the template comment above). Empty string/falsy
+    // means "ordinary confirm", the default for every other caller.
+    typedConfirmTarget: '',
+    typedValue: '',
     _form: null,
     show(title, message, form, opts) {
       opts = opts || {};
@@ -1049,17 +1238,139 @@ function confirmModal() {
       this.message = message;
       this.confirmText = opts.confirmText || 'Confirm';
       this.dangerClass = opts.danger ? 'btn-danger' : 'btn-green';
+      this.typedConfirmTarget = opts.typeToConfirm || '';
+      this.typedValue = '';
       this._form = form;
       this.open = true;
+      // Cancel gets default focus on every confirm -- including
+      // destructive/type-to-confirm ones -- so a reflexive Enter keypress
+      // never fires the guarded action (Material 3 / Apple HIG / Carbon /
+      // Polaris / GOV.UK's converging rule). $nextTick waits for the modal's
+      // just-set `open=true` to actually paint before focusing it.
+      this.$nextTick(() => { if (this.$refs.cancelBtn) this.$refs.cancelBtn.focus(); });
     },
-    cancel() { this.open = false; this._form = null; },
+    cancel() { this.open = false; this._form = null; this.typedConfirmTarget = ''; this.typedValue = ''; },
     proceed() {
+      if (this.typedConfirmTarget && this.typedValue !== this.typedConfirmTarget) return;
       this.open = false;
       // requestSubmit() (unlike submit()) fires a real 'submit' event, so htmx's
       // submit interception still kicks in for hx-post/hx-get forms and does a
       // smooth AJAX swap instead of falling through to a full page reload.
       if (this._form) this._form.requestSubmit();
     }
+  };
+}
+// Command palette (Cmd+K / Ctrl+K) -- a genuinely reusable Alpine
+// component, not a one-off: fuzzy-searches every nav destination plus
+// every real app in the fleet (fetched from /api/fleet, never mocked).
+// See base.html's #command-palette markup for the trigger + result list.
+function commandPalette() {
+  return {
+    open: false,
+    query: '',
+    results: [],
+    activeIndex: 0,
+    apps: null, // null = not yet fetched; [] = fetched, fleet is empty
+    navItems: [
+      { label: 'Fleet', href: '/', hint: 'All monitored apps' },
+      { label: 'Admin Review', href: '/admin-review', hint: 'Cluster-admin-review gates' },
+      { label: 'Events', href: '/events', hint: 'Agent activity feed' },
+      { label: 'Dead-Letter Queue', href: '/events/dlq', hint: 'Undeliverable events' },
+      { label: 'Health', href: '/health', hint: 'System health & pipelines' },
+      { label: 'Insights', href: '/insights', hint: 'Fleet-wide insights' },
+      { label: 'Decisions', href: '/decisions', hint: 'LLM decision log' },
+      { label: 'Capabilities', href: '/capabilities', hint: 'Agent registry & catalog' },
+      { label: 'Settings', href: '/settings', hint: 'Auto-mode & allowlist' },
+      { label: 'Schedules', href: '/schedules', hint: 'Scheduled operations' },
+      { label: 'Fleet SLOs', href: '/fleet/slos', hint: 'SLOs across every app' },
+      { label: 'Fleet Remediations', href: '/fleet/remediations', hint: 'Remediations across every app' },
+    ],
+    handleGlobalKeydown(e) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        this.open ? this.close() : this.openPalette();
+      }
+    },
+    async openPalette() {
+      this.open = true;
+      this.query = '';
+      this.activeIndex = 0;
+      this.computeResults();
+      this.$nextTick(() => { if (this.$refs.paletteInput) this.$refs.paletteInput.focus(); });
+      if (this.apps === null) {
+        try {
+          const res = await fetch('/api/fleet');
+          this.apps = res.ok ? await res.json() : [];
+        } catch (e) {
+          this.apps = [];
+        }
+        this.computeResults();
+      }
+    },
+    close() { this.open = false; },
+    // Simple case-insensitive fuzzy match: exact substring scores highest
+    // (favoring earlier matches), otherwise an in-order subsequence match
+    // (every needle char found, in order, somewhere in the haystack).
+    // Returns -1 for no match at all.
+    fuzzyScore(needle, haystack) {
+      needle = (needle || '').toLowerCase();
+      haystack = (haystack || '').toLowerCase();
+      if (!needle) return 1;
+      const idx = haystack.indexOf(needle);
+      if (idx !== -1) return 1000 - idx;
+      let ni = 0, score = 0;
+      for (let hi = 0; hi < haystack.length && ni < needle.length; hi++) {
+        if (haystack[hi] === needle[ni]) { ni++; score++; }
+      }
+      return ni === needle.length ? score : -1;
+    },
+    computeResults() {
+      const q = this.query.trim();
+      const navMatches = this.navItems
+        .map((item) => ({ item, score: this.fuzzyScore(q, item.label) }))
+        .filter((m) => m.score >= 0)
+        .sort((a, b) => b.score - a.score)
+        .map((m) => ({ type: 'nav', label: m.item.label, hint: m.item.hint, href: m.item.href }));
+      const apps = this.apps || [];
+      const appMatches = apps
+        .map((a) => ({ a, score: this.fuzzyScore(q, a.repo_name) }))
+        .filter((m) => m.score >= 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 8)
+        .map((m) => ({
+          type: 'app', label: m.a.repo_name,
+          hint: 'Score ' + Math.round(m.a.latest_score || 0) + '/100 · ' + (m.a.criticality || ''),
+          href: '/assessments/' + m.a.id,
+          repoUrl: m.a.repo_url, criticality: m.a.criticality,
+        }));
+      this.results = navMatches.concat(appMatches);
+      this.activeIndex = 0;
+    },
+    go(r) {
+      this.close();
+      window.location.href = r.href;
+    },
+    // Real "re-assess an app" action, right from the palette -- the exact
+    // same /assess endpoint the Fleet table's own per-row "Re-assess"
+    // button posts to (fleet.html), via fetch() so the CSRF header this
+    // route requires is attached (getCsrfCookie() is defined globally,
+    // above) the same way htmx attaches it for boosted form submits.
+    async reassess(r) {
+      this.close();
+      try {
+        const res = await fetch('/assess', {
+          method: 'POST',
+          headers: { 'X-CSRF-Token': getCsrfCookie(), 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ repo_url: r.repoUrl || '', criticality: r.criticality || 'medium' }),
+        });
+        window.location.href = res.url || '/';
+      } catch (e) {
+        window.location.href = '/';
+      }
+    },
+    moveDown() { this.activeIndex = Math.min(this.activeIndex + 1, this.results.length - 1); },
+    moveUp() { this.activeIndex = Math.max(this.activeIndex - 1, 0); },
+    selectActive() { if (this.results[this.activeIndex]) this.go(this.results[this.activeIndex]); },
   };
 }
 // Toast notification manager

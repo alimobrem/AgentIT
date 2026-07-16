@@ -178,9 +178,9 @@ class TestIsGitopsRegistered:
 
 class TestRouteAndDeliverClusterConfig:
     async def test_not_registered_routes_to_direct_apply(self):
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        aid = raw.save(report)
+        aid = await raw.save(report)
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": []}
             result = await route_and_deliver(
@@ -193,10 +193,10 @@ class TestRouteAndDeliverClusterConfig:
         mock_apply.assert_called_once()
 
     async def test_registered_routes_to_infra_repo_commit(self):
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
         report.infra_repo_url = "https://github.com/org/infra-gitops"
-        aid = raw.save(report)
+        aid = await raw.save(report)
         with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
              patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
              patch("agentit.portal.github_pr.ensure_applicationset") as mock_ensure, \
@@ -215,10 +215,10 @@ class TestRouteAndDeliverClusterConfig:
         mock_apply.assert_not_called()
 
     async def test_dry_run_skips_infra_commit_call(self):
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
         report.infra_repo_url = "https://github.com/org/infra-gitops"
-        aid = raw.save(report)
+        aid = await raw.save(report)
         with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
              patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit:
             result = await route_and_deliver(
@@ -232,16 +232,16 @@ class TestRouteAndDeliverClusterConfig:
 
 class TestRouteAndDeliverCicdLane:
     async def test_cicd_files_create_admin_review_gate_never_silent_skip(self):
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        aid = raw.save(report)
+        aid = await raw.save(report)
         result = await route_and_deliver(
             [_cicd_file()], app_name=report.repo_name, namespace="ns",
             report=report, store=store, assessment_id=aid,
             actor="tester", dry_run=False, force_dry_run_first=False,
         )
         assert result["mechanisms"][CATEGORY_CICD_SHARED_NAMESPACE] == MECHANISM_CLUSTER_ADMIN_REVIEW_GATE
-        gates = raw.list_gates(status="pending")
+        gates = await raw.list_gates(status="pending")
         assert len(gates) == 1
         assert gates[0]["gate_type"] == "cluster-admin-review"
         assert "openshift-pipelines" in gates[0]["summary"]
@@ -251,9 +251,9 @@ class TestRouteAndDeliverCicdLane:
 
 class TestRouteAndDeliverSourcePatch:
     async def test_source_patch_routes_to_source_repo_pr_with_target_path(self):
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        aid = raw.save(report)
+        aid = await raw.save(report)
         with patch("agentit.portal.github_pr.create_source_patch_pr") as mock_pr:
             mock_pr.return_value = {"pr_url": "https://github.com/org/test-app/pull/9", "branch": "agentit/codechange", "files_committed": 1}
             result = await route_and_deliver(
@@ -269,9 +269,9 @@ class TestRouteAndDeliverSourcePatch:
 
 class TestRouteAndDeliverManifestAtRest:
     async def test_non_yaml_config_routes_to_app_repo_pr(self):
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        aid = raw.save(report)
+        aid = await raw.save(report)
         with patch("agentit.portal.github_pr.create_onboarding_pr") as mock_pr:
             mock_pr.return_value = {"pr_url": "https://github.com/org/test-app/pull/3", "branch": "agentit/onboarding", "files_added": 1}
             result = await route_and_deliver(
@@ -285,9 +285,9 @@ class TestRouteAndDeliverManifestAtRest:
 
 class TestRouteAndDeliverSecretsAndNarrative:
     async def test_secret_never_delivered(self):
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        aid = raw.save(report)
+        aid = await raw.save(report)
         result = await route_and_deliver(
             [_secret_file()], app_name=report.repo_name, namespace="ns",
             report=report, store=store, assessment_id=aid,
@@ -298,9 +298,9 @@ class TestRouteAndDeliverSecretsAndNarrative:
         assert result["outcomes"] == {}
 
     async def test_narrative_report_excluded_not_delivered(self):
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        aid = raw.save(report)
+        aid = await raw.save(report)
         result = await route_and_deliver(
             [_narrative_report_file()], app_name=report.repo_name, namespace="ns",
             report=report, store=store, assessment_id=aid,
@@ -312,9 +312,9 @@ class TestRouteAndDeliverSecretsAndNarrative:
 
 class TestDeliveriesTracking:
     async def test_delivery_row_created_with_categories_and_mechanism(self):
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        aid = raw.save(report)
+        aid = await raw.save(report)
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": []}
             result = await route_and_deliver(
@@ -322,7 +322,7 @@ class TestDeliveriesTracking:
                 report=report, store=store, assessment_id=aid,
                 actor="tester", dry_run=False, force_dry_run_first=False,
             )
-        delivery = raw.get_delivery(result["delivery_id"])
+        delivery = await raw.get_delivery(result["delivery_id"])
         assert delivery is not None
         assert delivery["assessment_id"] == aid
         assert delivery["app_name"] == report.repo_name
@@ -332,9 +332,9 @@ class TestDeliveriesTracking:
         assert delivery["verification"] == "unknown"
 
     async def test_list_deliveries_returns_rows_for_assessment(self):
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        aid = raw.save(report)
+        aid = await raw.save(report)
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": [], "skipped": [], "errors": []}
             await route_and_deliver(
@@ -342,44 +342,44 @@ class TestDeliveriesTracking:
                 report=report, store=store, assessment_id=aid,
                 actor="tester", dry_run=False, force_dry_run_first=False,
             )
-        deliveries = raw.list_deliveries(aid)
+        deliveries = await raw.list_deliveries(aid)
         assert len(deliveries) == 1
 
-    def test_update_delivery_merges_details(self):
-        store = make_async_store()[1]
+    async def test_update_delivery_merges_details(self):
+        store = (await make_async_store())[1]
         report = make_report()
-        aid = store.save(report)
-        delivery_id = store.create_delivery(aid, "app", {"cluster_config": 1}, "direct-apply", details={"a": 1})
-        ok = store.update_delivery(delivery_id, status="verified", verification="verified", details={"b": 2})
+        aid = await store.save(report)
+        delivery_id = await store.create_delivery(aid, "app", {"cluster_config": 1}, "direct-apply", details={"a": 1})
+        ok = await store.update_delivery(delivery_id, status="verified", verification="verified", details={"b": 2})
         assert ok is True
-        d = store.get_delivery(delivery_id)
+        d = await store.get_delivery(delivery_id)
         assert d["status"] == "verified"
         assert d["verification"] == "verified"
         assert d["details"] == {"a": 1, "b": 2}
 
-    def test_update_delivery_returns_false_for_unknown_id(self):
-        store = make_async_store()[1]
-        assert store.update_delivery("nonexistent", status="verified") is False
+    async def test_update_delivery_returns_false_for_unknown_id(self):
+        store = (await make_async_store())[1]
+        assert await store.update_delivery("nonexistent", status="verified") is False
 
-    def test_list_pending_gitops_deliveries_filters_by_mechanism_and_verification(self):
-        store = make_async_store()[1]
+    async def test_list_pending_gitops_deliveries_filters_by_mechanism_and_verification(self):
+        store = (await make_async_store())[1]
         report = make_report()
-        aid = store.save(report)
-        gitops_id = store.create_delivery(aid, "app", {}, "infra-repo-commit")
-        store.create_delivery(aid, "app", {}, "direct-apply")
-        pending = store.list_pending_gitops_deliveries()
+        aid = await store.save(report)
+        gitops_id = await store.create_delivery(aid, "app", {}, "infra-repo-commit")
+        await store.create_delivery(aid, "app", {}, "direct-apply")
+        pending = await store.list_pending_gitops_deliveries()
         assert [d["id"] for d in pending] == [gitops_id]
 
     async def test_delivery_records_edited_files_for_traceability(self):
         """The edit-before-apply flow's delivered-content traceability
         requirement: a file carrying the `edited` flag
-        (`store.update_onboarding_file()` sets this) must show up in the
+        (`await store.update_onboarding_file()` sets this) must show up in the
         delivery row's `details.edited_files`, a permanent, queryable fact
         about what was actually delivered vs. what was originally
         generated -- not just a transient UI diff."""
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        aid = raw.save(report)
+        aid = await raw.save(report)
         edited_file = dict(_cluster_config_file())
         edited_file["original_content"] = "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: test\n  original: true\n"
         edited_file["edited"] = True
@@ -390,13 +390,13 @@ class TestDeliveriesTracking:
                 report=report, store=store, assessment_id=aid,
                 actor="tester", dry_run=False, force_dry_run_first=False,
             )
-        delivery = raw.get_delivery(result["delivery_id"])
+        delivery = await raw.get_delivery(result["delivery_id"])
         assert delivery["details"]["edited_files"] == ["app-network-policy.yaml"]
 
     async def test_delivery_edited_files_empty_when_nothing_edited(self):
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        aid = raw.save(report)
+        aid = await raw.save(report)
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": []}
             result = await route_and_deliver(
@@ -404,5 +404,5 @@ class TestDeliveriesTracking:
                 report=report, store=store, assessment_id=aid,
                 actor="tester", dry_run=False, force_dry_run_first=False,
             )
-        delivery = raw.get_delivery(result["delivery_id"])
+        delivery = await raw.get_delivery(result["delivery_id"])
         assert delivery["details"]["edited_files"] == []

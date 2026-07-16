@@ -1,0 +1,55 @@
+{# Real, step-by-step onboarding progress -- rendered both on first paint
+   (onboard_progress.html includes this directly) and on every SSE tick
+   (onboard_progress_stream() renders this same template server-side and
+   pushes it as the "progress" event's data). Never a fabricated percentage:
+   the stepper reflects the job's own real `status`/`current_step`
+   (docs/ux-design-requirements.md checklist #6), and the agent list below
+   is sourced from the real per-agent events FleetOrchestrator already logs
+   live, not invented here. #}
+<div class="card" id="onboard-progress-card">
+  <div class="lifecycle-stepper">
+    {% set stages = [("running", "Running Agents"), ("saving", "Saving Manifests"), ("completed", "Done")] %}
+    {% for key, label in stages %}
+    {% set is_active = job.status == key %}
+    {% set is_done = job.status == "completed" or (key == "running" and job.status in ("saving", "completed")) %}
+    <div class="lifecycle-step {% if is_active %}step-active{% elif is_done %}step-done{% else %}step-pending{% endif %}">
+      <div class="step-marker">{% if is_done and not is_active %}&#10003;{% else %}{{ loop.index }}{% endif %}</div>
+      <div class="step-label">{{ label }}</div>
+    </div>
+    {% if not loop.last %}<div class="step-connector {% if is_done %}connector-done{% endif %}"></div>{% endif %}
+    {% endfor %}
+  </div>
+
+  <p class="text-muted text-center mb-1">{{ job.current_step or "Starting…" }}</p>
+
+  {% if agent_steps %}
+  <div class="mt-1">
+    <h3 class="text-sm mb-1">Agents</h3>
+    <ul class="finding-list">
+      {% for step in agent_steps %}
+      <li class="finding-item {% if step.action == 'failed' or step.action == 'timeout' %}finding-critical{% elif step.action == 'completed' %}finding-success{% endif %}">
+        {% if step.action == 'completed' %}
+        <span class="badge badge-low">done</span>
+        {% elif step.action in ('failed', 'timeout') %}
+        <span class="badge badge-critical">{{ step.action }}</span>
+        {% else %}
+        <span class="badge badge-info spinner-wrap"><span class="spinner"></span> {{ step.action }}</span>
+        {% endif %}
+        <strong>{{ step.agent }}</strong>
+        <span class="text-muted text-sm">{{ step.summary }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {% if job.status == "failed" %}
+  <div class="alert alert-error mt-1">{{ job.error or "Onboarding failed" }}</div>
+  <a href="/assessments/{{ assessment_id }}" class="btn btn-outline">Back to Assessment</a>
+  {% endif %}
+</div>
+{% if job.status == "completed" %}
+<script>window.location.href = "/assessments/{{ assessment_id }}/onboard-results";</script>
+{% elif job.status == "failed" %}
+<script>window.location.href = "/assessments/{{ assessment_id }}?error={{ (job.error or 'Onboarding failed') | urlencode }}";</script>
+{% endif %}

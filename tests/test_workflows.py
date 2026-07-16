@@ -28,16 +28,16 @@ class TestAssessOnboardFlow:
         from agentit.agents.orchestrator import FleetOrchestrator
 
         report = make_report(criticality="high")
-        store, raw = make_async_store()
-        aid = raw.save(report)
+        store, raw = await make_async_store()
+        aid = await raw.save(report)
 
         orch = FleetOrchestrator(report=report, output_dir=tmp_path / "out",
                                  store=store, assessment_id=aid)
         result = await orch.run()
 
         assert any(r.success for r in result.agent_results)
-        assert len(raw.list_remediations(aid)) > 0
-        assert len(raw.list_slos(aid)) > 0
+        assert len(await raw.list_remediations(aid)) > 0
+        assert len(await raw.list_slos(aid)) > 0
 
     async def test_orchestrator_registers_agents(self, tmp_path):
         """security/observability/cicd/compliance/infrastructure/incident/
@@ -46,15 +46,15 @@ class TestAssessOnboardFlow:
         agents are left to register."""
         from agentit.agents.orchestrator import FleetOrchestrator
 
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report()
-        aid = raw.save(report)
+        aid = await raw.save(report)
 
         orch = FleetOrchestrator(report=report, output_dir=tmp_path / "out",
                                  store=store, assessment_id=aid)
         await orch.run()
 
-        agents = raw.list_agents()
+        agents = await raw.list_agents()
         assert len(agents) >= 3
 
 
@@ -63,23 +63,23 @@ class TestAutoModeFlow:
 
     async def test_disabled_always_gates(self):
         from agentit.automode import AutoMode
-        store, _raw = make_async_store()
+        store, _raw = await make_async_store()
         auto = AutoMode(store=store)
         ok, _ = await auto.should_auto_apply(True, ["x"], "low", "app")
         assert ok is False
 
     async def test_enabled_no_llm_gates(self):
         from agentit.automode import AutoMode
-        store, raw = make_async_store()
-        raw.set_setting("auto_mode", "true")
+        store, raw = await make_async_store()
+        await raw.set_setting("auto_mode", "true")
         auto = AutoMode(store=store, llm_client=None)
         ok, _ = await auto.should_auto_apply(True, ["x"], "low", "app")
         assert ok is False
 
     async def test_enabled_llm_safe_approves(self):
         from agentit.automode import AutoMode
-        store, raw = make_async_store()
-        raw.set_setting("auto_mode", "true")
+        store, raw = await make_async_store()
+        await raw.set_setting("auto_mode", "true")
         llm = MagicMock()
         llm.classify_action.return_value = {"is_destructive": False, "confidence": 0.95, "reason": "safe"}
         auto = AutoMode(store=store, llm_client=llm)
@@ -88,8 +88,8 @@ class TestAutoModeFlow:
 
     async def test_enabled_llm_destructive_gates(self):
         from agentit.automode import AutoMode
-        store, raw = make_async_store()
-        raw.set_setting("auto_mode", "true")
+        store, raw = await make_async_store()
+        await raw.set_setting("auto_mode", "true")
         llm = MagicMock()
         llm.classify_action.return_value = {"is_destructive": True, "confidence": 0.9, "reason": "deletes"}
         auto = AutoMode(store=store, llm_client=llm)
@@ -102,7 +102,7 @@ class TestRemediationLoopFlow:
 
     async def test_loop_handles_assess_failure(self):
         from agentit.remediation_loop import RemediationLoop
-        store, _raw = make_async_store()
+        store, _raw = await make_async_store()
         loop = RemediationLoop(portal_url="http://bad-host:9999", store=store, timeout=2)
         result = await loop.trigger("https://github.com/org/app", "app", reason="test")
         assert result["outcome"] == "failed"
@@ -111,10 +111,10 @@ class TestRemediationLoopFlow:
 
     async def test_loop_logs_events(self):
         from agentit.remediation_loop import RemediationLoop
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         loop = RemediationLoop(portal_url="http://bad-host:9999", store=store, timeout=2)
         await loop.trigger("https://github.com/org/app", "test-app", reason="test")
-        events = raw.list_events()
+        events = await raw.list_events()
         assert any(e["action"] == "loop-started" for e in events)
         await loop.close()
 
@@ -151,29 +151,29 @@ class TestInfraRepoFlow:
 class TestGateLifecycleFlow:
     """Gates: dedup, expire, cascade delete."""
 
-    def test_full_gate_lifecycle(self):
-        store = make_store()
-        aid = store.save(make_report())
+    async def test_full_gate_lifecycle(self):
+        store = await make_store()
+        aid = await store.save(make_report())
 
-        g1 = store.create_gate(aid, "deploy", "Approve")
-        g2 = store.create_gate(aid, "deploy", "Duplicate")
+        g1 = await store.create_gate(aid, "deploy", "Approve")
+        g2 = await store.create_gate(aid, "deploy", "Duplicate")
         assert g1 == g2
 
-        store.resolve_gate(g1, "approved", "user")
-        assert len(store.list_gates("pending")) == 0
-        assert len(store.list_gates("approved")) == 1
+        await store.resolve_gate(g1, "approved", "user")
+        assert len(await store.list_gates("pending")) == 0
+        assert len(await store.list_gates("approved")) == 1
 
-    def test_delete_cascades_gates(self):
-        store = make_store()
-        aid = store.save(make_report())
-        store.create_gate(aid, "deploy", "Gate")
-        store.save_remediation(aid, "security", "Fix")
-        store.save_slo(aid, "avail", 99.9)
+    async def test_delete_cascades_gates(self):
+        store = await make_store()
+        aid = await store.save(make_report())
+        await store.create_gate(aid, "deploy", "Gate")
+        await store.save_remediation(aid, "security", "Fix")
+        await store.save_slo(aid, "avail", 99.9)
 
-        store.delete(aid)
-        assert store.get(aid) is None
-        assert store.list_remediations(aid) == []
-        assert store.list_slos(aid) == []
+        await store.delete(aid)
+        assert await store.get(aid) is None
+        assert await store.list_remediations(aid) == []
+        assert await store.list_slos(aid) == []
 
 
 class TestCodeChangeAgentFlow:

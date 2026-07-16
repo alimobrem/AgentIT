@@ -31,28 +31,30 @@ def get_known_agent_names() -> frozenset[str]:
     return frozenset(AGENT_CLASSES) | frozenset(w["name"] for w in WATCHER_AGENTS)
 
 
-def prune_stale_agents_and_log(store) -> list[str]:
+def _pruned_event(pruned: list[str]) -> dict:
+    """Pure helper for the event shape below."""
+    return dict(
+        agent_id="agent-registry", action="agent-registry-pruned", target_app=None,
+        severity="warning",
+        summary=(
+            f"Pruned {len(pruned)} stale agent registration(s) no longer in "
+            f"codebase: {', '.join(pruned)}"
+        ),
+    )
+
+
+async def prune_stale_agents_and_log(store) -> list[str]:
     """Delete `agent_registry` rows for names outside `get_known_agent_names()`
     and log a matching `agent-registry-pruned` event, mirroring
     `skill_inventory.py`'s `skill-added`/`skill-removed` event convention so
-    this shows up on the Events page for free.
-
-    Takes a synchronous store (`store.py`'s `AssessmentStore`, or the `.raw`
-    of an `AsyncSQLiteStore`) -- same calling convention as
-    `diff_and_log_inventory_changes()`, which this is meant to run alongside
-    in the portal's hourly background maintenance loop.
+    this shows up on the Events page for free. Runs alongside
+    `diff_and_log_inventory_changes()` in the portal's hourly background
+    maintenance loop.
 
     Returns the sorted list of pruned agent names (empty if nothing was
     stale).
     """
-    pruned = store.prune_stale_agents(get_known_agent_names())
+    pruned = await store.prune_stale_agents(get_known_agent_names())
     if pruned:
-        store.log_event(
-            agent_id="agent-registry", action="agent-registry-pruned", target_app=None,
-            severity="warning",
-            summary=(
-                f"Pruned {len(pruned)} stale agent registration(s) no longer in "
-                f"codebase: {', '.join(pruned)}"
-            ),
-        )
+        await store.log_event(**_pruned_event(pruned))
     return pruned

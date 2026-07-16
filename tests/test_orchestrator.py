@@ -156,24 +156,73 @@ class TestRun:
         # "cost" instead of the old "security" -- security is now a
         # skill-only domain with no Python agent left to run (see
         # docs/agent-removal-readiness.md).
-        store, raw = make_async_store()
+        store, raw = await make_async_store()
         report = make_report(criticality="medium")
-        aid = raw.save(report)
+        aid = await raw.save(report)
         orch = FleetOrchestrator(
             report, tmp_path / "out", store=store, assessment_id=aid,
             agent_filter=["cost"],
         )
         await orch.run()
 
-        runs = raw.list_agent_runs("cost")
+        runs = await raw.list_agent_runs("cost")
         assert len(runs) == 1
         assert runs[0]["status"] == "success"
         assert runs[0]["mode"] == "local"
         assert runs[0]["assessment_id"] == aid
         assert runs[0]["duration_ms"] is not None
 
-        stats = raw.get_agent_stats("cost")
+        stats = await raw.get_agent_stats("cost")
         assert stats[0]["successes"] == 1
+
+
+class TestDefaultSlosDedup:
+    """Regression, confirmed live: re-onboarding an app (assess again,
+    onboard again) re-ran `_create_default_slos()` with no uniqueness
+    check, inserting a second full set of the same 3 default metrics on
+    top of the existing ones -- 6 SLO rows instead of 3, inflating the
+    Fleet-Wide SLOs page's "Total SLOs" stat. The fix skips any metric
+    that already has an SLO for this assessment.
+    """
+
+    async def test_running_orchestrator_twice_does_not_duplicate_default_slos(self, tmp_path: Path) -> None:
+        store, raw = await make_async_store()
+        report = make_report(criticality="medium")
+        aid = await raw.save(report)
+
+        orch = FleetOrchestrator(report, tmp_path / "out1", store=store, assessment_id=aid)
+        await orch.run()
+        first_slos = await raw.list_slos(aid)
+        assert len(first_slos) == 3
+
+        # Re-onboard: a second orchestrator run against the *same*
+        # assessment_id, exactly what re-clicking "Onboard This App" does.
+        orch2 = FleetOrchestrator(report, tmp_path / "out2", store=store, assessment_id=aid)
+        await orch2.run()
+
+        slos = await raw.list_slos(aid)
+        assert len(slos) == 3, f"expected 3 deduped default SLOs, got {len(slos)}: {slos}"
+        metric_names = [s["metric_name"] for s in slos]
+        assert sorted(metric_names) == sorted(set(metric_names)), "duplicate metric_name rows present"
+
+    async def test_manually_added_slo_for_a_default_metric_is_not_duplicated_either(self, tmp_path: Path) -> None:
+        """A manually-added SLO (Add SLO form) for one of the 3 default
+        metrics must also block that metric's default from being seeded
+        again -- the dedup check is keyed on metric_name alone, not on
+        "was this row created by the orchestrator"."""
+        store, raw = await make_async_store()
+        report = make_report(criticality="medium")
+        aid = await raw.save(report)
+        await raw.save_slo(aid, "availability", 99.99)  # manual, before onboarding
+
+        orch = FleetOrchestrator(report, tmp_path / "out", store=store, assessment_id=aid)
+        await orch.run()
+
+        slos = await raw.list_slos(aid)
+        availability_rows = [s for s in slos if s["metric_name"] == "availability"]
+        assert len(availability_rows) == 1
+        assert availability_rows[0]["target_value"] == 99.99  # untouched, not overwritten
+        assert len(slos) == 3  # availability (manual) + error_rate + latency_p99_ms (seeded)
 
 
 class TestConflicts:

@@ -185,7 +185,7 @@ async def _background_maintenance() -> None:
         try:
             from agentit.portal.metrics import refresh_db_metrics
             s = await get_store()
-            refresh_db_metrics(s.raw if hasattr(s, "raw") else s)
+            await refresh_db_metrics(s)
         except Exception:
             log.debug("Background DB metrics refresh failed", exc_info=True)
 
@@ -208,13 +208,13 @@ async def _background_maintenance() -> None:
 
         try:
             s = await get_store()
-            diff_and_log_inventory_changes(s.raw if hasattr(s, "raw") else s)
+            await diff_and_log_inventory_changes(s)
         except Exception:
             log.debug("Background skill inventory diff failed", exc_info=True)
 
         try:
             s = await get_store()
-            pruned = prune_stale_agents_and_log(s.raw if hasattr(s, "raw") else s)
+            pruned = await prune_stale_agents_and_log(s)
             if pruned:
                 log.info("Background: pruned %d stale agent registration(s): %s",
                           len(pruned), ", ".join(pruned))
@@ -263,10 +263,7 @@ async def _shutdown() -> None:
     try:
         from agentit.portal.helpers import get_store
         s = await get_store()
-        if hasattr(s, "close"):
-            await s.close()
-        else:
-            (s.raw if hasattr(s, "raw") else s)._conn.close()
+        await s.close()
     except Exception:
         log.debug("Store close failed", exc_info=True)
 

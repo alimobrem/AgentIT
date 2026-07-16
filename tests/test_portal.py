@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from agentit.models import (
     ArchitectureInfo,
@@ -24,7 +24,6 @@ from agentit.models import (
 from agentit.platform_context import PlatformContext
 from agentit.portal.app import app, get_store
 from agentit.portal.routes.assessments import _get_trusted_base_url
-from agentit.portal.store_factory import AsyncSQLiteStore
 
 # Empty PlatformContext is FleetOrchestrator.run()'s "discovery never
 # actually connected" signal, which skips the has_api() gate entirely
@@ -91,8 +90,8 @@ def _make_report(repo_name: str = "test-repo") -> AssessmentReport:
 
 
 @pytest.fixture(autouse=True)
-def _override_store():
-    """Patch get_store so every test gets a fresh in-memory DB.
+async def _override_store():
+    """Patch get_store so every test gets the real, truncated-fresh store.
 
     Also patches image_builder.build_app_image: onboarding a report whose
     findings include a missing Containerfile causes HardeningAgent to
@@ -101,80 +100,79 @@ def _override_store():
     the local kubeconfig happens to point to. Without this patch, running
     this suite with an active `oc login` silently floods a real cluster.
     """
-    test_store = make_store()
-    async_store = AsyncSQLiteStore.wrap(test_store)
-    with patch("agentit.portal.app.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.webhooks.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.health.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.schedules.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.fleet.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.assessments.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.gates.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.capabilities.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.settings.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.insights.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.remediations.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.slos.get_store", return_value=async_store), \
+    test_store = await make_store()
+    with patch("agentit.portal.app.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.webhooks.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.health.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.schedules.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.fleet.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.assessments.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.gates.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.capabilities.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.settings.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.insights.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.remediations.get_store", return_value=test_store), \
+         patch("agentit.portal.routes.slos.get_store", return_value=test_store), \
          patch("agentit.image_builder.build_app_image",
                return_value={"image_ref": "test/image:test", "run_name": "test-run", "status": "skipped-in-tests"}):
         yield test_store
 
 
 @pytest.fixture
-def client():
-    c = TestClient(app)
-    prime_csrf(c)
-    return c
+async def client():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True) as c:
+        await prime_csrf(c)
+        yield c
 
 
-def test_dashboard_empty(client):
-    resp = client.get("/")
+async def test_dashboard_empty(client):
+    resp = await client.get("/")
     assert resp.status_code == 200
     assert "Assess your first app" in resp.text
 
 
-def test_assess_form(client):
-    resp = client.get("/assess")
+async def test_assess_form(client):
+    resp = await client.get("/assess")
     assert resp.status_code == 200
     assert "<form" in resp.text
     assert "repo_url" in resp.text
 
 
-def test_api_list_empty(client):
-    resp = client.get("/api/assessments")
+async def test_api_list_empty(client):
+    resp = await client.get("/api/assessments")
     assert resp.status_code == 200
     assert resp.json() == []
 
 
-def test_save_and_retrieve(client, _override_store):
+async def test_save_and_retrieve(client, _override_store):
     store = _override_store
     report = _make_report()
-    aid = store.save(report)
+    aid = await store.save(report)
 
-    resp = client.get(f"/assessments/{aid}")
+    resp = await client.get(f"/assessments/{aid}")
     assert resp.status_code == 200
     assert "test-repo" in resp.text
 
 
-def test_api_roundtrip(client, _override_store):
+async def test_api_roundtrip(client, _override_store):
     store = _override_store
     report = _make_report("my-service")
-    aid = store.save(report)
+    aid = await store.save(report)
 
-    resp = client.get(f"/api/assessments/{aid}")
+    resp = await client.get(f"/api/assessments/{aid}")
     assert resp.status_code == 200
     data = resp.json()
     assert data["repo_name"] == "my-service"
     assert "scores" in data
 
 
-def test_assessment_not_found(client):
-    resp = client.get("/assessments/nonexistent")
+async def test_assessment_not_found(client):
+    resp = await client.get("/assessments/nonexistent")
     assert resp.status_code == 404
 
 
-def test_api_detail_not_found(client):
-    resp = client.get("/api/assessments/nonexistent")
+async def test_api_detail_not_found(client):
+    resp = await client.get("/api/assessments/nonexistent")
     assert resp.status_code == 404
 
 
@@ -300,27 +298,36 @@ def _make_report_with_findings(repo_name: str = "onboard-repo") -> AssessmentRep
     )
 
 
-def test_onboard_creates_results(client, _override_store):
+async def test_onboard_creates_results(client, _override_store):
+    """Onboard runs as a background job (docs/ux-design-requirements.md
+    checklist #6/#8) -- the POST redirects to a real-time progress page,
+    not straight to onboard-results. TestClient awaits background tasks to
+    completion before returning the response, so the job is already
+    "completed" by the time the progress page's own redirect is followed."""
     store = _override_store
     report = _make_report_with_findings()
-    aid = store.save(report)
+    aid = await store.save(report)
 
-    resp = client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
+    resp = await client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
     assert resp.status_code == 303
-    assert f"/assessments/{aid}/onboard-results" in resp.headers["location"]
+    assert f"/assessments/{aid}/onboard/progress/" in resp.headers["location"]
+
+    progress_resp = await client.get(resp.headers["location"], follow_redirects=False)
+    assert progress_resp.status_code == 303
+    assert f"/assessments/{aid}/onboard-results" in progress_resp.headers["location"]
 
 
-def test_onboard_results_page(client, _override_store):
+async def test_onboard_results_page(client, _override_store):
     store = _override_store
     report = _make_report_with_findings()
-    aid = store.save(report)
+    aid = await store.save(report)
 
     # Pin platform discovery so skill generation doesn't depend on
     # whatever cluster happens to be reachable at test time (see
     # FleetOrchestrator.run()'s platform=None fallback).
     with patch("agentit.platform_context.discover_platform", return_value=_NO_CLUSTER):
-        client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
-    resp = client.get(f"/assessments/{aid}/onboard-results")
+        await client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
+    resp = await client.get(f"/assessments/{aid}/onboard-results")
     assert resp.status_code == 200
     # security/observability/compliance are now skill-only domains (see
     # docs/agent-removal-readiness.md) -- generated manifests are grouped
@@ -338,15 +345,15 @@ def test_onboard_results_page(client, _override_store):
     assert "Dry Run" in resp.text
 
 
-def test_api_manifests(client, _override_store):
+async def test_api_manifests(client, _override_store):
     store = _override_store
     report = _make_report_with_findings()
-    aid = store.save(report)
+    aid = await store.save(report)
 
     # Pin platform discovery — see comment in test_onboard_results_page.
     with patch("agentit.platform_context.discover_platform", return_value=_NO_CLUSTER):
-        client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
-    resp = client.get(f"/api/assessments/{aid}/manifests")
+        await client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
+    resp = await client.get(f"/api/assessments/{aid}/manifests")
     assert resp.status_code == 200
     data = resp.json()
     assert isinstance(data, list)
@@ -357,17 +364,17 @@ def test_api_manifests(client, _override_store):
     assert "skills" in categories
 
 
-def test_api_manifests_not_found(client):
-    resp = client.get("/api/assessments/nonexistent/manifests")
+async def test_api_manifests_not_found(client):
+    resp = await client.get("/api/assessments/nonexistent/manifests")
     assert resp.status_code == 404
 
 
-def test_onboard_not_found(client):
-    resp = client.post("/assessments/nonexistent/onboard", follow_redirects=False)
+async def test_onboard_not_found(client):
+    resp = await client.post("/assessments/nonexistent/onboard", follow_redirects=False)
     assert resp.status_code == 404
 
 
-def test_trusted_base_url_ignores_forged_host_header(client, _override_store):
+async def test_trusted_base_url_ignores_forged_host_header(client, _override_store):
     """A forged Host header must not affect the webhook URL registered with GitHub.
 
     Regression test for the reflected-Host-header issue: with no
@@ -376,7 +383,7 @@ def test_trusted_base_url_ignores_forged_host_header(client, _override_store):
     """
     store = _override_store
     report = _make_report()
-    aid = store.save(report)
+    aid = await store.save(report)
 
     fake_routes = [
         {"metadata": {"labels": {"app.kubernetes.io/name": "agentit"}},
@@ -387,7 +394,7 @@ def test_trusted_base_url_ignores_forged_host_header(client, _override_store):
          patch("agentit.kube.list_custom_resources", return_value=fake_routes), \
          patch.dict(os.environ, {"KUBERNETES_SERVICE_HOST": "10.0.0.1"}):
         mock_ensure_webhook.return_value = {"created": True}
-        client.post(
+        await client.post(
             f"/assessments/{aid}/onboard",
             follow_redirects=False,
             headers={"Host": "evil.example.com"},
@@ -446,28 +453,28 @@ def test_get_trusted_base_url_falls_back_to_request_when_route_unresolvable():
         assert _get_trusted_base_url(request) == "http://localhost:8080"
 
 
-def test_onboard_results_no_onboarding(client, _override_store):
+async def test_onboard_results_no_onboarding(client, _override_store):
     store = _override_store
     report = _make_report()
-    aid = store.save(report)
+    aid = await store.save(report)
 
-    resp = client.get(f"/assessments/{aid}/onboard-results")
+    resp = await client.get(f"/assessments/{aid}/onboard-results")
     assert resp.status_code == 404
 
 
-def test_download_manifests_zip(client, _override_store):
+async def test_download_manifests_zip(client, _override_store):
     store = _override_store
     report = _make_report_with_findings()
-    aid = store.save(report)
+    aid = await store.save(report)
 
     # Run onboarding to populate files. Pin platform discovery so skill
     # generation doesn't depend on whatever cluster happens to be
     # reachable at test time (see FleetOrchestrator.run()'s platform=None
     # fallback).
     with patch("agentit.platform_context.discover_platform", return_value=_NO_CLUSTER):
-        client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
+        await client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
 
-    resp = client.get(f"/api/assessments/{aid}/manifests/download")
+    resp = await client.get(f"/api/assessments/{aid}/manifests/download")
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/zip"
     assert "onboard-repo-onboarding.zip" in resp.headers["content-disposition"]
@@ -488,43 +495,43 @@ def test_download_manifests_zip(client, _override_store):
     zf.close()
 
 
-def test_download_manifests_not_found(client):
-    resp = client.get("/api/assessments/nonexistent/manifests/download")
+async def test_download_manifests_not_found(client):
+    resp = await client.get("/api/assessments/nonexistent/manifests/download")
     assert resp.status_code == 404
 
 
-def test_download_manifests_no_onboarding(client, _override_store):
+async def test_download_manifests_no_onboarding(client, _override_store):
     store = _override_store
     report = _make_report()
-    aid = store.save(report)
+    aid = await store.save(report)
 
-    resp = client.get(f"/api/assessments/{aid}/manifests/download")
+    resp = await client.get(f"/api/assessments/{aid}/manifests/download")
     assert resp.status_code == 404
 
 
-def test_verify_properties_not_found(client):
-    resp = client.get("/api/assessments/nonexistent/verify")
+async def test_verify_properties_not_found(client):
+    resp = await client.get("/api/assessments/nonexistent/verify")
     assert resp.status_code == 404
 
 
-def test_verify_properties_no_onboarding(client, _override_store):
+async def test_verify_properties_no_onboarding(client, _override_store):
     store = _override_store
     report = _make_report()
-    aid = store.save(report)
+    aid = await store.save(report)
 
-    resp = client.get(f"/api/assessments/{aid}/verify")
+    resp = await client.get(f"/api/assessments/{aid}/verify")
     assert resp.status_code == 404
 
 
-def test_verify_properties_runs_against_generated_files(client, _override_store):
+async def test_verify_properties_runs_against_generated_files(client, _override_store):
     """Regression: this endpoint used to call verify_all_properties(repo_name,
     repo_name) -- two strings -- while verify_all_properties() expects a
     list[GeneratedFile]. Any real call would raise a TypeError."""
     store = _override_store
     report = _make_report_with_findings()
-    aid = store.save(report)
+    aid = await store.save(report)
 
-    store.save_onboarding(aid, [
+    await store.save_onboarding(aid, [
         {
             "category": "security",
             "path": "netpol.yaml",
@@ -538,7 +545,7 @@ def test_verify_properties_runs_against_generated_files(client, _override_store)
         },
     ])
 
-    resp = client.get(f"/api/assessments/{aid}/verify")
+    resp = await client.get(f"/api/assessments/{aid}/verify")
     assert resp.status_code == 200
     body = resp.json()
     assert body["app"] == report.repo_name
@@ -547,12 +554,12 @@ def test_verify_properties_runs_against_generated_files(client, _override_store)
     assert "Network Isolation" in properties
 
 
-def test_assessment_detail_has_onboard_button(client, _override_store):
+async def test_assessment_detail_has_onboard_button(client, _override_store):
     store = _override_store
     report = _make_report()
-    aid = store.save(report)
+    aid = await store.save(report)
 
-    resp = client.get(f"/assessments/{aid}")
+    resp = await client.get(f"/assessments/{aid}")
     assert resp.status_code == 200
     assert f"/assessments/{aid}/onboard" in resp.text
     assert "Onboard" in resp.text
@@ -563,29 +570,55 @@ def test_assessment_detail_has_onboard_button(client, _override_store):
 # ------------------------------------------------------------------
 
 
-def test_events_page_renders(client, _override_store):
+async def test_events_page_renders(client, _override_store):
     store = _override_store
-    store.log_event("test-agent", "scan", "my-app", "high", "Found vuln")
-    resp = client.get("/events")
+    await store.log_event("test-agent", "scan", "my-app", "high", "Found vuln")
+    resp = await client.get("/events")
     assert resp.status_code == 200
     assert "Agent Activity Feed" in resp.text
     assert "test-agent" in resp.text
     assert "Found vuln" in resp.text
 
 
-def test_events_page_filters_by_correlation_id(client, _override_store):
+async def test_events_page_filters_by_correlation_id(client, _override_store):
     store = _override_store
-    store.log_event("orchestrator", "completed", "app-a", "info", "chain event", correlation_id="chain-xyz")
-    store.log_event("orchestrator", "completed", "app-b", "info", "other event", correlation_id="chain-other")
-    resp = client.get("/events?correlation_id=chain-xyz")
+    await store.log_event("orchestrator", "completed", "app-a", "info", "chain event", correlation_id="chain-xyz")
+    await store.log_event("orchestrator", "completed", "app-b", "info", "other event", correlation_id="chain-other")
+    resp = await client.get("/events?correlation_id=chain-xyz")
     assert resp.status_code == 200
     assert "chain event" in resp.text
     assert "other event" not in resp.text
 
 
-def test_dlq_retry_republishes_and_redirects(client, _override_store):
+async def test_events_target_app_links_to_assessment_when_resolvable(client, _override_store):
+    """Every other page (Fleet, Remediations, Decisions) links an app name
+    to its Assessment Detail page -- Events showed plain text instead."""
     store = _override_store
-    eid = store.log_event(
+    aid = await store.save(_make_report("linked-app"))
+    await store.log_event("test-agent", "scan", "linked-app", "info", "did a thing")
+
+    resp = await client.get("/events")
+    assert resp.status_code == 200
+    assert f'<a href="/assessments/{aid}">linked-app</a>' in resp.text
+
+
+async def test_events_target_app_plain_text_when_no_assessment_resolves(client, _override_store):
+    """Never fabricate a link target -- an event whose target_app doesn't
+    match any known app must render as plain text, not a broken link."""
+    store = _override_store
+    await store.log_event("test-agent", "scan", "unknown-app", "info", "did a thing")
+
+    resp = await client.get("/events")
+    assert resp.status_code == 200
+    assert "unknown-app" in resp.text
+    # No assessment exists at all in this test -- there must be no
+    # assessment link anywhere on the page, let alone a fabricated one.
+    assert 'href="/assessments/' not in resp.text
+
+
+async def test_dlq_retry_republishes_and_redirects(client, _override_store):
+    store = _override_store
+    eid = await store.log_event(
         "event-consumer", "dead-letter", "app", "error", "Dead-lettered",
         details={
             "original_topic": "agentit-events",
@@ -593,38 +626,67 @@ def test_dlq_retry_republishes_and_redirects(client, _override_store):
             "error": "boom",
         },
     )
-    resp = client.post(f"/events/dlq/{eid}/retry", follow_redirects=False)
+    resp = await client.post(f"/events/dlq/{eid}/retry", follow_redirects=False)
     assert resp.status_code == 303
     assert "success" in resp.headers["location"]
-    assert store.list_dlq_messages() == []
+    assert await store.list_dlq_messages() == []
 
 
-def test_insights_page_shows_fleet_wide_feedback(client, _override_store):
+async def test_insights_page_shows_fleet_wide_feedback(client, _override_store):
     """Regression: insights_page used get_feedback_for_app(""), which filters
     on app_name = '' and always returns nothing -- get_all_feedback fixes it."""
     store = _override_store
-    store.record_feedback("app-a", "security", "network-policy", "rejected", human_reason="not needed here")
-    resp = client.get("/insights")
+    await store.record_feedback("app-a", "security", "network-policy", "rejected", human_reason="not needed here")
+    resp = await client.get("/insights")
     assert resp.status_code == 200
     assert "not needed here" in resp.text
 
 
-def test_insights_page_shows_check_compliance(client, _override_store):
+async def test_insights_page_shows_check_compliance(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    store.save_check_results(aid, [
+    aid = await store.save(_make_report())
+    await store.save_check_results(aid, [
         {"check_name": "has-network-policy", "dimension": "security", "passed": True},
     ])
-    resp = client.get("/insights")
+    resp = await client.get("/insights")
     assert resp.status_code == 200
     assert "Fleet-Wide Check Compliance" in resp.text
     assert "has-network-policy" in resp.text
 
 
-def test_webhook_triggers_assessment(client, _override_store):
+async def test_insights_agent_performance_zero_success_rate_is_colored_danger(client, _override_store):
+    """Regression: the success-rate bar's own color fill is invisible at
+    0% (CSS `width: var(--pct)` -> a literal 0px-wide colored bar) --
+    confirmed live: a 0%-success agent looked identical to a 100%-success
+    one. The percentage label itself must carry the severity color too."""
+    store = _override_store
+    await store.register_agent("remediation-loop", "remediation")
+    for _ in range(3):
+        await store.save_agent_run("remediation-loop", "local", "error")
+
+    resp = await client.get("/insights")
+    assert resp.status_code == 200
+    row = resp.text.split("remediation-loop", 1)[1].split("</tr>", 1)[0]
+    assert 'class="text-sm text-danger"' in row
+    assert "0.0%" in row or "0%" in row
+
+
+async def test_insights_agent_performance_full_success_rate_is_colored_success(client, _override_store):
+    store = _override_store
+    await store.register_agent("hardening", "security")
+    await store.save_agent_run("hardening", "local", "success")
+    await store.save_agent_run("hardening", "local", "success")
+
+    resp = await client.get("/insights")
+    assert resp.status_code == 200
+    row = resp.text.split("hardening", 1)[1].split("</tr>", 1)[0]
+    assert 'class="text-sm text-success"' in row
+
+
+async def test_webhook_triggers_assessment(client, _override_store):
     report = _make_report("webhook-repo")
     with patch("agentit.portal.routes.webhooks.clone_assess_cleanup", return_value=report):
-        resp = client.post(
+        resp = await client.post(
             "/api/webhook/assess",
             json={"repo_url": "https://github.com/org/webhook-repo", "criticality": "high"},
         )
@@ -634,20 +696,20 @@ def test_webhook_triggers_assessment(client, _override_store):
     assert "overall_score" in data
 
 
-def test_webhook_missing_repo_url(client):
-    resp = client.post("/api/webhook/assess", json={"criticality": "high"})
+async def test_webhook_missing_repo_url(client):
+    resp = await client.post("/api/webhook/assess", json={"criticality": "high"})
     assert resp.status_code == 400
 
 
-def test_webhook_onboard_triggers_onboarding(client, _override_store):
+async def test_webhook_onboard_triggers_onboarding(client, _override_store):
     store = _override_store
     report = _make_report_with_findings()
-    aid = store.save(report)
+    aid = await store.save(report)
 
     fake_files = [{"category": "security", "path": "netpol.yaml", "content": "kind: NetworkPolicy", "description": "netpol"}]
     fake_summary = {"agents": [], "conflicts": [], "recommendation": "READY", "auto_approve": False, "gates": []}
     with patch("agentit.portal.routes.webhooks.run_onboarding", return_value=(fake_files, fake_summary)):
-        resp = client.post(
+        resp = await client.post(
             "/api/webhook/onboard",
             json={"correlationId": aid},
         )
@@ -658,35 +720,35 @@ def test_webhook_onboard_triggers_onboarding(client, _override_store):
     assert "security" in data["categories"]
 
 
-def test_webhook_onboard_missing_assessment_id(client):
-    resp = client.post("/api/webhook/onboard", json={"eventId": "evt-123"})
+async def test_webhook_onboard_missing_assessment_id(client):
+    resp = await client.post("/api/webhook/onboard", json={"eventId": "evt-123"})
     assert resp.status_code == 400
 
 
-def test_webhook_onboard_assessment_not_found(client):
-    resp = client.post(
+async def test_webhook_onboard_assessment_not_found(client):
+    resp = await client.post(
         "/api/webhook/onboard",
         json={"correlationId": "nonexistent-id"},
     )
     assert resp.status_code == 404
 
 
-def test_api_events_returns_json(client, _override_store):
+async def test_api_events_returns_json(client, _override_store):
     store = _override_store
-    store.log_event("agent-a", "deploy", "app-x", "info", "Deployed v2")
-    store.log_event("agent-b", "scan", "app-y", "medium", "Scan done")
-    resp = client.get("/api/events")
+    await store.log_event("agent-a", "deploy", "app-x", "info", "Deployed v2")
+    await store.log_event("agent-b", "scan", "app-y", "medium", "Scan done")
+    resp = await client.get("/api/events")
     assert resp.status_code == 200
     data = resp.json()
     assert isinstance(data, list)
     assert len(data) >= 2
 
 
-def test_api_events_filter_target_app(client, _override_store):
+async def test_api_events_filter_target_app(client, _override_store):
     store = _override_store
-    store.log_event("a", "x", "app-1", "info", "e1")
-    store.log_event("b", "y", "app-2", "info", "e2")
-    resp = client.get("/api/events?target_app=app-1")
+    await store.log_event("a", "x", "app-1", "info", "e1")
+    await store.log_event("b", "y", "app-2", "info", "e2")
+    resp = await client.get("/api/events?target_app=app-1")
     assert resp.status_code == 200
     data = resp.json()
     assert all(e["target_app"] == "app-1" for e in data)
@@ -704,53 +766,53 @@ def test_api_events_filter_target_app(client, _override_store):
 # ------------------------------------------------------------------
 
 
-def test_gates_redirects_to_admin_review(client):
-    resp = client.get("/gates", follow_redirects=False)
+async def test_gates_redirects_to_admin_review(client):
+    resp = await client.get("/gates", follow_redirects=False)
     assert resp.status_code == 301
     assert resp.headers["location"] == "/admin-review"
 
 
-def test_admin_review_page_empty(client):
-    resp = client.get("/admin-review")
+async def test_admin_review_page_empty(client):
+    resp = await client.get("/admin-review")
     assert resp.status_code == 200
     assert "No pending gates" in resp.text
 
 
-def test_admin_review_page_with_pending(client, _override_store):
+async def test_admin_review_page_with_pending(client, _override_store):
     store = _override_store
     report = _make_report()
-    aid = store.save(report)
-    store.create_gate(aid, "cluster-admin-review", "Approve deployment of test-repo")
+    aid = await store.save(report)
+    await store.create_gate(aid, "cluster-admin-review", "Approve deployment of test-repo")
 
-    resp = client.get("/admin-review")
+    resp = await client.get("/admin-review")
     assert resp.status_code == 200
     assert "Approve deployment of test-repo" in resp.text
     assert "Approve" in resp.text
     assert "Reject" in resp.text
 
 
-def test_admin_review_page_excludes_app_owner_gate_types(client, _override_store):
+async def test_admin_review_page_excludes_app_owner_gate_types(client, _override_store):
     """A "deploy"-style app-owner gate must never show up on Admin Review --
     that's exactly the audience split docs/ui-redesign-proposal.md §2 makes.
     It belongs on that app's own Assessment Detail Actions tab instead."""
     store = _override_store
     report = _make_report()
-    aid = store.save(report)
-    store.create_gate(aid, "deploy", "Approve deployment of test-repo")
+    aid = await store.save(report)
+    await store.create_gate(aid, "deploy", "Approve deployment of test-repo")
 
-    resp = client.get("/admin-review")
+    resp = await client.get("/admin-review")
     assert resp.status_code == 200
     assert "Approve deployment of test-repo" not in resp.text
     assert "No pending gates" in resp.text
 
 
-def test_resolve_gate_approve(client, _override_store):
+async def test_resolve_gate_approve(client, _override_store):
     store = _override_store
     report = _make_report()
-    aid = store.save(report)
-    gate_id = store.create_gate(aid, "deploy", "Approve deployment of test-repo")
+    aid = await store.save(report)
+    gate_id = await store.create_gate(aid, "deploy", "Approve deployment of test-repo")
 
-    resp = client.post(
+    resp = await client.post(
         f"/gates/{gate_id}/resolve",
         data={"status": "approved", "resolved_by": "tester"},
         follow_redirects=False,
@@ -758,23 +820,26 @@ def test_resolve_gate_approve(client, _override_store):
     assert resp.status_code == 303
     # A per-app ("deploy") gate with no onboarding files to deliver falls
     # through to the generic resolve path, which lands back on that app's
-    # own Assessment Detail page -- not the retired global Gates page.
-    assert resp.headers["location"] == f"/assessments/{aid}"
+    # own Assessment Detail Actions tab (not the Overview tab, and not the
+    # retired global Gates page) -- the next pending gate in the same
+    # queue is immediately visible there (docs/ux-design-requirements.md
+    # checklist #12).
+    assert resp.headers["location"] == f"/assessments/{aid}?tab=actions"
 
-    pending = store.list_gates(status="pending")
+    pending = await store.list_gates(status="pending")
     assert len(pending) == 0
-    approved = store.list_gates(status="approved")
+    approved = await store.list_gates(status="approved")
     assert len(approved) == 1
     assert approved[0]["resolved_by"] == "tester"
 
 
-def test_resolve_cluster_admin_review_gate_redirects_to_admin_review(client, _override_store):
+async def test_resolve_cluster_admin_review_gate_redirects_to_admin_review(client, _override_store):
     store = _override_store
     report = _make_report()
-    aid = store.save(report)
-    gate_id = store.create_gate(aid, "cluster-admin-review", "CI/CD manifests need elevated review")
+    aid = await store.save(report)
+    gate_id = await store.create_gate(aid, "cluster-admin-review", "CI/CD manifests need elevated review")
 
-    resp = client.post(
+    resp = await client.post(
         f"/gates/{gate_id}/resolve",
         data={"status": "rejected", "resolved_by": "tester", "reason": "not now"},
         follow_redirects=False,
@@ -783,20 +848,20 @@ def test_resolve_cluster_admin_review_gate_redirects_to_admin_review(client, _ov
     assert resp.headers["location"] == "/admin-review"
 
 
-def test_list_gates_includes_app_name(client, _override_store):
+async def test_list_gates_includes_app_name(client, _override_store):
     """docs/ui-redesign-proposal.md §2's confirmed defect: gates never
     carried which app they belonged to. list_gates()/list_all_gates() now
     join back to the assessment so every gate row is attributable."""
     store = _override_store
     report = _make_report("attributable-app")
-    aid = store.save(report)
-    store.create_gate(aid, "deploy", "Some gate summary with no app name in it")
+    aid = await store.save(report)
+    await store.create_gate(aid, "deploy", "Some gate summary with no app name in it")
 
-    pending = store.list_gates(status="pending")
+    pending = await store.list_gates(status="pending")
     assert len(pending) == 1
     assert pending[0]["app_name"] == "attributable-app"
 
-    all_gates = store.list_all_gates()
+    all_gates = await store.list_all_gates()
     assert len(all_gates) == 1
     assert all_gates[0]["app_name"] == "attributable-app"
 
@@ -836,13 +901,13 @@ def _make_report_scored(repo_name: str, score: int, criticality: str = "medium")
     )
 
 
-def test_fleet_dashboard_shows_portfolio_summary(client, _override_store):
+async def test_fleet_dashboard_shows_portfolio_summary(client, _override_store):
     store = _override_store
-    store.save(_make_report_scored("alpha-svc", 80, "low"))
-    store.save(_make_report_scored("beta-svc", 30, "critical"))
-    store.save(_make_report_scored("gamma-svc", 55, "medium"))
+    await store.save(_make_report_scored("alpha-svc", 80, "low"))
+    await store.save(_make_report_scored("beta-svc", 30, "critical"))
+    await store.save(_make_report_scored("gamma-svc", 55, "medium"))
 
-    resp = client.get("/")
+    resp = await client.get("/")
     assert resp.status_code == 200
     assert "alpha-svc" in resp.text
     assert "beta-svc" in resp.text
@@ -850,24 +915,24 @@ def test_fleet_dashboard_shows_portfolio_summary(client, _override_store):
     assert "Assess New Repo" in resp.text
 
 
-def test_fleet_empty(client):
-    resp = client.get("/")
+async def test_fleet_empty(client):
+    resp = await client.get("/")
     assert resp.status_code == 200
     assert "Assess your first app" in resp.text
 
 
-def test_fleet_redirects_to_home(client):
-    resp = client.get("/fleet", follow_redirects=False)
+async def test_fleet_redirects_to_home(client):
+    resp = await client.get("/fleet", follow_redirects=False)
     assert resp.status_code == 301
     assert resp.headers["location"] == "/"
 
 
-def test_api_fleet_returns_json(client, _override_store):
+async def test_api_fleet_returns_json(client, _override_store):
     store = _override_store
-    store.save(_make_report_scored("svc-a", 75))
-    store.save(_make_report_scored("svc-b", 40))
+    await store.save(_make_report_scored("svc-a", 75))
+    await store.save(_make_report_scored("svc-b", 40))
 
-    resp = client.get("/api/fleet")
+    resp = await client.get("/api/fleet")
     assert resp.status_code == 200
     data = resp.json()
     assert isinstance(data, list)
@@ -882,15 +947,15 @@ def test_api_fleet_returns_json(client, _override_store):
         assert "last_assessed" in r
 
 
-def test_api_fleet_trend_with_multiple_assessments(client, _override_store):
+async def test_api_fleet_trend_with_multiple_assessments(client, _override_store):
     store = _override_store
     r1 = _make_report_scored("trending", 40)
-    store.save(r1)
+    await store.save(r1)
     r2 = _make_report_scored("trending", 60)
     r2.assessed_at = datetime(2025, 2, 1, 12, 0, 0, tzinfo=timezone.utc)
-    store.save(r2)
+    await store.save(r2)
 
-    resp = client.get("/api/fleet")
+    resp = await client.get("/api/fleet")
     data = resp.json()
     assert len(data) == 1
     entry = data[0]
@@ -900,20 +965,20 @@ def test_api_fleet_trend_with_multiple_assessments(client, _override_store):
     assert entry["assessment_count"] == 2
 
 
-def test_dashboard_shows_portfolio_summary(client, _override_store):
+async def test_dashboard_shows_portfolio_summary(client, _override_store):
     store = _override_store
-    store.save(_make_report_scored("app-one", 90))
-    store.save(_make_report_scored("app-two", 60))
+    await store.save(_make_report_scored("app-one", 90))
+    await store.save(_make_report_scored("app-two", 60))
 
-    resp = client.get("/")
+    resp = await client.get("/")
     assert resp.status_code == 200
     assert "Apps" in resp.text
     assert "Avg Score" in resp.text
     assert "Critical" in resp.text
 
 
-def test_fleet_has_assess_modal(client):
-    resp = client.get("/")
+async def test_fleet_has_assess_modal(client):
+    resp = await client.get("/")
     assert resp.status_code == 200
     assert 'id="assess-modal"' in resp.text or 'action="/assess"' in resp.text
 
@@ -923,25 +988,25 @@ def test_fleet_has_assess_modal(client):
 # ------------------------------------------------------------------
 
 
-def test_base_has_htmx_script(client):
-    resp = client.get("/")
+async def test_base_has_htmx_script(client):
+    resp = await client.get("/")
     assert "htmx.org@2.0.4" in resp.text
     assert 'integrity="sha384-' in resp.text
 
 
-def test_base_has_alpinejs_script(client):
-    resp = client.get("/")
+async def test_base_has_alpinejs_script(client):
+    resp = await client.get("/")
     assert "alpinejs@3" in resp.text
     assert 'crossorigin="anonymous"' in resp.text
 
 
-def test_base_has_hx_boost(client):
-    resp = client.get("/")
+async def test_base_has_hx_boost(client):
+    resp = await client.get("/")
     assert 'hx-boost="true"' in resp.text
 
 
-def test_base_has_css_variables(client):
-    resp = client.get("/")
+async def test_base_has_css_variables(client):
+    resp = await client.get("/")
     assert "--color-bg:" in resp.text
     assert "--color-accent:" in resp.text
     assert "--color-surface:" in resp.text
@@ -949,10 +1014,10 @@ def test_base_has_css_variables(client):
     assert "--space-" in resp.text
 
 
-def test_no_inline_styles_dashboard(client, _override_store):
+async def test_no_inline_styles_dashboard(client, _override_store):
     store = _override_store
-    store.save(_make_report_scored("styled-app", 70))
-    resp = client.get("/")
+    await store.save(_make_report_scored("styled-app", 70))
+    resp = await client.get("/")
     html = resp.text
     lines = html.split("\n")
     for i, line in enumerate(lines, 1):
@@ -960,10 +1025,10 @@ def test_no_inline_styles_dashboard(client, _override_store):
             assert False, f"Inline style found on line {i}: {line.strip()}"
 
 
-def test_no_inline_styles_fleet(client, _override_store):
+async def test_no_inline_styles_fleet(client, _override_store):
     store = _override_store
-    store.save(_make_report_scored("fleet-app", 50))
-    resp = client.get("/fleet")
+    await store.save(_make_report_scored("fleet-app", 50))
+    resp = await client.get("/fleet")
     html = resp.text
     lines = html.split("\n")
     for i, line in enumerate(lines, 1):
@@ -971,61 +1036,61 @@ def test_no_inline_styles_fleet(client, _override_store):
             assert False, f"Inline style found on line {i}: {line.strip()}"
 
 
-def test_no_inline_styles_assess_form(client):
-    resp = client.get("/assess")
+async def test_no_inline_styles_assess_form(client):
+    resp = await client.get("/assess")
     html = resp.text
     for line in html.split("\n"):
         if "style=" in line.lower() and 'style="--pct' not in line:
             assert False, f"Inline style found: {line.strip()}"
 
 
-def test_no_inline_styles_assessment_detail(client, _override_store):
+async def test_no_inline_styles_assessment_detail(client, _override_store):
     store = _override_store
     report = _make_report()
-    aid = store.save(report)
-    resp = client.get(f"/assessments/{aid}")
+    aid = await store.save(report)
+    resp = await client.get(f"/assessments/{aid}")
     html = resp.text
     for line in html.split("\n"):
         if "style=" in line.lower() and 'style="--pct' not in line:
             assert False, f"Inline style found: {line.strip()}"
 
 
-def test_no_inline_styles_events(client):
-    resp = client.get("/events")
+async def test_no_inline_styles_events(client):
+    resp = await client.get("/events")
     html = resp.text
     for line in html.split("\n"):
         if "style=" in line.lower() and 'style="--pct' not in line:
             assert False, f"Inline style found: {line.strip()}"
 
 
-def test_no_inline_styles_gates(client, _override_store):
+async def test_no_inline_styles_gates(client, _override_store):
     store = _override_store
     report = _make_report()
-    aid = store.save(report)
-    store.create_gate(aid, "cluster-admin-review", "Test gate")
-    resp = client.get("/admin-review")
+    aid = await store.save(report)
+    await store.create_gate(aid, "cluster-admin-review", "Test gate")
+    resp = await client.get("/admin-review")
     html = resp.text
     for line in html.split("\n"):
         if "style=" in line.lower() and 'style="--pct' not in line:
             assert False, f"Inline style found: {line.strip()}"
 
 
-def test_no_inline_styles_onboard_results(client, _override_store):
+async def test_no_inline_styles_onboard_results(client, _override_store):
     store = _override_store
     report = _make_report_with_findings()
-    aid = store.save(report)
-    client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
-    resp = client.get(f"/assessments/{aid}/onboard-results")
+    aid = await store.save(report)
+    await client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
+    resp = await client.get(f"/assessments/{aid}/onboard-results")
     html = resp.text
     for line in html.split("\n"):
         if "style=" in line.lower() and 'style="--pct' not in line:
             assert False, f"Inline style found: {line.strip()}"
 
 
-def test_dashboard_uses_design_system_classes(client, _override_store):
+async def test_dashboard_uses_design_system_classes(client, _override_store):
     store = _override_store
-    store.save(_make_report_scored("css-app", 60))
-    resp = client.get("/")
+    await store.save(_make_report_scored("css-app", 60))
+    resp = await client.get("/")
     assert "stat-grid" in resp.text
     assert "stat-card" in resp.text
     assert "stat-label" in resp.text
@@ -1038,21 +1103,21 @@ def test_dashboard_uses_design_system_classes(client, _override_store):
     assert "card-footer" in resp.text
 
 
-def test_fleet_uses_design_system_classes(client, _override_store):
+async def test_fleet_uses_design_system_classes(client, _override_store):
     store = _override_store
-    store.save(_make_report_scored("fleet-css", 80))
-    resp = client.get("/fleet")
+    await store.save(_make_report_scored("fleet-css", 80))
+    resp = await client.get("/fleet")
     assert "stat-grid" in resp.text
     assert "row-border-" in resp.text
     assert "text-bold" in resp.text
     assert "btn btn-sm" in resp.text
 
 
-def test_assessment_detail_uses_design_system_classes(client, _override_store):
+async def test_assessment_detail_uses_design_system_classes(client, _override_store):
     store = _override_store
     report = _make_report()
-    aid = store.save(report)
-    resp = client.get(f"/assessments/{aid}")
+    aid = await store.save(report)
+    resp = await client.get(f"/assessments/{aid}")
     assert "score-hero" in resp.text
     assert "score-unit" in resp.text
     assert "section-title" in resp.text
@@ -1064,32 +1129,32 @@ def test_assessment_detail_uses_design_system_classes(client, _override_store):
     assert "btn-action" in resp.text
 
 
-def test_assess_form_uses_design_system_classes(client):
-    resp = client.get("/assess")
+async def test_assess_form_uses_design_system_classes(client):
+    resp = await client.get("/assess")
     assert "form-narrow" in resp.text
     assert "form-group" in resp.text
     assert "form-label" in resp.text
     assert "htmx-indicator" in resp.text
 
 
-def test_gates_uses_design_system_classes(client, _override_store):
+async def test_gates_uses_design_system_classes(client, _override_store):
     store = _override_store
     report = _make_report()
-    aid = store.save(report)
-    store.create_gate(aid, "cluster-admin-review", "Gate test")
-    resp = client.get("/admin-review")
+    aid = await store.save(report)
+    await store.create_gate(aid, "cluster-admin-review", "Gate test")
+    resp = await client.get("/admin-review")
     assert "gate-actions" in resp.text
     assert "btn-approve" in resp.text
     assert "btn-danger-outline" in resp.text
     assert "section-title" in resp.text
 
 
-def test_onboard_results_uses_design_system_classes(client, _override_store):
+async def test_onboard_results_uses_design_system_classes(client, _override_store):
     store = _override_store
     report = _make_report_with_findings()
-    aid = store.save(report)
-    client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
-    resp = client.get(f"/assessments/{aid}/onboard-results")
+    aid = await store.save(report)
+    await client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
+    resp = await client.get(f"/assessments/{aid}/onboard-results")
     assert "manifest-card" in resp.text
     assert "manifest-title" in resp.text
     assert "manifest-desc" in resp.text
@@ -1098,17 +1163,17 @@ def test_onboard_results_uses_design_system_classes(client, _override_store):
     assert 'hx-boost="false"' in resp.text
 
 
-def test_responsive_css_exists(client):
-    resp = client.get("/")
+async def test_responsive_css_exists(client):
+    resp = await client.get("/")
     assert "@media (max-width: 768px)" in resp.text
 
 
 # ── Agents page ────────────────────────────────────────────────────────
 
 
-def test_agents_page_empty(client, _override_store):
+async def test_agents_page_empty(client, _override_store):
     """With no registered agents, watcher agents are still shown."""
-    resp = client.get("/agents")
+    resp = await client.get("/agents")
     assert resp.status_code == 200
     assert "Agent Registry" in resp.text
     assert "vuln-watcher" in resp.text
@@ -1116,45 +1181,66 @@ def test_agents_page_empty(client, _override_store):
     assert "drift-detector" in resp.text
 
 
-def test_agents_page_with_data(client, _override_store):
+async def test_agents_page_with_data(client, _override_store):
     store = _override_store
-    store.register_agent("security", "hardening", "network,rbac")
-    store.register_agent("observability", "monitoring")
-    resp = client.get("/agents")
+    await store.register_agent("security", "hardening", "network,rbac")
+    await store.register_agent("observability", "monitoring")
+    resp = await client.get("/agents")
     assert resp.status_code == 200
     assert "security" in resp.text
     assert "observability" in resp.text
     assert "hardening" in resp.text
 
 
-def test_agents_and_capabilities_are_tabs_of_each_other(client, _override_store):
+async def test_agents_page_last_heartbeat_stat_card_uses_data_timestamp(client, _override_store):
+    """Regression: the stat card rendered a raw ISO timestamp while the
+    identical data one row below (in the table's own "Last Heartbeat"
+    column) correctly rendered as relative time -- both must use the same
+    `data-timestamp` mechanism."""
+    store = _override_store
+    # Every long-lived watcher gets a real heartbeat so none fall back to
+    # the synthetic "—" placeholder agents_page() merges in for watchers
+    # missing from the registry (a bare em-dash would otherwise win
+    # `max()` over any real ISO timestamp string).
+    for name in ("vuln-watcher", "slo-tracker", "drift-detector", "skill-learner", "capability-scout"):
+        await store.register_agent(name, "watcher")
+        await store.agent_heartbeat(name)
+
+    resp = await client.get("/agents")
+    assert resp.status_code == 200
+    stat_card = resp.text.split('<div class="stat-label">Last Heartbeat</div>', 1)[1][:400]
+    assert "data-timestamp=" in stat_card
+    assert "&mdash;" not in stat_card
+
+
+async def test_agents_and_capabilities_are_tabs_of_each_other(client, _override_store):
     """Agents/Capabilities were split top-level nav items; now share one nav
     entry with a tab strip cross-linking Registry (agents) and Catalog
     (capabilities)."""
-    agents_resp = client.get("/agents")
+    agents_resp = await client.get("/agents")
     assert 'href="/capabilities"' in agents_resp.text
 
-    capabilities_resp = client.get("/capabilities")
+    capabilities_resp = await client.get("/capabilities")
     assert 'href="/agents"' in capabilities_resp.text
 
 
-def test_api_agents(client, _override_store):
+async def test_api_agents(client, _override_store):
     store = _override_store
-    store.register_agent("cicd", "deployment")
-    resp = client.get("/api/agents")
+    await store.register_agent("cicd", "deployment")
+    resp = await client.get("/api/agents")
     assert resp.status_code == 200
     data = resp.json()
     assert any(a["agent_name"] == "cicd" for a in data)
 
 
-def test_agent_detail_page(client, _override_store):
+async def test_agent_detail_page(client, _override_store):
     store = _override_store
-    store.register_agent("security", "hardening", "network,rbac")
-    store.log_event("security", "completed", "test-app", "info", "Generated 5 files")
+    await store.register_agent("security", "hardening", "network,rbac")
+    await store.log_event("security", "completed", "test-app", "info", "Generated 5 files")
     report = _make_report()
-    aid = store.save(report)
-    store.save_remediation(aid, "security", "Add NetworkPolicy")
-    resp = client.get("/agents/security")
+    aid = await store.save(report)
+    await store.save_remediation(aid, "security", "Add NetworkPolicy")
+    resp = await client.get("/agents/security")
     assert resp.status_code == 200
     assert "security" in resp.text
     assert "hardening" in resp.text
@@ -1162,26 +1248,26 @@ def test_agent_detail_page(client, _override_store):
     assert "Add NetworkPolicy" in resp.text
 
 
-def test_agent_detail_not_found(client, _override_store):
-    resp = client.get("/agents/nonexistent")
+async def test_agent_detail_not_found(client, _override_store):
+    resp = await client.get("/agents/nonexistent")
     assert resp.status_code == 404
 
 
-def test_agent_detail_shows_run_history(client, _override_store):
+async def test_agent_detail_shows_run_history(client, _override_store):
     store = _override_store
-    store.register_agent("security", "hardening", "network,rbac")
-    store.save_agent_run("security", "local", "success", duration_ms=1500, resource_tier="standard")
-    store.save_agent_run("security", "local", "error", duration_ms=200, error="boom")
-    resp = client.get("/agents/security")
+    await store.register_agent("security", "hardening", "network,rbac")
+    await store.save_agent_run("security", "local", "success", duration_ms=1500, resource_tier="standard")
+    await store.save_agent_run("security", "local", "error", duration_ms=200, error="boom")
+    resp = await client.get("/agents/security")
     assert resp.status_code == 200
     assert "Run History" in resp.text
     assert "boom" in resp.text
 
 
-def test_agents_page_links_to_detail(client, _override_store):
+async def test_agents_page_links_to_detail(client, _override_store):
     store = _override_store
-    store.register_agent("observability", "monitoring")
-    resp = client.get("/agents")
+    await store.register_agent("observability", "monitoring")
+    resp = await client.get("/agents")
     assert resp.status_code == 200
     assert 'href="/agents/observability"' in resp.text
 
@@ -1189,41 +1275,41 @@ def test_agents_page_links_to_detail(client, _override_store):
 # ── Remediations page ─────────────────────────────────────────────────
 
 
-def test_remediations_page(client, _override_store):
+async def test_remediations_page(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    store.save_remediation(aid, "security", "Fix RBAC")
-    store.save_remediation(aid, "observability", "Add metrics")
-    resp = client.get(f"/assessments/{aid}/remediations")
+    aid = await store.save(_make_report())
+    await store.save_remediation(aid, "security", "Fix RBAC")
+    await store.save_remediation(aid, "observability", "Add metrics")
+    resp = await client.get(f"/assessments/{aid}/remediations")
     assert resp.status_code == 200
     assert "Remediations" in resp.text
     assert "Fix RBAC" in resp.text
     assert "Add metrics" in resp.text
 
 
-def test_remediations_page_empty(client, _override_store):
+async def test_remediations_page_empty(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    resp = client.get(f"/assessments/{aid}/remediations")
+    aid = await store.save(_make_report())
+    resp = await client.get(f"/assessments/{aid}/remediations")
     assert resp.status_code == 200
     assert "No remediations" in resp.text
 
 
-def test_complete_remediation(client, _override_store):
+async def test_complete_remediation(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    rid = store.save_remediation(aid, "security", "Fix RBAC")
-    resp = client.post(f"/assessments/{aid}/remediations/{rid}/complete", follow_redirects=False)
+    aid = await store.save(_make_report())
+    rid = await store.save_remediation(aid, "security", "Fix RBAC")
+    resp = await client.post(f"/assessments/{aid}/remediations/{rid}/complete", follow_redirects=False)
     assert resp.status_code == 303
-    rems = store.list_remediations(aid)
+    rems = await store.list_remediations(aid)
     assert rems[0]["status"] == "completed"
 
 
-def test_api_remediations(client, _override_store):
+async def test_api_remediations(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    store.save_remediation(aid, "compliance", "Add SBOM")
-    resp = client.get(f"/api/assessments/{aid}/remediations")
+    aid = await store.save(_make_report())
+    await store.save_remediation(aid, "compliance", "Add SBOM")
+    resp = await client.get(f"/api/assessments/{aid}/remediations")
     assert resp.status_code == 200
     assert len(resp.json()) == 1
 
@@ -1231,31 +1317,31 @@ def test_api_remediations(client, _override_store):
 # ── SLOs page ──────────────────────────────────────────────────────────
 
 
-def test_slos_page(client, _override_store):
+async def test_slos_page(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    store.save_slo(aid, "availability", 99.9)
-    store.save_slo(aid, "error_rate", 0.1)
-    resp = client.get(f"/assessments/{aid}/slos")
+    aid = await store.save(_make_report())
+    await store.save_slo(aid, "availability", 99.9)
+    await store.save_slo(aid, "error_rate", 0.1)
+    resp = await client.get(f"/assessments/{aid}/slos")
     assert resp.status_code == 200
     assert "SLOs" in resp.text
     assert "availability" in resp.text
     assert "error_rate" in resp.text
 
 
-def test_slos_page_empty(client, _override_store):
+async def test_slos_page_empty(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    resp = client.get(f"/assessments/{aid}/slos")
+    aid = await store.save(_make_report())
+    resp = await client.get(f"/assessments/{aid}/slos")
     assert resp.status_code == 200
     assert "No SLOs defined" in resp.text
 
 
-def test_api_slos(client, _override_store):
+async def test_api_slos(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    store.save_slo(aid, "latency_p99", 200.0)
-    resp = client.get(f"/api/assessments/{aid}/slos")
+    aid = await store.save(_make_report())
+    await store.save_slo(aid, "latency_p99", 200.0)
+    resp = await client.get(f"/api/assessments/{aid}/slos")
     assert resp.status_code == 200
     assert len(resp.json()) == 1
 
@@ -1263,42 +1349,42 @@ def test_api_slos(client, _override_store):
 # ── Nav bar ────────────────────────────────────────────────────────────
 
 
-def test_nav_includes_agents_link(client):
+async def test_nav_includes_agents_link(client):
     """/agents is no longer a top-level nav item — it's reachable via the
     Capabilities tab strip. The umbrella "Capabilities" link still appears
     globally, and /agents itself links back to /capabilities."""
-    resp = client.get("/")
+    resp = await client.get("/")
     assert 'href="/capabilities"' in resp.text
 
-    agents_resp = client.get("/agents")
+    agents_resp = await client.get("/agents")
     assert 'href="/capabilities"' in agents_resp.text
 
 
 # ── Assessment detail shows remediation/SLO buttons ────────────────────
 
 
-def test_assessment_detail_shows_remediation_button(client, _override_store):
+async def test_assessment_detail_shows_remediation_button(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    store.save_remediation(aid, "security", "Fix it")
-    resp = client.get(f"/assessments/{aid}")
+    aid = await store.save(_make_report())
+    await store.save_remediation(aid, "security", "Fix it")
+    resp = await client.get(f"/assessments/{aid}")
     assert resp.status_code == 200
     assert f"/assessments/{aid}/remediations" in resp.text
     assert "Remediations (1)" in resp.text
 
 
-def test_assessment_detail_renders_score_history(client, _override_store):
+async def test_assessment_detail_renders_score_history(client, _override_store):
     """Regression: score_history was fetched and passed to the template but
     never rendered — the Overview tab now shows a history table with deltas."""
     store = _override_store
     first = _make_report("history-repo")
     first.scores[0].score = 40
-    store.save(first)
+    await store.save(first)
     second = _make_report("history-repo")
     second.scores[0].score = 70
-    aid2 = store.save(second)
+    aid2 = await store.save(second)
 
-    resp = client.get(f"/assessments/{aid2}")
+    resp = await client.get(f"/assessments/{aid2}")
     assert resp.status_code == 200
     assert "Score History" in resp.text
     assert "score-history-table" in resp.text
@@ -1307,10 +1393,10 @@ def test_assessment_detail_renders_score_history(client, _override_store):
     assert "style=" not in history_section
 
 
-def test_assessment_detail_shows_links_with_zero_counts(client, _override_store):
+async def test_assessment_detail_shows_links_with_zero_counts(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    resp = client.get(f"/assessments/{aid}")
+    aid = await store.save(_make_report())
+    resp = await client.get(f"/assessments/{aid}")
     assert resp.status_code == 200
     assert "Remediations (0)" in resp.text
     assert "SLOs (0)" in resp.text
@@ -1320,25 +1406,25 @@ def test_assessment_detail_shows_links_with_zero_counts(client, _override_store)
 # ── SLO add form ───────────────────────────────────────────────────────
 
 
-def test_add_slo_via_form(client, _override_store):
+async def test_add_slo_via_form(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    resp = client.post(
+    aid = await store.save(_make_report())
+    resp = await client.post(
         f"/assessments/{aid}/slos/add",
         data={"metric_name": "availability", "target_value": "99.9"},
         follow_redirects=False,
     )
     assert resp.status_code == 303
-    slos = store.list_slos(aid)
+    slos = await store.list_slos(aid)
     assert len(slos) == 1
     assert slos[0]["metric_name"] == "availability"
     assert slos[0]["target_value"] == 99.9
 
 
-def test_slos_page_shows_add_form(client, _override_store):
+async def test_slos_page_shows_add_form(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    resp = client.get(f"/assessments/{aid}/slos")
+    aid = await store.save(_make_report())
+    resp = await client.get(f"/assessments/{aid}/slos")
     assert resp.status_code == 200
     assert "Add SLO" in resp.text
     assert "metric_name" in resp.text
@@ -1348,31 +1434,31 @@ def test_slos_page_shows_add_form(client, _override_store):
 # ── Onboarding history ─────────────────────────────────────────────────
 
 
-def test_onboarding_history_empty(client, _override_store):
+async def test_onboarding_history_empty(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    resp = client.get(f"/assessments/{aid}/onboarding-history")
+    aid = await store.save(_make_report())
+    resp = await client.get(f"/assessments/{aid}/onboarding-history")
     assert resp.status_code == 200
     assert "No onboarding runs" in resp.text
 
 
-def test_onboarding_history_with_data(client, _override_store):
+async def test_onboarding_history_with_data(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    store.save_onboarding(aid, [
+    aid = await store.save(_make_report())
+    await store.save_onboarding(aid, [
         {"category": "security", "path": "rbac.yaml", "content": "kind: Role", "description": "rbac"},
     ], orchestration={"recommendation": "READY FOR REVIEW", "auto_approve": False})
-    resp = client.get(f"/assessments/{aid}/onboarding-history")
+    resp = await client.get(f"/assessments/{aid}/onboarding-history")
     assert resp.status_code == 200
     assert "READY FOR REVIEW" in resp.text
     assert "1" in resp.text  # file count
 
 
-def test_assessment_detail_shows_history_button(client, _override_store):
+async def test_assessment_detail_shows_history_button(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    store.save_onboarding(aid, [{"category": "c", "path": "f.yaml", "content": "x", "description": "d"}])
-    resp = client.get(f"/assessments/{aid}")
+    aid = await store.save(_make_report())
+    await store.save_onboarding(aid, [{"category": "c", "path": "f.yaml", "content": "x", "description": "d"}])
+    resp = await client.get(f"/assessments/{aid}")
     assert resp.status_code == 200
     assert f"/assessments/{aid}/onboarding-history" in resp.text
     assert "History (1)" in resp.text
@@ -1381,89 +1467,102 @@ def test_assessment_detail_shows_history_button(client, _override_store):
 # ── Settings page ──────────────────────────────────────────────────────
 
 
-def test_settings_page_default(client, _override_store):
-    resp = client.get("/settings")
+async def test_settings_page_default(client, _override_store):
+    resp = await client.get("/settings")
     assert resp.status_code == 200
     assert "Settings" in resp.text
     assert "Auto-Mode" in resp.text
     assert "OFF" in resp.text
 
 
-def test_toggle_auto_mode_on(client, _override_store):
+async def test_toggle_auto_mode_on(client, _override_store):
     store = _override_store
-    resp = client.post("/settings/auto-mode", data={"value": "true"}, follow_redirects=False)
+    resp = await client.post("/settings/auto-mode", data={"value": "true"}, follow_redirects=False)
     assert resp.status_code == 303
-    assert store.get_setting("auto_mode") == "true"
+    assert await store.get_setting("auto_mode") == "true"
 
 
-def test_toggle_auto_mode_off(client, _override_store):
+async def test_toggle_auto_mode_off(client, _override_store):
     store = _override_store
-    store.set_setting("auto_mode", "true")
-    resp = client.post("/settings/auto-mode", data={"value": "false"}, follow_redirects=False)
+    await store.set_setting("auto_mode", "true")
+    resp = await client.post("/settings/auto-mode", data={"value": "false"}, follow_redirects=False)
     assert resp.status_code == 303
-    assert store.get_setting("auto_mode") == "false"
+    assert await store.get_setting("auto_mode") == "false"
 
 
-def test_settings_page_shows_on_when_enabled(client, _override_store):
+async def test_settings_page_shows_on_when_enabled(client, _override_store):
     store = _override_store
-    store.set_setting("auto_mode", "true")
-    resp = client.get("/settings")
+    await store.set_setting("auto_mode", "true")
+    resp = await client.get("/settings")
     assert resp.status_code == 200
     assert "ON" in resp.text
-    assert "Disable Auto-Mode" in resp.text
+    assert "Disable Global Fallback" in resp.text
 
 
-def test_settings_nav_link(client):
-    resp = client.get("/")
+async def test_settings_nav_link(client):
+    resp = await client.get("/")
     assert 'href="/settings"' in resp.text
 
 
-def test_settings_and_schedules_are_tabs_of_each_other(client, _override_store):
+async def test_settings_auto_mode_banner_does_not_reference_retired_gates_page(client, _override_store):
+    """Regression: the Auto-Mode banner said destructive changes get
+    "queued in Gates for your review" -- Gates no longer exists as a
+    standalone page (split into per-app Actions tabs + Admin Review)."""
+    store = _override_store
+    await store.set_setting("auto_mode", "true")
+    resp = await client.get("/settings")
+    assert resp.status_code == 200
+    assert "queued in Gates" not in resp.text
+    assert "Actions tab" in resp.text
+    assert "Admin Review" in resp.text
+
+
+async def test_settings_and_schedules_are_tabs_of_each_other(client, _override_store):
     """Settings/Schedules were split top-level nav items; now share one nav
     entry with a tab strip cross-linking the two pages."""
-    settings_resp = client.get("/settings")
+    settings_resp = await client.get("/settings")
     assert '/settings"' in settings_resp.text
     assert 'href="/schedules"' in settings_resp.text
 
-    schedules_resp = client.get("/schedules")
+    schedules_resp = await client.get("/schedules")
     assert 'href="/settings"' in schedules_resp.text
 
 
 # ── Auto-mode allowlist (Settings page) ───────────────────────────────
 
 
-def test_settings_page_shows_allowlist_empty_by_default(client, _override_store):
-    resp = client.get("/settings")
+async def test_settings_page_shows_allowlist_empty_by_default(client, _override_store):
+    resp = await client.get("/settings")
     assert resp.status_code == 200
     assert "Auto-Mode Allowlist" in resp.text
     assert "No allowlist entries configured" in resp.text
 
 
-def test_add_auto_mode_allowlist_entry(client, _override_store):
+async def test_add_auto_mode_allowlist_entry(client, _override_store):
     store = _override_store
-    resp = client.post(
+    resp = await client.post(
         "/settings/auto-mode-allowlist/add",
         data={"namespace": "prod", "kind": "ConfigMap"},
         follow_redirects=False,
     )
     assert resp.status_code == 303
     from agentit.automode import parse_allowlist
-    assert parse_allowlist(store.get_setting("auto_mode_allowlist")) == ["prod/ConfigMap"]
+    assert parse_allowlist(await store.get_setting("auto_mode_allowlist")) == ["prod/ConfigMap"]
 
 
-def test_add_auto_mode_allowlist_entry_defaults_namespace_to_wildcard(client, _override_store):
+async def test_add_auto_mode_allowlist_entry_defaults_namespace_to_wildcard(client, _override_store):
     store = _override_store
-    client.post("/settings/auto-mode-allowlist/add", data={"kind": "NetworkPolicy"}, follow_redirects=False)
+    await client.post("/settings/auto-mode-allowlist/add", data={"kind": "NetworkPolicy"}, follow_redirects=False)
     from agentit.automode import parse_allowlist
-    assert parse_allowlist(store.get_setting("auto_mode_allowlist")) == ["*/NetworkPolicy"]
+    assert parse_allowlist(await store.get_setting("auto_mode_allowlist")) == ["*/NetworkPolicy"]
 
 
-def test_add_auto_mode_allowlist_rejects_rbac_shaped_kind(client, _override_store):
+async def test_add_auto_mode_allowlist_rejects_rbac_shaped_kind(client, _override_store):
     """The Settings page rejects an RBAC-shaped kind up front with a clear
     error, rather than silently accepting a pattern that `split_files_by_
     allowlist()` would ignore anyway."""
     store = _override_store
-    resp = client.post(
+    resp = await client.post(
         "/settings/auto-mode-allowlist/add",
         data={"namespace": "*", "kind": "Secret"},
         follow_redirects=False,
@@ -1471,27 +1570,27 @@ def test_add_auto_mode_allowlist_rejects_rbac_shaped_kind(client, _override_stor
     assert resp.status_code == 303
     assert "allowlist_error" in resp.headers["location"]
     from agentit.automode import parse_allowlist
-    assert parse_allowlist(store.get_setting("auto_mode_allowlist")) == []
+    assert parse_allowlist(await store.get_setting("auto_mode_allowlist")) == []
 
 
-def test_remove_auto_mode_allowlist_entry(client, _override_store):
+async def test_remove_auto_mode_allowlist_entry(client, _override_store):
     store = _override_store
-    client.post(
+    await client.post(
         "/settings/auto-mode-allowlist/add", data={"namespace": "prod", "kind": "ConfigMap"},
         follow_redirects=False,
     )
-    resp = client.post(
+    resp = await client.post(
         "/settings/auto-mode-allowlist/remove", data={"pattern": "prod/ConfigMap"}, follow_redirects=False,
     )
     assert resp.status_code == 303
     from agentit.automode import parse_allowlist
-    assert parse_allowlist(store.get_setting("auto_mode_allowlist")) == []
+    assert parse_allowlist(await store.get_setting("auto_mode_allowlist")) == []
 
 
-def test_settings_page_lists_configured_allowlist_entries(client, _override_store):
+async def test_settings_page_lists_configured_allowlist_entries(client, _override_store):
     store = _override_store
-    store.set_setting("auto_mode_allowlist", '["prod/ConfigMap", "*/NetworkPolicy"]')
-    resp = client.get("/settings")
+    await store.set_setting("auto_mode_allowlist", '["prod/ConfigMap", "*/NetworkPolicy"]')
+    resp = await client.get("/settings")
     assert "prod" in resp.text
     assert "ConfigMap" in resp.text
     assert "NetworkPolicy" in resp.text
@@ -1500,57 +1599,81 @@ def test_settings_page_lists_configured_allowlist_entries(client, _override_stor
 # ── Schedules page ─────────────────────────────────────────────────────
 
 
-def test_schedules_page_empty(client, _override_store):
-    resp = client.get("/schedules")
+async def test_schedules_page_empty(client, _override_store):
+    resp = await client.get("/schedules")
     assert resp.status_code == 200
     assert "Scheduled Operations" in resp.text
 
 
-def test_schedules_page_shows_watchers(client, _override_store):
-    resp = client.get("/schedules")
+async def test_schedules_page_shows_watchers(client, _override_store):
+    resp = await client.get("/schedules")
     assert resp.status_code == 200
     assert "vuln-watcher" in resp.text
     assert "slo-tracker" in resp.text
     assert "drift-detector" in resp.text
 
 
-def test_schedules_nav_link(client):
+async def test_schedules_app_name_links_to_assessment_for_manual_schedule(client, _override_store):
+    """Every other page (Fleet, Remediations, Decisions) links an app name
+    to its Assessment Detail page -- Schedules showed plain text instead."""
+    store = _override_store
+    aid = await store.save(_make_report("scheduled-app"))
+    await store.create_schedule("scheduled-app", "Nightly scan", "compliance", "0 3 * * *", "cmd")
+
+    resp = await client.get("/schedules")
+    assert resp.status_code == 200
+    assert f'<a href="/assessments/{aid}">scheduled-app</a>' in resp.text
+
+
+async def test_schedules_app_name_plain_text_when_no_assessment_resolves(client, _override_store):
+    """A manual schedule's app_name is free text -- never fabricate a link
+    target when no matching assessment exists."""
+    store = _override_store
+    await store.create_schedule("no-such-app", "Nightly scan", "compliance", "0 3 * * *", "cmd")
+
+    resp = await client.get("/schedules")
+    assert resp.status_code == 200
+    assert "no-such-app" in resp.text
+    assert 'href="/assessments/' not in resp.text
+
+
+async def test_schedules_nav_link(client):
     """/schedules is no longer a top-level nav item — it's reachable via the
     Settings tab strip. The umbrella "Settings" link still appears globally."""
-    resp = client.get("/")
+    resp = await client.get("/")
     assert 'href="/settings"' in resp.text
 
 
-def test_update_schedule(client, _override_store):
+async def test_update_schedule(client, _override_store):
     store = _override_store
-    resp = client.post("/schedules/update", data={
+    resp = await client.post("/schedules/update", data={
         "app_name": "test-app",
         "job_key": "compliance",
         "schedule": "0 6 1 * *",
     }, follow_redirects=False)
     assert resp.status_code == 303
-    assert store.get_setting("schedule:test-app:compliance") == "0 6 1 * *"
+    assert await store.get_setting("schedule:test-app:compliance") == "0 6 1 * *"
 
 
-def test_toggle_schedule(client, _override_store):
+async def test_toggle_schedule(client, _override_store):
     store = _override_store
-    resp = client.post("/schedules/toggle", data={
+    resp = await client.post("/schedules/toggle", data={
         "app_name": "test-app",
         "job_key": "chaos",
         "enabled": "false",
     }, follow_redirects=False)
     assert resp.status_code == 303
-    assert store.get_setting("schedule:test-app:chaos:enabled") == "false"
+    assert await store.get_setting("schedule:test-app:chaos:enabled") == "false"
 
 
 # ── All pages accessible ──────────────────────────────────────────────
 
 
-def test_all_pages_return_200(client, _override_store):
+async def test_all_pages_return_200(client, _override_store):
     """Smoke test: every page returns 200."""
     store = _override_store
-    aid = store.save(_make_report())
-    store.register_agent("security", "hardening")
+    aid = await store.save(_make_report())
+    await store.register_agent("security", "hardening")
 
     pages = [
         "/",
@@ -1564,33 +1687,33 @@ def test_all_pages_return_200(client, _override_store):
         f"/assessments/{aid}",
     ]
     for page in pages:
-        resp = client.get(page)
+        resp = await client.get(page)
         assert resp.status_code == 200, f"{page} returned {resp.status_code}"
 
 
 # ── Health page ────────────────────────────────────────────────────────
 
 
-def test_health_page(client):
-    resp = client.get("/health")
+async def test_health_page(client):
+    resp = await client.get("/health")
     assert resp.status_code == 200
     assert "System Health" in resp.text
 
 
-def test_health_api(client):
-    resp = client.get("/api/health")
+async def test_health_api(client):
+    resp = await client.get("/api/health")
     assert resp.status_code in (200, 503)
     data = resp.json()
     assert "pods_running" in data
     assert "pipeline_status" in data
 
 
-def test_health_nav_link(client):
-    resp = client.get("/")
+async def test_health_nav_link(client):
+    resp = await client.get("/")
     assert 'href="/health"' in resp.text
 
 
-def test_failed_taskrun_pod_excluded_from_platform_degraded(client):
+async def test_failed_taskrun_pod_excluded_from_platform_degraded(client):
     """A Tekton TaskRun-owned pod that ended up Failed (e.g. a one-off
     onboarding/build attempt against a bad branch) is a terminal, one-shot
     execution record -- not an ongoing service health signal -- so it must
@@ -1614,14 +1737,14 @@ def test_failed_taskrun_pod_excluded_from_platform_degraded(client):
             patch("agentit.kube.list_custom_resources") as mock_list_crs:
         mock_list_pods.return_value = [taskrun_pod, real_failure_pod]
         mock_list_crs.return_value = []
-        resp = client.get("/api/health")
+        resp = await client.get("/api/health")
 
     data = resp.json()
     assert data["pods_failed"] == 1
     assert resp.status_code == 503
 
 
-def test_failed_non_taskrun_pod_only_excluded_when_owned_by_taskrun(client):
+async def test_failed_non_taskrun_pod_only_excluded_when_owned_by_taskrun(client):
     """Sanity check the inverse: with only the TaskRun-owned failed pod
     present (no other failures), pods_failed is 0 and /api/health is
     healthy on that signal."""
@@ -1633,29 +1756,29 @@ def test_failed_non_taskrun_pod_only_excluded_when_owned_by_taskrun(client):
             patch("agentit.kube.list_custom_resources") as mock_list_crs:
         mock_list_pods.return_value = [taskrun_pod]
         mock_list_crs.return_value = []
-        resp = client.get("/api/health")
+        resp = await client.get("/api/health")
 
     data = resp.json()
     assert data["pods_failed"] == 0
 
 
-def test_pod_detail_404(client):
+async def test_pod_detail_404(client):
     """Mock the kube client so this test is hermetic (no live-cluster round trip)."""
     with patch("agentit.portal.routes.health.kube") as mock_kube:
         mock_kube.core_v1.return_value.read_namespaced_pod.side_effect = Exception("not found")
-        resp = client.get("/health/pods/nonexistent-pod-xyz")
+        resp = await client.get("/health/pods/nonexistent-pod-xyz")
     assert resp.status_code == 404
 
 
-def test_pipeline_detail_404(client):
+async def test_pipeline_detail_404(client):
     """Mock the kube client so this test is hermetic (no live-cluster round trip)."""
     with patch("agentit.portal.routes.health.kube") as mock_kube:
         mock_kube.get_custom_resource.return_value = None
-        resp = client.get("/health/pipelines/nonexistent-run-xyz")
+        resp = await client.get("/health/pipelines/nonexistent-run-xyz")
     assert resp.status_code == 404
 
 
-def test_pod_detail_success(client):
+async def test_pod_detail_success(client):
     """Pod detail is served from the kube API client — no `oc` subprocess involved."""
     mock_pod = MagicMock()
     mock_pod.status.phase = "Running"
@@ -1675,7 +1798,7 @@ def test_pod_detail_success(client):
         mock_kube.core_v1.return_value.read_namespaced_pod_log.return_value = "log line 1\n"
         mock_kube.core_v1.return_value.list_namespaced_event.return_value.items = [mock_event]
 
-        resp = client.get("/health/pods/my-pod")
+        resp = await client.get("/health/pods/my-pod")
 
     assert resp.status_code == 200
     assert "Running" in resp.text
@@ -1686,7 +1809,7 @@ def test_pod_detail_success(client):
     )
 
 
-def test_pipeline_detail_success(client):
+async def test_pipeline_detail_success(client):
     """Pipeline detail is served from the kube custom-objects API — no `oc` subprocess."""
     pipelinerun = {
         "status": {
@@ -1703,7 +1826,7 @@ def test_pipeline_detail_success(client):
         mock_kube.get_custom_resource.return_value = pipelinerun
         mock_kube.core_v1.return_value.read_namespaced_pod.return_value.spec.containers = []
 
-        resp = client.get("/health/pipelines/build-my-app-123")
+        resp = await client.get("/health/pipelines/build-my-app-123")
 
     assert resp.status_code == 200
     assert "Succeeded" in resp.text
@@ -1713,7 +1836,7 @@ def test_pipeline_detail_success(client):
     )
 
 
-def test_operator_status_installed(client):
+async def test_operator_status_installed(client):
     """Regression test: CSV names are always "<package>.v<version>" (e.g.
     "vertical-pod-autoscaler.v4.21.0-202606301919", verified live against a
     real cluster) -- spec.displayName is a human-readable string ("My
@@ -1728,7 +1851,7 @@ def test_operator_status_installed(client):
                 "status": {"phase": "Succeeded"},
             },
         ]
-        resp = client.get("/api/operator-status?package=my-operator")
+        resp = await client.get("/api/operator-status?package=my-operator")
 
     assert resp.status_code == 200
     assert "Installed" in resp.text
@@ -1737,24 +1860,24 @@ def test_operator_status_installed(client):
     )
 
 
-def test_operator_status_still_installing(client):
+async def test_operator_status_still_installing(client):
     with patch("agentit.portal.routes.health.kube") as mock_kube:
         mock_kube.list_custom_resources.return_value = []
         mock_kube.get_custom_resource.return_value = {"status": {"state": "AtLatestKnown"}}
-        resp = client.get("/api/operator-status?package=my-operator")
+        resp = await client.get("/api/operator-status?package=my-operator")
 
     assert resp.status_code == 200
     assert "AtLatestKnown" in resp.text
 
 
-def test_operator_status_escapes_reflected_package_param(client):
+async def test_operator_status_escapes_reflected_package_param(client):
     """Regression test for docs/code-review-2026-07-12.md item #1: `package`
     is a client-supplied query param interpolated into a raw HTMLResponse
     (bypassing Jinja2 autoescaping), so an unescaped value is reflected XSS."""
     payload = '<script>alert(1)</script>'
     with patch("agentit.portal.routes.health.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = Exception("cluster unreachable")
-        resp = client.get(f"/api/operator-status?package={payload}")
+        resp = await client.get(f"/api/operator-status?package={payload}")
 
     assert resp.status_code == 200
     assert "<script>" not in resp.text
@@ -1764,109 +1887,108 @@ def test_operator_status_escapes_reflected_package_param(client):
 # ── Gate deduplication and expiry ──────────────────────────────────────
 
 
-def test_gate_deduplication(client, _override_store):
+async def test_gate_deduplication(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    g1 = store.create_gate(aid, "deploy", "First gate")
-    g2 = store.create_gate(aid, "deploy", "Duplicate gate")
+    aid = await store.save(_make_report())
+    g1 = await store.create_gate(aid, "deploy", "First gate")
+    g2 = await store.create_gate(aid, "deploy", "Duplicate gate")
     assert g1 == g2  # same gate returned
 
 
-def test_gate_different_types_not_deduped(client, _override_store):
+async def test_gate_different_types_not_deduped(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    g1 = store.create_gate(aid, "deploy", "Deploy gate")
-    g2 = store.create_gate(aid, "security-review", "Security gate")
+    aid = await store.save(_make_report())
+    g1 = await store.create_gate(aid, "deploy", "Deploy gate")
+    g2 = await store.create_gate(aid, "security-review", "Security gate")
     assert g1 != g2
 
 
-def test_stale_gate_expiry(client, _override_store):
+async def test_stale_gate_expiry(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    store.create_gate(aid, "deploy", "Old gate")
+    aid = await store.save(_make_report())
+    await store.create_gate(aid, "deploy", "Old gate")
     # Manually backdate the gate
-    store._conn.execute(
-        "UPDATE gates SET created_at = '2020-01-01T00:00:00' WHERE status = 'pending'"
+    await store._pool.execute(
+        "UPDATE gates SET created_at = '2020-01-01T00:00:00Z' WHERE status = 'pending'"
     )
-    store._conn.commit()
-    expired = store.expire_stale_gates(hours=1)
+    expired = await store.expire_stale_gates(hours=1)
     assert expired == 1
-    assert len(store.list_gates("pending")) == 0
+    assert len(await store.list_gates("pending")) == 0
 
 
 # ── Delete ─────────────────────────────────────────────────────────────
 
 
-def test_delete_assessment_route(client, _override_store):
+async def test_delete_assessment_route(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    resp = client.post(f"/assessments/{aid}/delete", follow_redirects=False)
+    aid = await store.save(_make_report())
+    resp = await client.post(f"/assessments/{aid}/delete", follow_redirects=False)
     assert resp.status_code == 303
-    assert store.get(aid) is None
+    assert await store.get(aid) is None
 
 
-def test_delete_cascades(client, _override_store):
+async def test_delete_cascades(client, _override_store):
     """Delete removes all related data — remediations, SLOs, gates, onboarding."""
     store = _override_store
-    aid = store.save(_make_report())
-    store.save_remediation(aid, "security", "Fix RBAC")
-    store.save_slo(aid, "availability", 99.9)
-    store.create_gate(aid, "deploy", "Approve deploy")
-    store.save_onboarding(aid, [{"category": "sec", "path": "x.yaml", "content": "y", "description": "d"}])
+    aid = await store.save(_make_report())
+    await store.save_remediation(aid, "security", "Fix RBAC")
+    await store.save_slo(aid, "availability", 99.9)
+    await store.create_gate(aid, "deploy", "Approve deploy")
+    await store.save_onboarding(aid, [{"category": "sec", "path": "x.yaml", "content": "y", "description": "d"}])
 
-    resp = client.post(f"/assessments/{aid}/delete", follow_redirects=False)
+    resp = await client.post(f"/assessments/{aid}/delete", follow_redirects=False)
     assert resp.status_code == 303
-    assert store.get(aid) is None
-    assert store.list_remediations(aid) == []
-    assert store.list_slos(aid) == []
-    assert store.get_onboarding(aid) is None
+    assert await store.get(aid) is None
+    assert await store.list_remediations(aid) == []
+    assert await store.list_slos(aid) == []
+    assert await store.get_onboarding(aid) is None
 
 
-def test_delete_nonexistent_returns_404(client, _override_store):
-    resp = client.post("/assessments/fake-id/delete", follow_redirects=False)
+async def test_delete_nonexistent_returns_404(client, _override_store):
+    resp = await client.post("/assessments/fake-id/delete", follow_redirects=False)
     assert resp.status_code == 404
 
 
-def test_delete_slo_route(client, _override_store):
+async def test_delete_slo_route(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    sid = store.save_slo(aid, "latency", 200.0)
-    resp = client.post(f"/assessments/{aid}/slos/{sid}/delete", follow_redirects=False)
+    aid = await store.save(_make_report())
+    sid = await store.save_slo(aid, "latency", 200.0)
+    resp = await client.post(f"/assessments/{aid}/slos/{sid}/delete", follow_redirects=False)
     assert resp.status_code == 303
-    assert len(store.list_slos(aid)) == 0
+    assert len(await store.list_slos(aid)) == 0
 
 
-def test_delete_remediation_route(client, _override_store):
+async def test_delete_remediation_route(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    rid = store.save_remediation(aid, "cicd", "Add pipeline")
-    resp = client.post(f"/assessments/{aid}/remediations/{rid}/delete", follow_redirects=False)
+    aid = await store.save(_make_report())
+    rid = await store.save_remediation(aid, "cicd", "Add pipeline")
+    resp = await client.post(f"/assessments/{aid}/remediations/{rid}/delete", follow_redirects=False)
     assert resp.status_code == 303
-    assert len(store.list_remediations(aid)) == 0
+    assert len(await store.list_remediations(aid)) == 0
 
 
-def test_cancel_gate_route(client, _override_store):
+async def test_cancel_gate_route(client, _override_store):
     store = _override_store
-    aid = store.save(_make_report())
-    gid = store.create_gate(aid, "deploy", "Approve")
-    resp = client.post(f"/gates/{gid}/cancel", follow_redirects=False)
+    aid = await store.save(_make_report())
+    gid = await store.create_gate(aid, "deploy", "Approve")
+    resp = await client.post(f"/gates/{gid}/cancel", follow_redirects=False)
     assert resp.status_code == 303
-    assert len(store.list_gates("pending")) == 0
+    assert len(await store.list_gates("pending")) == 0
 
 
 # ── Capabilities: learn (research CVEs & generate skills) ──────────────
 
 
-def test_capabilities_page_has_learn_button(client):
-    resp = client.get("/capabilities")
+async def test_capabilities_page_has_learn_button(client):
+    resp = await client.get("/capabilities")
     assert resp.status_code == 200
     assert '/capabilities/learn' in resp.text
     assert "Research CVEs" in resp.text
 
 
-def test_capabilities_learn_without_llm_shows_error(client, _override_store):
+async def test_capabilities_learn_without_llm_shows_error(client, _override_store):
     with patch("agentit.portal.routes.capabilities.get_llm_client", return_value=None):
-        resp = client.post("/capabilities/learn", follow_redirects=False)
+        resp = await client.post("/capabilities/learn", follow_redirects=False)
     assert resp.status_code == 303
     assert "error=" in resp.headers["location"]
     assert "LLM" in resp.headers["location"]
@@ -1874,13 +1996,13 @@ def test_capabilities_learn_without_llm_shows_error(client, _override_store):
     # that's the whole point of the "learning-run" action (Bucket 1 of the
     # learn-button transparency work: every attempt is queryable later, not
     # just the ones that generated a skill).
-    events = _override_store.list_events_by_action("learning-run", limit=5)
+    events = await _override_store.list_events_by_action("learning-run", limit=5)
     assert len(events) == 1
     assert events[0]["severity"] == "error"
     assert events[0]["agent_id"] == "learning-agent"
 
 
-def test_capabilities_learn_generates_new_skill(client, _override_store):
+async def test_capabilities_learn_generates_new_skill(client, _override_store):
     with patch("agentit.portal.routes.capabilities.get_llm_client", return_value=object()), \
          patch("agentit.learning_agent.research_cves", return_value=[{"id": "CVE-2099-00001"}]), \
          patch("agentit.learning_agent.check_skill_exists", return_value=False), \
@@ -1888,91 +2010,91 @@ def test_capabilities_learn_generates_new_skill(client, _override_store):
                return_value="---\nname: cve-2099-00001\n---\nbody"), \
          patch("agentit.learning_agent.save_skill",
                return_value=Path("/tmp/fake-skills/security/cve-2099-00001.md")):
-        resp = client.post("/capabilities/learn", follow_redirects=False)
+        resp = await client.post("/capabilities/learn", follow_redirects=False)
     assert resp.status_code == 303
     assert "success=" in resp.headers["location"]
-    events = _override_store.list_events_by_agent("learning-agent", limit=5)
+    events = await _override_store.list_events_by_agent("learning-agent", limit=5)
     assert any(e["action"] == "skills-generated" for e in events)
-    run_events = _override_store.list_events_by_action("learning-run", limit=5)
+    run_events = await _override_store.list_events_by_action("learning-run", limit=5)
     assert len(run_events) == 1
     assert run_events[0]["severity"] == "info"
     assert "cve-2099-00001" in run_events[0]["summary"]
 
 
-def test_capabilities_learn_skips_existing_skill(client, _override_store):
+async def test_capabilities_learn_skips_existing_skill(client, _override_store):
     with patch("agentit.portal.routes.capabilities.get_llm_client", return_value=object()), \
          patch("agentit.learning_agent.research_cves", return_value=[{"id": "CVE-2099-00002"}]), \
          patch("agentit.learning_agent.check_skill_exists", return_value=True):
-        resp = client.post("/capabilities/learn", follow_redirects=False)
+        resp = await client.post("/capabilities/learn", follow_redirects=False)
     assert resp.status_code == 303
     # A no-op run isn't the same as success -- it gets its own (non-error)
     # "warning" toast so it isn't mistaken for "a skill was generated".
     assert "warning=" in resp.headers["location"]
-    events = _override_store.list_events_by_agent("learning-agent", limit=5)
+    events = await _override_store.list_events_by_agent("learning-agent", limit=5)
     assert not any(e["action"] == "skills-generated" for e in events)
-    run_events = _override_store.list_events_by_action("learning-run", limit=5)
+    run_events = await _override_store.list_events_by_action("learning-run", limit=5)
     assert len(run_events) == 1
     assert run_events[0]["severity"] == "warning"
 
 
-def test_capabilities_learn_no_research_results(client, _override_store):
+async def test_capabilities_learn_no_research_results(client, _override_store):
     with patch("agentit.portal.routes.capabilities.get_llm_client", return_value=object()), \
          patch("agentit.learning_agent.research_cves", return_value=[]):
-        resp = client.post("/capabilities/learn", follow_redirects=False)
+        resp = await client.post("/capabilities/learn", follow_redirects=False)
     assert resp.status_code == 303
     assert "warning=" in resp.headers["location"]
-    run_events = _override_store.list_events_by_action("learning-run", limit=5)
+    run_events = await _override_store.list_events_by_action("learning-run", limit=5)
     assert len(run_events) == 1
     assert run_events[0]["severity"] == "warning"
 
 
-def test_capabilities_learn_research_failure_logs_error_event(client, _override_store):
+async def test_capabilities_learn_research_failure_logs_error_event(client, _override_store):
     """The exception path must also leave a durable trace, not just a
     transient toast -- this is the "not just successful ones" half of the
     every-run-leaves-a-trace requirement."""
     with patch("agentit.portal.routes.capabilities.get_llm_client", return_value=object()), \
          patch("agentit.learning_agent.research_cves", side_effect=RuntimeError("LLM timed out")):
-        resp = client.post("/capabilities/learn", follow_redirects=False)
+        resp = await client.post("/capabilities/learn", follow_redirects=False)
     assert resp.status_code == 303
     assert "error=" in resp.headers["location"]
-    run_events = _override_store.list_events_by_action("learning-run", limit=5)
+    run_events = await _override_store.list_events_by_action("learning-run", limit=5)
     assert len(run_events) == 1
     assert run_events[0]["severity"] == "error"
     assert "LLM timed out" in run_events[0]["summary"]
 
 
-def test_capabilities_page_shows_flagged_skill_preview(client, _override_store):
+async def test_capabilities_page_shows_flagged_skill_preview(client, _override_store):
     """Item 4: the button's description should say what it's about to do,
     not just what it already did -- if a skill is flagged low-effectiveness,
     the preview must name it instead of the generic CVE-sweep description."""
     for _ in range(6):
-        _override_store.record_skill_outcome("network-policy", "app-a", "rejected", "wrong")
-    resp = client.get("/capabilities")
+        await _override_store.record_skill_outcome("network-policy", "app-a", "rejected", "wrong")
+    resp = await client.get("/capabilities")
     assert resp.status_code == 200
     assert "improve" in resp.text
     assert "network-policy" in resp.text
 
 
-def test_capabilities_page_shows_cve_sweep_preview_when_nothing_flagged(client):
-    resp = client.get("/capabilities")
+async def test_capabilities_page_shows_cve_sweep_preview_when_nothing_flagged(client):
+    resp = await client.get("/capabilities")
     assert resp.status_code == 200
     assert "No skills are currently flagged as low-effectiveness" in resp.text
 
 
-def test_capabilities_page_shows_learning_run_history(client, _override_store):
+async def test_capabilities_page_shows_learning_run_history(client, _override_store):
     """Item 1: a past run (of either trigger source) must show up in a
     visible history table on the page, not just in the ephemeral toast."""
-    _override_store.log_event(
+    await _override_store.log_event(
         "learning-agent", "learning-run", None, "warning",
         "No new skills — 1 researched CVE(s) already have matching skills.",
         details={"trigger": "manual", "mode": "cve-sweep", "saved": [], "skipped": ["CVE-2099-00099"]},
     )
-    _override_store.log_event(
+    await _override_store.log_event(
         "skill-learner", "learning-run", None, "info",
         "Generated 1 improvement(s): network-policy-v2",
         details={"trigger": "watcher", "mode": "skill-improvement", "saved": ["network-policy-v2"], "skipped": []},
     )
-    resp = client.get("/capabilities")
+    resp = await client.get("/capabilities")
     assert resp.status_code == 200
     assert "Learning Agent Runs" in resp.text
     assert "already have matching skills" in resp.text
@@ -1980,15 +2102,15 @@ def test_capabilities_page_shows_learning_run_history(client, _override_store):
     assert "Manual" in resp.text
 
 
-def test_capabilities_page_shows_skill_learner_never_ticked(client):
-    resp = client.get("/capabilities")
+async def test_capabilities_page_shows_skill_learner_never_ticked(client):
+    resp = await client.get("/capabilities")
     assert resp.status_code == 200
     assert "never ticked on this deployment" in resp.text
 
 
-def test_capabilities_page_shows_skill_learner_recent_heartbeat(client, _override_store):
-    _override_store.agent_heartbeat("skill-learner")
-    resp = client.get("/capabilities")
+async def test_capabilities_page_shows_skill_learner_recent_heartbeat(client, _override_store):
+    await _override_store.agent_heartbeat("skill-learner")
+    resp = await client.get("/capabilities")
     assert resp.status_code == 200
     assert "is running" in resp.text
 
@@ -2004,14 +2126,14 @@ def test_capabilities_page_shows_skill_learner_recent_heartbeat(client, _overrid
 # _cached_skills() calls), not just that a file landed somewhere.
 
 
-def test_webhook_skill_draft_requires_content(client, tmp_path, monkeypatch):
+async def test_webhook_skill_draft_requires_content(client, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "skills").mkdir()
-    resp = client.post("/api/webhook/skill-draft", json={"domain": "security"})
+    resp = await client.post("/api/webhook/skill-draft", json={"domain": "security"})
     assert resp.status_code == 400
 
 
-def test_webhook_skill_draft_saves_and_busts_cache(client, tmp_path, monkeypatch):
+async def test_webhook_skill_draft_saves_and_busts_cache(client, tmp_path, monkeypatch):
     """The core cross-pod-visibility fix: a draft submitted through this
     internal endpoint (what the skill-learner watcher's own pod calls
     instead of writing only to its own isolated filesystem) lands exactly
@@ -2027,7 +2149,7 @@ def test_webhook_skill_draft_saves_and_busts_cache(client, tmp_path, monkeypatch
         "---\nname: watcher-drafted-cve\ndomain: security\nversion: 1\n"
         "triggers: [test]\noutputs: [NetworkPolicy]\nstatus: draft\n---\nbody\n"
     )
-    resp = client.post("/api/webhook/skill-draft", json={"content": content, "domain": "security"})
+    resp = await client.post("/api/webhook/skill-draft", json={"content": content, "domain": "security"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["name"] == "watcher-drafted-cve"
@@ -2045,11 +2167,11 @@ def test_webhook_skill_draft_saves_and_busts_cache(client, tmp_path, monkeypatch
     assert capabilities_routes._skills_cache["data"] is None
 
 
-def test_webhook_skill_draft_save_failure_returns_500(client, tmp_path, monkeypatch):
+async def test_webhook_skill_draft_save_failure_returns_500(client, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "skills").mkdir()
     with patch("agentit.learning_agent.save_skill", return_value=None):
-        resp = client.post(
+        resp = await client.post(
             "/api/webhook/skill-draft",
             json={"content": "---\nname: x\n---\nbody", "domain": "security"},
         )
@@ -2094,11 +2216,11 @@ def _make_draft_skill(tmp_path, name="cve-2099-00003", domain="security") -> Pat
     return skill_file
 
 
-def test_activate_skill_promotes_draft_to_active(client, tmp_path, monkeypatch):
+async def test_activate_skill_promotes_draft_to_active(client, tmp_path, monkeypatch):
     skill_file = _make_draft_skill(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    resp = client.post(
+    resp = await client.post(
         "/capabilities/skills/activate",
         data={"skill_path": str(skill_file)},
         follow_redirects=False,
@@ -2108,7 +2230,7 @@ def test_activate_skill_promotes_draft_to_active(client, tmp_path, monkeypatch):
     assert "status: active" in skill_file.read_text()
 
 
-def test_activate_skill_already_active_shows_error(client, tmp_path, monkeypatch):
+async def test_activate_skill_already_active_shows_error(client, tmp_path, monkeypatch):
     skills_dir = tmp_path / "skills" / "security"
     skills_dir.mkdir(parents=True)
     skill_file = skills_dir / "already-active.md"
@@ -2119,7 +2241,7 @@ def test_activate_skill_already_active_shows_error(client, tmp_path, monkeypatch
     )
     monkeypatch.chdir(tmp_path)
 
-    resp = client.post(
+    resp = await client.post(
         "/capabilities/skills/activate",
         data={"skill_path": str(skill_file)},
         follow_redirects=False,
@@ -2128,13 +2250,13 @@ def test_activate_skill_already_active_shows_error(client, tmp_path, monkeypatch
     assert "error=" in resp.headers["location"]
 
 
-def test_activate_skill_rejects_path_outside_skills_dir(client, tmp_path, monkeypatch):
+async def test_activate_skill_rejects_path_outside_skills_dir(client, tmp_path, monkeypatch):
     outside_file = tmp_path / "not-a-skill.md"
     outside_file.write_text("status: draft", encoding="utf-8")
     (tmp_path / "skills").mkdir()
     monkeypatch.chdir(tmp_path)
 
-    resp = client.post(
+    resp = await client.post(
         "/capabilities/skills/activate",
         data={"skill_path": str(outside_file)},
         follow_redirects=False,
@@ -2144,11 +2266,11 @@ def test_activate_skill_rejects_path_outside_skills_dir(client, tmp_path, monkey
     assert outside_file.read_text() == "status: draft"
 
 
-def test_activate_skill_missing_file_shows_error(client, tmp_path, monkeypatch):
+async def test_activate_skill_missing_file_shows_error(client, tmp_path, monkeypatch):
     (tmp_path / "skills").mkdir()
     monkeypatch.chdir(tmp_path)
 
-    resp = client.post(
+    resp = await client.post(
         "/capabilities/skills/activate",
         data={"skill_path": str(tmp_path / "skills" / "nope.md")},
         follow_redirects=False,
@@ -2157,7 +2279,7 @@ def test_activate_skill_missing_file_shows_error(client, tmp_path, monkeypatch):
     assert "error=" in resp.headers["location"]
 
 
-def test_activate_skill_blocked_when_generation_fails(client, tmp_path, monkeypatch):
+async def test_activate_skill_blocked_when_generation_fails(client, tmp_path, monkeypatch):
     """A draft skill with no usable template and no LLM fails verify_skill()'s
     functional check -- activation must be blocked, not silently allowed."""
     skills_dir = tmp_path / "skills" / "security"
@@ -2170,7 +2292,7 @@ def test_activate_skill_blocked_when_generation_fails(client, tmp_path, monkeypa
     )
     monkeypatch.chdir(tmp_path)
 
-    resp = client.post(
+    resp = await client.post(
         "/capabilities/skills/activate",
         data={"skill_path": str(skill_file)},
         follow_redirects=False,
@@ -2183,22 +2305,22 @@ def test_activate_skill_blocked_when_generation_fails(client, tmp_path, monkeypa
 # ── Capabilities: per-skill lifecycle view ──────────────────────────────
 
 
-def test_skill_history_page_renders_for_unknown_skill(client):
+async def test_skill_history_page_renders_for_unknown_skill(client):
     """A skill with no recorded outcomes/events still renders a valid page
     (not a 404/500) -- most skills won't have effectiveness data yet."""
-    resp = client.get("/capabilities/skills/some-skill-with-no-history/history")
+    resp = await client.get("/capabilities/skills/some-skill-with-no-history/history")
     assert resp.status_code == 200
     assert "some-skill-with-no-history" in resp.text
     assert "No recorded outcomes" in resp.text
 
 
-def test_skill_history_page_shows_outcomes_and_events(client, _override_store):
+async def test_skill_history_page_shows_outcomes_and_events(client, _override_store):
     store = _override_store
-    store.record_skill_outcome("network-policy", "app-a", "approved", "looks fine")
-    store.record_skill_outcome("network-policy", "app-b", "rejected", "wrong port")
-    store.log_event("skill-inventory", "skill-added", None, "info", "New skill added: security/network-policy")
+    await store.record_skill_outcome("network-policy", "app-a", "approved", "looks fine")
+    await store.record_skill_outcome("network-policy", "app-b", "rejected", "wrong port")
+    await store.log_event("skill-inventory", "skill-added", None, "info", "New skill added: security/network-policy")
 
-    resp = client.get("/capabilities/skills/network-policy/history")
+    resp = await client.get("/capabilities/skills/network-policy/history")
     assert resp.status_code == 200
     assert "app-a" in resp.text
     assert "app-b" in resp.text
@@ -2206,14 +2328,14 @@ def test_skill_history_page_shows_outcomes_and_events(client, _override_store):
     assert "New skill added: security/network-policy" in resp.text
 
 
-def test_get_skill_history_store_method():
+async def test_get_skill_history_store_method():
     from conftest import make_store
-    store = make_store()
-    store.record_skill_outcome("rbac", "app-a", "approved", "fine")
-    store.log_event("drift-detector", "skill-deprecated", "cluster", "warning",
+    store = await make_store()
+    await store.record_skill_outcome("rbac", "app-a", "approved", "fine")
+    await store.log_event("drift-detector", "skill-deprecated", "cluster", "warning",
                      "Auto-deprecated skill rbac: RoleBinding API removed")
 
-    history = store.get_skill_history("rbac")
+    history = await store.get_skill_history("rbac")
     assert len(history["outcomes"]) == 1
     assert history["outcomes"][0]["app_name"] == "app-a"
     assert len(history["events"]) == 1
@@ -2223,21 +2345,21 @@ def test_get_skill_history_store_method():
 # ── Capabilities: catalog change tracking (skill_inventory) ────────────
 
 
-def test_capabilities_page_renders_catalog_changes_section(client):
+async def test_capabilities_page_renders_catalog_changes_section(client):
     """The 'Recent Catalog Changes' section should always render, even empty."""
-    resp = client.get("/capabilities")
+    resp = await client.get("/capabilities")
     assert resp.status_code == 200
     assert "Recent Catalog Changes" in resp.text
 
 
-def test_capabilities_page_shows_catalog_change_events(client, _override_store):
+async def test_capabilities_page_shows_catalog_change_events(client, _override_store):
     store = _override_store
-    store.log_event("skill-inventory", "skill-added", None, "info",
+    await store.log_event("skill-inventory", "skill-added", None, "info",
                      "New skill added: security/cve-2099-1")
-    store.log_event("skill-inventory", "check-removed", None, "warning",
+    await store.log_event("skill-inventory", "check-removed", None, "warning",
                      "Check removed: reliability/has-readiness-probe")
 
-    resp = client.get("/capabilities")
+    resp = await client.get("/capabilities")
     assert resp.status_code == 200
     assert "New skill added: security/cve-2099-1" in resp.text
     assert "Check removed: reliability/has-readiness-probe" in resp.text
@@ -2245,7 +2367,7 @@ def test_capabilities_page_shows_catalog_change_events(client, _override_store):
     assert "badge-warning" in resp.text
 
 
-def test_background_skill_inventory_diff_surfaces_on_events_page(client, _override_store, tmp_path, monkeypatch):
+async def test_background_skill_inventory_diff_surfaces_on_events_page(client, _override_store, tmp_path, monkeypatch):
     """Simulates a tick of `_background_maintenance()`'s inventory-diff step
     without waiting for the real hourly loop, then confirms the resulting
     events show up on /events (and thus on the Capabilities page too)."""
@@ -2263,8 +2385,8 @@ def test_background_skill_inventory_diff_surfaces_on_events_page(client, _overri
 
     store = _override_store
     # First tick: no prior snapshot -> seeds baseline, no events yet.
-    diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
-    assert store.list_events_by_agent("skill-inventory") == []
+    await diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
+    assert await store.list_events_by_agent("skill-inventory") == []
 
     # A new skill lands on disk (as if a PR merged to skills/).
     (security_dir / "cve-2099-1.md").write_text(
@@ -2274,18 +2396,18 @@ def test_background_skill_inventory_diff_surfaces_on_events_page(client, _overri
     )
 
     # Second tick: diff finds the addition and logs an event.
-    diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
+    await diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
 
-    events = store.list_events_by_agent("skill-inventory")
+    events = await store.list_events_by_agent("skill-inventory")
     assert len(events) == 1
     assert events[0]["action"] == "skill-added"
 
-    resp = client.get("/events")
+    resp = await client.get("/events")
     assert resp.status_code == 200
     assert "skill-added" in resp.text
     assert "cve-2099-1" in resp.text
 
-    caps_resp = client.get("/capabilities")
+    caps_resp = await client.get("/capabilities")
     assert caps_resp.status_code == 200
     assert "cve-2099-1" in caps_resp.text
 
@@ -2298,32 +2420,32 @@ def test_background_skill_inventory_diff_surfaces_on_events_page(client, _overri
 # already know a PR exists.
 
 
-def test_self_improvement_tab_renders_when_empty(client):
-    resp = client.get("/capabilities/self-improvement")
+async def test_self_improvement_tab_renders_when_empty(client):
+    resp = await client.get("/capabilities/self-improvement")
     assert resp.status_code == 200
     assert "Self-Improvement" in resp.text
     assert "never ticked on this deployment" in resp.text
 
 
-def test_self_improvement_tab_is_a_third_tab_alongside_catalog_and_registry(client):
-    resp = client.get("/capabilities/self-improvement")
+async def test_self_improvement_tab_is_a_third_tab_alongside_catalog_and_registry(client):
+    resp = await client.get("/capabilities/self-improvement")
     assert 'href="/capabilities"' in resp.text
     assert 'href="/agents"' in resp.text
 
-    catalog_resp = client.get("/capabilities")
+    catalog_resp = await client.get("/capabilities")
     assert 'href="/capabilities/self-improvement"' in catalog_resp.text
 
 
-def test_self_improvement_tab_shows_run_history(client, _override_store):
+async def test_self_improvement_tab_shows_run_history(client, _override_store):
     """Every cycle appears here, including ones that proposed nothing or
     got gate-blocked -- not just the ones that shipped a PR."""
     store = _override_store
-    store.log_event(
+    await store.log_event(
         "capability-scout", "capability-run", None, "warning",
         "No proposal this cycle — insufficient real signal (1 data point(s), need 5).",
         details={"trigger": "watcher", "evidence": "", "doc_anchor": None, "gate_results": [], "pr_url": None},
     )
-    store.log_event(
+    await store.log_event(
         "capability-scout", "capability-run", None, "warning",
         "Proposal 'Track stack signatures' gate-blocked: test-plan-required",
         details={
@@ -2334,7 +2456,7 @@ def test_self_improvement_tab_shows_run_history(client, _override_store):
         },
     )
 
-    resp = client.get("/capabilities/self-improvement")
+    resp = await client.get("/capabilities/self-improvement")
     assert resp.status_code == 200
     assert "Self-Improvement Runs" in resp.text
     assert "insufficient real signal" in resp.text
@@ -2342,16 +2464,16 @@ def test_self_improvement_tab_shows_run_history(client, _override_store):
     assert "Automatic (24h watcher)" in resp.text
 
 
-def test_self_improvement_tab_shows_watcher_heartbeat(client, _override_store):
-    _override_store.agent_heartbeat("capability-scout")
-    resp = client.get("/capabilities/self-improvement")
+async def test_self_improvement_tab_shows_watcher_heartbeat(client, _override_store):
+    await _override_store.agent_heartbeat("capability-scout")
+    resp = await client.get("/capabilities/self-improvement")
     assert resp.status_code == 200
     assert "is running" in resp.text
 
 
-def test_capability_run_detail_page_renders_evidence_and_gates(client, _override_store):
+async def test_capability_run_detail_page_renders_evidence_and_gates(client, _override_store):
     store = _override_store
-    event_id = store.log_event(
+    event_id = await store.log_event(
         "capability-scout", "capability-run", None, "warning",
         "Proposal 'Track stack signatures' gate-blocked: test-plan-required",
         details={
@@ -2368,7 +2490,7 @@ def test_capability_run_detail_page_renders_evidence_and_gates(client, _override
         },
     )
 
-    resp = client.get(f"/capabilities/self-improvement/runs/{event_id}")
+    resp = await client.get(f"/capabilities/self-improvement/runs/{event_id}")
     assert resp.status_code == 200
     assert "README.md:42" in resp.text
     assert "test-plan-required" in resp.text
@@ -2376,14 +2498,14 @@ def test_capability_run_detail_page_renders_evidence_and_gates(client, _override
     assert "low" in resp.text
 
 
-def test_capability_run_detail_page_404s_for_unknown_run(client, _override_store):
-    resp = client.get("/capabilities/self-improvement/runs/does-not-exist")
+async def test_capability_run_detail_page_404s_for_unknown_run(client, _override_store):
+    resp = await client.get("/capabilities/self-improvement/runs/does-not-exist")
     assert resp.status_code == 404
 
 
-def test_capability_run_detail_shows_live_pr_status(client, _override_store):
+async def test_capability_run_detail_shows_live_pr_status(client, _override_store):
     store = _override_store
-    event_id = store.log_event(
+    event_id = await store.log_event(
         "capability-scout", "capability-run", None, "info",
         "Opened proposal PR: Track stack signatures (https://github.com/org/agentit/pull/9)",
         details={
@@ -2394,7 +2516,7 @@ def test_capability_run_detail_shows_live_pr_status(client, _override_store):
     )
 
     with patch("agentit.portal.github_pr.get_pr_status", return_value={"state": "open", "html_url": "https://github.com/org/agentit/pull/9"}):
-        resp = client.get(f"/capabilities/self-improvement/runs/{event_id}")
+        resp = await client.get(f"/capabilities/self-improvement/runs/{event_id}")
 
     assert resp.status_code == 200
     assert "open" in resp.text
@@ -2404,7 +2526,7 @@ def test_capability_run_detail_shows_live_pr_status(client, _override_store):
 # ── Agent registry cleanup (agent_registry_cleanup) ───────────────────
 
 
-def test_background_agent_registry_prune_surfaces_on_events_page(client, _override_store):
+async def test_background_agent_registry_prune_surfaces_on_events_page(client, _override_store):
     """Simulates a tick of `_background_maintenance()`'s agent-registry-prune
     step without waiting for the real hourly loop, then confirms the pruned
     agents disappear from `/api/agents` and the resulting event shows up on
@@ -2414,83 +2536,83 @@ def test_background_agent_registry_prune_surfaces_on_events_page(client, _overri
     store = _override_store
     # Rows left behind by Python agents removed in favor of skills-only
     # generation, plus the legitimate agents/watchers that must survive.
-    store.register_agent("security", "security")
-    store.register_agent("observability", "observability")
-    store.register_agent("cost", "cost")
-    store.agent_heartbeat("vuln-watcher")
+    await store.register_agent("security", "security")
+    await store.register_agent("observability", "observability")
+    await store.register_agent("cost", "cost")
+    await store.agent_heartbeat("vuln-watcher")
 
-    pruned = prune_stale_agents_and_log(store)
+    pruned = await prune_stale_agents_and_log(store)
     assert sorted(pruned) == ["observability", "security"]
 
-    api_resp = client.get("/api/agents")
+    api_resp = await client.get("/api/agents")
     assert api_resp.status_code == 200
     names = {a["agent_name"] for a in api_resp.json()}
     assert names == {"cost", "vuln-watcher"}
 
-    events_resp = client.get("/events")
+    events_resp = await client.get("/events")
     assert events_resp.status_code == 200
     assert "agent-registry-pruned" in events_resp.text
 
-    events = store.list_events_by_agent("agent-registry")
+    events = await store.list_events_by_agent("agent-registry")
     assert len(events) == 1
     assert events[0]["action"] == "agent-registry-pruned"
     assert "security" in events[0]["summary"]
     assert "observability" in events[0]["summary"]
 
 
-def test_background_agent_registry_prune_is_noop_when_nothing_stale(client, _override_store):
+async def test_background_agent_registry_prune_is_noop_when_nothing_stale(client, _override_store):
     """No stale rows -> no event, no change -- confirms the loop can run
     safely on every tick without spamming the Events feed."""
     from agentit.agent_registry_cleanup import prune_stale_agents_and_log
 
     store = _override_store
-    store.register_agent("cost", "cost")
-    store.register_agent("dependency", "dependency")
+    await store.register_agent("cost", "cost")
+    await store.register_agent("dependency", "dependency")
 
-    pruned = prune_stale_agents_and_log(store)
+    pruned = await prune_stale_agents_and_log(store)
 
     assert pruned == []
-    assert store.list_events_by_agent("agent-registry") == []
-    names = {a["agent_name"] for a in store.list_agents()}
+    assert await store.list_events_by_agent("agent-registry") == []
+    names = {a["agent_name"] for a in await store.list_agents()}
     assert names == {"cost", "dependency"}
 
 
 # ── Loop health meta-metric ──────────────────────────────────────────────
 
 
-def test_get_loop_health_no_flagged_skills():
+async def test_get_loop_health_no_flagged_skills():
     from conftest import make_store
-    store = make_store()
-    health = store.get_loop_health()
+    store = await make_store()
+    health = await store.get_loop_health()
     assert health["flagged_count"] == 0
     assert health["pct_with_improvement"] is None
 
 
-def test_get_loop_health_counts_recent_improvement_drafts():
+async def test_get_loop_health_counts_recent_improvement_drafts():
     from conftest import make_store
-    store = make_store()
+    store = await make_store()
     for _ in range(5):
-        store.record_skill_outcome("network-policy", "app-a", "rejected", "wrong")
+        await store.record_skill_outcome("network-policy", "app-a", "rejected", "wrong")
     for _ in range(5):
-        store.record_skill_outcome("containerfile", "app-a", "rejected", "wrong")
+        await store.record_skill_outcome("containerfile", "app-a", "rejected", "wrong")
 
     # Only network-policy got a follow-up improvement draft.
-    store.log_event("skill-learner", "skill-improvement-drafted", None, "info",
+    await store.log_event("skill-learner", "skill-improvement-drafted", None, "info",
                      "Drafted network-policy-v2.md to improve low-effectiveness skill "
                      "'network-policy' (0% approval)")
 
-    health = store.get_loop_health()
+    health = await store.get_loop_health()
     assert health["flagged_count"] == 2
     assert health["with_recent_improvement"] == 1
     assert health["pct_with_improvement"] == 50.0
 
 
-def test_insights_page_shows_loop_health(client, _override_store):
+async def test_insights_page_shows_loop_health(client, _override_store):
     store = _override_store
     for _ in range(5):
-        store.record_skill_outcome("network-policy", "app-a", "rejected", "wrong")
+        await store.record_skill_outcome("network-policy", "app-a", "rejected", "wrong")
 
-    resp = client.get("/insights")
+    resp = await client.get("/insights")
     assert resp.status_code == 200
     assert "Loop Health" in resp.text
 
@@ -2498,20 +2620,20 @@ def test_insights_page_shows_loop_health(client, _override_store):
 # ── LLM Decisions audit page ─────────────────────────────────────────────
 
 
-def test_decisions_page_renders_empty_state(client):
-    resp = client.get("/decisions")
+async def test_decisions_page_renders_empty_state(client):
+    resp = await client.get("/decisions")
     assert resp.status_code == 200
     assert "LLM Decisions" in resp.text
     assert "No LLM decisions logged yet" in resp.text
 
 
-def test_decisions_page_shows_fix_review_and_auto_mode_decisions(client, _override_store):
+async def test_decisions_page_shows_fix_review_and_auto_mode_decisions(client, _override_store):
     store = _override_store
-    store.record_skill_outcome("network-policy", "my-app", "approved", "Fix is correct and safe")
-    store.log_event("HardeningAgent", "decision", "other-app", "info",
+    await store.record_skill_outcome("network-policy", "my-app", "approved", "Fix is correct and safe")
+    await store.log_event("HardeningAgent", "decision", "other-app", "info",
                      "AUTO-APPLY: LLM classified as safe (0.95): Adds a ConfigMap")
 
-    resp = client.get("/decisions")
+    resp = await client.get("/decisions")
     assert resp.status_code == 200
     assert "network-policy" in resp.text
     assert "Fix is correct and safe" in resp.text
@@ -2520,12 +2642,12 @@ def test_decisions_page_shows_fix_review_and_auto_mode_decisions(client, _overri
     assert "auto-applied" in resp.text
 
 
-def test_decisions_page_filters_by_attribution(client, _override_store):
+async def test_decisions_page_filters_by_attribution(client, _override_store):
     store = _override_store
-    store.record_skill_outcome("network-policy", "app-a", "approved", "fine")
-    store.record_skill_outcome("containerfile", "app-a", "rejected", "wrong base image")
+    await store.record_skill_outcome("network-policy", "app-a", "approved", "fine")
+    await store.record_skill_outcome("containerfile", "app-a", "rejected", "wrong base image")
 
-    resp = client.get("/decisions?attribution=containerfile")
+    resp = await client.get("/decisions?attribution=containerfile")
     assert resp.status_code == 200
     assert "wrong base image" in resp.text
     # "fine" (network-policy's reason) shouldn't appear in the filtered decision
@@ -2534,18 +2656,18 @@ def test_decisions_page_filters_by_attribution(client, _override_store):
     assert ">fine<" not in resp.text
 
 
-def test_decisions_page_filters_by_decision_type(client, _override_store):
+async def test_decisions_page_filters_by_decision_type(client, _override_store):
     store = _override_store
-    store.record_skill_outcome("network-policy", "app-a", "approved", "fine skill decision")
-    store.log_event("auto-mode", "decision", "app-b", "info", "AUTO-APPLY: safe: fine auto decision")
+    await store.record_skill_outcome("network-policy", "app-a", "approved", "fine skill decision")
+    await store.log_event("auto-mode", "decision", "app-b", "info", "AUTO-APPLY: safe: fine auto decision")
 
-    resp = client.get("/decisions?decision_type=fix-review")
+    resp = await client.get("/decisions?decision_type=fix-review")
     assert resp.status_code == 200
     assert "fine skill decision" in resp.text
     assert "fine auto decision" not in resp.text
 
 
-def test_decisions_page_shows_secret_classify_decisions(client, _override_store):
+async def test_decisions_page_shows_secret_classify_decisions(client, _override_store):
     """Regression guard for the gap README/llm_decisions.py used to document:
     classify_secret decisions previously persisted nothing and never showed
     up here (see analyzers/security.py's secret_decisions_out param)."""
@@ -2557,9 +2679,9 @@ def test_decisions_page_shows_secret_classify_decisions(client, _override_store)
           "confidence": 0.9, "reason": "Looks like a real hardcoded API key", "kept": True}],
         target_app="my-app",
     ):
-        store.log_event(**ev)
+        await store.log_event(**ev)
 
-    resp = client.get("/decisions")
+    resp = await client.get("/decisions")
     assert resp.status_code == 200
     assert "secret-classify" in resp.text
     assert "security-analyzer" in resp.text
@@ -2567,25 +2689,25 @@ def test_decisions_page_shows_secret_classify_decisions(client, _override_store)
     assert "kept" in resp.text
 
 
-def test_decisions_page_filters_by_secret_classify_decision_type(client, _override_store):
+async def test_decisions_page_filters_by_secret_classify_decision_type(client, _override_store):
     from agentit.llm_decisions import build_secret_classify_events
 
     store = _override_store
-    store.record_skill_outcome("network-policy", "app-a", "approved", "fine skill decision")
+    await store.record_skill_outcome("network-policy", "app-a", "approved", "fine skill decision")
     for ev in build_secret_classify_events(
         [{"file_path": "app.py", "secret_type": "password", "is_secret": False,
           "confidence": 0.8, "reason": "env var lookup, false positive", "kept": False}],
         target_app="app-b",
     ):
-        store.log_event(**ev)
+        await store.log_event(**ev)
 
-    resp = client.get("/decisions?decision_type=secret-classify")
+    resp = await client.get("/decisions?decision_type=secret-classify")
     assert resp.status_code == 200
     assert "env var lookup, false positive" in resp.text
     assert "fine skill decision" not in resp.text
 
 
-def test_decisions_page_capability_proposal_success_outcomes_are_not_danger_badges(client, _override_store):
+async def test_decisions_page_capability_proposal_success_outcomes_are_not_danger_badges(client, _override_store):
     """Regression guard: the outcome-badge lookup previously only
     special-cased 'approved'/'auto-applied' (green) and 'gated' (yellow),
     defaulting everything else -- including capability-proposal's genuinely
@@ -2593,18 +2715,18 @@ def test_decisions_page_capability_proposal_success_outcomes_are_not_danger_badg
     red 'danger' badge, misrepresenting a successful self-improvement cycle
     as a failure on the live page."""
     store = _override_store
-    store.log_event(
+    await store.log_event(
         "capability-scout", "capability-run", None, "info",
         "Opened proposal PR: Track stack signatures",
         details={"evidence": "README.md:42", "pr_url": "https://github.com/org/agentit/pull/9"},
     )
-    store.log_event(
+    await store.log_event(
         "capability-scout", "capability-run", None, "warning",
         "No proposal this cycle — insufficient real signal.",
         details={"evidence": "", "pr_url": None, "gate_results": []},
     )
 
-    resp = client.get("/decisions")
+    resp = await client.get("/decisions")
     assert resp.status_code == 200
     assert 'badge badge-success">proposed' in resp.text
     assert 'badge badge-warning">no-signal' in resp.text

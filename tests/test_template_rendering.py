@@ -219,9 +219,9 @@ class TestDeliverButtonClickAttributeIntact:
     _ClickAttrCapture), which reproduces the exact browser behavior that
     silently broke these buttons before `| forceescape` was added."""
 
-    def test_onboard_results_deliver_click_attr_is_unbroken(self, portal_client):
+    async def test_onboard_results_deliver_click_attr_is_unbroken(self, portal_client):
         client, _store, aid = portal_client
-        resp = client.get(f"/assessments/{aid}/onboard-results")
+        resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert resp.status_code == 200
 
         parser = _ClickAttrCapture()
@@ -245,11 +245,11 @@ class TestDeliverButtonClickAttributeIntact:
             f"complete function call -- looks truncated:\n{click!r}"
         )
 
-    def test_admin_review_gate_card_click_attr_is_unbroken(self, portal_client):
+    async def test_admin_review_gate_card_click_attr_is_unbroken(self, portal_client):
         client, store, aid = portal_client
-        store.create_gate(aid, "cluster-admin-review", "Approve deployment of test-app")
+        await store.create_gate(aid, "cluster-admin-review", "Approve deployment of test-app")
 
-        resp = client.get("/admin-review")
+        resp = await client.get("/admin-review")
         assert resp.status_code == 200
 
         parser = _ClickAttrCapture()
@@ -412,80 +412,80 @@ class TestHTMXErrorHandling:
 
 
 class TestTemplateRendering:
-    def test_fleet_has_nav(self, portal_client):
+    async def test_fleet_has_nav(self, portal_client):
         client, _, _ = portal_client
-        text = client.get("/").text
+        text = (await client.get("/")).text
         assert "AgentIT" in text
 
-    def test_assess_form_has_inputs(self, portal_client):
+    async def test_assess_form_has_inputs(self, portal_client):
         client, _, _ = portal_client
-        text = client.get("/assess").text
+        text = (await client.get("/assess")).text
         assert "<form" in text
         assert "repo" in text.lower()
 
-    def test_assessment_detail_has_scores(self, portal_client):
+    async def test_assessment_detail_has_scores(self, portal_client):
         client, _, aid = portal_client
-        text = client.get(f"/assessments/{aid}").text
+        text = (await client.get(f"/assessments/{aid}")).text
         assert "security" in text.lower()
         assert "/100" in text
 
-    def test_events_page_renders(self, portal_client):
+    async def test_events_page_renders(self, portal_client):
         client, _, _ = portal_client
-        assert client.get("/events").status_code == 200
+        assert (await client.get("/events")).status_code == 200
 
-    def test_gates_page_renders(self, portal_client):
+    async def test_gates_page_renders(self, portal_client):
         client, _, _ = portal_client
-        assert client.get("/gates").status_code == 200
+        assert (await client.get("/gates")).status_code == 200
 
-    def test_agents_page_renders(self, portal_client):
+    async def test_agents_page_renders(self, portal_client):
         client, _, _ = portal_client
-        assert client.get("/agents").status_code == 200
+        assert (await client.get("/agents")).status_code == 200
 
-    def test_settings_page_renders(self, portal_client):
+    async def test_settings_page_renders(self, portal_client):
         client, _, _ = portal_client
-        assert client.get("/settings").status_code == 200
+        assert (await client.get("/settings")).status_code == 200
 
-    def test_schedules_page_renders(self, portal_client):
+    async def test_schedules_page_renders(self, portal_client):
         client, _, _ = portal_client
-        assert client.get("/schedules").status_code == 200
+        assert (await client.get("/schedules")).status_code == 200
 
-    def test_workflows_page_renders(self, portal_client):
+    async def test_workflows_page_renders(self, portal_client):
         client, _, _ = portal_client
-        assert client.get("/workflows").status_code == 200
+        assert (await client.get("/workflows")).status_code == 200
 
-    def test_health_page_renders(self, portal_client):
+    async def test_health_page_renders(self, portal_client):
         client, _, _ = portal_client
-        assert client.get("/health").status_code == 200
+        assert (await client.get("/health")).status_code == 200
 
-    def test_dlq_page_renders(self, portal_client):
+    async def test_dlq_page_renders(self, portal_client):
         client, _, _ = portal_client
-        assert client.get("/events/dlq").status_code == 200
+        assert (await client.get("/events/dlq")).status_code == 200
 
-    def test_onboard_results_renders(self, portal_client):
+    async def test_onboard_results_renders(self, portal_client):
         client, _, aid = portal_client
-        assert client.get(f"/assessments/{aid}/onboard-results").status_code == 200
+        assert (await client.get(f"/assessments/{aid}/onboard-results")).status_code == 200
 
-    def test_remediations_renders(self, portal_client):
+    async def test_remediations_renders(self, portal_client):
         client, _, aid = portal_client
-        assert client.get(f"/assessments/{aid}/remediations").status_code == 200
+        assert (await client.get(f"/assessments/{aid}/remediations")).status_code == 200
 
-    def test_slos_renders(self, portal_client):
+    async def test_slos_renders(self, portal_client):
         client, _, aid = portal_client
-        assert client.get(f"/assessments/{aid}/slos").status_code == 200
+        assert (await client.get(f"/assessments/{aid}/slos")).status_code == 200
 
-    def test_slos_progress_bar_direction_for_lower_is_better_metrics(self, portal_client):
+    async def test_slos_progress_bar_direction_for_lower_is_better_metrics(self, portal_client):
         """Regression: for lower-is-better metrics (error_rate, latency),
         the progress bar previously used current/target directly, so a
         HEALTHY (low) current_value rendered as a near-empty RED bar and a
         BREACHED (high) current_value rendered as a full GREEN bar --
         exactly backwards."""
         client, store, aid = portal_client
-        healthy_sid = store.save_slo(aid, "error_rate", 0.5)
-        store.update_slo(healthy_sid, 0.05, "met")  # well under target -> healthy
-        breached_sid = store.save_slo(aid, "error_rate", 0.5)
-        store.update_slo(breached_sid, 5.0, "breached")  # well over target -> breached
+        healthy_sid = await store.save_slo(aid, "error_rate", 0.5)
+        await store.update_slo(healthy_sid, 0.05, "met")  # well under target -> healthy
+        breached_sid = await store.save_slo(aid, "error_rate", 0.5)
+        await store.update_slo(breached_sid, 5.0, "breached")  # well over target -> breached
 
-        resp = client.get(f"/assessments/{aid}/slos")
+        resp = await client.get(f"/assessments/{aid}/slos")
         assert resp.status_code == 200
         rows = re.findall(r"<tr[^>]*>.*?</tr>", resp.text, re.DOTALL)
 
@@ -497,7 +497,7 @@ class TestTemplateRendering:
         assert "score-red" in breached_row, breached_row
         assert "score-green" not in breached_row
 
-    def test_slos_no_data_renders_empty_bar_not_full_green(self, portal_client):
+    async def test_slos_no_data_renders_empty_bar_not_full_green(self, portal_client):
         """Regression: for lower_is_better metrics (error_rate,
         latency_p99_ms), when current_value is None/falsy (no real
         telemetry yet), `pct` previously defaulted to 100 -- a brand-new
@@ -507,10 +507,10 @@ class TestTemplateRendering:
         matching the (already-correct) default for every other metric
         direction (e.g. availability)."""
         client, store, aid = portal_client
-        no_data_lower_sid = store.save_slo(aid, "error_rate", 0.5)
-        no_data_other_sid = store.save_slo(aid, "availability", 99.9)
+        no_data_lower_sid = await store.save_slo(aid, "error_rate", 0.5)
+        no_data_other_sid = await store.save_slo(aid, "availability", 99.9)
 
-        resp = client.get(f"/assessments/{aid}/slos")
+        resp = await client.get(f"/assessments/{aid}/slos")
         assert resp.status_code == 200
         rows = re.findall(r"<tr[^>]*>.*?</tr>", resp.text, re.DOTALL)
 
@@ -532,15 +532,15 @@ class TestTemplateRendering:
             f"now agree):\n{other_row}"
         )
 
-    def test_404_page(self, portal_client):
+    async def test_404_page(self, portal_client):
         client, _, _ = portal_client
-        assert client.get("/nonexistent-xyz").status_code == 404
+        assert (await client.get("/nonexistent-xyz")).status_code == 404
 
-    def test_all_pages_have_css(self, portal_client):
+    async def test_all_pages_have_css(self, portal_client):
         client, _, aid = portal_client
         for page in ["/", "/assess", f"/assessments/{aid}", "/events", "/gates",
                      "/agents", "/settings", "/workflows", "/health"]:
-            resp = client.get(page)
+            resp = await client.get(page)
             assert resp.status_code == 200, f"{page} returned {resp.status_code}"
             assert "<style" in resp.text, f"{page} missing CSS"
 
@@ -553,19 +553,19 @@ class TestAuthNav:
     that doesn't pass the header) must never show a Logout link to nothing.
     """
 
-    def test_no_logout_link_without_forwarded_user_header(self, portal_client):
+    async def test_no_logout_link_without_forwarded_user_header(self, portal_client):
         client, _, _ = portal_client
-        text = client.get("/").text
+        text = (await client.get("/")).text
         assert "Logout" not in text
         assert "Logged in as" not in text
 
-    def test_logout_link_appears_with_forwarded_user_header(self, portal_client):
+    async def test_logout_link_appears_with_forwarded_user_header(self, portal_client):
         client, _, _ = portal_client
-        text = client.get("/", headers={"X-Forwarded-User": "alice@example.com"}).text
+        text = (await client.get("/", headers={"X-Forwarded-User": "alice@example.com"})).text
         assert "Logged in as alice@example.com" in text
         assert "Logout" in text
 
-    def test_logout_href_matches_oauth_proxy_sign_out_path(self, portal_client):
+    async def test_logout_href_matches_oauth_proxy_sign_out_path(self, portal_client):
         """The rendered Logout href must be the *real* oauth-proxy sign-out
         path (from helpers.OAUTH_PROXY_SIGN_OUT_PATH, itself checked against
         chart/templates/deployment.yaml in test_helpers.py) -- not a
@@ -574,5 +574,5 @@ class TestAuthNav:
         from agentit.portal.helpers import OAUTH_PROXY_SIGN_OUT_PATH
 
         client, _, _ = portal_client
-        text = client.get("/", headers={"X-Forwarded-User": "alice@example.com"}).text
+        text = (await client.get("/", headers={"X-Forwarded-User": "alice@example.com"})).text
         assert f'href="{OAUTH_PROXY_SIGN_OUT_PATH}"' in text

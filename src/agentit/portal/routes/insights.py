@@ -19,10 +19,10 @@ async def insights_page(request: Request) -> HTMLResponse:
     s = await get_store()
     fleet_insights = await s.get_fleet_insights()
     agent_stats = await s.get_agent_stats()
-    feedback = await s.get_all_feedback(limit=10) if hasattr(s, 'get_all_feedback') else []
-    low_skills = await s.get_low_effectiveness_skills() if hasattr(s, 'get_low_effectiveness_skills') else []
-    check_compliance = await s.get_check_compliance() if hasattr(s, 'get_check_compliance') else []
-    loop_health = await s.get_loop_health() if hasattr(s, 'get_loop_health') else None
+    feedback = await s.get_all_feedback(limit=10)
+    low_skills = await s.get_low_effectiveness_skills()
+    check_compliance = await s.get_check_compliance()
+    loop_health = await s.get_loop_health()
     return get_templates().TemplateResponse(request, "insights.html", {
         "insights": fleet_insights,
         "agent_stats": agent_stats,
@@ -48,13 +48,10 @@ async def decisions_page(request: Request, decision_type: str = "", attribution:
 
     s = await get_store()
     # `list_llm_decisions` runs in a worker thread (`asyncio.to_thread`), so
-    # a Postgres-backed store's coroutine methods need bridging back onto
-    # *this* coroutine's event loop -- pass it the raw sync store directly
-    # when available (sqlite; no bridge needed) or `s` + this loop
-    # otherwise (postgres; see llm_decisions.py's `_bridge`).
+    # its store calls need bridging back onto *this* coroutine's event loop
+    # -- see llm_decisions.py's `_bridge`.
     loop = asyncio.get_running_loop()
-    store_arg = s.raw if hasattr(s, "raw") else s
-    all_decisions = await asyncio.to_thread(list_llm_decisions, store_arg, 500, loop=loop)
+    all_decisions = await asyncio.to_thread(list_llm_decisions, s, 500, loop=loop)
     decision_types = sorted({d["decision_type"] for d in all_decisions})
     attributions = sorted({d["attribution"] for d in all_decisions})
 
@@ -84,6 +81,16 @@ async def events_page(request: Request, page: int = 1, per_page: int = 25,
         all_events = await s.list_events_by_correlation_id(correlation_id, limit=2000)
     else:
         all_events = await s.list_events(limit=2000)
+
+    # target_app -> latest assessment id, so the "Target App" column can
+    # link to that app's Assessment Detail page wherever a real
+    # assessment_id resolves (Fleet, Remediations, and Decisions already
+    # link app names the same way; Events showed plain text).
+    fleet = await s.get_fleet_data()
+    app_ids_by_name = {app_data["repo_name"]: app_data["id"] for app_data in fleet}
+    for e in all_events:
+        e["assessment_id"] = app_ids_by_name.get(e.get("target_app"))
+
     if q:
         ql = q.lower()
         all_events = [e for e in all_events

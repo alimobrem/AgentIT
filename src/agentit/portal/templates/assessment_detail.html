@@ -47,11 +47,18 @@
 </div>
 {% endif %}
 
-<div class="score-hero
+{# Moment of joy (docs/ux-design-requirements.md checklist #9): tied to a
+   real, first-time milestone only -- never applied to a routine assessment
+   that happens to already be at 100. Subtle, ~300ms, respects
+   prefers-reduced-motion via base.html's global media-query reset. #}
+<div class="score-hero {% if celebrate_first_perfect_score %}celebrate{% endif %}
   {% if report.overall_score > 70 %} text-success
   {% elif report.overall_score >= 40 %} text-warning
   {% else %} text-danger{% endif %}
 ">{{ "%.0f"|format(report.overall_score) }}<span class="score-unit">/100</span></div>
+{% if celebrate_first_perfect_score %}
+<p class="text-success text-sm mb-1">&#127881; First perfect score for {{ report.repo_name }}.</p>
+{% endif %}
 
 {% if trend and trend.delta is not none %}
 <span class="trend {% if trend.delta > 0 %}trend-up{% elif trend.delta < 0 %}trend-down{% else %}trend-flat{% endif %}">
@@ -93,7 +100,16 @@
 </div>
 
 {% from "_macros.html" import client_tab_nav %}
-<div x-data="{ tab: 'overview' }">
+{# Initial tab honors ?tab=<key> (e.g. Fleet's "Needs Action" badge links
+   here with ?tab=actions) -- same query-param-driven Alpine init
+   convention fleet.html's Assess modal (`assessOpen`) already uses,
+   since client_tab_nav's tabs are pure client-side Alpine state with no
+   URL/anchor awareness of their own. Whitelisted against the real tab
+   keys below rather than interpolating the raw query param into the
+   Alpine expression. #}
+{% set _requested_tab = request.query_params.get('tab', 'overview') %}
+{% set _initial_tab = _requested_tab if _requested_tab in ('overview', 'findings', 'actions', 'timeline') else 'overview' %}
+<div x-data="{ tab: '{{ _initial_tab }}' }">
 {{ client_tab_nav([
   {"key": "overview", "label": "Overview"},
   {"key": "findings", "label": "Findings" ~ (" (" ~ urgent_findings|length ~ ")" if urgent_findings else "")},
@@ -155,14 +171,23 @@
     <div class="collapse-body" x-show="open" x-transition>
       <ul class="finding-list">
         {% for f in urgent_findings %}
-        <li class="finding-item {% if f.severity.name == 'critical' %}finding-critical{% else %}finding-high{% endif %}">
+        {# Optimistic UI (docs/ux-design-requirements.md checklist #7):
+           Suppress is genuinely reversible (Unsuppress on the Timeline tab
+           undoes it) and low-stakes (it only affects which checks future
+           assessments re-run -- nothing cluster-side). The finding hides
+           the instant Suppress is confirmed, reconciling back to visible
+           only if the real request actually fails -- never a bare spinner
+           + full-page reload for an action this safe. #}
+        <li class="finding-item {% if f.severity.name == 'critical' %}finding-critical{% else %}finding-high{% endif %}"
+            x-data="{ suppressing: false, suppressed: false }" x-show="!suppressed"
+            x-transition:leave="suppress-leave" x-transition:leave-end="suppress-leave-end">
           <span class="badge badge-{{ f.severity.name }} finding-badge">{{ f.severity.name }}</span>
           {{ f.description }}
           {% if f.source %}<span class="badge badge-muted finding-source">{{ f.source }}</span>{% endif %}
           {% if f.file_path %}<span class="finding-file">{{ f.file_path }}</span>{% endif %}
           {% if f.category in fixable_categories %}
           <form method="post" action="/assessments/{{ assessment_id }}/fix" class="inline-form"
-                x-data x-ref="fixFinding{{ loop.index }}">
+                x-ref="fixFinding{{ loop.index }}">
             <input type="hidden" name="category" value="{{ f.category }}">
             <input type="hidden" name="description" value="{{ f.description }}">
             <button type="button" class="btn btn-sm btn-green"
@@ -177,8 +202,11 @@
           </form>
           {% endif %}
           {% if f.source %}
-          <form method="post" action="/api/suppress" class="inline-form"
-                x-data="{ suppressing: false }">
+          <form action="/api/suppress" class="inline-form"
+                hx-post="/api/suppress" hx-swap="none"
+                @submit="suppressed = true"
+                @htmx:response-error.camel="suppressed = false"
+                @htmx:send-error.camel="suppressed = false">
             <input type="hidden" name="app_name" value="{{ report.repo_name }}">
             <input type="hidden" name="check_source" value="{{ f.source }}">
             <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
@@ -253,7 +281,11 @@
   {% endfor %}
   {% else %}
   <div class="empty-state">
+    {% if recently_resolved_actions_count %}
+    <p>No pending actions. {{ recently_resolved_actions_count }} resolved in the last 24 hours for this app.</p>
+    {% else %}
     <p>No pending actions for this app. Fix/Onboard-generated gates needing your review will show up here.</p>
+    {% endif %}
   </div>
   {% endif %}
 </div>

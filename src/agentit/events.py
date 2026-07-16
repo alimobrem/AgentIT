@@ -20,6 +20,37 @@ TOPIC_ALERTS = "agentit-alerts"
 TOPIC_DLQ = "agentit-dlq"
 
 
+def kafka_security_kwargs() -> dict:
+    """Build kafka-python SASL_SSL/SCRAM-SHA-512 kwargs from env vars.
+
+    Additive/opt-in, per docs/kafka-hardening-plan.md: when
+    AGENTIT_KAFKA_SASL_USERNAME/_PASSWORD aren't set (today's default for
+    every existing deployment), this returns ``{}`` and both
+    ``EventPublisher``/``EventConsumer`` construct their kafka-python client
+    exactly as before -- plain, unauthenticated ``bootstrap_servers``. Only
+    when both are present does the client get configured for SASL_SSL, with
+    SCRAM-SHA-512 as the mechanism (matching the KafkaUser CRs in
+    chart/templates/kafka/kafka-users.yaml). Those two env vars, plus the
+    optional CA file, are meant to be sourced from a Strimzi-generated
+    KafkaUser Secret -- this function only reads whatever is already in the
+    process environment; it does not know or care how it got there.
+    """
+    username = os.environ.get("AGENTIT_KAFKA_SASL_USERNAME")
+    password = os.environ.get("AGENTIT_KAFKA_SASL_PASSWORD")
+    if not username or not password:
+        return {}
+    kwargs: dict = {
+        "security_protocol": "SASL_SSL",
+        "sasl_mechanism": os.environ.get("AGENTIT_KAFKA_SASL_MECHANISM", "SCRAM-SHA-512"),
+        "sasl_plain_username": username,
+        "sasl_plain_password": password,
+    }
+    ca_file = os.environ.get("AGENTIT_KAFKA_SSL_CAFILE")
+    if ca_file:
+        kwargs["ssl_cafile"] = ca_file
+    return kwargs
+
+
 class EventPublisher:
     _RECONNECT_COOLDOWN = 60
 
@@ -34,9 +65,13 @@ class EventPublisher:
 
     @staticmethod
     def _resolve_buffer_db() -> str:
-        db_path = os.environ.get("AGENTIT_DB_PATH", "")
-        if db_path:
-            return str(Path(db_path).parent / "event-buffer.db")
+        """This buffer is a local, durable disk queue for Kafka publish
+        failures -- deliberately still SQLite, and deliberately unrelated
+        to `AssessmentStore`/Postgres: it exists specifically so events can
+        be buffered *without* depending on any network service (including
+        the primary store) being reachable. Co-located under the shared
+        `/data` PVC when mounted (see `chart/templates/pvc.yaml`), which
+        every component that publishes events still mounts."""
         data_dir = Path("/data")
         if data_dir.is_dir():
             return str(data_dir / "event-buffer.db")
@@ -65,6 +100,7 @@ class EventPublisher:
                 bootstrap_servers=self._bootstrap,
                 value_serializer=lambda v: json.dumps(v).encode(),
                 acks="all",
+                **kafka_security_kwargs(),
             )
             self._drain_buffer()
         except Exception as exc:

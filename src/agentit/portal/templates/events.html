@@ -41,7 +41,9 @@
       <td class="text-sm text-muted"><span data-timestamp="{{ e.timestamp }}">{{ e.timestamp[:16] }}</span></td>
       <td>{{ e.agent_id }}</td>
       <td>{{ e.action }}</td>
-      <td>{{ e.target_app or "-" }}</td>
+      <td>
+        {% if e.target_app and e.assessment_id %}<a href="/assessments/{{ e.assessment_id }}">{{ e.target_app }}</a>{% else %}{{ e.target_app or "-" }}{% endif %}
+      </td>
       <td>
         {% if e.severity == "critical" %}
           <span class="badge badge-critical">critical</span>

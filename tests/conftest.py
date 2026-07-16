@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import os
+import shutil
+import subprocess
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -22,7 +28,6 @@ def pytest_addoption(parser):
     parser.addoption("--run-real-repos", action="store_true", default=False, help="Run tests against real repos")
     parser.addoption("--live-cluster", action="store_true", default=False, help="Run e2e tests against a live OpenShift cluster")
     parser.addoption("--run-llm-evals", action="store_true", default=False, help="Run tests requiring real LLM credentials")
-    parser.addoption("--run-postgres-tests", action="store_true", default=False, help="Run tests requiring a real Postgres instance (podman/docker or AGENTIT_TEST_PG_DSN)")
 
 
 def pytest_collection_modifyitems(config, items):
@@ -44,11 +49,15 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if "llm_eval" in item.keywords:
                 item.add_marker(skip)
-    if not config.getoption("--run-postgres-tests"):
-        skip = pytest.mark.skip(reason="needs --run-postgres-tests flag (and podman/docker or AGENTIT_TEST_PG_DSN)")
-        for item in items:
-            if "postgres" in item.keywords:
-                item.add_marker(skip)
+    # No more --run-postgres-tests gate. Postgres is the only supported
+    # store (see docs/postgres-migration-plan.md) -- almost the entire
+    # suite needs a real instance now, not just a handful of opt-in tests,
+    # so requiring an extra flag to run the *default* `pytest` invocation
+    # would defeat the point. `postgres_dsn`/`make_store()` below handle
+    # getting a real instance transparently (env var, or an
+    # auto-started/auto-torn-down throwaway container); a test that
+    # genuinely can't reach either still skips itself via that fixture,
+    # it's just no longer an opt-in gate on the whole suite.
 
 
 @pytest.fixture(autouse=True)
@@ -98,25 +107,176 @@ def _hermetic_llm_env(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
         monkeypatch.delenv(var, raising=False)
 
 
-def make_store() -> AssessmentStore:
-    """Create an in-memory assessment store."""
-    return AssessmentStore(db_path=":memory:")
+# ── Real Postgres test infrastructure ────────────────────────────────
+#
+# Postgres is the only supported store (docs/postgres-migration-plan.md) --
+# there is no more SQLite ":memory:" fast path, so every test that touches
+# the store needs a real, reachable Postgres instance. Decision (stated
+# explicitly, not silently picked): a *session-scoped* container +
+# a *session-scoped* connection pool/AssessmentStore, reused by every test
+# that needs one, with per-test isolation via `TRUNCATE ... CASCADE`
+# instead of a fresh container/pool per test.
+#
+# Why not a container (or even just a pool) per test: this suite has ~900+
+# tests. `asyncpg.create_pool()` alone is a handful of real TCP
+# round-trips: fine once, prohibitively slow multiplied by every single
+# test. A fresh *container* per test would be far worse (multi-second
+# `podman run` + readiness-poll per test). A single shared container +
+# pool for the whole session, cleaned between tests with one cheap
+# `TRUNCATE` round-trip, is the standard, correct trade-off here -- it's
+# the same "real dependency, cheap per-test reset" shape SQLite's
+# ":memory:" gave for free, just achieved differently since there is no
+# async in-memory Postgres equivalent.
+#
+# This requires every async test/fixture in the whole suite to share one
+# event loop (an `asyncpg` pool is bound to the loop that created it and
+# cannot be driven from a different one) -- see
+# `asyncio_default_fixture_loop_scope`/`asyncio_default_test_loop_scope`
+# in pyproject.toml, both set to "session" for exactly this reason.
+_CONTAINER_NAME = f"agentit-pg-test-{uuid.uuid4().hex[:8]}"
+_container_started = False
 
 
-def make_async_store():
-    """Create an in-memory store plus an async facade over that *same*
-    connection (``AsyncSQLiteStore.wrap``, not a second ``:memory:`` store --
-    those are separate, isolated databases).
+def _container_runtime() -> str | None:
+    for candidate in ("podman", "docker"):
+        if shutil.which(candidate):
+            return candidate
+    return None
 
-    Returns ``(async_store, raw_store)``. ``async_store`` is what gets handed
-    to the now-async ``FleetOrchestrator``/``AutoMode``/``RemediationDispatcher``/
-    ``RemediationLoop``; ``raw_store`` is the plain synchronous store for
-    direct, non-async test assertions (``raw_store.list_remediations(...)``).
+
+def _resolve_postgres_dsn() -> str | None:
+    """Returns a DSN, starting a throwaway container if needed. ``None`` if
+    neither a configured DSN nor a container runtime is available -- the
+    caller decides whether that's a skip or an error."""
+    global _container_started
+    env_dsn = os.environ.get("AGENTIT_TEST_PG_DSN")
+    if env_dsn:
+        return env_dsn
+
+    runtime = _container_runtime()
+    if runtime is None:
+        return None
+
+    port = 55433
+    subprocess.run([runtime, "rm", "-f", _CONTAINER_NAME], capture_output=True)
+    result = subprocess.run(
+        [
+            runtime, "run", "-d", "--name", _CONTAINER_NAME,
+            "-e", "POSTGRES_USER=agentit_test",
+            "-e", "POSTGRES_PASSWORD=agentit_test",
+            "-e", "POSTGRES_DB=agentit_test",
+            "-p", f"{port}:5432",
+            "postgres:16-alpine",
+        ],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    _container_started = True
+
+    dsn = f"postgresql://agentit_test:agentit_test@localhost:{port}/agentit_test"
+    for _ in range(30):
+        check = subprocess.run(
+            [runtime, "exec", _CONTAINER_NAME, "pg_isready", "-U", "agentit_test"],
+            capture_output=True,
+        )
+        if check.returncode == 0:
+            return dsn
+        time.sleep(1)
+    return None
+
+
+@pytest.fixture(scope="session", autouse=True)
+def postgres_dsn():
+    """Session-scoped DSN, either from ``AGENTIT_TEST_PG_DSN`` or a
+    throw-away container started via podman/docker (torn down at the end
+    of the session by ``_pg_session_cleanup`` below).
+
+    Autouse and also exported as ``AGENTIT_DB_DSN`` for the whole test
+    session: a handful of code paths (e.g. ``portal/helpers.py::get_store()``'s
+    module-level singleton, reached by tests that hit a route without
+    patching ``get_store`` at all -- real production behavior, not a test
+    gap) read ``AGENTIT_DB_DSN`` straight from the environment rather than
+    through a fixture, the same way a real deployment's env would always
+    have it set.
     """
-    from agentit.portal.store_factory import AsyncSQLiteStore
+    dsn = _resolve_postgres_dsn()
+    if dsn is None:
+        pytest.skip("no AGENTIT_TEST_PG_DSN and no podman/docker on PATH to start one")
+    os.environ["AGENTIT_DB_DSN"] = dsn
+    yield dsn
 
-    raw_store = make_store()
-    return AsyncSQLiteStore.wrap(raw_store), raw_store
+
+@pytest.fixture(scope="session", autouse=True)
+def _pg_session_cleanup():
+    """Tears down the throwaway container (if one was started) once, after
+    the whole session -- runs unconditionally so it's a no-op when nothing
+    needed Postgres, but still cleans up if anything did."""
+    yield
+    if _container_started:
+        runtime = _container_runtime()
+        if runtime:
+            subprocess.run([runtime, "rm", "-f", _CONTAINER_NAME], capture_output=True)
+
+
+_ALL_STORE_TABLES = (
+    "assessments", "apps", "onboarding_results", "events", "gates",
+    "remediations", "agent_registry", "slos", "apply_results",
+    "settings", "remediation_jobs", "scheduled_operations",
+    "processed_webhooks", "agent_feedback", "skill_effectiveness",
+    "suppressed_checks", "skill_inventory_snapshots",
+    "agent_runs", "check_results", "deliveries",
+)
+
+_shared_store: AssessmentStore | None = None
+_shared_store_lock = asyncio.Lock()
+
+
+async def _get_shared_store() -> AssessmentStore:
+    """Session-wide ``AssessmentStore`` singleton, created lazily on first
+    use (mirrors ``portal/helpers.py::get_store()``'s own lazy-singleton
+    pattern). All async tests share one event loop this session
+    (``asyncio_default_test_loop_scope = "session"``), so this is safe to
+    reuse across every test without a "different loop" error.
+    """
+    global _shared_store
+    if _shared_store is None:
+        async with _shared_store_lock:
+            if _shared_store is None:
+                dsn = _resolve_postgres_dsn()
+                if dsn is None:
+                    pytest.skip("no AGENTIT_TEST_PG_DSN and no podman/docker on PATH to start one")
+                _shared_store = await AssessmentStore.create(dsn, min_size=2, max_size=10)
+    return _shared_store
+
+
+async def make_store() -> AssessmentStore:
+    """The one, real, Postgres-backed ``AssessmentStore`` for this test
+    session -- every table truncated first, so each call behaves like the
+    "fresh, empty store" the old ``AssessmentStore(db_path=":memory:")``
+    gave for free. Every caller is (necessarily) ``async def`` and
+    ``await``s this.
+    """
+    store = await _get_shared_store()
+    async with store._pool.acquire() as conn:
+        await conn.execute(f"TRUNCATE {', '.join(_ALL_STORE_TABLES)} CASCADE")
+    return store
+
+
+async def make_async_store():
+    """Historically returned ``(async_facade, raw_sync_store)`` -- a
+    facade wrapping a synchronous SQLite store plus the raw store itself,
+    so tests could make direct synchronous assertions while handing the
+    async facade to async-shaped classes (``FleetOrchestrator``/
+    ``AutoMode``/etc). There is only one store type now, and it's already
+    fully async -- both slots are the exact same object. Kept as a
+    2-tuple purely so the ~15 existing call sites that destructure
+    ``async_store, raw_store = make_async_store()`` don't all need an
+    additional, purely mechanical edit on top of everything else this
+    cutover already touches.
+    """
+    store = await make_store()
+    return store, store
 
 
 def make_report(
@@ -156,17 +316,26 @@ def make_report(
     )
 
 
-def prime_csrf(client) -> None:
+async def prime_csrf(client) -> None:
     """Fetch the CSRF cookie (set on every response by csrf_middleware) and
     attach it as the X-CSRF-Token header on the client itself, so every
-    subsequent request made through this TestClient instance automatically
+    subsequent request made through this async client automatically
     satisfies the double-submit-cookie check (see csrf.py) -- without having
     to pass a token through each individual `client.post(...)` call.
 
     This mirrors exactly what base.html's htmx:configRequest handler does in
     a real browser: read the cookie, echo it back as a header.
+
+    ``client`` is an ``httpx.AsyncClient`` (not Starlette's
+    ``TestClient``): a sync ``TestClient`` always drives the ASGI app on
+    its own separate event-loop thread, which is fundamentally
+    incompatible with the real, shared ``asyncpg`` connection pool the
+    store fixtures use (an ``asyncpg`` pool is bound to the loop that
+    created it) -- ``httpx.AsyncClient`` + ``ASGITransport`` calls the app
+    in-process on the *current* running loop instead, so both the test
+    body and the app's own route handlers agree on the same loop.
     """
-    resp = client.get("/healthz")
+    resp = await client.get("/healthz")
     token = resp.cookies.get("csrf_token") or client.cookies.get("csrf_token")
     if token:
         client.headers["X-CSRF-Token"] = token
@@ -187,37 +356,30 @@ def create_mock_repo(tmp_path: Path):
 
 
 @pytest.fixture()
-def portal_client():
-    """TestClient with all store locations patched and seeded with test data.
+async def portal_client():
+    """Async HTTP client with all store locations patched and seeded with
+    test data.
 
-    ``store`` (the fixture's 2nd yielded value, and what every test body
-    calls directly, e.g. ``store.log_event(...)``) stays the plain
-    *synchronous* ``AssessmentStore`` -- unchanged from before Phase 3 of
-    docs/postgres-migration-plan.md, so none of test_portal.py's 120 tests
-    need to become ``async def`` just to keep making direct store calls.
-
-    What *does* change: the app itself now calls `get_store()` as an
-    ``async def`` (Phase 3) -- ``AsyncSQLiteStore.wrap(store)`` gives every
-    patched location an async-compatible facade over the exact same
-    underlying in-memory sqlite connection (constructing a second, separate
-    ``AsyncSQLiteStore(":memory:")`` would silently point at a different,
-    empty database), so `await get_store()` inside the app sees the same
-    data `store.*` calls made directly in a test body already wrote.
+    ``store`` (the fixture's 2nd yielded value) is the real, async
+    ``AssessmentStore`` -- every direct call a test body makes against it
+    (e.g. ``await store.log_event(...)``) must now be awaited, since
+    there's no more synchronous facade. ``get_store()`` throughout the app
+    is patched to return this exact same store instance, so `await
+    get_store()` inside the app sees the same data the fixture/test body
+    wrote directly.
     """
-    from fastapi.testclient import TestClient
+    from httpx import ASGITransport, AsyncClient
     from agentit.portal.app import app
-    from agentit.portal.store_factory import AsyncSQLiteStore
 
-    store = make_store()
-    async_store = AsyncSQLiteStore.wrap(store)
+    store = await make_store()
     report = make_report()
-    assessment_id = store.save(report)
-    store.save_onboarding(assessment_id, [
+    assessment_id = await store.save(report)
+    await store.save_onboarding(assessment_id, [
         {"category": "security", "path": "test.yaml",
          "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test",
          "description": "test file"}
     ])
-    store.log_event("test", "test-action", "test-app", "info", "test event")
+    await store.log_event("test", "test-action", "test-app", "info", "test event")
 
     fake_health = {
         "argo_apps": [], "argo_synced": True,
@@ -228,21 +390,21 @@ def portal_client():
         "kafka_stats": {"available": False, "topics": {}, "consumer_groups": []},
     }
 
-    with patch("agentit.portal.app.get_store", return_value=async_store), \
-         patch("agentit.portal.helpers.get_store", return_value=async_store), \
-         patch("agentit.portal.helpers._store", async_store), \
-         patch("agentit.portal.routes.webhooks.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.health.get_store", return_value=async_store), \
+    with patch("agentit.portal.app.get_store", return_value=store), \
+         patch("agentit.portal.helpers.get_store", return_value=store), \
+         patch("agentit.portal.helpers._store", store), \
+         patch("agentit.portal.routes.webhooks.get_store", return_value=store), \
+         patch("agentit.portal.routes.health.get_store", return_value=store), \
          patch("agentit.portal.routes.health._get_cluster_health", return_value=fake_health), \
-         patch("agentit.portal.routes.schedules.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.fleet.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.assessments.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.gates.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.capabilities.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.settings.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.insights.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.remediations.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.slos.get_store", return_value=async_store):
-        client = TestClient(app)
-        prime_csrf(client)
-        yield client, store, assessment_id
+         patch("agentit.portal.routes.schedules.get_store", return_value=store), \
+         patch("agentit.portal.routes.fleet.get_store", return_value=store), \
+         patch("agentit.portal.routes.assessments.get_store", return_value=store), \
+         patch("agentit.portal.routes.gates.get_store", return_value=store), \
+         patch("agentit.portal.routes.capabilities.get_store", return_value=store), \
+         patch("agentit.portal.routes.settings.get_store", return_value=store), \
+         patch("agentit.portal.routes.insights.get_store", return_value=store), \
+         patch("agentit.portal.routes.remediations.get_store", return_value=store), \
+         patch("agentit.portal.routes.slos.get_store", return_value=store):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True) as client:
+            await prime_csrf(client)
+            yield client, store, assessment_id

@@ -95,11 +95,10 @@ spec:
               value: {{ .Values.image.tag | quote }}
             - name: AGENTIT_IMAGE_TAG
               value: {{ .Values.image.tag | quote }}
-            - name: AGENTIT_DB_PATH
-              value: /data/agentit.db
-            - name: AGENTIT_DB_BACKEND
-              value: {{ .Values.postgres.backend | default "sqlite" | quote }}
-            {{- if eq (.Values.postgres.backend | default "sqlite") "postgres" }}
+            # Postgres is the only supported store -- always-on, not a
+            # flag. See docs/postgres-migration-plan.md for the history of
+            # how this cutover happened (that doc is now marked
+            # historically-complete/superseded).
             - name: PGUSER
               valueFrom:
                 secretKeyRef:
@@ -112,7 +111,6 @@ spec:
                   key: password
             - name: AGENTIT_DB_DSN
               value: "postgresql://$(PGUSER):$(PGPASSWORD)@{{ .Release.Name }}-postgres-bundled.{{ .Release.Namespace }}.svc:5432/{{ .Values.postgres.bundled.credentials.database }}"
-            {{- end }}
             - name: ANTHROPIC_VERTEX_PROJECT_ID
               value: {{ .Values.env.ANTHROPIC_VERTEX_PROJECT_ID | default "" | quote }}
             - name: CLOUD_ML_REGION

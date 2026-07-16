@@ -25,12 +25,11 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
     """Check cluster for each app's deployment status. Caches Argo CD data for 60s.
 
     Runs in a worker thread via `asyncio.to_thread` (see `home()` below), so
-    a Postgres-backed `_store`'s coroutine methods need bridging back onto
-    `_loop` (the event loop that constructed the store) via
-    `asyncio.run_coroutine_threadsafe` -- the same pattern
-    `EventConsumer._persist_dead_letter` established in commit 7533309. A
-    no-op passthrough against the sqlite backend's raw store, whose methods
-    return already-computed values, not coroutines.
+    `_store`'s coroutine methods need bridging back onto `_loop` (the event
+    loop that constructed the store) via `asyncio.run_coroutine_threadsafe`
+    -- the same pattern `EventConsumer._persist_dead_letter` uses for the
+    identical constraint (an `asyncpg` pool is bound to its creating loop
+    and can't be driven from a different thread's loop).
     """
     import asyncio as _asyncio
     import time as _t
@@ -106,10 +105,19 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
 
 async def _attach_pending_actions(fleet: list[dict], s: object) -> None:
     """"Needs action" badge per app (docs/ui-redesign-proposal.md §2) -- a
-    cheap ``GROUP BY assessment_id`` count of pending, app-owner-scoped
-    gates (``cluster-admin-review`` excluded: that's a different audience's
+    cheap ``GROUP BY repo_url`` count of pending, app-owner-scoped gates
+    (``cluster-admin-review`` excluded: that's a different audience's
     concern, counted separately for the Admin Review nav badge). Mutates
     each fleet row in place with ``pending_actions_count``.
+
+    Keyed by ``repo_url`` (not ``assessment_id``): ``list_gates()`` joins
+    each gate back to the specific historical assessment it was created
+    against, but a fleet row's ``id`` is always the app's LATEST
+    assessment_id (``get_fleet_data()``). A gate created against an older
+    assessment of the same app would never match the latest assessment_id
+    and would silently drop out of this badge count the moment the app is
+    re-assessed -- the same orphaned-gate-attribution bug fixed in
+    ``store.py``/``store_pg.py``'s ``list_gates_for_assessment()``.
     """
     from agentit.portal.delivery import ADMIN_REVIEW_GATE_TYPE
     try:
@@ -122,12 +130,12 @@ async def _attach_pending_actions(fleet: list[dict], s: object) -> None:
     for g in pending_gates:
         if g.get("gate_type") == ADMIN_REVIEW_GATE_TYPE:
             continue
-        aid = g.get("assessment_id")
-        if aid:
-            counts[aid] = counts.get(aid, 0) + 1
+        repo_url = g.get("repo_url")
+        if repo_url:
+            counts[repo_url] = counts.get(repo_url, 0) + 1
 
     for app_item in fleet:
-        app_item["pending_actions_count"] = counts.get(app_item["id"], 0)
+        app_item["pending_actions_count"] = counts.get(app_item["repo_url"], 0)
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -135,8 +143,7 @@ async def home(request: Request) -> HTMLResponse:
     s = await get_store()
     fleet = await s.get_fleet_data()
     loop = asyncio.get_running_loop()
-    store_arg = s.raw if hasattr(s, "raw") else s
-    fleet = await asyncio.to_thread(_enrich_fleet_with_cluster_status, fleet, store_arg, loop)
+    fleet = await asyncio.to_thread(_enrich_fleet_with_cluster_status, fleet, s, loop)
     await _attach_pending_actions(fleet, s)
     total_apps = len(fleet)
     if total_apps == 0:

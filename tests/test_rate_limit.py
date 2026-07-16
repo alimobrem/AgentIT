@@ -112,7 +112,7 @@ class TestClientKeyFor:
 class TestMiddlewareIntegration:
     """End-to-end through the actual FastAPI middleware stack (app.py)."""
 
-    def test_rate_limited_response_is_429(self, portal_client):
+    async def test_rate_limited_response_is_429(self, portal_client):
         # "/" (not "/fleet", which 301-redirects to "/" and would otherwise
         # silently consume 2 requests' worth of budget per logical call once
         # TestClient's default redirect-following is accounted for).
@@ -122,17 +122,17 @@ class TestMiddlewareIntegration:
             "AGENTIT_RATE_LIMIT_DEFAULT_PER_MIN": "1",
         }):
             rate_limit._hits.clear()
-            first = client.get("/healthz")  # exempt path -- never counted
+            first = await client.get("/healthz")  # exempt path -- never counted
             assert first.status_code == 200
-            r1 = client.get("/")
-            r2 = client.get("/")
+            r1 = await client.get("/")
+            r2 = await client.get("/")
         assert r1.status_code != 429
         assert r2.status_code == 429
         assert r2.json()["detail"] == "Rate limit exceeded"
 
-    def test_disabled_by_default_never_429s(self, portal_client):
+    async def test_disabled_by_default_never_429s(self, portal_client):
         client, _, _ = portal_client
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("AGENTIT_RATE_LIMIT_ENABLED", None)
             for _ in range(20):
-                assert client.get("/").status_code != 429
+                assert (await client.get("/")).status_code != 429
