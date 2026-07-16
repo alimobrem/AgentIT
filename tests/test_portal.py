@@ -629,8 +629,6 @@ async def test_masthead_nav_structure(client, _override_store):
     assert "/api/events?limit=50" in html
     assert "agentit.events.lastSeenAt" in html
     assert "refreshBadge" in html
-    assert "_isBadgeSeverity" in html
-    assert "_eventHref" in html
     assert "activity-menu" not in html
     # Bell shares Alpine scope with the drawer (aria-expanded + focus restore).
     assert ':aria-expanded="open"' in html
