@@ -366,14 +366,10 @@
   .badge-danger   { background: var(--color-danger); color: #fff; }
   .badge-warning  { background: var(--color-warning); color: var(--color-bg); }
   .badge-muted    { background: var(--color-border); color: var(--color-muted); }
-  /* "Needs your attention" badges (pending gate counts, "Needs You" fleet
-     filters) -- kept visually distinct from severity badges (badge-medium/
-     -warning, both --color-warning) by using --color-accent, the one color
-     this file's own convention reserves exclusively for that signal (see
-     this file's :root comment). Fleet's "N pending" badge and the Ledger's
-     "Needs You" badges previously used badge-medium/-warning here, which
-     accidentally made a routine medium-severity finding and an actionable
-     pending gate look identical -- this is the one class either should use. */
+  /* "Needs your attention" badges (Ledger Needs You rows / Ledger nav badge)
+     -- kept visually distinct from severity badges (badge-medium/-warning)
+     by using --color-accent. Fleet no longer hosts a competing pending-ops
+     column; only Ledger owns that signal. */
   .badge-accent   { background: var(--color-accent); color: #fff; box-shadow: var(--glow-accent); }
 
   /* ── Buttons ───────────────────────────────────────────────────── */
@@ -946,6 +942,7 @@
   }
   .user-menu-item:hover { background: var(--color-surface-3); text-decoration: none; }
   .user-menu-item.nav-active { color: var(--color-accent); }
+  .user-menu-item-sub { display: block; color: var(--color-muted); font-size: var(--font-xs); margin-top: 2px; }
   .user-menu-divider { height: 1px; background: var(--color-border); margin: var(--space-2) 0; }
   .user-menu-info { padding: var(--space-2) var(--space-4); color: var(--color-muted); font-size: var(--font-xs); }
   /* The deploy-status badge brings its own pill padding/border, so trim the
@@ -1245,7 +1242,7 @@
       width: min(14rem, calc(100% - 9rem));
       min-width: 0;
     }
-    /* Hamburger owns the full primary stack (Fleet…Insights) plus Events
+    /* Hamburger owns the full primary stack (Ledger…Insights) plus Events
        and account — not only secondary chrome. Match ancestor selectors so
        these beat the desktop `nav .links` / `nav .links-secondary` rules. */
     nav .links {
@@ -1304,13 +1301,18 @@
     <span x-show="navOpen" x-cloak>&#10005;</span>
   </button>
   <div id="nav-primary" class="links" :class="{ 'links-open': navOpen }">
-    <a href="/" class="{{ 'nav-active' if request.url.path == '/' or request.url.path.startswith('/assessments') or request.url.path == '/fleet' }}">Fleet
+    {# Exclusive jobs (docs/portal-experience-design-language.md §1):
+       Ledger = ops inbox (Needs You badge); Fleet = scoreboard only;
+       Admin Review = elevated queue (primary only when count > 0). #}
+    <a href="/ledger" class="{{ 'nav-active' if request.url.path == '/' or request.url.path.startswith('/ledger') }}">Ledger
       {% if nav_pending_actions %}<span class="nav-badge">{{ nav_pending_actions }}</span>{% endif %}
     </a>
+    <a href="/fleet" class="{{ 'nav-active' if request.url.path.startswith('/fleet') or request.url.path.startswith('/assessments') }}">Fleet</a>
+    {% if nav_admin_review_pending %}
     <a href="/admin-review" class="{{ 'nav-active' if request.url.path.startswith('/admin-review') }}">Admin Review
-      {% if nav_admin_review_pending %}<span class="nav-badge">{{ nav_admin_review_pending }}</span>{% endif %}
+      <span class="nav-badge">{{ nav_admin_review_pending }}</span>
     </a>
-    <a href="/ledger" class="{{ 'nav-active' if request.url.path.startswith('/ledger') }}">Ledger</a>
+    {% endif %}
     <a href="/health" class="{{ 'nav-active' if request.url.path.startswith('/health') }}">Health</a>
     <a href="/insights" class="{{ 'nav-active' if request.url.path == '/insights' }}">Insights</a>
   </div>
@@ -1343,7 +1345,14 @@
         <a href="/capabilities" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/capabilities' or request.url.path.startswith('/agents') }}">Capabilities</a>
         <a href="/settings" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/settings' }}">Settings</a>
         <a href="/schedules" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/schedules' }}">Schedules</a>
-        <a href="/decisions" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/decisions') }}">Decisions</a>
+        <a href="/decisions" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/decisions') }}">Decisions
+          <span class="user-menu-item-sub">Audit log — Ledger owns the stream</span>
+        </a>
+        {% if not nav_admin_review_pending %}
+        <a href="/admin-review" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/admin-review') }}">Admin Review
+          <span class="user-menu-item-sub">Elevated approvals</span>
+        </a>
+        {% endif %}
         {% if is_authenticated %}
         <div class="user-menu-divider"></div>
         <div class="user-menu-info">Logged in as {{ current_user }}</div>
@@ -1386,7 +1395,7 @@
       <div class="events-drawer-empty" x-show="!loading && !error && events.length === 0" x-cloak>
         <p>No events recorded yet.</p>
         <p class="events-drawer-empty-hint">
-          <a href="/" @click="close()">Run an assessment from Fleet</a>
+          <a href="/fleet" @click="close()">Run an assessment from Fleet</a>
           or
           <a href="/events" @click="close()">open Events</a>
           for filters and the DLQ.
@@ -1860,14 +1869,14 @@ function commandPalette() {
     activeIndex: 0,
     apps: null, // null = not yet fetched; [] = fetched, fleet is empty
     navItems: [
-      { label: 'Fleet', href: '/', hint: 'All monitored apps' },
-      { label: 'Admin Review', href: '/admin-review', hint: 'Cluster-admin-review gates' },
-      { label: 'Ledger', href: '/ledger', hint: 'Fleet-wide event/gate/delivery/decision stream' },
-      { label: 'Health', href: '/health', hint: 'System health & pipelines' },
-      { label: 'Insights', href: '/insights', hint: 'Fleet-wide insights' },
-      { label: 'Events', href: '/events', hint: 'Agent activity feed' },
+      { label: 'Ledger', href: '/ledger', hint: 'Morning inbox — Needs You and human gates' },
+      { label: 'Fleet', href: '/fleet', hint: 'Portfolio scoreboard — apps and scores' },
+      { label: 'Admin Review', href: '/admin-review', hint: 'Elevated approvals only' },
+      { label: 'Health', href: '/health', hint: 'Live infrastructure telemetry' },
+      { label: 'Insights', href: '/insights', hint: 'Fleet-wide aggregate analytics' },
+      { label: 'Events', href: '/events', hint: 'Bell feed + DLQ (not ops home)' },
       { label: 'Dead-Letter Queue', href: '/events/dlq', hint: 'Undeliverable events' },
-      { label: 'Decisions', href: '/decisions', hint: 'LLM decision log' },
+      { label: 'Decisions', href: '/decisions', hint: 'LLM decision audit — Ledger owns the stream' },
       { label: 'Capabilities', href: '/capabilities', hint: 'Agent registry & catalog' },
       { label: 'Settings', href: '/settings', hint: 'Auto-mode & allowlist' },
       { label: 'Schedules', href: '/schedules', hint: 'Scheduled operations' },

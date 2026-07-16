@@ -126,7 +126,7 @@ class TestHonestDeliverConfirm:
 class TestSeverityGatedEventsBadge:
     async def test_compute_badge_source_always_filters_severity(self, trust_client):
         client, _store = trust_client
-        resp = await client.get("/")
+        resp = await client.get("/ledger")
         assert resp.status_code == 200
         html = resp.text
         assert "_isBadgeSeverity" in html
@@ -154,7 +154,7 @@ class TestSeverityGatedEventsBadge:
 
     async def test_drawer_prefers_assessment_actions_href(self, trust_client):
         client, _store = trust_client
-        resp = await client.get("/")
+        resp = await client.get("/ledger")
         assert resp.status_code == 200
         assert "_eventHref" in resp.text
         assert "?tab=actions" in resp.text

@@ -5,10 +5,11 @@
 <div class="alert alert-error">{{ request.query_params.get('error') }}</div>
 {% endif %}
 <h1>Fleet</h1>
+<p class="text-muted text-sm mb-1">Portfolio scoreboard — apps, scores, Assess / Re-assess / Delete.</p>
 
 {% if assessments %}
 <div class="action-bar">
-  <a href="/?assess=1" class="btn">Assess New Repo</a>
+  <a href="/fleet?assess=1" class="btn">Assess New Repo</a>
 </div>
 
 {% if total_apps > 1 %}

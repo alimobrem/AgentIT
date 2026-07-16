@@ -41,18 +41,19 @@ not designed against an imagined backend.
 **Verified current state** (read directly from the working tree, not
 assumed): `docs/ui-redesign-proposal.md`'s 7 pieces are implemented.
 
-- `base.html`'s nav is exactly: **Fleet, Admin Review, Events, Health,
-  Insights, Decisions** (primary) + **Capabilities, Settings** (secondary,
-  behind a divider) — 7 top-level items, no standalone "Gates" link.
+- `base.html`'s primary nav is **Ledger** (Needs You badge), **Fleet**,
+  **Admin Review** (only when elevated count &gt; 0), Health, Insights;
+  Events is the bell; Decisions (+ Admin Review when empty) sit in the
+  account menu. `GET /` redirects to `/ledger`; Fleet lives at `/fleet`.
   `GET /gates` is a 301 redirect to `/admin-review` (`routes/gates.py`).
 - `admin_review.html` exists and is intentionally narrow — it renders only
   `cluster-admin-review` gates via `{% from "_macros.html" import gate_card %}`,
   exactly the shared macro, with the exact scoping comment from the design
   doc reproduced in its own template header.
-- `fleet.html` has both the GitOps/Direct-apply badge pair and a "Needs
-  Action" `pending_actions_count` badge per row (`routes/fleet.py::
-  _attach_pending_actions()`, a `GROUP BY assessment_id` count that
-  explicitly excludes `cluster-admin-review` gates).
+- `fleet.html` is the portfolio scoreboard (GitOps/Direct-apply + deploy
+  badges). Pending ops are a quiet “N need you → Ledger” link, not a
+  Needs Action column (`routes/fleet.py::_attach_pending_actions()` still
+  computes counts for Ledger grouping and that quiet pointer).
 - `assessment_detail.html` has the 4-tab shape (Overview / Findings /
   Actions / Timeline) with **Actions** rendering that app's own pending
   gates via the same `gate_card` macro Admin Review uses.
@@ -168,9 +169,22 @@ volume. The concrete mechanism, in order of what actually reduces volume:
 
 ## 3. What happens to every existing page
 
+### Exclusive ownership (shipped IA)
+
+Surfaces must not duplicate jobs. See also
+`docs/portal-experience-design-language.md` §1.
+
+| Surface | Exclusive job | MUST NOT |
+|---|---|---|
+| **Ledger** (`/ledger`; `/` redirects here) | Morning inbox: Needs You (default), what happened, human gates needing action | Compete with Fleet as a second ops home |
+| **Fleet** (`/fleet`) | Portfolio scoreboard only (apps, scores, Assess / Re-assess / Delete) | Host a primary pending-ops inbox (quiet “N need you → Ledger” link only) |
+| **Admin Review** | Elevated `cluster-admin-review` queue | Absorb app-owner gates; stay primary-nav when empty |
+| **Events** | Bell + DLQ | Claim ops home |
+| **Decisions** | Menu audit log | Own the chronological stream (Ledger does) |
+
 | Page | Fate | Why |
 |---|---|---|
-| **Fleet** (`/`) | **Kept, evolves into the entry point.** Unchanged GitOps badge, pending-actions badge, deploy-status badge. Each row gains an inline expand into that app's Ledger stream (see §2.2) — additive, no existing column removed. | It's already the correct "per-app index" shape; the Ledger becomes what a row expands into, not a replacement for the index itself. |
+| **Fleet** (`/fleet`; `/` → Ledger) | **Kept as portfolio scoreboard.** GitOps / deploy-status badges stay; pending-ops affordances demoted to a quiet Ledger link. | Scoreboard vs inbox is the founder-facing boundary; Ledger is ops home. |
 | **Assessment Detail** — Overview tab | **Kept unchanged.** Dimension scores, score history table, GitOps badge/nudge. | A sorted dimension bar chart and a score-history table are structured, tabular data — the wrong shape for a chronological feed. |
 | **Assessment Detail** — Findings tab | **Kept unchanged.** Per-finding Fix button, Remediation Plan table. | Findings are a point-in-time snapshot of *current* state ("what's wrong right now"), not a history of *events* — a feed answers "what happened," not "what's true right now"; both are needed, and conflating them would make Findings worse, not better. |
 | **Assessment Detail** — Actions tab | **Absorbed.** Replaced by the app-scoped Ledger stream, filtered to cards D/E (gates) — same `gate_card` macro, same three buttons, just rendered as cards in the stream instead of a flat list. | This tab is *exactly* "pending gates for this app," which is already one filtered slice of the Ledger — no reason to maintain it as a separately-templated list once the Ledger exists. |

@@ -99,7 +99,7 @@ def _assess_sync(
 @router.get("/assess")
 async def assess_form():
     """Redirect to fleet with modal open — single entry point for assessment."""
-    return RedirectResponse(url="/?assess=1", status_code=303)
+    return RedirectResponse(url="/fleet?assess=1", status_code=303)
 
 
 @router.post("/assess", response_model=None)

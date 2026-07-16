@@ -126,7 +126,7 @@ async def client():
 
 
 async def test_dashboard_empty(client):
-    resp = await client.get("/")
+    resp = await client.get("/fleet")
     assert resp.status_code == 200
     assert "Assess your first app" in resp.text
 
@@ -616,9 +616,9 @@ async def test_fleet_h1_not_enterprise_readiness(client, _override_store):
 
 
 async def test_masthead_nav_structure(client, _override_store):
-    """Ledger is primary nav; Decisions is in the user/main menu; Events is
-    a bell icon + drawer (full page still at /events). No Activity dropdown."""
-    resp = await client.get("/")
+    """Ledger is primary nav (ops home); Decisions is in the user/main menu;
+    Events is a bell icon + drawer (full page still at /events). No Activity dropdown."""
+    resp = await client.get("/ledger")
     assert resp.status_code == 200
     html = resp.text
     assert "events-bell" in html
@@ -656,8 +656,9 @@ async def test_masthead_nav_structure(client, _override_store):
     assert "Open full Events page" not in drawer
     assert "Run an assessment from Fleet" in drawer
     assert "events-drawer-empty-hint" in drawer
-    primary = html.split('class="links"', 1)[1].split("links-secondary", 1)[0]
+    primary = html.split('id="nav-primary"', 1)[1].split("links-secondary", 1)[0]
     assert 'href="/ledger"' in primary
+    assert 'href="/fleet"' in primary
     assert 'href="/decisions"' not in primary
     assert 'href="/events"' not in primary
     dropdown_idx = html.index("user-menu-dropdown")
@@ -1199,24 +1200,25 @@ async def test_fleet_dashboard_shows_portfolio_summary(client, _override_store):
     await store.save(_make_report_scored("beta-svc", 30, "critical"))
     await store.save(_make_report_scored("gamma-svc", 55, "medium"))
 
-    resp = await client.get("/")
+    resp = await client.get("/fleet")
     assert resp.status_code == 200
     assert "alpha-svc" in resp.text
     assert "beta-svc" in resp.text
     assert "gamma-svc" in resp.text
     assert "Assess New Repo" in resp.text
+    assert "<h1>Fleet</h1>" in resp.text
 
 
 async def test_fleet_empty(client):
-    resp = await client.get("/")
+    resp = await client.get("/fleet")
     assert resp.status_code == 200
     assert "Assess your first app" in resp.text
 
 
-async def test_fleet_redirects_to_home(client):
-    resp = await client.get("/fleet", follow_redirects=False)
-    assert resp.status_code == 301
-    assert resp.headers["location"] == "/"
+async def test_home_redirects_to_ledger(client):
+    resp = await client.get("/", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/ledger"
 
 
 async def test_api_fleet_returns_json(client, _override_store):
@@ -1262,7 +1264,7 @@ async def test_dashboard_shows_portfolio_summary(client, _override_store):
     await store.save(_make_report_scored("app-one", 90))
     await store.save(_make_report_scored("app-two", 60))
 
-    resp = await client.get("/")
+    resp = await client.get("/fleet")
     assert resp.status_code == 200
     assert "Apps" in resp.text
     assert "Avg Score" in resp.text
@@ -1270,7 +1272,7 @@ async def test_dashboard_shows_portfolio_summary(client, _override_store):
 
 
 async def test_fleet_has_assess_modal(client):
-    resp = await client.get("/")
+    resp = await client.get("/fleet")
     assert resp.status_code == 200
     assert 'id="assess-modal"' in resp.text or 'action="/assess"' in resp.text
 
@@ -1309,7 +1311,7 @@ async def test_base_has_css_variables(client):
 async def test_no_inline_styles_dashboard(client, _override_store):
     store = _override_store
     await store.save(_make_report_scored("styled-app", 70))
-    resp = await client.get("/")
+    resp = await client.get("/fleet")
     html = resp.text
     lines = html.split("\n")
     for i, line in enumerate(lines, 1):
@@ -1382,17 +1384,12 @@ async def test_no_inline_styles_onboard_results(client, _override_store):
 async def test_dashboard_uses_design_system_classes(client, _override_store):
     store = _override_store
     await store.save(_make_report_scored("css-app", 60))
-    resp = await client.get("/")
-    assert "stat-grid" in resp.text
-    assert "stat-card" in resp.text
-    assert "stat-label" in resp.text
-    assert "stat-value" in resp.text
-    assert "card-grid" in resp.text
-    assert "card-header" in resp.text
-    assert "card-title" in resp.text
-    assert "card-score" in resp.text
-    assert "card-meta" in resp.text
-    assert "card-footer" in resp.text
+    # Single-app fleet omits the multi-app stat-grid; still uses the table scoreboard.
+    resp = await client.get("/fleet")
+    assert "<h1>Fleet</h1>" in resp.text
+    assert "css-app" in resp.text
+    assert "<table>" in resp.text
+    assert "Re-assess" in resp.text
 
 
 async def test_fleet_uses_design_system_classes(client, _override_store):
@@ -2845,7 +2842,7 @@ async def test_capability_run_detail_shows_live_pr_status(client, _override_stor
 
 async def test_ledger_pending_count_uses_badge_accent(client, _override_store):
     """Pending-action counts on Ledger rows are attention signals — same
-    badge-accent as Fleet's Needs Action badge, not badge-warning."""
+    badge-accent as Ledger Needs You, not badge-warning."""
     store = _override_store
     aid = await store.save(_make_report("ledger-pending-badge"))
     await store.create_gate(aid, "auto-mode-review", "needs review")

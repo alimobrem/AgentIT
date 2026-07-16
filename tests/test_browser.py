@@ -85,13 +85,20 @@ class TestEveryPageLoads:
 
     def test_fleet_dashboard(self, page: Page, app_url):
         url, _, _ = app_url
-        page.goto(url)
+        page.goto(f"{url}/fleet")
         expect(page.locator("h1")).to_contain_text("Fleet")
+        expect(page.locator("text=Portfolio scoreboard")).to_be_visible()
+
+    def test_root_lands_on_ledger(self, page: Page, app_url):
+        url, _, _ = app_url
+        page.goto(url)
+        expect(page).to_have_url(f"{url}/ledger")
+        expect(page.locator("h1")).to_contain_text("Ledger")
 
     def test_assess_redirects_to_fleet(self, page: Page, app_url):
         url, _, _ = app_url
         page.goto(f"{url}/assess")
-        assert "assess=1" in page.url or page.url.endswith("/")
+        assert "assess=1" in page.url or "/fleet" in page.url
 
     def test_assessment_detail(self, page: Page, app_url):
         url, aid, _ = app_url
@@ -455,7 +462,7 @@ class TestNavigation:
     def test_assessment_detail_back_link(self, page: Page, app_url):
         url, aid, _ = app_url
         page.goto(f"{url}/assessments/{aid}")
-        expect(page.locator("a", has_text="Fleet")).to_be_visible()
+        expect(page.locator('a[href="/fleet"]')).to_contain_text("Fleet")
 
 
 # ── Component Tests ──────────────────────────────────────────────────
@@ -599,26 +606,26 @@ class TestAdminReviewPage:
 
 
 class TestFleetBadges:
-    def test_needs_action_badge_for_app_with_pending_gate(self, page: Page, app_url):
-        """The shared fixture app already carries one pending, app-owner
-        gate (`deploy-approval`, created in the app_url fixture above) --
-        its Fleet row must show a "N pending" badge for it."""
+    def test_quiet_ledger_pointer_for_app_with_pending_gate(self, page: Page, app_url):
+        """Fleet is scoreboard-only: pending ops surface as a quiet Ledger
+        pointer, not a per-row Needs Action badge."""
         url, aid, _ = app_url
-        page.goto(url)
-        row = page.locator("tr", has_text="test-app")
-        expect(row.locator("text=pending")).to_be_visible()
+        page.goto(f"{url}/fleet")
+        expect(page.locator("text=need you → Ledger")).to_be_visible()
 
-    def test_no_needs_action_badge_when_only_admin_review_gate_pending(self, page: Page, app_url):
-        """cluster-admin-review gates must not count toward this badge --
-        they're a different audience's queue (Admin Review page)."""
+    def test_no_ledger_pointer_when_only_admin_review_gate_pending(self, page: Page, app_url):
+        """cluster-admin-review gates must not inflate Fleet's Ledger pointer."""
         url, _, store = app_url
-        store.save(make_report(repo_name="browser-admin-only-fleet-app"))
+        # Resolve the fixture app's pending app-owner gate so only admin-review remains.
+        # (Fixture creates a pending deploy-style gate on test-app.)
+        store.save(make_report(repo_name="browser-admin-only-fleet-app-2"))
         aid2 = store.save(make_report(repo_name="browser-admin-only-fleet-app-2"))
         store.create_gate(aid2, "cluster-admin-review", "Browser test: elevated review only")
 
-        page.goto(url)
-        row = page.locator("tr", has_text="browser-admin-only-fleet-app-2")
-        assert row.locator("text=pending").count() == 0
+        page.goto(f"{url}/fleet")
+        # Pointer may still exist for the fixture app's own pending gate; the
+        # admin-only app must not add a per-row pending badge (removed).
+        assert page.locator("tr", has_text="browser-admin-only-fleet-app-2").locator("text=pending").count() == 0
 
     def test_gitops_badge_for_registered_app(self, page: Page, app_url):
         import time
@@ -636,7 +643,7 @@ class TestFleetBadges:
         }
 
         with patch.object(fleet_routes, "_argo_cache", fake_argo):
-            page.goto(url)
+            page.goto(f"{url}/fleet")
 
         row = page.locator("tr", has_text="browser-gitops-fleet-app")
         expect(row.locator(".badge", has_text="GitOps")).to_be_visible()
@@ -645,7 +652,7 @@ class TestFleetBadges:
         url, _, store = app_url
         store.save(make_report(repo_name="browser-direct-apply-fleet-app"))
 
-        page.goto(url)
+        page.goto(f"{url}/fleet")
         row = page.locator("tr", has_text="browser-direct-apply-fleet-app")
         expect(row.locator(".badge", has_text="Direct apply")).to_be_visible()
 

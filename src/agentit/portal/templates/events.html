@@ -7,6 +7,7 @@
   {"href": "/events/dlq", "label": "Dead-Letter Queue"},
 ], request) }}
 <h1>Events</h1>
+<p class="text-muted text-sm mb-1">Bell feed + DLQ — filters and pagination. Ops home is <a href="/ledger">Ledger</a>.</p>
 <form method="get" action="/events" class="action-bar">
   <input type="text" name="q" value="{{ q | default('') }}" placeholder="Filter by agent, action, or app..." class="filter-input">
   <select name="severity">

@@ -47,7 +47,7 @@ class TestFleetOperations:
 
     async def test_fleet_page_renders_all(self, fleet_client):
         client, _, _ = fleet_client
-        text = (await client.get("/")).text
+        text = (await client.get("/fleet")).text
         assert "frontend" in text
         assert "backend" in text
         assert "worker" in text
@@ -76,12 +76,11 @@ class TestFleetOperations:
         assert trend["assessments_count"] == 2
         assert trend["delta"] is not None
 
-    async def test_needs_action_badge_survives_reassessment(self, fleet_client):
+    async def test_needs_you_pointer_survives_reassessment(self, fleet_client):
         """Orphaned-gate-attribution regression: a gate created against
-        "frontend"'s OLD (pre-fixture) assessment must still show up as a
-        "needs action" badge on the fleet page after "frontend" is
-        re-assessed, since `_attach_pending_actions` (fleet.py) now keys off
-        `repo_url` instead of the stale `assessment_id`.
+        "frontend"'s OLD assessment must still count toward Fleet's quiet
+        Ledger pointer after re-assessment (`repo_url` keying in
+        `_attach_pending_actions`).
         """
         client, store, ids = fleet_client
         frontend_id = None
@@ -99,6 +98,6 @@ class TestFleetOperations:
         new_frontend_id = await store.save(report2)
         assert new_frontend_id != frontend_id
 
-        text = (await client.get("/")).text
-        assert f'/assessments/{new_frontend_id}?tab=actions' in text
-        assert "1 pending" in text
+        text = (await client.get("/fleet")).text
+        assert "1 need you → Ledger" in text
+        assert 'href="/ledger"' in text

@@ -1,8 +1,9 @@
 {% extends "base.html" %}
-{% block title %}AgentIT{% endblock %}
+{% block title %}Fleet - AgentIT{% endblock %}
 {% block content %}
 <div x-data="{ assessOpen: {{ 'true' if request.query_params.get('assess') else 'false' }} }" @keydown.escape.window="assessOpen = false">
 <h1>Fleet</h1>
+<p class="text-muted text-sm mb-1">Portfolio scoreboard — apps, scores, Assess / Re-assess / Delete.</p>
 
 <div class="action-bar">
   <button class="btn" @click="assessOpen = true">Assess New Repo</button>
@@ -12,6 +13,9 @@
       <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
     </button>
   </form>
+  {% if pending_need_you %}
+  <a href="/ledger" class="text-muted text-sm">{{ pending_need_you }} need you → Ledger</a>
+  {% endif %}
 </div>
 
 {% if total_apps > 1 %}
@@ -50,7 +54,6 @@
       <th>Namespace</th>
       <th>Criticality</th>
       <th>Critical</th>
-      <th>Needs Action</th>
       <th></th>
     </tr>
   </thead>
@@ -94,13 +97,6 @@
       <td class="text-sm text-muted">{{ r.deploy_namespace | default("—") }}</td>
       <td><span class="badge badge-{{ r.criticality }}">{{ r.criticality }}</span></td>
       <td class="{% if r.critical_count > 0 %}text-danger text-bold{% endif %}">{{ r.critical_count }}</td>
-      <td>
-        {% if r.pending_actions_count %}
-          <a href="/assessments/{{ r.id }}?tab=actions" class="badge badge-accent" title="Go to Actions tab">{{ r.pending_actions_count }} pending</a>
-        {% else %}
-          <span class="text-muted text-sm">&mdash;</span>
-        {% endif %}
-      </td>
       <td>
         <div class="gate-actions">
           <form method="post" action="/assess" class="inline-form">

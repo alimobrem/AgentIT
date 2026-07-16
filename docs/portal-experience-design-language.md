@@ -20,15 +20,33 @@ Shipped pattern (do not regress):
 
 | Surface | Placement | Notes |
 |---|---|---|
-| **Fleet**, Admin Review, **Ledger**, Health, Insights | Primary nav (`#nav-primary`) | Ledger is a first-class primary destination |
-| **Events** | Bell control → slide-over drawer | Full `/events` (+ DLQ) remains for filters/pagination |
-| **Decisions**, Capabilities, Settings, Schedules | Account / main menu | Not primary-nav text links |
+| **Ledger**, **Fleet**, Admin Review (when count&gt;0), Health, Insights | Primary nav (`#nav-primary`) | `/` redirects to Ledger (ops home) |
+| **Events** | Bell control → slide-over drawer | Full `/events` (+ DLQ) remains for filters/pagination — not ops home |
+| **Decisions**, Capabilities, Settings, Schedules; Admin Review when count=0 | Account / main menu | Not primary-nav text links |
+
+### Exclusive ownership (MUST NOT duplicate jobs)
+
+Each primary surface owns exactly one job. Competing copy or badges are
+regressions.
+
+| Surface | Exclusive job | MUST NOT |
+|---|---|---|
+| **Ledger** (`/ledger`, home via `/`) | Morning inbox: Needs You, what happened, human gates needing action | Be demoted behind Fleet as the ops entry; hide the Needs You default |
+| **Fleet** (`/fleet`) | Portfolio scoreboard: apps table, scores, Assess / Re-assess / Delete | Own pending-ops inbox UI (no primary “N pending” badge/column competing with Ledger) |
+| **Admin Review** | Elevated RBAC queue (`cluster-admin-review` only) | Absorb app-owner gates; stay in primary nav when count is 0 (bury in account menu with “Elevated approvals”) |
+| **Events** | Bell feed + DLQ filters/pagination | Claim “ops home” or duplicate Ledger Needs You |
+| **Decisions** | LLM decide-point audit log (menu) | Compete with Ledger for the chronological stream |
+| **Health** | Live infrastructure telemetry | Become an activity/ops inbox |
+| **Insights** | Fleet-wide aggregate analytics | Become an activity/ops inbox |
 
 **MUST [check]** `base.html` keep Events as a bell/drawer (`events-bell`,
 `#events-drawer`) rather than a primary-nav text link labeled only “Events”.
 
 **MUST [check]** Decisions remain reachable from the account/main menu (not
 reintroduced as a primary-nav peer of Fleet/Ledger).
+
+**MUST** put the primary-nav gate badge (Needs You / pending app-owner gates)
+on **Ledger**, not Fleet.
 
 **SHOULD** unread/critical Events badge come from real `/api/events` data;
 hide the badge when count is zero.
