@@ -193,10 +193,10 @@
    Alpine expression. #}
 {% set _requested_tab = request.query_params.get('tab', 'overview') %}
 {% set _initial_tab = _requested_tab if _requested_tab in ('overview', 'findings', 'actions', 'timeline', 'ledger') else 'overview' %}
-<div x-data="{ tab: '{{ _initial_tab }}' }">
+<div x-data="{ tab: '{{ _initial_tab }}', findingsCount: {{ urgent_findings|length }} }">
 {{ client_tab_nav([
   {"key": "overview", "label": "Overview"},
-  {"key": "findings", "label": "Findings" ~ (" (" ~ urgent_findings|length ~ ")" if urgent_findings else "")},
+  {"key": "findings", "label": "Findings (<span x-text=\"findingsCount\"></span>)" if urgent_findings else "Findings"},
   {"key": "actions", "label": "Actions" ~ (" (" ~ pending_actions|length ~ ")" if pending_actions and lifecycle_stage != "assessed" else "")},
   {"key": "timeline", "label": "Timeline"},
   {"key": "ledger", "label": "Ledger"},
@@ -251,7 +251,7 @@
   {% if urgent_findings %}
   <div x-data="{ open: true }">
     <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
-      Findings ({{ urgent_findings|length }})
+      Findings (<span x-text="findingsCount"></span>)
     </h2>
     <div class="collapse-body" x-show="open" x-transition>
       {# Pre-onboard: Onboard This App already generates manifests for every
@@ -305,9 +305,9 @@
           {% if f.source %}
           <form action="/api/suppress" class="inline-form"
                 hx-post="/api/suppress" hx-swap="none"
-                @submit="suppressed = true"
-                @htmx:response-error.camel="suppressed = false"
-                @htmx:send-error.camel="suppressed = false">
+                @submit="suppressed = true; findingsCount--"
+                @htmx:response-error.camel="suppressed = false; findingsCount++"
+                @htmx:send-error.camel="suppressed = false; findingsCount++">
             <input type="hidden" name="app_name" value="{{ report.repo_name }}">
             <input type="hidden" name="check_source" value="{{ f.source }}">
             <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
