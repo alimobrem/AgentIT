@@ -235,10 +235,11 @@ class CapabilityScout:
         slug = slugify(proposal.get("title", "proposal"))
         branch = f"agentit/self-improve/{slug}-{int(_time.time())}"
 
-        for path, content in diff.items():
-            full = self._repo_dir / path
-            full.parent.mkdir(parents=True, exist_ok=True)
-            full.write_text(content, encoding="utf-8")
+        from agentit.write_guard import write_diff_files
+
+        wrote_ok, write_detail = write_diff_files(self._repo_dir, diff)
+        if not wrote_ok:
+            return {"error": write_detail or "write_guard blocked source write"}
 
         if build_mode == "source" and not all(p.startswith("docs/proposals/") for p in diff):
             commit_message = (

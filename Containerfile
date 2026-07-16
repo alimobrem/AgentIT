@@ -94,11 +94,15 @@ USER 0
 # paths capability-scout writes before opening a PR. Without g+w on
 # tests/skills/checks/src/docs, source-mode cycles fail at write_text with
 # PermissionError even after gates pass (confirmed live on fa7db61).
+# chmod g+w on directories *and* files under the L3 allowlist. Directory g+w
+# alone lets scout create new files; file g+w is required to overwrite an
+# existing root-owned COPY artifact (e.g. regenerating a test module).
 RUN git config --system --add safe.directory /opt/app-root/src && \
     find .git -type d -exec chmod g+w {} + && \
     for d in tests skills checks src docs; do \
-      if [ -d "$d" ]; then find "$d" -type d -exec chmod g+w {} +; fi; \
-    done
+      if [ -d "$d" ]; then chmod -R g+w "$d"; fi; \
+    done && \
+    chmod g+w /opt/app-root/src
 USER 1001
 
 EXPOSE 8080
