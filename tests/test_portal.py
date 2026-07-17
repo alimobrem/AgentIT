@@ -2150,7 +2150,7 @@ async def test_settings_page_shows_on_when_enabled(client, _override_store):
     resp = await client.get("/settings")
     assert resp.status_code == 200
     assert "ON" in resp.text
-    assert "Disable Global Fallback" in resp.text
+    assert "Disable Auto-Mode" in resp.text
 
 
 async def test_settings_nav_link(client):
@@ -2182,72 +2182,32 @@ async def test_settings_and_schedules_are_tabs_of_each_other(client, _override_s
     assert 'href="/settings"' in schedules_resp.text
 
 
-# ── Auto-mode allowlist (Settings page) ───────────────────────────────
+# ── Auto-mode allowlist removed (Settings page) ─────────────────────────
+# The per-(namespace, kind) auto-mode allowlist -- and its Settings UI
+# (add/remove entries) -- has been removed along with Direct Apply and
+# AutoMode's direct-apply branch as a concept entirely: its entire purpose
+# was bounding what AutoMode could mutate *without a human already in the
+# loop*, which no longer describes any outcome AutoMode can reach (its one
+# live terminal action for cluster-config is now a GitOps commit+PR gated
+# on a human merge). See test_automode_extended.py for AutoMode's own
+# simplified behavior coverage.
 
 
-async def test_settings_page_shows_allowlist_empty_by_default(client, _override_store):
+async def test_settings_page_no_longer_shows_allowlist_ui(client, _override_store):
     resp = await client.get("/settings")
     assert resp.status_code == 200
-    assert "Auto-Mode Allowlist" in resp.text
-    assert "No allowlist entries configured" in resp.text
+    assert "Auto-Mode Allowlist" not in resp.text
+    assert "/settings/auto-mode-allowlist/add" not in resp.text
+    assert "/settings/auto-mode-allowlist/remove" not in resp.text
 
 
-async def test_add_auto_mode_allowlist_entry(client, _override_store):
-    store = _override_store
+async def test_auto_mode_allowlist_routes_no_longer_exist(client, _override_store):
     resp = await client.post(
         "/settings/auto-mode-allowlist/add",
         data={"namespace": "prod", "kind": "ConfigMap"},
         follow_redirects=False,
     )
-    assert resp.status_code == 303
-    from agentit.automode import parse_allowlist
-    assert parse_allowlist(await store.get_setting("auto_mode_allowlist")) == ["prod/ConfigMap"]
-
-
-async def test_add_auto_mode_allowlist_entry_defaults_namespace_to_wildcard(client, _override_store):
-    store = _override_store
-    await client.post("/settings/auto-mode-allowlist/add", data={"kind": "NetworkPolicy"}, follow_redirects=False)
-    from agentit.automode import parse_allowlist
-    assert parse_allowlist(await store.get_setting("auto_mode_allowlist")) == ["*/NetworkPolicy"]
-
-
-async def test_add_auto_mode_allowlist_rejects_rbac_shaped_kind(client, _override_store):
-    """The Settings page rejects an RBAC-shaped kind up front with a clear
-    error, rather than silently accepting a pattern that `split_files_by_
-    allowlist()` would ignore anyway."""
-    store = _override_store
-    resp = await client.post(
-        "/settings/auto-mode-allowlist/add",
-        data={"namespace": "*", "kind": "Secret"},
-        follow_redirects=False,
-    )
-    assert resp.status_code == 303
-    assert "allowlist_error" in resp.headers["location"]
-    from agentit.automode import parse_allowlist
-    assert parse_allowlist(await store.get_setting("auto_mode_allowlist")) == []
-
-
-async def test_remove_auto_mode_allowlist_entry(client, _override_store):
-    store = _override_store
-    await client.post(
-        "/settings/auto-mode-allowlist/add", data={"namespace": "prod", "kind": "ConfigMap"},
-        follow_redirects=False,
-    )
-    resp = await client.post(
-        "/settings/auto-mode-allowlist/remove", data={"pattern": "prod/ConfigMap"}, follow_redirects=False,
-    )
-    assert resp.status_code == 303
-    from agentit.automode import parse_allowlist
-    assert parse_allowlist(await store.get_setting("auto_mode_allowlist")) == []
-
-
-async def test_settings_page_lists_configured_allowlist_entries(client, _override_store):
-    store = _override_store
-    await store.set_setting("auto_mode_allowlist", '["prod/ConfigMap", "*/NetworkPolicy"]')
-    resp = await client.get("/settings")
-    assert "prod" in resp.text
-    assert "ConfigMap" in resp.text
-    assert "NetworkPolicy" in resp.text
+    assert resp.status_code == 404
 
 
 # ── Schedules page ─────────────────────────────────────────────────────

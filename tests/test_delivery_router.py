@@ -275,7 +275,7 @@ class TestRouteAndDeliverClusterConfig:
             result = await route_and_deliver(
                 [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
-                actor="tester", dry_run=False, force_dry_run_first=False,
+                actor="tester", dry_run=False,
             )
         assert result["registered"] is False
         assert result["mechanisms"]["cluster_config"] == MECHANISM_NONE
@@ -300,7 +300,7 @@ class TestRouteAndDeliverClusterConfig:
             result = await route_and_deliver(
                 [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
-                actor="tester", dry_run=False, force_dry_run_first=False,
+                actor="tester", dry_run=False,
             )
         assert result["registered"] is True
         assert result["mechanisms"]["cluster_config"] == MECHANISM_INFRA_REPO_COMMIT
@@ -338,7 +338,7 @@ class TestRouteAndDeliverClusterConfig:
             result = await route_and_deliver(
                 [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
-                actor="tester", dry_run=False, force_dry_run_first=False,
+                actor="tester", dry_run=False,
             )
         assert result["registered"] is False
         assert result["mechanisms"]["cluster_config"] == MECHANISM_INFRA_REPO_COMMIT
@@ -365,7 +365,7 @@ class TestRouteAndDeliverClusterConfig:
                 [_placeholder_cronjob_file(), _cluster_config_file()],
                 app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
-                actor="tester", dry_run=False, force_dry_run_first=False,
+                actor="tester", dry_run=False,
             )
         assert "cost-cronjob.yaml" in result["placeholder_blocked"]
         assert has_unresolved_placeholders(_placeholder_cronjob_file()["content"])
@@ -383,59 +383,10 @@ class TestRouteAndDeliverClusterConfig:
             result = await route_and_deliver(
                 [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
-                actor="tester", dry_run=True, force_dry_run_first=False,
+                actor="tester", dry_run=True,
             )
         mock_commit.assert_not_called()
         assert result["outcomes"]["cluster_config"]["dry_run"] is True
-
-
-class TestRouteAndDeliverForceDryRunFirstIsNowInert:
-    """`force_dry_run_first` (AutoMode's own safety knob) is now a no-op for
-    the cluster-config category: its one consumer was the direct-apply
-    branch (`apply_with_verification()`'s forced-dry-run-then-real-apply
-    sequence), removed along with Direct Apply as a concept entirely (see
-    `resolve_cluster_config_mechanism()`). Whether `automode.py` still has
-    any legitimate reason to pass `True` here, and whether this parameter
-    should be removed from the signature entirely, is being decided as its
-    own, separately-tested step -- this just proves `route_and_deliver()`
-    behaves identically for cluster-config regardless of this flag's value
-    today, i.e. that it genuinely has no remaining effect (never silently
-    reintroduces a direct apply)."""
-
-    async def test_force_dry_run_first_true_never_touches_the_cluster(self):
-        store, raw = await make_async_store()
-        report = make_report()
-        aid = await raw.save(report)
-        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
-            result = await route_and_deliver(
-                [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
-                report=report, store=store, assessment_id=aid,
-                actor="tester", dry_run=False, force_dry_run_first=True,
-            )
-        mock_apply.assert_not_called()
-        assert result["mechanisms"]["cluster_config"] == MECHANISM_NONE
-
-    async def test_force_dry_run_first_true_or_false_produce_the_same_outcome(self):
-        outcomes = {}
-        for force_dry_run_first in (True, False):
-            store, raw = await make_async_store()
-            report = make_report()
-            report.infra_repo_url = "https://github.com/org/infra-gitops"
-            aid = await raw.save(report)
-            with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
-                 patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
-                 patch("agentit.portal.github_pr.ensure_applicationset"):
-                mock_commit.return_value = {
-                    "pr_url": "https://github.com/org/infra-gitops/pull/1",
-                    "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1,
-                }
-                result = await route_and_deliver(
-                    [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
-                    report=report, store=store, assessment_id=aid,
-                    actor="tester", dry_run=False, force_dry_run_first=force_dry_run_first,
-                )
-            outcomes[force_dry_run_first] = result["mechanisms"]["cluster_config"]
-        assert outcomes[True] == outcomes[False] == MECHANISM_INFRA_REPO_COMMIT
 
 
 class TestRouteAndDeliverCicdLane:
@@ -446,7 +397,7 @@ class TestRouteAndDeliverCicdLane:
         result = await route_and_deliver(
             [_cicd_file()], app_name=report.repo_name, namespace="ns",
             report=report, store=store, assessment_id=aid,
-            actor="tester", dry_run=False, force_dry_run_first=False,
+            actor="tester", dry_run=False,
         )
         assert result["mechanisms"][CATEGORY_CICD_SHARED_NAMESPACE] == MECHANISM_CLUSTER_ADMIN_REVIEW_GATE
         gates = await raw.list_gates(status="pending")
@@ -467,7 +418,7 @@ class TestRouteAndDeliverSourcePatch:
             result = await route_and_deliver(
                 [_source_patch_file()], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
-                actor="tester", dry_run=False, force_dry_run_first=False,
+                actor="tester", dry_run=False,
             )
         assert result["mechanisms"][CATEGORY_SOURCE_PATCH] == MECHANISM_SOURCE_REPO_PR
         mock_pr.assert_called_once()
@@ -485,7 +436,7 @@ class TestRouteAndDeliverManifestAtRest:
             result = await route_and_deliver(
                 [_manifest_at_rest_file()], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
-                actor="tester", dry_run=False, force_dry_run_first=False,
+                actor="tester", dry_run=False,
             )
         assert result["mechanisms"][CATEGORY_MANIFEST_AT_REST] == MECHANISM_APP_REPO_PR
         mock_pr.assert_called_once()
@@ -499,7 +450,7 @@ class TestRouteAndDeliverSecretsAndNarrative:
         result = await route_and_deliver(
             [_secret_file()], app_name=report.repo_name, namespace="ns",
             report=report, store=store, assessment_id=aid,
-            actor="tester", dry_run=False, force_dry_run_first=False,
+            actor="tester", dry_run=False,
         )
         assert result["blocked"] == ["db-secret.yaml"]
         assert result["mechanisms"] == {}
@@ -512,7 +463,7 @@ class TestRouteAndDeliverSecretsAndNarrative:
         result = await route_and_deliver(
             [_narrative_report_file()], app_name=report.repo_name, namespace="ns",
             report=report, store=store, assessment_id=aid,
-            actor="tester", dry_run=False, force_dry_run_first=False,
+            actor="tester", dry_run=False,
         )
         assert result["excluded"] == ["dependency-report.md"]
         assert result["mechanisms"] == {}
@@ -532,7 +483,7 @@ class TestDeliveriesTracking:
             result = await route_and_deliver(
                 [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
-                actor="tester", dry_run=False, force_dry_run_first=False,
+                actor="tester", dry_run=False,
             )
         delivery = await raw.get_delivery(result["delivery_id"])
         assert delivery is not None
@@ -556,7 +507,7 @@ class TestDeliveriesTracking:
             await route_and_deliver(
                 [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
-                actor="tester", dry_run=False, force_dry_run_first=False,
+                actor="tester", dry_run=False,
             )
         deliveries = await raw.list_deliveries(aid)
         assert len(deliveries) == 1
@@ -608,7 +559,7 @@ class TestDeliveriesTracking:
             result = await route_and_deliver(
                 [edited_file], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
-                actor="tester", dry_run=False, force_dry_run_first=False,
+                actor="tester", dry_run=False,
             )
         delivery = await raw.get_delivery(result["delivery_id"])
         assert delivery["details"]["edited_files"] == ["app-network-policy.yaml"]
@@ -626,7 +577,7 @@ class TestDeliveriesTracking:
             result = await route_and_deliver(
                 [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
-                actor="tester", dry_run=False, force_dry_run_first=False,
+                actor="tester", dry_run=False,
             )
         delivery = await raw.get_delivery(result["delivery_id"])
         assert delivery["details"]["edited_files"] == []

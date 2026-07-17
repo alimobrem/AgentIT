@@ -264,7 +264,7 @@ async def resolve_gate(request: Request, gate_id: str):
                 delivery = await route_and_deliver(
                     files, app_name=report.repo_name, namespace=namespace,
                     report=report, store=s, assessment_id=assessment_id,
-                    actor=str(resolved_by), dry_run=False, force_dry_run_first=False,
+                    actor=str(resolved_by), dry_run=False,
                 )
             except Exception as exc:
                 await s.reopen_gate(gate_id, status)

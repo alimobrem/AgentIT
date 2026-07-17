@@ -350,10 +350,14 @@ async def gate_delivery_confirmation(store: object, gate: dict) -> str:
     gate_type = gate.get("gate_type", "")
     if gate_type == "rollback-review":
         return "AgentIT will: mark this rollback approved for manual intervention -- no automatic apply is triggered."
-    if gate_type in ("gitops-pr-pending", "cluster-admin-review", "auto-mode-scope-review"):
+    if gate_type in ("gitops-pr-pending", "cluster-admin-review"):
         # These gate types already carry the exact mechanism + reason in
         # their own summary text (see automode.py / delivery.py's gate
         # creation calls) -- reuse it verbatim instead of restating it.
+        # (`auto-mode-scope-review` used to be a third member of this list
+        # -- it can no longer be created at all now that the per-(namespace,
+        # kind) auto-mode allowlist that created it has been removed along
+        # with AutoMode's direct-apply branch.)
         return gate.get("summary", "")
     assessment_id = gate.get("assessment_id")
     if not assessment_id:
@@ -487,7 +491,6 @@ async def route_and_deliver(
     assessment_id: str,
     actor: str,
     dry_run: bool,
-    force_dry_run_first: bool,
 ) -> dict:
     """The one decision surface for "does this change reach a cluster/repo
     now" -- classify, look up GitOps registration, and route each
@@ -502,17 +505,12 @@ async def route_and_deliver(
     signature) because every side effect here -- gates, SLOs, audit
     resources, the ``deliveries`` row itself -- is keyed by it.
 
-    ``force_dry_run_first`` (AutoMode's own safety knob) is currently a
-    no-op: its one consumer was the cluster-config direct-apply branch,
-    removed along with Direct Apply as a concept entirely (see
-    ``resolve_cluster_config_mechanism()``). Left in the signature rather
-    than pulled now so every existing caller (``routes/gates.py``,
-    ``routes/assessments.py``, ``automode.py``) doesn't need a simultaneous,
-    unrelated signature-change edit in this same pass -- ``automode.py``'s
-    own fate (whether it still has any legitimate reason to pass ``True``
-    here at all) is being decided as its own, separately-tested step; this
-    parameter's removal belongs with that decision, not bundled into the
-    mechanism-resolution change alone.
+    No longer takes a ``force_dry_run_first`` parameter -- that was
+    AutoMode's own safety knob for the cluster-config direct-apply branch's
+    forced dry-run-then-real-apply sequence, removed along with Direct
+    Apply/AutoMode's direct-apply branch as a concept entirely (see
+    ``resolve_cluster_config_mechanism()``/``automode.py``'s simplified
+    ``execute()``).
     """
     groups: dict[str, list[dict]] = {}
     for f in files:
@@ -699,19 +697,9 @@ async def route_and_deliver(
 
         if cluster_files:
             mechanism_used = mechanisms[CATEGORY_CLUSTER_CONFIG]
-            cluster_outcome = outcomes.get(CATEGORY_CLUSTER_CONFIG)
-            # ``force_dry_run_first=True`` (AutoMode's own safety knob --
-            # see automode.py) can leave `cluster_outcome["dry_run_failed"]`
-            # True, meaning apply_with_verification() never attempted a
-            # real apply at all. Scheduling the SLO-watch-and-rollback tail
-            # for a delivery that never actually delivered anything would
-            # be wrong (a "breach" could roll back unrelated existing
-            # state) -- skip it for that case only.
-            dry_run_failed = isinstance(cluster_outcome, dict) and cluster_outcome.get("dry_run_failed")
-            if not dry_run_failed:
-                await _maybe_schedule_verification(
-                    store, delivery_id, assessment_id, app_name, namespace, mechanism_used, dry_run,
-                )
+            await _maybe_schedule_verification(
+                store, delivery_id, assessment_id, app_name, namespace, mechanism_used, dry_run,
+            )
     except Exception as exc:
         await store.update_delivery(
             delivery_id, status="failed", details={"error": str(exc)[:500]},

@@ -1147,7 +1147,6 @@ async def deliver(request: Request, assessment_id: str):
             files, app_name=report.repo_name, namespace=namespace,
             report=report, store=s, assessment_id=assessment_id,
             actor=get_current_user(request), dry_run=dry_run,
-            force_dry_run_first=False,
         )
     except Exception as exc:
         log.exception("Delivery failed for assessment %s", assessment_id)
