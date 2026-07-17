@@ -8,8 +8,42 @@
    no parallel notification mechanism. Falls back gracefully: if the
    EventSource never connects (e.g. a proxy stripping SSE), the initial
    server-rendered fragment below still shows the job's state as of page
-   load, and re-visiting this URL re-renders current state. #}
-<div hx-ext="sse" sse-connect="/assessments/{{ assessment_id }}/onboard/progress/{{ job_id }}/stream" sse-swap="progress" hx-swap="innerHTML">
-  {% include "_onboard_progress_fragment.html" %}
+   load, and re-visiting this URL re-renders current state.
+
+   Belt-and-suspenders for a *silently stalled* connection (one that never
+   errors so htmx-sse's own reconnect never fires -- e.g. a proxy that
+   holds the TCP connection open but stops forwarding bytes): if no SSE
+   message arrives for `stallMs`, stop waiting on the stream and poll this
+   same progress URL directly instead (the server route above already
+   redirects to onboard-results/assessment-with-error once the job is
+   actually terminal, so a plain re-fetch is the real status check, not a
+   fabricated one). A manual escape link is shown alongside it, so a user
+   is never stuck with only a spinner and no way forward. #}
+<div x-data="{
+       stalled: false,
+       init() {
+         const stallMs = 20000;
+         let lastEvent = Date.now();
+         this.$el.addEventListener('htmx:sseMessage', () => { lastEvent = Date.now(); this.stalled = false; });
+         setInterval(async () => {
+           if (Date.now() - lastEvent < stallMs) return;
+           this.stalled = true;
+           try {
+             const resp = await fetch(window.location.pathname, { redirect: 'follow' });
+             if (resp.redirected && resp.url !== window.location.href) {
+               window.location.href = resp.url;
+             }
+           } catch (e) { /* network hiccup -- next tick retries */ }
+         }, 5000);
+       },
+     }">
+  <div hx-ext="sse" sse-connect="/assessments/{{ assessment_id }}/onboard/progress/{{ job_id }}/stream" sse-swap="progress" hx-swap="innerHTML">
+    {% include "_onboard_progress_fragment.html" %}
+  </div>
+  <div class="alert alert-warn mt-1" x-show="stalled" x-cloak>
+    Still working, or the live connection was lost -- checking status in the background.
+    <a href="/assessments/{{ assessment_id }}/onboard-results" class="btn btn-sm btn-outline" hx-boost="false">View Results</a>
+    <a href="/assessments/{{ assessment_id }}" class="btn btn-sm btn-outline" data-nav="back-to-assessment" hx-boost="false">Back to Assessment</a>
+  </div>
 </div>
 {% endblock %}
