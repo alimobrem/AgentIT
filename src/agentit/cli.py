@@ -822,8 +822,12 @@ async def self_fix(repo_url: str, criticality: str, dry_run: bool, create_pr: bo
                         rejected.append(fix_file)
                         review_reasons[id(fix_file)] = review["reason"]
                 else:
-                    approved_files.append(fix_file)
-                    review_reasons[id(fix_file)] = "LLM unavailable — auto-approved (no review performed)"
+                    # Client construction itself failed (no API key, etc.) --
+                    # mirror the `review is None` fail-closed path above
+                    # rather than auto-approving unreviewed fixes.
+                    click.echo(f"  ⚠ {fix_file.path}: LLM unavailable — rejected (fail-closed)", err=True)
+                    rejected.append(fix_file)
+                    review_reasons[id(fix_file)] = "LLM unavailable — rejected (fail-closed)"
 
             click.echo(f"\n  Approved: {len(approved_files)}, Rejected: {len(rejected)}", err=True)
 

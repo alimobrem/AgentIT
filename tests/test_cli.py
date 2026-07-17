@@ -1,6 +1,7 @@
 import json
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 from click.testing import CliRunner
 
@@ -68,3 +69,41 @@ def test_cli_assess_output_file(tmp_path: Path):
     assert output_file.exists()
     parsed = json.loads(output_file.read_text())
     assert parsed["repo_url"] == repo_url
+
+
+def test_self_fix_llm_construction_failure_does_not_auto_approve(tmp_path: Path):
+    """Regression test for the "first approver gate" fail-open bug.
+
+    When ``LLMClient()`` itself fails to construct (no API key, etc.),
+    ``self-fix`` must route every generated fix through the same
+    fail-closed "rejected" path used when a successfully-constructed
+    client's ``review_fix()`` call returns ``None`` -- not auto-approve
+    them. Before the fix, every fix was appended straight to
+    ``approved_files`` here, so without ``--dry-run`` every one would be
+    written to disk (and, with ``--create-pr``, pushed/opened as a PR)
+    despite the command's own "all fixes gated" message and zero actual
+    review having taken place.
+    """
+    repo_url = _make_local_repo(tmp_path)
+    runner = CliRunner()
+
+    # discover_platform() would otherwise try to reach a real cluster via
+    # local kubeconfig -- force the same offline fallback path used by
+    # test_orchestrator.py so this stays hermetic and fast.
+    with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no API key configured")), \
+         patch("agentit.platform_context.discover_platform", side_effect=RuntimeError("no cluster in tests")), \
+         runner.isolated_filesystem(temp_dir=tmp_path) as cwd:
+        # Deliberately omit --dry-run: this is exactly the unsafe path the
+        # bug allowed (fixes written to disk with zero review).
+        result = runner.invoke(main, ["self-fix", "--repo-url", repo_url])
+
+        assert result.exit_code == 0, result.output
+        assert "auto-approved" not in result.output
+        assert "rejected (fail-closed)" in result.output
+        assert "Approved: 0" in result.output
+        assert "No fixes approved by LLM." in result.output
+
+        # Nothing should have been written to disk -- confirms the gate
+        # actually blocked application, not just the summary line.
+        written = list(Path(cwd).rglob("*.yaml"))
+        assert written == [], f"fix(es) written to disk despite failed review: {written}"
