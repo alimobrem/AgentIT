@@ -1,7 +1,6 @@
 """Schedule management endpoints."""
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
@@ -32,23 +31,13 @@ _SCHEDULE_FILES = {
 }
 
 from agentit.agents.capabilities import WATCHER_AGENTS as _WATCHER_AGENTS
+from agentit.portal.routes.capabilities import watcher_heartbeat_status
 
-
-def _get_watcher_deploy_status() -> dict[str, str]:
-    from agentit import kube
-
-    result: dict[str, str] = {}
-    try:
-        deps = kube.apps_v1().list_namespaced_deployment(
-            "agentit", label_selector="app.kubernetes.io/instance=agentit",
-        )
-        for dep in deps.items:
-            name = dep.metadata.name
-            ready = dep.status.ready_replicas or 0
-            result[name] = "running" if ready > 0 else "not running"
-    except Exception:
-        log.debug("Failed to get deployment status", exc_info=True)
-    return result
+# Same 2-day staleness threshold Capabilities' Self-Improvement tab already
+# uses for skill-learner/capability-scout (watchers/capability_scout.py's
+# real tick interval is 24h) -- reused here for every watcher so this table
+# and Capabilities can't disagree about the same watcher.
+_WATCHER_STALE_SECONDS = 2 * 86400
 
 
 # ── Routes ────────────────────────────────────────────────────────────
@@ -134,18 +123,24 @@ async def schedules_page(request: Request) -> HTMLResponse:
             sched["source"] = "onboarding"
 
     agents = await s.list_agents()
-    deploy_status = await asyncio.to_thread(_get_watcher_deploy_status)
     watchers = []
     for w in _WATCHER_AGENTS:
-        agent_record = next((a for a in agents if a["agent_name"] == w["name"]), None)
-        deploy_name = f"agentit-{w['name']}"
-        if agent_record:
-            status = agent_record["status"]
-        elif deploy_status.get(deploy_name) == "running":
-            status = "active"
+        # Same real heartbeat source Capabilities' Self-Improvement tab
+        # already uses (agent_registry.last_heartbeat, written by
+        # watchers/__init__.py::record_tick) -- not deployment-ready
+        # status, which only proves the pod is up, not that the watcher's
+        # own loop has ever actually ticked (confirmed live: a
+        # crash-looping-before-first-tick capability-scout pod still reads
+        # "ready" to Kubernetes while Capabilities correctly reports it has
+        # never ticked).
+        hb_status = watcher_heartbeat_status(agents, w["name"], _WATCHER_STALE_SECONDS)
+        if not hb_status["has_run"]:
+            status = "never ticked"
+        elif hb_status["stale"]:
+            status = "stale"
         else:
-            status = "not deployed"
-        watchers.append({**w, "status": status})
+            status = "active"
+        watchers.append({**w, "status": status, "last_heartbeat": hb_status["last_heartbeat"]})
 
     return get_templates().TemplateResponse(request, "schedules.html", {
         "schedules": schedules,

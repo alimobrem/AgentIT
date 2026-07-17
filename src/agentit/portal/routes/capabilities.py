@@ -163,6 +163,41 @@ _LEARNING_RUN_MODE_LABELS = {
 _SKILL_LEARNER_STALE_SECONDS = 2 * 86400
 
 
+def watcher_heartbeat_status(agents: list[dict], agent_name: str, stale_seconds: int) -> dict:
+    """Real status of a long-lived watcher, derived from its own tick
+    heartbeat (``agent_heartbeat()``, written by
+    ``watchers/__init__.py::record_tick`` after every loop iteration) --
+    never a deployment-ready/chart-intent default, which only proves the
+    pod is up, not that the watcher's own loop has ever actually ticked.
+    Shared by ``_get_skill_learner_status``/``_get_capability_scout_status``
+    below and by ``routes/schedules.py``'s "Long-Lived Agents" table, so
+    the two pages read off the same real signal and can't disagree about
+    the same watcher's status.
+
+    ``agents`` is the caller's already-fetched ``store.list_agents()``
+    result -- passed in rather than fetched here so callers keep their own
+    error handling/logging around that call.
+    """
+    agent = next((a for a in agents if a.get("agent_name") == agent_name), None)
+    last_heartbeat = agent.get("last_heartbeat") if agent else None
+    if not last_heartbeat:
+        return {"has_run": False, "last_heartbeat": None, "stale": None}
+
+    try:
+        last = datetime.fromisoformat(last_heartbeat)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        age_seconds = (datetime.now(timezone.utc) - last).total_seconds()
+    except ValueError:
+        return {"has_run": False, "last_heartbeat": None, "stale": None}
+
+    return {
+        "has_run": True,
+        "last_heartbeat": last_heartbeat,
+        "stale": age_seconds > stale_seconds,
+    }
+
+
 async def _get_learning_run_history(s, limit: int = 15) -> list[dict]:
     """Durable run history for the learning agent -- every manual button
     click AND every skill-learner watcher tick that reached a real outcome
@@ -216,24 +251,7 @@ async def _get_skill_learner_status(s) -> dict:
         log.warning("Failed to fetch agent registry for skill-learner status", exc_info=True)
         return {"has_run": False, "last_heartbeat": None, "stale": None}
 
-    agent = next((a for a in agents if a.get("agent_name") == "skill-learner"), None)
-    last_heartbeat = agent.get("last_heartbeat") if agent else None
-    if not last_heartbeat:
-        return {"has_run": False, "last_heartbeat": None, "stale": None}
-
-    try:
-        last = datetime.fromisoformat(last_heartbeat)
-        if last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
-        age_seconds = (datetime.now(timezone.utc) - last).total_seconds()
-    except ValueError:
-        return {"has_run": False, "last_heartbeat": None, "stale": None}
-
-    return {
-        "has_run": True,
-        "last_heartbeat": last_heartbeat,
-        "stale": age_seconds > _SKILL_LEARNER_STALE_SECONDS,
-    }
+    return watcher_heartbeat_status(agents, "skill-learner", _SKILL_LEARNER_STALE_SECONDS)
 
 
 async def _get_capability_run_history(s, limit: int = 15) -> list[dict]:
@@ -329,24 +347,7 @@ async def _get_capability_scout_status(s) -> dict:
         log.warning("Failed to fetch agent registry for capability-scout status", exc_info=True)
         return {"has_run": False, "last_heartbeat": None, "stale": None}
 
-    agent = next((a for a in agents if a.get("agent_name") == "capability-scout"), None)
-    last_heartbeat = agent.get("last_heartbeat") if agent else None
-    if not last_heartbeat:
-        return {"has_run": False, "last_heartbeat": None, "stale": None}
-
-    try:
-        last = datetime.fromisoformat(last_heartbeat)
-        if last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
-        age_seconds = (datetime.now(timezone.utc) - last).total_seconds()
-    except ValueError:
-        return {"has_run": False, "last_heartbeat": None, "stale": None}
-
-    return {
-        "has_run": True,
-        "last_heartbeat": last_heartbeat,
-        "stale": age_seconds > _CAPABILITY_SCOUT_STALE_SECONDS,
-    }
+    return watcher_heartbeat_status(agents, "capability-scout", _CAPABILITY_SCOUT_STALE_SECONDS)
 
 
 @router.get("/capabilities/self-improvement", response_class=HTMLResponse)
