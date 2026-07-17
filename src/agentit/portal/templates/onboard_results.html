@@ -20,8 +20,14 @@
   Next: choose how to deliver.
 </div>
 {% elif request.query_params.get('pr_url') %}
+{# pr_url_repo ("code"/"gitops") is set by the route that produced this PR
+   link -- traced from delivery.py's real mechanism-to-repo mapping (see
+   repo_kind_for_mechanism()), not guessed here -- so this never shows a
+   bare PR URL with no indication of which of the app's two repos it's in. #}
+{% set _pr_repo_kind = request.query_params.get('pr_url_repo') %}
+{% set _pr_repo_label = "code repo" if _pr_repo_kind == "code" else ("GitOps repo" if _pr_repo_kind == "gitops" else "repo") %}
 <div class="alert alert-success" role="status">
-  PR created: <a href="{{ request.query_params.get('pr_url') | safe_url }}" target="_blank" hx-boost="false">{{ request.query_params.get('pr_url') }}</a>
+  PR opened against the {{ _pr_repo_label }}: <a href="{{ request.query_params.get('pr_url') | safe_url }}" target="_blank" hx-boost="false">{{ request.query_params.get('pr_url') }}</a>
 </div>
 {% elif request.query_params.get('gate_approved') %}
 <div class="alert alert-success" role="status">Gate approved — delivered.</div>
@@ -34,8 +40,11 @@
   Saved edit to <strong>{{ request.query_params.get('edited') }}</strong> — this edited version is what "{{ _deliver_label }}" will use.
 </div>
 {% elif request.query_params.get('agent_prs') %}
+{# create_agent_prs() (github_pr.py) always commits against report.repo_url
+   -- the app's own code repo -- never the GitOps infra repo, so this label
+   is a fact about the mechanism, not a guess. #}
 <div class="alert alert-success" role="status">
-  Per-agent PRs created:
+  Per-agent PRs opened against the code repo:
   <ul class="mb-0">
     {% for pair in request.query_params.get('agent_prs').split('|') %}
     {% set parts = pair.split('=', 1) %}
@@ -68,19 +77,23 @@
 {% endif %}
 
 {% if pr_status %}
+{# onboardings[*].pr_url is only ever written by create_agent_prs() (Per-
+   Agent PRs), which always targets report.repo_url -- the app's own code
+   repo, never the GitOps infra repo -- so "code-repo" here is a fact, not
+   a guess. #}
 <div class="alert {% if pr_status.state == 'merged' %}alert-success{% elif pr_status.state == 'open' %}alert-warn{% else %}alert-info{% endif %}">
   {% if pr_status.state == 'merged' %}
     <span class="badge badge-low">MERGED</span>
-    PR merged{% if pr_status.merged_at %} <span data-timestamp="{{ pr_status.merged_at }}">{{ pr_status.merged_at[:10] }}</span>{% endif %} —
+    Code-repo PR merged{% if pr_status.merged_at %} <span data-timestamp="{{ pr_status.merged_at }}">{{ pr_status.merged_at[:10] }}</span>{% endif %} —
   {% elif pr_status.state == 'open' %}
     <span class="badge badge-medium">OPEN</span>
-    PR awaiting review —
+    Code-repo PR awaiting review —
   {% elif pr_status.state == 'closed' %}
     <span class="badge badge-critical">CLOSED</span>
-    PR closed without merging —
+    Code-repo PR closed without merging —
   {% else %}
     <span class="badge badge-info">PR</span>
-    PR created —
+    Code-repo PR created —
   {% endif %}
   <a href="{{ pr_status.html_url | safe_url }}" target="_blank" hx-boost="false">{{ pr_status.html_url }}</a>
 </div>

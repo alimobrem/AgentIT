@@ -990,7 +990,7 @@ async def deliver(request: Request, assessment_id: str):
     once via ``route_and_deliver()`` -- the mechanism (direct apply vs.
     GitOps commit+PR) is no longer a human choice, only ``dry_run`` is.
     """
-    from agentit.portal.delivery import route_and_deliver
+    from agentit.portal.delivery import repo_kind_for_mechanism, route_and_deliver
 
     s = await get_store()
     report = await s.get(assessment_id)
@@ -1049,6 +1049,16 @@ async def deliver(request: Request, assessment_id: str):
     ]
     if pr_urls:
         params.append(f"pr_url={quote(pr_urls[0])}")
+        # Which of the app's two repos (code vs. GitOps) pr_urls[0] actually
+        # opened against -- traced from the real mechanism that produced it
+        # (delivery["mechanisms"]), not guessed, so onboard_results.html's
+        # flash alert can label the link instead of showing a bare PR URL.
+        for cat, o in outcomes.items():
+            if isinstance(o, dict) and o.get("pr_url") == pr_urls[0]:
+                repo_kind = repo_kind_for_mechanism(delivery["mechanisms"].get(cat, ""))
+                if repo_kind:
+                    params.append(f"pr_url_repo={repo_kind}")
+                break
     if errors:
         params.append(f"error={quote(' | '.join(errors)[:300])}")
     if dry_run_previews:

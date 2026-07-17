@@ -213,10 +213,15 @@ def _gate_card(gate: dict, *, known_app_name: str | None = None) -> dict:
 
 _MECHANISM_SHORT_LABELS: dict[str, str] = {
     "direct-apply": "Applied directly",
-    "infra-repo-commit": "GitOps PR opened",
+    # These three all say plainly *which* repo the PR/commit targets --
+    # AgentIT apps have two distinct repos in play (report.repo_url, the
+    # app's own code repo; report.infra_repo_url, its GitOps repo -- see
+    # delivery.py's repo_kind_for_mechanism()), and a bare "PR opened" left
+    # every Ledger card and Delivery History row ambiguous about which one.
+    "infra-repo-commit": "PR opened against the GitOps repo",
     "cluster-admin-review-gate": "Cluster-admin review required",
-    "source-repo-pr": "Source PR opened",
-    "app-repo-pr": "App-repo PR opened",
+    "source-repo-pr": "Source-patch PR opened against the code repo",
+    "app-repo-pr": "App-repo PR opened against the code repo",
     "none": "Nothing delivered",
 }
 

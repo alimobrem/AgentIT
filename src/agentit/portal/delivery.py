@@ -74,10 +74,35 @@ MECHANISM_DESCRIPTIONS: dict[str, str] = {
     MECHANISM_DIRECT_APPLY: "Apply these manifests directly to the cluster -- no GitOps registration was found for this app.",
     MECHANISM_INFRA_REPO_COMMIT: "Commit to the GitOps infra repo and open a PR -- this app is GitOps-registered via a live Argo CD Application. A human must still merge the PR; AgentIT will never auto-merge.",
     MECHANISM_CLUSTER_ADMIN_REVIEW_GATE: "Hold for cluster-admin review -- these manifests target a shared operator namespace this service account cannot apply to without elevated RBAC.",
-    MECHANISM_SOURCE_REPO_PR: "Open a PR with a real patch against the named file(s) in this app's own source repo.",
-    MECHANISM_APP_REPO_PR: "Open an informational PR with these files under `.agentit/` in this app's own repo.",
+    MECHANISM_SOURCE_REPO_PR: "Open a PR against this app's code repo with a real patch to the named file(s).",
+    MECHANISM_APP_REPO_PR: "Open an informational PR against this app's code repo with these files under `.agentit/`.",
     MECHANISM_NONE: "Nothing to deliver.",
 }
+
+# Which repo (docs/unified-apply-flow.md's two distinct repos-in-play: the
+# app's own code repo vs. its GitOps infra repo) a commit/PR mechanism's URL
+# actually targets -- the single source of truth every PR-reference surface
+# (onboard_results.html's Delivery History + flash alerts, the Ledger's
+# delivery cards, confirmation_text() above) should trace back to instead of
+# each independently guessing from the mechanism name. Traces the real
+# mechanism-to-repo mapping route_and_deliver() already encodes:
+# MECHANISM_INFRA_REPO_COMMIT commits to report.infra_repo_url (the GitOps
+# repo); MECHANISM_SOURCE_REPO_PR/MECHANISM_APP_REPO_PR both open a PR
+# against report.repo_url (the app's own code repo) -- see
+# deliver_with_verification() above. Direct-apply/cluster-admin-review-
+# gate/none never touch a repo at all, so they map to "".
+_MECHANISM_REPO_KIND: dict[str, str] = {
+    MECHANISM_INFRA_REPO_COMMIT: "gitops",
+    MECHANISM_SOURCE_REPO_PR: "code",
+    MECHANISM_APP_REPO_PR: "code",
+}
+
+
+def repo_kind_for_mechanism(mechanism: str) -> str:
+    """``"code"``, ``"gitops"``, or ``""`` (no repo target) for a delivery
+    mechanism -- for labeling a PR/commit link with which of the app's two
+    repos it actually targets. See ``_MECHANISM_REPO_KIND`` above."""
+    return _MECHANISM_REPO_KIND.get(mechanism, "")
 
 
 def confirmation_text(mechanism: str, *, infra_repo_url: str | None = None) -> str:

@@ -191,7 +191,11 @@ async def resolve_gate(request: Request, gate_id: str):
                 f"Merged GitOps PR {pr_url} for assessment {assessment_id}",
             )
             return RedirectResponse(
-                url=f"/assessments/{assessment_id}/onboard-results?pr_url={pr_url}&gate_approved=true",
+                # gitops-pr-pending gates only ever exist for a merged commit
+                # against the GitOps infra repo (see the comment above) --
+                # pr_url_repo=gitops lets onboard_results.html's flash alert
+                # label this PR link instead of showing a bare URL.
+                url=f"/assessments/{assessment_id}/onboard-results?pr_url={pr_url}&pr_url_repo=gitops&gate_approved=true",
                 status_code=303,
             )
 
