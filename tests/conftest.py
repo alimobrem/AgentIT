@@ -121,6 +121,36 @@ def _hermetic_llm_env(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
         monkeypatch.delenv(var, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _reset_kube_breaker() -> None:
+    """Reset the shared, process-global ``kube_breaker`` (portal/helpers.py)
+    before and after every test.
+
+    Unlike ``llm_breaker`` (which almost never actually trips in the
+    general suite, since ``_hermetic_llm_env`` above keeps
+    ``get_llm_client()`` returning ``None`` everywhere outside
+    test_llm.py -- so ``LLMClient._chat()``, the only place that touches
+    ``llm_breaker``, is rarely even reached), a large fraction of this
+    suite deliberately mocks kube.py's real API calls (``core_v1``,
+    ``custom_objects``, ``batch_v1``, ``dynamic_client``, ...) to raise,
+    specifically to exercise ``KubeError`` handling and other error
+    branches. Now that those real API-calling functions feed genuine
+    exceptions into ``kube_breaker`` (see kube.py's ``_kube_breaker_scope``),
+    those intentionally-mocked failures accumulate against the same
+    shared breaker instance across the whole session -- without a
+    per-test reset, they can trip it (threshold=5) purely based on
+    unrelated test run order, making some later, unrelated test's
+    real-call expectations fail because the breaker skipped the call
+    instead of reaching the (mocked) client.
+    """
+    from agentit.portal.helpers import kube_breaker
+    kube_breaker._failures = 0
+    kube_breaker._last_failure = 0
+    yield
+    kube_breaker._failures = 0
+    kube_breaker._last_failure = 0
+
+
 # ── Real Postgres test infrastructure ────────────────────────────────
 #
 # Postgres is the only supported store (docs/postgres-migration-plan.md) --

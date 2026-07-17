@@ -2,12 +2,62 @@ from __future__ import annotations
 
 import logging
 import time as _time
+from contextlib import contextmanager
+
+from agentit.portal.helpers import kube_breaker
 
 logger = logging.getLogger(__name__)
 
 
 class KubeError(Exception):
     """Raised when a Kubernetes API call fails (not a missing-resource 404)."""
+
+
+class KubeOfflineError(KubeError):
+    """Raised specifically by ``get_client()`` when ``AGENTIT_OFFLINE`` is
+    set. A distinct subclass (rather than a plain ``KubeError``) so every
+    real API-calling function below can tell "the explicit offline
+    hard-stop fired" apart from "a real Kubernetes API call actually
+    failed" -- see ``_kube_breaker_scope()``, which deliberately never
+    counts this against ``kube_breaker``: offline mode is an intentional,
+    explicit choice, not evidence the cluster is unhealthy.
+    """
+
+
+@contextmanager
+def _kube_breaker_scope(*, benign_statuses: tuple[int, ...] = ()):
+    """Shared low-level choke point for ``kube_breaker`` bookkeeping around
+    a single real Kubernetes API call.
+
+    Every real-API-calling function below wraps its actual client call
+    with this instead of duplicating the same success/failure bookkeeping
+    (and the ``AGENTIT_OFFLINE`` carve-out) in each one -- mirrors
+    ``llm.py``'s ``LLMClient._chat()`` pattern (``record_success()`` on a
+    clean call, ``record_failure()`` on a real exception), just
+    centralized since this module has many more real call sites than
+    ``llm.py``'s single one.
+
+    ``benign_statuses`` lets a caller mark specific HTTP status codes as
+    *expected, not a health signal* (e.g. 404 "not found" for a lookup,
+    409 "already exists"/"conflict" for a create) -- those still
+    propagate to the caller's own except-clause exactly as before, they
+    just don't move the breaker.
+    """
+    try:
+        yield
+    except KubeOfflineError:
+        # Explicit, intentional offline mode -- not evidence the real
+        # cluster is unhealthy, so this must never move the breaker.
+        raise
+    except Exception as exc:
+        if getattr(exc, "status", None) in benign_statuses:
+            kube_breaker.record_success()
+        else:
+            kube_breaker.record_failure()
+        raise
+    else:
+        kube_breaker.record_success()
+
 
 _client_cache = None
 _client_cache_time: float = 0
@@ -41,7 +91,7 @@ def get_client():
     genuine hard-offline guarantee during local testing/review.
     """
     if _offline_mode_enabled():
-        raise KubeError(
+        raise KubeOfflineError(
             "AGENTIT_OFFLINE is set -- refusing to resolve a Kubernetes client "
             "(in-cluster config, kubeconfig, or otherwise). Unset AGENTIT_OFFLINE "
             "to allow real cluster access."
@@ -166,8 +216,12 @@ def batch_v1():
 
 def list_pods(namespace: str, label_selector: str = "") -> list[dict]:
     """List pods in a namespace, returns simplified dicts."""
+    if kube_breaker.is_open:
+        logger.warning("Kube circuit breaker open — skipping list_pods(%s)", namespace)
+        raise KubeError("Kubernetes circuit breaker open — too many recent API failures")
     try:
-        pods = core_v1().list_namespaced_pod(namespace, label_selector=label_selector, _request_timeout=10)
+        with _kube_breaker_scope():
+            pods = core_v1().list_namespaced_pod(namespace, label_selector=label_selector, _request_timeout=10)
         return [
             {
                 "name": p.metadata.name,
@@ -212,15 +266,19 @@ def list_custom_resources(
     like the ambient deploy-status badge pass a shorter value so a wedged
     apiserver cannot pin portal workers until oauth-proxy returns 502/503.
     """
+    if kube_breaker.is_open:
+        logger.warning("Kube circuit breaker open — skipping list_custom_resources(%s/%s %s)", group, version, plural)
+        raise KubeError("Kubernetes circuit breaker open — too many recent API failures")
     try:
-        if namespace:
-            result = custom_objects().list_namespaced_custom_object(
-                group, version, namespace, plural, _request_timeout=timeout,
-            )
-        else:
-            result = custom_objects().list_cluster_custom_object(
-                group, version, plural, _request_timeout=timeout,
-            )
+        with _kube_breaker_scope():
+            if namespace:
+                result = custom_objects().list_namespaced_custom_object(
+                    group, version, namespace, plural, _request_timeout=timeout,
+                )
+            else:
+                result = custom_objects().list_cluster_custom_object(
+                    group, version, plural, _request_timeout=timeout,
+                )
         return result.get("items", [])
     except Exception as exc:
         raise KubeError(f"Failed to list {group}/{version} {plural}: {exc}") from exc
@@ -230,14 +288,18 @@ def get_custom_resource(
     group: str, version: str, plural: str, name: str, namespace: str = "", timeout: int = 10,
 ) -> dict | None:
     """Get a single custom resource by name. Returns None if not found (404)."""
+    if kube_breaker.is_open:
+        logger.warning("Kube circuit breaker open — skipping get_custom_resource(%s/%s %s/%s)", group, version, plural, name)
+        raise KubeError("Kubernetes circuit breaker open — too many recent API failures")
     try:
-        if namespace:
-            return custom_objects().get_namespaced_custom_object(
-                group, version, namespace, plural, name, _request_timeout=timeout,
+        with _kube_breaker_scope(benign_statuses=(404,)):
+            if namespace:
+                return custom_objects().get_namespaced_custom_object(
+                    group, version, namespace, plural, name, _request_timeout=timeout,
+                )
+            return custom_objects().get_cluster_custom_object(
+                group, version, plural, name, _request_timeout=timeout,
             )
-        return custom_objects().get_cluster_custom_object(
-            group, version, plural, name, _request_timeout=timeout,
-        )
     except Exception as exc:
         if hasattr(exc, "status") and exc.status == 404:
             return None
@@ -246,16 +308,24 @@ def get_custom_resource(
 
 def create_custom_resource(group: str, version: str, plural: str, namespace: str, body: dict) -> dict:
     """Create a namespaced custom resource. Raises KubeError on failure (including 'already exists')."""
+    if kube_breaker.is_open:
+        logger.warning("Kube circuit breaker open — skipping create_custom_resource(%s/%s %s)", group, version, plural)
+        raise KubeError("Kubernetes circuit breaker open — too many recent API failures")
     try:
-        return custom_objects().create_namespaced_custom_object(group, version, namespace, plural, body, _request_timeout=15)
+        with _kube_breaker_scope():
+            return custom_objects().create_namespaced_custom_object(group, version, namespace, plural, body, _request_timeout=15)
     except Exception as exc:
         raise KubeError(f"Failed to create {group}/{version} {plural}: {exc}") from exc
 
 
 def patch_custom_resource(group: str, version: str, plural: str, name: str, namespace: str, body: dict) -> dict:
     """Merge-patch an existing namespaced custom resource. Raises KubeError on failure."""
+    if kube_breaker.is_open:
+        logger.warning("Kube circuit breaker open — skipping patch_custom_resource(%s/%s %s/%s)", group, version, plural, name)
+        raise KubeError("Kubernetes circuit breaker open — too many recent API failures")
     try:
-        return custom_objects().patch_namespaced_custom_object(group, version, namespace, plural, name, body, _request_timeout=15)
+        with _kube_breaker_scope():
+            return custom_objects().patch_namespaced_custom_object(group, version, namespace, plural, name, body, _request_timeout=15)
     except Exception as exc:
         raise KubeError(f"Failed to patch {group}/{version} {plural}/{name}: {exc}") from exc
 
@@ -327,6 +397,14 @@ def apply_yaml(
     import yaml as _yaml
     from kubernetes.client.exceptions import ApiException
 
+    if kube_breaker.is_open:
+        logger.warning("Kube circuit breaker open — skipping apply_yaml(%s)", namespace)
+        return {
+            "applied": False,
+            "error": "Kubernetes circuit breaker open — too many recent API failures",
+            "conflict": False, "conflict_details": [],
+        }
+
     try:
         docs = [d for d in _yaml.safe_load_all(content) if isinstance(d, dict)]
     except _yaml.YAMLError as exc:
@@ -335,7 +413,8 @@ def apply_yaml(
     if not docs:
         return {"applied": True, "error": None, "conflict": False, "conflict_details": []}
 
-    dyn = dynamic_client()
+    with _kube_breaker_scope():
+        dyn = dynamic_client()
     conflict_details: list[dict] = []
     first_error: str | None = None
     any_conflict = False
@@ -354,20 +433,22 @@ def apply_yaml(
             continue
 
         try:
-            resource = dyn.resources.get(api_version=api_version, kind=kind)
+            with _kube_breaker_scope():
+                resource = dyn.resources.get(api_version=api_version, kind=kind)
         except Exception as exc:
             any_failure = True
             first_error = first_error or f"{kind} ({api_version}) not found on cluster: {exc}"
             continue
 
         try:
-            dyn.server_side_apply(
-                resource, body=doc, name=name,
-                namespace=doc_namespace if resource.namespaced else None,
-                field_manager=field_manager, force_conflicts=force,
-                dry_run="All" if dry_run else None,
-                _request_timeout=30,
-            )
+            with _kube_breaker_scope(benign_statuses=(409,)):
+                dyn.server_side_apply(
+                    resource, body=doc, name=name,
+                    namespace=doc_namespace if resource.namespaced else None,
+                    field_manager=field_manager, force_conflicts=force,
+                    dry_run="All" if dry_run else None,
+                    _request_timeout=30,
+                )
         except ApiException as exc:
             if exc.status == 409:
                 any_conflict = True
@@ -398,9 +479,10 @@ def _get_argo_rollout(name: str, namespace: str) -> dict | None:
     """Return the Argo Rollout custom resource with this name, or None if it
     doesn't exist (or the Rollout CRD isn't installed on this cluster)."""
     try:
-        return custom_objects().get_namespaced_custom_object(
-            "argoproj.io", "v1alpha1", namespace, "rollouts", name, _request_timeout=10,
-        )
+        with _kube_breaker_scope(benign_statuses=(404,)):
+            return custom_objects().get_namespaced_custom_object(
+                "argoproj.io", "v1alpha1", namespace, "rollouts", name, _request_timeout=10,
+            )
     except Exception:
         return None
 
@@ -420,12 +502,17 @@ def rollout_undo(deployment: str, namespace: str) -> dict:
     the current spec rather than reverting to a previous ReplicaSet -- but is
     the best available fallback for non-Rollout resources.
     """
+    if kube_breaker.is_open:
+        logger.warning("Kube circuit breaker open — skipping rollout_undo(%s/%s)", namespace, deployment)
+        return {"success": False, "message": "Kubernetes circuit breaker open — too many recent API failures"}
+
     if _get_argo_rollout(deployment, namespace) is not None:
         try:
-            custom_objects().patch_namespaced_custom_object_status(
-                "argoproj.io", "v1alpha1", namespace, "rollouts", deployment,
-                body={"status": {"abort": True}}, _request_timeout=15,
-            )
+            with _kube_breaker_scope():
+                custom_objects().patch_namespaced_custom_object_status(
+                    "argoproj.io", "v1alpha1", namespace, "rollouts", deployment,
+                    body={"status": {"abort": True}}, _request_timeout=15,
+                )
             return {
                 "success": True,
                 "message": f"Argo Rollout '{deployment}' aborted -- reverted to previous stable ReplicaSet",
@@ -448,7 +535,8 @@ def rollout_undo(deployment: str, namespace: str) -> dict:
                 }
             }
         }
-        apps_v1().patch_namespaced_deployment(deployment, namespace, body, _request_timeout=15)
+        with _kube_breaker_scope():
+            apps_v1().patch_namespaced_deployment(deployment, namespace, body, _request_timeout=15)
         return {
             "success": True,
             "message": f"Rollout restart initiated for {deployment} "
@@ -470,14 +558,20 @@ def get_api_resources() -> set[str]:
     """
     import json
 
+    if kube_breaker.is_open:
+        logger.warning("Kube circuit breaker open — skipping get_api_resources()")
+        raise KubeError("Kubernetes circuit breaker open — too many recent API failures")
+
     try:
         resources = set()
-        api_client = get_client().ApiClient()
-
-        for api in core_v1().get_api_resources(_request_timeout=10).resources:
+        with _kube_breaker_scope():
+            api_client = get_client().ApiClient()
+            api_resources = core_v1().get_api_resources(_request_timeout=10).resources
+        for api in api_resources:
             resources.add(api.kind.lower())
 
-        groups = get_client().ApisApi(api_client).get_api_versions(_request_timeout=10)
+        with _kube_breaker_scope():
+            groups = get_client().ApisApi(api_client).get_api_versions(_request_timeout=10)
         for group in groups.groups:
             version = None
             if group.preferred_version is not None:
@@ -493,12 +587,13 @@ def get_api_resources() -> set[str]:
                 # authenticate). That previously left only core v1 kinds
                 # (~26) in the set, so SkillEngine gated out HPA /
                 # NetworkPolicy / Deployment skills on every onboard.
-                resp = api_client.call_api(
-                    f"/apis/{group.name}/{version}", "GET",
-                    auth_settings=["BearerToken"],
-                    _return_http_data_only=True, _preload_content=False,
-                    _request_timeout=10,
-                )
+                with _kube_breaker_scope():
+                    resp = api_client.call_api(
+                        f"/apis/{group.name}/{version}", "GET",
+                        auth_settings=["BearerToken"],
+                        _return_http_data_only=True, _preload_content=False,
+                        _request_timeout=10,
+                    )
                 data = json.loads(resp.read())
                 for res in data.get("resources", []):
                     kind = res.get("kind")
@@ -515,27 +610,36 @@ def get_api_resources() -> set[str]:
 def create_config_map(name: str, namespace: str, data: dict[str, str]) -> bool:
     """Create a ConfigMap. Returns True on success."""
     from kubernetes.client import V1ConfigMap, V1ObjectMeta
+    if kube_breaker.is_open:
+        logger.warning("Kube circuit breaker open — skipping create_config_map(%s/%s)", namespace, name)
+        return False
     try:
         cm = V1ConfigMap(
             metadata=V1ObjectMeta(name=name, namespace=namespace),
             data=data,
         )
-        core_v1().create_namespaced_config_map(namespace, cm)
+        with _kube_breaker_scope():
+            core_v1().create_namespaced_config_map(namespace, cm)
         return True
     except Exception as exc:
         if "already exists" in str(exc).lower():
-            core_v1().replace_namespaced_config_map(name, namespace, V1ConfigMap(
-                metadata=V1ObjectMeta(name=name, namespace=namespace),
-                data=data,
-            ))
+            with _kube_breaker_scope():
+                core_v1().replace_namespaced_config_map(name, namespace, V1ConfigMap(
+                    metadata=V1ObjectMeta(name=name, namespace=namespace),
+                    data=data,
+                ))
             return True
         logger.warning("Failed to create ConfigMap %s: %s", name, exc)
         return False
 
 
 def delete_config_map(name: str, namespace: str) -> None:
+    if kube_breaker.is_open:
+        logger.warning("Kube circuit breaker open — skipping delete_config_map(%s/%s)", namespace, name)
+        return
     try:
-        core_v1().delete_namespaced_config_map(name, namespace)
+        with _kube_breaker_scope(benign_statuses=(404,)):
+            core_v1().delete_namespaced_config_map(name, namespace)
     except Exception:
         logger.debug("delete_config_map %s/%s failed", namespace, name, exc_info=True)
 
@@ -547,8 +651,12 @@ def get_current_pod_image() -> str | None:
     if not hostname:
         return None
     namespace = os.environ.get("AGENTIT_NAMESPACE", "agentit")
+    if kube_breaker.is_open:
+        logger.warning("Kube circuit breaker open — skipping get_current_pod_image()")
+        return None
     try:
-        pod = core_v1().read_namespaced_pod(hostname, namespace)
+        with _kube_breaker_scope():
+            pod = core_v1().read_namespaced_pod(hostname, namespace)
         if pod.spec.containers:
             return pod.spec.containers[0].image
     except Exception as exc:
@@ -627,8 +735,12 @@ def create_job(
         ),
     )
 
+    if kube_breaker.is_open:
+        logger.warning("Kube circuit breaker open — skipping create_job(%s/%s)", namespace, name)
+        return False
     try:
-        batch_v1().create_namespaced_job(namespace, job)
+        with _kube_breaker_scope():
+            batch_v1().create_namespaced_job(namespace, job)
         return True
     except Exception as exc:
         logger.warning("Failed to create Job %s: %s", name, exc)
@@ -637,8 +749,12 @@ def create_job(
 
 def get_job_status(name: str, namespace: str) -> str:
     """Get Job status: 'active', 'succeeded', 'failed', or 'unknown'."""
+    if kube_breaker.is_open:
+        logger.warning("Kube circuit breaker open — skipping get_job_status(%s/%s)", namespace, name)
+        return "unknown"
     try:
-        job = batch_v1().read_namespaced_job_status(name, namespace, _request_timeout=10)
+        with _kube_breaker_scope():
+            job = batch_v1().read_namespaced_job_status(name, namespace, _request_timeout=10)
         if job.status.succeeded and job.status.succeeded > 0:
             return "succeeded"
         if job.status.failed and job.status.failed > 0:
@@ -653,14 +769,19 @@ def get_job_status(name: str, namespace: str) -> str:
 
 def get_job_pod_log(job_name: str, namespace: str) -> str:
     """Read logs from the pod created by a Job."""
+    if kube_breaker.is_open:
+        logger.warning("Kube circuit breaker open — skipping get_job_pod_log(%s/%s)", namespace, job_name)
+        return ""
     try:
-        pods = core_v1().list_namespaced_pod(
-            namespace, label_selector=f"agentit/job={job_name}", _request_timeout=10,
-        )
+        with _kube_breaker_scope():
+            pods = core_v1().list_namespaced_pod(
+                namespace, label_selector=f"agentit/job={job_name}", _request_timeout=10,
+            )
         if not pods.items:
             return ""
         pod_name = pods.items[0].metadata.name
-        return core_v1().read_namespaced_pod_log(pod_name, namespace, _request_timeout=30)
+        with _kube_breaker_scope():
+            return core_v1().read_namespaced_pod_log(pod_name, namespace, _request_timeout=30)
     except Exception as exc:
         logger.warning("Failed to read Job pod log %s: %s", job_name, exc)
         return ""
@@ -669,18 +790,26 @@ def get_job_pod_log(job_name: str, namespace: str) -> str:
 def delete_job(name: str, namespace: str) -> None:
     """Delete a Job and its pods."""
     from kubernetes.client import V1DeleteOptions
+    if kube_breaker.is_open:
+        logger.warning("Kube circuit breaker open — skipping delete_job(%s/%s)", namespace, name)
+        return
     try:
-        batch_v1().delete_namespaced_job(
-            name, namespace,
-            body=V1DeleteOptions(propagation_policy="Background"),
-        )
+        with _kube_breaker_scope(benign_statuses=(404,)):
+            batch_v1().delete_namespaced_job(
+                name, namespace,
+                body=V1DeleteOptions(propagation_policy="Background"),
+            )
     except Exception:
         logger.debug("delete_job %s/%s failed", namespace, name, exc_info=True)
 
 
 def namespace_exists(namespace: str) -> bool:
+    if kube_breaker.is_open:
+        logger.warning("Kube circuit breaker open — skipping namespace_exists(%s)", namespace)
+        raise KubeError("Kubernetes circuit breaker open — too many recent API failures")
     try:
-        core_v1().read_namespace(namespace, _request_timeout=5)
+        with _kube_breaker_scope(benign_statuses=(404,)):
+            core_v1().read_namespace(namespace, _request_timeout=5)
         return True
     except Exception as exc:
         if hasattr(exc, "status") and exc.status == 404:
@@ -691,8 +820,12 @@ def namespace_exists(namespace: str) -> bool:
 def create_namespace(namespace: str) -> None:
     from kubernetes.client import V1Namespace, V1ObjectMeta
 
+    if kube_breaker.is_open:
+        logger.warning("Kube circuit breaker open — skipping create_namespace(%s)", namespace)
+        raise KubeError("Kubernetes circuit breaker open — too many recent API failures")
     try:
-        core_v1().create_namespace(V1Namespace(metadata=V1ObjectMeta(name=namespace)), _request_timeout=10)
+        with _kube_breaker_scope(benign_statuses=(409,)):
+            core_v1().create_namespace(V1Namespace(metadata=V1ObjectMeta(name=namespace)), _request_timeout=10)
     except Exception as exc:
         if hasattr(exc, "status") and exc.status == 409:
             return
