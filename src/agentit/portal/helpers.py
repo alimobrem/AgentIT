@@ -63,6 +63,90 @@ def get_circuit_breaker_states() -> dict[str, dict[str, object]]:
     }
 
 
+# ── Credential health ─────────────────────────────────────────────────
+#
+# The 3 credentials that genuinely require admin action to configure, and
+# that every GitHub- or LLM-dependent feature silently degrades without:
+# the GitHub token, the GitHub webhook HMAC secret, and the LLM backend
+# (Vertex AI service-account credentials or a direct Anthropic API key).
+# get_credential_states() mirrors get_circuit_breaker_states()'s shape
+# above so the Health page's Credentials table renders identically to its
+# Circuit Breakers table.
+
+
+def _check_llm_backend() -> dict[str, object]:
+    """Report which LLM backend `agentit.llm._create_client()` would
+    actually select, checking the same env vars it does.
+
+    Vertex AI is confirmed only via existence + readability of the
+    `GOOGLE_APPLICATION_CREDENTIALS` file -- a full GCP auth round trip is
+    too expensive/complex for a Health-page check, so this is a cheap,
+    reasonable proxy for "the mounted service-account key is usable".
+    """
+    project = os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "")
+    region = os.environ.get("CLOUD_ML_REGION", "")
+    if project and region:
+        creds_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+        if not creds_path:
+            return {
+                "ok": False, "status": "invalid",
+                "detail": (
+                    "Vertex AI selected (ANTHROPIC_VERTEX_PROJECT_ID + CLOUD_ML_REGION "
+                    "set) but GOOGLE_APPLICATION_CREDENTIALS is not set"
+                ),
+            }
+        if not os.path.isfile(creds_path):
+            return {
+                "ok": False, "status": "invalid",
+                "detail": f"GOOGLE_APPLICATION_CREDENTIALS ({creds_path}) does not exist",
+            }
+        if not os.access(creds_path, os.R_OK):
+            return {
+                "ok": False, "status": "invalid",
+                "detail": f"GOOGLE_APPLICATION_CREDENTIALS ({creds_path}) exists but is not readable",
+            }
+        return {
+            "ok": True, "status": "valid",
+            "detail": f"Vertex AI backend (project={project}, region={region})",
+        }
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return {"ok": True, "status": "valid", "detail": "Direct Anthropic API backend (ANTHROPIC_API_KEY set)"}
+    return {
+        "ok": False, "status": "missing",
+        "detail": (
+            "No LLM backend configured -- neither Vertex AI "
+            "(ANTHROPIC_VERTEX_PROJECT_ID + CLOUD_ML_REGION) nor ANTHROPIC_API_KEY are set"
+        ),
+    }
+
+
+def get_credential_states() -> dict[str, dict[str, object]]:
+    """Live status for the GitHub token, GitHub webhook secret, and LLM
+    backend credentials -- used by the Health page's Credentials table.
+    """
+    from agentit.portal import github_pr
+
+    github_check = github_pr.check_github_token()
+    webhook_secret_set = bool(os.environ.get("GITHUB_WEBHOOK_SECRET"))
+
+    return {
+        "github-token": {
+            "ok": github_check["status"] == "valid",
+            "status": github_check["status"],
+            "detail": github_check["detail"],
+        },
+        "github-webhook-secret": {
+            "ok": webhook_secret_set,
+            "status": "configured" if webhook_secret_set else "missing",
+            "detail": (
+                "GITHUB_WEBHOOK_SECRET is set" if webhook_secret_set
+                else "GITHUB_WEBHOOK_SECRET is not set -- inbound webhook signatures cannot be verified"
+            ),
+        },
+        "llm-backend": _check_llm_backend(),
+    }
+
+
 # ── Store singleton ───────────────────────────────────────────────────
 #
 # ``get_store()`` is async -- it's the only way any caller (portal, CLI,

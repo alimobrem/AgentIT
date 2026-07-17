@@ -20,7 +20,12 @@ from agentit.portal.health_links import (
     resolve_console_url,
     resolve_github_repo_url,
 )
-from agentit.portal.helpers import get_circuit_breaker_states, get_store, get_templates
+from agentit.portal.helpers import (
+    get_circuit_breaker_states,
+    get_credential_states,
+    get_store,
+    get_templates,
+)
 
 log = logging.getLogger(__name__)
 
@@ -572,6 +577,12 @@ def _get_cluster_health(store=None, loop=None) -> dict:
     except Exception:
         log.debug("Failed to collect circuit breaker states", exc_info=True)
         result["circuit_breakers"] = {}
+
+    try:
+        result["credentials"] = get_credential_states()
+    except Exception:
+        log.debug("Failed to collect credential states", exc_info=True)
+        result["credentials"] = {}
 
     # Deep-links for Health cards / tables — real console/GitHub URLs only.
     console_url = resolve_console_url()

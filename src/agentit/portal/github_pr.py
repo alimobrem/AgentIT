@@ -35,6 +35,46 @@ def _parse_owner_repo(repo_url: str) -> tuple[str, str]:
     return parts[-2], parts[-1]
 
 
+def check_github_token() -> dict:
+    """Cheap, real liveness check for the configured GitHub token, used by
+    the Health page's Credentials section (``portal/helpers.py::
+    get_credential_states()``).
+
+    Calls ``GET /rate_limit`` -- unlike almost every other GitHub API
+    endpoint this doesn't require any particular OAuth scope, and per
+    GitHub's own docs it doesn't count against the caller's rate limit
+    either, making it the cheapest possible way to confirm a token is both
+    present and still accepted. Never raises: ``_get_token()``'s
+    ``RuntimeError`` (unset ``GITHUB_TOKEN``) is caught here and reported
+    as "missing" rather than propagating into a 500 on the Health page.
+
+    Returns {"status": "missing"|"valid"|"invalid", "detail": str}.
+    """
+    try:
+        token = _get_token()
+    except RuntimeError:
+        return {"status": "missing", "detail": "GITHUB_TOKEN is not set"}
+
+    hdrs = _headers(token)
+    try:
+        resp = requests.get(f"{_API}/rate_limit", headers=hdrs, timeout=5)
+    except Exception as exc:
+        logger.warning("GitHub token liveness check failed: %s", exc)
+        return {"status": "invalid", "detail": f"Could not reach the GitHub API: {exc}"}
+
+    if resp.status_code == 200:
+        return {"status": "valid", "detail": "Authenticated successfully via GET /rate_limit"}
+    if resp.status_code in (401, 403):
+        return {
+            "status": "invalid",
+            "detail": f"GitHub API returned {resp.status_code} -- token invalid or expired",
+        }
+    return {
+        "status": "invalid",
+        "detail": f"GitHub API returned unexpected status {resp.status_code}",
+    }
+
+
 def get_pr_status(pr_url: str) -> dict:
     """Check the merge status of a GitHub PR.
 

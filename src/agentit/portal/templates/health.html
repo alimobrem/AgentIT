@@ -258,6 +258,24 @@
 </table>
 {% endif %}
 
+{% if credentials %}
+<h2 class="section-title">Credentials</h2>
+<div id="credentials-panel" hx-get="/health" hx-trigger="every 30s" hx-select="#credentials-panel" hx-target="this" hx-swap="outerHTML">
+<table>
+  <thead><tr><th>Credential</th><th>Status</th><th>Detail</th></tr></thead>
+  <tbody>
+    {% for name, state in credentials.items() %}
+    <tr class="{% if state.ok %}row-border-green{% else %}row-border-red{% endif %}">
+      <td class="text-bold">{{ name }}</td>
+      <td><span class="badge {% if state.ok %}badge-low{% else %}badge-critical{% endif %}">{{ state.status | capitalize }}</span></td>
+      <td class="text-sm text-muted">{{ state.detail }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
 {% if kafka_stats and kafka_stats.available %}
 <h3 class="text-sm mt-1 mb-1">Topics</h3>
 <table>
