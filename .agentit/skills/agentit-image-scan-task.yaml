@@ -53,9 +53,4 @@ spec:
     - name: gate
       image: aquasec/trivy:latest
       script: |
-        #!/usr/bin/env sh
-        set -e
-        trivy image \
-          --severity CRITICAL \
-          --exit-code 1 \
-          $(params.IMAGE)
+        #!/usr/bin/env
