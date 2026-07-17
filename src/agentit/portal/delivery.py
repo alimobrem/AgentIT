@@ -392,6 +392,23 @@ async def _maybe_schedule_verification(
     )
 
 
+async def _log_verification_outcome(
+    store: object, action: str, app_name: str, severity: str, summary: str,
+) -> None:
+    """Mirrors ``slo_tracker.py``'s ``rollback-recommended`` event-logging
+    pattern (Kafka publish + store-persisted event, the latter wrapped in
+    its own best-effort try/except) so a delivery's verification outcome
+    produces a real Ledger card/observable event, not just a status-column
+    update nobody's watching.
+    """
+    from agentit.portal.helpers import publish_event
+    publish_event(action, app_name, summary, agent_id="delivery-verifier")
+    try:
+        await store.log_event("delivery-verifier", action, app_name, severity, summary)
+    except Exception:
+        logger.warning("Failed to log %s event for %s", action, app_name, exc_info=True)
+
+
 async def verify_and_close_delivery(
     store: object, delivery_id: str, assessment_id: str, app_name: str,
     namespace: str, mechanism: str,
@@ -415,6 +432,10 @@ async def verify_and_close_delivery(
 
     if result["healthy"]:
         await store.update_delivery(delivery_id, status="verified", verification="verified")
+        await _log_verification_outcome(
+            store, "delivery-verified", app_name, "info",
+            f"Delivery {delivery_id} verified healthy after {mechanism} -- no SLO breach detected",
+        )
         return result
 
     if mechanism == MECHANISM_DIRECT_APPLY:
@@ -423,10 +444,20 @@ async def verify_and_close_delivery(
             delivery_id, status="rolled_back", verification="breached",
             details={"rollback": rb, "breach_reason": result.get("reason")},
         )
+        await _log_verification_outcome(
+            store, "delivery-rolled-back", app_name, "critical",
+            f"Delivery {delivery_id} breached SLOs after direct apply -- "
+            f"rolled back automatically ({result.get('reason')})",
+        )
     else:
         await store.update_delivery(
             delivery_id, status="breach-reported", verification="breached",
             details={"breach_reason": result.get("reason")},
+        )
+        await _log_verification_outcome(
+            store, "delivery-breach-reported", app_name, "critical",
+            f"Delivery {delivery_id} breached SLOs after {mechanism} -- no automatic "
+            f"rollback for GitOps deliveries ({result.get('reason')}); manual review needed",
         )
     return result
 

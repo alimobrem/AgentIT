@@ -54,6 +54,17 @@ _EVENT_ACTION_TO_CARD_TYPE: dict[str, str] = {
     SECRET_CLASSIFY_ACTION: "C",
     "tick-complete": "H",
     "tick-failed": "H",
+    # Rollout-verification outcomes for the shared verify_and_close_
+    # delivery() tail (delivery.py) -- the same lifecycle as the "Delivery
+    # routed" card F's `deliveries` row, just its later, previously-silent
+    # verification step (docs/onboarding-loop-vision-gap-analysis.md
+    # Phase 0 item 3): before this, a delivery's status column changed to
+    # verified/rolled_back/breach-reported with no event, so nothing new
+    # ever showed up here once a delivery was confirmed healthy or found
+    # to have failed.
+    "delivery-verified": "F",
+    "delivery-rolled-back": "F",
+    "delivery-breach-reported": "F",
     "critical-findings-detected": "I",
     "remediation-failed": "I",
     "rollback-recommended": "J",
