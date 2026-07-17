@@ -1,0 +1,22 @@
+apiVersion: kyverno.io/v1
+kind: Policy
+metadata:
+  name: agentit-require-labels
+  labels:
+    app.kubernetes.io/name: agentit
+spec:
+  validationFailureAction: Audit
+  rules:
+    - name: require-labels
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "Labels app.kubernetes.io/name and app.kubernetes.io/managed-by are required"
+        pattern:
+          metadata:
+            labels:
+              app.kubernetes.io/name: "?*"
+              app.kubernetes.io/managed-by: "?*"

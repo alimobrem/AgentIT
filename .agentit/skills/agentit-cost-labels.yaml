@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentit-cost-labels
+  labels:
+    app.kubernetes.io/name: agentit
+    cost-center: "agentit"
+    team: "agentit"
+    environment: "production"
+data:
+  cost-center: "agentit"
+  team: "agentit"
+  environment: "production"
+  project: "agentit"

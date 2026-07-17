@@ -1,0 +1,22 @@
+apiVersion: audit.k8s.io/v1
+kind: Policy
+metadata:
+  name: agentit-audit-policy
+rules:
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  - level: RequestResponse
+    resources:
+      - group: ""
+        resources: ["pods", "services", "secrets"]
+      - group: "apps"
+        resources: ["deployments"]
+      - group: "rbac.authorization.k8s.io"
+        resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+    verbs: ["create", "update", "patch", "delete"]
+  - level: Metadata
+    omitStages:
+      - RequestReceived

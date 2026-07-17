@@ -1,0 +1,66 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agentit-data-archive
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/component: data-archive
+    app.kubernetes.io/part-of: agentit
+    app.kubernetes.io/managed-by: platform-engineering
+    criticality: high
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentit
+        app.kubernetes.io/component: data-archive
+        app.kubernetes.io/part-of: agentit
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: archive
+          image: registry.access.redhat.com/rhel9/postgresql-15:latest
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: PGHOST
+              valueFrom:
+                secretKeyRef:
+                  name: agentit-db-credentials
+                  key: host
+            - name: PGPORT
+              valueFrom:
+                secretKeyRef:
+                  name: agentit-db-credentials
+                  key: port
+                  optional: true
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: agentit-db-credentials
+                  key: database
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: agentit-db-credentials
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: agentit-db-credentials
+                  key: password
+          command:
+            - /bin/bash
+            - -c
+            - |

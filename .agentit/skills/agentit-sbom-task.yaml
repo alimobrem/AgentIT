@@ -1,0 +1,36 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: agentit-sbom
+  labels:
+    app.kubernetes.io/name: agentit
+spec:
+  params:
+    - name: IMAGE
+      description: Container image reference to scan
+      type: string
+  results:
+    - name: SBOM_PATH
+      description: Path to the generated SBOM file
+  steps:
+    - name: generate-sbom
+      image: anchore/syft:latest
+      args:
+        - $(params.IMAGE)
+        - --output
+        - cyclonedx-json=/workspace/sbom.json
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+    - name: report-result
+      image: registry.access.redhat.com/ubi9-minimal:latest
+      script: |
+        #!/usr/bin/env sh
+        echo -n "/workspace/sbom.json" > $(results.SBOM_PATH.path)
+        echo "SBOM generated: $(wc -c < /workspace/sbom.json) bytes"
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+  volumes:
+    - name: workspace
+      emptyDir: {}

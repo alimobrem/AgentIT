@@ -1,0 +1,71 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: agentit-pipeline
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/part-of: agentit
+    app.kubernetes.io/managed-by: tekton
+spec:
+  params:
+    - name: repo-url
+      type: string
+      description: Source repository URL to clone
+    - name: revision
+      type: string
+      description: Git revision (branch, tag, or commit SHA)
+      default: main
+    - name: image-ref
+      type: string
+      description: Fully qualified image reference including registry and tag
+  workspaces:
+    - name: shared-workspace
+      description: Shared workspace for source code and build artifacts
+    - name: docker-credentials
+      description: Workspace holding registry credentials (config.json)
+  tasks:
+    - name: git-clone
+      taskRef:
+        name: git-clone
+        kind: ClusterTask
+      params:
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.revision)
+        - name: deleteExisting
+          value: "true"
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+    - name: build
+      taskRef:
+        name: agentit-python-build
+        kind: Task
+      runAfter:
+        - git-clone
+      params:
+        - name: SOURCE_DIR
+          value: $(workspaces.source.path)
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+    - name: test
+      taskRef:
+        name: agentit-python-test
+        kind: Task
+      runAfter:
+        - build
+      params:
+        - name: SOURCE_DIR
+          value: $(workspaces.source.path)
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+    - name: image-build
+      taskRef:
+        name: buildah
+        kind: ClusterTask
+      runAfter:
+        - test
+      params:
