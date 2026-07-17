@@ -2393,6 +2393,132 @@ async def test_toggle_schedule(client, _override_store):
     assert await store.get_setting("schedule:test-app:chaos:enabled") == "false"
 
 
+# ── Cron humanization (schedules.py::humanize_cron) ────────────────────
+#
+# Regression coverage for the bug where any cron string outside a
+# 5-entry hardcoded dict fell back to returning the raw cron string as
+# its own "human-readable" version -- which schedules.html then rendered
+# twice, back-to-back (e.g. "0 8 * * 1 0 8 * * 1"). cost-cronjob.md's own
+# generated schedule ("0 8 * * 1") was itself one of the strings this hit.
+
+
+def test_humanize_cron_matches_previously_hardcoded_strings_exactly():
+    """The 5 exact strings the old _CRON_HUMAN dict special-cased must
+    still produce byte-identical output from the new general parser --
+    no regression for schedules already displaying correctly."""
+    from agentit.portal.routes.schedules import humanize_cron
+
+    assert humanize_cron("0 3 1 * *") == "Monthly (1st, 3am UTC)"
+    assert humanize_cron("0 4 * * 1") == "Weekly (Mon 4am UTC)"
+    assert humanize_cron("0 5 * * 1") == "Weekly (Mon 5am UTC)"
+    assert humanize_cron("0 2 * * 3") == "Weekly (Wed 2am UTC)"
+    assert humanize_cron("0 6 * * 1") == "Weekly (Mon 6am UTC)"
+
+
+def test_humanize_cron_handles_real_skill_template_schedules():
+    """The exact cron strings AgentIT's own skill templates generate --
+    none of which were in the old hardcoded dict except dependency's --
+    must now produce a real, correct English description instead of
+    echoing the raw string back."""
+    from agentit.portal.routes.schedules import humanize_cron
+
+    # skills/cost/cost-cronjob.md: "0 8 * * 1" = every Monday at 08:00 UTC.
+    # This was the exact string that duplicated on the live Schedules page.
+    assert humanize_cron("0 8 * * 1") == "Weekly (Mon 8am UTC)"
+    # skills/compliance/compliance-cronjob.md: "0 2 1 * *" = 1st of month, 02:00 UTC.
+    assert humanize_cron("0 2 1 * *") == "Monthly (1st, 2am UTC)"
+    # skills/dependency/dependency-cronjob.md: "0 6 * * 1" -- already worked
+    # (happened to be one of the 5 hardcoded strings), confirm it still does.
+    assert humanize_cron("0 6 * * 1") == "Weekly (Mon 6am UTC)"
+
+    # None of these real, correct outputs are just the raw cron echoed back.
+    for cron in ("0 8 * * 1", "0 2 1 * *", "0 6 * * 1"):
+        assert humanize_cron(cron) != cron
+
+
+def test_humanize_cron_returns_none_for_unresolvable_expressions():
+    """Anything genuinely unrecognized must come back falsy, never the raw
+    string -- callers (and the template) rely on this to decide whether
+    there's a second, human-readable span worth rendering at all."""
+    from agentit.portal.routes.schedules import humanize_cron
+
+    assert humanize_cron("not a cron expression") is None
+    assert humanize_cron("unknown") is None
+    assert humanize_cron("") is None
+    assert humanize_cron("* * * * *") is None  # every minute: no literal minute/hour to describe
+    assert humanize_cron("*/15 * * * *") is None  # step values: outside the shapes this parser claims
+    assert humanize_cron("0 8 * * *  extra") is None  # malformed field count
+
+
+async def test_schedules_page_humanizes_cost_cronjob_real_schedule(client, _override_store):
+    """End-to-end: cost-cronjob.md's real generated schedule ("0 8 * * 1")
+    used to render duplicated ("0 8 * * 1 0 8 * * 1") because it wasn't one
+    of the 5 hardcoded exact strings. Confirmed live before this fix by
+    seeding this exact manifest and observing the duplicate in the
+    rendered HTML."""
+    store = _override_store
+    aid = await store.save(_make_report("cost-schedule-app"))
+    await store.save_onboarding(aid, [{
+        "category": "cost",
+        "path": "cost-schedule-app-cost-cronjob.yaml",
+        "content": "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: x\nspec:\n  schedule: '0 8 * * 1'\n",
+        "description": "cost cronjob",
+    }])
+
+    resp = await client.get("/schedules")
+    assert resp.status_code == 200
+    assert "Weekly (Mon 8am UTC)" in resp.text
+    # The raw cron appears exactly once as the primary value, and the
+    # human-readable text is a real description, not the cron repeated.
+    assert resp.text.count("0 8 * * 1") == 1
+
+
+async def test_schedules_page_humanizes_compliance_cronjob_real_schedule(client, _override_store):
+    """Same regression, for compliance-cronjob.md's real generated
+    schedule ("0 2 1 * *", monthly on the 1st at 02:00 UTC)."""
+    store = _override_store
+    aid = await store.save(_make_report("compliance-schedule-app"))
+    await store.save_onboarding(aid, [{
+        "category": "compliance",
+        "path": "compliance-schedule-app-compliance-cronjob.yaml",
+        "content": "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: x\nspec:\n  schedule: '0 2 1 * *'\n",
+        "description": "compliance cronjob",
+    }])
+
+    resp = await client.get("/schedules")
+    assert resp.status_code == 200
+    assert "Monthly (1st, 2am UTC)" in resp.text
+    assert resp.text.count("0 2 1 * *") == 1
+
+
+async def test_schedules_page_manual_schedule_with_unrecognized_cron_has_no_duplicate_span(client, _override_store):
+    """A manual schedule using a cron shape humanize_cron() genuinely can't
+    describe must show the raw cron exactly once, with no second span
+    duplicating it -- not the raw string rendered as its own "human"
+    description."""
+    store = _override_store
+    await store.create_schedule("weird-schedule-app", "Custom job", "compliance", "*/15 * * * *", "cmd")
+
+    resp = await client.get("/schedules")
+    assert resp.status_code == 200
+    assert "weird-schedule-app" in resp.text
+    assert resp.text.count("*/15 * * * *") == 1
+
+
+async def test_schedules_page_manual_schedule_regression_hardcoded_string_still_works(client, _override_store):
+    """Regression via the full page render (not just the unit-level
+    parser): a manual schedule using one of the previously-hardcoded exact
+    strings must still show the same human-readable text, exactly once
+    (not duplicated), after switching to the general parser."""
+    store = _override_store
+    await store.create_schedule("regression-schedule-app", "Old job", "compliance", "0 4 * * 1", "cmd")
+
+    resp = await client.get("/schedules")
+    assert resp.status_code == 200
+    assert "Weekly (Mon 4am UTC)" in resp.text
+    assert resp.text.count("0 4 * * 1") == 1
+
+
 # ── All pages accessible ──────────────────────────────────────────────
 
 

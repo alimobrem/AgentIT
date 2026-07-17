@@ -13,15 +13,119 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 
-# ── Constants ─────────────────────────────────────────────────────────
+# ── Cron humanization ────────────────────────────────────────────────
+#
+# AgentIT's own skill templates (skills/compliance/compliance-cronjob.md,
+# skills/cost/cost-cronjob.md, skills/dependency/dependency-cronjob.md --
+# the only three that currently generate a CronJob/CronWorkflow) only ever
+# emit two shapes: weekly-on-a-given-weekday-and-hour ("0 8 * * 1") and
+# monthly-on-a-given-day-and-hour ("0 2 1 * *"). This used to be a 5-entry
+# dict of exact strings seen in practice, which meant any cron outside
+# that list (e.g. cost-cronjob.md's own "0 8 * * 1") fell back to
+# returning the raw cron string as its own "human-readable" version --
+# rendered twice, back-to-back, in schedules.html. humanize_cron() below
+# is a real (if intentionally narrow) parser for standard 5-field cron
+# that covers those two shapes plus daily/yearly for completeness, and
+# returns None for anything it can't confidently describe so callers
+# never echo the raw string back as if it were human-readable.
 
-_CRON_HUMAN = {
-    "0 3 1 * *": "Monthly (1st, 3am UTC)",
-    "0 4 * * 1": "Weekly (Mon 4am UTC)",
-    "0 5 * * 1": "Weekly (Mon 5am UTC)",
-    "0 2 * * 3": "Weekly (Wed 2am UTC)",
-    "0 6 * * 1": "Weekly (Mon 6am UTC)",
-}
+_DOW_NAMES = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+_MONTH_NAMES = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+
+
+def _parse_int_field(value: str, lo: int, hi: int) -> int | None:
+    """Parse a cron field that must be a single literal integer in [lo, hi]."""
+    if not value or not (value.isdigit() or (value.startswith("-") and value[1:].isdigit())):
+        return None
+    n = int(value)
+    return n if lo <= n <= hi else None
+
+
+def _parse_dow_list(value: str) -> list[int] | None:
+    """Parse a day-of-week field: a single day or a comma-separated list.
+    Accepts 0-7 (both 0 and 7 mean Sunday, matching standard cron)."""
+    days = []
+    for part in value.split(","):
+        n = _parse_int_field(part, 0, 7)
+        if n is None:
+            return None
+        days.append(0 if n == 7 else n)
+    return days
+
+
+def _ordinal(n: int) -> str:
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _format_time(hour: int, minute: int) -> str:
+    period = "am" if hour < 12 else "pm"
+    display_hour = hour % 12 or 12
+    return f"{display_hour}{period}" if minute == 0 else f"{display_hour}:{minute:02d}{period}"
+
+
+def humanize_cron(cron: str) -> str | None:
+    """Translate a standard 5-field cron expression (minute hour
+    day-of-month month day-of-week) into a short English description.
+
+    Returns ``None`` when the expression is malformed or doesn't match one
+    of the shapes handled below -- callers must treat that as "nothing
+    meaningful to show", not fall back to the raw cron string.
+    """
+    if not cron or not isinstance(cron, str):
+        return None
+    fields = cron.split()
+    if len(fields) != 5:
+        return None
+    minute_f, hour_f, dom_f, month_f, dow_f = fields
+
+    minute = _parse_int_field(minute_f, 0, 59)
+    hour = _parse_int_field(hour_f, 0, 23)
+    if minute is None or hour is None:
+        return None
+
+    dom_is_wild = dom_f == "*"
+    month_is_wild = month_f == "*"
+    dow_is_wild = dow_f == "*"
+    time_str = _format_time(hour, minute)
+
+    # Weekly: one or more specific weekdays, every day-of-month/month.
+    if not dow_is_wild and dom_is_wild and month_is_wild:
+        days = _parse_dow_list(dow_f)
+        if not days:
+            return None
+        day_names = "/".join(_DOW_NAMES[d] for d in days)
+        return f"Weekly ({day_names} {time_str} UTC)"
+
+    # Monthly: one specific day-of-month, every month, any weekday.
+    if not dom_is_wild and month_is_wild and dow_is_wild:
+        day = _parse_int_field(dom_f, 1, 31)
+        if day is None:
+            return None
+        return f"Monthly ({_ordinal(day)}, {time_str} UTC)"
+
+    # Daily: every day-of-month, every month, any weekday.
+    if dom_is_wild and month_is_wild and dow_is_wild:
+        return f"Daily ({time_str} UTC)"
+
+    # Yearly: one specific day of one specific month, any weekday.
+    if not dom_is_wild and not month_is_wild and dow_is_wild:
+        day = _parse_int_field(dom_f, 1, 31)
+        month = _parse_int_field(month_f, 1, 12)
+        if day is None or month is None:
+            return None
+        return f"Yearly ({_MONTH_NAMES[month - 1]} {_ordinal(day)}, {time_str} UTC)"
+
+    return None
+
+
+# ── Constants ─────────────────────────────────────────────────────────
 
 _SCHEDULE_FILES = {
     "compliance-cronjob.yaml": ("compliance", "Compliance re-assessment"),
@@ -94,7 +198,7 @@ async def schedules_page(request: Request) -> HTMLResponse:
                 "app_id": aid,
                 "job_name": desc,
                 "schedule": cron,
-                "human_schedule": _CRON_HUMAN.get(cron, cron),
+                "human_schedule": humanize_cron(cron),
                 "agent": agent,
                 "concurrency": concurrency,
                 "enabled": True,
@@ -112,7 +216,7 @@ async def schedules_page(request: Request) -> HTMLResponse:
             "app_id": app_ids_by_name.get(ms["app_name"]),
             "job_name": ms["job_name"],
             "schedule": ms["schedule"],
-            "human_schedule": _CRON_HUMAN.get(ms["schedule"], ms["schedule"]),
+            "human_schedule": humanize_cron(ms["schedule"]),
             "agent": ms["agent"],
             "concurrency": "Allow",
             "enabled": bool(ms["enabled"]),

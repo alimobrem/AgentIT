@@ -121,7 +121,7 @@
            live CronJob or the generated manifest -- see the explanatory
            note above the table. #}
         <span>{{ s.schedule }}</span>
-        <span class="text-muted text-xs">{{ s.human_schedule }}</span>
+        {% if s.human_schedule %}<span class="text-muted text-xs">{{ s.human_schedule }}</span>{% endif %}
         {% endif %}
       </td>
       <td>{{ s.agent }}</td>
