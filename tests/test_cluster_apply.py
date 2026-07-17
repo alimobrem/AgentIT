@@ -169,16 +169,18 @@ def test_conflict_kept_separate_from_errors(_mock_kube):
     assert result["conflicts"][0]["path"] == "cm.yaml"
 
 
-def test_force_defaults_false_and_is_passed_through(_mock_kube):
+def test_force_kwarg_no_longer_exists(_mock_kube):
+    """`apply_manifests_to_cluster()`'s `force` parameter (seize
+    field-manager ownership on a conflict) has been removed along with the
+    `cluster-conflict-review` gate type that was its only caller -- calling
+    with `force=` now raises, and `kube.apply_yaml()` is never called with
+    a `force` kwarg at all (it keeps its own default, `False`)."""
     files = [_file("cm.yaml", _k8s_yaml("ConfigMap", "test"))]
+    with pytest.raises(TypeError):
+        apply_manifests_to_cluster(files, force=True)
+
     apply_manifests_to_cluster(files)
-    assert _mock_kube.apply_yaml.call_args.kwargs["force"] is False
-
-
-def test_force_true_is_threaded_to_kube_apply_yaml(_mock_kube):
-    files = [_file("cm.yaml", _k8s_yaml("ConfigMap", "test"))]
-    apply_manifests_to_cluster(files, force=True)
-    assert _mock_kube.apply_yaml.call_args.kwargs["force"] is True
+    assert "force" not in _mock_kube.apply_yaml.call_args.kwargs
 
 
 def test_dry_run_reports_conflicts_from_the_real_dry_run_call(_mock_kube):

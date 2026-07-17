@@ -214,7 +214,6 @@ async def resolve_gate(request: Request, gate_id: str):
                 try:
                     results = await apply_with_verification(
                         cicd_files, namespace, False,
-                        force_dry_run_first=False,
                         store=s, app_name=report.repo_name,
                         skill_outcome_reason=f"cluster-admin-review gate {gate_id} approved by {resolved_by}",
                         actor=str(resolved_by), action="cluster-admin-apply",
