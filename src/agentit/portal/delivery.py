@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -1128,3 +1129,141 @@ async def check_pending_delivery_verifications(
                 ))
         results.append({"delivery_id": d["id"], **outcome, "escalations": escalations})
     return results
+
+
+# ── Phase 5: a real "what happens next" fact, per app ──────────────────────
+# (docs/onboarding-loop-vision-gap-analysis.md's Step 8 discussion). Purely a
+# read-side view over Phase 3/4's own data -- no new tables, no new writes --
+# answering, for one app, which of the states below is currently true.
+NEXT_ACTION_ESCALATED = "escalated"
+NEXT_ACTION_RETRYING = "retrying"
+NEXT_ACTION_PENDING_VERIFICATION = "pending_verification"
+NEXT_ACTION_NONE = "none"
+
+_ESCALATION_CATEGORY_RE = re.compile(r"^'([^']+)'")
+
+
+def _escalation_gate_category(summary: str) -> str:
+    """Recover the finding category ``escalate_unresolved_finding()`` named
+    in its own gate summary (``"'{category}' finding has failed to resolve
+    ..."``) -- ``gates`` has no structured category column of its own (see
+    ``store.py``'s schema), and this deterministic summary shape, produced
+    by this same module, is the one place that category still lives.
+    """
+    match = _ESCALATION_CATEGORY_RE.match(summary or "")
+    return match.group(1) if match else "finding"
+
+
+async def get_next_action_state(
+    store: object,
+    app_name: str,
+    *,
+    repo_url: str | None = None,
+    pending_gates: list[dict] | None = None,
+) -> dict:
+    """The one real "what happens next" fact for ``app_name`` -- reusing
+    Phase 3/4's own data access (``store.list_gates``/``list_deliveries_
+    pending_finding_check``/``get_finding_failure_count``) rather than a new
+    query, and never inventing a re-check cadence that doesn't exist.
+
+    Checked in priority order, since these three states are (by
+    construction, see ``handle_confirmed_finding_failure()``) close to
+    mutually exclusive per finding but a real app can have more than one
+    finding in flight at once:
+
+    1. ``NEXT_ACTION_ESCALATED`` -- an ``ESCALATION_GATE_TYPE`` gate is open
+       for this app: automated retries are exhausted for some finding, a
+       human is needed now. Takes priority over the other two because it's
+       the one state that actually requires a person to act.
+    2. ``NEXT_ACTION_RETRYING`` -- a pending (not yet finding-checked)
+       delivery exists whose target finding has already failed at least
+       once (``get_finding_failure_count() > 0``) -- i.e. this pending
+       delivery IS a bounded auto-retry already in flight, awaiting the next
+       push to verify it.
+    3. ``NEXT_ACTION_PENDING_VERIFICATION`` -- a pending delivery exists
+       whose target finding has never failed before -- ordinary, first-time
+       "wait for the next push" verification.
+    4. ``NEXT_ACTION_NONE`` -- nothing pending or failing right now. There is
+       no periodic re-check to report here: ``webhook_github_push`` only
+       ever re-assesses on a push to the app's own repo (see docs/
+       onboarding-loop-vision-gap-analysis.md §8) -- nothing re-assesses a
+       clean app on any schedule, so this state says that plainly rather
+       than implying a cadence that doesn't exist.
+
+    ``pending_gates``, when given, is an already-fetched pending-gates list
+    (either fleet-wide from ``list_gates()``, or already scoped to this app
+    from ``list_gates_for_assessment()``) -- lets a caller enriching many
+    apps at once (Fleet) fetch gates once instead of once per app. Left
+    ``None`` (the default), this fetches its own -- the right choice for a
+    single-app caller (Assessment Detail already has its own scoped list to
+    pass in instead).
+    """
+    if pending_gates is None:
+        try:
+            pending_gates = await store.list_gates(status="pending")
+        except Exception:
+            logger.debug("Failed to fetch pending gates for %s's next-action state", app_name, exc_info=True)
+            pending_gates = []
+
+    # Fleet-wide lists (list_gates()) carry app_name via a join; assessment-
+    # scoped lists (list_gates_for_assessment()) don't need it -- they're
+    # already scoped to this exact app by their own query.
+    escalation_gate = next(
+        (
+            g for g in pending_gates
+            if g.get("gate_type") == ESCALATION_GATE_TYPE and g.get("app_name", app_name) == app_name
+        ),
+        None,
+    )
+    if escalation_gate is not None:
+        category = _escalation_gate_category(escalation_gate.get("summary", ""))
+        return {
+            "state": NEXT_ACTION_ESCALATED,
+            "label": "Needs review",
+            "message": f"Needs your review -- automated fixes exhausted for '{category}'.",
+            "category": category,
+            "gate_id": escalation_gate["id"],
+            "assessment_id": escalation_gate.get("assessment_id"),
+        }
+
+    pending_deliveries = await store.list_deliveries_pending_finding_check(app_name)
+    if not pending_deliveries:
+        return {
+            "state": NEXT_ACTION_NONE,
+            "label": None,
+            "message": (
+                "Nothing pending or failing for this app right now -- AgentIT only re-checks on "
+                "the next push to this app's repo (or a manual re-Assess); there's no periodic "
+                "re-check on a schedule."
+            ),
+        }
+
+    worst_category: str | None = None
+    worst_failure_count = -1
+    for d in pending_deliveries:
+        for key in d.get("target_findings") or []:
+            category = key[0]
+            failure_count = await store.get_finding_failure_count(app_name, category)
+            if failure_count > worst_failure_count:
+                worst_failure_count = failure_count
+                worst_category = category
+
+    if worst_failure_count > 0:
+        return {
+            "state": NEXT_ACTION_RETRYING,
+            "label": f"Retry {worst_failure_count} of {FINDING_ESCALATION_THRESHOLD}",
+            "message": (
+                f"Retry {worst_failure_count} of {FINDING_ESCALATION_THRESHOLD} -- AgentIT will "
+                f"re-attempt this fix automatically for '{worst_category}'."
+            ),
+            "category": worst_category,
+            "failure_count": worst_failure_count,
+        }
+
+    repo_label = repo_url or app_name
+    return {
+        "state": NEXT_ACTION_PENDING_VERIFICATION,
+        "label": "Awaiting verification",
+        "message": f"Awaiting verification -- will check on next push to `{repo_label}`.",
+        "repo": repo_label,
+    }
