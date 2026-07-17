@@ -256,6 +256,55 @@ def create_onboarding_pr(
         return {"error": str(exc)}
 
 
+def _get_file_content_at_ref(base_url: str, hdrs: dict, path: str, ref: str) -> str | None:
+    """Fetch a file's current text content at ``ref`` via the Contents API.
+
+    Returns ``None`` when the file doesn't exist at ``ref`` (404) or its
+    content can't be read/decoded (binary, oversized, transient API error)
+    -- callers must treat ``None`` as "unknown/not present", i.e. always
+    "different", never silently treat a lookup failure as "unchanged".
+    """
+    try:
+        resp = requests.get(
+            f"{base_url}/contents/{path}", headers=hdrs, timeout=10, params={"ref": ref},
+        )
+    except Exception:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        data = resp.json()
+        return base64.b64decode(data["content"]).decode("utf-8")
+    except Exception:
+        return None
+
+
+def _agent_content_unchanged(
+    base_url: str, hdrs: dict, category: str, files: list[dict], default_branch: str,
+) -> bool:
+    """True only if every one of ``files`` is byte-identical to what's
+    already at its destination path on the freshly-fetched ``default_branch``.
+
+    This is the missing dedup check identified in the root-cause
+    investigation of the recurring redundant-PR pattern (PRs #85/#89/#90/#91):
+    self-improvement agents (codechange/cost/dependency) regenerate
+    deterministic advisory content on every run and this function's caller
+    used to unconditionally branch/commit/push/open-PR even when that exact
+    content had already merged to `main` via an earlier run -- wasting
+    review attention on a genuinely empty diff. Checked against a freshly
+    fetched `default_branch` HEAD (not a stale local/cached ref), so this
+    reflects the real current state of the target repo, not a snapshot from
+    whenever this branch was first created.
+    """
+    for f in files:
+        filename = Path(f["path"]).name
+        target_path = f".agentit/{category}/{filename}"
+        existing = _get_file_content_at_ref(base_url, hdrs, target_path, default_branch)
+        if existing != f["content"]:
+            return False
+    return True
+
+
 def create_agent_prs(
     repo_url: str,
     repo_name: str,
@@ -264,10 +313,16 @@ def create_agent_prs(
     """Create per-agent branches and PRs via the GitHub API.
 
     Each agent gets its own branch (agentit/{agent_name}) and PR with
-    only that agent's generated files.
+    only that agent's generated files. Before committing anything, each
+    agent's generated files are diffed against what's already at their
+    destination path on the repo's current default branch (fetched fresh
+    for this call, never a stale/cached ref) -- if every file is
+    byte-identical, nothing is committed and no PR is opened for that agent
+    (see `_agent_content_unchanged`'s docstring for why this check exists).
 
     agent_results: [{agent_name, category, files: [{path, content, description}]}]
-    Returns: [{agent_name, pr_url, branch, error}]
+    Returns: [{agent_name, pr_url, branch, error}] with {agent_name, skipped,
+    reason} entries for agents whose content was already up to date.
     """
     try:
         token = _get_token()
@@ -296,6 +351,18 @@ def create_agent_prs(
         category = agent["category"]
         files = agent.get("files", [])
         if not files:
+            continue
+
+        if _agent_content_unchanged(base_url, hdrs, category, files, default_branch):
+            logger.info(
+                "agentit: %s manifests unchanged from %s -- skipping PR, nothing to commit",
+                agent_name, default_branch,
+            )
+            results.append({
+                "agent_name": agent_name,
+                "skipped": True,
+                "reason": f"content already matches {default_branch} -- no PR needed",
+            })
             continue
 
         branch_name = f"agentit/{agent_name}"

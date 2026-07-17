@@ -1189,6 +1189,7 @@ async def create_agent_prs_route(assessment_id: str):
 
     successful = [r for r in results if "pr_url" in r]
     errors = [r for r in results if "error" in r]
+    skipped = [r for r in results if r.get("skipped")]
 
     if successful:
         pr_list = ", ".join(f"{r['agent_name']}" for r in successful)
@@ -1196,6 +1197,14 @@ async def create_agent_prs_route(assessment_id: str):
         await s.update_pr_url(assessment_id, all_pr_urls)
         await s.log_event("orchestrator", "agent-prs-created", report.repo_name,
                            "info", f"Created {len(successful)} per-agent PRs: {pr_list}")
+
+    if skipped:
+        # Content already matched the target repo's default branch --
+        # nothing to commit, so no PR was opened for these agents (see
+        # github_pr.py::_agent_content_unchanged).
+        skip_list = ", ".join(f"{r['agent_name']}" for r in skipped)
+        await s.log_event("orchestrator", "agent-prs-skipped", report.repo_name,
+                           "info", f"Skipped {len(skipped)} agent(s) — no changes vs. default branch: {skip_list}")
 
     if errors and not successful:
         return RedirectResponse(
