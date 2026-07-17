@@ -1152,15 +1152,39 @@ def learn_for(repo_url: str, criticality: str, limit: int, dry_run: bool) -> Non
 @main.command("activate-skill")
 @click.argument("skill_path", type=click.Path(exists=True))
 def activate_skill(skill_path: str) -> None:
-    """Activate a draft skill after testing."""
+    """Activate a draft skill after testing.
+
+    Mirrors the portal's equivalent action
+    (``routes/capabilities.py::activate_skill_route``): parses the skill
+    and runs its functional verification (``verify_skill()``) before
+    flipping status to active, blocking activation on failure instead of
+    just checking for the literal "status: draft" string.
+    """
     path = Path(skill_path)
     content = path.read_text(encoding="utf-8")
     if "status: draft" not in content:
         click.echo("Skill is not in draft status.", err=True)
         return
+
+    from agentit.portal.helpers import get_llm_client
+    from agentit.skill_engine import load_skill, verify_skill
+
+    skill = load_skill(path)
+    if skill is None:
+        click.echo("Could not parse skill file — activation blocked.", err=True)
+        sys.exit(1)
+
+    passed, issues, verify_warnings = verify_skill(skill, llm_client=get_llm_client())
+    if not passed:
+        click.echo(f"Activation blocked — skill failed verification: {'; '.join(issues)}", err=True)
+        sys.exit(1)
+
     updated = content.replace("status: draft", "status: active", 1)
     path.write_text(updated, encoding="utf-8")
-    click.echo(f"Activated: {skill_path}", err=True)
+    success_msg = f"Activated: {skill_path}"
+    if verify_warnings:
+        success_msg += f" (note: {'; '.join(verify_warnings)})"
+    click.echo(success_msg, err=True)
 
 
 @main.command("migrate-sqlite-to-postgres")

@@ -107,3 +107,71 @@ def test_self_fix_llm_construction_failure_does_not_auto_approve(tmp_path: Path)
         # actually blocked application, not just the summary line.
         written = list(Path(cwd).rglob("*.yaml"))
         assert written == [], f"fix(es) written to disk despite failed review: {written}"
+
+
+def _make_functional_draft_skill(path: Path, name: str = "cli-activate-test", domain: str = "security") -> None:
+    """A draft skill that actually generates valid output via its own
+    template body -- mirrors ``tests/test_portal.py``'s ``_make_draft_skill``
+    so ``verify_skill()``'s functional generation smoke test passes."""
+    path.write_text(
+        f"---\n"
+        f"name: {name}\n"
+        f"domain: {domain}\n"
+        f"version: 1\n"
+        f"triggers: [test]\n"
+        f"outputs: [NetworkPolicy]\n"
+        f"status: draft\n"
+        f"---\n"
+        "## Property\nEnsures network isolation.\n\n"
+        "## Constraints\nMust apply to all pods.\n\n"
+        "## Verification\nCheck that a NetworkPolicy restricting Ingress exists.\n\n"
+        "```yaml\n"
+        "apiVersion: networking.k8s.io/v1\n"
+        "kind: NetworkPolicy\n"
+        "metadata:\n"
+        "  name: {{app_name}}-netpol\n"
+        "spec:\n"
+        "  podSelector: {}\n"
+        "  policyTypes:\n"
+        "    - Ingress\n"
+        "```\n",
+        encoding="utf-8",
+    )
+
+
+def test_activate_skill_blocks_when_verification_fails(tmp_path: Path):
+    """Regression test: ``activate-skill`` previously only checked for the
+    literal "status: draft" string and string-replaced it to "active" --
+    no ``load_skill()``/``verify_skill()`` functional check at all, unlike
+    the portal's documented-equivalent action
+    (``routes/capabilities.py::activate_skill_route``). A draft skill with
+    no usable template must now be blocked, not silently promoted.
+    """
+    skill_file = tmp_path / "nonfunctional.md"
+    skill_file.write_text(
+        "---\nname: nonfunctional\ndomain: security\nversion: 1\n"
+        "triggers: [test]\noutputs: [NetworkPolicy]\nstatus: draft\n---\nno template here\n",
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["activate-skill", str(skill_file)])
+
+    assert result.exit_code != 0
+    assert "Activation blocked" in result.output
+    assert "status: draft" in skill_file.read_text()
+
+
+def test_activate_skill_promotes_valid_draft(tmp_path: Path):
+    """A genuinely valid draft skill (real triggers/outputs and a usable
+    template body) still activates successfully through the new
+    ``verify_skill()`` gate."""
+    skill_file = tmp_path / "cli-activate-test.md"
+    _make_functional_draft_skill(skill_file)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["activate-skill", str(skill_file)])
+
+    assert result.exit_code == 0, result.output
+    assert "Activated" in result.output
+    assert "status: active" in skill_file.read_text()
