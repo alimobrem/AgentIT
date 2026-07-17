@@ -167,6 +167,47 @@ class TestAssessments:
     async def test_delete_missing_returns_false(self, store):
         assert await store.delete(uuid.uuid4().hex) is False
 
+    async def test_delete_removes_every_historical_assessment_for_the_app(self, store):
+        """A Delete on the app's LATEST assessment must remove every prior
+        assessment of that same repo_url too (plus their gates/
+        remediations/slos/onboarding), not just the one id passed in --
+        otherwise get_fleet_data()'s MAX(assessed_at) join resurrects the
+        "deleted" app via an older surviving assessment row, contradicting
+        fleet.html's "cannot be undone" confirm text."""
+        old_id = await store.save(_make_report("multi-run-app"))
+        new_id = await store.save(_make_report("multi-run-app"))
+
+        gate_id = await store.create_gate(old_id, "rollback-review", "old gate")
+        rem_id = await store.save_remediation(old_id, "security", "old remediation")
+        slo_id = await store.save_slo(old_id, "latency_p99_ms", 200)
+        await store.save_onboarding(old_id, [{"category": "x", "path": "a.yaml", "content": "", "description": ""}])
+
+        # Sanity: the app shows up via its latest assessment before delete.
+        fleet = await store.get_fleet_data()
+        assert any(r["id"] == new_id for r in fleet)
+
+        assert await store.delete(new_id) is True
+
+        # The app must not reappear via the older, surviving assessment.
+        fleet_after = await store.get_fleet_data()
+        assert not any(r["repo_url"] == "https://github.com/org/multi-run-app" for r in fleet_after)
+
+        # Every assessment row for this repo_url is gone, including the old one.
+        assert await store.get(old_id) is None
+        assert await store.get(new_id) is None
+
+        # Every dependent of the OLD assessment (not just the latest) is gone too.
+        assert await store.list_gates_for_assessment(old_id) == []
+        assert await store.list_remediations(old_id) == []
+        assert await store.list_slos(old_id) == []
+        assert await store.get_onboarding(old_id) is None
+        gate_row = await store._pool.fetchrow("SELECT 1 FROM gates WHERE id = $1", gate_id)
+        assert gate_row is None
+        rem_row = await store._pool.fetchrow("SELECT 1 FROM remediations WHERE id = $1", rem_id)
+        assert rem_row is None
+        slo_row = await store._pool.fetchrow("SELECT 1 FROM slos WHERE id = $1", slo_id)
+        assert slo_row is None
+
 
 class TestFleetAndTrend:
     async def test_get_fleet_data(self, store):

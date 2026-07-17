@@ -555,15 +555,57 @@ class AssessmentStore:
         return _rows_to_dicts(rows)
 
     async def delete(self, assessment_id: str) -> bool:
+        """Delete the whole app, not just the one ``assessment_id`` passed
+        in -- Fleet's confirm dialog (fleet.html) promises removing "ALL
+        related data (assessments, onboarding, gates, remediations, SLOs)"
+        and that this "cannot be undone". An app re-assessed more than once
+        has older ``assessments`` rows the caller never names, and a delete
+        scoped to only one exact id left every one of THOSE rows' gates/
+        remediations/slos/onboarding/apply_results/deliveries/events fully
+        intact -- ``get_fleet_data()``'s ``MAX(assessed_at)`` join then
+        picked the next-latest surviving assessment on the next Fleet load,
+        silently resurrecting the "deleted" app.
+
+        Scoped by the app's ``repo_url`` -- the same identity
+        ``get_fleet_data()``/``list_history()``/``list_gates_for_assessment()``
+        already key every other fleet-wide/app-wide query on (see
+        docs/architecture.md's "Data model: assessments vs. apps") -- so
+        every historical assessment for this app, and everything hanging
+        off any of them, is removed together.
+        """
         async with self._pool.acquire() as conn:
             async with conn.transaction():
-                await conn.execute("DELETE FROM remediation_jobs WHERE assessment_id = $1", assessment_id)
-                await conn.execute("DELETE FROM onboarding_results WHERE assessment_id = $1", assessment_id)
-                await conn.execute("DELETE FROM remediations WHERE assessment_id = $1", assessment_id)
-                await conn.execute("DELETE FROM slos WHERE assessment_id = $1", assessment_id)
-                await conn.execute("DELETE FROM gates WHERE assessment_id = $1", assessment_id)
-                await conn.execute("DELETE FROM apply_results WHERE assessment_id = $1", assessment_id)
-                status = await conn.execute("DELETE FROM assessments WHERE id = $1", assessment_id)
+                repo_row = await conn.fetchrow(
+                    "SELECT repo_url, repo_name FROM assessments WHERE id = $1", assessment_id,
+                )
+                if repo_row is None:
+                    return False
+                repo_url = repo_row["repo_url"]
+                repo_name = repo_row["repo_name"]
+
+                for table in (
+                    "remediation_jobs", "onboarding_results", "remediations",
+                    "slos", "gates", "apply_results", "deliveries",
+                ):
+                    await conn.execute(
+                        f"DELETE FROM {table} WHERE assessment_id IN "
+                        "(SELECT id FROM assessments WHERE repo_url = $1)",
+                        repo_url,
+                    )
+                # `events` has no `assessment_id` column/FK (see SCHEMA_SQL)
+                # -- scoped instead by this app's name (most events) or, for
+                # events correlated to one specific assessment run
+                # (assessment-complete, onboarding-complete, ...), by
+                # `correlation_id` matching one of its assessment ids.
+                await conn.execute(
+                    """
+                    DELETE FROM events WHERE target_app = $1 OR correlation_id IN (
+                        SELECT id FROM assessments WHERE repo_url = $2
+                    )
+                    """,
+                    repo_name, repo_url,
+                )
+                status = await conn.execute("DELETE FROM assessments WHERE repo_url = $1", repo_url)
         return _affected(status) > 0
 
     async def save_onboarding(
