@@ -13,7 +13,6 @@ from agentit.portal.cluster_apply import apply_with_verification
 from agentit.portal.delivery import (
     ADMIN_REVIEW_GATE_TYPE,
     CATEGORY_CICD_SHARED_NAMESPACE,
-    CATEGORY_CLUSTER_CONFIG,
     classify_file,
     gate_delivery_confirmation,
     route_and_deliver,
@@ -245,54 +244,17 @@ async def resolve_gate(request: Request, gate_id: str):
                     status_code=303,
                 )
 
-        if gate.get("gate_type") == "cluster-conflict-review":
-            # A server-side-apply field-manager conflict (kube.apply_yaml()'s
-            # structured conflict result, surfaced through
-            # apply_with_verification()) was routed here instead of being
-            # silently forced through or failed. Approving this gate is the
-            # ONE place in the app that ever passes force=True to the apply
-            # pipeline -- only because a human has now explicitly reviewed
-            # which manager owns the conflicting field(s) and chosen to
-            # seize ownership anyway. Re-applying the same cluster-config
-            # manifests is safe for the documents that already succeeded
-            # (server-side-apply is idempotent for an unchanged,
-            # non-conflicting object) and forces through only the ones that
-            # actually conflicted.
-            files = await s.get_onboarding(assessment_id)
-            report = await s.get(assessment_id)
-            if files and report:
-                cluster_files = [f for f in files if classify_file(f) == CATEGORY_CLUSTER_CONFIG]
-                namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
-                try:
-                    results = await apply_with_verification(
-                        cluster_files, namespace, False,
-                        force_dry_run_first=False,
-                        store=s, app_name=report.repo_name,
-                        skill_outcome_reason=f"cluster-conflict-review gate {gate_id} approved by {resolved_by}",
-                        actor=str(resolved_by), action="cluster-conflict-force-apply",
-                        resource=f"assessment:{assessment_id}",
-                        force=True,
-                    )
-                except Exception as exc:
-                    await s.reopen_gate(gate_id, status)
-                    log.exception("Forced apply failed for gate %s (assessment %s)", gate_id, assessment_id)
-                    return RedirectResponse(
-                        url=(
-                            f"/assessments/{assessment_id}/onboard-results?error="
-                            f"{quote(f'Forced apply failed: {str(exc)[:150]}. The gate remains pending — fix the issue and re-approve, or Reject with a reason.')}"
-                        ),
-                        status_code=303,
-                    )
-                applied = len(results["applied"])
-                return RedirectResponse(
-                    url=f"/assessments/{assessment_id}/onboard-results?applied={applied}&gate_approved=true",
-                    status_code=303,
-                )
-            await s.reopen_gate(gate_id, status)
-            return RedirectResponse(
-                url=f"/assessments/{assessment_id}/onboard-results?error={quote('Cannot resolve conflict — original manifests not found for reapply')}",
-                status_code=303,
-            )
+        # cluster-conflict-review (a server-side-apply field-manager
+        # conflict, surfaced through apply_with_verification()'s force=True
+        # re-apply) has been removed along with Direct Apply as a concept
+        # entirely -- apply_manifests_to_cluster()/kube.apply_yaml() are
+        # never called for the cluster-config category anymore, so this
+        # conflict can no longer genuinely occur (see
+        # route_and_deliver()/resolve_cluster_config_mechanism()). This gate
+        # type can no longer be created by any code path in this app; if one
+        # somehow still exists (e.g. stale data from before this directive),
+        # it now falls through to the generic delivery branch below, same as
+        # any other unrecognized gate type.
 
         files = await s.get_onboarding(assessment_id)
         report = await s.get(assessment_id)

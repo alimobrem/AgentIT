@@ -165,20 +165,6 @@ def _scope_gate_summary(denied_files: list[dict], denial_reasons: dict[str, list
     )[:1000]
 
 
-def _conflict_gate_summary(conflicts: list[dict]) -> str:
-    parts = []
-    for c in conflicts[:5]:
-        detail_msgs = "; ".join(d.get("message", "") for d in (c.get("details") or []))
-        parts.append(f"{c.get('path', '?')}: {detail_msgs or c.get('error', '')}")
-    return (
-        f"{len(conflicts)} manifest(s) hit a server-side-apply field-manager conflict -- "
-        "another manager already owns the conflicting field(s), so AgentIT did not force "
-        "through. Approving this gate re-applies with force=True, seizing ownership from "
-        "the other manager. "
-        + " | ".join(parts)
-    )[:1000]
-
-
 class AutoMode:
     """Decides whether agent-generated manifests should be auto-applied or queued.
 
@@ -321,16 +307,21 @@ class AutoMode:
         `routes/webhooks.py`'s `webhook_auto_apply`/`webhook_finding`) is threaded
         straight through to `route_and_deliver()` below, which is what actually
         decides GitOps registration and mechanism now -- `should_auto_apply()`'s
-        safety classification above is completely unchanged by it. Omitting `report`
-        (every pre-existing caller/test) is always treated by the router as "not
-        GitOps-registered", preserving the exact prior direct-apply behavior.
+        safety classification above is completely unchanged by it. Direct Apply
+        has been removed as a concept entirely: omitting `report` (or a `report`
+        with no known `infra_repo_url`) can no longer fall back to a direct
+        apply -- `route_and_deliver()` refuses outright (`MECHANISM_NONE`) and
+        this gates for human review with a routing-error reason instead.
 
         Returns {"action": "applied"|"split"|"partial_failure"|"gated"|"failed", "reason": str, "details": dict}.
         ``"split"`` only occurs when the auto-mode allowlist denied part (not
-        all) of the batch and the allowed remainder delivered cleanly; a
-        real server-side-apply field-manager conflict always returns
-        ``"gated"`` (dry-run stage) or ``"partial_failure"`` (real-apply
-        stage) with a ``cluster-conflict-review`` gate, never ``"applied"``.
+        all) of the batch and the allowed remainder delivered cleanly. A real
+        server-side-apply field-manager conflict can no longer occur for the
+        cluster-config category at all (`apply_manifests_to_cluster()`/
+        `kube.apply_yaml()` are never called for it anymore -- see
+        `route_and_deliver()`); the historical `cluster-conflict-review` gate
+        type this used to create for that case has been removed along with
+        Direct Apply.
         """
         from agentit.portal.delivery import CATEGORY_CLUSTER_CONFIG, MECHANISM_INFRA_REPO_COMMIT, route_and_deliver
 
@@ -503,27 +494,37 @@ class AutoMode:
             return {"action": "gated", "reason": "delivery routing error",
                     "details": {"delivery": delivery, "gate_id": gate_id, **split_extra}}
 
+        # `cluster_outcome.get("dry_run_failed")`/a real server-side-apply
+        # conflict (`cluster_outcome.get("conflicts")`) can no longer
+        # genuinely occur here -- both require `apply_with_verification()`/
+        # `apply_manifests_to_cluster()` to have actually been called for
+        # the cluster-config category, which never happens anymore (Direct
+        # Apply removed as a concept entirely; see `route_and_deliver()`).
+        # The branches below are kept only as defensive handling in case
+        # `cluster_outcome` is ever produced some other way in the future --
+        # they no longer create a dedicated `cluster-conflict-review` gate
+        # for a conflict (that gate type has been removed along with Direct
+        # Apply); a conflict is just one more reason folded into the same
+        # generic dry-run-failed/partial-failure gating as any other error.
         if cluster_outcome.get("dry_run_failed"):
-            if cluster_outcome.get("conflicts") and not cluster_outcome["errors"]:
-                gate_id = await self._gate_for_conflicts(assessment_id, app_name, cluster_outcome["conflicts"])
-                return {"action": "gated", "reason": "field-manager conflict(s) detected",
-                        "details": {**cluster_outcome, "delivery": delivery, "gate_id": gate_id, **split_extra}}
+            failure_notes = list(cluster_outcome["errors"])
+            if cluster_outcome.get("conflicts"):
+                failure_notes.extend(
+                    c.get("error", "field-manager conflict") for c in cluster_outcome["conflicts"]
+                )
             await self._log_event(
                 "auto-mode", "dry-run-failed", app_name, "warning",
-                f"Dry-run failed with {len(cluster_outcome['errors'])} error(s)",
+                f"Dry-run failed with {len(failure_notes)} error(s)",
             )
             gate_id = await self._store.create_gate(
                 assessment_id, "dry-run-failed",
-                f"Dry-run failed: {'; '.join(cluster_outcome['errors'][:3])}",
+                f"Dry-run failed: {'; '.join(failure_notes[:3])}",
             )
             return {"action": "gated", "reason": "dry-run failed",
                     "details": {**cluster_outcome, "delivery": delivery, "gate_id": gate_id, **split_extra}}
 
         if cluster_outcome["errors"] or cluster_outcome.get("conflicts"):
             details = {**cluster_outcome, "delivery": delivery, **split_extra}
-            if cluster_outcome.get("conflicts"):
-                gate_id = await self._gate_for_conflicts(assessment_id, app_name, cluster_outcome["conflicts"])
-                details["gate_id"] = gate_id
             await self._log_event(
                 "auto-mode", "partial-failure", app_name, "warning",
                 f"Applied {len(cluster_outcome['applied'])} but {len(cluster_outcome['errors'])} error(s), "
@@ -551,23 +552,6 @@ class AutoMode:
         for rem in remediations:
             if rem["status"] != "completed":
                 await self._store.complete_remediation(rem["id"])
-
-    async def _gate_for_conflicts(self, assessment_id: str, app_name: str, conflicts: list[dict]) -> str:
-        """Create (or reuse a pending) ``cluster-conflict-review`` gate for a
-        real server-side-apply field-manager conflict -- the one caller-level
-        reaction ``kube.apply_yaml()``'s structured conflict result exists
-        to enable: never silently fail, never blindly force, always route to
-        a human who can decide whether to seize ownership (see
-        ``routes/gates.py``'s resolution handler for this gate type, the
-        only code path that ever passes ``force=True``)."""
-        gate_id = await self._store.create_gate(
-            assessment_id, "cluster-conflict-review", _conflict_gate_summary(conflicts),
-        )
-        await self._log_event(
-            "auto-mode", "conflict-detected", app_name, "warning",
-            f"{len(conflicts)} field-manager conflict(s) detected -- gated for human review (gate {gate_id})",
-        )
-        return gate_id
 
     async def _log_event(self, agent_id: str, action: str, target: str, severity: str, summary: str) -> None:
         try:

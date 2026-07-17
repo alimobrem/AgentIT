@@ -238,19 +238,27 @@ class TestClusterAdminReviewGate:
         assert len(approved) == 1
 
 
-class TestClusterConflictReviewGate:
-    """Approving a `cluster-conflict-review` gate is the ONE code path in
-    the app that ever passes `force=True` down to `kube.apply_yaml()` --
-    only reachable after a human has explicitly reviewed a field-manager
-    conflict and chosen to seize ownership."""
+class TestClusterConflictReviewGateTypeRemoved:
+    """`cluster-conflict-review` (approving it used to be the ONE code path
+    in the app that ever passed `force=True` down to `kube.apply_yaml()`,
+    only reachable after a human explicitly reviewed a real server-side-
+    apply field-manager conflict) has been removed along with Direct Apply
+    as a concept entirely: `apply_manifests_to_cluster()`/`kube.apply_yaml()`
+    are never called for the cluster-config category anymore, so this
+    conflict can no longer genuinely occur, and no code path in this app
+    creates this gate type anymore (see `automode.py`'s now-removed
+    `_gate_for_conflicts()`). `resolve_gate()` no longer special-cases it at
+    all -- if a gate of this type somehow still exists (e.g. stale data from
+    before this directive), approving it now falls through to the exact
+    same generic `route_and_deliver()` path any other gate type does,
+    never a force=True re-apply."""
 
-    async def test_approve_force_reapplies_cluster_config_files(self, gate_client, _mock_kube):
+    async def test_stale_gate_of_this_type_funnels_through_the_generic_router(self, gate_client, _mock_kube):
         client, store, aid = gate_client
         await store.save_onboarding(aid, [_cluster_config_file()])
         gate_id = await store.create_gate(
             aid, "cluster-conflict-review",
-            "1 manifest(s) hit a server-side-apply field-manager conflict. "
-            "Approving this gate re-applies with force=True, seizing ownership.",
+            "Stale gate from before Direct Apply was removed.",
         )
 
         resp = await client.post(
@@ -260,15 +268,20 @@ class TestClusterConflictReviewGate:
         )
         assert resp.status_code == 303
         assert "gate_approved=true" in resp.headers["location"]
-        _mock_kube.apply_yaml.assert_called_once()
-        assert _mock_kube.apply_yaml.call_args.kwargs["force"] is True
+        # No known infra repo on this report -- the generic router refuses
+        # rather than falling back to a direct, possibly force=True, apply.
+        _mock_kube.apply_yaml.assert_not_called()
 
         approved = await store.list_gates(status="approved")
         assert len(approved) == 1
 
-    async def test_missing_onboarding_files_leaves_gate_pending_with_error(self, gate_client, _mock_kube):
+    async def test_missing_onboarding_files_still_approves_no_special_handling(self, gate_client, _mock_kube):
+        """Without the removed gate-type-specific branch, there is no
+        special "leave pending with an error" handling left for a missing-
+        onboarding-files case either -- it behaves exactly like any other
+        unrecognized gate type reaching the same generic fallback."""
         client, store, aid = gate_client
-        gate_id = await store.create_gate(aid, "cluster-conflict-review", "Conflict detected")
+        gate_id = await store.create_gate(aid, "cluster-conflict-review", "Stale gate, no onboarding.")
 
         resp = await client.post(
             f"/gates/{gate_id}/resolve",
@@ -276,25 +289,9 @@ class TestClusterConflictReviewGate:
             follow_redirects=False,
         )
         assert resp.status_code == 303
-        assert "error=" in resp.headers["location"]
         _mock_kube.apply_yaml.assert_not_called()
-        assert len(await store.list_gates(status="pending")) == 1
-        assert len(await store.list_gates(status="approved")) == 0
-
-    async def test_forced_apply_failure_leaves_gate_pending(self, gate_client, _mock_kube):
-        client, store, aid = gate_client
-        await store.save_onboarding(aid, [_cluster_config_file()])
-        gate_id = await store.create_gate(aid, "cluster-conflict-review", "Conflict detected")
-        _mock_kube.apply_yaml.side_effect = RuntimeError("cluster unreachable")
-
-        resp = await client.post(
-            f"/gates/{gate_id}/resolve",
-            data={"status": "approved", "resolved_by": "admin"},
-            follow_redirects=False,
-        )
-        assert resp.status_code == 303
-        assert "error=" in resp.headers["location"]
-        assert len(await store.list_gates(status="pending")) == 1
+        assert len(await store.list_gates(status="approved")) == 1
+        assert len(await store.list_gates(status="pending")) == 0
 
 
 class TestGitopsPrPendingGate:

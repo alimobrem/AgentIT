@@ -350,7 +350,7 @@ async def gate_delivery_confirmation(store: object, gate: dict) -> str:
     gate_type = gate.get("gate_type", "")
     if gate_type == "rollback-review":
         return "AgentIT will: mark this rollback approved for manual intervention -- no automatic apply is triggered."
-    if gate_type in ("gitops-pr-pending", "cluster-admin-review", "cluster-conflict-review", "auto-mode-scope-review"):
+    if gate_type in ("gitops-pr-pending", "cluster-admin-review", "auto-mode-scope-review"):
         # These gate types already carry the exact mechanism + reason in
         # their own summary text (see automode.py / delivery.py's gate
         # creation calls) -- reuse it verbatim instead of restating it.
