@@ -306,6 +306,41 @@ class TestDeliverButtonClickAttributeIntact:
         )
 
 
+class TestOnboardResultsApplyErrorShowsFullMessage:
+    """onboard_results.html's Apply Report "Errors" list used to render
+    `f.split(':')[0]` -- for the real error shape cluster_apply.py
+    produces (`f"{fpath}: {result['error']}"`), that discarded everything
+    after the first colon, showing only the filename with no reason at
+    all. Confirms the fix shows the full reason too, split on only the
+    first colon (a reason that itself contains a colon must survive
+    intact)."""
+
+    async def test_full_error_reason_rendered_not_just_filename(self, portal_client):
+        client, store, aid = portal_client
+        await store.save_apply_results(
+            aid,
+            {
+                "applied": [],
+                "skipped": [],
+                "errors": [
+                    "app-network-policy.yaml: (403)\nReason: Forbidden\n"
+                    "HTTP response body: cannot create resource in namespace: test-app",
+                ],
+                "repo_files": [],
+            },
+            "test-app",
+            dry_run=True,
+        )
+
+        resp = await client.get(f"/assessments/{aid}/onboard-results")
+        assert resp.status_code == 200
+        assert "app-network-policy.yaml" in resp.text
+        assert "cannot create resource in namespace: test-app" in resp.text, (
+            "Only the filename fragment before the first colon was shown -- "
+            "the actual failure reason after it is missing from the page."
+        )
+
+
 class TestFormActions:
     """Every form action URL should match a registered route."""
 
