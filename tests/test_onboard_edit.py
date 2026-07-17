@@ -233,6 +233,114 @@ class TestOnboardResultsPageRendersEditAndDiff:
                 assert False, f"Inline style found: {line.strip()}"
 
 
+# ── Editing after a Dry Run must invalidate the stale dry-run-passed state ──
+
+
+class TestEditInvalidatesStaleDryRun:
+    async def test_edit_after_passing_dry_run_clears_apply_results(self, edit_client):
+        """Regression: a passing Dry Run persists apply_results (dry_run=True,
+        no errors) -- onboard_results.html's Apply/Commit gate reads that
+        row via dry_run_done. Editing a file afterward must invalidate it:
+        the dry run ran against the OLD content, not what a human is about
+        to deliver."""
+        client, store, aid = edit_client
+        await store.save_apply_results(
+            aid, {"applied": [], "skipped": [], "errors": [], "repo_files": [{"path": "app-config.yaml", "purpose": "dry-run"}]},
+            "test-app", dry_run=True,
+        )
+        assert await store.get_apply_results(aid) is not None
+
+        resp = await client.post(
+            f"/assessments/{aid}/onboard-results/edit-file",
+            data={
+                "category": "skills", "path": "app-config.yaml",
+                "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  key: newvalue\n",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert await store.get_apply_results(aid) is None
+
+    async def test_onboard_results_page_reverts_to_dry_run_needed_after_edit(self, edit_client):
+        """End-to-end: the page itself must stop claiming dryDone/"Dry run
+        passed" once a file is edited after a successful Dry Run."""
+        client, store, aid = edit_client
+        await store.save_apply_results(
+            aid, {"applied": [], "skipped": [], "errors": [], "repo_files": [{"path": "app-config.yaml", "purpose": "dry-run"}]},
+            "test-app", dry_run=True,
+        )
+        before = await client.get(f"/assessments/{aid}/onboard-results")
+        assert 'data-dry-done="true"' in before.text
+        assert "Dry run passed" in before.text
+
+        await client.post(
+            f"/assessments/{aid}/onboard-results/edit-file",
+            data={
+                "category": "skills", "path": "app-config.yaml",
+                "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  key: newvalue\n",
+            },
+            follow_redirects=False,
+        )
+
+        after = await client.get(f"/assessments/{aid}/onboard-results")
+        assert 'data-dry-done="false"' in after.text
+        assert "Dry run passed" not in after.text
+        assert "No dry run yet" in after.text
+
+    async def test_edit_after_real_delivery_also_clears_apply_results(self, edit_client, _mock_kube):
+        """A real (non-dry-run) delivery also persists apply_results
+        (dry_run=False) -- editing afterward must clear that too, since it
+        likewise describes content that no longer matches what's saved."""
+        client, store, aid = edit_client
+        await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "false"}, follow_redirects=False)
+        assert await store.get_apply_results(aid) is not None
+
+        await client.post(
+            f"/assessments/{aid}/onboard-results/edit-file",
+            data={
+                "category": "skills", "path": "app-config.yaml",
+                "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  key: post-delivery-edit\n",
+            },
+            follow_redirects=False,
+        )
+        assert await store.get_apply_results(aid) is None
+
+    async def test_edit_with_no_prior_apply_results_is_a_safe_no_op(self, edit_client):
+        """Clearing must not error/blow up when there was never a Dry Run
+        to invalidate in the first place."""
+        client, store, aid = edit_client
+        assert await store.get_apply_results(aid) is None
+
+        resp = await client.post(
+            f"/assessments/{aid}/onboard-results/edit-file",
+            data={
+                "category": "skills", "path": "app-config.yaml",
+                "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  key: x\n",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert await store.get_apply_results(aid) is None
+
+    async def test_rejected_invalid_edit_does_not_clear_apply_results(self, edit_client):
+        """An edit that fails manifest validation is never persisted --
+        it must not invalidate a still-accurate, still-current dry run
+        result either."""
+        client, store, aid = edit_client
+        await store.save_apply_results(
+            aid, {"applied": [], "skipped": [], "errors": [], "repo_files": [{"path": "app-config.yaml", "purpose": "dry-run"}]},
+            "test-app", dry_run=True,
+        )
+        broken_yaml = "apiVersion: v1\nkind: ConfigMap\nmetadata: [unterminated\n"
+        resp = await client.post(
+            f"/assessments/{aid}/onboard-results/edit-file",
+            data={"category": "skills", "path": "app-config.yaml", "content": broken_yaml},
+            follow_redirects=False,
+        )
+        assert "error=" in resp.headers["location"]
+        assert await store.get_apply_results(aid) is not None
+
+
 # ── Genuine round trip: edited content is what actually gets delivered ──
 
 

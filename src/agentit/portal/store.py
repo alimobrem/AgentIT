@@ -471,6 +471,22 @@ class AssessmentStore:
             "created_at": row["created_at"].isoformat(),
         }
 
+    async def clear_apply_results(self, assessment_id: str) -> None:
+        """Delete every persisted ``apply_results`` row for this assessment.
+
+        Called when a generated file is edited (``update_onboarding_file``)
+        after a Dry Run (or a real delivery) already ran against the
+        PRE-edit content -- without this, ``get_apply_results()`` keeps
+        returning that stale pass/fail/delivered row, so
+        ``onboard_results.html``'s ``dry_run_done``/Apply-Commit gate stays
+        unlocked for content that was never actually dry-run. A no-op if
+        none exist yet. The next real Dry Run (against the current,
+        edited content) inserts a fresh row via ``save_apply_results``.
+        """
+        await self._pool.execute(
+            "DELETE FROM apply_results WHERE assessment_id = $1", assessment_id,
+        )
+
     async def _upsert_app(self, repo_url: str, repo_name: str, infra_repo_url: str | None) -> None:
         """Upsert the app-level facts row -- see docs/architecture.md's
         "Data model: assessments vs. apps" section for the full rationale.

@@ -790,6 +790,15 @@ async def edit_onboarding_file(request: Request, assessment_id: str):
     the original LLM/template output wouldn't have had, and this is the
     existing, reusable validation path rather than a new one built from
     scratch. An invalid edit is rejected outright -- never partially saved.
+
+    Also clears any persisted ``apply_results`` for this assessment: those
+    rows record whether a Dry Run (or a real delivery) passed against the
+    content as it existed BEFORE this edit, and ``onboard_results.html``
+    gates Apply/Commit on that same persisted state. Leaving it in place
+    would keep Apply/Commit unlocked on the strength of a dry run that was
+    never actually run against the content a human is about to deliver --
+    a human must re-run Dry Run against the real, current content before
+    Apply/Commit can unlock again.
     """
     s = await get_store()
     report = await s.get(assessment_id)
@@ -819,9 +828,12 @@ async def edit_onboarding_file(request: Request, assessment_id: str):
     if updated is None:
         raise HTTPException(status_code=404, detail="Onboarding file not found")
 
+    await s.clear_apply_results(assessment_id)
+
     await s.log_event(
         "portal", "onboarding-file-edited", report.repo_name, "info",
-        f"Edited generated file before delivery: {path}",
+        f"Edited generated file before delivery: {path} — any prior Dry Run/delivery result is "
+        "now stale; Dry Run must be re-run against the edited content before Apply/Commit unlocks.",
         correlation_id=assessment_id,
     )
     return RedirectResponse(
