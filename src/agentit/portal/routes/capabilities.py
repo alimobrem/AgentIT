@@ -57,6 +57,32 @@ def _cached_checks():
 
 # ── Agents ────────────────────────────────────────────────────────────
 
+# Same 2-day staleness threshold Schedules' watcher table and Capabilities'
+# Self-Improvement tab already use (see `_SKILL_LEARNER_STALE_SECONDS`/
+# `_CAPABILITY_SCOUT_STALE_SECONDS` below and schedules.py's
+# `_WATCHER_STALE_SECONDS`) -- reused here so the Agent Registry/Agent
+# Detail pages read off the same real liveness signal instead of the
+# `agent_registry.status` column, which `register_agent()`/
+# `agent_heartbeat()` only ever write as `'active'` (no code path ever
+# writes anything else, so it's true of every row by construction and
+# proves nothing about whether the agent is still alive). Keeping every
+# page on this one threshold means they can't disagree about the same
+# agent's status.
+_AGENT_STALE_SECONDS = 2 * 86400
+
+
+def _agent_display_status(agents: list[dict], agent_name: str) -> str:
+    """Real display status for an Agent Registry row/detail page, derived
+    from heartbeat age via `watcher_heartbeat_status()` (defined below) --
+    "active" (heartbeat within `_AGENT_STALE_SECONDS`), "stale" (heartbeat
+    older than that), or "never ticked" (no heartbeat recorded at all).
+    Mirrors `schedules.py`'s watcher-table status convention exactly.
+    """
+    hb = watcher_heartbeat_status(agents, agent_name, _AGENT_STALE_SECONDS)
+    if not hb["has_run"]:
+        return "never ticked"
+    return "stale" if hb["stale"] else "active"
+
 
 @router.get("/agents", response_class=HTMLResponse)
 async def agents_page(request: Request) -> HTMLResponse:
@@ -79,6 +105,11 @@ async def agents_page(request: Request) -> HTMLResponse:
                 "registered_at": "—",
                 "last_heartbeat": "—",
             })
+
+    # Real liveness, not the always-'active' registry column -- see
+    # `_agent_display_status()` above.
+    for a in agents:
+        a["status"] = _agent_display_status(agents, a["agent_name"])
 
     agent_stats = {a["agent"]: a for a in (await s.get_agent_stats())} if hasattr(s, 'get_agent_stats') else {}
 
@@ -118,6 +149,10 @@ async def agent_detail(request: Request, agent_name: str) -> HTMLResponse:
             }
         else:
             raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Real liveness, not the always-'active' registry column -- see
+    # `_agent_display_status()` above.
+    agent["status"] = _agent_display_status(agents, agent_name)
 
     events = await s.list_events_by_agent(agent_name, limit=50)
     remediations = await s.list_remediations_by_agent(agent_name)

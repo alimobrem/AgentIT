@@ -1824,6 +1824,61 @@ async def test_agents_page_links_to_detail(client, _override_store):
     assert 'href="/agents/observability"' in resp.text
 
 
+async def test_agents_page_shows_real_status_from_heartbeat_age(client, _override_store):
+    """Regression: `agent_registry.status` is written as 'active' by every
+    code path (`register_agent()`/`agent_heartbeat()` never write anything
+    else), so a row existing at all used to be definitionally "active" --
+    a crashed/long-stopped agent showed the green Active badge forever,
+    right next to its own stale `last_heartbeat`. The Agent Registry list
+    must instead derive its displayed status from heartbeat age, the same
+    way Schedules'/Capabilities' watcher tables already do."""
+    from datetime import timedelta
+
+    store = _override_store
+    await store.register_agent("fresh-agent", "security")
+    await store.register_agent("stale-agent", "security")
+    # Push stale-agent's heartbeat well past the 2-day staleness threshold
+    # `watcher_heartbeat_status()` already uses for every other watcher --
+    # fresh-agent keeps the recent heartbeat `register_agent()` just wrote.
+    await store._pool.execute(
+        "UPDATE agent_registry SET last_heartbeat = $1 WHERE agent_name = $2",
+        datetime.now(timezone.utc) - timedelta(days=3), "stale-agent",
+    )
+
+    resp = await client.get("/agents")
+    assert resp.status_code == 200
+
+    fresh_row = resp.text.split('href="/agents/fresh-agent"', 1)[1].split("</tr>", 1)[0]
+    assert '<span class="badge badge-low">active</span>' in fresh_row
+
+    stale_row = resp.text.split('href="/agents/stale-agent"', 1)[1].split("</tr>", 1)[0]
+    assert '<span class="badge badge-medium">stale</span>' in stale_row
+    assert "badge-low" not in stale_row, "a long-stopped agent must not show the active badge"
+
+
+async def test_agent_detail_page_shows_real_status_from_heartbeat_age(client, _override_store):
+    """Same regression as `test_agents_page_shows_real_status_from_heartbeat_age`
+    above, but for the Agent Detail page's Status stat card."""
+    from datetime import timedelta
+
+    store = _override_store
+    await store.register_agent("fresh-agent", "security")
+    await store.register_agent("stale-agent", "security")
+    await store._pool.execute(
+        "UPDATE agent_registry SET last_heartbeat = $1 WHERE agent_name = $2",
+        datetime.now(timezone.utc) - timedelta(days=3), "stale-agent",
+    )
+
+    fresh_resp = await client.get("/agents/fresh-agent")
+    assert fresh_resp.status_code == 200
+    assert '<span class="text-success">Active</span>' in fresh_resp.text
+
+    stale_resp = await client.get("/agents/stale-agent")
+    assert stale_resp.status_code == 200
+    assert '<span class="text-warning">stale</span>' in stale_resp.text
+    assert '<span class="text-success">Active</span>' not in stale_resp.text
+
+
 # ── Remediations page ─────────────────────────────────────────────────
 
 
