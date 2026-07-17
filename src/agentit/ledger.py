@@ -1,11 +1,11 @@
-"""The Ledger — one queryable stream over events, gates, deliveries, and
+"""The Ledger ? one queryable stream over events, gates, deliveries, and
 fix-review decisions. See docs/ledger-design-spec.md for the full design;
-this module implements that spec's Phase 1 backing query (plus the §2
-noise-at-scale shaping and the §4 rewind chain query) -- read-only, no
+this module implements that spec's Phase 1 backing query (plus the ?2
+noise-at-scale shaping and the ?4 rewind chain query) -- read-only, no
 changes to any existing write path.
 
 ``get_ledger_cards()`` unions the four real tables into the card shapes
-listed in the spec's §1 table (card types A-P) and returns them newest
+listed in the spec's ?1 table (card types A-P) and returns them newest
 first. Every mapping below is keyed off a real, already-produced
 ``action``/``gate_type``/``mechanism`` value -- nothing here invents new
 telemetry; Phase 0 (this module's sibling changes in ``slo_tracker.py``/
@@ -14,7 +14,7 @@ that cards J and K have something to render.
 
 ``group_cards_by_app()``, ``recent_watcher_failures()``, and
 ``get_chain_cards()`` back the fleet-wide grouped view, the "Needs You"
-watcher-health signal, and the rewind scrubber (§2/§4) respectively --
+watcher-health signal, and the rewind scrubber (?2/?4) respectively --
 all pure/read-only reshaping of what ``get_ledger_cards()`` (or, for the
 chain query, the same ``list_events_by_correlation_id`` the Events page's
 existing "Chain" link already runs) already returns.
@@ -27,12 +27,12 @@ from agentit.analyzers.security import SECRET_CLASSIFY_ACTION
 from agentit.capability_scout import CAPABILITY_RUN_ACTION
 from agentit.learning_agent import LEARNING_RUN_ACTION
 
-# §2 rule 4: collapse consecutive tick-complete events from the same watcher;
+# ?2 rule 4: collapse consecutive tick-complete events from the same watcher;
 # a tick-failed always stays its own card and breaks the run.
 _TICK_ACTIONS = ("tick-complete", "tick-failed")
 
 # Every event `action` this module knows how to turn into a card, mapped to
-# its card type letter from docs/ledger-design-spec.md §1. An action not in
+# its card type letter from docs/ledger-design-spec.md ?1. An action not in
 # this table produces no card (rather than an unlabeled generic one) --
 # extend this table, don't add a fallback bucket, so every card type stays
 # traceable to a real spec entry.
@@ -42,7 +42,7 @@ _EVENT_ACTION_TO_CARD_TYPE: dict[str, str] = {
     "fix-generated": "B",
     "onboarding-complete": "B",
     "decision": "C",
-    # docs/ledger-design-spec.md §3's own claim that the Decisions page is
+    # docs/ledger-design-spec.md ?3's own claim that the Decisions page is
     # "Absorbed as card types C and G" only holds if every one of its four
     # decision types actually maps to a card -- secret-classify (the other
     # non-fix-review, non-capability-proposal decision type) was missing
@@ -100,7 +100,7 @@ def _tick_run_summary(agent_id: str, run: list[dict]) -> dict:
 
 
 def _collapse_tick_events(tick_events: list[dict]) -> list[dict]:
-    """Per docs/ledger-design-spec.md §2 rule 4. Only ever called on the
+    """Per docs/ledger-design-spec.md ?2 rule 4. Only ever called on the
     tick-complete/tick-failed subset of events -- every other action passes
     through ``get_ledger_cards`` untouched by this function."""
     by_agent: dict[str, list[dict]] = {}
@@ -131,7 +131,7 @@ def _annotate_chain_counts(event_cards: list[dict]) -> None:
     how many cards in *this same fetch* share its ``correlation_id`` --
     so the "Part of a chain (N events)" affordance never issues an extra
     query just to know N. Gates/deliveries/fix-reviews have no
-    ``correlation_id`` of their own (per spec §1, they're joined to a
+    ``correlation_id`` of their own (per spec ?1, they're joined to a
     chain via ``assessment_id`` instead), so this only ever touches cards
     sourced from ``events``."""
     counts: dict[str, int] = {}
@@ -147,7 +147,7 @@ def _annotate_chain_counts(event_cards: list[dict]) -> None:
 def group_cards_by_app(cards: list[dict]) -> dict[str, list[dict]]:
     """Group an already-fetched, newest-first card list by ``target_app``,
     preserving each app's relative newest-first order. Backs the fleet-wide
-    Ledger's grouped-by-app view (§2 rule 2): ``bucket[0]`` is always that
+    Ledger's grouped-by-app view (?2 rule 2): ``bucket[0]`` is always that
     app's single most-recent/most-severe card to summarize inline before
     it's expanded."""
     by_app: dict[str, list[dict]] = {}
@@ -159,7 +159,7 @@ def group_cards_by_app(cards: list[dict]) -> dict[str, list[dict]]:
 
 
 def recent_watcher_failures(cards: list[dict], *, hours: int = 4) -> list[dict]:
-    """§2 rule 3's 4th "Needs You" signal: a watcher's last tick failed
+    """?2 rule 3's 4th "Needs You" signal: a watcher's last tick failed
     within the configured interval -- the same real ``tick-failed`` event
     every watcher already logs (``watchers/__init__.py::record_tick``), the
     same signal ``AgentITWatcherStale`` alerts on via Prometheus. Fleet-wide
@@ -211,17 +211,45 @@ def _gate_card(gate: dict, *, known_app_name: str | None = None) -> dict:
     }
 
 
+_MECHANISM_SHORT_LABELS: dict[str, str] = {
+    "direct-apply": "Applied directly",
+    "infra-repo-commit": "GitOps PR opened",
+    "cluster-admin-review-gate": "Cluster-admin review required",
+    "source-repo-pr": "Source PR opened",
+    "app-repo-pr": "App-repo PR opened",
+    "none": "Nothing delivered",
+}
+
+
+def _humanize_delivery_mechanism(mechanism: str) -> str:
+    """Decode deliveries.mechanism into a short, human phrase for the
+    Ledger badge -- never the raw category:mechanism routing string
+    route_and_deliver() persists there. The raw value is either a single
+    mechanism (e.g. "direct-apply") or, for a multi-category delivery, a
+    comma-joined "category:mechanism" string (e.g.
+    "cluster_config:direct-apply,cicd_shared_namespace:cluster-admin-
+    review-gate") -- this strips the category prefixes and humanizes each
+    distinct mechanism, deduped, in original order."""
+    if not mechanism:
+        return _MECHANISM_SHORT_LABELS["none"]
+    labels: list[str] = []
+    for part in mechanism.split(","):
+        mech = part.split(":", 1)[1] if ":" in part else part
+        label = _MECHANISM_SHORT_LABELS.get(mech, mech.replace("-", " ").replace("_", " "))
+        if label not in labels:
+            labels.append(label)
+    return " / ".join(labels)
+
+
 def _delivery_card(delivery: dict) -> dict:
+    humanized = _humanize_delivery_mechanism(delivery["mechanism"])
     return {
         "card_type": "F",
         "timestamp": delivery["created_at"],
         "target_app": delivery.get("app_name"),
         "severity": "info",
-        "title": f"delivery-{delivery['mechanism']}",
-        "summary": (
-            f"Delivered via {delivery['mechanism']} "
-            f"(verification: {delivery.get('verification', 'unknown')})"
-        ),
+        "title": humanized,
+        "summary": f"{humanized} (verification: {delivery.get('verification', 'unknown')})",
         "assessment_id": delivery.get("assessment_id"),
         "mechanism": delivery["mechanism"],
         "source": "deliveries",
@@ -300,7 +328,7 @@ async def get_ledger_cards(
 
 
 async def get_chain_cards(store: object, correlation_id: str) -> list[dict]:
-    """Backs the rewind scrubber (docs/ledger-design-spec.md §4) -- the
+    """Backs the rewind scrubber (docs/ledger-design-spec.md ?4) -- the
     non-speculative "replay history" half only, never the ruled-out
     forward-looking half. Reuses, verbatim, the same data this system
     already computes for the exact same purpose:
