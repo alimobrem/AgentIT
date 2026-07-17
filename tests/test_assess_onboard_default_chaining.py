@@ -47,7 +47,8 @@ async def _post_assess_and_wait_for_job(client, store, report) -> dict:
     not a Python-level default a direct coroutine call could paper over."""
     with patch.object(assessments, "clone_repo", return_value=Path("/tmp/fake-fresh-assess-repo")), \
          patch.object(assessments, "run_assessment", return_value=report), \
-         patch.object(assessments, "_auto_create_infra_repo", return_value=None):
+         patch.object(assessments, "_auto_create_infra_repo",
+                      return_value="https://github.com/org/fresh-assess-chain-app-gitops"):
         resp = await client.post(
             "/assess",
             data={"repo_url": report.repo_url, "criticality": "medium"},
@@ -90,7 +91,8 @@ class TestFreshAssessChainsByDefault:
 
         with patch.object(assessments, "clone_repo", return_value=Path("/tmp/fake-fresh-signal-repo")), \
              patch.object(assessments, "run_assessment", return_value=report), \
-             patch.object(assessments, "_auto_create_infra_repo", return_value=None):
+             patch.object(assessments, "_auto_create_infra_repo",
+                          return_value="https://github.com/org/fresh-assess-signal-app-gitops"):
             resp = await client.post(
                 "/assess",
                 data={"repo_url": report.repo_url, "criticality": "medium"},
@@ -126,7 +128,8 @@ class TestFreshAssessChainsByDefault:
 
         with patch.object(assessments, "clone_repo", return_value=Path("/tmp/fake-opt-out-repo")), \
              patch.object(assessments, "run_assessment", return_value=report), \
-             patch.object(assessments, "_auto_create_infra_repo", return_value=None):
+             patch.object(assessments, "_auto_create_infra_repo",
+                          return_value="https://github.com/org/fresh-assess-opt-out-app-gitops"):
             resp = await client.post(
                 "/assess",
                 data={"repo_url": report.repo_url, "criticality": "medium", "continue_onboard": "0"},

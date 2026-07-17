@@ -275,7 +275,9 @@ async def test_portal_llm_unavailable(client, _override_store):
 
     with patch("agentit.portal.routes.assessments.get_llm_client", return_value=None), \
          patch("agentit.portal.routes.assessments.clone_repo", return_value=Path("/tmp/fake")), \
-         patch("agentit.portal.routes.assessments.run_assessment", return_value=report):
+         patch("agentit.portal.routes.assessments.run_assessment", return_value=report), \
+         patch("agentit.portal.routes.assessments._auto_create_infra_repo",
+               return_value="https://github.com/org/no-llm-repo-gitops"):
         resp = await client.post(
             "/assess",
             data={"repo_url": "https://github.com/org/no-llm-repo", "criticality": "medium"},

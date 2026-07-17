@@ -776,16 +776,27 @@ _TRUSTED_GIT_DOMAINS = frozenset(
 )
 
 
-def ensure_applicationset(infra_repo_url: str) -> bool:
-    """Ensure an Argo CD ApplicationSet exists for the infra repo."""
+def is_trusted_git_host(repo_url: str) -> bool:
+    """Whether ``repo_url``'s host is in ``AGENTIT_TRUSTED_GIT_DOMAINS``
+    (default ``github.com,gitlab.com``) -- extracted from
+    ``ensure_applicationset()`` (below) so the mandatory GitOps-registration
+    gate (``routes/assessments.py``'s ``_resolve_mandatory_infra_repo_url()``)
+    can validate a candidate infra repo URL up front, at Assess time, instead
+    of only discovering post-hoc (at first-delivery time) that
+    ``ensure_applicationset()`` will silently refuse to ever register it.
+    """
     from urllib.parse import urlparse as _urlparse
 
-    parsed = _urlparse(infra_repo_url)
-    host = (parsed.hostname or "").lower()
-    if not any(host == d or host.endswith("." + d) for d in _TRUSTED_GIT_DOMAINS):
+    host = (_urlparse(repo_url).hostname or "").lower()
+    return any(host == d or host.endswith("." + d) for d in _TRUSTED_GIT_DOMAINS)
+
+
+def ensure_applicationset(infra_repo_url: str) -> bool:
+    """Ensure an Argo CD ApplicationSet exists for the infra repo."""
+    if not is_trusted_git_host(infra_repo_url):
         logger.warning(
-            "Skipping ApplicationSet: infra_repo_url host '%s' not in trusted domains %s",
-            host, _TRUSTED_GIT_DOMAINS,
+            "Skipping ApplicationSet: infra_repo_url host not in trusted domains %s: %s",
+            _TRUSTED_GIT_DOMAINS, infra_repo_url,
         )
         return False
 

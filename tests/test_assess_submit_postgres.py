@@ -63,7 +63,8 @@ async def test_assess_submit_completes_against_real_postgres():
     with patch.object(assessments, "get_store", return_value=pg_store), \
          patch.object(assessments, "clone_repo", return_value=Path("/tmp/fake-pg-assess-repo")), \
          patch.object(assessments, "run_assessment", return_value=report), \
-         patch.object(assessments, "_auto_create_infra_repo", return_value=None):
+         patch.object(assessments, "_auto_create_infra_repo",
+                      return_value="https://github.com/org/pg-assess-app-gitops"):
         response = await assessments.assess_submit(
             request=None, repo_url=report.repo_url, criticality="medium",
             infra_repo_url="", continue_onboard="",

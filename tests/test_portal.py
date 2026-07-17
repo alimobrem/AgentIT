@@ -138,7 +138,8 @@ async def test_self_assess_logs_events_with_repo_name_casing(client, _override_s
 
     store = _override_store
     report = _make_report_with_findings("AgentIT")
-    with patch.object(assessments, "_auto_create_infra_repo", return_value=None), \
+    with patch.object(assessments, "_auto_create_infra_repo",
+                      return_value="https://github.com/org/agentit-gitops"), \
          patch.object(assessments, "_clone_assess_cleanup", return_value=report):
         resp = await client.post("/self-assess")
     assert resp.status_code in (200, 303)

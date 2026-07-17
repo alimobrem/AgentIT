@@ -167,7 +167,9 @@ async def test_assess_onboard_flow(client, _override_store):
     # item 5) so this test can keep exercising the separate, manual
     # "Step 2: onboard" POST below in isolation.
     with patch("agentit.portal.routes.assessments.clone_repo", return_value=Path("/tmp/fake")), \
-         patch("agentit.portal.routes.assessments.run_assessment", return_value=report):
+         patch("agentit.portal.routes.assessments.run_assessment", return_value=report), \
+         patch("agentit.portal.routes.assessments._auto_create_infra_repo",
+               return_value="https://github.com/org/flow-repo-gitops"):
         resp = await client.post(
             "/assess",
             data={"repo_url": "https://github.com/org/flow-repo", "criticality": "high", "continue_onboard": "0"},
@@ -295,7 +297,8 @@ async def test_assess_error_shows_progress(client):
     """When run_assessment raises, the progress page shows the error."""
     with patch("agentit.portal.routes.assessments.clone_repo", return_value=Path("/tmp/fake")), \
          patch("agentit.portal.routes.assessments.run_assessment", side_effect=RuntimeError("clone failed: repo not found")), \
-         patch("agentit.portal.routes.assessments._auto_create_infra_repo", return_value=None):
+         patch("agentit.portal.routes.assessments._auto_create_infra_repo",
+               return_value="https://github.com/org/bad-repo-gitops"):
         resp = await client.post(
             "/assess",
             data={"repo_url": "https://github.com/org/bad-repo", "criticality": "medium"},
@@ -332,7 +335,9 @@ async def test_reassess_from_dashboard(client, _override_store):
     # item 5) -- this test only cares about the new-vs-original assessment
     # identity, not onboarding.
     with patch("agentit.portal.routes.assessments.clone_repo", return_value=Path("/tmp/fake")), \
-         patch("agentit.portal.routes.assessments.run_assessment", return_value=new_report):
+         patch("agentit.portal.routes.assessments.run_assessment", return_value=new_report), \
+         patch("agentit.portal.routes.assessments._auto_create_infra_repo",
+               return_value="https://github.com/org/reassess-repo-gitops"):
         resp = await client.post(
             "/assess",
             data={"repo_url": "https://github.com/org/reassess-repo", "criticality": "high", "continue_onboard": "0"},

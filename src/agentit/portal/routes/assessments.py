@@ -79,6 +79,61 @@ def _clone_assess_cleanup(
         shutil.rmtree(repo_path, ignore_errors=True)
 
 
+class InfraRepoRequiredError(Exception):
+    """Raised when a real GitOps infra repo can't be resolved for a new
+    assessment -- the product directive that all apps must use GitOps means
+    this is a hard stop on Assess, never a fallback to Direct Apply. Carries
+    a human-readable, actionable message (trusted-domain rejection, a
+    repo-creation permission error, etc.) shown verbatim on the failed job.
+    """
+
+
+def _resolve_mandatory_infra_repo_url(repo_url: str, human_supplied: str | None) -> str:
+    """Resolve a real, usable GitOps infra repo URL for a brand-new
+    assessment -- auto-created via ``_auto_create_infra_repo()`` when the
+    human didn't supply one, otherwise the human-supplied URL itself.
+    Either way the result is validated against the same trusted-git-host
+    allowlist ``ensure_applicationset()`` enforces at first-delivery time
+    (``github_pr.is_trusted_git_host()``), so an untrusted or unusable infra
+    repo is rejected here -- at Assess time -- rather than silently accepted
+    only to discover, much later, that GitOps sync will never actually work.
+
+    Raises ``InfraRepoRequiredError`` (never returns ``None``/falls back to
+    Direct Apply) on any failure -- all apps must be GitOps-registered now.
+    """
+    from agentit.portal.github_pr import is_trusted_git_host
+
+    if human_supplied:
+        if not is_trusted_git_host(human_supplied):
+            raise InfraRepoRequiredError(
+                f"GitOps infra repo '{human_supplied}' is not on a trusted Git host "
+                "(set AGENTIT_TRUSTED_GIT_DOMAINS if it should be) -- Assess cannot "
+                "proceed without a usable GitOps infra repo."
+            )
+        return human_supplied
+
+    infra = _auto_create_infra_repo(repo_url)
+    if infra is None:
+        raise InfraRepoRequiredError(
+            "Could not auto-create a GitOps infra repo for this app (often a "
+            "GITHUB_TOKEN permissions issue, or the repo's GitHub org/token doesn't "
+            "allow AgentIT to create a private repo there) -- all apps must be "
+            "GitOps-registered now, with no Direct Apply fallback. Supply a GitOps "
+            "Infra Repo URL manually and retry Assess."
+        )
+    if not is_trusted_git_host(infra):
+        # Nothing in the request handed us this URL -- it came back from our
+        # own _auto_create_infra_repo()/GitHub API call -- so this branch is
+        # only reachable if AGENTIT_TRUSTED_GIT_DOMAINS was narrowed below the
+        # default GitHub host ensure_infra_repo() itself always creates
+        # against. Still validated (never assumed) rather than skipped.
+        raise InfraRepoRequiredError(
+            f"Auto-created GitOps infra repo '{infra}' is not on a trusted Git host -- "
+            "Assess cannot proceed without a usable GitOps infra repo."
+        )
+    return infra
+
+
 def _assess_sync(
     repo_url: str,
     criticality: str,
@@ -86,10 +141,16 @@ def _assess_sync(
     check_results_out: list[dict] | None = None,
     secret_decisions_out: list[dict] | None = None,
 ):
-    """Run assessment synchronously. Used by webhooks and background threads."""
-    infra = infra_repo_url
-    if not infra:
-        infra = _auto_create_infra_repo(repo_url)
+    """Run assessment synchronously. Used by webhooks and background threads.
+
+    GitOps registration is mandatory: resolves (and validates) a real
+    infra_repo_url BEFORE cloning/running the assessment pipeline at all --
+    see ``_resolve_mandatory_infra_repo_url()``. Raises
+    ``InfraRepoRequiredError`` (a hard stop, no Direct Apply fallback) if none
+    can be resolved, so the caller never wastes a clone+assess cycle on an
+    app that can't proceed anyway.
+    """
+    infra = _resolve_mandatory_infra_repo_url(repo_url, infra_repo_url)
     return _clone_assess_cleanup(
         repo_url, criticality, infra,
         check_results_out=check_results_out, secret_decisions_out=secret_decisions_out,
@@ -111,6 +172,26 @@ async def assess_submit(
     continue_onboard: str = Form("1"),
 ):
     infra = infra_repo_url.strip() or None
+    # Fail fast, synchronously, for the one failure mode that's cheap to
+    # check without a network call and doesn't need the background job at
+    # all: a human-supplied infra repo URL on a host
+    # AGENTIT_TRUSTED_GIT_DOMAINS doesn't allow. Every other mandatory-
+    # registration failure (auto-create permission errors, a trusted-domain
+    # rejection of an *auto-created* repo) can only be known after the
+    # background job actually attempts it -- see
+    # `_resolve_mandatory_infra_repo_url()`/`InfraRepoRequiredError` in
+    # `_assess_sync()` below, which is the real, always-enforced gate this
+    # is just an early, friendlier front door for.
+    if infra is not None:
+        from agentit.portal.github_pr import is_trusted_git_host
+        if not is_trusted_git_host(infra):
+            return RedirectResponse(
+                url=(
+                    "/fleet?assess=1&error="
+                    f"{quote(f'GitOps infra repo {infra!r} is not on a trusted Git host -- Assess cannot proceed without a usable GitOps infra repo.')}"
+                ),
+                status_code=303,
+            )
     s = await get_store()
     # Chaining into onboarding is now the default for every Assess, not
     # just Fleet's "Refresh Onboard" button (docs/onboarding-loop-vision-
@@ -174,24 +255,11 @@ async def assess_submit(
             from agentit.llm_decisions import build_secret_classify_events
             for ev in build_secret_classify_events(secret_decisions, report.repo_name):
                 _bridge(store.log_event(**ev, correlation_id=assessment_id))
-            # `infra` (the human-supplied form field, captured before this
-            # closure ran) was empty here iff `_assess_sync()` attempted
-            # `_auto_create_infra_repo()` internally -- if that attempt
-            # failed, `report.infra_repo_url` comes back empty too. Unlike
-            # `register_gitops()`'s standalone retry route (which redirects
-            # with a real `?error=` flash), this background-thread path had
-            # no request/response cycle left to surface that failure to --
-            # previously it was only `_auto_create_infra_repo()`'s own
-            # `logger.warning()`, a server log line nobody watching the
-            # portal ever sees.
-            if infra is None and not report.infra_repo_url:
-                _bridge(store.log_event(
-                    "portal", "infra-repo-creation-failed", report.repo_name, "warning",
-                    "Could not auto-create a GitOps infra repo for this app during assessment "
-                    "(often a GITHUB_TOKEN permissions issue) -- it will use Direct Apply until "
-                    "you register a GitOps infra repo manually.",
-                    correlation_id=assessment_id,
-                ))
+            # `_assess_sync()` now guarantees `report.infra_repo_url` is always
+            # set (`_resolve_mandatory_infra_repo_url()` raises
+            # `InfraRepoRequiredError` -- handled below -- rather than ever
+            # returning `None`) -- there is no more silent-failure/Direct-Apply-
+            # fallback case to detect and flag here.
             # Publish event on first assessment for this repo
             history = _bridge(store.list_history(report.repo_url))
             if len(history) <= 1:
@@ -202,6 +270,28 @@ async def assess_submit(
                     correlation_id=assessment_id,
                 )
             _bridge(store.update_assessment_job(job_id, "completed", "Assessment complete", assessment_id=assessment_id))
+        except InfraRepoRequiredError as exc:
+            # A hard stop, never a fallback to Direct Apply -- all apps must
+            # be GitOps-registered now. Reuses the visible-failure event
+            # pattern 9e036d9 introduced for the (formerly soft-warning)
+            # infra-repo-creation-failed case, but no assessment was saved
+            # here at all (this fires before the clone+assess pipeline ever
+            # runs), so there's no assessment_id/report to correlate to or
+            # show a banner on -- the failed job page itself (assess_progress.html)
+            # is where this human-readable, actionable message surfaces.
+            log.warning("Assess blocked for %s: %s", repo_url, exc)
+            from agentit.portal.metrics import assessments_total as _at
+            _at.labels(criticality=criticality, status="error").inc()
+            from agentit.portal.github_pr import _parse_owner_repo
+            try:
+                _, app_name = _parse_owner_repo(repo_url)
+            except Exception:
+                app_name = None
+            _bridge(store.log_event(
+                "portal", "infra-repo-creation-failed", app_name, "critical",
+                f"Assess blocked for {repo_url}: {exc}",
+            ))
+            _bridge(store.update_assessment_job(job_id, "failed", str(exc)[:280]))
         except Exception as exc:
             log.exception("Assessment failed for %s", repo_url)
             from agentit.portal.metrics import assessments_total as _at
@@ -266,16 +356,25 @@ def _auto_create_infra_repo(repo_url: str) -> str | None:
 async def self_assess_route(request: Request):
     """One-click self-assessment -- AgentIT assesses its own repo."""
     repo_url = "https://github.com/alimobrem/AgentIT"
-    infra = await asyncio.to_thread(_auto_create_infra_repo, repo_url)
     check_results: list[dict] = []
     secret_decisions: list[dict] = []
     try:
+        # Mandatory-registration gate (no Direct Apply fallback) applies here
+        # exactly like the main Assess path -- see
+        # `_resolve_mandatory_infra_repo_url()`/`InfraRepoRequiredError`.
+        infra = await asyncio.to_thread(_resolve_mandatory_infra_repo_url, repo_url, None)
         report = await with_timeout(
             asyncio.to_thread(
                 _clone_assess_cleanup, repo_url, "high", infra,
                 check_results_out=check_results, secret_decisions_out=secret_decisions,
             )
         )
+    except InfraRepoRequiredError as exc:
+        log.warning("Self-assess blocked: %s", exc)
+        s = await get_store()
+        await s.log_event("portal", "infra-repo-creation-failed", "AgentIT", "critical",
+                           f"Self-assess blocked: {exc}")
+        return RedirectResponse(url=f"/?error={quote(str(exc)[:280])}", status_code=303)
     except Exception as exc:
         log.exception("Self-assessment failed")
         return RedirectResponse(url=f"/?error={quote(str(exc)[:200])}", status_code=303)
