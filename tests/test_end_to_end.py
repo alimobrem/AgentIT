@@ -161,12 +161,16 @@ async def test_assess_onboard_flow(client, _override_store):
     store = _override_store
     report = _make_report_with_findings("flow-repo")
 
-    # Step 1: assess with mocked clone/run — now async via background thread
+    # Step 1: assess with mocked clone/run — now async via background thread.
+    # continue_onboard=0 explicitly opts out of the now-default assess->
+    # onboard chaining (docs/onboarding-loop-vision-gap-analysis.md Phase 0
+    # item 5) so this test can keep exercising the separate, manual
+    # "Step 2: onboard" POST below in isolation.
     with patch("agentit.portal.routes.assessments.clone_repo", return_value=Path("/tmp/fake")), \
          patch("agentit.portal.routes.assessments.run_assessment", return_value=report):
         resp = await client.post(
             "/assess",
-            data={"repo_url": "https://github.com/org/flow-repo", "criticality": "high"},
+            data={"repo_url": "https://github.com/org/flow-repo", "criticality": "high", "continue_onboard": "0"},
             follow_redirects=False,
         )
         assert resp.status_code == 303
@@ -323,11 +327,15 @@ async def test_reassess_from_dashboard(client, _override_store):
     new_report = _make_report_with_findings("reassess-repo")
     new_report.assessed_at = datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
 
+    # continue_onboard=0 explicitly opts out of the now-default assess->
+    # onboard chaining (docs/onboarding-loop-vision-gap-analysis.md Phase 0
+    # item 5) -- this test only cares about the new-vs-original assessment
+    # identity, not onboarding.
     with patch("agentit.portal.routes.assessments.clone_repo", return_value=Path("/tmp/fake")), \
          patch("agentit.portal.routes.assessments.run_assessment", return_value=new_report):
         resp = await client.post(
             "/assess",
-            data={"repo_url": "https://github.com/org/reassess-repo", "criticality": "high"},
+            data={"repo_url": "https://github.com/org/reassess-repo", "criticality": "high", "continue_onboard": "0"},
             follow_redirects=False,
         )
         assert resp.status_code == 303

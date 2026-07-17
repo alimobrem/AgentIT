@@ -108,16 +108,23 @@ async def assess_submit(
     repo_url: str = Form(...),
     criticality: str = Form("medium"),
     infra_repo_url: str = Form(""),
-    continue_onboard: str = Form(""),
+    continue_onboard: str = Form("1"),
 ):
     infra = infra_repo_url.strip() or None
     s = await get_store()
-    # Fleet "Refresh Onboard" posts continue_onboard=1 so assess_progress
-    # chains into onboard after the new scorecard is saved — avoids the
-    # Re-assess → assessed → Onboard again two-click trap for apps that
-    # already generated manifests once.
+    # Chaining into onboarding is now the default for every Assess, not
+    # just Fleet's "Refresh Onboard" button (docs/onboarding-loop-vision-
+    # gap-analysis.md §2/§8: the vision's "no difference between assessment
+    # and onboarding" step, confirmed as a deliberate product decision, not
+    # a free consolidation -- it removes the one point a human sees raw
+    # findings before Onboard generates fixes for all of them). A caller
+    # can still opt out by explicitly posting continue_onboard=0/false/"" --
+    # nothing today does, but the mechanism (this Form field) stays
+    # available rather than being removed outright.
     # Direct callers (tests/test_assess_submit_postgres.py) bypass FastAPI
-    # Form injection, so the default may still be a Form() object — coerce.
+    # Form injection, so the default may still be a Form() object -- treat
+    # that the same as an explicit opt-out rather than silently defaulting
+    # to True for a caller that never resolved the field at all.
     continue_flag = continue_onboard if isinstance(continue_onboard, str) else ""
     chain = continue_flag.strip().lower() in ("1", "true", "yes", "on")
     job_id = await s.create_assessment_job(repo_url, continue_onboard=chain)
