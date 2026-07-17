@@ -5,15 +5,32 @@
    the stepper reflects the job's own real `status`/`current_step`
    (docs/ux-design-requirements.md checklist #6), and the agent list below
    is sourced from the real per-agent events FleetOrchestrator already logs
-   live, not invented here. #}
+   live, not invented here.
+
+   `redirect_url` (only passed by onboard_progress_stream(), never on the
+   plain first-paint include -- see onboard_progress()'s own direct
+   RedirectResponse for that case) is the single source of truth for where
+   a terminal job sends the browser, computed once by
+   `_onboard_terminal_redirect_url()` so the GET route's redirect and this
+   SSE-driven client-side one can never disagree. #}
+{% set _auto_deliver = "auto_deliver" in (job.steps_completed or []) %}
 <div class="card" id="onboard-progress-card">
   <div class="lifecycle-stepper">
+    {% if _auto_deliver %}
+    {% set stages = [("running", "Running Agents"), ("saving", "Saving Manifests"), ("dry_run", "Dry Run"), ("delivering", "Delivering"), ("completed", "PR Opened")] %}
+    {% else %}
     {% set stages = [("running", "Running Agents"), ("saving", "Saving Manifests"), ("completed", "Done")] %}
+    {% endif %}
+    {% set _failed_stage = "dry_run" if job.status == "dry_run_failed" else ("delivering" if job.status == "deliver_failed" else none) %}
     {% for key, label in stages %}
-    {% set is_active = job.status == key %}
-    {% set is_done = job.status == "completed" or (key == "running" and job.status in ("saving", "completed")) %}
-    <div class="lifecycle-step {% if is_active %}step-active{% elif is_done %}step-done{% else %}step-pending{% endif %}">
-      <div class="step-marker">{% if is_done and not is_active %}&#10003;{% else %}{{ loop.index }}{% endif %}</div>
+    {% set is_active = job.status == key or key == _failed_stage %}
+    {% set is_done = job.status == "completed" or
+       (key == "running" and job.status not in ("pending", "running")) or
+       (key == "saving" and job.status in ("dry_run", "delivering", "completed")) or
+       (key == "dry_run" and job.status in ("delivering", "completed")) or
+       (key == "delivering" and job.status == "completed") %}
+    <div class="lifecycle-step {% if key == _failed_stage %}step-failed{% elif is_active %}step-active{% elif is_done %}step-done{% else %}step-pending{% endif %}">
+      <div class="step-marker">{% if key == _failed_stage %}&#10007;{% elif is_done and not is_active %}&#10003;{% else %}{{ loop.index }}{% endif %}</div>
       <div class="step-label">{{ label }}</div>
     </div>
     {% if not loop.last %}<div class="step-connector {% if is_done %}connector-done{% endif %}"></div>{% endif %}
@@ -21,6 +38,16 @@
   </div>
 
   <p class="text-muted text-center mb-1">{{ job.current_step or "Starting…" }}</p>
+
+  {# Visible, opt-outable-by-construction signal (requirement: never a
+     silent automation) -- mirrors assess_progress.html's own "onboarding
+     will start automatically" message for the assess->onboard chain
+     (f215d13). Hidden once the chain has already resolved (terminal) --
+     at that point the outcome itself (stepper/banner below) is the
+     accurate statement, not a future-tense claim. #}
+  {% if _auto_deliver and job.status not in ("completed", "dry_run_failed", "deliver_failed", "failed") %}
+  <p class="text-muted text-center text-sm">Dry Run and Deliver will run automatically once onboarding completes.</p>
+  {% endif %}
 
   {% if agent_steps %}
   <div class="mt-1">
@@ -47,10 +74,15 @@
   <div class="alert alert-error mt-1">{{ job.error or "Onboarding failed" }}</div>
   <a href="/assessments/{{ assessment_id }}?error={{ (job.error or 'Onboarding failed') | urlencode }}"
      class="btn btn-outline" data-nav="back-to-assessment" hx-boost="false">Back to Assessment</a>
+  {% elif job.status in ("dry_run_failed", "deliver_failed") %}
+  {# Manifests already exist by this point -- land on Onboard Results, not
+     Assessment Detail, so a human can see them and retry Dry Run/Deliver
+     directly instead of starting over. #}
+  <div class="alert alert-error mt-1">{{ job.error or "Automatic delivery failed" }}</div>
+  <a href="/assessments/{{ assessment_id }}/onboard-results?error={{ (job.error or 'Automatic delivery failed') | urlencode }}"
+     class="btn btn-outline" data-nav="back-to-assessment" hx-boost="false">View Onboard Results</a>
   {% endif %}
 </div>
-{% if job.status == "completed" %}
-<script>window.location.href = "/assessments/{{ assessment_id }}/onboard-results";</script>
-{% elif job.status == "failed" %}
-<script>window.location.href = "/assessments/{{ assessment_id }}?error={{ (job.error or 'Onboarding failed') | urlencode }}";</script>
+{% if redirect_url %}
+<script>window.location.href = "{{ redirect_url | safe }}";</script>
 {% endif %}
