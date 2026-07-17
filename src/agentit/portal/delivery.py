@@ -596,9 +596,19 @@ async def route_and_deliver(
 
         if cluster_files:
             mechanism_used = mechanisms[CATEGORY_CLUSTER_CONFIG]
-            await _maybe_schedule_verification(
-                store, delivery_id, assessment_id, app_name, namespace, mechanism_used, dry_run,
-            )
+            cluster_outcome = outcomes.get(CATEGORY_CLUSTER_CONFIG)
+            # ``force_dry_run_first=True`` (AutoMode's own safety knob --
+            # see automode.py) can leave `cluster_outcome["dry_run_failed"]`
+            # True, meaning apply_with_verification() never attempted a
+            # real apply at all. Scheduling the SLO-watch-and-rollback tail
+            # for a delivery that never actually delivered anything would
+            # be wrong (a "breach" could roll back unrelated existing
+            # state) -- skip it for that case only.
+            dry_run_failed = isinstance(cluster_outcome, dict) and cluster_outcome.get("dry_run_failed")
+            if not dry_run_failed:
+                await _maybe_schedule_verification(
+                    store, delivery_id, assessment_id, app_name, namespace, mechanism_used, dry_run,
+                )
     except Exception as exc:
         await store.update_delivery(
             delivery_id, status="failed", details={"error": str(exc)[:500]},

@@ -302,6 +302,52 @@ class TestRouteAndDeliverClusterConfig:
         assert result["outcomes"]["cluster_config"]["dry_run"] is True
 
 
+class TestRouteAndDeliverForceDryRunFirst:
+    """`force_dry_run_first=True` (AutoMode's own safety knob -- see
+    automode.py) is threaded straight through to `apply_with_verification()`
+    unchanged. This covers a gap introduced by wiring AutoMode through this
+    router for the first time: when the forced dry-run fails,
+    `apply_with_verification()` never attempts a real apply at all, so
+    scheduling the SLO-watch-and-rollback verification tail for a delivery
+    that never actually happened would be wrong (a "breach" could roll back
+    unrelated existing state)."""
+
+    async def test_dry_run_failure_skips_scheduling_verification(self):
+        store, raw = await make_async_store()
+        report = make_report()
+        aid = await raw.save(report)
+        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply, \
+             patch("agentit.portal.delivery._maybe_schedule_verification") as mock_schedule:
+            mock_apply.return_value = {"applied": [], "skipped": [], "errors": ["forbidden"]}
+            result = await route_and_deliver(
+                [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=False, force_dry_run_first=True,
+            )
+        assert result["outcomes"]["cluster_config"]["dry_run_failed"] is True
+        mock_apply.assert_called_once()  # dry-run only; real apply never attempted
+        mock_schedule.assert_not_called()
+
+    async def test_clean_forced_dry_run_still_schedules_verification(self):
+        """Sanity check: the guard only skips scheduling for a failed forced
+        dry-run -- a clean one (real apply attempted) still schedules
+        exactly like every other direct-apply delivery."""
+        store, raw = await make_async_store()
+        report = make_report()
+        aid = await raw.save(report)
+        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply, \
+             patch("agentit.portal.delivery._maybe_schedule_verification") as mock_schedule:
+            mock_apply.return_value = {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": []}
+            result = await route_and_deliver(
+                [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=False, force_dry_run_first=True,
+            )
+        assert result["outcomes"]["cluster_config"]["dry_run_failed"] is False
+        assert mock_apply.call_count == 2  # dry-run, then real apply
+        mock_schedule.assert_called_once()
+
+
 class TestRouteAndDeliverCicdLane:
     async def test_cicd_files_create_admin_review_gate_never_silent_skip(self):
         store, raw = await make_async_store()

@@ -76,11 +76,17 @@ class TestExecuteAutoApply:
             "is_destructive": False, "confidence": 0.95, "reason": "Safe",
         }
 
+        # Real, parseable NetworkPolicy content (not the old placeholder
+        # "x") -- execute() now routes through delivery.py's classify_file(),
+        # which sorts unparseable YAML into manifest-at-rest, not
+        # cluster_config, so a real manifest is needed to reach mock_apply.
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": ["np.yaml"], "skipped": [], "errors": []}
             engine = AutoMode(store=s, llm_client=llm)
-            await engine.execute(aid, [{"path": "np.yaml", "content": "x", "category": "sec", "description": "np"}],
-                                  "default", "low", True, "test-app")
+            await engine.execute(aid, [{
+                "path": "np.yaml", "category": "sec", "description": "np",
+                "content": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: test\n",
+            }], "default", "low", True, "test-app")
 
         rems = await raw.list_remediations(aid)
         assert rems[0]["status"] == "completed"
@@ -102,7 +108,12 @@ class TestExecuteDryRunFirstAlwaysEnforced:
         llm.classify_action.return_value = {
             "is_destructive": False, "confidence": 0.95, "reason": "Safe",
         }
-        files = [{"category": "sec", "path": "np.yaml", "content": "x", "description": "np"}]
+        # Real, parseable NetworkPolicy content -- see the comment on
+        # test_marks_remediations_complete_on_apply above for why.
+        files = [{
+            "category": "sec", "path": "np.yaml", "description": "np",
+            "content": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: test\n",
+        }]
 
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": ["np.yaml"], "skipped": [], "errors": []}
@@ -131,7 +142,12 @@ class TestExecuteAuditLogGapClosed:
         llm.classify_action.return_value = {
             "is_destructive": False, "confidence": 0.95, "reason": "Adds ConfigMap",
         }
-        files = [{"category": "cost", "path": "labels.yaml", "content": "x", "description": "labels"}]
+        # Real, parseable ConfigMap content -- see the comment on
+        # test_marks_remediations_complete_on_apply above for why.
+        files = [{
+            "category": "cost", "path": "labels.yaml", "description": "labels",
+            "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\n",
+        }]
 
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": ["labels.yaml"], "skipped": [], "errors": []}
@@ -143,7 +159,11 @@ class TestExecuteAuditLogGapClosed:
         audit_records = [r for r in caplog.records if getattr(r, "audit", False)]
         assert len(audit_records) == 1
         assert audit_records[0].actor == "auto-mode"
-        assert audit_records[0].action == "auto-apply"
+        # "deliver-apply", not the old "auto-apply" -- AutoMode's direct-apply
+        # now goes through the exact same apply_with_verification() call site
+        # (inside route_and_deliver()) every other caller uses, so it shares
+        # that caller's action label instead of a separate one.
+        assert audit_records[0].action == "deliver-apply"
         assert audit_records[0].resource == f"assessment:{aid}"
         assert audit_records[0].outcome == "success"
 
@@ -157,7 +177,12 @@ class TestExecuteAuditLogGapClosed:
         llm.classify_action.return_value = {
             "is_destructive": False, "confidence": 0.95, "reason": "Safe",
         }
-        files = [{"category": "sec", "path": "np.yaml", "content": "x", "description": "np"}]
+        # Real, parseable NetworkPolicy content -- see the comment on
+        # test_marks_remediations_complete_on_apply above for why.
+        files = [{
+            "category": "sec", "path": "np.yaml", "description": "np",
+            "content": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: test\n",
+        }]
 
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": [], "skipped": [], "errors": ["forbidden"]}
@@ -282,7 +307,12 @@ class TestExecuteConflictHandling:
 
         llm = MagicMock()
         llm.classify_action.return_value = {"is_destructive": False, "confidence": 0.95, "reason": "Safe"}
-        files = [{"category": "sec", "path": "np.yaml", "content": "x", "description": "np"}]
+        # Real, parseable NetworkPolicy content -- see the comment on
+        # test_marks_remediations_complete_on_apply above for why.
+        files = [{
+            "category": "sec", "path": "np.yaml", "description": "np",
+            "content": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: test\n",
+        }]
 
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = self._conflict_result()
@@ -305,7 +335,12 @@ class TestExecuteConflictHandling:
 
         llm = MagicMock()
         llm.classify_action.return_value = {"is_destructive": False, "confidence": 0.95, "reason": "Safe"}
-        files = [{"category": "sec", "path": "np.yaml", "content": "x", "description": "np"}]
+        # Real, parseable NetworkPolicy content -- see the comment on
+        # test_marks_remediations_complete_on_apply above for why.
+        files = [{
+            "category": "sec", "path": "np.yaml", "description": "np",
+            "content": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: test\n",
+        }]
 
         call_results = [
             {"applied": [], "skipped": [], "errors": []},  # clean dry-run
@@ -332,7 +367,12 @@ class TestExecuteConflictHandling:
 
         llm = MagicMock()
         llm.classify_action.return_value = {"is_destructive": False, "confidence": 0.95, "reason": "Safe"}
-        files = [{"category": "sec", "path": "np.yaml", "content": "x", "description": "np"}]
+        # Real, parseable NetworkPolicy content -- see the comment on
+        # test_marks_remediations_complete_on_apply above for why.
+        files = [{
+            "category": "sec", "path": "np.yaml", "description": "np",
+            "content": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: test\n",
+        }]
 
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             mock_apply.return_value = {"applied": ["np.yaml"], "skipped": [], "errors": []}
@@ -342,6 +382,143 @@ class TestExecuteConflictHandling:
         assert result["action"] == "applied"
         gates = await raw.list_gates(status="pending")
         assert not any(g["gate_type"] == "cluster-conflict-review" for g in gates)
+
+
+class TestExecuteUnifiedRouterGuards:
+    """The bug this refactor fixes: `execute()` used to hand-roll its own
+    routing (GitOps-registration check, then a raw `apply_with_verification`
+    call on the whole allowed batch) and never called
+    `delivery.py::classify_file()` at all -- so none of the guards every
+    other delivery-triggering caller (manual Deliver, gate-approve) gets for
+    free via `route_and_deliver()` ever applied to AutoMode's own auto-apply
+    path. `execute()` now calls `route_and_deliver()` for the actual
+    routing/classification/mechanism decision instead of reimplementing it.
+
+    Confirmed against the pre-fix code (temporarily reverting `automode.py`
+    to its prior direct `apply_with_verification()` call and re-running
+    these two tests) that both gaps are real: the Secret test's
+    `mock_apply.assert_not_called()`/`"secret.yaml" not in paths` assertions
+    failed (the Secret WAS handed to `apply_manifests_to_cluster`), and the
+    CI/CD test's gate assertion failed with zero `cluster-admin-review`
+    gates created (the Pipeline was silently `skip_operator_ns`'d inside
+    `cluster_apply.py` instead). Both pass against the fixed code below.
+    """
+
+    async def test_secret_manifest_never_reaches_cluster_apply(self):
+        """(a) A Secret-kind manifest riding along in an otherwise-safe
+        AutoMode batch must never reach `apply_manifests_to_cluster` --
+        the same `CATEGORY_SECRET_BLOCKED` permanent deny-rule a manual
+        Deliver click already gets for free via `classify_file()`. The
+        ConfigMap in the same batch must still apply normally."""
+        s, raw = await make_async_store()
+        await raw.set_setting("auto_mode", "true")
+        report = make_report(criticality="low", summary="test")
+        aid = await raw.save(report)
+
+        llm = MagicMock()
+        llm.classify_action.return_value = {
+            "is_destructive": False, "confidence": 0.95, "reason": "Safe",
+        }
+        files = [
+            {"category": "skills", "path": "cm.yaml", "description": "configmap",
+             "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\n"},
+            {"category": "skills", "path": "secret.yaml", "description": "should never be delivered",
+             "content": "apiVersion: v1\nkind: Secret\nmetadata:\n  name: db\ndata:\n  password: c2VjcmV0\n"},
+        ]
+
+        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_apply.return_value = {"applied": ["cm.yaml"], "skipped": [], "errors": []}
+            engine = AutoMode(store=s, llm_client=llm)
+            result = await engine.execute(aid, files, "default", "low", True, "test-app")
+
+        # The Secret must never have been handed to apply_manifests_to_cluster
+        # at all, in either the dry-run or the real-apply call.
+        for call in mock_apply.call_args_list:
+            paths = {f["path"] for f in call.args[0]}
+            assert "secret.yaml" not in paths
+        assert mock_apply.call_count == 2  # dry-run + real apply, ConfigMap only
+        assert result["action"] == "applied"
+        assert result["details"]["delivery"]["blocked"] == ["secret.yaml"]
+
+    async def test_cicd_shared_namespace_escalates_to_admin_review_gate(self):
+        """(b) A CI/CD manifest destined for a shared operator namespace
+        (e.g. `openshift-pipelines`) must escalate to a `cluster-admin-review`
+        gate -- never `cluster_apply.py`'s older, silent `skip_operator_ns`
+        behavior every other AutoMode-generated manifest kind gets."""
+        s, raw = await make_async_store()
+        await raw.set_setting("auto_mode", "true")
+        report = make_report(criticality="low", summary="test")
+        aid = await raw.save(report)
+
+        llm = MagicMock()
+        llm.classify_action.return_value = {
+            "is_destructive": False, "confidence": 0.95, "reason": "Safe",
+        }
+        files = [{
+            "category": "skills", "path": "pipeline.yaml", "description": "tekton pipeline",
+            "content": (
+                "apiVersion: tekton.dev/v1\nkind: Pipeline\n"
+                "metadata:\n  name: build\n  namespace: openshift-pipelines\n"
+            ),
+        }]
+
+        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            # Only relevant pre-fix: the real (unmocked) function's own
+            # skip_operator_ns classification for this exact manifest.
+            mock_apply.return_value = {
+                "applied": [], "errors": [],
+                "skipped": ["pipeline.yaml (targets operator namespace openshift-pipelines)"],
+            }
+            engine = AutoMode(store=s, llm_client=llm)
+            result = await engine.execute(aid, files, "default", "low", True, "test-app")
+
+        # Never routed through cluster_apply.py at all -- no chance of the
+        # old silent skip_operator_ns behavior.
+        mock_apply.assert_not_called()
+        gates = await raw.list_gates(status="pending")
+        admin_gates = [g for g in gates if g["gate_type"] == "cluster-admin-review"]
+        assert len(admin_gates) == 1
+        assert "openshift-pipelines" in admin_gates[0]["summary"]
+        assert "never a silent skip" in admin_gates[0]["summary"]
+        delivery = result["details"]["delivery"]
+        assert delivery["mechanisms"]["cicd_shared_namespace"] == "cluster-admin-review-gate"
+        assert delivery["outcomes"]["cicd_shared_namespace"]["gate_id"] == admin_gates[0]["id"]
+
+    async def test_mixed_batch_applies_cluster_config_and_gates_cicd_separately(self):
+        """A single AutoMode batch mixing an ordinary ConfigMap with a
+        CI/CD-shared-namespace manifest must split correctly: the ConfigMap
+        applies directly, the CI/CD manifest gets its own admin-review gate
+        -- both guards apply in the same call, not just in isolation."""
+        s, raw = await make_async_store()
+        await raw.set_setting("auto_mode", "true")
+        report = make_report(criticality="low", summary="test")
+        aid = await raw.save(report)
+
+        llm = MagicMock()
+        llm.classify_action.return_value = {
+            "is_destructive": False, "confidence": 0.95, "reason": "Safe",
+        }
+        files = [
+            {"category": "skills", "path": "cm.yaml", "description": "configmap",
+             "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\n"},
+            {"category": "skills", "path": "pipeline.yaml", "description": "tekton pipeline",
+             "content": (
+                 "apiVersion: tekton.dev/v1\nkind: Pipeline\n"
+                 "metadata:\n  name: build\n  namespace: openshift-pipelines\n"
+             )},
+        ]
+
+        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_apply.return_value = {"applied": ["cm.yaml"], "skipped": [], "errors": []}
+            engine = AutoMode(store=s, llm_client=llm)
+            result = await engine.execute(aid, files, "default", "low", True, "test-app")
+
+        for call in mock_apply.call_args_list:
+            paths = {f["path"] for f in call.args[0]}
+            assert paths == {"cm.yaml"}
+        assert result["action"] == "applied"
+        gates = await raw.list_gates(status="pending")
+        assert any(g["gate_type"] == "cluster-admin-review" for g in gates)
 
 
 class TestExecuteWithPublisher:

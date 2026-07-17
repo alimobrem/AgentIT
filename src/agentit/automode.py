@@ -199,6 +199,19 @@ class AutoMode:
     this layer is a no-op and the matrix above is the whole story, exactly
     as before it existed.
 
+    Once both of the above have approved a batch (``should_auto_apply()``'s
+    safety classification, then the allowlist scoping), ``execute()`` hands
+    that batch to ``portal/delivery.py::route_and_deliver()`` -- the same
+    decision surface the manual "Deliver" button and gate-approve use (see
+    docs/unified-apply-flow.md) -- for classification (secret-block,
+    unresolved-placeholder guard, CI/CD-shared-namespace escalation),
+    GitOps-registration lookup, and mechanism selection. This class no
+    longer re-decides any of that on its own; it only supplies its own two
+    extra, AutoMode-specific safety layers on top (the LLM classification
+    and the allowlist scoping above), plus its own reaction to
+    ``force_dry_run_first=True`` (a safety knob no other router caller
+    exercises) once the router returns.
+
     ``store`` is an ``AssessmentStore`` — every store call below is ``await``ed.
     ``llm_client`` (``agentit.llm.LLMClient``) stays a synchronous object;
     its one blocking network call (``classify_action``) is dispatched via
@@ -305,30 +318,21 @@ class AutoMode:
         can omit it and the decision is logged under "auto-mode" as before.
 
         `report` (the assessment's `AssessmentReport`, when the caller has it -- see
-        `routes/webhooks.py`'s `webhook_auto_apply`/`webhook_finding`) is AutoMode's
-        *only* new input for the unified apply flow: `should_auto_apply()`'s safety
-        classification above is completely unchanged by it. It only decides this
-        method's *terminal action* once `can_apply` is True -- direct-apply when the
-        app isn't GitOps-registered (today's unchanged behavior), or an autonomous
-        commit-and-PR-but-human-must-merge when it is (see docs/unified-apply-flow.md
-        section (B)). Omitting `report` (every pre-existing caller/test) is always
-        treated as "not GitOps-registered", preserving the exact prior direct-apply
-        behavior.
+        `routes/webhooks.py`'s `webhook_auto_apply`/`webhook_finding`) is threaded
+        straight through to `route_and_deliver()` below, which is what actually
+        decides GitOps registration and mechanism now -- `should_auto_apply()`'s
+        safety classification above is completely unchanged by it. Omitting `report`
+        (every pre-existing caller/test) is always treated by the router as "not
+        GitOps-registered", preserving the exact prior direct-apply behavior.
 
         Returns {"action": "applied"|"split"|"partial_failure"|"gated"|"failed", "reason": str, "details": dict}.
         ``"split"`` only occurs when the auto-mode allowlist denied part (not
-        all) of the batch and the allowed remainder applied cleanly; a
+        all) of the batch and the allowed remainder delivered cleanly; a
         real server-side-apply field-manager conflict always returns
         ``"gated"`` (dry-run stage) or ``"partial_failure"`` (real-apply
         stage) with a ``cluster-conflict-review`` gate, never ``"applied"``.
         """
-        from agentit.portal.cluster_apply import apply_with_verification
-        from agentit.portal.delivery import (
-            MECHANISM_INFRA_REPO_COMMIT,
-            confirmation_text,
-            deliver_with_verification,
-            is_gitops_registered,
-        )
+        from agentit.portal.delivery import CATEGORY_CLUSTER_CONFIG, MECHANISM_INFRA_REPO_COMMIT, route_and_deliver
 
         manifests = [f["content"] for f in files if f["path"].endswith((".yaml", ".yml"))]
 
@@ -349,54 +353,14 @@ class AutoMode:
             )
             return {"action": "gated", "reason": reason, "details": {"gate_id": gate_id}}
 
-        registered, infra_repo_url = await is_gitops_registered(app_name, report)
-
-        if registered and infra_repo_url is not None:
-            # GitOps-aware terminal action: AutoMode already trusts its own
-            # safety classification enough to skip human review for a direct
-            # apply -- but merging into a self-healing, prune:true GitOps
-            # repo is a bigger blast-radius grant than a single kubectl
-            # apply, so the PR is opened autonomously and a human must still
-            # merge it. AgentIT never auto-merges, matching this project's
-            # own "Argo CD is the sole deployer" stance for itself.
-            commit_result = await deliver_with_verification(
-                mechanism=MECHANISM_INFRA_REPO_COMMIT, files=files, report=report,
-                app_name=app_name, store=self._store, assessment_id=assessment_id,
-                actor="auto-mode", dry_run=False,
-            )
-            if "error" in commit_result:
-                await self._log_event(
-                    "auto-mode", "gitops-commit-failed", app_name, "warning",
-                    f"Commit to infra repo failed: {commit_result['error']}",
-                )
-                gate_id = await self._store.create_gate(
-                    assessment_id, "auto-mode-review",
-                    f"Auto-mode's GitOps commit failed: {commit_result['error']}",
-                )
-                return {"action": "gated", "reason": "gitops commit failed", "details": commit_result}
-
-            pr_url = commit_result.get("pr_url", "")
-            mechanism_text = confirmation_text(MECHANISM_INFRA_REPO_COMMIT, infra_repo_url=infra_repo_url)
-            gate_id = await self._store.create_gate(
-                assessment_id, "gitops-pr-pending",
-                f"{mechanism_text} PR opened: {pr_url}. Reason: {reason}. "
-                "Approving this gate merges the PR -- AgentIT never auto-merges.",
-            )
-            await self._log_event(
-                "auto-mode", "gitops-pr-opened", app_name, "info",
-                f"Opened PR {pr_url} against the GitOps infra repo -- awaiting human merge (gate {gate_id})",
-            )
-            return {
-                "action": "gated",
-                "reason": f"GitOps-registered -- opened PR, awaiting human merge: {reason}",
-                "details": {**commit_result, "gate_id": gate_id},
-            }
-
         # Per-(namespace, kind) allowlist scoping -- see
         # ``split_files_by_allowlist()``'s docstring above. A no-op (returns
         # every file as ``allowed_files``, ``denied_files`` empty) unless an
         # operator has configured the ``auto_mode_allowlist`` setting, so
         # this can never change behavior for anyone who hasn't opted in.
+        # This is AutoMode's own additive safety layer, applied *before*
+        # handing off to the shared router below -- not a replacement for
+        # anything the router does.
         allowlist = await self.get_allowlist()
         allowed_files, denied_files, denial_reasons = split_files_by_allowlist(files, namespace, allowlist)
 
@@ -418,85 +382,175 @@ class AutoMode:
                     "details": {"gate_id": scope_gate_id, "denied": denial_reasons},
                 }
 
-        # Dry-run first, then apply for real -- ``force_dry_run_first=True``
-        # is auto-mode's own safety gate (unlike the manual "Apply to
-        # Cluster" route, which just does whatever the human explicitly
-        # asked for via its own ``dry_run`` flag with no automatic
-        # dry-run-first sequencing). Per-skill outcome recording is
-        # deliberately gated on a *fully clean* real apply here (see
-        # ``record_outcomes_on_partial_failure=False`` below): "gated" is a
-        # deferral to a human, not a verdict on the skill, and a partial
-        # failure is intentionally left unrecorded too (the human's eventual
-        # decision at /gates is what records approved/rejected for a gated
-        # candidate). ``audit_log()`` (inside ``apply_with_verification``)
-        # now covers auto-mode's own privileged apply action too, matching
-        # the manual route -- previously auto-mode had no audit trail here
-        # at all, only the ``_log_event``/publisher calls below.
-        #
-        # ``force`` is never passed here (stays at ``apply_with_verification``'s
-        # default of ``False``) -- AutoMode never seizes field-manager
-        # ownership on its own; a genuine conflict below always routes to
-        # the ``cluster-conflict-review`` gate instead, whose *human*
-        # approval path in ``routes/gates.py`` is the only place that
-        # passes ``force=True``.
-        result = await apply_with_verification(
-            allowed_files, namespace, dry_run=False,
-            force_dry_run_first=True,
-            store=self._store, app_name=app_name,
-            skill_outcome_reason=reason,
-            record_outcomes_on_partial_failure=False,
-            actor="auto-mode", action="auto-apply",
-            resource=f"assessment:{assessment_id}",
+        # Everything from here on delegates to the exact same decision
+        # surface every other delivery-triggering caller uses (manual
+        # Deliver, gate-approve, docs/unified-apply-flow.md): classify each
+        # of ``allowed_files`` (secret-block, unresolved-placeholder guard,
+        # CI/CD-shared-namespace escalation all now apply uniformly, where
+        # before this refactor none of them did for AutoMode), look up
+        # GitOps registration, and pick the mechanism per classified group.
+        # ``force_dry_run_first=True`` is AutoMode's own, unchanged safety
+        # knob, threaded straight through to the router's direct-apply
+        # branch -- no other caller sets this ``True`` today, so reacting to
+        # its outcome (``dry_run_failed``/conflicts) below is AutoMode's own
+        # safety layer on top of the router, not a duplication of it.
+        delivery = await route_and_deliver(
+            allowed_files, app_name=app_name, namespace=namespace, report=report,
+            store=self._store, assessment_id=assessment_id, actor="auto-mode",
+            dry_run=False, force_dry_run_first=True,
         )
 
-        if result["dry_run_failed"]:
-            if result.get("conflicts") and not result["errors"]:
-                gate_id = await self._gate_for_conflicts(assessment_id, app_name, result["conflicts"])
-                return {"action": "gated", "reason": "field-manager conflict(s) detected", "details": {**result, "gate_id": gate_id}}
+        mechanism_used = delivery["mechanisms"].get(CATEGORY_CLUSTER_CONFIG)
+        cluster_outcome = delivery["outcomes"].get(CATEGORY_CLUSTER_CONFIG)
+        split_extra = {"scope_gate_id": scope_gate_id, "denied_files": list(denial_reasons)} if denied_files else {}
+
+        if mechanism_used == MECHANISM_INFRA_REPO_COMMIT:
+            return await self._finish_gitops_pr(assessment_id, app_name, reason, cluster_outcome, delivery, split_extra)
+
+        return await self._finish_direct_apply(
+            assessment_id, app_name, namespace, reason, cluster_outcome, delivery,
+            bool(denied_files), split_extra,
+        )
+
+    async def _finish_gitops_pr(
+        self, assessment_id: str, app_name: str, reason: str,
+        cluster_outcome: dict | None, delivery: dict, split_extra: dict,
+    ) -> dict:
+        """Terminal action once the router has picked the GitOps-registered
+        infra-repo-commit mechanism for the cluster/app-config category
+        (docs/unified-apply-flow.md section (B)): merging into a
+        self-healing, ``prune: true`` GitOps repo is a bigger blast-radius
+        grant than a direct apply, so the PR is opened autonomously but a
+        human must still merge it -- AgentIT never auto-merges.
+        ``route_and_deliver()`` already opened the PR (via
+        ``deliver_with_verification``) and, on success, already created the
+        ``gitops-pr-pending`` gate itself -- this only reacts to that
+        result, it never re-opens the PR or re-creates the gate.
+        """
+        if isinstance(cluster_outcome, dict) and cluster_outcome.get("gate_id"):
+            pr_url = cluster_outcome.get("pr_url", "")
+            gate_id = cluster_outcome["gate_id"]
+            await self._log_event(
+                "auto-mode", "gitops-pr-opened", app_name, "info",
+                f"Opened PR {pr_url} against the GitOps infra repo -- awaiting human merge (gate {gate_id})",
+            )
+            return {
+                "action": "gated",
+                "reason": f"GitOps-registered -- opened PR, awaiting human merge: {reason}",
+                "details": {"delivery": delivery, "gate_id": gate_id, **split_extra},
+            }
+
+        error = cluster_outcome.get("error", "unknown error") if isinstance(cluster_outcome, dict) else "unknown error"
+        await self._log_event(
+            "auto-mode", "gitops-commit-failed", app_name, "warning",
+            f"Commit to infra repo failed: {error}",
+        )
+        gate_id = await self._store.create_gate(
+            assessment_id, "auto-mode-review",
+            f"Auto-mode's GitOps commit failed: {error}",
+        )
+        return {"action": "gated", "reason": "gitops commit failed",
+                "details": {"delivery": delivery, "gate_id": gate_id, **split_extra}}
+
+    async def _finish_direct_apply(
+        self, assessment_id: str, app_name: str, namespace: str, reason: str,
+        cluster_outcome: dict | None, delivery: dict, split: bool, split_extra: dict,
+    ) -> dict:
+        """Terminal action for every category the router didn't route to
+        the GitOps-PR mechanism above -- direct cluster apply for
+        cluster/app-config (the common case), plus whatever the router
+        already did on its own for any CI/CD-shared-namespace/source-patch/
+        manifest-at-rest/secret-blocked files in the same batch (fully
+        handled by ``route_and_deliver()`` itself; nothing further to do
+        for those here).
+
+        ``cluster_outcome`` is ``apply_with_verification()``'s own return
+        value, passed through by the router untouched -- so AutoMode's
+        pre-existing reaction to ``dry_run_failed``/conflicts (its own
+        ``force_dry_run_first=True`` safety net, which no other router
+        caller exercises) still works exactly as before, just fed from here
+        instead of a direct call.
+        """
+        if cluster_outcome is None:
+            # No cluster/app-config files in this allowed batch at all --
+            # e.g. it was entirely source-patch/manifest-at-rest/CI-CD
+            # files, which the router already fully delivered/gated/blocked
+            # above. Nothing to gate here on a dry-run-failure/conflict
+            # basis since no direct apply was ever attempted.
+            await self._log_event(
+                "auto-mode", "auto-applied", app_name, "info",
+                "Delivered via the unified router -- no cluster/app-config files in this batch",
+            )
+            await self._complete_remediations(assessment_id)
+            return {"action": "split" if split else "applied", "reason": reason,
+                    "details": {"delivery": delivery, **split_extra}}
+
+        if "error" in cluster_outcome and "errors" not in cluster_outcome:
+            # A pre-apply routing error (e.g. the router's own
+            # registered-but-no-known-infra_repo_url edge case) that never
+            # reached apply_with_verification() at all -- gate for human
+            # review rather than assume apply_with_verification()'s
+            # errors/conflicts/dry_run_failed keys exist.
+            error = cluster_outcome["error"]
+            await self._log_event(
+                "auto-mode", "delivery-routing-error", app_name, "warning",
+                f"Could not route cluster/app-config files: {error}",
+            )
+            gate_id = await self._store.create_gate(
+                assessment_id, "auto-mode-review",
+                f"Auto-mode could not route cluster/app-config files: {error}",
+            )
+            return {"action": "gated", "reason": "delivery routing error",
+                    "details": {"delivery": delivery, "gate_id": gate_id, **split_extra}}
+
+        if cluster_outcome.get("dry_run_failed"):
+            if cluster_outcome.get("conflicts") and not cluster_outcome["errors"]:
+                gate_id = await self._gate_for_conflicts(assessment_id, app_name, cluster_outcome["conflicts"])
+                return {"action": "gated", "reason": "field-manager conflict(s) detected",
+                        "details": {**cluster_outcome, "delivery": delivery, "gate_id": gate_id, **split_extra}}
             await self._log_event(
                 "auto-mode", "dry-run-failed", app_name, "warning",
-                f"Dry-run failed with {len(result['errors'])} error(s)",
+                f"Dry-run failed with {len(cluster_outcome['errors'])} error(s)",
             )
             gate_id = await self._store.create_gate(
                 assessment_id, "dry-run-failed",
-                f"Dry-run failed: {'; '.join(result['errors'][:3])}",
+                f"Dry-run failed: {'; '.join(cluster_outcome['errors'][:3])}",
             )
-            return {"action": "gated", "reason": "dry-run failed", "details": result}
+            return {"action": "gated", "reason": "dry-run failed",
+                    "details": {**cluster_outcome, "delivery": delivery, "gate_id": gate_id, **split_extra}}
 
-        if result["errors"] or result.get("conflicts"):
-            details = result
-            if result.get("conflicts"):
-                gate_id = await self._gate_for_conflicts(assessment_id, app_name, result["conflicts"])
-                details = {**result, "gate_id": gate_id}
+        if cluster_outcome["errors"] or cluster_outcome.get("conflicts"):
+            details = {**cluster_outcome, "delivery": delivery, **split_extra}
+            if cluster_outcome.get("conflicts"):
+                gate_id = await self._gate_for_conflicts(assessment_id, app_name, cluster_outcome["conflicts"])
+                details["gate_id"] = gate_id
             await self._log_event(
                 "auto-mode", "partial-failure", app_name, "warning",
-                f"Applied {len(result['applied'])} but {len(result['errors'])} error(s), "
-                f"{len(result.get('conflicts', []))} conflict(s) in {namespace}",
+                f"Applied {len(cluster_outcome['applied'])} but {len(cluster_outcome['errors'])} error(s), "
+                f"{len(cluster_outcome.get('conflicts', []))} conflict(s) in {namespace}",
             )
             return {
                 "action": "partial_failure",
-                "reason": f"partial failure: {len(result['errors'])} error(s), {len(result.get('conflicts', []))} conflict(s)",
+                "reason": f"partial failure: {len(cluster_outcome['errors'])} error(s), {len(cluster_outcome.get('conflicts', []))} conflict(s)",
                 "details": details,
             }
 
         await self._log_event(
             "auto-mode", "auto-applied", app_name, "info",
-            f"Applied {len(result['applied'])} manifests to {namespace}",
+            f"Applied {len(cluster_outcome['applied'])} manifests to {namespace}",
         )
+        await self._complete_remediations(assessment_id)
+        return {
+            "action": "split" if split else "applied",
+            "reason": reason,
+            "details": {**cluster_outcome, "delivery": delivery, **split_extra},
+        }
 
+    async def _complete_remediations(self, assessment_id: str) -> None:
         remediations = await self._store.list_remediations(assessment_id)
         for rem in remediations:
             if rem["status"] != "completed":
                 await self._store.complete_remediation(rem["id"])
-
-        return {
-            "action": "applied" if not denied_files else "split",
-            "reason": reason,
-            "details": {
-                **result,
-                **({"scope_gate_id": scope_gate_id, "denied_files": list(denial_reasons)} if denied_files else {}),
-            },
-        }
 
     async def _gate_for_conflicts(self, assessment_id: str, app_name: str, conflicts: list[dict]) -> str:
         """Create (or reuse a pending) ``cluster-conflict-review`` gate for a
