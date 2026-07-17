@@ -316,7 +316,7 @@ async def test_suppress_form_is_optimistic_htmx_with_reconciliation(client, _ove
     assert resp.status_code == 200
     assert 'hx-post="/api/suppress"' in resp.text
     assert 'hx-swap="none"' in resp.text
-    assert '@submit="suppressed = true"' in resp.text
+    assert '@submit="suppressed = true; findingsCount--"' in resp.text
     assert "response-error.camel" in resp.text
 
 
