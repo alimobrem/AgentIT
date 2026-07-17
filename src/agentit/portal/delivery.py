@@ -1065,8 +1065,13 @@ async def handle_confirmed_finding_failure(
     if failure_count >= FINDING_ESCALATION_THRESHOLD:
         gate_id = await escalate_unresolved_finding(store, assessment_id, app_name, finding, failure_count)
         return {"action": "escalated", "gate_id": gate_id, "failure_count": failure_count}
+    # Nested (not flattened via `**result`) deliberately: redispatch_finding_
+    # fix() returns its own "action" key (the underlying AutoMode outcome,
+    # e.g. "gated"/"applied") -- flattening it would silently overwrite this
+    # function's own "redispatched" vs. "escalated" decision, the one thing
+    # a caller most needs to tell apart.
     result = await redispatch_finding_fix(store, llm_client, report, assessment_id, app_name, finding)
-    return {"action": "redispatched", "failure_count": failure_count, **result}
+    return {"action": "redispatched", "failure_count": failure_count, "redispatch_result": result}
 
 
 async def check_pending_delivery_verifications(
