@@ -256,7 +256,49 @@ async def webhook_github_push(request: Request):
                             await s.log_event("learning", "skipped-rejected", managed["repo_name"],
                                                "info", f"Skipping {finding.category} -- rejected 3+ times")
                             continue
-                        await dispatcher.dispatch(assessment_id, finding.category, managed["repo_name"])
+                        dispatch_result = await dispatcher.dispatch(assessment_id, finding.category, managed["repo_name"])
+                        if dispatch_result.get("error") and not dispatch_result["files"]:
+                            await s.log_event("dispatcher", "no-fix-available", managed["repo_name"],
+                                               "warning", dispatch_result["error"])
+                            continue
+                        if not dispatch_result["files"]:
+                            continue
+                        # Persist the same way fix_finding() (assessments.py)
+                        # does for its human-initiated equivalent -- a saved
+                        # `remediations` row is the durable record that a fix
+                        # was generated, not just an in-memory dict this
+                        # handler used to discard once dispatch() returned.
+                        for f in dispatch_result["files"]:
+                            await s.save_remediation(
+                                assessment_id, dispatch_result["agent"], f["description"],
+                                status="generated", manifest_path=f["path"],
+                            )
+                        await s.log_event(
+                            "dispatcher", "fix-generated", managed["repo_name"], "info",
+                            f"Generated {len(dispatch_result['files'])} fix(es) for '{finding.category}' via {dispatch_result['agent']}",
+                        )
+                        # Unlike fix_finding()'s human-initiated path (which
+                        # stops at generation -- a human still clicks Deliver
+                        # on Onboard Results), this branch only runs when the
+                        # repo owner already turned on the `auto_mode`
+                        # setting above, so -- matching the fully-autonomous
+                        # treatment `RemediationLoop.trigger()` already gives
+                        # webhook-driven fixes elsewhere -- actually deliver
+                        # via the same router every other delivery goes
+                        # through, instead of leaving the generated fix
+                        # sitting ungenerated-from-the-router's-perspective
+                        # until a human happens to notice it.
+                        from agentit.automode import AutoMode
+                        auto = AutoMode(store=s, publisher=None, llm_client=get_llm_client())
+                        auto_result = await auto.execute(
+                            assessment_id, dispatch_result["files"], managed["repo_name"],
+                            report.criticality, True, managed["repo_name"],
+                            dispatch_result["agent"], report=report,
+                        )
+                        await s.log_event(
+                            "dispatcher", auto_result["action"], managed["repo_name"], "info",
+                            f"Auto-fix {auto_result['action']} for {finding.category}: {auto_result['reason']}",
+                        )
 
         await s.log_event("change-analysis", "impact-analyzed", managed["repo_name"],
                            "info", impact.summary())
