@@ -40,7 +40,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import click
@@ -73,6 +73,8 @@ class SkillLearner:
         draft_retry_delay: int = 20,
         startup_grace_seconds: int = 120,
         startup_probe_interval: int = 10,
+        improvement_cooldown_attempts: int = 3,
+        improvement_cooldown_hours: float = 24.0,
     ) -> None:
         self._publisher = publisher
         self._llm_model = llm_model
@@ -91,6 +93,17 @@ class SkillLearner:
         self._draft_retry_delay = draft_retry_delay
         self._startup_grace_seconds = startup_grace_seconds
         self._startup_probe_interval = startup_probe_interval
+        # Backoff for the stuck-loop bug: without this, a flagged
+        # low-effectiveness skill that fails to improve gets re-attempted
+        # every single tick forever with zero new information (confirmed
+        # live: the Capabilities page's "Learning Agent Runs" table showed
+        # the same flagged skill's improvement attempt failing "couldn't be
+        # improved this time" over and over). After this many failed
+        # attempts within `improvement_cooldown_hours`, that skill is
+        # skipped (falling back to the next flagged skill or the CVE sweep)
+        # until the window ages out -- see `_recent_improvement_failure_counts`.
+        self._improvement_cooldown_attempts = improvement_cooldown_attempts
+        self._improvement_cooldown_hours = improvement_cooldown_hours
 
     async def research_once(self) -> tuple[list[str], list[str]]:
         """Research low-effectiveness skills first, falling back to a generic
@@ -134,13 +147,28 @@ class SkillLearner:
 
         flagged = await self._get_flagged_skills()
         if flagged:
-            click.echo(f"[skill-learn] {len(flagged)} low-effectiveness skill(s) flagged -- "
-                       "prioritizing improvement research over the generic CVE sweep this cycle.", err=True)
+            failure_counts = await self._recent_improvement_failure_counts()
+            eligible = [
+                entry for entry in flagged
+                if failure_counts.get(entry["skill"], 0) < self._improvement_cooldown_attempts
+            ]
+            cooling_down = [entry["skill"] for entry in flagged if entry not in eligible]
+            if cooling_down:
+                click.echo(
+                    f"[skill-learn] Backing off {len(cooling_down)} flagged skill(s) -- already failed "
+                    f"{self._improvement_cooldown_attempts}+ improvement attempt(s) in the last "
+                    f"{self._improvement_cooldown_hours:.0f}h with no new information, so not retrying "
+                    f"immediately: {', '.join(cooling_down)}", err=True,
+                )
+
+            if eligible:
+                click.echo(f"[skill-learn] {len(eligible)} low-effectiveness skill(s) flagged -- "
+                           "prioritizing improvement research over the generic CVE sweep this cycle.", err=True)
             from agentit.skill_engine import load_all_skills
             all_skills = await asyncio.to_thread(load_all_skills, self._skills_dir)
             by_name = {s.name: s for s in all_skills}
 
-            for entry in flagged[: self._limit]:
+            for entry in eligible[: self._limit]:
                 skill_name = entry["skill"]
                 skill = by_name.get(skill_name)
                 if skill is None:
@@ -341,6 +369,33 @@ class SkillLearner:
         except Exception:
             logger.warning("Failed to fetch low-effectiveness skills", exc_info=True)
             return []
+
+    async def _recent_improvement_failure_counts(self) -> dict[str, int]:
+        """How many times each flagged skill has already failed to improve
+        in the last ``self._improvement_cooldown_hours``, so a skill that
+        keeps coming up empty isn't re-attempted every single tick with no
+        new information (confirmed live: the Capabilities page's "Learning
+        Agent Runs" table showed the same flagged skill's improvement
+        attempt failing "couldn't be improved this time" over and over).
+
+        There's no dedicated attempts table -- every attempt already leaves
+        a durable trace via ``_log_run``/``describe_learning_run`` (the
+        failed skill's name lands in that run's ``details["skipped"]``
+        under ``mode == "skill-improvement"``), so replaying that history
+        is enough to detect the repeat-offender pattern without any new
+        persisted state. ``[]``/``{}`` on any store failure, same fail-open
+        convention as ``_get_flagged_skills()`` above.
+        """
+        if self._store is None or not hasattr(self._store, "list_events_by_action"):
+            return {}
+        from agentit.learning_agent import LEARNING_RUN_ACTION, count_recent_improvement_failures
+        try:
+            events = await self._store.list_events_by_action(LEARNING_RUN_ACTION, limit=50)
+        except Exception:
+            logger.warning("Failed to fetch learning-run history for improvement cooldown", exc_info=True)
+            return {}
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=self._improvement_cooldown_hours)
+        return count_recent_improvement_failures(events, cutoff)
 
     async def _wait_for_portal_draft_route(self) -> bool:
         """Block the first research tick until ``/api/webhook/skill-draft`` is

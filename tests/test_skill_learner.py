@@ -133,6 +133,135 @@ async def test_research_once_prioritizes_flagged_skill_over_cve_sweep(tmp_path):
     assert learning_runs[0]["severity"] == "info"
 
 
+class TestImprovementCooldown:
+    """Regression for the stuck-loop bug: the Capabilities page's "Learning
+    Agent Runs" table kept showing the exact same flagged low-effectiveness
+    skill failing "couldn't be improved this time" over and over, forever,
+    with zero memory of prior attempts. These prove a skill that's already
+    failed `improvement_cooldown_attempts` times within
+    `improvement_cooldown_hours` is backed off instead of retried
+    immediately, and that it still falls back to the CVE sweep when every
+    flagged skill is cooling down."""
+
+    async def _flag_skill(self, store, skill_name: str, *, rejected: int = 5) -> None:
+        for _ in range(rejected):
+            await store.record_skill_outcome(skill_name, "app-a", "rejected", "wrong")
+
+    async def test_skips_flagged_skill_after_cooldown_attempts_exhausted(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        (skills_dir / "security").mkdir(parents=True)
+        (skills_dir / "security" / "network-policy.md").write_text(
+            "---\nname: network-policy\ndomain: security\nversion: 1\n"
+            "triggers: [network]\noutputs: [NetworkPolicy]\nstatus: active\n---\nbody\n",
+            encoding="utf-8",
+        )
+        async_store, store = await make_async_store()
+        await self._flag_skill(store, "network-policy")
+
+        learner, _ = _learner(
+            store=async_store, skills_dir=skills_dir, improvement_cooldown_attempts=3,
+        )
+        # Simulate 3 prior failed improvement attempts against this exact
+        # skill, all recent (well within the default 24h cooldown window).
+        from agentit.learning_agent import LEARNING_RUN_ACTION, describe_learning_run
+        for _ in range(3):
+            severity, summary, details = describe_learning_run(
+                "watcher", "skill-improvement", [], ["network-policy"],
+            )
+            await store.log_event("skill-learner", LEARNING_RUN_ACTION, None, severity, summary, details=details)
+
+        with patch("agentit.llm.LLMClient", return_value=object()), \
+             patch("agentit.learning_agent.research_cves", return_value=[]) as mock_cves, \
+             patch("agentit.learning_agent.research_skill_improvement") as mock_improve:
+            saved, skipped = await learner.research_once()
+
+        mock_improve.assert_not_called()
+        mock_cves.assert_called_once()
+        assert saved == []
+        assert skipped == []
+
+    async def test_still_attempts_flagged_skill_below_cooldown_threshold(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        (skills_dir / "security").mkdir(parents=True)
+        (skills_dir / "security" / "network-policy.md").write_text(
+            "---\nname: network-policy\ndomain: security\nversion: 1\n"
+            "triggers: [network]\noutputs: [NetworkPolicy]\nstatus: active\n---\nbody\n",
+            encoding="utf-8",
+        )
+        async_store, store = await make_async_store()
+        await self._flag_skill(store, "network-policy")
+
+        learner, _ = _learner(
+            store=async_store, skills_dir=skills_dir, improvement_cooldown_attempts=3,
+        )
+        # Only 2 prior failures -- below the 3-attempt cooldown threshold,
+        # so this skill must still be attempted this cycle.
+        from agentit.learning_agent import LEARNING_RUN_ACTION, describe_learning_run
+        for _ in range(2):
+            severity, summary, details = describe_learning_run(
+                "watcher", "skill-improvement", [], ["network-policy"],
+            )
+            await store.log_event("skill-learner", LEARNING_RUN_ACTION, None, severity, summary, details=details)
+
+        with patch("agentit.llm.LLMClient", return_value=object()), \
+             patch("agentit.learning_agent.research_skill_improvement",
+                   return_value={"title": "network-policy-v2", "description": "better"}) as mock_improve, \
+             patch("agentit.learning_agent.generate_skill_from_research",
+                   return_value="---\nname: network-policy-v2\n---\nbody"), \
+             patch("agentit.learning_agent.save_skill",
+                   return_value=Path("/tmp/fake-skills/security/network-policy-v2.md")):
+            saved, skipped = await learner.research_once()
+
+        mock_improve.assert_called_once()
+        assert saved == ["network-policy-v2"]
+
+    async def test_cooldown_ignores_failures_older_than_the_window(self, tmp_path):
+        """A skill that failed 3 times a week ago (outside a 1h cooldown
+        window here) must not still be blocked -- the window ages out."""
+        skills_dir = tmp_path / "skills"
+        (skills_dir / "security").mkdir(parents=True)
+        (skills_dir / "security" / "network-policy.md").write_text(
+            "---\nname: network-policy\ndomain: security\nversion: 1\n"
+            "triggers: [network]\noutputs: [NetworkPolicy]\nstatus: active\n---\nbody\n",
+            encoding="utf-8",
+        )
+        async_store, store = await make_async_store()
+        await self._flag_skill(store, "network-policy")
+
+        learner, _ = _learner(
+            store=async_store, skills_dir=skills_dir,
+            improvement_cooldown_attempts=3, improvement_cooldown_hours=1.0,
+        )
+        # 3 prior failures, backdated to 2 hours ago -- outside this
+        # learner's 1h cooldown window (real datetime object, matching the
+        # asyncpg TIMESTAMPTZ column, not an ISO string).
+        from datetime import datetime, timedelta, timezone
+        from agentit.learning_agent import LEARNING_RUN_ACTION, describe_learning_run
+        old_timestamp = datetime.now(timezone.utc) - timedelta(hours=2)
+        for _ in range(3):
+            severity, summary, details = describe_learning_run(
+                "watcher", "skill-improvement", [], ["network-policy"],
+            )
+            event_id = await store.log_event(
+                "skill-learner", LEARNING_RUN_ACTION, None, severity, summary, details=details,
+            )
+            await store._pool.execute(
+                "UPDATE events SET timestamp = $1 WHERE id = $2", old_timestamp, event_id,
+            )
+
+        with patch("agentit.llm.LLMClient", return_value=object()), \
+             patch("agentit.learning_agent.research_skill_improvement",
+                   return_value={"title": "network-policy-v2", "description": "better"}) as mock_improve, \
+             patch("agentit.learning_agent.generate_skill_from_research",
+                   return_value="---\nname: network-policy-v2\n---\nbody"), \
+             patch("agentit.learning_agent.save_skill",
+                   return_value=Path("/tmp/fake-skills/security/network-policy-v2.md")):
+            saved, skipped = await learner.research_once()
+
+        mock_improve.assert_called_once()
+        assert saved == ["network-policy-v2"]
+
+
 class TestTickNotDuplicatedAcrossRestarts:
     """Regression for the interval/frequency-mismatch bug: the Capabilities
     page's "Learning Agent Runs" table showed "Automatic (24h watcher)" rows

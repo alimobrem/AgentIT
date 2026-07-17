@@ -331,3 +331,47 @@ def describe_learning_run(
         )
         return "warning", summary, details
     return "warning", "No new skills generated — research returned nothing usable this time.", details
+
+
+def count_recent_improvement_failures(events: list[dict], cutoff: datetime) -> dict[str, int]:
+    """Count how many times each skill name shows up in ``skipped`` across
+    recent ``learning-run`` events logged with ``mode == "skill-improvement"``
+    and a timestamp at or after ``cutoff``.
+
+    This is the read side of the skill-improvement cooldown/backoff fix:
+    without it, a flagged low-effectiveness skill that fails to improve
+    gets re-researched every single tick forever with no new information
+    (confirmed live: the same skill's improvement attempt kept failing
+    "couldn't be improved this time" repeatedly). There's no dedicated
+    attempts table -- every attempt already leaves a durable trace via
+    ``describe_learning_run``'s ``details`` above, so replaying that
+    history is enough to detect "we've already tried this one N times
+    recently" without any new persisted state.
+
+    ``events`` is the raw shape ``AssessmentStore.list_events_by_action()``
+    returns (``timestamp`` an ISO-8601 string, ``details_json`` a JSON
+    string) -- any event missing or malformed in either field is skipped,
+    not raised on.
+    """
+    counts: dict[str, int] = {}
+    for ev in events:
+        ts = ev.get("timestamp")
+        if not ts:
+            continue
+        try:
+            when = datetime.fromisoformat(ts)
+        except (TypeError, ValueError):
+            continue
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        if when < cutoff:
+            continue
+        try:
+            run_details = json.loads(ev.get("details_json") or "{}")
+        except (TypeError, ValueError):
+            continue
+        if run_details.get("mode") != "skill-improvement":
+            continue
+        for skill_name in run_details.get("skipped") or []:
+            counts[skill_name] = counts.get(skill_name, 0) + 1
+    return counts

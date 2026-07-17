@@ -5,7 +5,14 @@ leaves a durable trace" transparency work shared by the portal's
 skill-learner watcher (watchers/skill_learner.py)."""
 from __future__ import annotations
 
-from agentit.learning_agent import LEARNING_RUN_ACTION, describe_learning_run
+import json
+from datetime import datetime, timedelta, timezone
+
+from agentit.learning_agent import (
+    LEARNING_RUN_ACTION,
+    count_recent_improvement_failures,
+    describe_learning_run,
+)
 
 
 def test_action_name_is_stable():
@@ -71,3 +78,72 @@ def test_mode_none_when_run_never_reached_a_mode():
     assert severity == "error"
     assert details["mode"] is None
     assert "no credentials" in summary
+
+
+def _run_event(*, hours_ago: float, mode: str | None, skipped: list[str]) -> dict:
+    """Build one raw event dict in the exact shape
+    ``AssessmentStore.list_events_by_action()`` returns -- ``timestamp`` an
+    ISO-8601 string, ``details_json`` a JSON string (not pre-parsed)."""
+    timestamp = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
+    details = {"trigger": "watcher", "mode": mode, "saved": [], "skipped": skipped}
+    return {"timestamp": timestamp, "details_json": json.dumps(details)}
+
+
+class TestCountRecentImprovementFailures:
+    """Read side of the stuck-loop fix -- the same flagged skill kept
+    failing to improve "couldn't be improved this time" on every single
+    tick with zero cooldown/backoff logic. This reconstructs a per-skill
+    recent-failure count from ``learning-run`` history alone, with no new
+    persisted attempts table."""
+
+    def test_counts_skipped_skill_improvement_entries_within_window(self):
+        events = [
+            _run_event(hours_ago=1, mode="skill-improvement", skipped=["network-policy"]),
+            _run_event(hours_ago=2, mode="skill-improvement", skipped=["network-policy"]),
+        ]
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+
+        counts = count_recent_improvement_failures(events, cutoff)
+
+        assert counts == {"network-policy": 2}
+
+    def test_ignores_events_older_than_cutoff(self):
+        events = [
+            _run_event(hours_ago=1, mode="skill-improvement", skipped=["network-policy"]),
+            _run_event(hours_ago=48, mode="skill-improvement", skipped=["network-policy"]),
+        ]
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+
+        counts = count_recent_improvement_failures(events, cutoff)
+
+        assert counts == {"network-policy": 1}
+
+    def test_ignores_cve_sweep_mode_entries(self):
+        """A skipped CVE (already has a matching skill) is unrelated to the
+        skill-improvement cooldown -- must not count towards it."""
+        events = [_run_event(hours_ago=1, mode="cve-sweep", skipped=["CVE-2099-0001"])]
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+
+        counts = count_recent_improvement_failures(events, cutoff)
+
+        assert counts == {}
+
+    def test_ignores_events_with_no_skipped_skills(self):
+        events = [_run_event(hours_ago=1, mode="skill-improvement", skipped=[])]
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+
+        assert count_recent_improvement_failures(events, cutoff) == {}
+
+    def test_tolerates_malformed_events(self):
+        """A missing timestamp or unparseable details_json must be skipped,
+        not raised on -- this reads store history, which should never be
+        able to crash a research tick."""
+        events = [
+            {"timestamp": None, "details_json": "{}"},
+            {"timestamp": "not-a-date", "details_json": "{}"},
+            {"timestamp": datetime.now(timezone.utc).isoformat(), "details_json": "not json"},
+            _run_event(hours_ago=1, mode="skill-improvement", skipped=["network-policy"]),
+        ]
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+
+        assert count_recent_improvement_failures(events, cutoff) == {"network-policy": 1}
