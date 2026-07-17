@@ -231,6 +231,42 @@ class TestFleetAndTrend:
         assert fleet[0]["ever_onboarded"] is True
         assert await store.repo_has_onboarding(fleet[0]["repo_url"]) is True
 
+    async def test_fleet_collapses_git_suffix_and_trailing_slash_duplicates(self, store):
+        """Regression: the same repo submitted once without a `.git` suffix
+        (e.g. via `self_assess_route`'s hardcoded URL) and once with one
+        (e.g. pasted from GitHub's own "Clone" HTTPS URL, or via a
+        manually-typed "Assess New Repo" submission) must land in
+        `get_fleet_data()` as ONE row, not two -- `repo_name` already
+        collapses these superficially (both display as the same name),
+        which is exactly what made two real rows look like a grouping bug
+        rather than the two-distinct-repo_url-strings issue it actually is.
+        """
+        from conftest import make_report
+
+        bare_id = await store.save(make_report(repo_name="dup-app", repo_url="https://github.com/org/dup-app"))
+        dotgit_id = await store.save(make_report(repo_name="dup-app", repo_url="https://github.com/org/dup-app.git"))
+        slash_id = await store.save(make_report(repo_name="dup-app", repo_url="https://github.com/org/dup-app/"))
+
+        fleet = [r for r in await store.get_fleet_data() if r["repo_name"] == "dup-app"]
+        assert len(fleet) == 1
+        assert fleet[0]["repo_url"] == "https://github.com/org/dup-app"
+        assert fleet[0]["assessment_count"] == 3
+
+        # The stored reports themselves were normalized too, not just the
+        # fleet aggregation query -- `list_history`/`repo_has_onboarding`/etc
+        # all key on the exact stored string, so this must be true for
+        # those to see one identity rather than three.
+        for aid in (bare_id, dotgit_id, slash_id):
+            report = await store.get(aid)
+            assert report.repo_url == "https://github.com/org/dup-app"
+
+    async def test_normalize_repo_url_preserves_case(self):
+        """Deliberately NOT case-folded -- see `normalize_repo_url()`'s
+        docstring for why."""
+        from agentit.portal.store import normalize_repo_url
+        assert normalize_repo_url("https://github.com/AliMobrem/AgentIT.git/") == \
+            "https://github.com/AliMobrem/AgentIT"
+
     async def test_assessment_job_continue_onboard_claim_once(self, store):
         job_id = await store.create_assessment_job(
             "https://github.com/org/chain-app", continue_onboard=True,

@@ -364,6 +364,36 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def normalize_repo_url(repo_url: str) -> str:
+    """Canonicalize a repo URL before it's stored/compared as the identity
+    key `get_fleet_data()` (and every other repo-scoped query) groups by.
+
+    Without this, the exact same repo submitted once as e.g.
+    ``https://github.com/org/app`` (the form's own placeholder text, and
+    what `self_assess_route`'s hardcoded URL uses) and once as
+    ``https://github.com/org/app.git`` (the default form GitHub's own
+    "Clone" HTTPS URL uses, or a trailing slash from a pasted browser URL)
+    are two different strings -- `repo_name`, derived from this same
+    string via ``repo_url.rstrip("/").split("/")[-1].removesuffix(".git")``
+    (see `runner.py`), happens to normalize those two particular
+    differences away for *display*, so Fleet shows two rows with an
+    identical name for what a human reasonably expects to be one app.
+
+    Deliberately does not touch letter case: GitHub owner/repo path
+    segments are case-preserving in the UI and in every generated display
+    name/URL derived from this string, even though GitHub's own routing is
+    case-insensitive -- lowercasing here would silently rename every
+    already-displayed app and could break exact-string comparisons
+    elsewhere (e.g. GitHub API calls) that expect the real casing.
+    """
+    url = repo_url.strip()
+    while url.endswith("/"):
+        url = url[:-1]
+    if url.lower().endswith(".git"):
+        url = url[: -len(".git")]
+    return url
+
+
 class AssessmentStore:
     """The one and only ``AssessmentStore``. Postgres-backed, fully async.
 
@@ -515,6 +545,12 @@ class AssessmentStore:
 
     async def save(self, report: AssessmentReport) -> str:
         assessment_id = uuid.uuid4().hex
+        # Normalize once, in place, so every downstream use of `report.repo_url`
+        # in THIS call (the INSERT below, `_upsert_app`) and in the caller
+        # (e.g. `assess_submit`'s `list_history(report.repo_url)`) all see the
+        # same canonical string -- see `normalize_repo_url()` for why this
+        # matters for `get_fleet_data()`'s `GROUP BY repo_url`.
+        report.repo_url = normalize_repo_url(report.repo_url)
         if report.infra_repo_url is None:
             report.infra_repo_url = await self._last_known_infra_repo_url(report.repo_url)
         await self._pool.execute(
