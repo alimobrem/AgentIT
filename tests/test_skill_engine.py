@@ -6,8 +6,10 @@ import asyncio
 
 from pathlib import Path
 
+import pytest
+
 from agentit.platform_context import offline_context
-from agentit.skill_engine import Skill, SkillEngine, _pluralize_kind
+from agentit.skill_engine import Skill, SkillEngine, UnresolvedPlaceholderError, _pluralize_kind, _render_template
 from conftest import make_report
 
 
@@ -152,6 +154,155 @@ class TestLLMPassthrough:
 
         assert len(fake_llm.calls) == 1
         assert len(files) == 1
+
+
+_TWO_PLACEHOLDER_TEMPLATE_BODY = """# Two-placeholder template (regression fixture)
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{app_name}}
+  namespace: {{namespace}}
+spec:
+  selector:
+    matchLabels:
+      app: {{app_name}}
+  template:
+    metadata:
+      labels:
+        app: {{app_name}}
+    spec:
+      containers:
+        - name: {{app_name}}
+          image: "{{image}}"
+```
+"""
+
+# A response that fails validate_manifest() on every attempt (missing both
+# 'kind' and 'metadata.name'/'generateName') -- simulating a real
+# `stop_reason=max_tokens` truncation, which _chat() still returns as
+# non-None text (just a warning log), not None. _generate_with_llm() then
+# exhausts its 2 retry attempts and returns [], forcing generate() to fall
+# back to the raw template -- exactly the path the live self-assessment run
+# hit twice (app-rollout-patch.yaml, app-compliance-cronjob.yaml).
+_TRUNCATED_LLM_RESPONSE = (
+    "apiVersion: apps/v1\n"
+    "kind: Deployment\n"
+    "metadata:\n"
+    "  labels:\n"
+    "    app: truncated-mid-ob"
+)
+
+
+class TestLLMTruncationFallbackPlaceholderSubstitution:
+    """Regression coverage for the live-reproduced bug: when an LLM call
+    truncates (stop_reason=max_tokens) and generate() falls back to the raw
+    template, the OLD substitution loop only ever replaced `{{app_name}}` --
+    every other placeholder (`{{image}}`, `{{namespace}}`, etc.) shipped
+    literally in the final manifest. Confirmed live: app-rollout-patch.yaml
+    shipped `image: "{{image}}"`; app-compliance-cronjob.yaml shipped
+    `"--namespace", "{{namespace}}"` verbatim.
+    """
+
+    def _skill(self) -> Skill:
+        return Skill(
+            name="two-placeholder-deploy",
+            domain="security",
+            version=1,
+            triggers=["network"],
+            outputs=["Deployment"],
+            property_description="two-placeholder-deploy property",
+            body=_TWO_PLACEHOLDER_TEMPLATE_BODY,
+            file_path="skills/security/two-placeholder-deploy.md",
+            mode="llm",
+        )
+
+    def test_llm_truncation_forces_template_fallback(self, tmp_path: Path) -> None:
+        """Sanity check that the truncated response really does exhaust
+        both LLM attempts and fall through to the template path (i.e. this
+        test fixture actually reproduces the reported trigger condition)."""
+        engine = SkillEngine(tmp_path, platform=offline_context())
+        skill = self._skill()
+        report = make_report(repo_name="my-app")
+        fake_llm = _FakeLLMClient(_TRUNCATED_LLM_RESPONSE)
+
+        files = engine.generate(skill, report, llm_client=fake_llm)
+
+        assert len(fake_llm.calls) == 2, "expected both LLM retry attempts to be exhausted"
+        # Whatever generate() returns here (template content or a hard
+        # rejection) must come from the template-fallback path, not the
+        # (invalid) LLM response -- verified precisely by the two tests below.
+        assert files == [] or "Deployment" in files[0].content
+
+    def test_known_placeholders_are_fully_substituted_not_shipped_literally(self, tmp_path: Path) -> None:
+        """`{{namespace}}` has a real, known value (the app's own namespace,
+        matching routes/assessments.py's delivery convention) -- it must be
+        substituted, never shipped as literal `{{namespace}}` text. This
+        alone reproduces the confirmed app-compliance-cronjob.yaml bug
+        (`"--namespace", "{{namespace}}"` shipped verbatim)."""
+        skill_body = _TWO_PLACEHOLDER_TEMPLATE_BODY.replace('image: "{{image}}"', "restartPolicy: Always")
+        skill = Skill(
+            name="namespace-only-deploy", domain="security", version=1,
+            triggers=["network"], outputs=["Deployment"],
+            property_description="namespace-only-deploy property",
+            body=skill_body, file_path="skills/security/namespace-only-deploy.md",
+            mode="llm",
+        )
+        engine = SkillEngine(tmp_path, platform=offline_context())
+        report = make_report(repo_name="my-app")
+        fake_llm = _FakeLLMClient(_TRUNCATED_LLM_RESPONSE)
+
+        files = engine.generate(skill, report, llm_client=fake_llm)
+
+        assert len(files) == 1, "template fallback should fully substitute and ship a file"
+        content = files[0].content
+        assert "{{" not in content, f"unsubstituted placeholder(s) leaked into output: {content}"
+        assert "namespace: my-app" in content
+        assert "name: my-app" in content
+
+    def test_unresolvable_placeholder_hard_fails_instead_of_shipping_literal_text(self, tmp_path: Path) -> None:
+        """`{{image}}` has no real, known value in this code path -- rather
+        than ship `image: "{{image}}"` literally (the confirmed
+        app-rollout-patch.yaml bug), generation must hard-fail (produce no
+        file) instead of silently shipping broken output."""
+        engine = SkillEngine(tmp_path, platform=offline_context())
+        skill = self._skill()
+        report = make_report(repo_name="my-app")
+        fake_llm = _FakeLLMClient(_TRUNCATED_LLM_RESPONSE)
+
+        files = engine.generate(skill, report, llm_client=fake_llm)
+
+        assert files == [], "must hard-fail (no file) rather than ship literal {{image}} text"
+
+    def test_render_template_raises_on_unresolved_placeholder(self) -> None:
+        """Unit-level check on the substitution primitive itself."""
+        with pytest.raises(UnresolvedPlaceholderError) as exc_info:
+            _render_template("image: {{image}}\nname: {{app_name}}", {"app_name": "my-app"})
+        assert exc_info.value.placeholders == ["image"]
+
+    def test_render_template_substitutes_every_provided_variable(self) -> None:
+        rendered = _render_template(
+            "name: {{app_name}}\nnamespace: {{namespace}}\nrepoURL: {{git_url}}",
+            {"app_name": "my-app", "namespace": "my-app", "git_url": "https://github.com/org/my-app"},
+        )
+        assert rendered == "name: my-app\nnamespace: my-app\nrepoURL: https://github.com/org/my-app"
+
+    def test_go_template_alertmanager_syntax_is_never_treated_as_unresolved(self) -> None:
+        """Alertmanager/Go-template notification syntax (`{{ .AlertName }}`,
+        `{{ range .Alerts }}...{{ end }}`) is legitimate content those
+        skills ship verbatim for Alertmanager itself to evaluate at
+        alert-fire time -- it must never be misidentified as an AgentIT
+        placeholder and must never trigger the hard-fail safety net."""
+        text = (
+            'description_template: "[CRITICAL] {{app_name}} - {{ .AlertName }}: {{ .Summary }}"\n'
+            'title: "[{{ .Status | toUpper }}] {{ .GroupLabels.alertname }}"\n'
+            'text: "{{ range .Alerts }}{{ .Annotations.summary }}\\n{{ end }}"\n'
+        )
+        rendered = _render_template(text, {"app_name": "my-app"})
+        assert "{{ .AlertName }}" in rendered
+        assert "{{ range .Alerts }}" in rendered
+        assert "my-app" in rendered
 
 
 class TestRunAllStoreWiring:

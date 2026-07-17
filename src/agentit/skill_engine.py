@@ -32,6 +32,90 @@ def _pluralize_kind(kind: str) -> str:
     return _IRREGULAR_KIND_PLURALS.get(lower, lower + "s")
 
 
+# Matches only AgentIT's own bare-identifier placeholders (e.g. {{app_name}},
+# {{namespace}}, {{scanner_image}}) -- deliberately the same shape as
+# test_all_skills.py's `re.sub(r"\{\{(\w+)\}\}", ...)` sanitization regex, so
+# both agree on what counts as "an AgentIT placeholder". This must NOT match
+# Go-template/Alertmanager notification syntax skills legitimately ship
+# verbatim for the receiving system to evaluate at runtime (e.g.
+# `{{ .GroupLabels.alertname }}`, `{{ range .Alerts }}...{{ end }}` in
+# alertmanager-config.md/pagerduty-config.md) -- those always have a leading
+# space/dot or pipe/keyword, which `\w+` alone never matches.
+_PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
+
+
+class UnresolvedPlaceholderError(Exception):
+    """Raised when a rendered skill template still contains literal
+    ``{{...}}`` placeholder text after substituting every value this
+    method actually has real data for.
+
+    This is the safety net for template-fallback generation: it guarantees
+    a manifest with unsubstituted placeholders (e.g. ``image: "{{image}}"``)
+    never reaches a ``GeneratedFile`` a user might apply to a real cluster.
+    """
+
+    def __init__(self, placeholders: list[str]) -> None:
+        self.placeholders = placeholders
+        super().__init__(f"unresolved placeholder(s): {', '.join(placeholders)}")
+
+
+def _template_variables(app_name: str, report: AssessmentReport) -> dict[str, str]:
+    """Real, already-available substitution values for skill templates.
+
+    Deliberately small: every value here has a genuine, non-fabricated
+    source of truth, so a skill that needs something not listed (a
+    scanner image, cost center, team, environment, ...) gets no
+    substitution for it and ``_render_template`` hard-fails rather than
+    inventing a value (per the "no mock data" rule -- see AGENTS docs).
+
+    - ``namespace`` intentionally mirrors ``routes/assessments.py``'s
+      delivery route (``namespace = report.repo_name.lower()...``), i.e.
+      the real convention this codebase already uses for "the onboarded
+      app's own namespace" -- NOT ``self.platform.namespace``, which is
+      AgentIT's *own* operating namespace (see ``PlatformContext``), a
+      different thing entirely.
+    - ``repo_url``/``git_url`` are the same real value
+      (``report.repo_url``) under the two different placeholder names
+      different skills happen to use (argocd-application.md uses
+      ``{{git_url}}``, tekton-pipeline.md uses ``{{repo_url}}``).
+    - ``image_ref`` is ``image_builder.get_image_ref(app_name)`` -- the
+      exact internal-registry path ``build_app_image()`` already pushes
+      to from its two real production call sites (``webhooks.py``,
+      ``assessments.py``, both calling it with no explicit namespace, i.e.
+      its "agentit" default) -- a true statement regardless of build
+      history (this is where the Pipeline this skill defines *will* push
+      to), unlike a *deployed* container's ``{{image}}`` (rollout-patch.md,
+      argo-rollout.md), which would be an unverifiable claim that a build
+      already happened. That distinction is why only ``image_ref`` is
+      listed here.
+    """
+    from agentit.image_builder import get_image_ref
+
+    return {
+        "app_name": app_name,
+        "namespace": app_name,
+        "repo_url": report.repo_url,
+        "git_url": report.repo_url,
+        "image_ref": get_image_ref(app_name),
+    }
+
+
+def _render_template(template_text: str, variables: dict[str, str]) -> str:
+    """Substitute every known placeholder in *variables*, then hard-fail
+    (raise ``UnresolvedPlaceholderError``) if any AgentIT-style ``{{...}}``
+    placeholder remains -- rather than returning content with literal
+    unsubstituted text a caller might ship as a real manifest.
+    """
+    rendered = template_text
+    for key, value in variables.items():
+        rendered = rendered.replace(f"{{{{{key}}}}}", value)
+
+    unresolved = sorted(set(_PLACEHOLDER_RE.findall(rendered)))
+    if unresolved:
+        raise UnresolvedPlaceholderError(unresolved)
+    return rendered
+
+
 @dataclass
 class Skill:
     """A single skill definition loaded from a Markdown file with YAML frontmatter."""
@@ -219,7 +303,15 @@ class SkillEngine:
         if skill.mode == "template" or skill.mode == "llm":
             template_text = _extract_template(skill.body)
             if template_text:
-                rendered = template_text.replace("{{app_name}}", app_name)
+                try:
+                    rendered = _render_template(template_text, _template_variables(app_name, report))
+                except UnresolvedPlaceholderError as exc:
+                    logger.error(
+                        "Skill %s template-fallback generation for %s rejected: %s "
+                        "-- refusing to ship a manifest with literal placeholder text",
+                        skill.name, app_name, exc,
+                    )
+                    return []
                 return [GeneratedFile(
                     path=f"{app_name}-{skill.name}.yaml",
                     content=rendered,
