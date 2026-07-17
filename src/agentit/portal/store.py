@@ -1605,16 +1605,27 @@ class AssessmentStore:
 
     # ── Remediation Jobs ──────────────────────────────────────────────────
 
-    async def create_remediation_job(self, assessment_id: str) -> str:
+    async def create_remediation_job(self, assessment_id: str, auto_deliver: bool = False) -> str:
+        """Create a tracking job for an async onboarding run.
+
+        When ``auto_deliver`` is True, ``steps_completed`` starts with
+        ``["auto_deliver"]`` -- mirrors ``create_assessment_job()``'s
+        ``continue_onboard`` flag convention exactly, so
+        ``onboard_progress``/its SSE fragment can show the "Dry Run and
+        Deliver will run automatically" signal, and ``_run_onboarding_job``
+        knows whether to chain into the automatic Dry Run -> Deliver
+        sequence once manifests are saved.
+        """
         job_id = uuid.uuid4().hex
         now = _now()
+        steps = '["auto_deliver"]' if auto_deliver else "[]"
         await self._pool.execute(
             """
             INSERT INTO remediation_jobs
                 (id, assessment_id, status, current_step, steps_completed, error, created_at, updated_at)
-            VALUES ($1, $2, 'pending', '', '[]'::jsonb, '', $3, $4)
+            VALUES ($1, $2, 'pending', '', $3::jsonb, '', $4, $5)
             """,
-            job_id, assessment_id, now, now,
+            job_id, assessment_id, steps, now, now,
         )
         return job_id
 

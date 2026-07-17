@@ -407,6 +407,29 @@ class TestRouteAndDeliverCicdLane:
         outcome = result["outcomes"][CATEGORY_CICD_SHARED_NAMESPACE]
         assert outcome["gate_id"] == gates[0]["id"]
 
+    async def test_dry_run_never_creates_a_real_gate(self):
+        """A real Dry Run must stay a pure preview -- no side effects --
+        exactly like every other category. Found via the automatic Dry Run
+        -> Deliver chain (assessments.py's onboarding auto-chain): a Dry
+        Run that now runs unconditionally after every onboarding surfaced
+        that this branch had no such guard, unlike every other mechanism
+        here -- a "preview" call was silently opening a real, pending
+        cluster-admin-review gate."""
+        store, raw = await make_async_store()
+        report = make_report()
+        aid = await raw.save(report)
+        result = await route_and_deliver(
+            [_cicd_file()], app_name=report.repo_name, namespace="ns",
+            report=report, store=store, assessment_id=aid,
+            actor="tester", dry_run=True,
+        )
+        gates = await raw.list_gates(status="pending")
+        assert gates == []
+        outcome = result["outcomes"][CATEGORY_CICD_SHARED_NAMESPACE]
+        assert outcome["dry_run"] is True
+        assert "gate_id" not in outcome
+        assert outcome["files"] == ["pipeline.yaml"]
+
 
 class TestRouteAndDeliverSourcePatch:
     async def test_source_patch_routes_to_source_repo_pr_with_target_path(self):

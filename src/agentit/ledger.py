@@ -74,6 +74,15 @@ _EVENT_ACTION_TO_CARD_TYPE: dict[str, str] = {
     # human would actually look (docs/onboarding-loop-vision-gap-analysis.md
     # Phase 0 item 4).
     "infra-repo-creation-failed": "I",
+    # The automatic Dry Run -> Deliver chain (docs/onboarding-loop-vision-
+    # gap-analysis.md Phase 3) halting at a real gate -- no infra repo
+    # known, a routing error, etc. -- is exactly the same "something in the
+    # pipeline needs attention" shape as the other two entries in this
+    # bucket. A successful auto-chain deliberately has no event mapped
+    # here: `route_and_deliver()`'s own `deliveries` row already produces
+    # card F for it, and adding a second card for the same delivery would
+    # be a duplicate, not new signal.
+    "onboard-auto-deliver-blocked": "I",
     "rollback-recommended": "J",
     "drift-detected": "K",
     "drift-auto-synced": "K",

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from agentit import kube
 from agentit.audit import audit_log
@@ -661,12 +662,29 @@ async def route_and_deliver(
                 }
 
         if cicd_files:
-            gate_id = await store.create_gate(
-                assessment_id, "cluster-admin-review", _cicd_gate_summary(cicd_files),
-            )
-            outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = {
-                "gate_id": gate_id, "files": [f["path"] for f in cicd_files],
-            }
+            # A real Dry Run must stay a pure preview -- no side effects --
+            # exactly like every other category above (`deliver_with_
+            # verification()`'s own `dry_run=True` branch never mutates
+            # anything either). Discovered via the automatic Dry Run ->
+            # Deliver chain (``auto_dry_run_then_deliver()``): a Dry Run
+            # that ran unconditionally after every onboarding surfaced that
+            # this branch had no such guard, unlike every other mechanism
+            # here -- a "preview" click was silently opening a real,
+            # pending cluster-admin-review gate. Fixed here rather than
+            # only in the automatic path, since a human's manual Dry Run
+            # click had exactly the same latent bug.
+            if dry_run:
+                outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = {
+                    "dry_run": True, "mechanism": MECHANISM_CLUSTER_ADMIN_REVIEW_GATE,
+                    "files": [f["path"] for f in cicd_files],
+                }
+            else:
+                gate_id = await store.create_gate(
+                    assessment_id, "cluster-admin-review", _cicd_gate_summary(cicd_files),
+                )
+                outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = {
+                    "gate_id": gate_id, "files": [f["path"] for f in cicd_files],
+                }
 
         if source_files:
             if report is not None:
@@ -715,4 +733,104 @@ async def route_and_deliver(
         "blocked": [f["path"] for f in blocked],
         "placeholder_blocked": [f["path"] for f in placeholder_blocked],
         "excluded": [f["path"] for f in excluded],
+    }
+
+
+def _outcome_errors(delivery: dict) -> list[str]:
+    """Every ``{"error": ...}`` a ``route_and_deliver()`` result's per-
+    category outcomes carry -- the same signal the manual Deliver route
+    (``routes/assessments.py::deliver()``) already uses to build its
+    ``error=`` flash, reused here so a real routing/delivery failure means
+    the same thing regardless of who triggered it."""
+    return [
+        o["error"] for o in delivery["outcomes"].values()
+        if isinstance(o, dict) and o.get("error")
+    ]
+
+
+async def auto_dry_run_then_deliver(
+    files: list[dict],
+    *,
+    app_name: str,
+    namespace: str,
+    report: AssessmentReport | None,
+    store: object,
+    assessment_id: str,
+    actor: str,
+    on_stage: Callable[[str], Awaitable[None]] | None = None,
+) -> dict:
+    """Onboarding's own automatic "Dry Run, then Deliver" chain -- the same
+    two steps a human already clicks by hand on Onboard Results, run back-
+    to-back once onboarding finishes (docs/onboarding-loop-vision-gap-
+    analysis.md Phase 3, scoped narrowly to this, not ``AutoMode``'s LLM-
+    classification path).
+
+    Calls the exact same ``route_and_deliver()`` the manual Dry Run and
+    Deliver clicks call, in the same order, through the same classify/
+    secret-block/placeholder-strip/GitOps-mandatory logic -- so the secret-
+    block and placeholder-guard apply identically regardless of who
+    triggered delivery, and the mechanism can only ever be the GitOps
+    commit+PR (or the legacy ``MECHANISM_NONE`` refusal for a pre-mandatory-
+    GitOps assessment), never a direct apply.
+
+    Dry Run is a real, respected gate here, not a rubber stamp: if it
+    raises, or if any category's dry-run outcome carries an ``"error"``
+    (e.g. ``MECHANISM_NONE`` -- no infra repo known), this returns
+    immediately with ``ok=False`` and ``stage="dry_run"`` -- the real
+    Deliver call is never attempted. ``on_stage(stage)`` (when given) is
+    awaited right before each of the two ``route_and_deliver()`` calls,
+    purely so a caller (``_run_onboarding_job``) can reflect the chain's
+    real progress onto its own job-tracking row -- this function makes no
+    store writes of its own beyond what ``route_and_deliver()`` already
+    does.
+    """
+    if on_stage:
+        await on_stage("dry_run")
+    try:
+        dry_run_result = await route_and_deliver(
+            files, app_name=app_name, namespace=namespace, report=report,
+            store=store, assessment_id=assessment_id, actor=actor, dry_run=True,
+        )
+    except Exception as exc:
+        return {"ok": False, "stage": "dry_run", "error": str(exc)[:300]}
+
+    dry_run_errors = _outcome_errors(dry_run_result)
+    if dry_run_errors:
+        return {
+            "ok": False, "stage": "dry_run",
+            "error": " | ".join(dry_run_errors)[:300],
+            "delivery": dry_run_result,
+        }
+
+    if on_stage:
+        await on_stage("delivering")
+    try:
+        deliver_result = await route_and_deliver(
+            files, app_name=app_name, namespace=namespace, report=report,
+            store=store, assessment_id=assessment_id, actor=actor, dry_run=False,
+        )
+    except Exception as exc:
+        return {"ok": False, "stage": "deliver", "error": str(exc)[:300]}
+
+    deliver_errors = _outcome_errors(deliver_result)
+    if deliver_errors:
+        return {
+            "ok": False, "stage": "deliver",
+            "error": " | ".join(deliver_errors)[:300],
+            "delivery": deliver_result,
+        }
+
+    pr_url = ""
+    pr_url_repo = ""
+    for cat, o in deliver_result["outcomes"].items():
+        if isinstance(o, dict) and o.get("pr_url"):
+            pr_url = o["pr_url"]
+            pr_url_repo = repo_kind_for_mechanism(deliver_result["mechanisms"].get(cat, ""))
+            break
+
+    return {
+        "ok": True, "stage": "delivered",
+        "delivery": deliver_result,
+        "pr_url": pr_url,
+        "pr_url_repo": pr_url_repo,
     }
