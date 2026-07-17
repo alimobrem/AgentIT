@@ -5,8 +5,72 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from kubernetes.config import ConfigException
 
 from agentit import kube
+
+
+class TestOfflineMode:
+    """``AGENTIT_OFFLINE`` guarantees zero cluster access -- regression
+    coverage for the finding (hit independently by both a customer-review
+    and a UX review pass) that `unset KUBECONFIG` alone is NOT sufficient:
+    the Kubernetes Python client's default config-resolution chain still
+    falls back to the ambient default ``~/.kube/config`` regardless."""
+
+    def test_get_client_raises_immediately_without_resolving_config(self):
+        with patch.dict("os.environ", {"AGENTIT_OFFLINE": "1"}), \
+             patch("kubernetes.config.load_incluster_config") as mock_incluster, \
+             patch("kubernetes.config.load_kube_config") as mock_kubeconfig:
+            with pytest.raises(kube.KubeError, match="AGENTIT_OFFLINE"):
+                kube.get_client()
+
+        mock_incluster.assert_not_called()
+        mock_kubeconfig.assert_not_called()
+
+    def test_offline_check_runs_before_the_cache_lookup(self):
+        """Toggling AGENTIT_OFFLINE mid-session must not be bypassed by an
+        already-resolved client cached from before it was set."""
+        with patch("agentit.kube._client_cache", MagicMock()), \
+             patch("agentit.kube._client_cache_time", kube._time.monotonic()), \
+             patch.dict("os.environ", {"AGENTIT_OFFLINE": "1"}):
+            with pytest.raises(kube.KubeError, match="AGENTIT_OFFLINE"):
+                kube.get_client()
+
+    @pytest.mark.parametrize("value", ["1", "true", "True", "on", "ON"])
+    def test_truthy_values_all_trigger_offline_mode(self, value):
+        with patch.dict("os.environ", {"AGENTIT_OFFLINE": value}), \
+             patch("kubernetes.config.load_incluster_config") as mock_incluster, \
+             patch("kubernetes.config.load_kube_config") as mock_kubeconfig:
+            with pytest.raises(kube.KubeError, match="AGENTIT_OFFLINE"):
+                kube.get_client()
+
+        mock_incluster.assert_not_called()
+        mock_kubeconfig.assert_not_called()
+
+    def test_falsy_value_does_not_enable_offline_mode(self):
+        with patch.dict("os.environ", {"AGENTIT_OFFLINE": "0"}), \
+             patch("agentit.kube._client_cache", None), \
+             patch("kubernetes.config.load_incluster_config", side_effect=ConfigException("no in-cluster config")), \
+             patch("kubernetes.config.load_kube_config") as mock_kubeconfig:
+            kube.get_client()
+
+        mock_kubeconfig.assert_called_once()
+
+    def test_unset_leaves_existing_behavior_unchanged(self, monkeypatch):
+        """Without AGENTIT_OFFLINE set at all, get_client() must still
+        attempt real config resolution exactly as it did before this
+        change (mocked here so this hermetic test never itself attempts a
+        real config-resolution call)."""
+        monkeypatch.delenv("AGENTIT_OFFLINE", raising=False)
+        with patch("agentit.kube._client_cache", None), \
+             patch("kubernetes.config.load_incluster_config", side_effect=ConfigException("no in-cluster config")) as mock_incluster, \
+             patch("kubernetes.config.load_kube_config") as mock_kubeconfig:
+            result = kube.get_client()
+
+        mock_incluster.assert_called_once()
+        mock_kubeconfig.assert_called_once()
+        from kubernetes import client as real_client
+        assert result is real_client
 
 
 class TestGetApiResources:

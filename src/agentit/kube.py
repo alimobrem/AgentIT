@@ -15,12 +15,37 @@ _client_cache_source: str | None = None
 _CLIENT_TTL = 600  # 10 minutes
 
 
+def _offline_mode_enabled() -> bool:
+    """True when ``AGENTIT_OFFLINE`` is set truthy -- see ``get_client()``'s
+    docstring for exactly what this guarantees and why it exists."""
+    import os
+    return os.environ.get("AGENTIT_OFFLINE", "").lower() in ("1", "true", "on")
+
+
 def get_client():
     """Get a configured kubernetes client. Auto-detects in-cluster vs kubeconfig.
 
     Cached with a 10-minute TTL so bound service-account tokens (which rotate
     hourly) are picked up after expiry.
+
+    Checks ``AGENTIT_OFFLINE`` FIRST -- before the cache lookup and before
+    any config-resolution attempt -- and raises ``KubeError`` immediately if
+    it's set, rather than resolving a real client. This exists because
+    unsetting ``KUBECONFIG`` alone is NOT a reliable "zero cluster access"
+    guarantee: two independent live reviews confirmed the Kubernetes Python
+    client's default config-resolution chain (``config.load_kube_config()``)
+    still falls back to the ambient default ``~/.kube/config`` regardless of
+    ``KUBECONFIG`` being unset, silently connecting to whatever real cluster
+    that machine's default kubeconfig happens to point at. Set
+    ``AGENTIT_OFFLINE=1`` (see the README's Configuration table) for a
+    genuine hard-offline guarantee during local testing/review.
     """
+    if _offline_mode_enabled():
+        raise KubeError(
+            "AGENTIT_OFFLINE is set -- refusing to resolve a Kubernetes client "
+            "(in-cluster config, kubeconfig, or otherwise). Unset AGENTIT_OFFLINE "
+            "to allow real cluster access."
+        )
     global _client_cache, _client_cache_time, _client_cache_source
     now = _time.monotonic()
     if _client_cache is not None and (now - _client_cache_time) < _CLIENT_TTL:
