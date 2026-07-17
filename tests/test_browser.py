@@ -6,29 +6,136 @@ These use the FastAPI TestClient with ASGI transport (no subprocess needed).
 """
 from __future__ import annotations
 
+import asyncio
 import re
+import socket
+import threading
+import time as _time
 
 import pytest
 from unittest.mock import patch
 
 pytest.importorskip("playwright")
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, expect, sync_playwright
 
-from conftest import make_report
+from conftest import _ALL_STORE_TABLES, _resolve_postgres_dsn, make_report
 
 
 @pytest.fixture(scope="module")
-def app_url(tmp_path_factory):
-    """Run the portal via ASGI testclient on a local port."""
-    import threading
+def _browser():
+    """One Chromium instance for the whole module -- launching a fresh
+    browser per test (83 of them in this file) is needlessly slow; a
+    fresh `context` (below) per test still gives each test a clean
+    cookie/storage slate, same as ``pytest-playwright``'s own default
+    session-scoped-browser/function-scoped-context split."""
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        yield browser
+        browser.close()
+
+
+@pytest.fixture
+def page(_browser):
+    """A plain Playwright ``Page``, managed directly via ``sync_playwright()``.
+
+    This project depends on bare ``playwright``, not the ``pytest-playwright``
+    plugin (which would otherwise supply this fixture) -- confirmed by
+    ``pyproject.toml``'s ``browser`` extra and the lockfile, and matching
+    ``test_browser_critical.py``'s own precedent of managing Playwright
+    directly rather than relying on plugin-provided fixtures (there via
+    ``async_playwright()``; here via the sync counterpart, since every test
+    body in this file already uses the synchronous Playwright API).
+    """
+    context = _browser.new_context()
+    pg = context.new_page()
+    try:
+        yield pg
+    finally:
+        context.close()
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+class _SyncStoreBridge:
+    """Wraps a real async ``AssessmentStore`` so its coroutine methods can
+    be called synchronously -- every ``store.save(...)``/``store.create_gate(...)``
+    call already scattered across this file's (deliberately synchronous,
+    ``playwright.sync_api``-based) test bodies keeps working unchanged.
+
+    Marshals each call onto ``loop`` (the single dedicated background event
+    loop this fixture also runs the real uvicorn server on) via
+    ``asyncio.run_coroutine_threadsafe`` -- the same bridge
+    ``fleet.py::_enrich_fleet_with_cluster_status``'s own ``_bridge()``
+    helper uses for the identical constraint: an ``asyncpg`` pool is bound
+    to the loop that created it and can't be driven from a different one.
+    """
+
+    def __init__(self, store, loop: asyncio.AbstractEventLoop):
+        self._store = store
+        self._loop = loop
+
+    def __getattr__(self, name):
+        attr = getattr(self._store, name)
+        if not asyncio.iscoroutinefunction(attr):
+            return attr
+
+        def _call(*args, **kwargs):
+            future = asyncio.run_coroutine_threadsafe(attr(*args, **kwargs), self._loop)
+            return future.result(timeout=30)
+
+        return _call
+
+
+@pytest.fixture(scope="module")
+def app_url():
+    """Run the real portal app (real async ``AssessmentStore`` against a
+    real Postgres, real uvicorn server) on a dedicated background event
+    loop, exposing a synchronous store bridge so every existing
+    ``playwright.sync_api`` test body in this file -- including the ones
+    that call ``store.save(...)``/``store.create_gate(...)`` etc directly --
+    keeps working unchanged.
+
+    Previously constructed ``AssessmentStore(":memory:")`` (no such
+    constructor exists anymore; ``AssessmentStore.__init__`` takes an
+    ``asyncpg.Pool``) and called its ``async def`` methods without
+    ``await``, so every one of them was a silent no-op returning an
+    unawaited coroutine -- ``aid`` was always ``None`` and the pages under
+    test never actually had any seeded data.
+    """
     import uvicorn
     from agentit.models import DimensionScore, Finding, Severity
     from agentit.portal.app import app
     from agentit.portal.store import AssessmentStore
-    from conftest import make_report
 
-    store = AssessmentStore(":memory:")
-    async_store = store
+    dsn = _resolve_postgres_dsn()
+    if dsn is None:
+        pytest.skip("no AGENTIT_TEST_PG_DSN and no podman/docker on PATH to start one")
+
+    loop = asyncio.new_event_loop()
+
+    def _run_loop() -> None:
+        asyncio.set_event_loop(loop)
+        loop.run_forever()
+
+    loop_thread = threading.Thread(target=_run_loop, daemon=True)
+    loop_thread.start()
+
+    def _run_on_loop(coro, timeout: float = 30):
+        return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=timeout)
+
+    async def _make_store() -> AssessmentStore:
+        s = await AssessmentStore.create(dsn, min_size=1, max_size=4)
+        async with s._pool.acquire() as conn:
+            await conn.execute(f"TRUNCATE {', '.join(_ALL_STORE_TABLES)} CASCADE")
+        return s
+
+    async_store = _run_on_loop(_make_store())
+    store = _SyncStoreBridge(async_store, loop)
+
     # A real assessment always scores all 7 analyzer dimensions (see
     # analyzers/*.py's dimension= literals) -- make_report()'s single-dimension
     # default is fine for unit tests that don't care about score breakdown,
@@ -53,6 +160,12 @@ def app_url(tmp_path_factory):
     store.log_event("test-agent", "completed", report.repo_name, "info", "test event")
     store.create_gate(aid, "deploy-approval", "Test gate for approval")
 
+    async def _noop_close(_self=None) -> None:
+        return None
+
+    port = _free_port()
+    url = f"http://127.0.0.1:{port}"
+
     with patch("agentit.portal.app.get_store", return_value=async_store), \
          patch("agentit.portal.helpers.get_store", return_value=async_store), \
          patch("agentit.portal.helpers._store", async_store), \
@@ -66,15 +179,38 @@ def app_url(tmp_path_factory):
          patch("agentit.portal.routes.settings.get_store", return_value=async_store), \
          patch("agentit.portal.routes.insights.get_store", return_value=async_store), \
          patch("agentit.portal.routes.remediations.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.slos.get_store", return_value=async_store):
+         patch("agentit.portal.routes.slos.get_store", return_value=async_store), \
+         patch.object(AssessmentStore, "close", _noop_close):
 
-        server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=9998, log_level="error"))
-        thread = threading.Thread(target=server.run, daemon=True)
-        thread.start()
-        import time
-        time.sleep(2)
-        yield "http://127.0.0.1:9998", aid, store
+        server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
+        # pytest (this thread) owns signals -- uvicorn must not install its
+        # own handlers on a loop that isn't running on the main thread.
+        server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
+        serve_future = asyncio.run_coroutine_threadsafe(server.serve(), loop)
+
+        import httpx
+        deadline = _time.monotonic() + 15
+        while _time.monotonic() < deadline:
+            try:
+                if httpx.get(f"{url}/healthz", timeout=0.5).status_code == 200:
+                    break
+            except httpx.HTTPError:
+                pass
+            _time.sleep(0.1)
+        else:
+            raise RuntimeError(f"portal did not become ready at {url}")
+
+        yield url, aid, store
+
         server.should_exit = True
+        try:
+            serve_future.result(timeout=5)
+        except Exception:
+            pass
+
+    _run_on_loop(async_store._pool.close())
+    loop.call_soon_threadsafe(loop.stop)
+    loop_thread.join(timeout=5)
 
 
 # ── Page Load Tests ──────────────────────────────────────────────────
@@ -288,13 +424,15 @@ class TestModals:
 
     def test_assess_modal_opens(self, page: Page, app_url):
         url, _, _ = app_url
-        page.goto(url)
+        # The assess modal lives on Fleet (fleet.html) -- root now lands on
+        # Ledger (docs/ui-redesign-proposal.md), which has no such modal.
+        page.goto(f"{url}/fleet")
         page.click("text=Assess New Repo")
         expect(page.locator("#assess-modal")).to_have_class(re.compile("open"))
 
     def test_assess_modal_closes_with_x(self, page: Page, app_url):
         url, _, _ = app_url
-        page.goto(url)
+        page.goto(f"{url}/fleet")
         page.click("text=Assess New Repo")
         expect(page.locator("#assess-modal")).to_have_class(re.compile("open"))
         page.click("#assess-modal .modal-close")
@@ -302,7 +440,7 @@ class TestModals:
 
     def test_assess_modal_has_form_fields(self, page: Page, app_url):
         url, _, _ = app_url
-        page.goto(url)
+        page.goto(f"{url}/fleet")
         page.click("text=Assess New Repo")
         expect(page.locator("#assess-modal input[name='repo_url']")).to_be_visible()
         expect(page.locator("#assess-modal select[name='criticality']")).to_be_visible()
@@ -311,7 +449,7 @@ class TestModals:
     def test_edl_assess_modal_dialog_role_and_escape(self, page: Page, app_url):
         """EDL §5: assess overlay is a dialog and Escape dismisses it."""
         url, _, _ = app_url
-        page.goto(url)
+        page.goto(f"{url}/fleet")
         page.click("text=Assess New Repo")
         modal = page.locator("#assess-modal")
         expect(modal).to_have_class(re.compile("open"))
@@ -340,8 +478,18 @@ class TestNavigation:
         url, _, _ = app_url
         page.goto(url)
         expect(page.locator("nav >> text=Fleet")).to_be_visible()
-        expect(page.locator("nav >> text=Admin Review")).to_be_visible()
-        expect(page.locator("nav >> text=Ledger")).to_be_visible()
+        # Plain `text=Ledger` is ambiguous -- the user menu's (hidden but
+        # still DOM-present) Decisions item sub-text happens to also
+        # contain "Ledger" ("Audit log — Ledger owns the stream"). Scope
+        # to the actual nav link.
+        expect(page.locator('nav a[href="/ledger"]')).to_be_visible()
+        # Admin Review is only primary in the top-level nav when a
+        # cluster-admin-review gate is pending (docs/portal-experience-
+        # design-language.md §1); otherwise it's demoted into the user
+        # menu dropdown -- open that first, matching this fixture's app
+        # (which has no pending cluster-admin-review gate).
+        page.click("button[aria-label='Open account and settings menu']")
+        expect(page.locator(".user-menu-dropdown >> text=Admin Review")).to_be_visible()
         # Gates was retired as a standalone nav concept -- the 7 app-owner
         # gate types now surface via Fleet's "Needs Action" badge + each
         # app's own Actions tab; only cluster-admin-review still gets a
@@ -390,7 +538,7 @@ class TestNavigation:
         url, _, _ = app_url
         page.goto(f"{url}/settings")
         page.click("nav >> text=Fleet")
-        page.wait_for_url("**/")
+        page.wait_for_url("**/fleet")
 
     def test_hamburger_on_mobile(self, page: Page, app_url):
         url, _, _ = app_url
@@ -515,7 +663,10 @@ class TestNavigation:
     def test_assessment_detail_back_link(self, page: Page, app_url):
         url, aid, _ = app_url
         page.goto(f"{url}/assessments/{aid}")
-        expect(page.locator('a[href="/fleet"]')).to_contain_text("Fleet")
+        # `a[href="/fleet"]` alone is ambiguous now (nav's own Fleet link
+        # plus other in-page "Fleet" links/CTAs) -- scope to the specific
+        # "&larr; Fleet" back-link at the top of the page.
+        expect(page.locator('p.mb-1 a[href="/fleet"]')).to_contain_text("Fleet")
 
 
 # ── Component Tests ──────────────────────────────────────────────────
@@ -545,14 +696,19 @@ class TestComponents:
         # app intentionally renders without stat cards.
         url, _, store = app_url
         store.save(make_report(repo_name="browser-stat-cards-app"))
-        page.goto(url)
+        # The stat grid lives on Fleet (fleet.html) -- root now lands on
+        # Ledger (docs/ui-redesign-proposal.md), which has no stat grid.
+        page.goto(f"{url}/fleet")
         cards = page.locator(".stat-card")
         assert cards.count() >= 2
 
     def test_events_filter_bar(self, page: Page, app_url):
         url, _, _ = app_url
         page.goto(f"{url}/events")
-        expect(page.locator("input[name='q']")).to_be_visible()
+        # `input[name='q']` alone is ambiguous now -- the command palette's
+        # search input (base.html) happens to share the same `name`. Scope
+        # to the events filter bar's own input by id.
+        expect(page.locator("#filter-events-q")).to_be_visible()
         expect(page.locator("select[name='severity']")).to_be_visible()
 
     def test_pagination_on_events(self, page: Page, app_url):
@@ -571,7 +727,12 @@ class TestComponents:
 
     def test_pipeline_flow_on_workflows(self, page: Page, app_url):
         url, _, _ = app_url
+        # /workflows now redirects into the merged Capabilities & Workflows
+        # page; "Onboarding Pipeline"/"Onboarding Agents" moved into the
+        # collapsed "How Onboarding Works" reference section (collapsed by
+        # default so activity/stats stay above the fold) -- expand it first.
         page.goto(f"{url}/workflows")
+        page.click("button.collapse-toggle:has-text('How Onboarding Works')")
         expect(page.locator("text=Onboarding Pipeline")).to_be_visible()
         expect(page.locator("text=Onboarding Agents")).to_be_visible()
 
@@ -943,7 +1104,10 @@ class TestConfirmModalFocusAndTypeToConfirm:
     def test_delete_app_requires_typing_exact_name(self, page: Page, app_url):
         url, _, store = app_url
         aid = store.save(make_report(repo_name="type-confirm-app"))
-        page.goto(url)
+        # The delete button lives on Fleet's table (fleet.html) -- root now
+        # lands on Ledger (docs/ui-redesign-proposal.md), which has no such
+        # per-app delete action.
+        page.goto(f"{url}/fleet")
         row = page.locator("tr", has_text="type-confirm-app")
         row.locator("button[aria-label='Delete type-confirm-app']").click()
 
@@ -963,7 +1127,7 @@ class TestConfirmModalFocusAndTypeToConfirm:
     def test_delete_app_confirm_actually_deletes_once_enabled(self, page: Page, app_url):
         url, _, store = app_url
         aid = store.save(make_report(repo_name="type-confirm-delete-app"))
-        page.goto(url)
+        page.goto(f"{url}/fleet")
         row = page.locator("tr", has_text="type-confirm-delete-app")
         row.locator("button[aria-label='Delete type-confirm-delete-app']").click()
 
@@ -971,7 +1135,10 @@ class TestConfirmModalFocusAndTypeToConfirm:
         page.locator("#confirm-modal button", has_text="I understand, delete this app").click()
 
         expect(page.locator("#confirm-modal")).not_to_have_class(re.compile("open"))
-        page.wait_for_url(re.compile(r"^" + re.escape(url) + r"/?$"))
+        # delete_assessment() redirects to "/", which itself now redirects
+        # on to "/ledger" (docs/ui-redesign-proposal.md) -- the final
+        # landing page after following both hops.
+        page.wait_for_url(re.compile(r"^" + re.escape(url) + r"/ledger/?$"))
         assert store.get(aid) is None
 
     def test_ordinary_confirm_has_no_type_to_confirm_input(self, page: Page, app_url):
