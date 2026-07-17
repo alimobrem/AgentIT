@@ -60,6 +60,11 @@ class TestWebhookAutoFixDispatchIsNotDiscarded:
         await store.set_setting("auto_mode", "true")
 
         new_report = _report_with_network_finding(repo_name=old_report.repo_name, repo_url=repo_url)
+        # Direct Apply has been removed as a concept entirely -- a known
+        # infra_repo_url is required for AutoMode's delivery to actually go
+        # anywhere (see resolve_cluster_config_mechanism()); this now
+        # exercises the GitOps commit+PR path rather than a direct apply.
+        new_report.infra_repo_url = "https://github.com/org/infra-gitops"
 
         safe_llm = MagicMock()
         safe_llm.classify_action.return_value = {
@@ -69,8 +74,12 @@ class TestWebhookAutoFixDispatchIsNotDiscarded:
 
         with patch("agentit.portal.routes.webhooks.clone_assess_cleanup", return_value=new_report), \
              patch("agentit.portal.routes.webhooks.get_llm_client", return_value=safe_llm), \
+             patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"), \
              patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
-            mock_apply.return_value = {"applied": ["test-app-deny-all.yaml"], "skipped": [], "errors": []}
+            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
             resp = await client.post(
                 "/api/webhook/github-push",
                 json=_push_body(repo_url),
@@ -98,9 +107,10 @@ class TestWebhookAutoFixDispatchIsNotDiscarded:
         assert len(deliveries) == 1
         assert deliveries[0]["app_name"] == old_report.repo_name
 
-        # AutoMode always dry-runs first (force_dry_run_first=True) before a
-        # real apply -- two calls (dry-run, then real), not zero.
-        assert mock_apply.call_count == 2
+        # GitOps-registered -- AutoMode commits to the infra repo and opens
+        # a PR (never a direct apply) and never touches the cluster at all.
+        mock_commit.assert_called_once()
+        mock_apply.assert_not_called()
 
     async def test_dispatch_still_logs_a_visible_event_even_when_llm_unavailable(self, portal_client):
         """Fail-closed case: with no LLM client available (this suite's

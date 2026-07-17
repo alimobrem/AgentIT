@@ -229,48 +229,62 @@ class TestIsGitopsRegistered:
 
 class TestResolveClusterConfigMechanism:
     """Direct coverage of the shared decision function every mechanism-
-    predicting caller now goes through -- docs/onboarding-loop-vision-gap-
-    analysis.md §1's bootstrap-circularity fix. An infra repo URL being
-    known is what matters for whether to commit there; `registered` only
-    strengthens that decision, it's never a precondition."""
+    predicting caller now goes through. Direct Apply has been removed as a
+    concept entirely (product directive: all apps must use GitOps, no
+    fallback) -- this can never select MECHANISM_DIRECT_APPLY as a live
+    outcome. `registered` (whether a live Argo CD Application already
+    exists) is no longer even a parameter: knowing an infra repo URL is the
+    only thing that ever matters for whether to commit there (see
+    docs/onboarding-loop-vision-gap-analysis.md §1's bootstrap-circularity
+    fix -- the very first delivery for a known infra repo still commits,
+    live-registered or not)."""
 
-    def test_not_registered_no_infra_repo_falls_back_to_direct_apply(self):
-        assert resolve_cluster_config_mechanism(False, None) == MECHANISM_DIRECT_APPLY
+    def test_no_infra_repo_refuses_with_no_direct_apply_fallback(self):
+        """Only reachable for an assessment saved before GitOps
+        registration became mandatory -- refuses outright rather than
+        falling back to a direct apply."""
+        assert resolve_cluster_config_mechanism(None) == MECHANISM_NONE
 
-    def test_not_registered_with_infra_repo_bootstraps_infra_commit(self):
+    def test_not_yet_registered_with_infra_repo_bootstraps_infra_commit(self):
         """The exact bootstrap case: no live Application yet, but an infra
         repo URL is known -- must commit there, not direct-apply, or the
         app can never reach registered=True at all."""
         assert (
-            resolve_cluster_config_mechanism(False, "https://github.com/org/infra-gitops")
+            resolve_cluster_config_mechanism("https://github.com/org/infra-gitops")
             == MECHANISM_INFRA_REPO_COMMIT
         )
 
     def test_registered_with_infra_repo_commits(self):
         assert (
-            resolve_cluster_config_mechanism(True, "https://github.com/org/infra-gitops")
+            resolve_cluster_config_mechanism("https://github.com/org/infra-gitops")
             == MECHANISM_INFRA_REPO_COMMIT
         )
 
-    def test_registered_with_no_known_infra_repo_url_refuses_to_guess(self):
-        assert resolve_cluster_config_mechanism(True, None) == MECHANISM_NONE
-
 
 class TestRouteAndDeliverClusterConfig:
-    async def test_not_registered_routes_to_direct_apply(self):
+    async def test_no_infra_repo_refuses_with_no_direct_apply_fallback(self):
+        """Direct Apply has been removed as a concept entirely -- an app
+        with no known infra repo at all (only possible for an assessment
+        saved before GitOps registration became mandatory) cannot be
+        delivered, full stop. Never falls back to mutating the cluster
+        directly, and never calls apply_manifests_to_cluster."""
         store, raw = await make_async_store()
         report = make_report()
         aid = await raw.save(report)
         with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
-            mock_apply.return_value = {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": []}
             result = await route_and_deliver(
                 [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
                 actor="tester", dry_run=False, force_dry_run_first=False,
             )
         assert result["registered"] is False
-        assert result["mechanisms"]["cluster_config"] == MECHANISM_DIRECT_APPLY
-        mock_apply.assert_called_once()
+        assert result["mechanisms"]["cluster_config"] == MECHANISM_NONE
+        mock_apply.assert_not_called()
+        outcome = result["outcomes"]["cluster_config"]
+        assert "error" in outcome
+        assert "GitOps" in outcome["error"]
+        delivery = await raw.get_delivery(result["delivery_id"])
+        assert delivery["status"] == "partial"
 
     async def test_registered_routes_to_infra_repo_commit(self):
         store, raw = await make_async_store()
@@ -375,50 +389,53 @@ class TestRouteAndDeliverClusterConfig:
         assert result["outcomes"]["cluster_config"]["dry_run"] is True
 
 
-class TestRouteAndDeliverForceDryRunFirst:
-    """`force_dry_run_first=True` (AutoMode's own safety knob -- see
-    automode.py) is threaded straight through to `apply_with_verification()`
-    unchanged. This covers a gap introduced by wiring AutoMode through this
-    router for the first time: when the forced dry-run fails,
-    `apply_with_verification()` never attempts a real apply at all, so
-    scheduling the SLO-watch-and-rollback verification tail for a delivery
-    that never actually happened would be wrong (a "breach" could roll back
-    unrelated existing state)."""
+class TestRouteAndDeliverForceDryRunFirstIsNowInert:
+    """`force_dry_run_first` (AutoMode's own safety knob) is now a no-op for
+    the cluster-config category: its one consumer was the direct-apply
+    branch (`apply_with_verification()`'s forced-dry-run-then-real-apply
+    sequence), removed along with Direct Apply as a concept entirely (see
+    `resolve_cluster_config_mechanism()`). Whether `automode.py` still has
+    any legitimate reason to pass `True` here, and whether this parameter
+    should be removed from the signature entirely, is being decided as its
+    own, separately-tested step -- this just proves `route_and_deliver()`
+    behaves identically for cluster-config regardless of this flag's value
+    today, i.e. that it genuinely has no remaining effect (never silently
+    reintroduces a direct apply)."""
 
-    async def test_dry_run_failure_skips_scheduling_verification(self):
+    async def test_force_dry_run_first_true_never_touches_the_cluster(self):
         store, raw = await make_async_store()
         report = make_report()
         aid = await raw.save(report)
-        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply, \
-             patch("agentit.portal.delivery._maybe_schedule_verification") as mock_schedule:
-            mock_apply.return_value = {"applied": [], "skipped": [], "errors": ["forbidden"]}
+        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
             result = await route_and_deliver(
                 [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
                 actor="tester", dry_run=False, force_dry_run_first=True,
             )
-        assert result["outcomes"]["cluster_config"]["dry_run_failed"] is True
-        mock_apply.assert_called_once()  # dry-run only; real apply never attempted
-        mock_schedule.assert_not_called()
+        mock_apply.assert_not_called()
+        assert result["mechanisms"]["cluster_config"] == MECHANISM_NONE
 
-    async def test_clean_forced_dry_run_still_schedules_verification(self):
-        """Sanity check: the guard only skips scheduling for a failed forced
-        dry-run -- a clean one (real apply attempted) still schedules
-        exactly like every other direct-apply delivery."""
-        store, raw = await make_async_store()
-        report = make_report()
-        aid = await raw.save(report)
-        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply, \
-             patch("agentit.portal.delivery._maybe_schedule_verification") as mock_schedule:
-            mock_apply.return_value = {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": []}
-            result = await route_and_deliver(
-                [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
-                report=report, store=store, assessment_id=aid,
-                actor="tester", dry_run=False, force_dry_run_first=True,
-            )
-        assert result["outcomes"]["cluster_config"]["dry_run_failed"] is False
-        assert mock_apply.call_count == 2  # dry-run, then real apply
-        mock_schedule.assert_called_once()
+    async def test_force_dry_run_first_true_or_false_produce_the_same_outcome(self):
+        outcomes = {}
+        for force_dry_run_first in (True, False):
+            store, raw = await make_async_store()
+            report = make_report()
+            report.infra_repo_url = "https://github.com/org/infra-gitops"
+            aid = await raw.save(report)
+            with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+                 patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+                 patch("agentit.portal.github_pr.ensure_applicationset"):
+                mock_commit.return_value = {
+                    "pr_url": "https://github.com/org/infra-gitops/pull/1",
+                    "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1,
+                }
+                result = await route_and_deliver(
+                    [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
+                    report=report, store=store, assessment_id=aid,
+                    actor="tester", dry_run=False, force_dry_run_first=force_dry_run_first,
+                )
+            outcomes[force_dry_run_first] = result["mechanisms"]["cluster_config"]
+        assert outcomes[True] == outcomes[False] == MECHANISM_INFRA_REPO_COMMIT
 
 
 class TestRouteAndDeliverCicdLane:
@@ -505,9 +522,13 @@ class TestDeliveriesTracking:
     async def test_delivery_row_created_with_categories_and_mechanism(self):
         store, raw = await make_async_store()
         report = make_report()
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
         aid = await raw.save(report)
-        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
-            mock_apply.return_value = {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": []}
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"):
+            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
             result = await route_and_deliver(
                 [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
@@ -518,16 +539,20 @@ class TestDeliveriesTracking:
         assert delivery["assessment_id"] == aid
         assert delivery["app_name"] == report.repo_name
         assert delivery["categories"] == {"cluster_config": 1}
-        assert "cluster_config:direct-apply" in delivery["mechanism"]
+        assert "cluster_config:infra-repo-commit" in delivery["mechanism"]
         assert delivery["status"] == "delivered"
         assert delivery["verification"] == "unknown"
 
     async def test_list_deliveries_returns_rows_for_assessment(self):
         store, raw = await make_async_store()
         report = make_report()
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
         aid = await raw.save(report)
-        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
-            mock_apply.return_value = {"applied": [], "skipped": [], "errors": []}
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"):
+            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
             await route_and_deliver(
                 [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
@@ -570,12 +595,16 @@ class TestDeliveriesTracking:
         generated -- not just a transient UI diff."""
         store, raw = await make_async_store()
         report = make_report()
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
         aid = await raw.save(report)
         edited_file = dict(_cluster_config_file())
         edited_file["original_content"] = "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: test\n  original: true\n"
         edited_file["edited"] = True
-        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
-            mock_apply.return_value = {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": []}
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"):
+            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
             result = await route_and_deliver(
                 [edited_file], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
@@ -587,9 +616,13 @@ class TestDeliveriesTracking:
     async def test_delivery_edited_files_empty_when_nothing_edited(self):
         store, raw = await make_async_store()
         report = make_report()
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
         aid = await raw.save(report)
-        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
-            mock_apply.return_value = {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": []}
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"):
+            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
             result = await route_and_deliver(
                 [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,

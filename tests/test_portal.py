@@ -409,13 +409,11 @@ async def test_onboard_results_page(client, _override_store):
     assert "skills" in resp.text
     assert "Download" in resp.text
     # The unified apply flow (docs/unified-apply-flow.md) collapsed the
-    # independent "Apply to Cluster" / "Create PR" buttons into one
-    # dynamically-labeled Deliver action -- GitOps → "Commit & Open PR",
-    # Direct → "Apply to Cluster". This report has no infra_repo_url and
-    # isn't GitOps-registered, so the button reads "Apply to Cluster".
-    assert "Apply to Cluster" in resp.text
-    assert "Commit &amp; Open PR" not in resp.text
-    assert "Commit & Open PR" not in resp.text
+    # independent "Apply to Cluster" / "Create PR" buttons into one Deliver
+    # action. Direct Apply has been removed as a concept entirely -- Deliver
+    # always reads "Commit & Open PR" now, never "Apply to Cluster".
+    assert "Apply to Cluster" not in resp.text
+    assert "Commit &amp; Open PR" in resp.text or "Commit & Open PR" in resp.text
     assert "Deliver Now" not in resp.text
     assert "Per-Agent PRs" in resp.text
     assert "Dry Run" in resp.text
@@ -431,13 +429,15 @@ async def test_onboard_results_page(client, _override_store):
     assert "Download" in secondary
     assert "Per-Agent" not in secondary
     # Status chip lives outside the Apply CTA (not packed into the button).
-    assert "No dry run yet" in resp.text
+    # This report has no infra_repo_url at all (the legacy, pre-mandatory-
+    # GitOps case) -- Deliver is blocked entirely with a clear message, not
+    # just soft-gated behind Dry Run, and there is no Override escape hatch.
+    assert "Not GitOps-registered" in resp.text
     assert "NO DRY RUN YET" not in resp.text
-    # Soft-gate: both deliver options disabled until Dry Run succeeds; override remains.
     assert 'data-action="apply"' in resp.text
     assert "disabled" in resp.text
-    assert 'data-action="apply-override"' in resp.text
-    assert ">Override<" in resp.text or "Override</button>" in resp.text
+    assert 'data-action="apply-override"' not in resp.text
+    assert ">Override<" not in resp.text and "Override</button>" not in resp.text
 
 
 async def test_onboard_results_delivery_history_humanizes_raw_mechanism(client, _override_store):

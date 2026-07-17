@@ -155,7 +155,14 @@ async def test_fleet_assess_modal_has_dialog_semantics(edl_client):
 async def test_onboard_results_dry_run_apply_status_outside_button(edl_client):
     """EDL §7: Dry Run → deliver choice; 'No dry run yet' is a sibling chip."""
     client, store = edl_client
-    aid = await store.save(make_report())
+    report = make_report()
+    aid = await store.save(report)
+    # A known infra_repo_url -- Direct Apply has been removed as a concept
+    # entirely, so an app with none at all is blocked from delivering
+    # outright (a separate "Not GitOps-registered" state, not "No dry run
+    # yet"); this test is about the Dry Run/deliver-choice chip layout, not
+    # GitOps registration state.
+    await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
     await store.save_onboarding(aid, [
         {
             "category": "security",
@@ -170,7 +177,9 @@ async def test_onboard_results_dry_run_apply_status_outside_button(edl_client):
     assert "Dry Run" in html
     assert (
         "Apply to Cluster" in html
+        # Jinja autoescape turns "&" into "&amp;" in rendered HTML text.
         or "Commit & Open PR" in html
+        or "Commit &amp; Open PR" in html
         or re.search(r">\s*Apply\s*<", html)
         or re.search(r">\s*Open PR\s*<", html)
         or "_deliver_label" in html

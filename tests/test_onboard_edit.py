@@ -265,6 +265,11 @@ class TestEditInvalidatesStaleDryRun:
         """End-to-end: the page itself must stop claiming dryDone/"Dry run
         passed" once a file is edited after a successful Dry Run."""
         client, store, aid = edit_client
+        # A known infra_repo_url so the "No dry run yet" nudge (rather than
+        # the separate, unrelated "Not GitOps-registered" block) is what
+        # actually renders -- this test is about edit-invalidates-dry-run,
+        # not about GitOps registration state.
+        await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
         await store.save_apply_results(
             aid, {"applied": [], "skipped": [], "errors": [], "repo_files": [{"path": "app-config.yaml", "purpose": "dry-run"}]},
             "test-app", dry_run=True,
@@ -288,11 +293,20 @@ class TestEditInvalidatesStaleDryRun:
         assert "No dry run yet" in after.text
 
     async def test_edit_after_real_delivery_also_clears_apply_results(self, edit_client, _mock_kube):
-        """A real (non-dry-run) delivery also persists apply_results
-        (dry_run=False) -- editing afterward must clear that too, since it
-        likewise describes content that no longer matches what's saved."""
+        """A real (non-dry-run) delivery-outcome row also describes content
+        that no longer matches what's saved once a file is edited afterward
+        -- editing must clear it too. Direct Apply's removal means no
+        current cluster-config delivery mechanism actually persists
+        ``apply_results`` with ``dry_run=False`` anymore (a GitOps commit's
+        real confirmation is the PR-opened flash/Delivery History, not this
+        table) -- seed the row directly to prove the *edit* invalidation
+        logic itself still clears any stale real-delivery row that exists,
+        regardless of how it got there."""
         client, store, aid = edit_client
-        await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "false"}, follow_redirects=False)
+        await store.save_apply_results(
+            aid, {"applied": ["app-config.yaml"], "skipped": [], "errors": []},
+            "test-app", dry_run=False,
+        )
         assert await store.get_apply_results(aid) is not None
 
         await client.post(
@@ -347,6 +361,7 @@ class TestEditInvalidatesStaleDryRun:
 class TestDeliverUsesEditedContent:
     async def test_deliver_applies_edited_content_not_original(self, edit_client, _mock_kube):
         client, store, aid = edit_client
+        await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
         edited_content = (
             "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  key: EDITED_VALUE\n"
         )
@@ -357,14 +372,21 @@ class TestDeliverUsesEditedContent:
         )
         assert edit_resp.status_code == 303
 
-        deliver_resp = await client.post(
-            f"/assessments/{aid}/deliver", data={"dry_run": "false"}, follow_redirects=False,
-        )
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"):
+            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
+            deliver_resp = await client.post(
+                f"/assessments/{aid}/deliver", data={"dry_run": "false"}, follow_redirects=False,
+            )
         assert deliver_resp.status_code == 303
-        assert "applied=1" in deliver_resp.headers["location"]
+        assert "pull/1" in deliver_resp.headers["location"]
 
-        _mock_kube.apply_yaml.assert_called_once()
-        delivered_content = _mock_kube.apply_yaml.call_args[0][0]
+        _mock_kube.apply_yaml.assert_not_called()
+        mock_commit.assert_called_once()
+        committed_files = mock_commit.call_args[0][2]
+        delivered_content = next(f["content"] for f in committed_files if f["path"] == "app-config.yaml")
         assert "EDITED_VALUE" in delivered_content
         assert "EDITED_VALUE" not in _configmap_file()["content"]
 

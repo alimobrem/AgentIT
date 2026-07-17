@@ -1042,7 +1042,7 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
         resolve_cluster_config_mechanism,
     )
     gitops_registered, infra_repo_url = await is_gitops_registered(report.repo_name, report)
-    delivery_mechanism = resolve_cluster_config_mechanism(gitops_registered, infra_repo_url)
+    delivery_mechanism = resolve_cluster_config_mechanism(infra_repo_url)
     delivery_confirmation = confirmation_text(delivery_mechanism, infra_repo_url=infra_repo_url)
     deliveries = await s.list_deliveries(assessment_id) if hasattr(s, "list_deliveries") else []
 

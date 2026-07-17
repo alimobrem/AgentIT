@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from html.parser import HTMLParser
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -248,21 +249,30 @@ class TestDeliverButtonClickAttributeIntact:
     silently broke these buttons before `| forceescape` was added."""
 
     async def test_onboard_results_deliver_click_attr_is_unbroken(self, portal_client):
-        client, _store, aid = portal_client
+        client, store, aid = portal_client
+        # A known infra_repo_url -- Direct Apply has been removed as a
+        # concept entirely, so Deliver's real @click confirm only ever
+        # exists once GitOps registration is known (otherwise Deliver is
+        # blocked outright with no @click at all -- see the "no infra repo"
+        # coverage elsewhere, e.g. test_customer_trust_ux.py). The primary
+        # Deliver button is also soft-gated on a successful Dry Run (the
+        # Override bypass has been removed too), so run one first.
+        await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}):
+            await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "true"}, follow_redirects=False)
+
         resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert resp.status_code == 200
 
         parser = _ClickAttrCapture()
         parser.feed(resp.text)
-        # Soft-gate: primary Apply has no @click until Dry Run; override
-        # confirm still carries the full mechanism + consequence text.
         # Note: Jinja tojson emits the em dash as \\u2014, so match on
-        # "Override" + mechanism label rather than a literal "—".
+        # "Confirm Commit" + mechanism label rather than a literal "—".
         deliver_clicks = [
             c for c in parser.clicks
-            if "Override" in c and "Apply to Cluster" in c
+            if "Confirm Commit" in c and "Open PR" in c
         ]
-        assert deliver_clicks, "no @click attribute found for the Override Apply button"
+        assert deliver_clicks, "no @click attribute found for the primary Deliver button"
 
         click = deliver_clicks[0]
         assert "AgentIT will:" in click, (
@@ -271,9 +281,12 @@ class TestDeliverButtonClickAttributeIntact:
             f"(without `| forceescape`) broke out of the HTML attribute "
             f"early:\n{click!r}"
         )
-        assert "may modify cluster resources" in click, (
+        assert (
+            "does not mutate the cluster" in click
+            or "cluster is not mutated" in click
+        ), (
             f"Deliver button's @click attribute was truncated -- it never "
-            f"reaches the honest Direct Apply consequence tail:\n{click!r}"
+            f"reaches the honest GitOps-commit consequence tail:\n{click!r}"
         )
         assert "cannot be undone" not in click
         assert "modifies production" not in click

@@ -159,46 +159,61 @@ class TestExecuteAllowlistIntegration:
 
     async def test_no_allowlist_configured_applies_everything_unchanged(self):
         """Purely additive: no `auto_mode_allowlist` setting -> identical to
-        pre-allowlist behavior (single apply call covering every file)."""
+        pre-allowlist behavior (single commit covering every file). Direct
+        Apply has been removed as a concept entirely -- "applies" now means
+        a single GitOps commit+PR, not a direct cluster apply."""
         s, raw = await make_async_store()
         await raw.set_setting("auto_mode", "true")
         report = make_report(criticality="low", summary="test")
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
         aid = await raw.save(report)
         engine = await self._make_engine_with_safe_llm(s)
 
         files = [_cm_file(), _crb_file()]
-        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
-            mock_apply.return_value = {"applied": ["cm.yaml", "crb.yaml"], "skipped": [], "errors": []}
-            result = await engine.execute(aid, files, "default", "low", True, "test-app")
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"), \
+             patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 2}
+            result = await engine.execute(aid, files, "default", "low", True, "test-app", report=report)
 
-        assert result["action"] == "applied"
-        # Both files passed through to the same single apply call -- no split.
-        first_call = mock_apply.call_args_list[0]
-        assert len(first_call.args[0]) == 2
+        assert result["action"] == "gated"
+        mock_apply.assert_not_called()
+        # Both files passed through to the same single commit call -- no split.
+        mock_commit.assert_called_once()
+        assert len(mock_commit.call_args[0][2]) == 2
 
-    async def test_partial_allowlist_splits_batch_applies_allowed_gates_denied(self):
+    async def test_partial_allowlist_splits_batch_commits_allowed_gates_denied(self):
         s, raw = await make_async_store()
         await raw.set_setting("auto_mode", "true")
         await raw.set_setting("auto_mode_allowlist", '["*/ConfigMap"]')
         report = make_report(criticality="low", summary="test")
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
         aid = await raw.save(report)
         engine = await self._make_engine_with_safe_llm(s)
 
         cm = _cm_file(path="cm.yaml")
         crb = _crb_file(path="crb.yaml")
-        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
-            mock_apply.return_value = {"applied": ["cm.yaml"], "skipped": [], "errors": []}
-            result = await engine.execute(aid, [cm, crb], "default", "low", True, "test-app")
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"), \
+             patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
+            result = await engine.execute(aid, [cm, crb], "default", "low", True, "test-app", report=report)
 
-        assert result["action"] == "split"
-        # Only the allowed ConfigMap was ever handed to the real apply pipeline.
-        for call in mock_apply.call_args_list:
-            paths = {f["path"] for f in call.args[0]}
-            assert "crb.yaml" not in paths
+        assert result["action"] == "gated"
+        mock_apply.assert_not_called()
+        # Only the allowed ConfigMap was ever handed to the commit pipeline.
+        mock_commit.assert_called_once()
+        committed_paths = {f["path"] for f in mock_commit.call_args[0][2]}
+        assert "crb.yaml" not in committed_paths
         gates = await raw.list_gates(status="pending")
         scope_gates = [g for g in gates if g["gate_type"] == "auto-mode-scope-review"]
         assert len(scope_gates) == 1
         assert "crb.yaml" in scope_gates[0]["summary"]
+        assert any(g["gate_type"] == "gitops-pr-pending" for g in gates)
 
     async def test_all_denied_gates_whole_batch_without_calling_apply(self):
         s, raw = await make_async_store()

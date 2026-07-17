@@ -48,30 +48,31 @@ def _mock_kube():
         yield mock_kube
 
 
-class TestDeliverNotRegisteredAppliesDirectly:
-    async def test_real_delivery_applies_and_records_delivery_row(self, deliver_client, _mock_kube):
+class TestDeliverWithNoInfraRepoRefusesWithNoDirectApplyFallback:
+    """Direct Apply has been removed as a concept entirely -- an app with no
+    known infra repo at all (only possible for an assessment saved before
+    GitOps registration became mandatory) cannot be delivered, full stop.
+    Never falls back to mutating the cluster directly."""
+
+    async def test_real_delivery_refuses_and_records_a_partial_delivery_row(self, deliver_client, _mock_kube):
         client, store, aid = deliver_client
         resp = await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "false"}, follow_redirects=False)
         assert resp.status_code == 303
-        assert "applied=1" in resp.headers["location"]
-        _mock_kube.apply_yaml.assert_called_once()
+        assert "error=" in resp.headers["location"]
+        _mock_kube.apply_yaml.assert_not_called()
 
         deliveries = await store.list_deliveries(aid)
         assert len(deliveries) == 1
-        assert deliveries[0]["mechanism"] == "cluster_config:direct-apply"
-        assert deliveries[0]["status"] == "delivered"
+        assert deliveries[0]["status"] == "partial"
 
-    async def test_dry_run_calls_apply_yaml_with_dry_run_flag(self, deliver_client, _mock_kube):
-        """Dry run must be a real server-side-apply dry run against the API
-        server (finding: a dry run reported "32/32 OK" while zero cluster
-        was actually reachable), not a no-op that skips kube.apply_yaml()
-        entirely."""
+    async def test_dry_run_also_refuses_never_touches_the_cluster(self, deliver_client, _mock_kube):
+        """Even a Dry Run never calls kube.apply_yaml() for an app with no
+        known infra repo -- there is nothing left to simulate applying."""
         client, store, aid = deliver_client
         resp = await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "true"}, follow_redirects=False)
         assert resp.status_code == 303
-        assert "dry_run=true" in resp.headers["location"]
-        _mock_kube.apply_yaml.assert_called_once()
-        assert _mock_kube.apply_yaml.call_args.kwargs["dry_run"] is True
+        assert "error=" in resp.headers["location"]
+        _mock_kube.apply_yaml.assert_not_called()
 
 
 class TestDeliverRegisteredCommitsToInfraRepo:
@@ -166,12 +167,15 @@ class TestDeliverRegisteredCommitsToInfraRepo:
 
 
 class TestOnboardResultsWarnsBeforeDryRun:
-    """Soft-gate Apply until Dry Run succeeds: warning chip outside the CTA,
-    primary Apply disabled, override confirm available. After a successful
-    dry run the primary unlocks with mechanism-specific confirm text."""
+    """Soft-gate Deliver until Dry Run succeeds: warning chip outside the
+    CTA, primary Deliver disabled. After a successful dry run the primary
+    unlocks with mechanism-specific confirm text. (The Override bypass has
+    been removed along with Direct Apply -- Deliver now requires an actual
+    successful Dry Run, no escape hatch.)"""
 
     async def test_warning_badge_shown_before_any_apply_action(self, deliver_client):
-        client, _store, aid = deliver_client
+        client, store, aid = deliver_client
+        await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
         resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert resp.status_code == 200
         assert "No dry run yet" in resp.text
@@ -179,16 +183,19 @@ class TestOnboardResultsWarnsBeforeDryRun:
         assert "delivery-step-status" in resp.text
         assert 'class="btn btn-green btn-lg"' not in resp.text
         assert "NO DRY RUN YET" not in resp.text
-        assert "Apply to Cluster" in resp.text
+        assert "Commit &amp; Open PR" in resp.text or "Commit & Open PR" in resp.text
+        assert "Apply to Cluster" not in resp.text
         assert "Deliver Now" not in resp.text
-        assert 'data-action="apply-override"' in resp.text
-        assert "Override</button>" in resp.text or ">Override<" in resp.text
+        assert 'data-action="apply-override"' not in resp.text
+        assert "Override</button>" not in resp.text
         # Primary Apply carries a disabled attribute while ungated.
         assert 'data-action="apply"' in resp.text
 
     async def test_warning_badge_gone_after_a_dry_run(self, deliver_client, _mock_kube):
-        client, _store, aid = deliver_client
-        await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "true"}, follow_redirects=False)
+        client, store, aid = deliver_client
+        await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}):
+            await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "true"}, follow_redirects=False)
 
         resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert resp.status_code == 200
@@ -201,7 +208,20 @@ class TestOnboardResultsWarnsBeforeDryRun:
         assert not re.search(
             r'data-action="apply"[^>]*\sdisabled(?:\s|=|>)', resp.text, re.I,
         )
-        assert "confirmText: " in resp.text or "Apply to Cluster" in resp.text
+        assert "confirmText: " in resp.text or "Commit &amp; Open PR" in resp.text or "Commit & Open PR" in resp.text
+
+    async def test_no_infra_repo_blocks_delivery_with_no_override_escape_hatch(self, deliver_client):
+        """The legacy (pre-mandatory-GitOps) case: no infra_repo_url known
+        at all -- Deliver is blocked entirely, with a clear message, not
+        just soft-gated behind Dry Run (there is nothing an Override could
+        meaningfully bypass to)."""
+        client, _store, aid = deliver_client
+        resp = await client.get(f"/assessments/{aid}/onboard-results")
+        assert resp.status_code == 200
+        assert "Not GitOps-registered" in resp.text
+        assert "Register this app for GitOps" in resp.text or "Register for GitOps" in resp.text
+        assert 'data-action="apply-override"' not in resp.text
+        assert re.search(r'data-action="apply"[^>]*\sdisabled(?:\s|=|>)', resp.text, re.I)
 
     async def test_gitops_dry_run_unlocks_commit_and_never_contradicts(self, deliver_client, _mock_kube):
         """P0: GitOps dry-run showed 'Dry run complete' + 'NO DRY RUN YET'."""

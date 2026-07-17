@@ -62,41 +62,45 @@ async def _seed_onboard(store, repo_name: str = "trust-app") -> str:
 
 
 class TestHonestDeliverConfirm:
-    async def test_direct_apply_confirm_names_namespace_not_irreversible(self, trust_client):
+    async def test_no_infra_repo_blocks_delivery_without_misleading_claims(self, trust_client):
+        """Direct Apply has been removed as a concept entirely -- an app
+        with no known infra repo at all (the legacy, pre-mandatory-GitOps
+        case) is blocked from delivering, not silently offered a
+        cluster-mutating fallback. The page must say so honestly, never
+        claim "Apply to Cluster" or an irreversible consequence that can no
+        longer happen."""
         client, store = trust_client
         aid = await _seed_onboard(store, "direct-ns-app")
 
         resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert resp.status_code == 200
         text = resp.text
-        assert "Apply to Cluster" in text
+        assert "Apply to Cluster" not in text
         assert "cannot be undone" not in text
         assert "modifies production resources and cannot be undone" not in text
+        assert "Not GitOps-registered" in text
 
         parser = _ClickAttrCapture()
         parser.feed(text)
-        # Soft-gate: primary Apply has no @click until Dry Run; override
-        # confirm still carries the honest Direct Apply consequence text.
-        clicks = [
-            c for c in parser.clicks
-            if "Override" in c and "Apply to Cluster" in html_lib.unescape(c)
-        ]
-        assert clicks, "expected Override Apply to Cluster confirm @click"
-        click = html_lib.unescape(clicks[0])
-        assert "namespace direct-ns-app" in click
-        assert "may modify cluster resources" in click
-        assert "cannot be undone" not in click
-        assert "does not mutate the cluster" not in click
+        # Blocked entirely -- no @click confirm exists at all for Deliver
+        # (there is no Override escape hatch to bypass the block with).
+        clicks = [c for c in parser.clicks if "Confirm Commit" in html_lib.unescape(c)]
+        assert not clicks, "Deliver must carry no confirm @click while blocked"
 
     async def test_gitops_confirm_opens_pr_does_not_claim_cluster_mutation(self, trust_client):
         client, store = trust_client
         aid = await _seed_onboard(store, "gitops-trust-app")
+        await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
 
         with patch(
             "agentit.portal.delivery.is_gitops_registered",
             new_callable=AsyncMock,
             return_value=(True, "https://github.com/org/infra-gitops"),
         ):
+            # Deliver is soft-gated on a successful Dry Run (no Override
+            # bypass anymore) -- run one first so the primary Deliver
+            # button's real confirm @click is actually present to inspect.
+            await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "true"}, follow_redirects=False)
             resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert resp.status_code == 200
         text = resp.text
@@ -107,12 +111,11 @@ class TestHonestDeliverConfirm:
 
         parser = _ClickAttrCapture()
         parser.feed(text)
-        # Soft-gate: check override confirm (primary unlocked only after Dry Run).
         clicks = [
             c for c in parser.clicks
-            if "Override" in c and "Open PR" in html_lib.unescape(c)
+            if "Confirm Commit" in html_lib.unescape(c) and "Open PR" in html_lib.unescape(c)
         ]
-        assert clicks, "expected Override Commit & Open PR confirm @click"
+        assert clicks, "expected the primary Commit & Open PR confirm @click"
         click = html_lib.unescape(clicks[0]).encode("utf-8").decode("unicode_escape")
         assert "opens a pull request" in click.lower() or "open a PR" in click
         assert (

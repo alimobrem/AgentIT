@@ -17,11 +17,7 @@ from pathlib import Path
 from agentit import kube
 from agentit.audit import audit_log
 from agentit.models import AssessmentReport
-from agentit.portal.cluster_apply import (
-    _OPERATOR_NAMESPACES,
-    _parse_manifest,
-    apply_with_verification,
-)
+from agentit.portal.cluster_apply import _OPERATOR_NAMESPACES, _parse_manifest
 from agentit.skill_engine import record_skill_outcomes
 
 logger = logging.getLogger(__name__)
@@ -43,7 +39,12 @@ CATEGORY_SECRET_BLOCKED = "secret_blocked"
 # ``helpers.py`` can all reference it without importing a routes module.
 ADMIN_REVIEW_GATE_TYPE = "cluster-admin-review"
 
-# Mechanisms a category can be routed to.
+# Mechanisms a category can be routed to. MECHANISM_DIRECT_APPLY is no
+# longer a selectable live outcome (Direct Apply has been removed as a
+# concept entirely -- see resolve_cluster_config_mechanism()) -- the
+# constant/string survives only so historical `deliveries`/`gates` rows
+# already persisted with this mechanism (from before this directive
+# landed) still render honest text instead of a blank/`KeyError` lookup.
 MECHANISM_DIRECT_APPLY = "direct-apply"
 MECHANISM_INFRA_REPO_COMMIT = "infra-repo-commit"
 MECHANISM_CLUSTER_ADMIN_REVIEW_GATE = "cluster-admin-review-gate"
@@ -105,32 +106,38 @@ def repo_kind_for_mechanism(mechanism: str) -> str:
     return _MECHANISM_REPO_KIND.get(mechanism, "")
 
 
-def resolve_cluster_config_mechanism(registered: bool, infra_repo_url: str | None) -> str:
+def resolve_cluster_config_mechanism(infra_repo_url: str | None) -> str:
     """The cluster/app-config category's delivery mechanism, shared by every
     caller that predicts or acts on it (``route_and_deliver()``,
     ``gate_delivery_confirmation()``, and the dry-run preview on Onboard
     Results) so they can never disagree about what a given
-    ``(registered, infra_repo_url)`` pair resolves to.
+    ``infra_repo_url`` resolves to.
 
-    Knowing an infra repo URL is what actually matters for whether to
-    commit there -- ``registered`` (a live Argo CD ``Application`` already
-    exists) is only a *stronger* confirmation once ``True``, never a
-    precondition for attempting the commit. Gating
-    ``MECHANISM_INFRA_REPO_COMMIT`` on ``registered`` already being
-    ``True`` was a closed loop with no escape: Argo's ``ApplicationSet``
-    only ever creates that live ``Application`` by discovering
-    ``apps/{app}/`` already committed in the infra repo, and nothing but
-    this exact mechanism ever commits that directory in the first place
-    (see docs/onboarding-loop-vision-gap-analysis.md §1). So the very
-    first delivery for an app with a known infra repo must still commit
-    there -- direct apply is the true fallback only when no infra repo is
-    known at all.
+    Direct Apply has been removed as a concept entirely (product directive:
+    all apps must use GitOps; GitHub-PR-merge is the only sanctioned gate) --
+    this can no longer select ``MECHANISM_DIRECT_APPLY`` as a live outcome,
+    for any caller, ever. Knowing an infra repo URL is the only thing that
+    matters now: whether a live Argo CD ``Application`` already exists
+    (``registered``, formerly a parameter here) is irrelevant to *whether* to
+    commit -- only *whether this is the first commit that bootstraps
+    ``apps/{app}/`` for Argo's ``ApplicationSet`` to discover* (see
+    docs/onboarding-loop-vision-gap-analysis.md §1), which
+    ``deliver_with_verification()``'s ``MECHANISM_INFRA_REPO_COMMIT`` branch
+    already handles identically either way.
+
+    GitOps registration is mandatory for every new assessment
+    (``routes/assessments.py``'s ``_resolve_mandatory_infra_repo_url()``
+    hard-stops Assess otherwise -- see the README's "GitOps registration is
+    now mandatory" entry), so ``infra_repo_url`` should always be known in
+    practice. The ``None`` case below is only reachable for an assessment
+    saved before that directive landed (no infra repo was ever recorded) --
+    this refuses to guess rather than falling back to a direct apply; a
+    human must register this app for GitOps (e.g. via "Register for GitOps")
+    before it can be delivered at all.
     """
-    if registered and infra_repo_url is None:
-        return MECHANISM_NONE
     if infra_repo_url is not None:
         return MECHANISM_INFRA_REPO_COMMIT
-    return MECHANISM_DIRECT_APPLY
+    return MECHANISM_NONE
 
 
 def confirmation_text(mechanism: str, *, infra_repo_url: str | None = None) -> str:
@@ -150,6 +157,14 @@ def confirmation_text(mechanism: str, *, infra_repo_url: str | None = None) -> s
     API server, just reads back the already-resolved client config) is
     real safety signal a human needs before a destructive action, not
     cosmetic.
+
+    ``MECHANISM_DIRECT_APPLY`` handling below is kept for two reasons even
+    though ``resolve_cluster_config_mechanism()`` can never select it as a
+    live outcome anymore: historical ``deliveries``/``gates`` rows already
+    persisted with this mechanism string still need honest, renderable text
+    if ever re-derived rather than a `KeyError`/blank string, and this
+    function has no way to distinguish "asked to describe a mechanism that
+    can no longer be chosen" from "asked to describe a legacy record."
     """
     base = MECHANISM_DESCRIPTIONS.get(mechanism, mechanism)
     if mechanism == MECHANISM_INFRA_REPO_COMMIT and infra_repo_url:
@@ -346,8 +361,8 @@ async def gate_delivery_confirmation(store: object, gate: dict) -> str:
     report = await store.get(assessment_id)
     if report is None:
         return ""
-    registered, infra_repo_url = await is_gitops_registered(report.repo_name, report)
-    mechanism = resolve_cluster_config_mechanism(registered, infra_repo_url)
+    _registered, infra_repo_url = await is_gitops_registered(report.repo_name, report)
+    mechanism = resolve_cluster_config_mechanism(infra_repo_url)
     return confirmation_text(mechanism, infra_repo_url=infra_repo_url)
 
 
@@ -486,6 +501,18 @@ async def route_and_deliver(
     ``assessment_id`` is required (not in the design doc's illustrative
     signature) because every side effect here -- gates, SLOs, audit
     resources, the ``deliveries`` row itself -- is keyed by it.
+
+    ``force_dry_run_first`` (AutoMode's own safety knob) is currently a
+    no-op: its one consumer was the cluster-config direct-apply branch,
+    removed along with Direct Apply as a concept entirely (see
+    ``resolve_cluster_config_mechanism()``). Left in the signature rather
+    than pulled now so every existing caller (``routes/gates.py``,
+    ``routes/assessments.py``, ``automode.py``) doesn't need a simultaneous,
+    unrelated signature-change edit in this same pass -- ``automode.py``'s
+    own fate (whether it still has any legitimate reason to pass ``True``
+    here at all) is being decided as its own, separately-tested step; this
+    parameter's removal belongs with that decision, not bundled into the
+    mechanism-resolution change alone.
     """
     groups: dict[str, list[dict]] = {}
     for f in files:
@@ -547,19 +574,15 @@ async def route_and_deliver(
     mechanisms: dict[str, str] = {}
     outcomes: dict[str, object] = {}
 
-    # Registered-but-no-known-infra-repo-URL is a real (rare) edge case the
-    # design doc doesn't name explicitly: a live Argo CD Application found
-    # for this app, but this particular assessment's report never recorded
-    # which infra repo it lives in. Direct-applying here would be exactly
-    # the footgun the design doc closes (racing Argo's next prune-sync), and
-    # there's no repo to guess for a commit -- so this refuses to pick
-    # either mechanism and surfaces the ambiguity instead. Every other case
-    # (including "not yet registered, but an infra repo URL is known" --
-    # the bootstrap case, see resolve_cluster_config_mechanism()'s docstring)
-    # goes through the shared decision function.
+    # Direct Apply has been removed as a concept entirely -- every
+    # cluster/app-config delivery either commits to a known infra repo
+    # (bootstrapping apps/{app}/ on the very first delivery, see
+    # resolve_cluster_config_mechanism()'s docstring) or refuses outright
+    # when no infra repo is known at all (only possible for an assessment
+    # saved before GitOps registration became mandatory).
     cluster_files = groups.pop(CATEGORY_CLUSTER_CONFIG, [])
     if cluster_files:
-        mechanisms[CATEGORY_CLUSTER_CONFIG] = resolve_cluster_config_mechanism(registered, infra_repo_url)
+        mechanisms[CATEGORY_CLUSTER_CONFIG] = resolve_cluster_config_mechanism(infra_repo_url)
 
     cicd_files = groups.pop(CATEGORY_CICD_SHARED_NAMESPACE, [])
     if cicd_files:
@@ -596,15 +619,7 @@ async def route_and_deliver(
     # never "failed").
     try:
         if cluster_files:
-            if mechanisms[CATEGORY_CLUSTER_CONFIG] == MECHANISM_NONE:
-                outcomes[CATEGORY_CLUSTER_CONFIG] = {
-                    "error": (
-                        "app is GitOps-registered but no infra_repo_url is known for this "
-                        "assessment -- refusing to direct-apply (would race Argo's prune-sync) "
-                        "or guess which repo to commit to"
-                    ),
-                }
-            elif mechanisms[CATEGORY_CLUSTER_CONFIG] == MECHANISM_INFRA_REPO_COMMIT and report is not None:
+            if mechanisms[CATEGORY_CLUSTER_CONFIG] == MECHANISM_INFRA_REPO_COMMIT and report is not None:
                 outcomes[CATEGORY_CLUSTER_CONFIG] = await deliver_with_verification(
                     mechanism=MECHANISM_INFRA_REPO_COMMIT, files=cluster_files, report=report,
                     app_name=app_name, store=store, assessment_id=assessment_id,
@@ -631,16 +646,21 @@ async def route_and_deliver(
                     )
                     cluster_outcome["gate_id"] = gate_id
             else:
-                result = await apply_with_verification(
-                    cluster_files, namespace, dry_run,
-                    force_dry_run_first=force_dry_run_first,
-                    store=store, app_name=app_name,
-                    skill_outcome_reason=f"delivered via {actor}",
-                    actor=actor, action="deliver-apply",
-                    resource=f"assessment:{assessment_id}",
-                )
-                await store.save_apply_results(assessment_id, result, namespace, result["is_dry_run"])
-                outcomes[CATEGORY_CLUSTER_CONFIG] = result
+                # MECHANISM_NONE: no infra_repo_url is known for this
+                # assessment at all -- Direct Apply is no longer a fallback
+                # (removed as a concept entirely), so this refuses rather
+                # than mutating the cluster or guessing which repo to commit
+                # to. Only reachable for an assessment saved before GitOps
+                # registration became mandatory; a human must register this
+                # app for GitOps (e.g. "Register for GitOps" on Assessment
+                # Detail) before it can be delivered at all.
+                outcomes[CATEGORY_CLUSTER_CONFIG] = {
+                    "error": (
+                        "no GitOps infra repo is known for this assessment -- Direct Apply has "
+                        "been removed, so this cannot be delivered until the app is registered "
+                        "for GitOps (see \"Register for GitOps\" on Assessment Detail)"
+                    ),
+                }
 
         if cicd_files:
             gate_id = await store.create_gate(

@@ -105,8 +105,14 @@
         {% endif %}
         {% if r.gitops_registered %}
           <span class="badge badge-info" title="Changes to this app go through PR review + Argo CD sync">GitOps</span>
+        {% elif r.infra_repo_url %}
+          {# Direct Apply has been removed as a concept entirely -- a known
+             infra repo with no live Argo CD Application yet is
+             bootstrapping (its first delivery commits apps/{app}/ for Argo
+             to discover), not falling back to a direct apply. #}
+          <span class="badge badge-info" title="GitOps infra repo known; awaiting the first delivery to bootstrap Argo CD registration">GitOps (pending)</span>
         {% else %}
-          <span class="badge badge-muted" title="Changes to this app apply directly to the cluster">Direct apply</span>
+          <span class="badge badge-warning" title="No GitOps infra repo known for this app -- register it for GitOps before it can be delivered">Not GitOps-registered</span>
         {% endif %}
       </td>
       <td class="text-sm text-muted">{{ r.deploy_namespace | default("—") }}</td>

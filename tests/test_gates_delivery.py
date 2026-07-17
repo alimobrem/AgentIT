@@ -50,6 +50,25 @@ async def gate_client():
             yield client, store, aid
 
 
+@pytest.fixture
+async def gitops_gate_client():
+    """Same as ``gate_client`` but with a known ``infra_repo_url`` -- Direct
+    Apply has been removed as a concept entirely, so any test exercising the
+    generic gate-approve path through ``route_and_deliver()`` needs a known
+    infra repo or delivery refuses outright (see
+    ``resolve_cluster_config_mechanism()``)."""
+    store = await make_store()
+    async_store = store
+    report = make_report(repo_name="test-app")
+    report.infra_repo_url = "https://github.com/org/infra-gitops"
+    aid = await store.save(report)
+    with patch("agentit.portal.app.get_store", return_value=async_store), \
+         patch("agentit.portal.routes.gates.get_store", return_value=async_store):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True) as client:
+            await prime_csrf(client)
+            yield client, store, aid
+
+
 @pytest.fixture(autouse=True)
 def _mock_kube():
     with patch("agentit.portal.cluster_apply.kube") as mock_kube:
@@ -60,7 +79,46 @@ def _mock_kube():
 
 
 class TestResolveGateFunnelsThroughRouter:
-    async def test_approve_with_cluster_config_files_applies_directly_when_not_registered(self, gate_client, _mock_kube):
+    async def test_approve_with_cluster_config_files_commits_to_infra_repo(self, gitops_gate_client, _mock_kube):
+        """Direct Apply has been removed as a concept entirely -- a generic
+        gate approval for cluster-config files now always resolves to a
+        GitOps commit+PR (given a known infra_repo_url), never a direct
+        apply, so this never touches ``kube.apply_yaml`` at all."""
+        client, store, aid = gitops_gate_client
+        await store.save_onboarding(aid, [_cluster_config_file()])
+        gate_id = await store.create_gate(aid, "deploy", "Approve deployment")
+
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"):
+            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
+            resp = await client.post(
+                f"/gates/{gate_id}/resolve",
+                data={"status": "approved", "resolved_by": "tester"},
+                follow_redirects=False,
+            )
+        assert resp.status_code == 303
+        assert "gate_approved=true" in resp.headers["location"]
+        _mock_kube.apply_yaml.assert_not_called()
+        mock_commit.assert_called_once()
+
+        approved = await store.list_gates(status="approved")
+        assert len(approved) == 1
+
+        deliveries = await store.list_deliveries(aid)
+        assert len(deliveries) == 1
+        assert deliveries[0]["mechanism"] == "cluster_config:infra-repo-commit"
+
+        # The successful commit also opens a gitops-pr-pending gate --
+        # a human still merges, AgentIT still never auto-merges.
+        pending = await store.list_gates(status="pending")
+        assert any(g["gate_type"] == "gitops-pr-pending" for g in pending)
+
+    async def test_no_infra_repo_refuses_with_no_direct_apply_fallback(self, gate_client, _mock_kube):
+        """The legacy (pre-mandatory-GitOps) case: no infra_repo_url known
+        at all -- refuses outright rather than falling back to a direct
+        apply."""
         client, store, aid = gate_client
         await store.save_onboarding(aid, [_cluster_config_file()])
         gate_id = await store.create_gate(aid, "deploy", "Approve deployment")
@@ -72,23 +130,23 @@ class TestResolveGateFunnelsThroughRouter:
         )
         assert resp.status_code == 303
         assert "gate_approved=true" in resp.headers["location"]
-        _mock_kube.apply_yaml.assert_called_once()
+        _mock_kube.apply_yaml.assert_not_called()
 
         approved = await store.list_gates(status="approved")
         assert len(approved) == 1
 
         deliveries = await store.list_deliveries(aid)
         assert len(deliveries) == 1
-        assert deliveries[0]["mechanism"] == "cluster_config:direct-apply"
+        assert deliveries[0]["status"] == "partial"
 
-    async def test_concurrent_resolve_requests_apply_only_once(self, gate_client, _mock_kube):
+    async def test_concurrent_resolve_requests_deliver_only_once(self, gitops_gate_client, _mock_kube):
         """Regression guard for the check-then-act gate-resolution race
         (Priority 1b): two genuinely concurrent resolve requests for the
-        SAME pending gate must not both perform the cluster apply. Before
+        SAME pending gate must not both perform the delivery. Before
         the fix, the route read the gate as `pending`, ran the side
         effect, and only afterward called the atomic `resolve_gate()`
         status-flip -- so two near-simultaneous requests could both read
-        `pending` and both apply. `list_gates("pending")` (the route's
+        `pending` and both deliver. `list_gates("pending")` (the route's
         own initial read) is slowed down here so both concurrent requests
         genuinely observe the gate as still-pending before either one
         reaches its `resolve_gate()` claim -- reproducing the exact
@@ -99,7 +157,7 @@ class TestResolveGateFunnelsThroughRouter:
 
         from agentit.portal.store import AssessmentStore
 
-        client, store, aid = gate_client
+        client, store, aid = gitops_gate_client
         await store.save_onboarding(aid, [_cluster_config_file()])
         gate_id = await store.create_gate(aid, "deploy", "Approve deployment")
 
@@ -111,13 +169,18 @@ class TestResolveGateFunnelsThroughRouter:
                 await asyncio.sleep(0.2)
             return result
 
-        with patch.object(AssessmentStore, "list_gates", _slow_list_gates):
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"), \
+             patch.object(AssessmentStore, "list_gates", _slow_list_gates):
+            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
             resp1, resp2 = await asyncio.gather(
                 client.post(f"/gates/{gate_id}/resolve", data={"status": "approved", "resolved_by": "tester"}, follow_redirects=False),
                 client.post(f"/gates/{gate_id}/resolve", data={"status": "approved", "resolved_by": "tester"}, follow_redirects=False),
             )
 
-        assert _mock_kube.apply_yaml.call_count == 1
+        assert mock_commit.call_count == 1
         locations = [resp1.headers["location"], resp2.headers["location"]]
         assert sum(1 for l in locations if "error=" in l) == 1
         assert sum(1 for l in locations if "gate_approved=true" in l) == 1
@@ -125,13 +188,18 @@ class TestResolveGateFunnelsThroughRouter:
         approved = await store.list_gates(status="approved")
         assert len(approved) == 1
 
-    async def test_approve_audits_the_delivery(self, gate_client, _mock_kube, caplog):
+    async def test_approve_audits_the_delivery(self, gitops_gate_client, _mock_kube, caplog):
         import logging
-        client, store, aid = gate_client
+        client, store, aid = gitops_gate_client
         await store.save_onboarding(aid, [_cluster_config_file()])
         gate_id = await store.create_gate(aid, "deploy", "Approve deployment")
 
-        with caplog.at_level(logging.INFO, logger="agentit.audit"):
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"), \
+             caplog.at_level(logging.INFO, logger="agentit.audit"):
+            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
             await client.post(
                 f"/gates/{gate_id}/resolve",
                 data={"status": "approved", "resolved_by": "tester"},
@@ -141,8 +209,8 @@ class TestResolveGateFunnelsThroughRouter:
         audit_records = [r for r in caplog.records if getattr(r, "audit", False)]
         # One for the generic "gate-approved" audit line, one for the
         # delivery itself (closing the pre-existing gap: gate-approve had
-        # zero audit log entry for the apply itself).
-        deliver_records = [r for r in audit_records if r.action == "deliver-apply"]
+        # zero audit log entry for the commit+PR itself).
+        deliver_records = [r for r in audit_records if r.action == "deliver"]
         assert len(deliver_records) == 1
         assert deliver_records[0].outcome == "success"
 

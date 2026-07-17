@@ -9,7 +9,15 @@
 </p>
 <h1>Onboarding: {{ report.repo_name }}</h1>
 
-{% set _deliver_label = "Commit & Open PR" if gitops_registered else "Apply to Cluster" %}
+{# Direct Apply has been removed as a concept entirely -- Deliver always
+   resolves to the GitOps commit+PR mechanism now that GitOps registration
+   is mandatory (see resolve_cluster_config_mechanism()). The one remaining
+   non-"infra-repo-commit" outcome, "none", is a legacy edge case (an
+   assessment saved before GitOps registration became mandatory, with no
+   infra repo known at all) -- Deliver is blocked entirely for it, not
+   relabeled, since there is no mechanism left to fall back to. #}
+{% set _delivery_blocked = delivery_mechanism == "none" %}
+{% set _deliver_label = "Commit & Open PR" %}
 {# One primary status region: error XOR dry-run/delivery flash. #}
 {% if request.query_params.get('error') %}
 <div class="alert alert-error" role="status">{{ request.query_params.get('error') }}</div>
@@ -114,17 +122,12 @@
 {# ── Primary Actions ─────────────────────────────────────────────── #}
 {% set total = namespace(count=0) %}
 {% for cat, files in grouped.items() %}{% set total.count = total.count + files|length %}{% endfor %}
-{# Confirm tails are mechanism-honest: GitOps only opens a PR (cluster
-   unchanged until merge); Direct Apply names the target namespace. Never
-   claim "cannot be undone / modifies production" on the PR path. #}
-{% set _deliver_ns = report.repo_name.lower().replace('_', '-').replace('.', '-') %}
-{% if gitops_registered %}
+{# Confirm tail is mechanism-honest: GitOps only opens a PR, the cluster is
+   never mutated until a human merges it -- never claim "cannot be undone /
+   modifies production" on this path. Direct Apply has been removed as a
+   concept entirely, so there is no longer a second, cluster-mutating
+   variant of this text. #}
 {% set _confirm_tail = 'This opens a pull request in the infra repo. It does not mutate the cluster until a human merges the PR.' %}
-{% set _override_tail = 'Proceeding skips the dry-run preview. This still only opens a PR — the cluster is not mutated until merge.' %}
-{% else %}
-{% set _confirm_tail = 'This applies manifests to namespace ' ~ _deliver_ns ~ ' and may modify cluster resources.' %}
-{% set _override_tail = 'Proceeding skips the dry-run preview and applies to namespace ' ~ _deliver_ns ~ ', which may modify cluster resources.' %}
-{% endif %}
 
 {% if apply_results and not apply_results.get('dry_run') and not apply_results.get('errors') %}
 {# Moment of joy (docs/ux-design-requirements.md checklist #9): reserved
@@ -145,6 +148,7 @@
 {% set _dry_done = dry_run_done|default(false) %}
 {% set _delivered = apply_results and not apply_results.get('dry_run') and not apply_results.get('errors') %}
 {% set _dry_failed = apply_results and apply_results.get('dry_run') and apply_results.get('errors') %}
+{% set _deliver_disabled = not _dry_done or _delivery_blocked %}
 <div class="delivery-actions" x-data="{ busy: '', dryDone: {{ 'true' if _dry_done else 'false' }} }"
      data-dry-done="{{ 'true' if _dry_done else 'false' }}">
   <div class="delivery-primary" role="group" aria-label="Delivery steps">
@@ -183,12 +187,12 @@
           <form method="post" action="/assessments/{{ assessment_id }}/deliver" class="inline-form"
                 x-ref="deliverForm" @submit="busy = 'apply'">
             <button type="button" class="btn btn-green" data-action="apply"
-                    {% if not _dry_done %}disabled aria-disabled="true"{% endif %}
+                    {% if _deliver_disabled %}disabled aria-disabled="true"{% endif %}
                     :disabled="busy !== '' || !dryDone"
                     :aria-disabled="!dryDone"
                     :aria-busy="busy === 'apply'"
                     :class="{ 'btn-loading': busy === 'apply', 'submitting': busy === 'apply' }"
-              {% if _dry_done %}
+              {% if _dry_done and not _delivery_blocked %}
               @click="$dispatch('show-confirm', {
                 title: {{ ('Confirm ' ~ _deliver_label) | tojson | forceescape }},
                 message: {{ delivery_confirmation | tojson | forceescape }} + ' ({{ total.count }} manifest(s).) ' + {{ _confirm_tail | tojson | forceescape }},
@@ -216,8 +220,11 @@
       </div>
       <p class="delivery-choice-hint">One PR for everything, or a PR per agent.</p>
       <div class="delivery-step-status">
-        {% if not _dry_done and not _delivered %}
-        <span class="badge badge-warning" title="No successful Dry Run yet — run Dry Run first, or use Override below.">No dry run yet</span>
+        {% if _delivery_blocked %}
+        <span class="badge badge-critical" title="No GitOps infra repo is known for this assessment -- Direct Apply has been removed, so this app must be registered for GitOps before it can be delivered.">Not GitOps-registered</span>
+        <span>Register this app for GitOps (see Assessment Detail) before delivering.</span>
+        {% elif not _dry_done and not _delivered %}
+        <span class="badge badge-warning" title="No successful Dry Run yet — run Dry Run first.">No dry run yet</span>
         <span>Run Dry Run before delivering.</span>
         {% elif _delivered %}
         <span class="badge badge-low">Delivered</span>
@@ -225,23 +232,6 @@
         <span>Ready — choose a deliver option.</span>
         {% endif %}
       </div>
-      {% if not _dry_done %}
-      {# Soft-gate override: combined deliver stays disabled; override needs an
-         explicit danger confirm restating the mechanism + missing dry run. #}
-      <div class="delivery-override">
-        <form method="post" action="/assessments/{{ assessment_id }}/deliver" class="inline-form"
-              x-ref="overrideDeliverForm" @submit="busy = 'apply'">
-          <button type="button" class="btn btn-outline btn-sm" data-action="apply-override"
-                  :disabled="busy !== ''"
-            @click="$dispatch('show-confirm', {
-              title: {{ ('Override — ' ~ _deliver_label ~ '?') | tojson | forceescape }},
-              message: 'No successful Dry Run yet. ' + {{ delivery_confirmation | tojson | forceescape }} + ' ({{ total.count }} manifest(s).) ' + {{ _override_tail | tojson | forceescape }},
-              form: $refs.overrideDeliverForm,
-              opts: { confirmText: {{ _deliver_label | tojson | forceescape }}, danger: true }
-            })">Override</button>
-        </form>
-      </div>
-      {% endif %}
     </div>
   </div>
 

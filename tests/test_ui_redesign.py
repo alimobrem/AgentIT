@@ -136,7 +136,9 @@ class TestFixFindingIsPureGeneration:
         resp = await client.get(f"/assessments/{aid}/onboard-results?fix_generated=1&agent=security")
         assert resp.status_code == 200
         assert "apply to cluster or create a PR" not in resp.text
-        assert "Review below, then Apply to Cluster" in resp.text
+        # Direct Apply has been removed as a concept entirely -- the flash
+        # always names "Commit & Open PR" now, never "Apply to Cluster".
+        assert "Review below, then Commit &amp; Open PR" in resp.text or "Review below, then Commit & Open PR" in resp.text
 
 
 # ── 1b. Per-finding Fix is post-onboard only ─────────────────────────────
@@ -465,13 +467,16 @@ class TestOrphanedRoutesRetired:
 
 
 class TestGitOpsVisibility:
-    async def test_assessment_detail_shows_direct_apply_badge_when_unregistered(self, ui_client):
+    async def test_assessment_detail_shows_not_registered_badge_when_unregistered(self, ui_client):
+        """Direct Apply has been removed as a concept entirely -- an app
+        with no known infra repo shows a "Not GitOps-registered" badge, not
+        a "Direct apply" badge implying a live mutating fallback exists."""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="unregistered-app"))
 
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
-        assert "Direct apply" in resp.text
+        assert "Direct apply" not in resp.text
         assert "Not GitOps-registered" in resp.text
 
     async def test_assessment_detail_shows_gitops_badge_when_registered(self, ui_client):
@@ -503,14 +508,18 @@ class TestGitOpsVisibility:
         assert resp.status_code == 200
         assert ">GitOps<" in resp.text
 
-    async def test_fleet_shows_direct_apply_badge_for_unregistered_app(self, ui_client):
+    async def test_fleet_shows_not_registered_badge_for_unregistered_app(self, ui_client):
+        """Direct Apply has been removed as a concept entirely -- Fleet
+        shows "Not GitOps-registered" for an app with no known infra repo,
+        never a "Direct apply" badge implying a live mutating fallback."""
         client, store = ui_client
         await store.save(make_report(repo_name="plain-fleet-app"))
         with patch("agentit.portal.routes.fleet._argo_cache", {"data": {}, "ts": 0}):
             resp = await client.get("/fleet")
 
         assert resp.status_code == 200
-        assert ">Direct apply<" in resp.text
+        assert ">Direct apply<" not in resp.text
+        assert "Not GitOps-registered" in resp.text
 
     async def test_register_gitops_route_sets_infra_repo_url_and_ensures_applicationset(self, ui_client):
         client, store = ui_client
