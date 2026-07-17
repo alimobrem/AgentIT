@@ -408,3 +408,93 @@ class TestChaosSkillsUseCorrectLitmusSemantics:
         doc = yaml.safe_load(files[0].content)
         exp = doc["spec"]["experiments"][0]
         assert exp["name"] == "pod-network-latency"
+
+
+# ---------------------------------------------------------------------------
+# 5. audit-policy no longer fabricates a never-applyable `audit.k8s.io`
+#    Policy resource (that API group/kind is not a real Kubernetes REST
+#    resource on any cluster -- it's a static file schema consumed only by
+#    kube-apiserver's own --audit-policy-file startup flag). It must be
+#    delivered as advisory documentation instead, using the same
+#    ConfigMap-wrapped-markdown pattern already used by
+#    incident/runbook.md, retirement/decommission-plan.md, and
+#    compliance/compliance-evidence.md.
+# ---------------------------------------------------------------------------
+
+
+class TestAuditPolicyIsNoLongerAFabricatedApplyAttempt:
+    def test_output_is_not_a_kind_policy_apply_attempt(self, full_report: AssessmentReport) -> None:
+        repo_root = Path(__file__).resolve().parent.parent
+        skill = load_skill(repo_root / "skills/compliance/audit-policy.md")
+        engine = SkillEngine(SKILLS_DIR, platform=None)
+        files = engine.generate(skill, full_report, llm_client=None)
+        assert files, "audit-policy: template fallback produced no files"
+
+        for f in files:
+            for doc in yaml.safe_load_all(f.content):
+                if doc is None:
+                    continue
+                assert doc.get("kind") != "Policy", (
+                    "audit-policy must not emit a bare 'Policy' apply attempt -- "
+                    "audit.k8s.io/v1 Policy is not a real cluster REST resource"
+                )
+                assert "audit.k8s.io" not in str(doc.get("apiVersion", "")), (
+                    "audit-policy must not attempt to apply an audit.k8s.io resource directly"
+                )
+
+    def test_routed_to_advisory_configmap_instead(self, full_report: AssessmentReport) -> None:
+        """Routed the same way as the other advisory-only skills: a real,
+        always-applyable ConfigMap holding the reference policy content
+        and human instructions, never silently treated as "already
+        enforced" since nothing this service account can apply actually
+        turns on audit logging."""
+        repo_root = Path(__file__).resolve().parent.parent
+        skill = load_skill(repo_root / "skills/compliance/audit-policy.md")
+        engine = SkillEngine(SKILLS_DIR, platform=None)
+        files = engine.generate(skill, full_report, llm_client=None)
+        assert len(files) == 1
+
+        doc = yaml.safe_load(files[0].content)
+        assert doc["kind"] == "ConfigMap"
+        assert doc["apiVersion"] == "v1"
+        assert "audit-policy.yaml" in doc["data"], "expected the real audit policy rules preserved as reference data"
+        # The actual audit.k8s.io rules are still present -- just as
+        # reference content for a human to wire in, not an apply target.
+        assert "audit.k8s.io/v1" in doc["data"]["audit-policy.yaml"]
+        assert "kind: Policy" in doc["data"]["audit-policy.yaml"]
+
+    def test_missing_operator_misattribution_no_longer_reachable(self, full_report: AssessmentReport) -> None:
+        """Regression guard for the cluster_apply.py misattribution: since
+        the skill's output is a ConfigMap (a core, always-registered kind),
+        `_classify_and_fix`'s CRD-missing check can never trigger for it,
+        so `_CRD_TO_OPERATOR["Policy"]` (Kyverno) can never be
+        misattributed to this skill's output -- even on a cluster with no
+        Kyverno installed at all."""
+        from unittest.mock import patch
+
+        from agentit.portal.cluster_apply import apply_manifests_to_cluster
+
+        repo_root = Path(__file__).resolve().parent.parent
+        skill = load_skill(repo_root / "skills/compliance/audit-policy.md")
+        engine = SkillEngine(SKILLS_DIR, platform=None)
+        files = engine.generate(skill, full_report, llm_client=None)
+        assert files
+
+        file_dicts = [
+            {"category": "skills", "path": f.path, "content": f.content, "description": f.description}
+            for f in files
+        ]
+
+        with patch("agentit.portal.cluster_apply.kube") as mock_kube:
+            mock_kube.namespace_exists.return_value = True
+            # No Kyverno CRD ("policies") installed on this cluster --
+            # the exact scenario that used to misattribute the fabricated
+            # audit.k8s.io Policy failure to a missing Kyverno operator.
+            mock_kube.get_api_resources.return_value = {"configmaps", "deployments", "services"}
+            mock_kube.apply_yaml.return_value = {"applied": True, "error": None}
+
+            result = apply_manifests_to_cluster(file_dicts, namespace="parity-app")
+
+        assert result["applied"] == [f.path for f in files]
+        assert result["missing_operators"] == {}
+        assert result["errors"] == []
