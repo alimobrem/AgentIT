@@ -733,10 +733,63 @@ class TestCheckSyntax:
 class TestRunTestSuite:
     def test_returns_true_when_pytest_exits_zero(self, tmp_path):
         with patch("agentit.capability_scout.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="12 passed in 1.23s", stderr="",
+            )
             passed, detail = run_test_suite(tmp_path)
         assert passed is True
         assert "passed" in detail
+
+    def test_returns_false_when_pytest_exits_zero_but_every_test_skipped(self, tmp_path):
+        """Real regression test: the live capability-scout pod has only the
+        production AGENTIT_DB_DSN wired in (chart/templates/agents/
+        capability-scout.yaml), no AGENTIT_TEST_PG_DSN, and the
+        Containerfile ships neither podman nor docker -- so every test's
+        session-scoped `postgres_dsn` fixture (tests/conftest.py) calls
+        `pytest.skip(...)` and the whole suite exits 0 with nothing
+        actually run. Confirmed live (unmocked) by stripping podman/docker
+        from PATH and unsetting AGENTIT_TEST_PG_DSN: `pytest
+        tests/test_capability_scout.py -q` reported "87 skipped in 0.04s"
+        with exit code 0. Before this fix, `run_test_suite()` read that as
+        "pytest passed" and this fail-closed gate would wave a proposal
+        through having verified precisely nothing."""
+        with patch("agentit.capability_scout.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="ssssssssssssssssssssssssssssssssssssssssssssss [100%]\n87 skipped in 0.04s\n",
+                stderr="",
+            )
+            passed, detail = run_test_suite(tmp_path)
+        assert passed is False
+        assert "0 tests actually passed" in detail
+
+    def test_all_skipped_failure_detail_surfaces_the_skip_reason(self, tmp_path):
+        """The skip-reason detail (e.g. "no AGENTIT_TEST_PG_DSN and no
+        podman/docker on PATH to start one") only appears in pytest's
+        captured stdout with `-rs` passed -- assert the gate actually asks
+        for it and surfaces it, since a bare "0 tests actually passed" with
+        no reason would be as undiagnosable as the bug this replaces."""
+        skip_reason = "no AGENTIT_TEST_PG_DSN and no podman/docker on PATH to start one"
+        with patch("agentit.capability_scout.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=f"SKIPPED [87] tests/test_capability_scout.py:900: {skip_reason}\n"
+                       "87 skipped in 0.04s\n",
+                stderr="",
+            )
+            passed, detail = run_test_suite(tmp_path)
+        assert passed is False
+        assert skip_reason in detail
+
+    def test_invokes_pytest_with_skip_reason_reporting_enabled(self, tmp_path):
+        """`-rs` is what makes skip reasons show up in stdout at all --
+        without it the all-skipped detection above would have nothing
+        diagnosable to surface."""
+        with patch("agentit.capability_scout.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="1 passed in 0.01s", stderr="")
+            run_test_suite(tmp_path)
+        args, _kwargs = mock_run.call_args
+        assert "-rs" in args[0]
 
     def test_returns_false_when_pytest_exits_nonzero(self, tmp_path):
         with patch("agentit.capability_scout.subprocess.run") as mock_run:

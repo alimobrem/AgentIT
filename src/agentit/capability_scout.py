@@ -1020,21 +1020,35 @@ def run_test_suite(repo_dir: Path) -> tuple[bool, str]:
     only removes the risk of accidentally reaching production, it doesn't
     remove the test suite's ability to run.
 
-    **Known follow-up gap, not fixed here**: this pod has neither
+    **Known infra gap, code-level half fixed here**: this pod has neither
     podman/docker (so ``tests/conftest.py``'s auto-start fallback can't
     help) nor an ``AGENTIT_TEST_PG_DSN`` of its own wired into its
     Deployment env -- unlike CI (a GitHub Actions ``services:`` block / a
     Tekton ``Sidecar``, see ``.github/workflows/tests.yml``/
-    ``chart/templates/tekton/pipeline.yaml``), so this safety gate's test
-    run will currently fail to acquire a Postgres instance at all inside
-    the live capability-scout pod. Deliberately NOT fixed by pointing this
-    at the live bundled instance's own database -- test fixtures `TRUNCATE`
-    every table, which would be a real, severe data-loss bug if aimed at
-    production data. The correct fix is a small, dedicated Postgres
-    instance (or a distinct, human-provisioned database on the bundled
-    one) wired into this watcher's own Deployment via a new, explicit
-    ``AGENTIT_TEST_PG_DSN`` value -- flagged here for whoever picks it up
-    next rather than guessed at under this pass's time constraints.
+    ``chart/templates/tekton/pipeline.yaml``). Confirmed against
+    ``chart/templates/agents/capability-scout.yaml``: that Deployment wires
+    only the production ``AGENTIT_DB_DSN`` (the bundled fleet Postgres), no
+    ``AGENTIT_TEST_PG_DSN``, and ``Containerfile`` installs neither
+    ``podman`` nor ``docker``. So every collected test's session-scoped
+    ``postgres_dsn`` fixture calls ``pytest.skip(...)``, and a suite that is
+    100% skipped still exits ``0`` -- **without the check below, that read
+    as a clean "pytest passed" and this fail-closed gate would wave a
+    proposal through having verified precisely nothing.** The check below
+    fixes that half of the bug at the code level: an all-skipped run is now
+    treated as a gate failure, not a pass, so the gate fails *closed*
+    instead of *silently green* when Postgres is unreachable.
+    Deliberately NOT fixed by pointing this at the live bundled instance's
+    own database -- test fixtures `TRUNCATE` every table, which would be a
+    real, severe data-loss bug if aimed at production data. Completing the
+    other half (letting this gate actually execute real tests every cycle,
+    instead of correctly-but-uselessly failing closed every cycle) still
+    needs an infrastructure change outside what's verifiable from this
+    pass: a small, dedicated Postgres instance (or a distinct,
+    human-provisioned database on the bundled one) wired into this
+    watcher's own Deployment via a new, explicit ``AGENTIT_TEST_PG_DSN``
+    Secret/env var in ``chart/templates/agents/capability-scout.yaml`` --
+    flagged here for whoever picks it up next rather than guessed at under
+    this pass's time constraints.
     """
     import os
 
@@ -1046,7 +1060,7 @@ def run_test_suite(repo_dir: Path) -> tuple[bool, str]:
         env.pop(var, None)
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "pytest", "tests/", "-q",
+            [sys.executable, "-m", "pytest", "tests/", "-q", "-rs",
              "--ignore=tests/test_real_repos.py",
              "--ignore=tests/test_browser.py",
              "--ignore=tests/test_browser_critical.py",
@@ -1063,6 +1077,19 @@ def run_test_suite(repo_dir: Path) -> tuple[bool, str]:
         # both so the real cause is visible from the gate result itself.
         tail = (result.stdout[-500:] + "\n" + result.stderr[-500:]).strip()
         return False, f"pytest exited {result.returncode}: {tail}"
+    # `pytest` exits 0 both for "everything passed" and for "every collected
+    # test skipped itself" (e.g. no reachable Postgres -- see the docstring
+    # above). The latter is not a passing safety gate, it is a gate that
+    # never ran: fail closed instead of reporting a false "pytest passed"
+    # for a run that verified zero actual behavior. `-rs` above puts each
+    # skip reason in stdout so the real cause (e.g. "no AGENTIT_TEST_PG_DSN
+    # and no podman/docker on PATH to start one") is visible in the detail.
+    if not re.search(r"\b[1-9]\d*\s+passed\b", result.stdout):
+        tail = result.stdout[-500:].strip()
+        return False, (
+            "pytest exited 0 but 0 tests actually passed -- the whole suite skipped itself "
+            f"(likely no Postgres reachable in this pod; see run_test_suite()'s docstring): {tail}"
+        )
     return True, "pytest passed"
 
 
