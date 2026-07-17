@@ -1,0 +1,18 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agentit-monitor
+  namespace: agentit
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/instance: agentit
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: agentit
+spec:
+  selector:
+    matchLabels:
+      app: agentit
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s

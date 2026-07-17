@@ -1,0 +1,41 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: agentit-cost-report
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/component: cost-reporting
+spec:
+  schedule: "0 8 * * 1"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 4
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: agentit
+            app.kubernetes.io/component: cost-reporting
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: agentit-cost-reporter
+          containers:
+            - name: cost-report
+              image: "agentit-cost-report:latest"
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              env:
+                - name: NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: REPORT_FORMAT
+                  value: "json"
