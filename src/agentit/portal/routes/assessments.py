@@ -167,6 +167,24 @@ async def assess_submit(
             from agentit.llm_decisions import build_secret_classify_events
             for ev in build_secret_classify_events(secret_decisions, report.repo_name):
                 _bridge(store.log_event(**ev, correlation_id=assessment_id))
+            # `infra` (the human-supplied form field, captured before this
+            # closure ran) was empty here iff `_assess_sync()` attempted
+            # `_auto_create_infra_repo()` internally -- if that attempt
+            # failed, `report.infra_repo_url` comes back empty too. Unlike
+            # `register_gitops()`'s standalone retry route (which redirects
+            # with a real `?error=` flash), this background-thread path had
+            # no request/response cycle left to surface that failure to --
+            # previously it was only `_auto_create_infra_repo()`'s own
+            # `logger.warning()`, a server log line nobody watching the
+            # portal ever sees.
+            if infra is None and not report.infra_repo_url:
+                _bridge(store.log_event(
+                    "portal", "infra-repo-creation-failed", report.repo_name, "warning",
+                    "Could not auto-create a GitOps infra repo for this app during assessment "
+                    "(often a GITHUB_TOKEN permissions issue) -- it will use Direct Apply until "
+                    "you register a GitOps infra repo manually.",
+                    correlation_id=assessment_id,
+                ))
             # Publish event on first assessment for this repo
             history = _bridge(store.list_history(report.repo_url))
             if len(history) <= 1:
@@ -328,6 +346,20 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
 
     gitops_registered, infra_repo_url = await is_gitops_registered(report.repo_name, report)
 
+    # Surface a silent _auto_create_infra_repo() failure (assessments.py's
+    # main assess_submit background job) as a real, visible banner here --
+    # not just a server log line. Only flagged while it's still the *most
+    # recent* fact about this app's infra-repo state: a later successful
+    # "gitops-registered" event (e.g. from a manual Register-for-GitOps
+    # retry) naturally clears it with no extra bookkeeping needed.
+    infra_repo_creation_failed = False
+    if not infra_repo_url and hasattr(s, "list_events"):
+        recent_infra_events = await s.list_events(target_app=report.repo_name, limit=50)
+        for ev in recent_infra_events:
+            if ev["action"] in ("infra-repo-creation-failed", "gitops-registered"):
+                infra_repo_creation_failed = ev["action"] == "infra-repo-creation-failed"
+                break
+
     timeline = await s.get_assessment_timeline(assessment_id) if hasattr(s, 'get_assessment_timeline') else []
     # docs/ledger-design-spec.md Phase 1: additive 5th tab, alongside (not
     # replacing) Actions/Timeline above -- same gate_card macro, same
@@ -382,6 +414,7 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "pending_actions": pending_actions,
             "gitops_registered": gitops_registered,
             "infra_repo_url": infra_repo_url,
+            "infra_repo_creation_failed": infra_repo_creation_failed,
             "timeline": timeline,
             "ledger_cards": ledger_cards,
             "trend": trend,

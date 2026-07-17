@@ -40,6 +40,19 @@
 <div class="alert alert-success mb-2" role="status">{{ request.query_params.get('success') }}</div>
 {% endif %}
 
+{% if infra_repo_creation_failed %}
+{# _auto_create_infra_repo() (assessments.py's main assess_submit
+   background job) tried and failed to auto-create a GitOps infra repo for
+   this app during assessment -- previously this was only a server log
+   line nobody watching the portal ever saw. Distinct from, and shown
+   above, the generic "never registered" nudge below -- this specifically
+   says an attempt was already made and it didn't work. #}
+<div x-data="{ dismissed: false }" x-show="!dismissed" x-cloak class="alert alert-warn mb-2">
+  <span class="text-sm">AgentIT tried to auto-create a GitOps infra repo for this app during assessment, but it failed (often a <code>GITHUB_TOKEN</code> permissions issue) -- this app is using Direct Apply until you register one manually below.</span>
+  <button type="button" class="btn btn-sm btn-outline" @click="dismissed = true">Dismiss</button>
+</div>
+{% endif %}
+
 {% if not gitops_registered and not infra_repo_url %}
 {# Parent x-data owns dismissed + busy; form only has x-ref (same pattern as
    Findings Fix) so $refs.registerGitopsForm resolves in the button scope.

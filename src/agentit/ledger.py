@@ -67,6 +67,13 @@ _EVENT_ACTION_TO_CARD_TYPE: dict[str, str] = {
     "delivery-breach-reported": "F",
     "critical-findings-detected": "I",
     "remediation-failed": "I",
+    # Not a "finding" in the literal sense, but the same "something in the
+    # pipeline silently failed and needs attention" bucket "remediation-
+    # failed" above already occupies -- assess_submit()'s background job
+    # previously only logged this to the server, invisible anywhere a
+    # human would actually look (docs/onboarding-loop-vision-gap-analysis.md
+    # Phase 0 item 4).
+    "infra-repo-creation-failed": "I",
     "rollback-recommended": "J",
     "drift-detected": "K",
     "drift-auto-synced": "K",
