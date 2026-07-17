@@ -139,7 +139,7 @@ class CapabilityScout:
             await self._log_run(severity, summary, details)
             return {"outcome": "no-proposal"}
 
-        if proposal_already_implemented(proposal, self._repo_dir):
+        if proposal_already_implemented(proposal, self._repo_dir, evidence.get("store_capabilities")):
             click.echo(
                 f"[capability-scout] Skipping already-implemented proposal "
                 f"'{proposal.get('title')}' (module present in tree).",

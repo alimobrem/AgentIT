@@ -39,6 +39,51 @@ OUTCOME_COOLDOWN_DAYS = 30
 STALE_PR_DAYS = 14
 REJECT_REASON_PREFIX = "agentit:reject-reason:"
 
+# Real closer text, seen twice (PRs #63/#88), that means "this isn't a gap
+# at all -- the capability already exists elsewhere in the codebase," as
+# opposed to "wontfix" (a real gap, deprioritized for now). Distinguishing
+# these matters: a "duplicate" closure should never expire the way wontfix's
+# 30-day cooldown does, because the underlying capability doesn't stop
+# existing after 30 days. Phrases below are drawn verbatim from real closed
+# PR comments (#63/#88), not invented.
+_DUPLICATE_REASON_PHRASES = (
+    "duplicates existing", "this duplicates", "already exists", "already has a",
+    "already persists", "closing for the same reason as", "same underlying proposal",
+    "redundant with", "capability already exists",
+)
+_WONTFIX_REASON_PHRASES = ("won't fix", "wont fix", "not planned", "declining this")
+
+
+_HARD_BLOCK_REASONS = ("wontfix", "duplicate")
+
+
+def _is_hard_block_reason(reason: str) -> bool:
+    """True for a closed-without-merge reason that should stop this exact
+    gap from being re-proposed -- ``wontfix`` (a real gap, deprioritized)
+    and ``duplicate`` (not a real gap: the capability already exists
+    elsewhere in the codebase, even under a different name). Both are
+    treated the same by the doc-gap filters below; only
+    ``proposal_blocked_by_outcome()`` distinguishes them further (wontfix
+    expires after ``OUTCOME_COOLDOWN_DAYS``, duplicate does not -- an
+    already-existing capability doesn't stop existing after 30 days)."""
+    return str(reason or "").lower() in _HARD_BLOCK_REASONS
+
+
+def _infer_reject_reason_from_text(text: str) -> str:
+    """Best-effort ``reject_reason`` from a human's free-form close comment
+    when they didn't use the exact ``agentit:reject-reason:...`` convention
+    -- confirmed live: every real capability-scout PR closed so far (#47,
+    #53, #63, #88) was closed via a plain comment, never that label/body
+    convention, so relying on the exact prefix alone left every one of
+    those closures invisible to ``proposal_blocked_by_outcome()``. Returns
+    ``""`` (no signal) rather than guessing when no known phrase matches."""
+    lower = (text or "").lower()
+    if any(p in lower for p in _DUPLICATE_REASON_PHRASES):
+        return "duplicate"
+    if any(p in lower for p in _WONTFIX_REASON_PHRASES):
+        return "wontfix"
+    return ""
+
 # Direct, mechanical enforcement of this project's own "keep changes
 # minimal" convention (see llm.py's system prompt) — not a new philosophy,
 # just making an existing rule machine-checked for once.
@@ -130,8 +175,16 @@ def _now_utc(now: str | datetime | None = None) -> datetime:
     return parsed or datetime.now(timezone.utc)
 
 
-def parse_reject_reason(labels: list[str] | None, body: str | None = None) -> str:
-    """Extract ``agentit:reject-reason:…`` from PR labels or body text."""
+def parse_reject_reason(
+    labels: list[str] | None, body: str | None = None, comments: list[str] | None = None,
+) -> str:
+    """Extract ``agentit:reject-reason:…`` from PR labels, body, or comment
+    text (checked in that order), falling back to a real-phrase heuristic
+    (``_infer_reject_reason_from_text``) over body+comments when no human
+    used the exact machine-parseable convention anywhere. ``comments`` is
+    the real PR comment bodies (see ``fetch_pr_close_comments``) -- every
+    real capability-scout PR closed so far explained its reason there, not
+    in a label or the PR body itself."""
     for label in labels or []:
         text = str(label or "")
         if text.lower().startswith(REJECT_REASON_PREFIX):
@@ -141,19 +194,32 @@ def parse_reject_reason(labels: list[str] | None, body: str | None = None) -> st
         stripped = line.strip()
         if stripped.lower().startswith(REJECT_REASON_PREFIX):
             return stripped[len(REJECT_REASON_PREFIX):].strip()
-    return ""
+    comments_text = "\n".join(str(c or "") for c in (comments or []))
+    for line in comments_text.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith(REJECT_REASON_PREFIX):
+            return stripped[len(REJECT_REASON_PREFIX):].strip()
+    return _infer_reject_reason_from_text(f"{body_text}\n{comments_text}")
 
 
 def outcome_from_pr_status(
     status: dict,
     *,
     now: str | datetime | None = None,
+    comments: list[str] | None = None,
 ) -> dict | None:
-    """Map a ``get_pr_status`` payload to a durable outcome, or None if still open."""
+    """Map a ``get_pr_status`` payload to a durable outcome, or None if still open.
+
+    ``comments`` (the PR's real comment bodies, from ``fetch_pr_close_comments``)
+    is optional -- ``get_pr_status`` itself never reads a PR's comment
+    thread, only its own body/labels, so this is the only place a close
+    explanation left as a plain comment (the real, observed pattern for
+    every capability-scout PR closed so far) reaches ``reject_reason``.
+    """
     state = str(status.get("state") or "unknown")
     pr_url = str(status.get("html_url") or status.get("pr_url") or "")
     title = str(status.get("title") or "")
-    reject_reason = parse_reject_reason(status.get("labels") or [], status.get("body") or "")
+    reject_reason = parse_reject_reason(status.get("labels") or [], status.get("body") or "", comments=comments)
     base = {
         "state": state,
         "pr_url": pr_url,
@@ -222,7 +288,7 @@ def filter_actionable_doc_gaps(
     merged_or_wontfix = [
         o for o in (outcomes or [])
         if o.get("state") == "merged"
-        or (o.get("state") == "closed" and str(o.get("reject_reason") or "").lower() == "wontfix")
+        or (o.get("state") == "closed" and _is_hard_block_reason(o.get("reject_reason")))
     ]
     out: list[dict] = []
     for gap in gaps:
@@ -252,15 +318,16 @@ def filter_actionable_doc_gaps(
 
 
 def rank_doc_gaps(gaps: list[dict], outcomes: list[dict] | None = None) -> list[dict]:
-    """Prefer untried gaps; deprioritize recent wontfix titles; boost remediable rejects."""
+    """Prefer untried gaps; deprioritize recent wontfix/duplicate titles; boost remediable rejects."""
     outcomes = outcomes or []
     wontfix = [
         o for o in outcomes
-        if o.get("state") == "closed" and str(o.get("reject_reason") or "").lower() == "wontfix"
+        if o.get("state") == "closed" and _is_hard_block_reason(o.get("reject_reason"))
     ]
     remediable = [
         o for o in outcomes
-        if o.get("state") == "closed" and str(o.get("reject_reason") or "").lower() not in ("", "wontfix")
+        if o.get("state") == "closed" and not _is_hard_block_reason(o.get("reject_reason"))
+        and str(o.get("reject_reason") or "").lower() != ""
     ]
     tried_titles = [str(o.get("title") or "") for o in outcomes if o.get("state") in ("merged", "closed", "stale")]
 
@@ -347,8 +414,74 @@ def cited_merges(outcomes: list[dict] | None, *, limit: int = 5) -> list[dict]:
     return merges[:limit]
 
 
-def proposal_already_implemented(proposal: dict, repo_dir: Path | None = None) -> bool:
-    """True when the proposal's sibling module (or a known shipped L3 module) exists."""
+def list_store_capabilities(store: object | None) -> list[str]:
+    """Real, introspected public method names on ``store`` (e.g.
+    ``record_skill_outcome``, ``get_low_effectiveness_skills``) -- given to
+    the LLM as evidence, and used by ``proposal_already_implemented()``
+    below, so a proposal can be checked against what the store *actually
+    already does*, not just against filenames under ``src/agentit/``.
+
+    This directly targets the real, twice-repeated root cause behind PRs
+    #47/#53/#63/#88: each proposed a new module to "record structured
+    per-rejection reasons," and each was closed because that capability
+    already exists as ``store.py``'s ``skill_effectiveness.reason`` column
+    / ``record_skill_outcome()`` -- but ``gather_evidence()`` never told the
+    LLM that, and ``proposal_already_implemented()`` only ever checked a
+    *literal expected filename* (``sibling_module_path()`` / a small shipped-
+    module list below), never the store's real method surface. Never
+    invented: this is ``dir(store)`` filtered to public callables, nothing
+    more. Returns ``[]`` for ``store is None`` (no store to introspect).
+    """
+    if store is None:
+        return []
+    try:
+        return sorted(
+            name for name in dir(store)
+            if not name.startswith("_") and callable(getattr(store, name, None))
+        )
+    except Exception:
+        return []
+
+
+def _shipped_capability_phrases() -> list[tuple[tuple[str, ...], str]]:
+    """(phrase variants, real store method) for capabilities that keep
+    getting re-proposed as a *new* module under a different name -- see
+    PRs #47/#53/#63/#88, all describing "record/monitor per-rejection
+    reasons for a low-effectiveness skill," all closed because that's
+    already ``record_skill_outcome()``/``get_low_effectiveness_skills()``.
+    Only used to *block* a proposal when ``store_capabilities`` (real,
+    introspected -- see ``list_store_capabilities()``) confirms the named
+    method genuinely exists; a phrase match alone is never enough, since a
+    stale/hardcoded assumption that a method exists would be exactly the
+    kind of unverified guess this fix is trying to eliminate.
+    """
+    return [
+        (
+            (
+                "rejection reason", "reject reason", "rejection sampler", "per-rejection",
+                "rejection-tracking", "approval rate", "effectiveness monitor",
+                "effectiveness alert", "effectiveness alerter",
+            ),
+            "record_skill_outcome",
+        ),
+    ]
+
+
+def proposal_already_implemented(
+    proposal: dict,
+    repo_dir: Path | None = None,
+    store_capabilities: list[str] | None = None,
+) -> bool:
+    """True when the proposal's sibling module (or a known shipped L3
+    module) already exists on disk, *or* when its title/gap_description
+    describes a capability that a real, introspected store method
+    (``store_capabilities``) already provides under a different name.
+
+    The third check only fires when ``store_capabilities`` is a real,
+    non-empty list that actually contains the matching method -- when it's
+    unavailable (``None``/``[]``, e.g. no store this cycle), this function
+    makes no claim either way about that capability, rather than guessing.
+    """
     repo_dir = repo_dir or Path(".")
     title = str(proposal.get("title") or "")
     sibling = sibling_module_path(title)
@@ -358,6 +491,11 @@ def proposal_already_implemented(proposal: dict, repo_dir: Path | None = None) -
     for phrases, module in _shipped_module_phrases():
         if any(p in lower for p in phrases) and (repo_dir / "src" / "agentit" / module).is_file():
             return True
+    if store_capabilities:
+        combined_lower = f"{lower} {str(proposal.get('gap_description') or '').lower()}"
+        for phrases, method in _shipped_capability_phrases():
+            if method in store_capabilities and any(p in combined_lower for p in phrases):
+                return True
     return False
 
 
@@ -367,7 +505,19 @@ def proposal_blocked_by_outcome(
     *,
     now: str | datetime | None = None,
 ) -> bool:
-    """True when a recent merge or wontfix outcome covers this proposal title."""
+    """True when a recent merge, wontfix, or duplicate outcome covers this
+    proposal title.
+
+    ``wontfix`` expires after ``OUTCOME_COOLDOWN_DAYS`` (business priorities
+    can change) -- ``duplicate`` does not, because "the capability already
+    exists elsewhere in the codebase" doesn't stop being true after 30 days.
+    This is the direct fix for the real, twice-repeated bug where two
+    capability-scout PRs (#63, #88) proposed the same already-covered
+    "record structured per-rejection reasons" capability weeks apart: #63
+    was closed as a duplicate, but a bare "closed, not merged" reading (the
+    prior behavior here) treated that as "still an open, remediable gap"
+    instead of "already correctly rejected."
+    """
     title = str(proposal.get("title") or "")
     if not title:
         return False
@@ -381,7 +531,10 @@ def proposal_blocked_by_outcome(
             continue
         if outcome.get("state") == "merged":
             return True
-        if outcome.get("state") == "closed" and str(outcome.get("reject_reason") or "").lower() == "wontfix":
+        reject_reason = str(outcome.get("reject_reason") or "").lower()
+        if outcome.get("state") == "closed" and reject_reason == "duplicate":
+            return True
+        if outcome.get("state") == "closed" and reject_reason == "wontfix":
             recorded = _parse_iso(str(outcome.get("recorded_at") or outcome.get("merged_at") or ""))
             if recorded is None:
                 return True
@@ -470,6 +623,37 @@ def list_self_improve_prs_from_gh(*, state: str = "all", limit: int = 50) -> lis
     return out
 
 
+def fetch_pr_close_comments(pr_url: str) -> list[str]:
+    """Real comment bodies on ``pr_url`` via ``gh pr view --json comments``.
+
+    ``get_pr_status()`` (``github_pr.py``) only ever reads a PR's own
+    body/labels/title via the REST API -- confirmed by reading it directly
+    -- it never fetches the comment thread. But every real capability-scout
+    PR closed so far (#47, #53, #63, #88) explains its close reason in a
+    plain issue comment, not a label or a body edit, so relying on
+    ``get_pr_status()`` alone leaves ``parse_reject_reason()`` blind to the
+    one place humans actually write the reason. Returns ``[]`` on any
+    failure -- callers must treat that as "no comment signal available,"
+    never fabricate one.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", pr_url, "--json", "comments"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("capability-scout: gh pr view --json comments failed for %s: %s", pr_url, exc)
+        return []
+    if result.returncode != 0:
+        return []
+    try:
+        data = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return []
+    comments = data.get("comments") if isinstance(data, dict) else None
+    return [str(c.get("body") or "") for c in (comments or []) if isinstance(c, dict)]
+
+
 def merge_tracked_prs(*sources: list[dict] | None) -> list[dict]:
     """Deduplicate tracked PR dicts by ``pr_url`` (first title wins)."""
     merged: list[dict] = []
@@ -492,14 +676,21 @@ async def sync_proposal_outcomes(
     *,
     get_status=None,
     list_prs=None,
+    get_comments=None,
     now: str | datetime | None = None,
 ) -> list[dict]:
     """Poll self-improve PRs and log new ``capability-outcome`` events.
 
     Sources: prior ``capability-run`` rows *and* ``gh pr list`` discovery so
-    human merges on ``agentit/self-improve/*`` branches are not missed.
-    Idempotent per ``pr_url``: already-recorded outcomes are skipped. Returns
-    only newly recorded outcome dicts.
+    human merges on ``agentit/self-improve/*`` branches are not missed. For
+    PRs closed without merge, also fetches the real PR comment thread
+    (``get_comments``, default ``fetch_pr_close_comments``) so a close
+    reason left as a plain comment (the pattern every real capability-scout
+    PR closed so far actually used -- see ``fetch_pr_close_comments``'s
+    docstring) reaches ``reject_reason`` via ``parse_reject_reason()``'s
+    heuristic fallback, not just the exact ``agentit:reject-reason:``
+    label/body convention. Idempotent per ``pr_url``: already-recorded
+    outcomes are skipped. Returns only newly recorded outcome dicts.
     """
     if store is None:
         return []
@@ -507,6 +698,8 @@ async def sync_proposal_outcomes(
         from agentit.portal.github_pr import get_pr_status as get_status
     if list_prs is None:
         list_prs = list_self_improve_prs_from_gh
+    if get_comments is None:
+        get_comments = fetch_pr_close_comments
 
     run_events = await _safe_call(store, "list_events_by_action", CAPABILITY_RUN_ACTION, limit=100)
     prior = proposal_outcomes_from_events(
@@ -533,7 +726,17 @@ async def sync_proposal_outcomes(
         # Prefer title from the original propose event when GitHub omits it.
         if not status.get("title") and tracked.get("title"):
             status = {**status, "title": tracked["title"]}
-        outcome = outcome_from_pr_status(status, now=now)
+        comments: list[str] = []
+        if str(status.get("state") or "") == "closed":
+            # Only closed-not-merged PRs can have a close *reason* worth
+            # reading -- merged/open PRs have no comment thread signal
+            # relevant to reject_reason, so skip the extra `gh` call for them.
+            try:
+                comments = await asyncio.to_thread(get_comments, pr_url)
+            except Exception:
+                logger.warning("capability-scout: failed to fetch PR comments for %s", pr_url, exc_info=True)
+                comments = []
+        outcome = outcome_from_pr_status(status, now=now, comments=comments)
         if outcome is None:
             continue
         outcome["recorded_at"] = _now_utc(now).isoformat()
@@ -601,6 +804,11 @@ async def gather_evidence(store: object | None, repo_dir: Path | None = None) ->
     existing_modules = list_existing_src_modules(repo_dir)
     merges = cited_merges(outcomes)
     fix_regression_only = last_merge_broke_ci(outcomes, recent_events)
+    # Real, introspected store method names -- not counted in signal_count
+    # (it's context for "does this already exist," not evidence that a
+    # proposal is warranted this cycle). See list_store_capabilities()'s
+    # docstring for the exact bug this closes.
+    store_capabilities = list_store_capabilities(store)
 
     if store is None:
         return {
@@ -617,6 +825,8 @@ async def gather_evidence(store: object | None, repo_dir: Path | None = None) ->
             "proposal_outcomes": outcomes,
             "cited_merges": merges,
             "fix_regression_only": fix_regression_only,
+            "store_capabilities": store_capabilities,
+            "recent_skill_activity": [],
             "signal_count": len(doc_gaps),
         }
 
@@ -625,6 +835,12 @@ async def gather_evidence(store: object | None, repo_dir: Path | None = None) ->
     check_compliance = await _safe_call(store, "get_check_compliance")
     skill_effectiveness = await _safe_call(store, "get_skill_effectiveness", default={})
     low_effectiveness_skills = await _safe_call(store, "get_low_effectiveness_skills")
+    # Real sample rows proving *why* skills were rejected is already
+    # captured (skill_effectiveness.reason) -- given as evidence so the LLM
+    # can see this directly instead of re-inventing a parallel mechanism
+    # for exactly what get_recent_skill_activity() already returns (see
+    # PRs #47/#53/#63/#88).
+    recent_skill_activity = await _safe_call(store, "get_recent_skill_activity", limit=10)
     loop_health = await _safe_call(store, "get_loop_health", default={})
     tick_failures = await _safe_call(store, "list_events_by_action", "tick-failed", limit=20)
     # Drop stale EACCES rows once allowlist paths are writable again so scout
@@ -657,6 +873,7 @@ async def gather_evidence(store: object | None, repo_dir: Path | None = None) ->
         "check_compliance": check_compliance,
         "skill_effectiveness": skill_effectiveness,
         "low_effectiveness_skills": low_effectiveness_skills,
+        "recent_skill_activity": recent_skill_activity,
         "loop_health": loop_health,
         "tick_failures": tick_failures,
         "existing_modules": existing_modules,
@@ -664,6 +881,7 @@ async def gather_evidence(store: object | None, repo_dir: Path | None = None) ->
         "proposal_outcomes": outcomes,
         "cited_merges": merges,
         "fix_regression_only": fix_regression_only,
+        "store_capabilities": store_capabilities,
         "signal_count": signal_count,
     }
 

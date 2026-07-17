@@ -24,8 +24,10 @@ from agentit.capability_scout import (
     check_scope_allowlist,
     check_syntax,
     describe_capability_run,
+    fetch_pr_close_comments,
     filter_actionable_doc_gaps,
     gather_evidence,
+    list_store_capabilities,
     outcome_from_pr_status,
     parse_reject_reason,
     proposal_already_implemented,
@@ -403,6 +405,380 @@ class TestProposalOutcomes:
         severity, _summary, details = describe_capability_run(evidence, None, None, None)
         assert details["cited_merges"]
         assert details["proposal_outcomes"]
+
+
+# ── Root-cause regression: PRs #47/#53/#63/#88 (resourcequota rejection- ──
+# ── sampler proposed 4x, closed 4x as duplicate/stub) ──────────────────────
+#
+# Real, verified root causes (see PR #63/#88's own closing comments):
+# 1. get_pr_status() never reads a PR's comment thread, only body/labels --
+#    every real close reason here was left as a plain comment, so
+#    parse_reject_reason() never saw it and treated "closed, not merged" as
+#    "still an open, remediable gap."
+# 2. proposal_already_implemented() only checked a literal expected
+#    filename, never whether the store already exposes the capability
+#    (record_skill_outcome's `reason` column) under a different name.
+
+
+class TestDuplicateRejectionDetection:
+    """Fix for root cause 1: real close-comment text -> reject_reason, and
+    'duplicate' treated as a permanent block (unlike wontfix's 30-day
+    cooldown, which correctly assumes the underlying gap might still be
+    real later)."""
+
+    def test_parse_reject_reason_infers_duplicate_from_real_pr63_comment(self):
+        # Verbatim excerpt from the real closing comment on
+        # github.com/alimobrem/AgentIT/pull/63 -- no agentit:reject-reason:
+        # label or body line was ever used, only this plain comment.
+        real_comment = (
+            "Closing \u2014 this duplicates existing, better functionality. The codebase "
+            "already has a Postgres-backed rejection-tracking mechanism (skill_effectiveness "
+            "table's reason column + record_skill_outcome()/get_low_effectiveness_skills()), "
+            "which persists across restarts unlike this PR's in-memory RejectionSampler."
+        )
+        assert parse_reject_reason([], "", comments=[real_comment]) == "duplicate"
+
+    def test_parse_reject_reason_infers_duplicate_from_real_pr88_comment(self):
+        # Verbatim excerpt from github.com/alimobrem/AgentIT/pull/88.
+        real_comment = (
+            "Closing for the same reason as #63 (same underlying proposal, regenerated) "
+            "\u2014 the capability already exists: store.py's skill_effectiveness table has "
+            "a reason TEXT column..."
+        )
+        assert parse_reject_reason([], "", comments=[real_comment]) == "duplicate"
+
+    def test_parse_reject_reason_explicit_prefix_still_wins_over_inference(self):
+        """The exact agentit:reject-reason: convention (label/body) is
+        checked before the comment-text heuristic, and still works exactly
+        as before -- this fix only adds a fallback, never overrides the
+        explicit signal."""
+        assert parse_reject_reason(
+            ["agentit:reject-reason:wontfix"], "", comments=["this duplicates something else entirely"],
+        ) == "wontfix"
+
+    def test_parse_reject_reason_no_signal_stays_empty(self):
+        assert parse_reject_reason([], "just needs a rebase", comments=["looks good, will merge after CI"]) == ""
+
+    def test_outcome_from_pr_status_picks_up_duplicate_from_comments(self):
+        out = outcome_from_pr_status(
+            {
+                "state": "closed", "merged_at": "", "html_url": "https://github.com/o/r/pull/88",
+                "labels": [], "title": "Add a skill-approval rate sampler", "body": "",
+            },
+            comments=["Closing for the same reason as #63 -- this duplicates existing functionality."],
+        )
+        assert out["state"] == "closed"
+        assert out["reject_reason"] == "duplicate"
+
+    def test_fetch_pr_close_comments_returns_real_comment_bodies(self):
+        with patch("agentit.capability_scout.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=json.dumps({"comments": [{"body": "Closing -- duplicates #63"}, {"body": "ok"}]}),
+                stderr="",
+            )
+            comments = fetch_pr_close_comments("https://github.com/o/r/pull/88")
+        assert comments == ["Closing -- duplicates #63", "ok"]
+        args, _kwargs = mock_run.call_args
+        assert args[0][:3] == ["gh", "pr", "view"]
+        assert "comments" in args[0][-1]
+
+    def test_fetch_pr_close_comments_returns_empty_on_failure(self):
+        with patch("agentit.capability_scout.subprocess.run", side_effect=OSError("gh not found")):
+            assert fetch_pr_close_comments("https://github.com/o/r/pull/1") == []
+        with patch("agentit.capability_scout.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="not authenticated")
+            assert fetch_pr_close_comments("https://github.com/o/r/pull/1") == []
+
+    async def test_sync_proposal_outcomes_reads_comments_only_for_closed_prs(self):
+        """The extra `gh pr view --json comments` call must only fire for
+        closed (not merged/open) PRs -- merged/open PRs have no close
+        reason worth reading, so this keeps the extra API call bounded."""
+        async_store, _raw = await make_async_store()
+        get_comments = MagicMock(return_value=["Closing -- duplicates #63"])
+
+        def _status(url):
+            return {
+                "state": "merged", "merged_at": "2026-07-16T12:00:00Z", "html_url": url,
+                "labels": [], "title": "Merged thing", "body": "", "created_at": "2026-07-15T12:00:00Z",
+            }
+
+        await sync_proposal_outcomes(
+            async_store, get_status=_status, list_prs=lambda: [{"pr_url": "https://x/pull/1", "title": "Merged thing"}],
+            get_comments=get_comments,
+        )
+        get_comments.assert_not_called()
+
+    async def test_sync_proposal_outcomes_records_duplicate_reject_reason_from_comments(self):
+        """End-to-end: a closed PR whose only reason signal is a real
+        free-form comment (the actual PR #88 shape) is recorded with
+        reject_reason='duplicate', not blank."""
+        async_store, raw_store = await make_async_store()
+
+        def _status(url):
+            return {
+                "state": "closed", "merged_at": "", "html_url": url, "labels": [],
+                "title": "Add a skill-approval rate sampler that records structured per-rejection context",
+                "body": "", "created_at": "2026-07-17T14:00:00Z",
+            }
+
+        def _comments(url):
+            return ["Closing for the same reason as #63 -- this duplicates existing, better functionality."]
+
+        newly = await sync_proposal_outcomes(
+            async_store, get_status=_status, get_comments=_comments,
+            list_prs=lambda: [{"pr_url": "https://github.com/o/r/pull/88", "title": "irrelevant"}],
+        )
+        assert len(newly) == 1
+        assert newly[0]["reject_reason"] == "duplicate"
+        rows = await raw_store.list_events_by_action(CAPABILITY_OUTCOME_ACTION)
+        details = rows[0].get("details") or json.loads(rows[0].get("details_json") or "{}")
+        assert details["reject_reason"] == "duplicate"
+
+    def test_proposal_blocked_by_duplicate_outcome_has_no_cooldown(self):
+        """Unlike wontfix (30-day cooldown), a duplicate outcome blocks
+        forever -- an already-existing capability doesn't stop existing
+        after 30 days. Recorded 200 days ago, still blocks."""
+        outcomes = [{
+            "state": "closed", "reject_reason": "duplicate",
+            "title": "Add a resourcequota skill rejection sampler that records structured "
+                     "rejection reasons for zero-approval skills",
+            "slug": "add-a-resourcequota-skill-rejection-sampler",
+            "recorded_at": "2025-12-30T00:00:00+00:00",
+        }]
+        assert proposal_blocked_by_outcome(
+            {
+                "title": "Add a skill-approval rate sampler that records structured "
+                         "per-rejection context for low-effectiveness skills",
+            },
+            outcomes,
+            now="2026-07-17T00:00:00+00:00",
+        )
+
+    def test_rank_doc_gaps_deprioritizes_duplicate_same_as_wontfix(self):
+        gaps = [
+            {"text": "Known gap: rewrite entire portal", "file": "a.md", "line_no": 1},
+            {"text": "Known gap: predictive fast-forward view", "file": "b.md", "line_no": 2},
+        ]
+        outcomes = [{
+            "state": "closed", "reject_reason": "duplicate",
+            "title": "Rewrite entire portal", "slug": "rewrite-entire-portal",
+            "recorded_at": "2026-07-10T00:00:00+00:00",
+        }]
+        ranked = rank_doc_gaps(gaps, outcomes)
+        assert "fast-forward" in ranked[0]["text"]
+
+    def test_filter_actionable_doc_gaps_drops_duplicate_titles_like_wontfix(self, tmp_path):
+        gaps = [{
+            "file": "docs/x.md", "line_no": 1, "anchor": "Known gap",
+            "text": "Known gap: add a resourcequota skill rejection sampler",
+        }]
+        outcomes = [{
+            "state": "closed", "reject_reason": "duplicate",
+            "title": "Add a resourcequota skill rejection sampler",
+            "slug": "add-a-resourcequota-skill-rejection-sampler",
+        }]
+        assert filter_actionable_doc_gaps(gaps, repo_dir=tmp_path, outcomes=outcomes) == []
+
+
+class TestStoreCapabilityEvidence:
+    """Fix for root cause 2: real evidence about what the store already
+    does, so a proposal can be checked against actual capabilities, not
+    just an expected filename."""
+
+    async def test_list_store_capabilities_includes_real_methods(self):
+        async_store, _raw = await make_async_store()
+        caps = list_store_capabilities(async_store)
+        assert "record_skill_outcome" in caps
+        assert "get_low_effectiveness_skills" in caps
+        assert "get_recent_skill_activity" in caps
+        # Private/dunder methods never leak into LLM-facing evidence.
+        assert not any(c.startswith("_") for c in caps)
+
+    def test_list_store_capabilities_empty_for_no_store(self):
+        assert list_store_capabilities(None) == []
+
+    def test_proposal_already_implemented_flags_rejection_sampler_when_capability_confirmed(self):
+        """The exact PR #63/#88 title+gap_description shape, checked
+        against a real (confirmed) store_capabilities list -- must be
+        flagged as already-implemented instead of gated only on a literal
+        filename match."""
+        proposal = {
+            "title": "Add a skill-approval rate sampler that records structured "
+                     "per-rejection context for low-effectiveness skills",
+            "gap_description": (
+                "The resourcequota skill has a weighted approval rate of only 16.7% with no "
+                "structured per-rejection context being captured. A new small module can "
+                "record rejection reasons per skill tick."
+            ),
+        }
+        assert proposal_already_implemented(
+            proposal, Path("/nonexistent"), store_capabilities=["record_skill_outcome", "get_agent_stats"],
+        )
+
+    def test_proposal_already_implemented_does_not_guess_without_confirmed_capability(self):
+        """No store_capabilities evidence available this cycle (e.g. store
+        is None) -> this check makes no claim, rather than assuming the
+        method exists. Sibling-module/shipped-module checks are unaffected."""
+        proposal = {
+            "title": "Add a skill-approval rate sampler that records structured "
+                     "per-rejection context for low-effectiveness skills",
+            "gap_description": "records rejection reasons per skill tick",
+        }
+        assert not proposal_already_implemented(proposal, Path("/nonexistent"), store_capabilities=[])
+        assert not proposal_already_implemented(proposal, Path("/nonexistent"), store_capabilities=None)
+
+    def test_proposal_already_implemented_ignores_unrelated_titles(self):
+        """The capability-phrase check is narrow -- an unrelated proposal
+        title/gap must never be flagged just because record_skill_outcome
+        happens to be in store_capabilities."""
+        proposal = {"title": "Add a retry backoff to the drift detector", "gap_description": "retries too fast"}
+        assert not proposal_already_implemented(
+            proposal, Path("/nonexistent"), store_capabilities=["record_skill_outcome"],
+        )
+
+    async def test_gather_evidence_includes_store_capabilities_and_recent_skill_activity(self, monkeypatch, tmp_path):
+        """Proves the LLM now actually receives evidence that
+        record_skill_outcome (with a real 'reason') already exists --
+        the concrete piece of evidence missing from every one of the four
+        real proposals that re-invented it."""
+        monkeypatch.chdir(tmp_path)
+        async_store, raw_store = await make_async_store()
+        for _ in range(5):
+            await raw_store.record_skill_outcome("resourcequota", "pinky", "rejected", "quota exceeded")
+        await raw_store.record_skill_outcome("resourcequota", "pinky", "approved", "")
+
+        evidence = await gather_evidence(async_store, repo_dir=tmp_path)
+
+        assert "record_skill_outcome" in evidence["store_capabilities"]
+        assert "get_low_effectiveness_skills" in evidence["store_capabilities"]
+        assert evidence["recent_skill_activity"]
+        assert any(row.get("reason") == "quota exceeded" for row in evidence["recent_skill_activity"])
+        # Not counted as "real signal that justifies a cycle" on its own.
+        assert evidence["signal_count"] >= len(evidence["low_effectiveness_skills"])
+
+    async def test_gather_evidence_store_capabilities_empty_without_a_store(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        evidence = await gather_evidence(None)
+        assert evidence["store_capabilities"] == []
+        assert evidence["recent_skill_activity"] == []
+
+
+class TestResourcequotaRejectionSamplerRegression:
+    """Full simulation of the real, twice(-plus)-repeated bug: a
+    'resourcequota' skill-effectiveness gap that's already covered by
+    skill_effectiveness/record_skill_outcome, with a prior PR on the same
+    topic closed as a duplicate via a plain comment (no label, no
+    agentit:reject-reason: body line -- the real observed shape). Confirms
+    gather_evidence + the block/already-implemented checks now stop a
+    second near-identical proposal, using real store data throughout (no
+    mock data for the actual skill_effectiveness rows)."""
+
+    async def _seeded_evidence(self, tmp_path, raw_store, async_store):
+        for _ in range(5):
+            await raw_store.record_skill_outcome("resourcequota", "pinky", "rejected", "quota exceeded")
+        await raw_store.record_skill_outcome("resourcequota", "pinky", "approved", "")
+        # Real fleet-wide rejection signal, matching MIN_SIGNAL_ROWS's bar
+        # for "enough real data to ground a proposal at all" -- unrelated to
+        # the specific resourcequota/duplicate mechanics under test here.
+        for i in range(4):
+            await raw_store.record_feedback(f"app-{i}", "hardening", f"cat-{i}", "rejected")
+        # The real PR #63 outcome: closed as a duplicate, discovered only
+        # via its plain closing comment (sync_proposal_outcomes already
+        # covered elsewhere) -- recorded directly here as the
+        # capability-outcome event gather_evidence() reads back.
+        await raw_store.log_event(
+            "capability-scout", CAPABILITY_OUTCOME_ACTION, None, "info",
+            "Proposal closed: Add a resourcequota skill rejection sampler that records "
+            "structured rejection reasons for zero-approval skills (duplicate)",
+            details={
+                "state": "closed",
+                "title": "Add a resourcequota skill rejection sampler that records structured "
+                         "rejection reasons for zero-approval skills",
+                "slug": "add-a-resourcequota-skill-rejection-sampler-that-records-structu",
+                "pr_url": "https://github.com/alimobrem/AgentIT/pull/63",
+                "reject_reason": "duplicate",
+                "recorded_at": "2026-07-17T00:46:23Z",
+            },
+        )
+        return await gather_evidence(async_store, repo_dir=tmp_path)
+
+    async def test_evidence_proves_the_capability_already_exists(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        async_store, raw_store = await make_async_store()
+        evidence = await self._seeded_evidence(tmp_path, raw_store, async_store)
+
+        assert any(s.get("skill") == "resourcequota" for s in evidence["low_effectiveness_skills"])
+        assert "record_skill_outcome" in evidence["store_capabilities"]
+        assert any(row.get("reason") for row in evidence["recent_skill_activity"])
+        assert evidence["proposal_outcomes"]
+        assert evidence["proposal_outcomes"][0]["reject_reason"] == "duplicate"
+
+    async def test_a_fresh_near_identical_proposal_is_blocked_by_outcome(self, monkeypatch, tmp_path):
+        """A new LLM proposal re-describing the exact same capability under
+        a new title (the real PR #88 shape, regenerated weeks after #63)
+        must be blocked before it ever reaches the safety gates / opens a
+        second PR."""
+        monkeypatch.chdir(tmp_path)
+        async_store, raw_store = await make_async_store()
+        evidence = await self._seeded_evidence(tmp_path, raw_store, async_store)
+
+        new_proposal = {
+            "has_proposal": True,
+            "title": "Add a skill-approval rate sampler that records structured "
+                     "per-rejection context for low-effectiveness skills",
+            "gap_description": (
+                "The resourcequota skill has a weighted approval rate of only 16.7% with no "
+                "structured per-rejection context being captured."
+            ),
+            "target_files": ["src/agentit/skill_rejection_sampler.py", "tests/test_skill_rejection_sampler.py"],
+            "risk": "low",
+            "test_plan": "Assert record_rejection persists structured samples.",
+        }
+        assert proposal_blocked_by_outcome(new_proposal, evidence["proposal_outcomes"])
+        assert proposal_already_implemented(
+            new_proposal, tmp_path, store_capabilities=evidence["store_capabilities"],
+        )
+
+    async def test_research_once_skips_the_duplicate_instead_of_opening_a_second_pr(self, monkeypatch, tmp_path):
+        """Full watcher-level proof: research_once() must not open a PR for
+        the regenerated duplicate. It stops at the already-implemented
+        check (store_capabilities confirms record_skill_outcome already
+        covers this) before even reaching the outcome-blocked check --
+        either is a correct fix; already-implemented is the more precise
+        diagnosis, and test_a_fresh_near_identical_proposal_is_blocked_by_outcome
+        above separately proves the outcome-blocked path also fires for
+        this exact case."""
+        from unittest.mock import MagicMock as _MM
+
+        from agentit.watchers.capability_scout import CapabilityScout
+
+        monkeypatch.chdir(tmp_path)
+        async_store, raw_store = await make_async_store()
+        await self._seeded_evidence(tmp_path, raw_store, async_store)
+
+        publisher = _MM()
+        scout = CapabilityScout(publisher=publisher, store=async_store, repo_dir=tmp_path)
+
+        mock_llm = _MM()
+        mock_llm.propose_capability_improvement.return_value = {
+            "has_proposal": True,
+            "title": "Add a skill-approval rate sampler that records structured "
+                     "per-rejection context for low-effectiveness skills",
+            "gap_description": "records rejection reasons per skill tick",
+            "target_files": ["src/agentit/skill_rejection_sampler.py", "tests/test_skill_rejection_sampler.py"],
+            "risk": "low",
+            "test_plan": "Assert record_rejection persists structured samples.",
+        }
+        with patch("agentit.llm.LLMClient", return_value=mock_llm), \
+             patch("agentit.git_pr.create_branch_commit_push") as mock_branch, \
+             patch("agentit.git_pr.open_draft_pr") as mock_open_pr:
+            result = await scout.research_once()
+
+        assert result["outcome"] in ("already-implemented", "outcome-blocked")
+        mock_branch.assert_not_called()
+        mock_open_pr.assert_not_called()
+        publisher.publish.assert_not_called()
 
 
 # ── gather_evidence ─────────────────────────────────────────────────────────
