@@ -6,7 +6,18 @@
 </p>
 <h1>{{ report.repo_name }}</h1>
 <p class="mb-2">
+  {# Two distinct repos can be in play for one app: the app's own code repo
+     (report.repo_url) and, once GitOps-registered, the infra repo manifests
+     actually sync from (infra_repo_url, only real once gitops_registered is
+     true -- see delivery.is_gitops_registered()). Label both so "the repo"
+     is never ambiguous here. #}
+  <span class="text-muted text-sm">Code repo:</span>
   <a href="{{ report.repo_url | safe_url }}" target="_blank" hx-boost="false">{{ report.repo_url }}</a>
+  {% if gitops_registered and infra_repo_url %}
+  &nbsp;&middot;&nbsp;
+  <span class="text-muted text-sm">GitOps repo:</span>
+  <a href="{{ infra_repo_url | safe_url }}" target="_blank" hx-boost="false">{{ infra_repo_url }}</a>
+  {% endif %}
   &nbsp;
   <span class="badge badge-{{ report.criticality }}">{{ report.criticality }}</span>
   &nbsp;

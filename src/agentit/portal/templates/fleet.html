@@ -64,7 +64,21 @@
       {% if r.latest_score > 70 %}row-border-green
       {% elif r.latest_score >= 40 %}row-border-yellow
       {% else %}row-border-red{% endif %}">
-      <td><a href="/assessments/{{ r.id }}">{{ r.repo_name }}</a></td>
+      <td>
+        <a href="/assessments/{{ r.id }}">{{ r.repo_name }}</a>
+        {# Every app has a code repo (report.repo_url); GitOps-registered
+           apps also have a distinct infra repo manifests actually sync
+           from (report.infra_repo_url) -- label both so "the repo" is
+           never ambiguous. gitops_registered mirrors delivery.py's
+           is_gitops_registered() (a live Argo CD Application check), set
+           by this page's own cluster enrichment below. #}
+        <div class="text-xs text-muted">
+          <a href="{{ r.repo_url | safe_url }}" target="_blank" hx-boost="false">Code repo</a>
+          {% if r.gitops_registered and r.infra_repo_url %}
+          &middot; <a href="{{ r.infra_repo_url | safe_url }}" target="_blank" hx-boost="false">GitOps repo</a>
+          {% endif %}
+        </div>
+      </td>
       <td class="text-bold
         {% if r.latest_score > 70 %} text-success
         {% elif r.latest_score >= 40 %} text-warning
