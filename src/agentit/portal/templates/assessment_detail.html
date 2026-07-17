@@ -435,6 +435,10 @@
       {% endfor %}
     </div>
   </details>
+  {% else %}
+  <div class="empty-state">
+    <p>No timeline events for this app yet. Assessment, onboarding, delivery, and gate activity will appear here as it happens.</p>
+  </div>
   {% endif %}
 
   {% if suppressions %}

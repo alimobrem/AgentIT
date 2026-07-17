@@ -302,6 +302,18 @@ class TestGateAppAttributionAndActionsTab:
         assert resp.status_code == 200
         assert "No pending actions for this app" in resp.text
 
+    async def test_assessment_detail_timeline_tab_empty_state(self, ui_client):
+        """The Timeline tab rendered nothing at all (not even an empty-state
+        message) when there were no matching events -- every sibling tab
+        (e.g. Actions above) has a specific one."""
+        client, store = ui_client
+        aid = await store.save(make_report(repo_name="no-timeline-app"))
+
+        resp = await client.get(f"/assessments/{aid}")
+        assert resp.status_code == 200
+        timeline_tab = resp.text.split('x-show="tab === \'timeline\'"', 1)[1].split('x-show="tab === \'ledger\'"', 1)[0]
+        assert "No timeline events for this app yet" in timeline_tab
+
     async def test_assessment_detail_actions_tab_shows_gate_from_old_assessment_of_same_app(self, ui_client):
         """Orphaned-gate-attribution regression: a gate created against an
         app's OLD assessment_id must still be visible/actionable from the
