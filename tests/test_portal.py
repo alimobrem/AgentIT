@@ -2146,6 +2146,25 @@ async def test_schedules_app_name_plain_text_when_no_assessment_resolves(client,
     assert 'href="/assessments/' not in resp.text
 
 
+async def test_schedules_unresolvable_cron_is_not_a_fake_editable_value(client, _override_store):
+    """When the generated CronWorkflow YAML's spec.schedule can't be parsed,
+    schedules.py falls back to cron = "unknown" -- that must render as a
+    plainly unresolvable, disabled state, never a live textbox + working
+    Save button styled identically to a real cron value (a user could
+    accidentally "save" the literal word "unknown" as a real schedule)."""
+    store = _override_store
+    aid = await store.save(_make_report("cron-parse-fail-app"))
+    await store.save_onboarding(aid, [
+        {"category": "compliance", "path": "cron-parse-fail-app-compliance-cronjob.yaml",
+         "content": "not: [valid, yaml", "description": "compliance cronjob"},
+    ])
+
+    resp = await client.get("/schedules")
+    assert resp.status_code == 200
+    assert "unresolvable" in resp.text
+    assert 'name="schedule" value="unknown"' not in resp.text
+
+
 async def test_schedules_nav_link(client):
     """/schedules is no longer a top-level nav item — it's reachable via the
     Settings tab strip. The umbrella "Settings" link still appears globally."""

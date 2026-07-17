@@ -101,7 +101,15 @@
       </td>
       <td>{{ s.job_name }}</td>
       <td>
-        {% if s.source == 'onboarding' %}
+        {% if s.schedule == 'unknown' %}
+        {# The generated CronWorkflow YAML's spec.schedule couldn't be
+           parsed (see schedules.py's cron = "unknown" fallback) -- render
+           a plainly unresolvable, non-editable state instead of a live
+           textbox + working Save button styled identically to a real
+           cron value, which invited saving the literal word "unknown"
+           as a real schedule. #}
+        <span class="badge badge-muted" title="Could not parse a cron schedule from the generated CronWorkflow YAML -- re-onboard to regenerate it.">unresolvable</span>
+        {% elif s.source == 'onboarding' %}
         <form method="post" action="/schedules/update" class="inline-form schedule-edit-form">
           <input type="hidden" name="app_name" value="{{ s.app_name }}">
           <input type="hidden" name="job_key" value="{{ s.agent }}">
@@ -111,10 +119,11 @@
             <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
           </button>
         </form>
+        <span class="text-muted text-xs">{{ s.human_schedule }}</span>
         {% else %}
         <span>{{ s.schedule }}</span>
-        {% endif %}
         <span class="text-muted text-xs">{{ s.human_schedule }}</span>
+        {% endif %}
       </td>
       <td>{{ s.agent }}</td>
       <td>
