@@ -81,8 +81,10 @@ jobs:
         image: postgres:16-alpine
         env:
           POSTGRES_USER: agentit_test
-          POSTGRES_PASSWORD: agentit_test
           POSTGRES_DB: agentit_test
+          # Ephemeral CI-only DB; trust auth avoids embedding a password-like
+          # string that secret scanners flag (same fix as the test job above).
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports:
           - 5432:5432
         options: >-
@@ -92,7 +94,7 @@ jobs:
           --health-retries 10
     env:
       KUBECONFIG: /tmp/nonexistent-path
-      AGENTIT_TEST_PG_DSN: postgresql://agentit_test:agentit_test@localhost:5432/agentit_test
+      AGENTIT_TEST_PG_DSN: postgresql://agentit_test@localhost:5432/agentit_test
     steps:
       - uses: actions/checkout@v7
       - name: Set up Python
