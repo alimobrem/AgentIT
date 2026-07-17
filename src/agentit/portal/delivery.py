@@ -596,6 +596,7 @@ async def route_and_deliver(
                         assessment_id, "gitops-pr-pending",
                         f"{mechanism_text} PR opened: {pr_url}. "
                         "Approving this gate merges the PR -- AgentIT never auto-merges.",
+                        pr_url=pr_url,
                     )
                     cluster_outcome["gate_id"] = gate_id
             else:

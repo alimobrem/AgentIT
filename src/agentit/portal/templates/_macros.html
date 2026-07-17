@@ -69,6 +69,13 @@
   </div>
 
   <p class="my-4">{{ gate.summary }}</p>
+  {# gitops-pr-pending gates carry the real PR URL as a structured field
+     (delivery.py's route_and_deliver() passes pr_url= to create_gate()),
+     not just embedded as plain text inside gate.summary above -- render a
+     real, clickable <a href> instead of leaving the URL inert. #}
+  {% if gate.pr_url %}
+  <p class="text-sm mb-1"><a href="{{ gate.pr_url | safe_url }}" target="_blank" rel="noopener" hx-boost="false">View pull request &rarr;</a></p>
+  {% endif %}
   {# Several gate types (rollback-review, gitops-pr-pending, cluster-
      admin-review, cluster-conflict-review, auto-mode-scope-review) reuse
      gate.summary verbatim as delivery_confirmation (see delivery.py's

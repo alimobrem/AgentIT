@@ -117,8 +117,15 @@ CREATE TABLE IF NOT EXISTS gates (
     summary TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL,
     resolved_at TIMESTAMPTZ,
-    resolved_by TEXT
+    resolved_by TEXT,
+    pr_url TEXT
 );
+-- Additive, idempotent column for a table that may already exist from
+-- before `pr_url` was added (this codebase has no migration framework --
+-- see migrate_sqlite.py's module comment -- so this ALTER covers an
+-- already-created table the same way the CREATE ... IF NOT EXISTS above
+-- covers a brand-new one).
+ALTER TABLE gates ADD COLUMN IF NOT EXISTS pr_url TEXT;
 
 CREATE TABLE IF NOT EXISTS remediations (
     id TEXT PRIMARY KEY,
@@ -1062,8 +1069,16 @@ class AssessmentStore:
 
     # ── Gates ────────────────────────────────────────────────────────────
 
-    async def create_gate(self, assessment_id: str, gate_type: str, summary: str) -> str:
+    async def create_gate(
+        self, assessment_id: str, gate_type: str, summary: str, pr_url: str | None = None,
+    ) -> str:
         """Create a pending gate, or return the existing one for this app.
+
+        ``pr_url``, when given (only ``gitops-pr-pending`` gates set this
+        today), is the structured, single-source-of-truth PR link for this
+        gate -- rendered as a real ``<a href>`` by ``_macros.html``'s
+        ``gate_card()`` instead of the gate having to be regex-scanned out
+        of ``summary``'s free text.
 
         Dedupes by ``repo_url`` + ``gate_type`` (not exact ``assessment_id``):
         gates are app-scoped facts that outlive a single assessment
@@ -1109,10 +1124,10 @@ class AssessmentStore:
                 gate_id = uuid.uuid4().hex
                 await conn.execute(
                     """
-                    INSERT INTO gates (id, assessment_id, gate_type, status, summary, created_at)
-                    VALUES ($1, $2, $3, 'pending', $4, $5)
+                    INSERT INTO gates (id, assessment_id, gate_type, status, summary, created_at, pr_url)
+                    VALUES ($1, $2, $3, 'pending', $4, $5, $6)
                     """,
-                    gate_id, assessment_id, gate_type, summary, _now(),
+                    gate_id, assessment_id, gate_type, summary, _now(), pr_url,
                 )
         await self._refresh_active_gates_metric()
         return gate_id
