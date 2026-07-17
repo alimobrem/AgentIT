@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentit-cost-labels
+  namespace: default
+  labels:
+    app.kubernetes.io/name: agentit
+data:
+  cost-center: engineering
+  team: agentit
+  environment: production
+  app-tier: small
