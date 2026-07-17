@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import os
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -18,13 +19,49 @@ from agentit.portal.helpers import (
 
 log = logging.getLogger(__name__)
 
+# Width of the time bucket folded into the no-delivery-id fallback key
+# below. Wide enough to still dedup genuine near-simultaneous duplicate
+# submissions (accidental double-click, a network-level duplicate, the
+# concurrent-request race `test_concurrent_identical_deliveries_run_
+# pipeline_once` guards), narrow enough that two later, unrelated calls
+# with the same content don't collide for the whole dedup retention
+# window (7 days -- see `store.purge_old_data`'s `processed_webhooks`
+# cutoff).
+_DEDUP_TIME_BUCKET_SECONDS = 60
+
 
 def _get_delivery_id(request: Request, body: dict) -> str:
-    """Get a unique delivery ID from GitHub header or body hash."""
+    """Get a unique delivery ID from GitHub header or body hash.
+
+    The pure content-hash fallback (no time component) used to mean two
+    genuinely distinct, unrelated events with an identical body collapsed
+    into the same dedup key for the whole `processed_webhooks` retention
+    window -- not just a theoretical edge case here: `/api/webhook/assess`
+    is called with the exact same `{repo_url, criticality}` body on every
+    Tekton CI run for a given app (`chart/templates/tekton/pipeline.yaml`'s
+    `register-self-in-fleet` step) and on every `RemediationLoop._assess()`
+    call for a given app/criticality (`remediation_loop.py`) -- neither
+    caller ever supplies a delivery-id header. Confirmed live-shaped bug:
+    a second, legitimate trigger for the same app+criticality within the
+    window got silently treated as a duplicate of the first, and
+    `RemediationLoop.trigger()` then raised an unhandled `KeyError` trying
+    to read `assessment_id` out of the resulting `{"status": "duplicate"}`
+    response instead of a real assessment result.
+    Folding in a coarse time bucket keeps near-simultaneous duplicate
+    POSTs deduped while letting later, content-identical-but-unrelated
+    calls each go through. (`/api/webhook/github-push` always carries a
+    real GitHub `X-GitHub-Delivery` header in production, and the
+    Argo-Events-sourced `/api/webhook/onboard`/`/finding` bodies already
+    carry a genuinely unique `eventId` from `EventPublisher.publish()`
+    -- see events.py -- so this fallback path is exercised by
+    `/api/webhook/assess` in practice, not those routes.)
+    """
     gh_delivery = request.headers.get("X-GitHub-Delivery")
     if gh_delivery:
         return gh_delivery
-    return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()[:32]
+    time_bucket = int(time.time() // _DEDUP_TIME_BUCKET_SECONDS)
+    payload = f"{time_bucket}:{json.dumps(body, sort_keys=True)}"
+    return hashlib.sha256(payload.encode()).hexdigest()[:32]
 
 
 def _verify_github_signature(request: Request, body_bytes: bytes) -> bool:

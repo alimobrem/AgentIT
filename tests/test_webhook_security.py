@@ -5,9 +5,66 @@ import hashlib
 import hmac
 import json
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 import pytest
 from conftest import make_report
+
+
+def _fake_request(headers: dict | None = None) -> MagicMock:
+    request = MagicMock()
+    request.headers = headers or {}
+    return request
+
+
+class TestGetDeliveryIdFallback:
+    """Unit tests for `_get_delivery_id`'s no-header content-hash fallback --
+    see its docstring in `webhooks.py` for the real bug this time-bucketing
+    fixes (Tekton's `register-self-in-fleet` step and `RemediationLoop.
+    _assess()` both repeat an identical body on every real call, with no
+    delivery-id header)."""
+
+    def test_prefers_the_github_delivery_header_when_present(self):
+        from agentit.portal.routes.webhooks import _get_delivery_id
+
+        request = _fake_request({"X-GitHub-Delivery": "abc-123"})
+        assert _get_delivery_id(request, {"anything": "here"}) == "abc-123"
+
+    def test_same_body_in_the_same_time_bucket_yields_the_same_id(self):
+        from agentit.portal.routes.webhooks import _get_delivery_id
+
+        request = _fake_request()
+        body = {"repo_url": "https://github.com/t/r", "criticality": "high"}
+        with patch("agentit.portal.routes.webhooks.time.time", return_value=1_000_000.0):
+            first = _get_delivery_id(request, body)
+            second = _get_delivery_id(request, body)
+        assert first == second
+
+    def test_same_body_in_a_later_time_bucket_yields_a_different_id(self):
+        """The actual fix: without this, the Tekton `register-self-in-fleet`
+        step's identical {repo_url, criticality} body on every CI run (and
+        every same-app/criticality `RemediationLoop._assess()` retrigger)
+        would collide forever within the dedup retention window."""
+        from agentit.portal.routes.webhooks import _DEDUP_TIME_BUCKET_SECONDS, _get_delivery_id
+
+        request = _fake_request()
+        body = {"repo_url": "https://github.com/t/r", "criticality": "high"}
+        with patch("agentit.portal.routes.webhooks.time.time", return_value=1_000_000.0):
+            first = _get_delivery_id(request, body)
+        with patch(
+            "agentit.portal.routes.webhooks.time.time",
+            return_value=1_000_000.0 + _DEDUP_TIME_BUCKET_SECONDS * 3,
+        ):
+            second = _get_delivery_id(request, body)
+        assert first != second
+
+    def test_different_bodies_in_the_same_time_bucket_still_differ(self):
+        from agentit.portal.routes.webhooks import _get_delivery_id
+
+        request = _fake_request()
+        with patch("agentit.portal.routes.webhooks.time.time", return_value=1_000_000.0):
+            first = _get_delivery_id(request, {"repo_url": "https://github.com/t/a"})
+            second = _get_delivery_id(request, {"repo_url": "https://github.com/t/b"})
+        assert first != second
 
 
 class TestGitHubSignature:
@@ -285,6 +342,46 @@ class TestWebhookDedup:
         assert resp1.status_code == 200
         resp2 = await client.post("/api/webhook/assess", json=payload)
         assert resp2.json().get("status") == "duplicate"
+
+    @patch("agentit.portal.routes.webhooks.clone_assess_cleanup")
+    async def test_distinct_calls_outside_the_time_bucket_are_not_treated_as_duplicates(
+        self, mock_assess, portal_client,
+    ):
+        """Regression test for the content-hash-fallback edge case: with no
+        delivery-id header, two genuinely separate calls that happen to
+        share an identical body (the normal case for both
+        `chart/templates/tekton/pipeline.yaml`'s `register-self-in-fleet`
+        step, which POSTs the exact same {repo_url, criticality} on every
+        CI run, and `RemediationLoop._assess()`, which does the same for
+        every remediation of a given app) must each be processed, not
+        silently collapsed into "duplicate" for the whole dedup retention
+        window. `_get_delivery_id()`'s time-bucketed fallback should let a
+        call from a later bucket through even with an identical body."""
+        import time as _time_module
+
+        mock_assess.return_value = make_report()
+        client, _, _ = portal_client
+        payload = {"repo_url": "https://github.com/t/repeat-trigger", "criticality": "high"}
+
+        resp1 = await client.post("/api/webhook/assess", json=payload)
+        assert resp1.status_code == 200
+        assert "assessment_id" in resp1.json()
+
+        # Simulate the second call landing a full dedup-time-bucket later
+        # (e.g. the next day's CI run, or the next remediation trigger for
+        # the same app) -- still no delivery-id header, still an identical
+        # body.
+        from agentit.portal.routes import webhooks as webhooks_module
+
+        with patch.object(
+            webhooks_module.time, "time",
+            return_value=_time_module.time() + webhooks_module._DEDUP_TIME_BUCKET_SECONDS * 2,
+        ):
+            resp2 = await client.post("/api/webhook/assess", json=payload)
+        assert resp2.status_code == 200
+        assert "assessment_id" in resp2.json()
+        assert resp2.json().get("status") != "duplicate"
+        assert mock_assess.call_count == 2
 
     @patch("agentit.portal.routes.webhooks.clone_assess_cleanup")
     async def test_concurrent_identical_deliveries_run_pipeline_once(self, mock_assess, portal_client):
