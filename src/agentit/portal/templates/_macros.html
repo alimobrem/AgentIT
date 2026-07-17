@@ -69,7 +69,14 @@
   </div>
 
   <p class="my-4">{{ gate.summary }}</p>
-  {% if gate.delivery_confirmation %}
+  {# Several gate types (rollback-review, gitops-pr-pending, cluster-
+     admin-review, cluster-conflict-review, auto-mode-scope-review) reuse
+     gate.summary verbatim as delivery_confirmation (see delivery.py's
+     gate_delivery_confirmation()) -- for those, this second line added no
+     new information, just the same sentence restated in muted text right
+     below itself. Only show it when it actually says something summary
+     doesn't. #}
+  {% if gate.delivery_confirmation and gate.delivery_confirmation != gate.summary %}
   <p class="text-sm text-muted mb-1"><strong>{{ gate.delivery_confirmation }}</strong></p>
   {% endif %}
 

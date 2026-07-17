@@ -793,13 +793,13 @@ class TestAdminReviewPage:
 
         page.goto(f"{url}/admin-review")
         expect(page.locator("h1")).to_contain_text("Admin Review")
-        # cluster-admin-review's delivery_confirmation echoes its own
-        # summary verbatim (delivery.py's gate_delivery_confirmation()), so
-        # the text legitimately appears twice within the one gate card --
-        # scope to the card itself rather than the bare text to avoid a
-        # Playwright strict-mode violation on the expected duplicate.
         gate_card = page.locator(".card", has_text="Browser test: CI/CD manifests need elevated review")
         expect(gate_card).to_be_visible()
+        # cluster-admin-review's delivery_confirmation echoes its own
+        # summary verbatim (delivery.py's gate_delivery_confirmation()) --
+        # gate_card only renders that second line when it says something
+        # summary doesn't, so the text must appear exactly once, not twice.
+        expect(gate_card.get_by_text("Browser test: CI/CD manifests need elevated review")).to_have_count(1)
 
     def test_admin_review_excludes_app_owner_gate_types(self, page: Page, app_url):
         """A gate type other than cluster-admin-review must never show up
