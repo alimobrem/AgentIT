@@ -69,3 +69,42 @@ spec:
       runAfter:
         - test
       params:
+        - name: IMAGE
+          value: $(params.image-ref)
+        - name: DOCKERFILE
+          value: ./Containerfile
+        - name: TLSVERIFY
+          value: "true"
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+        - name: dockerconfig
+          workspace: docker-credentials
+    - name: image-scan
+      taskRef:
+        name: image-scan
+        kind: Task
+      runAfter:
+        - image-build
+      params:
+        - name: IMAGE
+          value: $(params.image-ref)
+    - name: sbom-generate
+      taskRef:
+        name: agentit-sbom
+        kind: Task
+      runAfter:
+        - image-build
+      params:
+        - name: IMAGE
+          value: $(params.image-ref)
+    - name: deploy
+      taskRef:
+        name: kubernetes-actions
+        kind: ClusterTask
+      runAfter:
+        - image-scan
+        - sbom-generate
+      params:
+        - name: script
+          value: kubectl rollout restart deployment/agentit
