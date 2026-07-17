@@ -1751,11 +1751,11 @@ function showLoading() {
   loadingBar.classList.add('active');
   document.body.style.cursor = 'progress';
 }
-document.querySelectorAll('nav a, a[href^="/"]').forEach(function(link) {
-  link.addEventListener('click', showLoading);
-});
 document.addEventListener('submit', function() { showLoading(); });
-// Also trigger on htmx boosted requests
+// Also trigger on htmx boosted requests -- covers every nav link/form
+// click already (body has hx-boost="true"), so no separate per-link
+// listener is needed (and one bound only to first-page-load anchors
+// would be discarded by htmx-boosted navigation anyway).
 document.body.addEventListener('htmx:beforeRequest', function() { showLoading(); });
 // Loading bar completion
 function completeLoading() {
