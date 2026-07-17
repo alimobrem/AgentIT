@@ -260,10 +260,10 @@ async def self_assess_route(request: Request):
     from agentit.llm_decisions import build_secret_classify_events
     for ev in build_secret_classify_events(secret_decisions, report.repo_name):
         await s.log_event(**ev, correlation_id=assessment_id)
-    await s.log_event("self-assess", "assessment-complete", "agentit", "info",
+    await s.log_event("self-assess", "assessment-complete", report.repo_name, "info",
                        f"Self-assessment complete: {report.overall_score:.0f}/100")
     from agentit.events import TOPIC_ASSESSMENTS as _TOPIC_ASSESS
-    publish_event("assessment-complete", "agentit",
+    publish_event("assessment-complete", report.repo_name,
                    f"Self-assessment: {report.overall_score:.0f}/100",
                    {"assessment_id": assessment_id, "score": report.overall_score},
                    correlation_id=assessment_id,

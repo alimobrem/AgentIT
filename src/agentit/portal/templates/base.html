@@ -1511,22 +1511,28 @@
               x-text="badgeCount > 99 ? '99+' : badgeCount" aria-hidden="true"></span>
       </button>
       <div class="user-menu" x-data="{ open: false }" @keydown.escape.window="open = false">
-        <button type="button" class="user-menu-trigger" @click="open = !open" :aria-expanded="open" aria-haspopup="true" aria-label="Open account and settings menu">
+        <button type="button" class="user-menu-trigger" @click="open = !open" :aria-expanded="open" aria-haspopup="true" aria-label="Open account and settings menu" aria-controls="user-menu-dropdown">
           <span class="user-menu-avatar" aria-hidden="true">{{ (current_user[0] | upper) if is_authenticated and current_user else 'A' }}</span>
           <span class="user-menu-label">{{ current_user if is_authenticated and current_user else 'Menu' }}</span>
           <span class="user-menu-chevron" aria-hidden="true">&#9662;</span>
         </button>
-        <div class="user-menu-dropdown" x-show="open" x-cloak x-transition.opacity.duration.100ms
+        <div id="user-menu-dropdown" class="user-menu-dropdown" x-show="open" x-cloak x-transition.opacity.duration.100ms
              @click.outside.capture="open = false" @click="open = false" role="menu">
           <a href="/capabilities" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/capabilities' or request.url.path.startswith('/agents') }}">Capabilities</a>
           <a href="/settings" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/settings' }}">Settings</a>
           <a href="/schedules" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/schedules' }}">Schedules</a>
-          <a href="/decisions" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/decisions') }}">Decisions
-            <span class="user-menu-item-sub">Audit log — Ledger owns the stream</span>
+          {# aria-label + aria-describedby (rather than letting the sub-span's
+             text run into the link's accessible name by default) so a screen
+             reader announces "Decisions, Audit log — Ledger owns the stream"
+             as label + description, not one run-on name. #}
+          <a href="/decisions" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/decisions') }}"
+             aria-label="Decisions" aria-describedby="user-menu-decisions-sub">Decisions
+            <span class="user-menu-item-sub" id="user-menu-decisions-sub">Audit log — Ledger owns the stream</span>
           </a>
           {% if not nav_admin_review_pending %}
-          <a href="/admin-review" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/admin-review') }}">Admin Review
-            <span class="user-menu-item-sub">Elevated approvals</span>
+          <a href="/admin-review" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/admin-review') }}"
+             aria-label="Admin Review" aria-describedby="user-menu-admin-review-sub">Admin Review
+            <span class="user-menu-item-sub" id="user-menu-admin-review-sub">Elevated approvals</span>
           </a>
           {% endif %}
           {% if is_authenticated %}
