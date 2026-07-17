@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import html
 import logging
 import threading
@@ -32,6 +33,24 @@ _DEPLOY_STATUS_K8S_TIMEOUT = 2
 _DEPLOY_STATUS_DEADLINE = 3.0
 _DEPLOY_STATUS_CACHE_TTL = 20.0
 _deploy_status_cache: dict = {"data": None, "ts": 0.0}
+# `asyncio.wait_for(asyncio.to_thread(...), timeout=...)` below only
+# cancels the *awaiting* coroutine on timeout -- the dispatched thread
+# itself keeps running in whichever executor it was submitted to
+# regardless (a `concurrent.futures` work item can't be interrupted once
+# started). Using the process-wide default executor (what `asyncio.
+# to_thread` submits to) would mean a genuinely wedged apiserver leaks one
+# stuck thread per poll (every 15s, from every open page) into a pool
+# shared with every other `asyncio.to_thread` call in the app, eventually
+# starving unrelated work too. A small, dedicated executor instead
+# contains that blast radius to this one route: worst case, these 4
+# workers back up, but nothing outside this endpoint is affected --
+# `loop.run_in_executor(_deploy_status_executor, ...)` here isn't itself
+# a full fix (the underlying kube call can still hang past the deadline;
+# see the deferred follow-up noted alongside this route below), just a
+# bounded-blast-radius mitigation for the exhaustion risk specifically.
+_deploy_status_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="deploy-status",
+)
 # `_get_deploy_status_bounded` runs in a real OS thread (via
 # `asyncio.to_thread`), so concurrent pollers can genuinely interleave the
 # read-check-write below at the bytecode level -- an `asyncio.Lock` would
@@ -598,10 +617,17 @@ async def deploy_status_badge(request: Request) -> HTMLResponse:
     Bounded by ``_DEPLOY_STATUS_DEADLINE`` so a slow/wedged kube-apiserver
     returns **200** with degraded/last-good HTML instead of hanging the
     worker until oauth-proxy times out with 502/503.
+
+    Runs on ``_deploy_status_executor`` (a small dedicated thread pool),
+    not the process-wide default executor -- see that pool's module-level
+    comment for why: a genuinely wedged apiserver would otherwise leak one
+    stuck thread per poll into a pool shared with every other
+    ``asyncio.to_thread`` call in the app.
     """
+    loop = asyncio.get_running_loop()
     try:
         status = await asyncio.wait_for(
-            asyncio.to_thread(_get_deploy_status_bounded),
+            loop.run_in_executor(_deploy_status_executor, _get_deploy_status_bounded),
             timeout=_DEPLOY_STATUS_DEADLINE,
         )
     except asyncio.TimeoutError:
