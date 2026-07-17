@@ -204,7 +204,13 @@ async def schedules_page(request: Request) -> HTMLResponse:
                 "enabled": True,
             })
 
-    # Merge manually created schedules from the store
+    # Merge manually created reminders from the store -- see create_schedule()
+    # below for why these are reminders, not real schedules: nothing ever
+    # reads scheduled_operations to generate, apply, or deliver a CronJob, so
+    # there is no real concurrencyPolicy to report either. `concurrency: None`
+    # (rendered as "n/a" by schedules.html) instead of fabricating "Allow",
+    # which used to claim a real Kubernetes semantic for an object that never
+    # existed, even in principle.
     manual_schedules = await s.list_schedules()
     for ms in manual_schedules:
         schedules.append({
@@ -218,7 +224,7 @@ async def schedules_page(request: Request) -> HTMLResponse:
             "schedule": ms["schedule"],
             "human_schedule": humanize_cron(ms["schedule"]),
             "agent": ms["agent"],
-            "concurrency": "Allow",
+            "concurrency": None,
             "enabled": bool(ms["enabled"]),
             "source": "manual",
         })
@@ -305,6 +311,19 @@ async def toggle_schedule(request: Request):
 
 @router.post("/schedules/create", response_model=None)
 async def create_schedule(request: Request):
+    """Saves a plain reminder row in ``scheduled_operations`` -- nothing
+    more. Unlike the onboarding-generated schedules above (real CronJob/
+    CronWorkflow manifests, once actually delivered), this route never
+    generates a manifest, never touches a cluster or GitOps repo, and the
+    ``command`` a human types in is stored purely as a note-to-self -- it is
+    never parsed, executed, or built into anything. There was never a real
+    object behind a row this creates, even in principle, until a human
+    separately writes one by hand (or onboards the app so AgentIT generates
+    a real CronJob) outside this form. schedules.html's copy and the
+    "Track a Schedule"/"Save Reminder" wording reflect this; see
+    schedules_page() above for why manual rows report `concurrency: None`
+    ("n/a") instead of a fabricated policy.
+    """
     form = await request.form()
     app_name = str(form.get("app_name", "")).strip()
     job_name = str(form.get("job_name", "")).strip()
@@ -321,13 +340,20 @@ async def create_schedule(request: Request):
     await s.create_schedule(app_name, job_name, agent, schedule, command)
     await s.log_event(
         "portal", "schedule-created", app_name, "info",
-        f"Manual schedule created: {job_name} ({schedule})",
+        f"Schedule reminder saved: {job_name} ({schedule}) -- not a real CronJob; "
+        "nothing was generated, applied, or delivered.",
     )
     return RedirectResponse(url="/schedules?created=true", status_code=303)
 
 
 @router.post("/schedules/delete", response_model=None)
 async def delete_schedule_route(request: Request):
+    """Symmetric counterpart to create_schedule() above: deletes the same
+    DB-only reminder row. This was already honest before this file's other
+    changes -- it never claimed to remove a real CronJob either -- so its
+    behavior is unchanged; only the event message below now says "reminder"
+    to match create_schedule()'s wording.
+    """
     form = await request.form()
     schedule_id = str(form.get("schedule_id", "")).strip()
     if not schedule_id:
@@ -336,5 +362,5 @@ async def delete_schedule_route(request: Request):
     s = await get_store()
     if not await s.delete_schedule(schedule_id):
         raise HTTPException(404, "Schedule not found")
-    await s.log_event("portal", "schedule-deleted", None, "info", f"Deleted manual schedule {schedule_id}")
+    await s.log_event("portal", "schedule-deleted", None, "info", f"Deleted schedule reminder {schedule_id}")
     return RedirectResponse(url="/schedules?deleted=true", status_code=303)

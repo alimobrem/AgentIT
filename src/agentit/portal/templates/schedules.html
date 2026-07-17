@@ -9,10 +9,10 @@
 <h1>Scheduled Operations</h1>
 
 {% if request.query_params.get('created') %}
-<div class="alert alert-success">Schedule created successfully.</div>
+<div class="alert alert-success">Reminder saved -- this does not create a real scheduled job (see note below).</div>
 {% endif %}
 {% if request.query_params.get('deleted') %}
-<div class="alert alert-success">Schedule deleted.</div>
+<div class="alert alert-success">Reminder deleted.</div>
 {% endif %}
 
 <div class="stat-grid">
@@ -31,8 +31,14 @@
 </div>
 
 <div x-data="{ showForm: false }">
-  <button class="btn btn-green mb-1" @click="showForm = !showForm" x-text="showForm ? 'Cancel' : 'Create Schedule'"></button>
+  <button class="btn btn-green mb-1" @click="showForm = !showForm" x-text="showForm ? 'Cancel' : 'Track a Schedule'"></button>
   <div x-show="showForm" x-cloak>
+    <p class="text-muted text-sm mb-1">
+      This saves a reminder in AgentIT's own database only -- it does not create a CronJob, apply
+      anything to a cluster, or run the notes below. For a real, deliverable schedule: onboard this
+      app (or re-onboard it) so AgentIT generates a real CronJob manifest, then Dry Run +
+      Apply/Commit (or open a GitOps PR) on that app's Onboarding Results page.
+    </p>
     <form method="post" action="/schedules/create" class="form-narrow mb-2">
       <div class="form-group">
         <label class="form-label" for="sched-app">App Name</label>
@@ -47,15 +53,15 @@
         <input type="text" id="sched-agent" name="agent" required placeholder="compliance">
       </div>
       <div class="form-group">
-        <label class="form-label" for="sched-cron">Schedule (cron)</label>
+        <label class="form-label" for="sched-cron">Intended schedule (cron)</label>
         <input type="text" id="sched-cron" name="schedule" required placeholder="0 3 * * *">
       </div>
       <div class="form-group">
-        <label class="form-label" for="sched-cmd">Command</label>
-        <input type="text" id="sched-cmd" name="command" required placeholder="python -m agentit watch --rescan --dimension compliance">
+        <label class="form-label" for="sched-cmd">Notes -- what should eventually run</label>
+        <input type="text" id="sched-cmd" name="command" required placeholder="e.g. python -m agentit watch --rescan --dimension compliance">
       </div>
       <button type="submit" class="btn">
-        <span class="btn-label">Create</span>
+        <span class="btn-label">Save Reminder</span>
         <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
       </button>
     </form>
@@ -94,7 +100,9 @@
   this page cannot change a real, already-delivered schedule (it never patches a live CronJob's
   <code>spec.schedule</code>/<code>spec.suspend</code> on the cluster). To change one for real: edit
   the generated cronjob file on that app's Onboarding Results page, then redeliver (Dry Run, then
-  Apply/Commit or Per-Agent PRs).
+  Apply/Commit or Per-Agent PRs). Rows tagged <span class="badge badge-info">reminder</span> below
+  are plain notes-to-self saved in AgentIT's own database -- they were never a real CronJob, and
+  nothing in AgentIT ever reads them to generate, apply, or deliver anything.
 </p>
 <table>
   <thead>
@@ -127,12 +135,18 @@
       <td>{{ s.agent }}</td>
       <td>
         {% if s.source == 'manual' %}
-          <span class="badge badge-info">manual</span>
+          <span class="badge badge-info">reminder</span>
         {% else %}
           <span class="badge badge-low">onboarding</span>
         {% endif %}
       </td>
-      <td><span class="badge badge-info" title="{% if s.concurrency == 'Forbid' %}Skip if previous run still active{% elif s.concurrency == 'Replace' %}Cancel previous run and start new{% else %}Allow concurrent runs{% endif %}">{{ s.concurrency }}</span></td>
+      <td>
+        {% if s.concurrency %}
+        <span class="badge badge-info" title="{% if s.concurrency == 'Forbid' %}Skip if previous run still active{% elif s.concurrency == 'Replace' %}Cancel previous run and start new{% else %}Allow concurrent runs{% endif %}">{{ s.concurrency }}</span>
+        {% else %}
+        <span class="badge badge-muted" title="Not a real CronJob -- this is a reminder only, so there's no real concurrencyPolicy to show.">n/a</span>
+        {% endif %}
+      </td>
       <td>
         {% if s.source == 'onboarding' %}
           <span class="text-muted text-xs" title="Set by the generated manifest -- not editable from this page. Edit the file and redeliver to change it for real.">set via manifest</span>

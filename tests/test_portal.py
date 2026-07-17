@@ -2393,6 +2393,162 @@ async def test_toggle_schedule(client, _override_store):
     assert await store.get_setting("schedule:test-app:chaos:enabled") == "false"
 
 
+# ── "Create Schedule" is an honest DB-only reminder, not a real CronJob ─
+#
+# create_schedule()/delete_schedule_route() only ever insert/delete a row in
+# scheduled_operations. Confirmed live (local Postgres + AGENTIT_OFFLINE=1):
+# submitting the form produced a real-looking row (a parsed cron, a
+# concurrencyPolicy-style "Allow" badge) in the same table as real
+# onboarding-generated CronJobs, with zero code path anywhere that ever
+# reads scheduled_operations to generate, apply, or deliver a manifest --
+# and the "command" a human types in was stored but never even rendered
+# back, let alone executed. These tests cover the fix: honest labeling
+# (button text, flash messages, a "reminder" badge, an "n/a" policy instead
+# of a fabricated one) with the DB-only behavior itself unchanged.
+
+
+async def test_create_schedule_route_saves_reminder_row_only(client, _override_store):
+    """The route creates exactly one scheduled_operations row and nothing
+    else -- no onboarding_results row, no gate, no delivery -- even for an
+    app_name that DOES correspond to a real, already-assessed app."""
+    store = _override_store
+    aid = await store.save(_make_report("reminder-app"))
+
+    resp = await client.post("/schedules/create", data={
+        "app_name": "reminder-app",
+        "job_name": "Nightly compliance scan",
+        "agent": "compliance",
+        "schedule": "0 3 * * *",
+        "command": "python -m agentit watch --rescan --dimension compliance",
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/schedules?created=true"
+
+    saved = await store.list_schedules()
+    assert len(saved) == 1
+    assert saved[0]["app_name"] == "reminder-app"
+    assert saved[0]["schedule"] == "0 3 * * *"
+    # The typed "command" is stored verbatim as a note -- confirming it is
+    # persisted (so Delete has something real to remove) without this test
+    # implying it is ever parsed or executed anywhere.
+    assert saved[0]["command"] == "python -m agentit watch --rescan --dimension compliance"
+
+    # No real, deliverable artifact was ever created for this already-real
+    # app: nothing to onboard, nothing to deliver -- there was never a real
+    # object behind this row, even in principle.
+    assert await store.get_onboarding(aid) is None
+
+
+async def test_create_schedule_flash_and_row_are_honest_about_not_being_real(client, _override_store):
+    """The success flash and the table row for a freshly created schedule
+    must both say plainly that this is a reminder, not a real CronJob --
+    the exact "success + changed on-screen value with no real effect and no
+    visible tell" failure mode be075b3 already fixed for Save/Enable/Disable
+    must not reappear here for Create."""
+    resp = await client.post("/schedules/create", data={
+        "app_name": "reminder-app-2",
+        "job_name": "Weekly cost check",
+        "agent": "cost",
+        "schedule": "0 5 * * 2",
+        "command": "echo not a real command",
+    })
+    assert resp.status_code == 200
+    # Redirected (follow_redirects=True by default) straight to the page
+    # with the honest flash, not the old "Schedule created successfully."
+    assert "does not create a real scheduled job" in resp.text
+    assert "Schedule created successfully." not in resp.text
+
+    # The row itself: tagged "reminder" (not "manual" with no further
+    # context), and its Policy column says "n/a" rather than fabricating a
+    # real Kubernetes concurrencyPolicy for an object that was never made.
+    assert "reminder-app-2" in resp.text
+    assert ">reminder<" in resp.text
+    assert ">n/a<" in resp.text
+    # The old fabricated policy badge must never appear for this row.
+    assert 'title="Allow concurrent runs"' not in resp.text
+
+
+async def test_create_schedule_form_button_and_command_field_are_honestly_labeled(client, _override_store):
+    """Regression: the button used to read "Create Schedule" (implying a
+    real create-and-run action) and the free-text field used to be labeled
+    "Command" with a placeholder that looked like something that would
+    actually execute -- neither was ever true. Both must now say so."""
+    resp = await client.get("/schedules")
+    assert resp.status_code == 200
+    assert "Track a Schedule" in resp.text
+    assert "Create Schedule" not in resp.text
+    assert "Save Reminder" in resp.text
+    assert "does not create a CronJob" in resp.text
+    assert 'for="sched-cmd">Notes' in resp.text
+
+
+async def test_delete_schedule_route_removes_reminder_row(client, _override_store):
+    """delete_schedule_route() is the symmetric, already-honest counterpart
+    to create -- it only ever removed the same DB-only row. Confirms the
+    route still does exactly that and the honest "Reminder deleted" flash
+    replaces the old "Schedule deleted." wording."""
+    store = _override_store
+    schedule_id = await store.create_schedule("delete-me-app", "Job", "compliance", "0 3 * * *", "cmd")
+
+    resp = await client.post("/schedules/delete", data={"schedule_id": schedule_id}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/schedules?deleted=true"
+    assert await store.list_schedules() == []
+
+    resp2 = await client.get("/schedules?deleted=true")
+    assert "Reminder deleted." in resp2.text
+    assert "Schedule deleted." not in resp2.text
+
+
+async def test_delete_schedule_route_missing_id_returns_400(client, _override_store):
+    resp = await client.post("/schedules/delete", data={})
+    assert resp.status_code == 400
+
+
+async def test_delete_schedule_route_unknown_id_returns_404(client, _override_store):
+    resp = await client.post("/schedules/delete", data={"schedule_id": "does-not-exist"})
+    assert resp.status_code == 404
+
+
+async def test_create_schedule_missing_field_returns_400(client, _override_store):
+    resp = await client.post("/schedules/create", data={
+        "app_name": "incomplete-app",
+        "job_name": "Job",
+        "agent": "compliance",
+        "schedule": "0 3 * * *",
+        # command omitted
+    })
+    assert resp.status_code == 400
+
+
+async def test_create_schedule_invalid_cron_returns_400(client, _override_store):
+    resp = await client.post("/schedules/create", data={
+        "app_name": "bad-cron-app",
+        "job_name": "Job",
+        "agent": "compliance",
+        "schedule": "not a cron",
+        "command": "cmd",
+    })
+    assert resp.status_code == 400
+
+
+async def test_create_schedule_logs_honest_event(client, _override_store):
+    """The event-log entry for a created reminder must say plainly that it
+    is not a real CronJob and that nothing was generated/applied/delivered
+    -- matching the honest wording added to schedules.py."""
+    store = _override_store
+    await client.post("/schedules/create", data={
+        "app_name": "event-honesty-app",
+        "job_name": "Nightly scan",
+        "agent": "compliance",
+        "schedule": "0 3 * * *",
+        "command": "cmd",
+    })
+    matching = await store.list_events_by_action("schedule-created")
+    assert len(matching) == 1
+    assert "not a real CronJob" in matching[0]["summary"]
+
+
 # ── Cron humanization (schedules.py::humanize_cron) ────────────────────
 #
 # Regression coverage for the bug where any cron string outside a
@@ -3219,6 +3375,177 @@ async def test_activate_skill_blocked_when_generation_fails(client, tmp_path, mo
     assert resp.status_code == 303
     assert "error=" in resp.headers["location"]
     assert "status: draft" in skill_file.read_text()
+
+
+# ── Capabilities: activation durability (git commit / PR) ──────────────
+# Regression coverage for the confirmed live bug: `skills/` is baked into
+# the container image (Containerfile COPY, no PVC/volume mount), so the
+# pre-fix `activate_skill_route` only ever flipped the live pod's writable
+# layer -- silently wiped by the next redeploy. See
+# docs/self-improvement-for-agentit.md / capability_scout.py's own
+# "never a direct commit to main" convention for why this reuses
+# `git_pr.create_branch_commit_push` + `git_pr.open_draft_pr` (branch + PR)
+# rather than pushing straight to `main`.
+
+
+async def test_activate_skill_commits_to_git_and_opens_pr(client, tmp_path, monkeypatch):
+    """(a) A successful activation results in both the in-pod file change
+    AND a real git commit/PR call, invoked with the right file/content."""
+    skill_file = _make_draft_skill(tmp_path, name="cve-2099-00010")
+    monkeypatch.chdir(tmp_path)
+
+    captured_content_at_commit_time = {}
+
+    def _fake_commit_push(branch, paths, message, cwd=None):
+        # The pod-local write must already have happened by the time the
+        # git step runs, so what actually gets committed is the activated
+        # content, not the pre-activation draft.
+        captured_content_at_commit_time["paths"] = paths
+        captured_content_at_commit_time["content"] = skill_file.read_text()
+        captured_content_at_commit_time["cwd"] = cwd
+        return {"success": True, "branch": branch}
+
+    with patch("agentit.git_pr.create_branch_commit_push", side_effect=_fake_commit_push) as mock_commit, \
+         patch("agentit.git_pr.open_draft_pr", return_value={"pr_url": "https://github.com/alimobrem/AgentIT/pull/999"}) as mock_pr:
+        resp = await client.post(
+            "/capabilities/skills/activate",
+            data={"skill_path": str(skill_file)},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    location = resp.headers["location"]
+    assert "success=" in location
+    assert "warning=" not in location
+    assert "pull/999" in location  # PR URL surfaced in the success toast
+
+    mock_commit.assert_called_once()
+    assert captured_content_at_commit_time["paths"] == ["skills/security/cve-2099-00010.md"]
+    assert "status: active" in captured_content_at_commit_time["content"]
+    assert captured_content_at_commit_time["cwd"] == tmp_path
+
+    mock_pr.assert_called_once()
+    assert mock_pr.call_args.kwargs["cwd"] == tmp_path
+
+    assert "status: active" in skill_file.read_text()
+
+
+async def test_activate_skill_git_failure_keeps_activation_but_warns(client, tmp_path, monkeypatch, _override_store):
+    """(b) If the git-side step fails, the in-pod activation still
+    succeeded but a clear warning is surfaced via the existing
+    success/warning flash-message mechanism (not silently swallowed)."""
+    skill_file = _make_draft_skill(tmp_path, name="cve-2099-00011")
+    monkeypatch.chdir(tmp_path)
+    store = _override_store
+
+    with patch(
+        "agentit.git_pr.create_branch_commit_push",
+        return_value={"success": False, "error": "remote: permission denied (network/auth failure)"},
+    ):
+        resp = await client.post(
+            "/capabilities/skills/activate",
+            data={"skill_path": str(skill_file)},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    location = resp.headers["location"]
+    # Activation itself is not made worse than today: still reported success...
+    assert "success=" in location
+    # ...but the temporary/at-risk nature of the change is surfaced, not swallowed.
+    assert "warning=" in location
+    from urllib.parse import unquote
+    assert "redeploy" in unquote(location).lower()
+
+    # The in-pod file write happened regardless of the git failure.
+    assert "status: active" in skill_file.read_text()
+
+    import json
+
+    events = await store.list_events_by_action("skill-activated")
+    assert len(events) == 1
+    assert events[0]["severity"] == "warning"
+    details = json.loads(events[0]["details_json"] or "{}")
+    assert "git_persist_error" in details
+    assert "pr_url" not in details
+
+
+async def test_activate_skill_survives_simulated_redeploy(tmp_path, monkeypatch):
+    """(c) A once-wiped CVE-mitigation skill, re-activated with this fix,
+    now survives a simulated redeploy: the activated content is captured
+    in a real git commit pushed to a remote ("origin"), not just the
+    ephemeral pod copy -- proven by cloning that remote fresh (as a
+    redeploy's image build effectively would) and checking the file
+    there, independent of the original working tree.
+    """
+    import subprocess
+
+    from httpx import ASGITransport, AsyncClient
+
+    from agentit.portal.app import app
+
+    # A real local "origin" (bare) + a real working-tree clone of it --
+    # `create_branch_commit_push`'s `git push -u origin <branch>` runs for
+    # real against this, with no GitHub/network dependency.
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+
+    repo_dir = tmp_path / "repo"
+    subprocess.run(["git", "clone", str(origin), str(repo_dir)], check=True, capture_output=True)
+
+    skill_file = _make_draft_skill(repo_dir, name="cve-2018-1002105")
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "chore: seed draft skill"], cwd=repo_dir, check=True, capture_output=True,
+    )
+    subprocess.run(["git", "push", "origin", "HEAD:main"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=origin, check=True, capture_output=True,
+    )
+
+    monkeypatch.chdir(repo_dir)
+
+    # `gh` (PR creation) is mocked -- not available/authenticated in this
+    # sandbox -- but the branch/commit/push step below is fully real.
+    with patch(
+        "agentit.git_pr.open_draft_pr",
+        return_value={"pr_url": "https://github.com/alimobrem/AgentIT/pull/1000"},
+    ):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=False) as client:
+            await prime_csrf(client)
+            resp = await client.post(
+                "/capabilities/skills/activate",
+                data={"skill_path": str(skill_file)},
+            )
+
+    assert resp.status_code == 303
+    assert "success=" in resp.headers["location"]
+
+    # Simulate a redeploy: build a brand-new clone from "origin" (mirrors
+    # how a container image build pulls from the remote, never from a
+    # pod's local writable layer) and confirm the activated branch's
+    # content -- not just the original working tree's file -- has the
+    # activation. This is the actual git object graph reachable from the
+    # pushed branch, so it proves durability beyond the ephemeral copy.
+    branches = subprocess.run(
+        ["git", "branch", "-r"], cwd=origin.parent / "repo", check=True, capture_output=True, text=True,
+    )
+    pushed_branches = [
+        line.strip().removeprefix("origin/")
+        for line in branches.stdout.splitlines()
+        if "agentit/activate-skill/" in line
+    ]
+    assert len(pushed_branches) == 1, f"expected exactly one pushed activation branch, got: {branches.stdout}"
+    activation_branch = pushed_branches[0]
+
+    redeploy_clone = tmp_path / "redeploy-clone"
+    subprocess.run(
+        ["git", "clone", "--branch", activation_branch, str(origin), str(redeploy_clone)],
+        check=True, capture_output=True,
+    )
+    redeployed_content = (redeploy_clone / "skills" / "security" / "cve-2018-1002105.md").read_text()
+    assert "status: active" in redeployed_content
+    assert "status: draft" not in redeployed_content
 
 
 # ── Capabilities: per-skill lifecycle view ──────────────────────────────
