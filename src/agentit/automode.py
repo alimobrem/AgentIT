@@ -122,6 +122,7 @@ class AutoMode:
         app_name: str,
         agent_name: str | None = None,
         report: object | None = None,
+        target_findings: list[tuple[str, str]] | None = None,
     ) -> dict:
         """Full auto-apply pipeline: classify → deliver or gate.
 
@@ -141,6 +142,15 @@ class AutoMode:
         with no known `infra_repo_url`) can no longer fall back to a direct
         apply -- `route_and_deliver()` refuses outright (`MECHANISM_NONE`) and
         this gates for human review with a routing-error reason instead.
+
+        `target_findings` (docs/onboarding-loop-vision-gap-analysis.md Phase
+        3), when the caller knows which specific finding(s) `files` was
+        generated to resolve (e.g. a single-finding webhook dispatch), is
+        threaded straight through to `route_and_deliver()` so the resulting
+        `deliveries` row can later be correlated against a re-assessment's
+        diff. Omitted for callers spanning many findings at once (e.g.
+        onboarding's whole-batch auto-chain, which threads the full finding
+        list through its own call site instead).
 
         Returns {"action": "applied"|"partial_failure"|"gated", "reason": str, "details": dict}.
         There is no more per-(namespace, kind) allowlist scoping AutoMode
@@ -179,7 +189,7 @@ class AutoMode:
         delivery = await route_and_deliver(
             files, app_name=app_name, namespace=namespace, report=report,
             store=self._store, assessment_id=assessment_id, actor="auto-mode",
-            dry_run=False,
+            dry_run=False, target_findings=target_findings,
         )
 
         mechanism_used = delivery["mechanisms"].get(CATEGORY_CLUSTER_CONFIG)

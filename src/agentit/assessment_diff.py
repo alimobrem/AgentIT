@@ -9,6 +9,33 @@ from agentit.models import AssessmentReport, DimensionScore
 logger = logging.getLogger(__name__)
 
 
+def finding_key(category: str, description: str) -> tuple[str, str]:
+    """The dedup key ``diff_assessments()`` identifies one finding by across
+    two assessments: ``(category, description-prefix)``, lowercased and
+    truncated to keep near-identical descriptions (e.g. differing only in a
+    file path or line number appended at the end) matching. Factored out so
+    any other caller that needs to compute -- and later look up -- the
+    identical key (e.g. ``portal/delivery.py``'s ``target_findings``
+    tracking) can never drift out of sync with ``diff_assessments()``'s own
+    internal computation of it.
+    """
+    return (category, description.lower()[:80])
+
+
+def current_finding_keys(report: AssessmentReport) -> set[tuple[str, str]]:
+    """Every finding's ``finding_key()`` across all of one assessment's
+    dimensions -- the same per-finding key ``diff_assessments()`` computes
+    internally, exposed here so a caller can ask "is this exact finding
+    present in this one assessment" without having to diff it against a
+    second one first.
+    """
+    keys: set[tuple[str, str]] = set()
+    for score in report.scores:
+        for f in score.findings:
+            keys.add(finding_key(f.category, f.description))
+    return keys
+
+
 @dataclass
 class FindingDelta:
     category: str
@@ -88,17 +115,17 @@ def diff_assessments(old: AssessmentReport, new: AssessmentReport) -> Assessment
 
         if old_dim:
             for f in old_dim.findings:
-                old_finding_keys.add((f.category, f.description.lower()[:80]))
+                old_finding_keys.add(finding_key(f.category, f.description))
         if new_dim:
             for f in new_dim.findings:
-                new_finding_keys.add((f.category, f.description.lower()[:80]))
+                new_finding_keys.add(finding_key(f.category, f.description))
 
         new_in_dim: list[FindingDelta] = []
         resolved_in_dim: list[FindingDelta] = []
 
         if new_dim:
             for f in new_dim.findings:
-                key = (f.category, f.description.lower()[:80])
+                key = finding_key(f.category, f.description)
                 if key not in old_finding_keys:
                     fd = FindingDelta(
                         category=f.category,
@@ -111,7 +138,7 @@ def diff_assessments(old: AssessmentReport, new: AssessmentReport) -> Assessment
 
         if old_dim:
             for f in old_dim.findings:
-                key = (f.category, f.description.lower()[:80])
+                key = finding_key(f.category, f.description)
                 if key not in new_finding_keys:
                     fd = FindingDelta(
                         category=f.category,

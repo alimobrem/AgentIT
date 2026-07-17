@@ -245,10 +245,27 @@ async def webhook_github_push(request: Request):
                                    "warning" if diff.degraded else "info",
                                    diff.summary())
 
+                auto_mode_on = (await s.get_setting("auto_mode")) == "true"
+
+                # Finding-scoped re-verification (docs/onboarding-loop-
+                # vision-gap-analysis.md Phase 3): every push-triggered
+                # re-assessment automatically checks whether any prior
+                # delivery on this app that recorded a target finding
+                # actually cleared it, regardless of auto_mode -- this is
+                # pure correlation + a visible signal, not itself an
+                # automated delivery. Phase 4's bounded auto-retry/
+                # escalation on a confirmed failure IS gated on auto_mode,
+                # same as the diff.auto_fixable dispatch loop below.
+                from agentit.portal.delivery import check_pending_delivery_verifications
+                await check_pending_delivery_verifications(
+                    s, managed["repo_name"], report, assessment_id,
+                    auto_mode=auto_mode_on, llm_client=get_llm_client(),
+                )
+
                 # Auto-fix new findings that are auto-fixable. RemediationDispatcher
                 # is now genuinely async -- await it directly, no more
                 # .raw/to_thread bridge needed for this call path.
-                if diff.auto_fixable and (await s.get_setting("auto_mode")) == "true":
+                if diff.auto_fixable and auto_mode_on:
                     from agentit.remediation.dispatcher import RemediationDispatcher
                     dispatcher = RemediationDispatcher(s)
                     for finding in diff.auto_fixable:
@@ -289,11 +306,13 @@ async def webhook_github_push(request: Request):
                         # sitting ungenerated-from-the-router's-perspective
                         # until a human happens to notice it.
                         from agentit.automode import AutoMode
+                        from agentit.assessment_diff import finding_key
                         auto = AutoMode(store=s, publisher=None, llm_client=get_llm_client())
                         auto_result = await auto.execute(
                             assessment_id, dispatch_result["files"], managed["repo_name"],
                             report.criticality, True, managed["repo_name"],
                             dispatch_result["agent"], report=report,
+                            target_findings=[finding_key(finding.category, finding.description)],
                         )
                         await s.log_event(
                             "dispatcher", auto_result["action"], managed["repo_name"], "info",
@@ -410,12 +429,17 @@ async def webhook_auto_apply(request: Request):
     # AutoMode is now genuinely async -- await it directly, no more
     # .raw/to_thread bridge needed for this call path.
     from agentit.automode import AutoMode
+    from agentit.assessment_diff import current_finding_keys
     engine = AutoMode(store=s, publisher=None, llm_client=get_llm_client())
 
+    # This batch spans the whole onboarding run (every finding the
+    # assessment surfaced, not one specific finding) -- target every
+    # finding known at this assessment so a later re-assessment's diff can
+    # still tell whether this delivery's underlying findings cleared.
     result = await engine.execute(
         assessment_id, files, namespace,
         report.criticality, auto_approve, report.repo_name,
-        report=report,
+        report=report, target_findings=sorted(current_finding_keys(report)),
     )
 
     log.info("auto-apply result for %s: %s -- %s", assessment_id, result["action"], result["reason"])
@@ -474,10 +498,12 @@ async def webhook_finding(request: Request):
         # plumbing-gap fix: a fleet-wide dict alone can't answer "is this
         # app GitOps-registered").
         finding_report = await s.get(app["id"])
+        from agentit.assessment_diff import finding_key
         auto_result = await auto.execute(
             app["id"], result["files"], namespace,
             app.get("criticality", "medium"), False, app_name,
             result["agent"], report=finding_report,
+            target_findings=[finding_key(category, description)],
         )
         await s.log_event("dispatcher", auto_result["action"], app_name, "info",
                            f"Auto-mode {auto_result['action']} for {category}: {auto_result['reason']}")

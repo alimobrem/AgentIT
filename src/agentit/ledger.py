@@ -65,6 +65,23 @@ _EVENT_ACTION_TO_CARD_TYPE: dict[str, str] = {
     "delivery-verified": "F",
     "delivery-rolled-back": "F",
     "delivery-breach-reported": "F",
+    # Finding-scoped re-verification (docs/onboarding-loop-vision-gap-
+    # analysis.md Phase 3): a delivery's specific target finding confirmed
+    # gone (or still there) on a later push-triggered re-assessment -- the
+    # same "delivery outcome" bucket as the SLO-verification cards above
+    # for a resolved finding, the same "needs attention" bucket "remediation-
+    # failed" already occupies for a still-present one.
+    "delivery-finding-resolved": "F",
+    "delivery-finding-still-present": "I",
+    # Phase 4's bounded auto-escalation: a fresh fix attempt re-dispatched
+    # below the failure threshold reads like any other freshly-generated
+    # fix; a finding escalated to a human at/above the threshold is a
+    # "needs attention" signal in its own right, in addition to (not
+    # instead of) the real pending gate (`ESCALATION_GATE_TYPE`) it also
+    # creates -- card D for that gate.
+    "finding-redispatched": "B",
+    "finding-redispatch-no-fix": "I",
+    "finding-escalated": "I",
     "critical-findings-detected": "I",
     "remediation-failed": "I",
     # Not a "finding" in the literal sense, but the same "something in the

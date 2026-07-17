@@ -157,6 +157,26 @@ async def resolve_gate(request: Request, gate_id: str):
                 status_code=303,
             )
 
+        if gate.get("gate_type") == "finding-unresolved-escalation":
+            # A finding that's failed FINDING_ESCALATION_THRESHOLD confirmed
+            # automated fix attempts (delivery.py's escalate_unresolved_
+            # finding()) -- approving this gate is a pure acknowledgment
+            # that a human has looked at it, never a re-delivery: falling
+            # through to the generic branch below would re-deliver this
+            # app's ENTIRE onboarding batch, not just retry the one
+            # escalated finding, which is not what approving this gate
+            # should do.
+            await s.log_event(
+                "gate-resolver", "finding-escalation-acknowledged",
+                gate.get("target_app"), "info",
+                f"Escalated finding acknowledged for assessment {assessment_id} — "
+                "no automatic re-delivery was triggered by this approval.",
+            )
+            return RedirectResponse(
+                url=f"/assessments/{assessment_id}?tab=actions&success=Escalation+acknowledged.",
+                status_code=303,
+            )
+
         if gate.get("gate_type") == "gitops-pr-pending":
             # AutoMode already opened the PR autonomously when it created
             # this gate (automode.py::execute) -- approving it is a merge,

@@ -836,10 +836,12 @@ async def _run_onboarding_job(
             }[stage]
             await s.update_remediation_job(job_id, stage, label)
 
+        from agentit.assessment_diff import current_finding_keys
+
         chain_result = await auto_dry_run_then_deliver(
             chain_files, app_name=report.repo_name, namespace=namespace, report=report,
             store=s, assessment_id=assessment_id, actor="onboarding-auto-deliver",
-            on_stage=_on_stage,
+            on_stage=_on_stage, target_findings=sorted(current_finding_keys(report)),
         )
 
         if chain_result["ok"]:
@@ -1266,6 +1268,7 @@ async def deliver(request: Request, assessment_id: str):
     once via ``route_and_deliver()`` -- the mechanism (direct apply vs.
     GitOps commit+PR) is no longer a human choice, only ``dry_run`` is.
     """
+    from agentit.assessment_diff import current_finding_keys
     from agentit.portal.delivery import repo_kind_for_mechanism, route_and_deliver
 
     s = await get_store()
@@ -1280,11 +1283,17 @@ async def deliver(request: Request, assessment_id: str):
     dry_run = form.get("dry_run") == "true"
     namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
 
+    # Onboarding generates fixes for every finding in this assessment (not
+    # one specific finding) -- target every one of them so a later
+    # re-assessment's diff can correlate this whole-app delivery back to
+    # the findings it was meant to clear (docs/onboarding-loop-vision-gap-
+    # analysis.md Phase 3).
     try:
         delivery = await route_and_deliver(
             files, app_name=report.repo_name, namespace=namespace,
             report=report, store=s, assessment_id=assessment_id,
             actor=get_current_user(request), dry_run=dry_run,
+            target_findings=sorted(current_finding_keys(report)),
         )
     except Exception as exc:
         log.exception("Delivery failed for assessment %s", assessment_id)

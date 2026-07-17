@@ -290,6 +290,20 @@ CREATE TABLE IF NOT EXISTS deliveries (
 );
 CREATE INDEX IF NOT EXISTS idx_deliveries_assessment ON deliveries(assessment_id);
 CREATE INDEX IF NOT EXISTS idx_deliveries_app ON deliveries(app_name);
+-- Finding-scoped re-verification (docs/onboarding-loop-vision-gap-analysis.md
+-- Phase 3): which specific finding(s) -- keyed the same
+-- (category, description.lower()[:80]) shape assessment_diff.py's
+-- diff_assessments() dedups findings on -- this delivery was meant to
+-- resolve, and whether a later push-triggered re-assessment confirmed it
+-- actually did. ``finding_resolution`` is deliberately a separate column
+-- from ``verification`` above: that one tracks post-delivery SLO health
+-- (verify_and_close_delivery()); this one tracks whether the specific
+-- finding the delivery targeted stopped showing up on re-assessment -- two
+-- different questions about the same delivery, so conflating them into one
+-- column would lose one or the other. Additive columns on an already-
+-- created table, same convention as the `gates.pr_url` ALTER below.
+ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS target_findings_json JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS finding_resolution TEXT;
 
 -- One-time backfill for databases that predate the `apps` table: populate
 -- it from existing `assessments` history using "most recent non-null value
@@ -355,6 +369,7 @@ def _delivery_row_to_dict(row: asyncpg.Record | None) -> dict[str, Any] | None:
         return None
     d["categories"] = json.loads(d.pop("categories_json"))
     d["details"] = json.loads(d.pop("details_json"))
+    d["target_findings"] = [tuple(f) for f in json.loads(d.pop("target_findings_json"))]
     return d
 
 
@@ -1252,17 +1267,27 @@ class AssessmentStore:
         mechanism: str,
         status: str = "pending",
         details: dict | None = None,
+        target_findings: list[tuple[str, str]] | None = None,
     ) -> str:
+        """``target_findings``, when given, is the ``(category,
+        description.lower()[:80])`` key -- the exact shape
+        ``assessment_diff.diff_assessments()`` dedups findings on (see
+        ``assessment_diff.finding_key()``) -- for the specific finding(s)
+        this delivery was generated to resolve. Defaults to empty (unknown/
+        not tracked): most historical callers, and any delivery whose files
+        don't trace back to one or a few specific findings (e.g. a delivery
+        with no report at all), never set this.
+        """
         delivery_id = uuid.uuid4().hex
         now = _now()
         await self._pool.execute(
             """
             INSERT INTO deliveries
-                (id, assessment_id, app_name, categories_json, mechanism, status, verification, details_json, created_at, updated_at)
-            VALUES ($1, $2, $3, $4::jsonb, $5, $6, 'unknown', $7::jsonb, $8, $9)
+                (id, assessment_id, app_name, categories_json, mechanism, status, verification, details_json, target_findings_json, created_at, updated_at)
+            VALUES ($1, $2, $3, $4::jsonb, $5, $6, 'unknown', $7::jsonb, $8::jsonb, $9, $9)
             """,
             delivery_id, assessment_id, app_name, json.dumps(categories), mechanism, status,
-            json.dumps(details or {}), now, now,
+            json.dumps(details or {}), json.dumps(list(target_findings or [])), now,
         )
         return delivery_id
 
@@ -1273,6 +1298,7 @@ class AssessmentStore:
         status: str | None = None,
         verification: str | None = None,
         details: dict | None = None,
+        finding_resolution: str | None = None,
     ) -> bool:
         row = await self._pool.fetchrow(
             "SELECT details_json FROM deliveries WHERE id = $1", delivery_id,
@@ -1288,10 +1314,11 @@ class AssessmentStore:
                 status = COALESCE($2, status),
                 verification = COALESCE($3, verification),
                 details_json = $4::jsonb,
-                updated_at = $5
+                finding_resolution = COALESCE($5, finding_resolution),
+                updated_at = $6
             WHERE id = $1
             """,
-            delivery_id, status, verification, json.dumps(merged_details), _now(),
+            delivery_id, status, verification, json.dumps(merged_details), finding_resolution, _now(),
         )
         return _affected(result) > 0
 
@@ -1321,6 +1348,51 @@ class AssessmentStore:
             "ORDER BY created_at ASC",
         )
         return [_delivery_row_to_dict(r) for r in rows]
+
+    async def list_deliveries_pending_finding_check(self, app_name: str) -> list[dict]:
+        """Every delivery for this app that recorded ``target_findings`` (see
+        ``create_delivery()``) and hasn't been finding-checked yet
+        (``finding_resolution IS NULL``) -- the queue
+        ``delivery.check_pending_delivery_verifications()`` walks on every
+        push-triggered re-assessment (docs/onboarding-loop-vision-gap-
+        analysis.md Phase 3). A delivery with no recorded target findings at
+        all (the default for most historical/whole-batch deliveries) never
+        shows up here -- there's nothing to correlate.
+        """
+        rows = await self._pool.fetch(
+            """
+            SELECT * FROM deliveries
+            WHERE app_name = $1 AND finding_resolution IS NULL AND target_findings_json != '[]'::jsonb
+            ORDER BY created_at ASC
+            """,
+            app_name,
+        )
+        return [_delivery_row_to_dict(r) for r in rows]
+
+    async def get_finding_failure_count(self, app_name: str, finding_category: str) -> int:
+        """How many delivery attempts for this app, targeting this finding
+        category, have been confirmed (via ``list_deliveries_pending_
+        finding_check``'s correlation) to have left their target finding
+        still present after the fix? Mirrors ``get_rejection_count()``'s
+        exact (app_name, finding_category) counting shape above for the
+        same "how many times has X failed" concept -- applied here to a
+        machine-confirmed still-broken automated delivery rather than a
+        human's explicit gate rejection, so it's counted against
+        ``deliveries``, not ``agent_feedback`` (a table documented, and
+        consumed elsewhere, as specifically HUMAN feedback).
+        """
+        row = await self._pool.fetchrow(
+            """
+            SELECT COUNT(*) as cnt FROM deliveries
+            WHERE app_name = $1 AND finding_resolution = 'still_present'
+              AND EXISTS (
+                SELECT 1 FROM jsonb_array_elements(target_findings_json) elem
+                WHERE elem->>0 = $2
+              )
+            """,
+            app_name, finding_category,
+        )
+        return row["cnt"] if row else 0
 
     # ── Remediations ───────────────────────────────────────────────────
 

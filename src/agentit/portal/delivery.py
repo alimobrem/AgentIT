@@ -40,6 +40,24 @@ CATEGORY_SECRET_BLOCKED = "secret_blocked"
 # ``helpers.py`` can all reference it without importing a routes module.
 ADMIN_REVIEW_GATE_TYPE = "cluster-admin-review"
 
+# The gate type a finding creates once it's failed to resolve
+# FINDING_ESCALATION_THRESHOLD times in a row (docs/onboarding-loop-vision-
+# gap-analysis.md Phase 4) -- a real, visible "needs you" signal (see
+# resolve_gate()'s special case for it, routes/gates.py), not a silent
+# give-up and not another identical auto-retry forever. Per-app, like
+# every other gate type above ADMIN_REVIEW_GATE_TYPE.
+ESCALATION_GATE_TYPE = "finding-unresolved-escalation"
+
+# How many confirmed "still present after the fix" delivery attempts, for
+# the same (app, finding-category), before this stops auto-retrying and
+# escalates to a human instead. 3 matches this codebase's existing
+# precedent for the identical "how many failed attempts before backing off"
+# shape: webhooks.py's `get_rejection_count(...) >= 3` (skip an
+# auto-fixable category that's been rejected 3+ times) and
+# skill_learner.py's `improvement_cooldown_attempts` default (back off a
+# flagged skill after 3 failed improvement attempts, 0724871).
+FINDING_ESCALATION_THRESHOLD = 3
+
 # Mechanisms a category can be routed to. MECHANISM_DIRECT_APPLY is no
 # longer a selectable live outcome (Direct Apply has been removed as a
 # concept entirely -- see resolve_cluster_config_mechanism()) -- the
@@ -351,6 +369,11 @@ async def gate_delivery_confirmation(store: object, gate: dict) -> str:
     gate_type = gate.get("gate_type", "")
     if gate_type == "rollback-review":
         return "AgentIT will: mark this rollback approved for manual intervention -- no automatic apply is triggered."
+    if gate_type == ESCALATION_GATE_TYPE:
+        return (
+            "AgentIT will: mark this escalated finding acknowledged for manual follow-up -- "
+            "no automatic fix or re-delivery is triggered by approving this gate."
+        )
     if gate_type in ("gitops-pr-pending", "cluster-admin-review"):
         # These gate types already carry the exact mechanism + reason in
         # their own summary text (see automode.py / delivery.py's gate
@@ -492,6 +515,7 @@ async def route_and_deliver(
     assessment_id: str,
     actor: str,
     dry_run: bool,
+    target_findings: list[tuple[str, str]] | None = None,
 ) -> dict:
     """The one decision surface for "does this change reach a cluster/repo
     now" -- classify, look up GitOps registration, and route each
@@ -512,6 +536,20 @@ async def route_and_deliver(
     Apply/AutoMode's direct-apply branch as a concept entirely (see
     ``resolve_cluster_config_mechanism()``/``automode.py``'s simplified
     ``execute()``).
+
+    ``target_findings`` (docs/onboarding-loop-vision-gap-analysis.md Phase
+    3), when the caller knows which specific finding(s) this batch of
+    ``files`` was generated to resolve, is recorded verbatim on the
+    ``deliveries`` row (``store.create_delivery()``) as the exact
+    ``(category, description.lower()[:80])`` key
+    ``assessment_diff.diff_assessments()`` dedups findings on -- so a later
+    re-assessment's diff can be correlated back to this one delivery
+    (``correlate_delivery_finding()`` below) to answer "did this delivery's
+    target finding actually clear." Omitted (the default) for callers that
+    don't have one or a few specific findings in mind for this batch (e.g.
+    a dry-run-only call, or a batch spanning many findings at once where no
+    single one is "the" target) -- ``list_deliveries_pending_finding_check()``
+    simply never returns those rows, so nothing downstream breaks.
     """
     groups: dict[str, list[dict]] = {}
     for f in files:
@@ -606,6 +644,7 @@ async def route_and_deliver(
                 cat: confirmation_text(m, infra_repo_url=infra_repo_url) for cat, m in mechanisms.items()
             },
         },
+        target_findings=target_findings,
     )
 
     # Everything below can raise (cluster API calls, GitHub PR creation,
@@ -758,6 +797,7 @@ async def auto_dry_run_then_deliver(
     assessment_id: str,
     actor: str,
     on_stage: Callable[[str], Awaitable[None]] | None = None,
+    target_findings: list[tuple[str, str]] | None = None,
 ) -> dict:
     """Onboarding's own automatic "Dry Run, then Deliver" chain -- the same
     two steps a human already clicks by hand on Onboard Results, run back-
@@ -783,6 +823,11 @@ async def auto_dry_run_then_deliver(
     real progress onto its own job-tracking row -- this function makes no
     store writes of its own beyond what ``route_and_deliver()`` already
     does.
+
+    ``target_findings`` is threaded straight through to the real (non-dry-
+    run) ``route_and_deliver()`` call only -- the dry-run call's own
+    ``deliveries`` row is a throwaway preview record, never a candidate for
+    Phase 3's later finding-resolution correlation.
     """
     if on_stage:
         await on_stage("dry_run")
@@ -808,6 +853,7 @@ async def auto_dry_run_then_deliver(
         deliver_result = await route_and_deliver(
             files, app_name=app_name, namespace=namespace, report=report,
             store=store, assessment_id=assessment_id, actor=actor, dry_run=False,
+            target_findings=target_findings,
         )
     except Exception as exc:
         return {"ok": False, "stage": "deliver", "error": str(exc)[:300]}
@@ -834,3 +880,246 @@ async def auto_dry_run_then_deliver(
         "pr_url": pr_url,
         "pr_url_repo": pr_url_repo,
     }
+
+
+# ── Finding-scoped re-verification & bounded auto-escalation ──────────────
+# (docs/onboarding-loop-vision-gap-analysis.md §7/Phase 3-4). Nothing above
+# this line changes shape for a caller that never passes `target_findings`.
+# ESCALATION_GATE_TYPE/FINDING_ESCALATION_THRESHOLD are defined near the top
+# of this module, alongside ADMIN_REVIEW_GATE_TYPE.
+
+
+async def correlate_delivery_finding(
+    store: object, delivery: dict, new_report: AssessmentReport | None,
+) -> dict:
+    """Phase 3's finding-scoped re-verification: did THIS delivery's target
+    finding(s) (``delivery["target_findings"]``, set at delivery-creation
+    time by ``route_and_deliver()``) actually clear, per a subsequent
+    re-assessment?
+
+    Returns ``{"status": ..., "target_findings": [...],
+    "still_present_findings": [...], "resolved_findings": [...]}``, where
+    ``status`` is one of:
+
+    - ``"resolved"`` -- every target finding is gone from ``new_report``
+      (whatever delivered actually fixed it, or it disappeared for some
+      other reason -- either way, it's not there anymore).
+    - ``"still_present"`` -- at least one target finding is still present in
+      ``new_report``, unchanged or not -- the fix did not clear it.
+    - ``"pending"`` -- no subsequent assessment exists yet to check against
+      (``new_report is None``).
+    - ``"unknown"`` -- this delivery never recorded any target findings at
+      all (most historical/whole-batch deliveries), so there's nothing to
+      correlate.
+
+    Deliberately checks membership in ``new_report``'s own, current finding
+    set (via ``assessment_diff.current_finding_keys()``) rather than only
+    consulting a pre-computed ``AssessmentDiff``'s ``new_findings``/
+    ``resolved_findings`` lists: those two lists only cover findings that
+    *changed* between the two assessments, so a finding that's still
+    present completely unchanged -- the expected shape of "the fix didn't
+    work at all" -- would appear in neither list and be invisible to a
+    diff-only check.
+    """
+    target_findings = delivery.get("target_findings") or []
+    if not target_findings:
+        return {"status": "unknown", "target_findings": [], "still_present_findings": [], "resolved_findings": []}
+    if new_report is None:
+        return {
+            "status": "pending", "target_findings": target_findings,
+            "still_present_findings": [], "resolved_findings": [],
+        }
+
+    from agentit.assessment_diff import current_finding_keys
+
+    target_keys = {tuple(k) for k in target_findings}
+    current_keys = current_finding_keys(new_report)
+    still_present = sorted(target_keys & current_keys)
+    resolved = sorted(target_keys - current_keys)
+    status = "still_present" if still_present else "resolved"
+    return {
+        "status": status, "target_findings": target_findings,
+        "still_present_findings": still_present, "resolved_findings": resolved,
+    }
+
+
+async def _log_finding_resolution_outcome(
+    store: object, app_name: str, action: str, severity: str, summary: str,
+) -> None:
+    """Mirrors ``_log_verification_outcome()`` above (introduced for the
+    SLO-verification tail, 69e09b9) for the finding-resolution tail -- same
+    Kafka-publish-plus-store-event pattern, same best-effort try/except
+    around the store write, so a finding's resolved/still-present/escalated
+    outcome produces a real Ledger card/observable event instead of only a
+    column update nobody's watching.
+    """
+    from agentit.portal.helpers import publish_event
+    publish_event(action, app_name, summary, agent_id="delivery-verifier")
+    try:
+        await store.log_event("delivery-verifier", action, app_name, severity, summary)
+    except Exception:
+        logger.warning("Failed to log %s event for %s", action, app_name, exc_info=True)
+
+
+def _describe_finding(key: tuple[str, str]) -> str:
+    category, desc_key = key[0], key[1]
+    return f"{category} ('{desc_key}')"
+
+
+async def escalate_unresolved_finding(
+    store: object, assessment_id: str, app_name: str, finding: tuple[str, str], failure_count: int,
+) -> str:
+    """Phase 4's stop condition: a real, visible "needs you" signal for a
+    finding that has now failed to resolve ``failure_count`` (>=
+    ``FINDING_ESCALATION_THRESHOLD``) times in a row -- a new gate type
+    (``ESCALATION_GATE_TYPE``), not a silent give-up and not another
+    identical auto-retry. Dedupes per (app, gate_type) the same way every
+    other gate type already does (``store.create_gate()``); this stays a
+    real, visible, pending item -- surfaced on Fleet's per-app "needs
+    action" badge and the Ledger's card type D, exactly like any other
+    pending gate -- until a human resolves it.
+    """
+    category, desc_key = finding[0], finding[1]
+    summary = (
+        f"'{category}' finding has failed to resolve after {failure_count} automated fix "
+        f"attempt(s) -- human review needed. Target finding: {desc_key}"
+    )
+    gate_id = await store.create_gate(assessment_id, ESCALATION_GATE_TYPE, summary)
+    await _log_finding_resolution_outcome(
+        store, app_name, "finding-escalated", "critical", f"{summary} (gate {gate_id})",
+    )
+    return gate_id
+
+
+async def redispatch_finding_fix(
+    store: object, llm_client: object, report: AssessmentReport, assessment_id: str,
+    app_name: str, finding: tuple[str, str],
+) -> dict:
+    """Phase 4's below-threshold branch: re-dispatch a fresh fix attempt for
+    this exact finding through the same mechanism the original fix went
+    through -- ``RemediationDispatcher.dispatch()`` to generate, then
+    ``AutoMode.execute()`` (-> ``route_and_deliver()``) to deliver -- reusing
+    the auto-chain machinery this same effort already wired end-to-end
+    (``webhook_github_push``'s auto-fixable loop, Phase 0's 9ccfa21) rather
+    than re-implementing delivery logic here.
+
+    A category's skill/template renders deterministically (no LLM in the
+    generation step itself, see ``RemediationDispatcher``'s module comment)
+    -- a retry with no other state change will typically regenerate the
+    exact same fix. This bounded retry exists for the cases where that's
+    still enough (a transient delivery failure, a race, a since-changed
+    repo state), not as a mechanism for trying a materially different fix;
+    a structurally wrong fix is exactly what ``FINDING_ESCALATION_THRESHOLD``
+    -- not this function -- is meant to catch.
+    """
+    category = finding[0]
+    from agentit.automode import AutoMode
+    from agentit.remediation.dispatcher import RemediationDispatcher
+
+    dispatcher = RemediationDispatcher(store)
+    dispatch_result = await dispatcher.dispatch(assessment_id, category, app_name)
+    if not dispatch_result["files"]:
+        reason = dispatch_result.get("error") or "dispatcher produced no files"
+        await _log_finding_resolution_outcome(
+            store, app_name, "finding-redispatch-no-fix", "warning",
+            f"Re-dispatch for '{category}' produced no fix: {reason}",
+        )
+        return {"action": "no-fix-available", "reason": reason}
+
+    for f in dispatch_result["files"]:
+        await store.save_remediation(
+            assessment_id, dispatch_result["agent"], f["description"],
+            status="generated", manifest_path=f["path"],
+        )
+
+    namespace = app_name.lower().replace("_", "-").replace(".", "-")
+    auto = AutoMode(store=store, publisher=None, llm_client=llm_client)
+    auto_result = await auto.execute(
+        assessment_id, dispatch_result["files"], namespace, report.criticality, True,
+        app_name, dispatch_result["agent"], report=report, target_findings=[finding],
+    )
+    await _log_finding_resolution_outcome(
+        store, app_name, "finding-redispatched", "info",
+        f"Re-dispatched a fresh fix for '{category}' after a confirmed still-present finding: "
+        f"{auto_result['action']} -- {auto_result['reason']}",
+    )
+    return {"action": auto_result["action"], "reason": auto_result["reason"], "agent": dispatch_result["agent"]}
+
+
+async def handle_confirmed_finding_failure(
+    store: object, llm_client: object, report: AssessmentReport, assessment_id: str,
+    app_name: str, finding: tuple[str, str],
+) -> dict:
+    """Phase 4's single decision point, called once per still-present
+    target finding from ``check_pending_delivery_verifications()`` below:
+    below ``FINDING_ESCALATION_THRESHOLD`` confirmed failures for this
+    (app, finding-category), re-dispatch a fresh attempt; at or above it,
+    stop and escalate instead. This is the one place that decision is made
+    -- not scattered across ``RemediationLoop``/``VulnWatcher`` (a
+    structurally separate, watcher-triggered pipeline this phase never
+    touches -- neither one has any relationship to ``deliveries.
+    target_findings``/``finding_resolution`` today) or any other call site.
+    """
+    category = finding[0]
+    failure_count = await store.get_finding_failure_count(app_name, category)
+    if failure_count >= FINDING_ESCALATION_THRESHOLD:
+        gate_id = await escalate_unresolved_finding(store, assessment_id, app_name, finding, failure_count)
+        return {"action": "escalated", "gate_id": gate_id, "failure_count": failure_count}
+    result = await redispatch_finding_fix(store, llm_client, report, assessment_id, app_name, finding)
+    return {"action": "redispatched", "failure_count": failure_count, **result}
+
+
+async def check_pending_delivery_verifications(
+    store: object, app_name: str, new_report: AssessmentReport, new_assessment_id: str,
+    *, auto_mode: bool = False, llm_client: object | None = None,
+) -> list[dict]:
+    """Phase 3 + Phase 4's single entry point, called from
+    ``webhook_github_push``'s existing diff-triggered re-assessment flow
+    (routes/webhooks.py) for every push-triggered re-assessment, regardless
+    of ``auto_mode``: for every delivery on this app awaiting a finding
+    check (``store.list_deliveries_pending_finding_check()``), correlate
+    against ``new_report`` and persist+log the real outcome (Phase 3).
+
+    ``auto_mode`` additionally gates Phase 4's reaction to a confirmed
+    ``"still_present"`` outcome (bounded auto-retry, then escalate) -- the
+    same toggle this webhook's own existing ``diff.auto_fixable`` loop
+    already respects for its own auto-dispatch decision, so re-dispatching
+    (an automated delivery) never fires when the repo owner hasn't opted
+    into automated delivery at all; ``False`` still fully completes Phase
+    3's correlation+logging, it just never re-dispatches or escalates.
+    """
+    pending = await store.list_deliveries_pending_finding_check(app_name)
+    results: list[dict] = []
+    for d in pending:
+        outcome = await correlate_delivery_finding(store, d, new_report)
+        if outcome["status"] not in ("resolved", "still_present"):
+            continue
+
+        await store.update_delivery(d["id"], finding_resolution=outcome["status"])
+
+        if outcome["status"] == "resolved":
+            resolved_desc = ", ".join(_describe_finding(k) for k in outcome["resolved_findings"]) or "target finding"
+            await _log_finding_resolution_outcome(
+                store, app_name, "delivery-finding-resolved", "info",
+                f"Delivery {d['id']} confirmed resolved: {resolved_desc} no longer present on re-assessment",
+            )
+            results.append({"delivery_id": d["id"], **outcome})
+            continue
+
+        still_present_desc = ", ".join(_describe_finding(k) for k in outcome["still_present_findings"])
+        resolved_note = ""
+        if outcome["resolved_findings"]:
+            resolved_note = " (" + ", ".join(_describe_finding(k) for k in outcome["resolved_findings"]) + " did resolve)"
+        await _log_finding_resolution_outcome(
+            store, app_name, "delivery-finding-still-present", "warning",
+            f"Delivery {d['id']} did NOT resolve: {still_present_desc} still present on re-assessment{resolved_note}",
+        )
+
+        escalations = []
+        if auto_mode:
+            for key in outcome["still_present_findings"]:
+                escalations.append(await handle_confirmed_finding_failure(
+                    store, llm_client, new_report, new_assessment_id, app_name, tuple(key),
+                ))
+        results.append({"delivery_id": d["id"], **outcome, "escalations": escalations})
+    return results
