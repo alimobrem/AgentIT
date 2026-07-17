@@ -174,10 +174,35 @@ async def nav_badges_middleware(request: Request, call_next):
 _maintenance_task = None
 
 
+async def _reap_orphaned_jobs() -> None:
+    """Fails assess/onboard jobs orphaned by a dead process (see
+    ``AssessmentStore.reap_orphaned_jobs``) -- called at startup, since a
+    freshly-started process could never have legitimately created a
+    still-non-terminal row itself, and every 5 min after, to catch a job
+    orphaned by a *later* pod death without needing another restart."""
+    try:
+        s = await get_store()
+        reaped = await s.reap_orphaned_jobs()
+        for job in reaped:
+            log.warning(
+                "Reaped orphaned job %s (assessment %s, stuck at %r) -- "
+                "its owning process died before it reached a terminal state",
+                job["id"], job["assessment_id"], job["current_step"],
+            )
+            if job["assessment_id"]:
+                await s.log_event(
+                    "portal", "job-reaped", None, "warning",
+                    "Onboarding/assessment interrupted by a service restart -- retry from the app page.",
+                    correlation_id=job["assessment_id"],
+                )
+    except Exception:
+        log.debug("Background orphaned-job reap failed", exc_info=True)
+
+
 async def _background_maintenance() -> None:
-    """Every 5 min: refresh DB/event-buffer size metrics. Hourly: expire stale
-    gates, diff the skill/check inventory, prune stale agent_registry rows.
-    Daily: purge old data."""
+    """Every 5 min: refresh DB/event-buffer size metrics, reap orphaned
+    assess/onboard jobs. Hourly: expire stale gates, diff the skill/check
+    inventory, prune stale agent_registry rows. Daily: purge old data."""
     tick = 0
     while True:
         await asyncio.sleep(300)
@@ -189,6 +214,8 @@ async def _background_maintenance() -> None:
             await refresh_db_metrics(s)
         except Exception:
             log.debug("Background DB metrics refresh failed", exc_info=True)
+
+        await _reap_orphaned_jobs()
 
         if tick % 12 != 0:
             continue  # everything below this line only runs hourly (12 * 5min)
@@ -249,6 +276,11 @@ def _set_build_info() -> None:
 async def _start_background_tasks() -> None:
     global _maintenance_task
     _set_build_info()
+    # Run once immediately (not just on the 5-min maintenance tick): a
+    # process that just started can never have legitimately created a
+    # still-running job itself, so any it inherits from the last deploy
+    # are orphans right now, not five minutes from now.
+    await _reap_orphaned_jobs()
     _maintenance_task = asyncio.create_task(_background_maintenance())
 
 

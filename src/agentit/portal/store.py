@@ -1661,6 +1661,41 @@ class AssessmentStore:
             result.append(d)
         return result
 
+    async def reap_orphaned_jobs(self, max_age_seconds: int = 900) -> list[dict]:
+        """Fails any assess/onboard job still non-terminal well past every
+        real deadline that could keep it legitimately in progress.
+
+        Both ``assess_submit`` (a ``threading.Thread``) and
+        ``onboard_submit`` (a FastAPI ``BackgroundTasks`` coroutine) track
+        their work in this same table from *within the process that
+        started them* -- there's no persistent queue, and nothing resumes
+        or re-checks the job if that process dies mid-run (a routine
+        rolling deploy, OOM, crash). The row is then orphaned forever at
+        its last non-terminal status: no code path ever revisits it, so
+        anything polling it (the onboarding SSE stream/progress page,
+        assess's progress page) waits on a status that will never change.
+
+        A job that's still genuinely in progress in a live process can
+        never be older than ``with_timeout``'s ``OPERATION_TIMEOUT``
+        (300s) for the core clone/assess/onboard work, plus a small buffer
+        for the fast save/image-build-trigger/webhook steps around it --
+        900s leaves a wide margin over that before treating a row as
+        orphaned rather than merely slow.
+        """
+        cutoff = _now() - timedelta(seconds=max_age_seconds)
+        rows = await self._pool.fetch(
+            """
+            UPDATE remediation_jobs
+            SET status = 'failed',
+                error = 'Interrupted by a service restart before it finished. Please retry.',
+                updated_at = $1
+            WHERE status NOT IN ('completed', 'failed') AND created_at < $2
+            RETURNING id, assessment_id, current_step
+            """,
+            _now(), cutoff,
+        )
+        return _rows_to_dicts(rows)
+
     # ── Scheduled Operations ─────────────────────────────────────────
 
     async def create_schedule(

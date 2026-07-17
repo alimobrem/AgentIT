@@ -14,7 +14,7 @@ see docs/postgres-migration-plan.md for that history.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -284,6 +284,64 @@ class TestFleetAndTrend:
             "current_score": None, "previous_score": None,
             "delta": None, "assessments_count": 0,
         }
+
+
+class TestReapOrphanedJobs:
+    """``reap_orphaned_jobs`` fails assess/onboard jobs whose owning process
+    (a ``threading.Thread`` or FastAPI ``BackgroundTasks`` coroutine, never
+    a persistent queue) died before writing a terminal status -- the real,
+    current bug behind a live onboarding progress page stuck forever even
+    after the already-shipped client-side stall fallback (commit 2c7c461):
+    that fallback correctly re-checks the job's real status, but a job
+    orphaned by a pod restart never *has* a terminal status to find."""
+
+    async def test_fails_a_job_stuck_past_max_age(self, store):
+        aid = await store.save(_make_report("orphaned-onboard-app"))
+        job_id = await store.create_remediation_job(aid)
+        await store.update_remediation_job(job_id, "running", "Running onboarding agents...")
+        # Simulate the owning pod having died a long time ago: backdate
+        # creation past any real deploy/restart cadence.
+        await store._pool.execute(
+            "UPDATE remediation_jobs SET created_at = $1 WHERE id = $2",
+            datetime.now(timezone.utc) - timedelta(hours=1), job_id,
+        )
+
+        reaped = await store.reap_orphaned_jobs(max_age_seconds=900)
+
+        assert [r["id"] for r in reaped] == [job_id]
+        job = await store.get_remediation_job(job_id)
+        assert job["status"] == "failed"
+        assert "restart" in job["error"].lower()
+
+    async def test_leaves_a_fresh_running_job_alone(self, store):
+        """A job created moments ago on a still-live pod must never be
+        reaped just because it hasn't finished yet -- with two replicas
+        routinely running, this is the difference between "orphaned" and
+        "someone else is still legitimately working on this"."""
+        aid = await store.save(_make_report("live-onboard-app"))
+        job_id = await store.create_remediation_job(aid)
+        await store.update_remediation_job(job_id, "running", "Running onboarding agents...")
+
+        reaped = await store.reap_orphaned_jobs(max_age_seconds=900)
+
+        assert reaped == []
+        job = await store.get_remediation_job(job_id)
+        assert job["status"] == "running"
+
+    async def test_leaves_terminal_jobs_alone_even_if_old(self, store):
+        aid = await store.save(_make_report("completed-old-app"))
+        job_id = await store.create_remediation_job(aid)
+        await store.update_remediation_job(job_id, "completed", "Onboarding complete")
+        await store._pool.execute(
+            "UPDATE remediation_jobs SET created_at = $1 WHERE id = $2",
+            datetime.now(timezone.utc) - timedelta(hours=1), job_id,
+        )
+
+        reaped = await store.reap_orphaned_jobs(max_age_seconds=900)
+
+        assert reaped == []
+        job = await store.get_remediation_job(job_id)
+        assert job["status"] == "completed"
 
 
 class TestGates:

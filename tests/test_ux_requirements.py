@@ -22,7 +22,7 @@ docstring convention.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -302,6 +302,37 @@ async def test_onboard_agent_steps_sourced_from_real_events_not_fabricated(clien
     assert resp.status_code == 200
     assert "cost" in resp.text
     assert "Generated 2 files" in resp.text
+
+
+async def test_onboard_progress_recovers_from_a_job_orphaned_by_pod_restart(client, _override_store):
+    """Regression test for a stuck-forever onboarding progress page found
+    on a live instance: the already-shipped client-side stall fallback
+    (commit 2c7c461) correctly re-fetches this same progress URL once the
+    SSE stream goes quiet, but that only helps if the job *has* a terminal
+    status to redirect to. A job whose owning pod died mid-run (a routine
+    rolling deploy killing the FastAPI ``BackgroundTasks`` coroutine that
+    was tracking it, no persistent queue behind it) never gets one on its
+    own -- ``_reap_orphaned_jobs`` (called at startup and every 5 min) is
+    what actually unsticks it, by failing the job so the stall
+    fallback's re-fetch has something real to redirect to."""
+    from agentit.portal.app import _reap_orphaned_jobs
+
+    store = _override_store
+    aid = await store.save(_make_report("onboard-orphaned-app"))
+    job_id = await store.create_remediation_job(aid)
+    await store.update_remediation_job(job_id, "running", "Running onboarding agents...")
+    await store._pool.execute(
+        "UPDATE remediation_jobs SET created_at = $1 WHERE id = $2",
+        datetime.now(timezone.utc) - timedelta(hours=1), job_id,
+    )
+
+    await _reap_orphaned_jobs()
+
+    resp = await client.get(f"/assessments/{aid}/onboard/progress/{job_id}", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith(f"/assessments/{aid}?error=")
+    events = await store.list_events_by_correlation_id(aid)
+    assert any(e["action"] == "job-reaped" for e in events)
 
 
 # ── #7: optimistic UI for the (reversible, low-stakes) Suppress action ──
