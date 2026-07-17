@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
 
 from agentit.remediation_loop import RemediationLoop
 from conftest import make_async_store, make_report
@@ -32,6 +34,27 @@ class TestRemediationLoop:
         loop = RemediationLoop(portal_url="http://bad-host:9999", timeout=2)
         result = await loop.trigger("https://github.com/org/app", "app", reason="test")
         assert result["outcome"] == "failed"
+        assert result["step"] == "assess"
+        await loop.close()
+
+    async def test_trigger_handles_duplicate_assess_response_without_crashing(self):
+        """Regression: `webhooks.py::webhook_assess`'s dedup guard
+        (`claim_webhook`) returns HTTP 200 with `{"status": "duplicate",
+        "delivery_id": ...}` -- not the normal `{"assessment_id":
+        ..., "overall_score": ...}` shape -- when this call's
+        (repo_url, criticality) body collides with one already claimed in
+        the current time bucket (see `_get_delivery_id`'s docstring, which
+        documents this exact live incident: a second, legitimate trigger
+        for the same app+criticality got deduped and `trigger()` raised an
+        unhandled `KeyError: 'assessment_id'` reading past the `"error" in
+        assess_result` check). `trigger()` must recognize this shape and
+        return a clean "skipped" outcome instead of crashing."""
+        loop = RemediationLoop(timeout=2)
+        loop._client.post = AsyncMock(
+            return_value=httpx.Response(200, json={"status": "duplicate", "delivery_id": "abc123"})
+        )
+        result = await loop.trigger("https://github.com/org/app", "app", reason="test")
+        assert result["outcome"] == "skipped"
         assert result["step"] == "assess"
         await loop.close()
 

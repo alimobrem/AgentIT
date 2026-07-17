@@ -217,7 +217,7 @@ class RemediationLoop:
     ) -> dict:
         """Run the full pipeline: assess -> onboard -> auto-apply -> verify.
 
-        Returns {"outcome": "applied"|"gated"|"failed"|"rollback", "details": {...}}
+        Returns {"outcome": "applied"|"gated"|"failed"|"rollback"|"skipped", "details": {...}}
         """
         await self._log("loop-started", app_name, "info", f"Triggered by: {reason}")
 
@@ -228,6 +228,22 @@ class RemediationLoop:
         # Step 1: Re-assess
         await _update_job("assessing", "assessing")
         assess_result = await self._assess(repo_url, criticality, app_name)
+        if assess_result.get("status") == "duplicate":
+            # /api/webhook/assess's dedup guard (webhooks.py's claim_webhook,
+            # keyed by _get_delivery_id's content-hash+time-bucket fallback
+            # for this exact repo_url+criticality body) claimed this call as
+            # a duplicate of one already in flight/just completed, so it
+            # responds 200 with {"status": "duplicate", "delivery_id": ...}
+            # instead of a real {"assessment_id", "overall_score"} result --
+            # there's no fresh assessment_id here to onboard/apply against,
+            # and whichever call "won" the dedup race is already driving its
+            # own pipeline, so there's nothing more for *this* trigger to do.
+            await self._log("loop-skipped", app_name, "info",
+                            f"Assessment deduped (delivery_id={assess_result.get('delivery_id', '?')}) "
+                            "-- already in flight, nothing more to do")
+            await _update_job("skipped", "assessing")
+            return {"outcome": "skipped", "step": "assess", "details": assess_result}
+
         if "error" in assess_result:
             await self._log("loop-failed", app_name, "warning", f"Assessment failed: {assess_result['error']}")
             await _update_job("failed", "assessing", error=assess_result["error"])
