@@ -434,12 +434,25 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     # of the retired global Gates page -- cluster-admin-review is excluded,
     # it's the one gate type for a genuinely different audience and stays
     # on the separate Admin Review page (docs/ui-redesign-proposal.md §2).
-    from agentit.portal.delivery import ADMIN_REVIEW_GATE_TYPE, gate_delivery_confirmation, is_gitops_registered
+    from agentit.portal.delivery import (
+        ADMIN_REVIEW_GATE_TYPE,
+        gate_delivery_confirmation,
+        get_next_action_state,
+        is_gitops_registered,
+    )
     assessment_gates = await s.list_gates_for_assessment(assessment_id, status="pending") \
         if hasattr(s, "list_gates_for_assessment") else []
     pending_actions = [g for g in assessment_gates if g["gate_type"] != ADMIN_REVIEW_GATE_TYPE]
     for g in pending_actions:
         g["delivery_confirmation"] = await gate_delivery_confirmation(s, g)
+
+    # Real "what happens next" fact (docs/onboarding-loop-vision-gap-
+    # analysis.md's Step 8 discussion / Phase 5) -- reuses `assessment_gates`
+    # (already fetched above, already scoped to this app) instead of a
+    # second gates query.
+    next_action = await get_next_action_state(
+        s, report.repo_name, repo_url=report.repo_url, pending_gates=assessment_gates,
+    )
 
     # Real, specific empty-state copy for the Actions tab (docs/ux-design-
     # requirements.md checklist #10) -- how many of THIS app's gates were
@@ -524,6 +537,7 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "onboarding_count": len(onboardings),
             "fixable_categories": fixable_categories,
             "pending_actions": pending_actions,
+            "next_action": next_action,
             "gitops_registered": gitops_registered,
             "infra_repo_url": infra_repo_url,
             "infra_repo_creation_failed": infra_repo_creation_failed,

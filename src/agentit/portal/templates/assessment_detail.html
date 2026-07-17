@@ -180,6 +180,39 @@
   {% endif %}
 </div>
 
+{# A real "what happens next" fact for a delivery already made against this
+   app (docs/onboarding-loop-vision-gap-analysis.md's Step 8 discussion /
+   Phase 5) -- distinct from, and more specific than, the lifecycle hint
+   above: that one is about the onboarding pipeline itself (Onboard/Deliver/
+   pending gates); this one is about whether a fix that already shipped
+   actually resolved the finding it targeted. The "nothing pending" state
+   says plainly that nothing re-checks this app until the next push or a
+   manual re-Assess, rather than implying a re-check cadence that isn't
+   real -- but only worth stating once this app has ever been onboarded
+   (prior_onboarded/past "assessed"); a brand-new, never-onboarded app
+   already has an obvious next step above and "nothing pending" there would
+   just be noise restating the obvious. #}
+{% set _next_action_relevant = next_action.state != "none" or lifecycle_stage != "assessed" or prior_onboarded %}
+{% if _next_action_relevant %}
+  {% if next_action.state == "escalated" %}
+  <div class="alert alert-error mb-2" role="status">
+    <strong>Next action:</strong> {{ next_action.message }}
+    &nbsp;<a href="/assessments/{{ assessment_id }}?tab=actions">Review on the Actions tab</a>
+    &middot; <a href="/assessments/{{ assessment_id }}?tab=ledger">Ledger</a>
+  </div>
+  {% elif next_action.state == "retrying" %}
+  <div class="alert alert-warn mb-2" role="status">
+    <strong>Next action:</strong> {{ next_action.message }}
+  </div>
+  {% elif next_action.state == "pending_verification" %}
+  <div class="alert alert-info mb-2" role="status">
+    <strong>Next action:</strong> {{ next_action.message }}
+  </div>
+  {% else %}
+  <p class="text-muted text-sm mb-2">{{ next_action.message }}</p>
+  {% endif %}
+{% endif %}
+
 {# Primary CTA follows lifecycle: Onboard only while assessed; after onboard
    the giant Onboard button would teach the wrong next step. #}
 <div class="action-bar mt-2 mb-2">

@@ -78,6 +78,25 @@
           &middot; <a href="{{ r.infra_repo_url | safe_url }}" target="_blank" hx-boost="false">GitOps repo</a>
           {% endif %}
         </div>
+        {# Real "what happens next" fact (docs/onboarding-loop-vision-gap-
+           analysis.md's Step 8 discussion / Phase 5) -- reuses the exact
+           Phase 3/4 finding-resolution + escalation data this app's
+           deliveries already carry (r.next_action, set by fleet.py's
+           _attach_next_action_state()). Omitted entirely for a genuinely
+           clean app -- there's no fabricated "all clear, checking again on
+           <cadence>" here, since nothing re-checks a clean app on any
+           schedule (only the next push or a manual re-Assess does). #}
+        {% if r.next_action %}
+        <div class="mt-1">
+          {% if r.next_action.state == "escalated" %}
+          <a href="/assessments/{{ r.next_action.assessment_id }}?tab=actions" class="badge badge-accent" title="{{ r.next_action.message }}">{{ r.next_action.label }}</a>
+          {% elif r.next_action.state == "retrying" %}
+          <span class="badge badge-warning" title="{{ r.next_action.message }}">{{ r.next_action.label }}</span>
+          {% else %}
+          <span class="badge badge-info" title="{{ r.next_action.message }}">{{ r.next_action.label }}</span>
+          {% endif %}
+        </div>
+        {% endif %}
       </td>
       <td class="text-bold
         {% if r.latest_score > 70 %} text-success

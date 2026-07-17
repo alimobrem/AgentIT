@@ -150,6 +150,40 @@ async def _attach_pending_actions(fleet: list[dict], s: object) -> None:
         app_item["pending_actions_count"] = counts.get(app_item["repo_url"], 0)
 
 
+async def _attach_next_action_state(fleet: list[dict], s: object) -> None:
+    """Real "what happens next" per app (docs/onboarding-loop-vision-gap-
+    analysis.md's Step 8 discussion / Phase 5) -- reuses
+    ``delivery.get_next_action_state()``'s priority-ordered check
+    (escalation gate > bounded auto-retry in flight > pending finding-
+    verification > nothing pending) over the exact same Phase 3/4 data
+    (``deliveries.target_findings_json``/``finding_resolution``,
+    ``get_finding_failure_count()``, the ``finding-unresolved-escalation``
+    gate type) rather than a new query. One fleet-wide
+    ``list_gates(status="pending")`` call, mirroring
+    ``_attach_pending_actions()`` just above, so this doesn't add a second
+    per-app gates query on top of that one. Mutates each fleet row in place
+    with ``next_action`` (``None`` when nothing pending/failing -- Fleet
+    omits the indicator entirely rather than showing a fabricated "all
+    clear" for every row).
+    """
+    from agentit.portal.delivery import NEXT_ACTION_NONE, get_next_action_state
+    try:
+        pending_gates = await s.list_gates(status="pending")
+    except Exception:
+        log.debug("Failed to fetch pending gates for fleet next-action state", exc_info=True)
+        pending_gates = []
+
+    for app_item in fleet:
+        try:
+            state = await get_next_action_state(
+                s, app_item["repo_name"], repo_url=app_item["repo_url"], pending_gates=pending_gates,
+            )
+        except Exception:
+            log.debug("Failed to compute next-action state for %s", app_item["repo_name"], exc_info=True)
+            state = None
+        app_item["next_action"] = state if state and state["state"] != NEXT_ACTION_NONE else None
+
+
 @router.get("/")
 async def home() -> RedirectResponse:
     """Ops home is the Ledger (Needs You inbox) — Fleet is the scoreboard at /fleet."""
@@ -168,6 +202,7 @@ async def fleet_page(request: Request) -> HTMLResponse:
     loop = asyncio.get_running_loop()
     fleet = await asyncio.to_thread(_enrich_fleet_with_cluster_status, fleet, s, loop)
     await _attach_pending_actions(fleet, s)
+    await _attach_next_action_state(fleet, s)
     total_apps = len(fleet)
     if total_apps == 0:
         return get_templates().TemplateResponse(request, "dashboard.html", {
