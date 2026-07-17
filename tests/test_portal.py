@@ -1428,6 +1428,22 @@ async def test_dashboard_shows_portfolio_summary(client, _override_store):
     assert "Critical" in resp.text
 
 
+async def test_fleet_critical_column_label_includes_high(client, _override_store):
+    """The Fleet table's "Critical" column (and stat card) is computed as
+    severity in (critical, high) combined (store.py's get_fleet_data()) --
+    the header/label must say so, not just "Critical", which misled
+    fleet-wide triage (an app with 0 critical/21 high findings showed "21"
+    under a bare "Critical" header)."""
+    store = _override_store
+    await store.save(_make_report_scored("triage-app", 40, "high"))
+    await store.save(_make_report_scored("second-app", 80, "low"))
+
+    resp = await client.get("/fleet")
+    assert resp.status_code == 200
+    assert "<th>Critical + High</th>" in resp.text
+    assert "Critical + High Findings" in resp.text
+
+
 async def test_fleet_has_assess_modal(client):
     resp = await client.get("/fleet")
     assert resp.status_code == 200
