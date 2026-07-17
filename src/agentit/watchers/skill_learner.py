@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
@@ -385,6 +386,49 @@ class SkillLearner:
         )
         return False
 
+    async def _seconds_since_last_tick(self) -> float | None:
+        """Seconds since this watcher last *completed* a research tick
+        (success or failure), read back from its own persisted heartbeat
+        (``agent_heartbeat("skill-learner")``, written by ``record_tick``
+        after every loop iteration) -- or ``None`` if there's no store, no
+        prior tick was ever recorded, or the lookup fails.
+
+        Root cause of a real incident: the Capabilities page's "Learning
+        Agent Runs" table showed "Automatic (24h watcher)" rows appearing
+        every ~5-7 minutes, not once per ``--interval`` (86400s/24h) --
+        despite the interval itself being correctly configured everywhere
+        (chart/values.yaml, argocd/application.yaml). ``run()`` previously
+        called ``research_once()`` unconditionally on startup, with nothing
+        remembering "a prior incarnation of this pod already ticked
+        recently" across a restart (crash, redeploy, rescheduling -- this
+        Deployment is actively redeployed often; see argocd sync cadence).
+        Every restart therefore produced an extra, unscheduled tick no
+        matter how little wall-clock time had actually passed. This method
+        is the read side of the fix -- see its call site in ``run()``.
+        """
+        if self._store is None or not hasattr(self._store, "list_agents"):
+            return None
+        try:
+            agents = await self._store.list_agents()
+        except Exception:
+            logger.warning("Failed to fetch agent registry for tick-due check", exc_info=True)
+            return None
+
+        for agent in agents:
+            if agent.get("agent_name") != "skill-learner":
+                continue
+            last_heartbeat = agent.get("last_heartbeat")
+            if not last_heartbeat:
+                return None
+            try:
+                last = datetime.fromisoformat(last_heartbeat)
+            except (TypeError, ValueError):
+                return None
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - last).total_seconds()
+        return None
+
     async def run(self) -> None:
         """Main loop: research, sleep.
 
@@ -419,6 +463,23 @@ class SkillLearner:
             click.echo("Skill learner stopped.", err=True)
             await self._client.aclose()
             return
+
+        elapsed = await self._seconds_since_last_tick()
+        if elapsed is not None and elapsed < self._interval:
+            remaining = int(self._interval - elapsed)
+            click.echo(
+                f"[skill-learn] Last tick completed {elapsed:.0f}s ago (interval={self._interval}s) -- "
+                f"sleeping {remaining}s before researching again instead of ticking immediately "
+                "(this pod may have just restarted).",
+                err=True,
+            )
+            try:
+                await sleep_with_heartbeat(remaining)
+            except KeyboardInterrupt:
+                click.echo("Skill learner stopped.", err=True)
+                await self._client.aclose()
+                return
+
         while True:
             try:
                 await self.research_once()

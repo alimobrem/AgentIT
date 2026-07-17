@@ -133,6 +133,70 @@ async def test_research_once_prioritizes_flagged_skill_over_cve_sweep(tmp_path):
     assert learning_runs[0]["severity"] == "info"
 
 
+class TestTickNotDuplicatedAcrossRestarts:
+    """Regression for the interval/frequency-mismatch bug: the Capabilities
+    page's "Learning Agent Runs" table showed "Automatic (24h watcher)" rows
+    appearing every ~5-7 minutes even though `--interval` is genuinely
+    86400s everywhere (chart/values.yaml, argocd/application.yaml). Root
+    cause: `run()` always called `research_once()` immediately on startup
+    with no memory of when this watcher last actually ticked, so any pod
+    restart (crash, redeploy, rescheduling) produced an extra, unscheduled
+    tick regardless of how little wall-clock time had passed."""
+
+    @patch("agentit.watchers.skill_learner.sleep_with_heartbeat", side_effect=KeyboardInterrupt)
+    async def test_run_sleeps_remaining_time_instead_of_ticking_immediately_after_restart(self, mock_sleep):
+        async_store, store = await make_async_store()
+        await store.agent_heartbeat("skill-learner")  # simulates a tick completed moments ago
+
+        learner, _ = _learner(store=async_store, startup_grace_seconds=0, interval=86400)
+
+        with patch.object(learner, "research_once") as mock_research_once:
+            await learner.run()
+
+        mock_research_once.assert_not_called()
+        mock_sleep.assert_called_once()
+        (slept_seconds,), _ = mock_sleep.call_args
+        # Almost the full 86400s interval remains -- allow generous slack
+        # for real wall-clock time elapsed during the test itself.
+        assert 86300 <= slept_seconds <= 86400
+
+    @patch("agentit.watchers.skill_learner.sleep_with_heartbeat", side_effect=KeyboardInterrupt)
+    async def test_run_ticks_immediately_when_no_prior_tick_recorded(self, mock_sleep):
+        """A brand-new deployment (fresh agent_registry) must still tick on
+        its very first run -- only a *recent* prior tick should delay it."""
+        async_store, store = await make_async_store()
+
+        learner, _ = _learner(store=async_store, startup_grace_seconds=0, interval=86400)
+
+        with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")), \
+             patch.object(learner, "research_once", wraps=learner.research_once) as mock_research_once:
+            await learner.run()
+
+        mock_research_once.assert_called_once_with()
+
+    @patch("agentit.watchers.skill_learner.sleep_with_heartbeat", side_effect=KeyboardInterrupt)
+    async def test_run_ticks_immediately_once_interval_has_genuinely_elapsed(self, mock_sleep):
+        """A heartbeat older than the configured interval means a real tick
+        is actually due -- must not be delayed further."""
+        from datetime import datetime, timedelta, timezone
+
+        async_store, store = await make_async_store()
+        await store.agent_heartbeat("skill-learner")
+        old_timestamp = datetime.now(timezone.utc) - timedelta(seconds=200)
+        await store._pool.execute(
+            "UPDATE agent_registry SET last_heartbeat = $1 WHERE agent_name = $2",
+            old_timestamp, "skill-learner",
+        )
+
+        learner, _ = _learner(store=async_store, startup_grace_seconds=0, interval=100)
+
+        with patch("agentit.llm.LLMClient", side_effect=RuntimeError("no credentials")), \
+             patch.object(learner, "research_once", wraps=learner.research_once) as mock_research_once:
+            await learner.run()
+
+        mock_research_once.assert_called_once_with()
+
+
 async def test_research_once_falls_back_to_cve_sweep_when_nothing_flagged():
     """No low-effectiveness skills -> the existing CVE-sweep behavior runs
     exactly as before."""
