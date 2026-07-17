@@ -700,6 +700,67 @@ async def skill_history(request: Request, skill_name: str) -> HTMLResponse:
     })
 
 
+def _persist_skill_activation(target: Path, repo_dir: Path) -> dict:
+    """Commit `target`'s already-written draft->active flip to git and open
+    a draft PR for it -- reusing the exact branch/commit/push
+    (`git_pr.create_branch_commit_push`) and PR-open (`git_pr.open_draft_pr`)
+    mechanics `capability_scout.py`'s `_open_pr()` already uses for changes
+    to AgentIT's own repo, rather than inventing a new persistence path.
+
+    Never a direct commit to `main`: every existing automated flow that
+    touches this repo (`self-fix --create-pr`, capability-scout) pushes a
+    branch/opens a PR instead, and capability_scout.py's own module
+    docstring states that convention explicitly ("Never a direct commit to
+    `main`, never auto-merge") -- followed here for consistency, even
+    though this specific change (flipping one YAML field) is lower-risk
+    than either of those. (`main` has no GitHub branch-protection rule
+    enforcing this technically, but the codebase's own precedent already
+    settles it.)
+
+    Without this, `activate_skill_route`'s `target.write_text(...)` only
+    ever lands in the live pod's writable container layer -- `skills/` is
+    baked into the image at build time (no PVC/volume mount), so a
+    redeploy silently reverts every activation. Once the resulting PR
+    merges, the next redeploy bakes in the already-active state instead of
+    reverting it.
+
+    Returns ``{"pr_url": ...}`` on success or ``{"error": ...}`` on
+    failure -- never raises, matching `_open_pr`'s contract, since a
+    git/network/auth failure here must not undo (or crash) an activation
+    that's already live in the pod.
+    """
+    from agentit.git_pr import create_branch_commit_push, open_draft_pr
+
+    try:
+        rel_path = str(target.relative_to(repo_dir))
+    except ValueError:
+        rel_path = str(target)
+
+    branch = f"agentit/activate-skill/{target.stem}-{int(_time.time())}"
+    commit_message = (
+        f"chore(skills): activate {target.stem}\n\n"
+        f"Promotes {rel_path} from status: draft to status: active via the "
+        f"Capabilities UI. Without this commit the flip only lives in the "
+        f"running pod's writable layer and is silently reverted by the next "
+        f"redeploy, since skills/ is baked into the container image."
+    )
+    branch_result = create_branch_commit_push(branch, [rel_path], commit_message, cwd=repo_dir)
+    if not branch_result.get("success"):
+        return {"error": branch_result.get("error", "git branch/commit/push failed")}
+
+    body = (
+        f"## Activate skill: {target.stem}\n\n"
+        f"Promotes `{rel_path}` from `status: draft` to `status: active`.\n\n"
+        "The running pod's copy was already flipped (immediately usable); "
+        "this PR makes that survive the next redeploy, since `skills/` is "
+        "baked into the container image and isn't backed by a volume.\n\n"
+        "> Opened by AgentIT's Capabilities UI activation flow."
+    )
+    return open_draft_pr(
+        branch=branch, title=f"[AgentIT] Activate skill: {target.stem}", body=body, cwd=repo_dir,
+    )
+
+
 @router.post("/capabilities/skills/activate", response_model=None)
 async def activate_skill_route(request: Request):
     """Promote a draft skill to active. Portal equivalent of `agentit activate-skill`.
@@ -754,9 +815,42 @@ async def activate_skill_route(request: Request):
 
     target.write_text(content.replace("status: draft", "status: active", 1), encoding="utf-8")
     _skills_cache["data"] = None
+
+    # In-pod activation is done and already usable regardless of what
+    # happens next -- see `_persist_skill_activation`'s docstring for why
+    # this git step still has to run (skills/ is baked into the image, no
+    # volume mount) and why its failure must not be swallowed silently.
+    git_result = await asyncio.to_thread(_persist_skill_activation, target, Path.cwd())
+    pr_url = git_result.get("pr_url")
+
     success_msg = f"Activated: {target.stem}"
     if verify_warnings:
         success_msg += f" (note: {'; '.join(verify_warnings)})"
-    await s.log_event("portal", "skill-activated", None, "info",
-                       f"Activated skill: {target.stem}" + (f" ({'; '.join(verify_warnings)})" if verify_warnings else ""))
-    return RedirectResponse(url=f"/capabilities?success={quote(success_msg)}", status_code=303)
+    if pr_url:
+        success_msg += f" — persisted via PR: {pr_url}"
+
+    event_summary = f"Activated skill: {target.stem}" + (f" ({'; '.join(verify_warnings)})" if verify_warnings else "")
+    event_details: dict = {"skill": target.stem}
+    if pr_url:
+        event_details["pr_url"] = pr_url
+    else:
+        event_details["git_persist_error"] = git_result.get("error", "unknown error")
+    await s.log_event(
+        "portal", "skill-activated", None, "info" if pr_url else "warning",
+        event_summary, details=event_details,
+    )
+
+    url = f"/capabilities?success={quote(success_msg)}"
+    if not pr_url:
+        # The pod-local flip already happened and is usable now, but with
+        # no git trace anywhere it will be silently reverted by the next
+        # redeploy exactly like the pre-fix bug -- this must surface as a
+        # visible warning, not a swallowed failure, per the confirmed
+        # CVE-mitigation-skill incidents this fix addresses.
+        warning_msg = (
+            f"{target.stem} is active in this pod now, but the git commit needed to survive the "
+            f"next redeploy failed ({str(git_result.get('error', 'unknown error'))[:150]}) — it will be "
+            f"silently reverted on redeploy unless this is retried or committed manually."
+        )
+        url += f"&warning={quote(warning_msg)}"
+    return RedirectResponse(url=url, status_code=303)
