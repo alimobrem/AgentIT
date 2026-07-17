@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: agentit-dependency-scan
+  labels:
+    app.kubernetes.io/name: agentit-dependency
+spec:
+  schedule: 0 5 * * 1
+  concurrencyPolicy: Replace
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: job
+            image: REPLACE_WITH_AGENTIT_IMAGE
+            command:
+            - agentit
+            - assess
+            - --rescan
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+              limits:
+                cpu: 500m
+                memory: 512Mi
