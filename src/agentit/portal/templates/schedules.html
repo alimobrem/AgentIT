@@ -89,6 +89,13 @@
 
 {% if schedules %}
 <h2 class="section-title">Scheduled CronWorkflows</h2>
+<p class="text-muted text-sm mb-1">
+  Onboarding-generated schedules below are shown exactly as authored in the generated manifest --
+  this page cannot change a real, already-delivered schedule (it never patches a live CronJob's
+  <code>spec.schedule</code>/<code>spec.suspend</code> on the cluster). To change one for real: edit
+  the generated cronjob file on that app's Onboarding Results page, then redeliver (Dry Run, then
+  Apply/Commit or Per-Agent PRs).
+</p>
 <table>
   <thead>
     <tr><th>App</th><th>Job</th><th>Schedule</th><th>Agent</th><th>Source</th><th>Policy</th><th>Action</th></tr>
@@ -109,18 +116,10 @@
            cron value, which invited saving the literal word "unknown"
            as a real schedule. #}
         <span class="badge badge-muted" title="Could not parse a cron schedule from the generated CronWorkflow YAML -- re-onboard to regenerate it.">unresolvable</span>
-        {% elif s.source == 'onboarding' %}
-        <form method="post" action="/schedules/update" class="inline-form schedule-edit-form">
-          <input type="hidden" name="app_name" value="{{ s.app_name }}">
-          <input type="hidden" name="job_key" value="{{ s.agent }}">
-          <input type="text" name="schedule" value="{{ s.schedule }}" class="schedule-input">
-          <button type="submit" class="btn btn-sm btn-outline">
-            <span class="btn-label">Save</span>
-            <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
-          </button>
-        </form>
-        <span class="text-muted text-xs">{{ s.human_schedule }}</span>
         {% else %}
+        {# Read-only for every source: no control here has ever patched a
+           live CronJob or the generated manifest -- see the explanatory
+           note above the table. #}
         <span>{{ s.schedule }}</span>
         <span class="text-muted text-xs">{{ s.human_schedule }}</span>
         {% endif %}
@@ -136,27 +135,7 @@
       <td><span class="badge badge-info" title="{% if s.concurrency == 'Forbid' %}Skip if previous run still active{% elif s.concurrency == 'Replace' %}Cancel previous run and start new{% else %}Allow concurrent runs{% endif %}">{{ s.concurrency }}</span></td>
       <td>
         {% if s.source == 'onboarding' %}
-          {% if s.enabled %}
-          <form method="post" action="/schedules/toggle" class="inline-form">
-            <input type="hidden" name="app_name" value="{{ s.app_name }}">
-            <input type="hidden" name="job_key" value="{{ s.agent }}">
-            <input type="hidden" name="enabled" value="false">
-            <button type="submit" class="btn btn-sm btn-outline">
-              <span class="btn-label">Disable</span>
-              <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
-            </button>
-          </form>
-          {% else %}
-          <form method="post" action="/schedules/toggle" class="inline-form">
-            <input type="hidden" name="app_name" value="{{ s.app_name }}">
-            <input type="hidden" name="job_key" value="{{ s.agent }}">
-            <input type="hidden" name="enabled" value="true">
-            <button type="submit" class="btn btn-sm btn-green">
-              <span class="btn-label">Enable</span>
-              <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
-            </button>
-          </form>
-          {% endif %}
+          <span class="text-muted text-xs" title="Set by the generated manifest -- not editable from this page. Edit the file and redeliver to change it for real.">set via manifest</span>
         {% else %}
           <form method="post" action="/schedules/delete" class="inline-form"
                 x-data x-ref="deleteSchedule{{ s.id }}">

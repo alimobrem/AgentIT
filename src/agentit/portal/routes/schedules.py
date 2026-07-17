@@ -79,14 +79,16 @@ async def schedules_page(request: Request) -> HTMLResponse:
             except (ValueError, AttributeError, _yaml.YAMLError):
                 cron = "unknown"
                 concurrency = "unknown"
-            override_key = f"schedule:{app_data['repo_name']}:{agent}"
-            override = await s.get_setting(override_key)
-            if override:
-                cron = override
-            enabled_key = f"schedule:{app_data['repo_name']}:{agent}:enabled"
-            enabled_val = await s.get_setting(enabled_key)
-            enabled = enabled_val != "false"
-
+            # No settings-key override applied here (there used to be one,
+            # written by this page's own now-removed Save/Enable/Disable
+            # controls): that override only ever changed what THIS page
+            # displayed -- nothing reads it to patch a live CronJob or to
+            # regenerate/redeliver the generated manifest, so honoring it
+            # for display would show a schedule that was never actually
+            # true anywhere else. Always render the real value straight
+            # from the generated manifest -- see docs/unified-apply-flow.md
+            # for why a manifest edit has to go through Dry Run + Apply/
+            # Commit (or a GitOps PR) to ever become real.
             schedules.append({
                 "app_name": app_data["repo_name"],
                 "app_id": aid,
@@ -95,7 +97,7 @@ async def schedules_page(request: Request) -> HTMLResponse:
                 "human_schedule": _CRON_HUMAN.get(cron, cron),
                 "agent": agent,
                 "concurrency": concurrency,
-                "enabled": enabled,
+                "enabled": True,
             })
 
     # Merge manually created schedules from the store
@@ -151,6 +153,14 @@ async def schedules_page(request: Request) -> HTMLResponse:
 
 @router.post("/schedules/update", response_model=None)
 async def update_schedule(request: Request):
+    """No longer reachable from any UI control (see ``schedules_page()``
+    above/schedules.html) -- this used to look like it edited a live
+    CronJob's real schedule, but only ever wrote a display-only settings
+    key nothing (not even this page anymore) reads back. Kept only for
+    ``AGENTIT_DB_DSN``-level introspection/tests; a real schedule change
+    goes through editing the generated manifest + Dry Run + Apply/Commit
+    (or a GitOps PR) on that app's Onboarding Results page instead.
+    """
     form = await request.form()
     app_name = str(form.get("app_name", ""))
     job_key = str(form.get("job_key", ""))
@@ -170,6 +180,9 @@ async def update_schedule(request: Request):
 
 @router.post("/schedules/toggle", response_model=None)
 async def toggle_schedule(request: Request):
+    """No longer reachable from any UI control -- see ``update_schedule()``
+    above for why (same display-only settings key, same lack of any real
+    effect on a live CronJob)."""
     form = await request.form()
     app_name = str(form.get("app_name", ""))
     job_key = str(form.get("job_key", ""))

@@ -2263,6 +2263,61 @@ async def test_schedules_unresolvable_cron_is_not_a_fake_editable_value(client, 
     assert 'name="schedule" value="unknown"' not in resp.text
 
 
+async def test_schedules_onboarding_row_has_no_save_or_enable_disable_controls(client, _override_store):
+    """Regression: schedules.html used to render a real-looking editable
+    cron textbox + working Save button, plus Enable/Disable toggles, for
+    onboarding-generated schedules -- but schedules.py's update_schedule/
+    toggle_schedule only ever wrote a display-only settings key, never
+    patching the live CronJob or the generated manifest. A human got a
+    "success" flash and a changed on-screen value with no real effect and
+    no visible tell. This page must not offer those controls at all, and
+    must say so plainly instead."""
+    store = _override_store
+    aid = await store.save(_make_report("schedule-honesty-app"))
+    await store.save_onboarding(aid, [{
+        "category": "cost",
+        "path": "schedule-honesty-app-cost-cronjob.yaml",
+        "content": "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: x\nspec:\n  schedule: '0 4 * * 1'\n",
+        "description": "cost cronjob",
+    }])
+
+    resp = await client.get("/schedules")
+    assert resp.status_code == 200
+    assert 'action="/schedules/update"' not in resp.text
+    assert 'action="/schedules/toggle"' not in resp.text
+    assert ">Save<" not in resp.text
+    assert ">Enable<" not in resp.text
+    assert ">Disable<" not in resp.text
+    # The real, generated value is shown, plain and non-editable.
+    assert "0 4 * * 1" in resp.text
+    # And the page says plainly that this isn't a real control.
+    assert "does not" in resp.text.lower() or "cannot" in resp.text.lower()
+
+
+async def test_schedules_update_route_no_longer_affects_display(client, _override_store):
+    """Even hitting the (now UI-unreachable) update/toggle routes directly
+    must not change what /schedules displays -- the override they write is
+    no longer read back for display, since it was never real anywhere else
+    either."""
+    store = _override_store
+    aid = await store.save(_make_report("schedule-honesty-app2"))
+    await store.save_onboarding(aid, [{
+        "category": "cost",
+        "path": "schedule-honesty-app2-cost-cronjob.yaml",
+        "content": "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: x\nspec:\n  schedule: '0 4 * * 1'\n",
+        "description": "cost cronjob",
+    }])
+
+    await client.post("/schedules/update", data={
+        "app_name": "schedule-honesty-app2", "job_key": "cost", "schedule": "0 0 * * *",
+    })
+    resp = await client.get("/schedules")
+    assert resp.status_code == 200
+    # The stale override must never leak back into the display.
+    assert "0 0 * * *" not in resp.text
+    assert "0 4 * * 1" in resp.text
+
+
 async def test_schedules_nav_link(client):
     """/schedules is no longer a top-level nav item — it's reachable via the
     Settings tab strip. The umbrella "Settings" link still appears globally."""
