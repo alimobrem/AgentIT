@@ -249,7 +249,7 @@
       {% for d in deliveries %}
       <tr>
         <td class="text-sm" data-timestamp="{{ d.created_at }}">{{ d.created_at[:19] }}</td>
-        <td class="text-sm">{{ d.mechanism }}</td>
+        <td class="text-sm">{{ d.mechanism | humanize_mechanism }}</td>
         <td><span class="badge {% if d.status in ('delivered', 'verified') %}badge-low{% elif d.status == 'partial' %}badge-medium{% elif 'fail' in d.status or 'rolled_back' in d.status or 'breach' in d.status %}badge-critical{% else %}badge-info{% endif %}">{{ d.status }}</span></td>
         <td class="text-sm">{{ d.verification }}</td>
         <td class="text-sm">

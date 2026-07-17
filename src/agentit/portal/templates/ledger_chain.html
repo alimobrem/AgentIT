@@ -30,7 +30,7 @@
       </div>
       <p class="text-sm text-muted">{{ card.summary }}</p>
       {% if card.gate_status %}<p class="text-sm">Gate status: <strong>{{ card.gate_status }}</strong></p>{% endif %}
-      {% if card.mechanism %}<p class="text-sm">Delivery mechanism: <strong>{{ card.mechanism }}</strong></p>{% endif %}
+      {% if card.mechanism %}<p class="text-sm">Delivery mechanism: <strong>{{ card.mechanism | humanize_mechanism }}</strong></p>{% endif %}
       {% if card.attribution %}<p class="text-sm">Skill: <strong>{{ card.attribution }}</strong></p>{% endif %}
       <p class="text-muted text-sm">Step {{ loop.index }} of {{ cards|length }} — read-only history, no actions available here.</p>
     </div>

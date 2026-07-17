@@ -439,6 +439,31 @@ async def test_onboard_results_page(client, _override_store):
     assert ">Override<" in resp.text or "Override</button>" in resp.text
 
 
+async def test_onboard_results_delivery_history_humanizes_raw_mechanism(client, _override_store):
+    """Regression: onboard_results.html's Delivery History table rendered
+    {{ d.mechanism }} directly -- the raw, un-humanized routing string
+    ("cluster_config:direct-apply,cicd_shared_namespace:cluster-admin-
+    review-gate") instead of the same humanize_delivery_mechanism() decode
+    the Ledger's own card already applies to identical data."""
+    store = _override_store
+    report = _make_report_with_findings()
+    aid = await store.save(report)
+    await store.save_onboarding(aid, [
+        {"category": "skills", "path": "netpol.yaml", "content": "kind: NetworkPolicy", "description": "d"},
+    ])
+    await store.create_delivery(
+        aid, report.repo_name, {"cluster_config": ["a.yaml"], "cicd_shared_namespace": ["b.yaml"]},
+        "cluster_config:direct-apply,cicd_shared_namespace:cluster-admin-review-gate",
+    )
+
+    resp = await client.get(f"/assessments/{aid}/onboard-results")
+    assert resp.status_code == 200
+    assert "cluster_config:direct-apply" not in resp.text
+    assert "cicd_shared_namespace:cluster-admin-review-gate" not in resp.text
+    assert "Applied directly" in resp.text
+    assert "Cluster-admin review required" in resp.text
+
+
 async def test_api_manifests(client, _override_store):
     store = _override_store
     report = _make_report_with_findings()
@@ -1051,6 +1076,27 @@ async def test_ledger_chain_route_replays_a_real_chain_read_only(client, _overri
     assert "assessment-complete" in resp.text
     assert "finding-security" in resp.text
     assert 'action="/gates/' not in resp.text  # read-only: no gate-resolution form here
+
+
+async def test_ledger_chain_route_humanizes_raw_delivery_mechanism(client, _override_store):
+    """Regression: ledger_chain.html rendered {{ card.mechanism }} directly
+    -- the raw, un-humanized routing string
+    ("cluster_config:direct-apply,cicd_shared_namespace:cluster-admin-
+    review-gate") instead of the same humanize_delivery_mechanism() decode
+    the Ledger's own card title already applies to identical data."""
+    store = _override_store
+    aid = await store.save(_make_report("chain-mechanism-app"))
+    await store.create_delivery(
+        aid, "chain-mechanism-app", {"cluster_config": ["a.yaml"], "cicd_shared_namespace": ["b.yaml"]},
+        "cluster_config:direct-apply,cicd_shared_namespace:cluster-admin-review-gate",
+    )
+
+    resp = await client.get(f"/ledger/chain/{aid}")
+    assert resp.status_code == 200
+    assert "cluster_config:direct-apply" not in resp.text
+    assert "cicd_shared_namespace:cluster-admin-review-gate" not in resp.text
+    assert "Applied directly" in resp.text
+    assert "Cluster-admin review required" in resp.text
 
 
 async def test_ledger_chain_route_empty_for_unknown_correlation_id(client, _override_store):

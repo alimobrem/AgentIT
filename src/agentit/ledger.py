@@ -221,15 +221,22 @@ _MECHANISM_SHORT_LABELS: dict[str, str] = {
 }
 
 
-def _humanize_delivery_mechanism(mechanism: str) -> str:
-    """Decode deliveries.mechanism into a short, human phrase for the
-    Ledger badge -- never the raw category:mechanism routing string
-    route_and_deliver() persists there. The raw value is either a single
-    mechanism (e.g. "direct-apply") or, for a multi-category delivery, a
-    comma-joined "category:mechanism" string (e.g.
-    "cluster_config:direct-apply,cicd_shared_namespace:cluster-admin-
-    review-gate") -- this strips the category prefixes and humanizes each
-    distinct mechanism, deduped, in original order."""
+def humanize_delivery_mechanism(mechanism: str) -> str:
+    """Decode deliveries.mechanism into a short, human phrase -- never the
+    raw category:mechanism routing string route_and_deliver() persists
+    there. The raw value is either a single mechanism (e.g.
+    "direct-apply") or, for a multi-category delivery, a comma-joined
+    "category:mechanism" string (e.g. "cluster_config:direct-apply,
+    cicd_shared_namespace:cluster-admin-review-gate") -- this strips the
+    category prefixes and humanizes each distinct mechanism, deduped, in
+    original order.
+
+    Public (not just this module's own Ledger badge use): also registered
+    as the ``humanize_mechanism`` Jinja filter (see portal/app.py) so every
+    template rendering a raw ``mechanism`` field -- not just the Ledger
+    card this was originally written for -- decodes it the same way,
+    instead of leaking the raw routing string.
+    """
     if not mechanism:
         return _MECHANISM_SHORT_LABELS["none"]
     labels: list[str] = []
@@ -242,7 +249,7 @@ def _humanize_delivery_mechanism(mechanism: str) -> str:
 
 
 def _delivery_card(delivery: dict) -> dict:
-    humanized = _humanize_delivery_mechanism(delivery["mechanism"])
+    humanized = humanize_delivery_mechanism(delivery["mechanism"])
     return {
         "card_type": "F",
         "timestamp": delivery["created_at"],
