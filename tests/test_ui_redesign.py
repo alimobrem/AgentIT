@@ -356,7 +356,7 @@ class TestGateAppAttributionAndActionsTab:
 
         resp = await client.get(f"/assessments/{aid}?tab=ledger")
         assert resp.status_code == 200
-        assert "x-data=\"{ tab: 'ledger' }\"" in resp.text
+        assert "x-data=\"{ tab: 'ledger', findingsCount: 0 }\"" in resp.text
 
     async def test_fleet_quiet_ledger_pointer_counts_app_owner_gates_only(self, ui_client):
         """Fleet is scoreboard-only: pending ops → quiet Ledger link, not a
@@ -401,7 +401,7 @@ class TestGateAppAttributionAndActionsTab:
 
         resp = await client.get(f"/assessments/{aid}?tab=actions")
         assert resp.status_code == 200
-        assert "x-data=\"{ tab: 'actions' }\"" in resp.text
+        assert "x-data=\"{ tab: 'actions', findingsCount: 0 }\"" in resp.text
 
     async def test_assessment_detail_unknown_tab_query_param_falls_back_to_overview(self, ui_client):
         """An unrecognized/garbage ?tab= value must never be interpolated
@@ -411,7 +411,7 @@ class TestGateAppAttributionAndActionsTab:
 
         resp = await client.get(f"/assessments/{aid}?tab=" + "'};alert(1);//")
         assert resp.status_code == 200
-        assert "x-data=\"{ tab: 'overview' }\"" in resp.text
+        assert "x-data=\"{ tab: 'overview', findingsCount: 0 }\"" in resp.text
 
 
 # ── 4. Orphaned routes retired ──────────────────────────────────────────

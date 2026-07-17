@@ -404,6 +404,43 @@ async def test_deploy_status_badge_timeout_returns_200_degraded(client, monkeypa
     assert "Status unknown" in resp.text
 
 
+async def test_deploy_status_runs_on_dedicated_executor_not_shared_default(client, monkeypatch):
+    """Regression guard for Priority 3a: `asyncio.wait_for(...)` timing out
+    only cancels the *awaiting* coroutine -- the dispatched thread itself
+    keeps running regardless, in whichever executor it was submitted to.
+    `deploy_status_badge` must submit `_get_deploy_status_bounded` to its
+    own dedicated `_deploy_status_executor` (worker threads named
+    "deploy-status_N"), not the process-wide default executor
+    `asyncio.to_thread` uses (worker threads named "asyncio_N") --
+    otherwise a genuinely wedged apiserver leaks a stuck thread, every 15s
+    poll, into a pool shared by every *other* `asyncio.to_thread` call in
+    the app, eventually starving unrelated work too. Verified directly by
+    capturing the actual worker thread's name from inside the (wedged)
+    call.
+    """
+    monkeypatch.setattr(health_routes, "_DEPLOY_STATUS_DEADLINE", 0.05)
+    released = threading.Event()
+    thread_name: list[str] = []
+
+    def _hang(*_a, **_kw):
+        thread_name.append(threading.current_thread().name)
+        released.wait(timeout=5)
+        return {}
+
+    try:
+        with patch("agentit.portal.routes.health._get_deploy_status_bounded", side_effect=_hang):
+            resp = await client.get("/api/deploy-status")
+    finally:
+        released.set()
+
+    assert resp.status_code == 200
+    assert "deploy-status-degraded" in resp.text
+    assert len(thread_name) == 1
+    assert thread_name[0].startswith("deploy-status"), (
+        f"expected the dedicated _deploy_status_executor, got thread {thread_name[0]!r}"
+    )
+
+
 async def test_deploy_status_badge_timeout_serves_last_good(client, monkeypatch):
     """When a prior poll succeeded, a timed-out poll serves last-good HTML."""
     monkeypatch.setattr(health_routes, "_DEPLOY_STATUS_DEADLINE", 0.05)

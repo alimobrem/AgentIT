@@ -163,3 +163,95 @@ class TestEventConsumer:
         events = consumer.poll_once()
         assert len(events) == 1
         assert events[0]["action"] == "test-event"
+
+
+class TestConsumeOffsetCommitOrdering:
+    """Priority 3b: `consume()`'s bare `commit()` commits the consumer's
+    *current position* across every assigned partition, not just the
+    message that just resolved -- so a later success on the same
+    partition must not be allowed to silently commit past an earlier,
+    still-unresolved failure's offset."""
+
+    @staticmethod
+    def _make_msg(topic: str, partition: int, offset: int, value: dict) -> MagicMock:
+        msg = MagicMock()
+        msg.topic = topic
+        msg.partition = partition
+        msg.offset = offset
+        msg.value = value
+        return msg
+
+    def _make_consumer(self, max_retries: int = 3) -> EventConsumer:
+        consumer = EventConsumer.__new__(EventConsumer)
+        consumer._topics = ["agentit-events"]
+        consumer._max_retries = max_retries
+        consumer._retry_counts = {}
+        consumer._blocked_offset = {}
+        consumer._store = None
+        consumer._consumer = MagicMock()
+        return consumer
+
+    def test_failed_message_blocks_a_later_success_from_committing_past_it(self) -> None:
+        consumer = self._make_consumer(max_retries=3)
+        msg_a = self._make_msg("agentit-events", 0, 10, {"id": "a"})
+        msg_b = self._make_msg("agentit-events", 0, 11, {"id": "b"})
+        msg_c = self._make_msg("agentit-events", 0, 12, {"id": "c"})
+        consumer._consumer.__iter__ = MagicMock(return_value=iter([msg_a, msg_b, msg_c]))
+
+        def handler(value: dict) -> None:
+            if value["id"] == "b":
+                raise RuntimeError("transient failure")
+
+        consumer.consume(handler)
+
+        # A succeeded -> committed. B failed (retries not yet exhausted) --
+        # its offset must stay uncommitted. C succeeded too, but is on the
+        # SAME partition as the still-open B: its commit must be held back
+        # rather than fired unconditionally (which would silently commit
+        # past B, since Kafka's committed offset is a single per-partition
+        # watermark, not a sparse per-message ack).
+        assert consumer._consumer.commit.call_count == 1
+        assert consumer._blocked_offset == {("agentit-events", 0): 11}
+
+    def test_success_on_a_different_partition_is_not_blocked(self) -> None:
+        """The block is scoped per (topic, partition) -- a failure on
+        partition 0 must not stall unrelated progress on partition 1."""
+        consumer = self._make_consumer(max_retries=3)
+        msg_a = self._make_msg("agentit-events", 0, 10, {"id": "a"})
+        msg_b_fails = self._make_msg("agentit-events", 0, 11, {"id": "b"})
+        msg_other_partition = self._make_msg("agentit-events", 1, 5, {"id": "d"})
+        consumer._consumer.__iter__ = MagicMock(
+            return_value=iter([msg_a, msg_b_fails, msg_other_partition])
+        )
+
+        def handler(value: dict) -> None:
+            if value["id"] == "b":
+                raise RuntimeError("transient failure")
+
+        consumer.consume(handler)
+
+        assert consumer._consumer.commit.call_count == 2  # after a, and after the other partition
+        assert consumer._blocked_offset == {("agentit-events", 0): 11}
+
+    def test_dead_lettered_message_resolves_the_block_and_allows_future_commits(self) -> None:
+        """Exhausting retries into the DLQ is an explicit resolution --
+        once that happens, later messages on the same partition must be
+        able to commit again."""
+        consumer = self._make_consumer(max_retries=1)
+        msg_a = self._make_msg("agentit-events", 0, 10, {"id": "a"})
+        msg_b = self._make_msg("agentit-events", 0, 11, {"id": "b"})
+        msg_c = self._make_msg("agentit-events", 0, 12, {"id": "c"})
+        consumer._consumer.__iter__ = MagicMock(return_value=iter([msg_a, msg_b, msg_c]))
+
+        def handler(value: dict) -> None:
+            if value["id"] == "b":
+                raise RuntimeError("permanent failure")
+
+        with patch("agentit.events.get_publisher"):
+            consumer.consume(handler)
+
+        # a -> commit. b exhausts its single retry immediately -> dead-
+        # lettered -> commit (resolves the block). c -> commit (block
+        # cleared, free to proceed).
+        assert consumer._consumer.commit.call_count == 3
+        assert consumer._blocked_offset == {}
