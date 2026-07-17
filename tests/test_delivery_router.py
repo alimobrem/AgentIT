@@ -19,11 +19,13 @@ from agentit.portal.delivery import (
     MECHANISM_CLUSTER_ADMIN_REVIEW_GATE,
     MECHANISM_DIRECT_APPLY,
     MECHANISM_INFRA_REPO_COMMIT,
+    MECHANISM_NONE,
     MECHANISM_SOURCE_REPO_PR,
     classify_file,
     confirmation_text,
     has_unresolved_placeholders,
     is_gitops_registered,
+    resolve_cluster_config_mechanism,
     route_and_deliver,
 )
 from conftest import make_async_store, make_report
@@ -225,6 +227,35 @@ class TestIsGitopsRegistered:
         )
 
 
+class TestResolveClusterConfigMechanism:
+    """Direct coverage of the shared decision function every mechanism-
+    predicting caller now goes through -- docs/onboarding-loop-vision-gap-
+    analysis.md §1's bootstrap-circularity fix. An infra repo URL being
+    known is what matters for whether to commit there; `registered` only
+    strengthens that decision, it's never a precondition."""
+
+    def test_not_registered_no_infra_repo_falls_back_to_direct_apply(self):
+        assert resolve_cluster_config_mechanism(False, None) == MECHANISM_DIRECT_APPLY
+
+    def test_not_registered_with_infra_repo_bootstraps_infra_commit(self):
+        """The exact bootstrap case: no live Application yet, but an infra
+        repo URL is known -- must commit there, not direct-apply, or the
+        app can never reach registered=True at all."""
+        assert (
+            resolve_cluster_config_mechanism(False, "https://github.com/org/infra-gitops")
+            == MECHANISM_INFRA_REPO_COMMIT
+        )
+
+    def test_registered_with_infra_repo_commits(self):
+        assert (
+            resolve_cluster_config_mechanism(True, "https://github.com/org/infra-gitops")
+            == MECHANISM_INFRA_REPO_COMMIT
+        )
+
+    def test_registered_with_no_known_infra_repo_url_refuses_to_guess(self):
+        assert resolve_cluster_config_mechanism(True, None) == MECHANISM_NONE
+
+
 class TestRouteAndDeliverClusterConfig:
     async def test_not_registered_routes_to_direct_apply(self):
         store, raw = await make_async_store()
@@ -262,6 +293,48 @@ class TestRouteAndDeliverClusterConfig:
         mock_commit.assert_called_once()
         mock_ensure.assert_called_once()
         mock_apply.assert_not_called()
+        gate_id = result["outcomes"]["cluster_config"].get("gate_id")
+        assert gate_id
+        gates = await raw.list_gates(status="pending")
+        assert any(g["id"] == gate_id and g["gate_type"] == "gitops-pr-pending" for g in gates)
+
+    async def test_not_yet_registered_with_infra_repo_url_bootstraps_infra_commit(self):
+        """The bootstrap-circularity fix (docs/onboarding-loop-vision-gap-
+        analysis.md §1): a brand-new app has `infra_repo_url` set (an
+        assessment already ran `_auto_create_infra_repo`/`register_gitops`)
+        but no live Argo CD `Application` exists yet, because nothing has
+        ever committed `apps/{app}/` into the infra repo for Argo's
+        ApplicationSet to discover in the first place. Before this fix,
+        `registered=False` here fell through to `MECHANISM_DIRECT_APPLY`
+        -- which never commits anything to the infra repo, so the app
+        could never reach `registered=True` via this path: a closed loop
+        with no escape. It must now route to `MECHANISM_INFRA_REPO_COMMIT`
+        instead, bootstrapping `apps/{app}/` so Argo's ApplicationSet can
+        finally discover it."""
+        store, raw = await make_async_store()
+        report = make_report()
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
+        aid = await raw.save(report)
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset") as mock_ensure, \
+             patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
+            result = await route_and_deliver(
+                [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=False, force_dry_run_first=False,
+            )
+        assert result["registered"] is False
+        assert result["mechanisms"]["cluster_config"] == MECHANISM_INFRA_REPO_COMMIT
+        mock_commit.assert_called_once()
+        mock_ensure.assert_called_once()
+        mock_apply.assert_not_called()
+        # And it still opens the gitops-pr-pending gate, exactly like the
+        # already-registered infra-repo-commit path -- a human still
+        # merges, AgentIT still never auto-merges, for the bootstrap
+        # delivery too.
         gate_id = result["outcomes"]["cluster_config"].get("gate_id")
         assert gate_id
         gates = await raw.list_gates(status="pending")

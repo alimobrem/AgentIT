@@ -105,6 +105,34 @@ def repo_kind_for_mechanism(mechanism: str) -> str:
     return _MECHANISM_REPO_KIND.get(mechanism, "")
 
 
+def resolve_cluster_config_mechanism(registered: bool, infra_repo_url: str | None) -> str:
+    """The cluster/app-config category's delivery mechanism, shared by every
+    caller that predicts or acts on it (``route_and_deliver()``,
+    ``gate_delivery_confirmation()``, and the dry-run preview on Onboard
+    Results) so they can never disagree about what a given
+    ``(registered, infra_repo_url)`` pair resolves to.
+
+    Knowing an infra repo URL is what actually matters for whether to
+    commit there -- ``registered`` (a live Argo CD ``Application`` already
+    exists) is only a *stronger* confirmation once ``True``, never a
+    precondition for attempting the commit. Gating
+    ``MECHANISM_INFRA_REPO_COMMIT`` on ``registered`` already being
+    ``True`` was a closed loop with no escape: Argo's ``ApplicationSet``
+    only ever creates that live ``Application`` by discovering
+    ``apps/{app}/`` already committed in the infra repo, and nothing but
+    this exact mechanism ever commits that directory in the first place
+    (see docs/onboarding-loop-vision-gap-analysis.md §1). So the very
+    first delivery for an app with a known infra repo must still commit
+    there -- direct apply is the true fallback only when no infra repo is
+    known at all.
+    """
+    if registered and infra_repo_url is None:
+        return MECHANISM_NONE
+    if infra_repo_url is not None:
+        return MECHANISM_INFRA_REPO_COMMIT
+    return MECHANISM_DIRECT_APPLY
+
+
 def confirmation_text(mechanism: str, *, infra_repo_url: str | None = None) -> str:
     """The exact statement a human must see -- and actively acknowledge --
     immediately before ``route_and_deliver()`` actually fires for the
@@ -319,7 +347,7 @@ async def gate_delivery_confirmation(store: object, gate: dict) -> str:
     if report is None:
         return ""
     registered, infra_repo_url = await is_gitops_registered(report.repo_name, report)
-    mechanism = MECHANISM_INFRA_REPO_COMMIT if registered else MECHANISM_DIRECT_APPLY
+    mechanism = resolve_cluster_config_mechanism(registered, infra_repo_url)
     return confirmation_text(mechanism, infra_repo_url=infra_repo_url)
 
 
@@ -494,15 +522,13 @@ async def route_and_deliver(
     # which infra repo it lives in. Direct-applying here would be exactly
     # the footgun the design doc closes (racing Argo's next prune-sync), and
     # there's no repo to guess for a commit -- so this refuses to pick
-    # either mechanism and surfaces the ambiguity instead.
+    # either mechanism and surfaces the ambiguity instead. Every other case
+    # (including "not yet registered, but an infra repo URL is known" --
+    # the bootstrap case, see resolve_cluster_config_mechanism()'s docstring)
+    # goes through the shared decision function.
     cluster_files = groups.pop(CATEGORY_CLUSTER_CONFIG, [])
     if cluster_files:
-        if registered and infra_repo_url is None:
-            mechanisms[CATEGORY_CLUSTER_CONFIG] = MECHANISM_NONE
-        else:
-            mechanisms[CATEGORY_CLUSTER_CONFIG] = (
-                MECHANISM_INFRA_REPO_COMMIT if registered else MECHANISM_DIRECT_APPLY
-            )
+        mechanisms[CATEGORY_CLUSTER_CONFIG] = resolve_cluster_config_mechanism(registered, infra_repo_url)
 
     cicd_files = groups.pop(CATEGORY_CICD_SHARED_NAMESPACE, [])
     if cicd_files:
@@ -547,7 +573,7 @@ async def route_and_deliver(
                         "or guess which repo to commit to"
                     ),
                 }
-            elif registered and report is not None:
+            elif mechanisms[CATEGORY_CLUSTER_CONFIG] == MECHANISM_INFRA_REPO_COMMIT and report is not None:
                 outcomes[CATEGORY_CLUSTER_CONFIG] = await deliver_with_verification(
                     mechanism=MECHANISM_INFRA_REPO_COMMIT, files=cluster_files, report=report,
                     app_name=app_name, store=store, assessment_id=assessment_id,

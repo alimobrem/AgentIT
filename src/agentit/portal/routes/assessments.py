@@ -898,13 +898,12 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
     # un-skippable confirm dialog at the actual point of delivery, so the
     # two can never say different things about the same decision.
     from agentit.portal.delivery import (
-        MECHANISM_DIRECT_APPLY,
-        MECHANISM_INFRA_REPO_COMMIT,
         confirmation_text,
         is_gitops_registered,
+        resolve_cluster_config_mechanism,
     )
     gitops_registered, infra_repo_url = await is_gitops_registered(report.repo_name, report)
-    delivery_mechanism = MECHANISM_INFRA_REPO_COMMIT if gitops_registered else MECHANISM_DIRECT_APPLY
+    delivery_mechanism = resolve_cluster_config_mechanism(gitops_registered, infra_repo_url)
     delivery_confirmation = confirmation_text(delivery_mechanism, infra_repo_url=infra_repo_url)
     deliveries = await s.list_deliveries(assessment_id) if hasattr(s, "list_deliveries") else []
 
