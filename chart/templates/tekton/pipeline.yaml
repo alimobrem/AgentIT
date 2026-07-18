@@ -10,7 +10,14 @@ spec:
   params:
     - name: repo-url
       type: string
-      default: https://github.com/alimobrem/AgentIT.git
+      # No `.git` suffix: this default feeds both `git-clone`'s URL (which
+      # accepts either form) AND `register-self-in-fleet`'s webhook body
+      # (which does not normalize) -- a `.git`-suffixed default there
+      # briefly created a second, duplicate Fleet row for AgentIT itself
+      # before `normalize_repo_url()` (store.py) existed to collapse it.
+      # Keep this pre-normalized so it matches store.py's canonical form
+      # even if a future write path forgets to normalize.
+      default: https://github.com/alimobrem/AgentIT
     - name: revision
       type: string
       default: main

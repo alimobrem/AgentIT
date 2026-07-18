@@ -322,3 +322,52 @@ spec:
           port: 5432
     {{- end }}
 {{- end }}
+---
+{{- if .Values.agents.reassessScheduler.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-reassess-scheduler
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-reassess-scheduler
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ .Release.Name }}-reassess-scheduler
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    # NOTE: this rule intentionally has NO `ports` restriction -- see the
+    # identical rule on the other watchers above for the DNS-resolution
+    # rationale (empirically confirmed on this cluster's OVN-Kubernetes).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
+    # check_due_apps() only ever calls back into the portal's own
+    # /api/webhook/assess -- unlike vuln-watcher/slo-tracker/drift-detector
+    # this watcher never calls kube.py (no Kubernetes API server egress
+    # needed) and unlike skill-learner/capability-scout it never calls an
+    # LLM or GitHub directly (no public-internet port-443 egress needed).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}
+      ports:
+        - protocol: TCP
+          port: 8080
+    {{- if .Values.postgres.bundled.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: postgres-bundled
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- end }}
+{{- end }}

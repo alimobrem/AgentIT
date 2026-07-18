@@ -164,6 +164,16 @@ agents:
   driftDetector:
     enabled: false
     interval: 600     # 10 minutes
+  # reassess-scheduler: automatically re-Assesses apps once their configured
+  # per-app cadence (apps.assessment_cadence, set from the Assessment Detail
+  # page -- daily/weekly/monthly/manual) has elapsed since their last
+  # assessment. `interval` here is this watcher's own tick rate (how often
+  # it checks which apps are *due*), not any one app's cadence. Off by
+  # default like every other agent flag: an operator must opt in before any
+  # app's saved cadence actually causes an automatic re-assessment.
+  reassessScheduler:
+    enabled: false
+    interval: 3600    # 1 hour
   skillLearner:
     enabled: false
     interval: 86400   # 24 hours

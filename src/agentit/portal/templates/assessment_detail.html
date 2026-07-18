@@ -286,6 +286,42 @@
   </form>
 </div>
 
+{# Real, per-app setting -- read by watchers/reassess_scheduler.py's tick
+   loop (get_apps_due_for_reassessment()) to decide when to automatically
+   re-Assess this app, via the same /api/webhook/assess route the Fleet
+   page's Re-assess/Refresh Onboard buttons use. Saving this is always real
+   (persisted on the app row) -- the note below is honest about whether
+   anything is currently deployed to act on it. #}
+<div class="mb-2">
+  <h2 class="section-title">Automatic re-assessment</h2>
+  {% if reassess_scheduler_active %}
+  <p class="text-muted text-sm mb-1">
+    AgentIT automatically re-Assesses this app on the cadence below (in addition to the manual Re-Assess button above and push-triggered re-checks).
+  </p>
+  {% else %}
+  <p class="text-muted text-sm mb-1">
+    Cadence saved here is real, but no re-assessment scheduler is currently running in this deployment to act on it yet
+    (the <code>reassess-scheduler</code> agent is disabled or hasn't ticked) -- until it's enabled, this app is only
+    re-checked via the manual Re-Assess button above (or from <a href="/fleet">Fleet</a>) or a push to its repo.
+  </p>
+  {% endif %}
+  <form method="post" action="/assessments/{{ assessment_id }}/set-cadence" class="inline-form">
+    <div class="form-group">
+      <label class="form-label" for="cadence-select">Re-assess automatically</label>
+      <select id="cadence-select" name="cadence">
+        <option value="daily" {% if assessment_cadence == "daily" %}selected{% endif %}>Every 24 hours</option>
+        <option value="weekly" {% if assessment_cadence == "weekly" %}selected{% endif %}>Weekly</option>
+        <option value="monthly" {% if assessment_cadence == "monthly" %}selected{% endif %}>Monthly</option>
+        <option value="manual" {% if assessment_cadence == "manual" %}selected{% endif %}>Manual only</option>
+      </select>
+    </div>
+    <button type="submit" class="btn btn-sm btn-outline">
+      <span class="btn-label">Save</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+    </button>
+  </form>
+</div>
+
 {% from "_macros.html" import client_tab_nav, ledger_card %}
 {# Initial tab honors ?tab=<key> (e.g. Fleet's "Needs Action" badge links
    here with ?tab=actions) -- same query-param-driven Alpine init

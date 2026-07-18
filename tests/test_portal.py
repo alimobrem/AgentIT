@@ -1801,7 +1801,7 @@ async def test_agents_page_last_heartbeat_stat_card_uses_data_timestamp(client, 
     # the synthetic "—" placeholder agents_page() merges in for watchers
     # missing from the registry (a bare em-dash would otherwise win
     # `max()` over any real ISO timestamp string).
-    for name in ("vuln-watcher", "slo-tracker", "drift-detector", "skill-learner", "capability-scout"):
+    for name in ("vuln-watcher", "slo-tracker", "drift-detector", "skill-learner", "capability-scout", "reassess-scheduler"):
         await store.register_agent(name, "watcher")
         await store.agent_heartbeat(name)
 

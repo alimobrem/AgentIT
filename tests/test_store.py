@@ -16,6 +16,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import asyncpg
 import pytest
 
 from agentit.models import (
@@ -284,6 +285,262 @@ class TestFleetAndTrend:
             "current_score": None, "previous_score": None,
             "delta": None, "assessments_count": 0,
         }
+
+
+class TestRepoUrlNormalizationDbTrigger:
+    """DB-layer backstop for the whole "duplicate Fleet row" bug class:
+    ``SCHEMA_SQL``'s ``normalize_repo_url_before_write`` trigger mirrors
+    ``normalize_repo_url()`` in SQL and fires on every INSERT/UPDATE of
+    ``repo_url`` on ``assessments``/``apps`` -- so a non-canonical value
+    (a `.git` suffix, a trailing slash) can't reach storage even from a
+    write path that bypasses ``store.py`` entirely (a raw SQL statement, a
+    future code path, a one-off migration script), not just ones that
+    remember to call the Python ``normalize_repo_url()`` first. These
+    tests deliberately go around ``AssessmentStore.save()``/``_upsert_app()``
+    -- straight to ``store._pool`` -- to prove the guarantee holds at the
+    database layer itself, independent of any application code.
+    """
+
+    async def test_insert_into_assessments_is_normalized_at_the_db_layer(self, store):
+        await store._pool.execute(
+            """
+            INSERT INTO assessments (id, repo_url, repo_name, assessed_at, criticality, overall_score, report_json)
+            VALUES ($1, $2, $3, now(), 'medium', 80, '{}'::jsonb)
+            """,
+            uuid.uuid4().hex, "https://github.com/org/raw-insert-app.git/", "raw-insert-app",
+        )
+        row = await store._pool.fetchrow(
+            "SELECT repo_url FROM assessments WHERE repo_name = 'raw-insert-app'"
+        )
+        assert row["repo_url"] == "https://github.com/org/raw-insert-app"
+
+    async def test_insert_into_apps_is_normalized_at_the_db_layer(self, store):
+        now = datetime.now(timezone.utc)
+        await store._pool.execute(
+            "INSERT INTO apps (repo_url, repo_name, created_at, updated_at) VALUES ($1, $2, $3, $3)",
+            "https://github.com/org/raw-apps-app/", "raw-apps-app", now,
+        )
+        row = await store._pool.fetchrow(
+            "SELECT repo_url FROM apps WHERE repo_name = 'raw-apps-app'"
+        )
+        assert row["repo_url"] == "https://github.com/org/raw-apps-app"
+
+    async def test_update_of_repo_url_is_also_normalized(self, store):
+        aid = await store.save(_make_report("update-norm-app"))
+        await store._pool.execute(
+            "UPDATE assessments SET repo_url = $1 WHERE id = $2",
+            "https://github.com/org/UPDATE-NORM-APP.GIT", aid,
+        )
+        row = await store._pool.fetchrow("SELECT repo_url FROM assessments WHERE id = $1", aid)
+        assert row["repo_url"] == "https://github.com/org/UPDATE-NORM-APP"
+
+    async def test_apps_primary_key_rejects_a_dotgit_variant_of_an_existing_row(self, store):
+        """The strongest guarantee this trigger buys: ``apps.repo_url``'s
+        existing PRIMARY KEY now enforces uniqueness on the NORMALIZED
+        identity, not just the raw string -- a second raw INSERT spelling
+        an already-registered repo with a `.git` suffix is rejected
+        outright by Postgres, not silently accepted as a second row."""
+        now = datetime.now(timezone.utc)
+        await store._pool.execute(
+            "INSERT INTO apps (repo_url, repo_name, created_at, updated_at) VALUES ($1, $2, $3, $3)",
+            "https://github.com/org/pk-collision-app", "pk-collision-app", now,
+        )
+        with pytest.raises(asyncpg.UniqueViolationError):
+            await store._pool.execute(
+                "INSERT INTO apps (repo_url, repo_name, created_at, updated_at) VALUES ($1, $2, $3, $3)",
+                "https://github.com/org/pk-collision-app.git", "pk-collision-app", now,
+            )
+
+
+class TestDedupeRepoUrls:
+    """``AssessmentStore.dedupe_repo_urls()`` -- the self-healing
+    complement to the DB trigger above. That trigger only stops *future*
+    writes; it can't retroactively fix rows written before it existed --
+    exactly the real incident this backs up: a Tekton
+    ``register-self-in-fleet`` step posted a hardcoded `.git`-suffixed
+    ``repo-url`` before ``normalize_repo_url()`` was live, briefly
+    creating a second Fleet row for AgentIT itself that a human had to
+    clean up by hand via a live DB query / ``AssessmentStore.delete()``.
+    This is the "no one available to do that by hand" fallback.
+    """
+
+    async def _insert_legacy_unnormalized_row(
+        self, store, *, repo_url: str, repo_name: str, assessed_at: datetime | None = None,
+    ) -> str:
+        """Simulates a row written before ``normalize_repo_url_before_write``
+        existed, by briefly disabling it so a raw, non-canonical
+        ``repo_url`` actually lands as-is -- the same way real rows did in
+        the field before the normalization trigger (and before
+        ``normalize_repo_url()`` itself) shipped."""
+        from conftest import make_report
+
+        assessment_id = uuid.uuid4().hex
+        report = make_report(repo_name=repo_name, repo_url=repo_url)
+        if assessed_at is not None:
+            report.assessed_at = assessed_at
+        pool = store._pool
+        await pool.execute("ALTER TABLE assessments DISABLE TRIGGER normalize_repo_url_before_write")
+        await pool.execute("ALTER TABLE apps DISABLE TRIGGER normalize_repo_url_before_write")
+        try:
+            await pool.execute(
+                """
+                INSERT INTO assessments (id, repo_url, repo_name, assessed_at, criticality, overall_score, report_json)
+                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                """,
+                assessment_id, repo_url, repo_name, report.assessed_at,
+                report.criticality, report.overall_score, report.model_dump_json(),
+            )
+            now = datetime.now(timezone.utc)
+            await pool.execute(
+                """
+                INSERT INTO apps (repo_url, repo_name, created_at, updated_at)
+                VALUES ($1, $2, $3, $3)
+                ON CONFLICT (repo_url) DO NOTHING
+                """,
+                repo_url, repo_name, now,
+            )
+        finally:
+            await pool.execute("ALTER TABLE assessments ENABLE TRIGGER normalize_repo_url_before_write")
+            await pool.execute("ALTER TABLE apps ENABLE TRIGGER normalize_repo_url_before_write")
+        return assessment_id
+
+    async def test_merges_a_pre_trigger_dotgit_duplicate_into_one_fleet_row(self, store):
+        bare_id = await self._insert_legacy_unnormalized_row(
+            store, repo_url="https://github.com/org/legacy-dup", repo_name="legacy-dup",
+        )
+        dotgit_id = await self._insert_legacy_unnormalized_row(
+            store, repo_url="https://github.com/org/legacy-dup.git", repo_name="legacy-dup",
+        )
+
+        # Sanity: before healing, this really is two distinct Fleet rows --
+        # exactly the incident this backs up.
+        fleet_before = [r for r in await store.get_fleet_data() if r["repo_name"] == "legacy-dup"]
+        assert len(fleet_before) == 2
+
+        merged = await store.dedupe_repo_urls()
+
+        assert merged == [{
+            "from": "https://github.com/org/legacy-dup.git",
+            "to": "https://github.com/org/legacy-dup",
+        }]
+        fleet_after = [r for r in await store.get_fleet_data() if r["repo_name"] == "legacy-dup"]
+        assert len(fleet_after) == 1
+        assert fleet_after[0]["repo_url"] == "https://github.com/org/legacy-dup"
+        assert fleet_after[0]["assessment_count"] == 2
+
+        # No assessment history was lost -- both original ids still resolve,
+        # and both now agree on the canonical repo_url.
+        bare_report = await store.get(bare_id)
+        dotgit_report = await store.get(dotgit_id)
+        assert bare_report is not None and dotgit_report is not None
+        assert bare_report.repo_url == "https://github.com/org/legacy-dup"
+        assert dotgit_report.repo_url == "https://github.com/org/legacy-dup"
+
+        apps_rows = await store._pool.fetch(
+            "SELECT repo_url FROM apps WHERE repo_name = 'legacy-dup'"
+        )
+        assert [r["repo_url"] for r in apps_rows] == ["https://github.com/org/legacy-dup"]
+
+    async def test_merges_a_trailing_slash_duplicate_too(self, store):
+        await self._insert_legacy_unnormalized_row(
+            store, repo_url="https://github.com/org/slash-dup", repo_name="slash-dup",
+        )
+        await self._insert_legacy_unnormalized_row(
+            store, repo_url="https://github.com/org/slash-dup/", repo_name="slash-dup",
+        )
+
+        merged = await store.dedupe_repo_urls()
+
+        assert merged == [{
+            "from": "https://github.com/org/slash-dup/",
+            "to": "https://github.com/org/slash-dup",
+        }]
+        fleet = [r for r in await store.get_fleet_data() if r["repo_name"] == "slash-dup"]
+        assert len(fleet) == 1
+        assert fleet[0]["assessment_count"] == 2
+
+    async def test_heals_a_single_never_normalized_row_with_no_literal_duplicate(self, store):
+        """Even a single row that was only ever written in a non-canonical
+        form (no literal duplicate present) gets renamed to the canonical
+        form -- not just actual collisions."""
+        await self._insert_legacy_unnormalized_row(
+            store, repo_url="https://github.com/org/solo-dotgit.git", repo_name="solo-dotgit",
+        )
+
+        merged = await store.dedupe_repo_urls()
+
+        assert merged == [{
+            "from": "https://github.com/org/solo-dotgit.git",
+            "to": "https://github.com/org/solo-dotgit",
+        }]
+        row = await store._pool.fetchrow(
+            "SELECT repo_url FROM assessments WHERE repo_name = 'solo-dotgit'"
+        )
+        assert row["repo_url"] == "https://github.com/org/solo-dotgit"
+
+    async def test_is_idempotent_once_healed(self, store):
+        await self._insert_legacy_unnormalized_row(
+            store, repo_url="https://github.com/org/idem-dup.git", repo_name="idem-dup",
+        )
+        first = await store.dedupe_repo_urls()
+        assert len(first) == 1
+        second = await store.dedupe_repo_urls()
+        assert second == []
+
+    async def test_returns_empty_when_nothing_needs_healing(self, store):
+        await store.save(_make_report("already-clean-app"))
+        assert await store.dedupe_repo_urls() == []
+
+    async def test_merge_keeps_the_newer_infra_repo_url(self, store):
+        """`apps.infra_repo_url` merge policy mirrors `_upsert_app`'s own
+        "most recent write wins" rule -- whichever variant's `apps` row was
+        updated most recently keeps its `infra_repo_url` (falling back to
+        the other's if that one is null)."""
+        older_at = datetime.now(timezone.utc) - timedelta(days=1)
+        newer_at = datetime.now(timezone.utc)
+        await self._insert_legacy_unnormalized_row(
+            store, repo_url="https://github.com/org/infra-merge", repo_name="infra-merge",
+            assessed_at=older_at,
+        )
+        await store._pool.execute(
+            "UPDATE apps SET infra_repo_url = $1, updated_at = $2 WHERE repo_url = $3",
+            "https://github.com/org/infra-old", older_at, "https://github.com/org/infra-merge",
+        )
+        await self._insert_legacy_unnormalized_row(
+            store, repo_url="https://github.com/org/infra-merge.git", repo_name="infra-merge",
+            assessed_at=newer_at,
+        )
+        await store._pool.execute(
+            "UPDATE apps SET infra_repo_url = $1, updated_at = $2 WHERE repo_url = $3",
+            "https://github.com/org/infra-new", newer_at, "https://github.com/org/infra-merge.git",
+        )
+
+        await store.dedupe_repo_urls()
+
+        row = await store._pool.fetchrow(
+            "SELECT infra_repo_url FROM apps WHERE repo_url = 'https://github.com/org/infra-merge'"
+        )
+        assert row["infra_repo_url"] == "https://github.com/org/infra-new"
+        # And the duplicate row is gone, not just orphaned.
+        gone = await store._pool.fetchrow(
+            "SELECT 1 FROM apps WHERE repo_url = 'https://github.com/org/infra-merge.git'"
+        )
+        assert gone is None
+
+    async def test_dependents_of_the_merged_variant_survive_the_merge(self, store):
+        """Gates/remediations/SLOs/onboarding hanging off the non-canonical
+        variant's assessment id must still resolve after the merge --
+        they're keyed by `assessment_id`, which never changes; only the
+        parent assessment's `repo_url` string does."""
+        dotgit_id = await self._insert_legacy_unnormalized_row(
+            store, repo_url="https://github.com/org/deps-dup.git", repo_name="deps-dup",
+        )
+        gate_id = await store.create_gate(dotgit_id, "rollback-review", "gate on the dup variant")
+
+        await store.dedupe_repo_urls()
+
+        gates = await store.list_gates_for_assessment(dotgit_id)
+        assert any(g["id"] == gate_id for g in gates)
 
 
 class TestReapOrphanedJobs:
@@ -973,3 +1230,140 @@ class TestBackgroundMaintenanceAsyncHelpers:
         first = await diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
         assert not first.has_changes
         assert await store.get_last_skill_inventory_snapshot() is not None
+
+
+class TestAssessmentCadence:
+    """apps.assessment_cadence -- the per-app setting
+    watchers/reassess_scheduler.py's tick loop reads via
+    get_apps_due_for_reassessment() to decide which apps to automatically
+    re-Assess. See assessments.py::set_assessment_cadence (the portal
+    route the Assessment Detail page's dropdown posts to)."""
+
+    async def test_new_app_defaults_to_daily(self, store):
+        """'daily' is the schema default (ALTER TABLE ... DEFAULT 'daily')
+        so 'default to 24 hours' holds for every app, including ones that
+        existed before this column did -- not just ones onboarded after."""
+        await store.save(_make_report("cadence-default-app"))
+        cadence = await store.get_assessment_cadence("https://github.com/org/cadence-default-app")
+        assert cadence == "daily"
+
+    async def test_unknown_repo_url_also_defaults_to_daily(self, store):
+        """No apps row at all (e.g. a repo_url that was never assessed) --
+        still returns the schema default rather than raising or returning
+        None, so callers never need a None-check before comparing."""
+        assert await store.get_assessment_cadence("https://github.com/org/never-assessed") == "daily"
+
+    async def test_set_and_get_roundtrip(self, store):
+        await store.save(_make_report("cadence-roundtrip-app"))
+        repo_url = "https://github.com/org/cadence-roundtrip-app"
+
+        assert await store.set_assessment_cadence(repo_url, "weekly") is True
+        assert await store.get_assessment_cadence(repo_url) == "weekly"
+
+        assert await store.set_assessment_cadence(repo_url, "monthly") is True
+        assert await store.get_assessment_cadence(repo_url) == "monthly"
+
+    async def test_set_on_unknown_repo_url_returns_false(self, store):
+        assert await store.set_assessment_cadence("https://github.com/org/never-assessed", "weekly") is False
+
+    async def test_set_rejects_invalid_cadence(self, store):
+        await store.save(_make_report("cadence-invalid-app"))
+        with pytest.raises(ValueError):
+            await store.set_assessment_cadence("https://github.com/org/cadence-invalid-app", "hourly")
+
+
+class TestGetAppsDueForReassessment:
+    """The real query watchers/reassess_scheduler.py's tick loop runs every
+    tick -- must return exactly the apps whose cadence interval has
+    elapsed, and nothing else."""
+
+    async def test_freshly_assessed_daily_app_is_not_due(self, store):
+        await store.save(_make_report("fresh-daily-app"))
+        due = await store.get_apps_due_for_reassessment()
+        assert "https://github.com/org/fresh-daily-app" not in {d["repo_url"] for d in due}
+
+    async def test_daily_app_assessed_two_days_ago_is_due(self, store):
+        report = _make_report("stale-daily-app")
+        report.assessed_at = datetime.now(timezone.utc) - timedelta(days=2)
+        await store.save(report)
+
+        due = await store.get_apps_due_for_reassessment()
+        due_row = next(d for d in due if d["repo_url"] == "https://github.com/org/stale-daily-app")
+        assert due_row["assessment_cadence"] == "daily"
+
+    async def test_weekly_app_assessed_three_days_ago_is_not_due(self, store):
+        report = _make_report("recent-weekly-app")
+        report.assessed_at = datetime.now(timezone.utc) - timedelta(days=3)
+        await store.save(report)
+        await store.set_assessment_cadence(report.repo_url, "weekly")
+
+        due = await store.get_apps_due_for_reassessment()
+        assert report.repo_url not in {d["repo_url"] for d in due}
+
+    async def test_weekly_app_assessed_ten_days_ago_is_due(self, store):
+        report = _make_report("stale-weekly-app")
+        report.assessed_at = datetime.now(timezone.utc) - timedelta(days=10)
+        await store.save(report)
+        await store.set_assessment_cadence(report.repo_url, "weekly")
+
+        due = await store.get_apps_due_for_reassessment()
+        assert report.repo_url in {d["repo_url"] for d in due}
+
+    async def test_monthly_app_assessed_ten_days_ago_is_not_due(self, store):
+        report = _make_report("recent-monthly-app")
+        report.assessed_at = datetime.now(timezone.utc) - timedelta(days=10)
+        await store.save(report)
+        await store.set_assessment_cadence(report.repo_url, "monthly")
+
+        due = await store.get_apps_due_for_reassessment()
+        assert report.repo_url not in {d["repo_url"] for d in due}
+
+    async def test_manual_cadence_app_is_never_due_regardless_of_age(self, store):
+        """The opt-out: even an app that hasn't been assessed in a year
+        must never appear here while its cadence is 'manual'."""
+        report = _make_report("manual-cadence-app")
+        report.assessed_at = datetime.now(timezone.utc) - timedelta(days=400)
+        await store.save(report)
+        await store.set_assessment_cadence(report.repo_url, "manual")
+
+        due = await store.get_apps_due_for_reassessment()
+        assert report.repo_url not in {d["repo_url"] for d in due}
+
+    async def test_only_the_latest_assessment_counts_for_staleness(self, store):
+        """An app re-assessed recently (a fresh row) must not show as due
+        just because an OLDER assessment of the same repo is stale --
+        get_fleet_data() already has this same "latest per repo_url"
+        guarantee; this query must not regress it."""
+        old = _make_report("multi-assessed-app")
+        old.assessed_at = datetime.now(timezone.utc) - timedelta(days=5)
+        await store.save(old)
+        fresh = _make_report("multi-assessed-app")
+        fresh.assessed_at = datetime.now(timezone.utc)
+        await store.save(fresh)
+
+        due = await store.get_apps_due_for_reassessment()
+        assert fresh.repo_url not in {d["repo_url"] for d in due}
+
+    async def test_results_sorted_oldest_first(self, store):
+        newer = _make_report("due-app-newer")
+        newer.assessed_at = datetime.now(timezone.utc) - timedelta(days=3)
+        await store.save(newer)
+        older = _make_report("due-app-older")
+        older.assessed_at = datetime.now(timezone.utc) - timedelta(days=5)
+        await store.save(older)
+
+        due = await store.get_apps_due_for_reassessment()
+        due_urls = [d["repo_url"] for d in due]
+        assert due_urls.index("https://github.com/org/due-app-older") < due_urls.index(
+            "https://github.com/org/due-app-newer"
+        )
+
+    async def test_includes_criticality_from_latest_assessment(self, store):
+        report = _make_report("critical-due-app")
+        report.criticality = "critical"
+        report.assessed_at = datetime.now(timezone.utc) - timedelta(days=2)
+        await store.save(report)
+
+        due = await store.get_apps_due_for_reassessment()
+        due_row = next(d for d in due if d["repo_url"] == report.repo_url)
+        assert due_row["criticality"] == "critical"

@@ -14,6 +14,15 @@ from agentit.watchers import record_tick
 
 logger = logging.getLogger(__name__)
 
+# Either threshold alone is enough to alert (OR, not AND) -- a huge commit
+# burst that's only a few minutes old is just as actionable a signal as a
+# single commit that's been stuck for hours. Tuned to the 2026-07-17
+# incident's real timeline (notify-argocd stuck for hours, several commits
+# queued up behind it) without being so tight that a normal few-minute CI
+# run duration alone would false-alarm.
+_GITOPS_LAG_COMMIT_THRESHOLD = 3
+_GITOPS_LAG_HOURS_THRESHOLD = 1.0
+
 
 class DriftDetector:
     """Long-lived agent that polls Argo CD applications and publishes drift
@@ -61,6 +70,16 @@ class DriftDetector:
             # a poll it already runs rather than adding a new one.
             if revision:
                 await self._maybe_close_gitops_delivery(name, revision)
+
+            # Self-check only, deliberately: for the `agentit` Application
+            # we know the real GitOps branch (`main`, same one
+            # chart/templates/tekton/trigger.yaml's webhook filters on) --
+            # for arbitrary fleet apps we'd have to guess, which would
+            # violate the "surface real data, never fabricate" rule this
+            # repo follows everywhere else. See
+            # docs/cicd-stall-hardening-2026-07-17.md.
+            if name == "agentit" and revision:
+                await self._check_gitops_lag(app, revision)
 
             if sync_status == "OutOfSync":
                 self._publisher.publish(
@@ -144,6 +163,48 @@ class DriftDetector:
         if not items:
             return None
         return {"items": items}
+
+    async def _check_gitops_lag(self, argo_app: dict, deployed_revision: str) -> None:
+        """Detect "commits merged to main aren't reaching the cluster" --
+        the concrete signal that was missing during the 2026-07-17
+        incident, where notify-argocd sat stuck (pod scheduling/etcd
+        pressure) for hours with nothing telling anyone. Compares the
+        `agentit` Application's actually-synced revision against real
+        GitHub commit history for `main` (never a guess/fabrication --
+        see ``github_pr.get_commits_behind``'s docstring). A GitHub call
+        failure just skips this tick's check.
+        """
+        repo_url = argo_app.get("spec", {}).get("source", {}).get("repoURL", "")
+        if not repo_url:
+            return
+        from agentit.portal.github_pr import get_commits_behind
+
+        lag = await asyncio.to_thread(get_commits_behind, repo_url, deployed_revision, "main")
+        if not lag or lag.get("ahead_by", 0) <= 0:
+            return
+        ahead_by = lag["ahead_by"]
+
+        hours_behind = lag.get("hours_behind")
+        over_commits = ahead_by > _GITOPS_LAG_COMMIT_THRESHOLD
+        over_hours = hours_behind is not None and hours_behind > _GITOPS_LAG_HOURS_THRESHOLD
+        if not (over_commits or over_hours):
+            return
+
+        hours_msg = f"{hours_behind:.1f}h" if hours_behind is not None else "an unknown time"
+        summary = (
+            f"agentit's deployed revision {deployed_revision[:12]} is {ahead_by} commit(s) "
+            f"behind origin/main, oldest undeployed commit landed {hours_msg} ago -- the "
+            f"GitOps pipeline may be stuck (check notify-argocd / Tekton pod scheduling)."
+        )
+        self._publisher.publish(
+            "agentit-events",
+            agent_id="drift-detector",
+            action="gitops-lag-detected",
+            target_app="agentit",
+            severity="critical",
+            summary=summary,
+        )
+        click.echo(f"[drift-detect] GITOPS LAG: {summary}", err=True)
 
     async def _maybe_close_gitops_delivery(self, argo_app_name: str, synced_revision: str) -> None:
         """If ``synced_revision`` matches a pending GitOps delivery's

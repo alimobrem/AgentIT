@@ -115,6 +115,122 @@ class TestDriftDetectorTickTelemetry:
         await detector._maybe_auto_sync("some-app")  # auto-mode off -> returns early, no crash
 
 
+_AGENTIT_APP = {
+    "metadata": {"name": "agentit"},
+    "spec": {"source": {"repoURL": "https://github.com/alimobrem/AgentIT.git"}},
+    "status": {
+        "sync": {"status": "Synced", "revision": "a" * 40},
+        "health": {"status": "Healthy"},
+    },
+}
+
+
+class TestGitopsLagDetection:
+    """2026-07-17 incident: notify-argocd got stuck for hours with nothing
+    telling anyone commits on main had stopped reaching the cluster. See
+    docs/gitops-lag-alerting.md for the full design writeup."""
+
+    @patch("agentit.watchers.drift_detector.kube.list_custom_resources")
+    async def test_publishes_critical_event_when_far_behind_main(self, mock_list):
+        mock_list.return_value = [_AGENTIT_APP]
+        detector = _detector()
+
+        with patch(
+            "agentit.portal.github_pr.get_commits_behind",
+            return_value={"ahead_by": 5, "behind_by": 0, "status": "ahead", "hours_behind": 2.0},
+        ):
+            await detector.detect_once()
+
+        publish_calls = [
+            c for c in detector._publisher.publish.call_args_list
+            if c.kwargs.get("action") == "gitops-lag-detected"
+        ]
+        assert len(publish_calls) == 1
+        assert publish_calls[0].kwargs["severity"] == "critical"
+        assert publish_calls[0].kwargs["target_app"] == "agentit"
+
+    @patch("agentit.watchers.drift_detector.kube.list_custom_resources")
+    async def test_no_alert_when_in_sync(self, mock_list):
+        mock_list.return_value = [_AGENTIT_APP]
+        detector = _detector()
+
+        with patch(
+            "agentit.portal.github_pr.get_commits_behind",
+            return_value={"ahead_by": 0, "behind_by": 0, "status": "identical", "hours_behind": None},
+        ):
+            await detector.detect_once()
+
+        publish_calls = [
+            c for c in detector._publisher.publish.call_args_list
+            if c.kwargs.get("action") == "gitops-lag-detected"
+        ]
+        assert publish_calls == []
+
+    @patch("agentit.watchers.drift_detector.kube.list_custom_resources")
+    async def test_no_alert_when_slightly_behind_and_recent(self, mock_list):
+        """A couple of commits landed a few minutes ago (normal CI-in-flight
+        lag) must not alert -- both thresholds (commits AND hours) need to
+        be under the bar."""
+        mock_list.return_value = [_AGENTIT_APP]
+        detector = _detector()
+
+        with patch(
+            "agentit.portal.github_pr.get_commits_behind",
+            return_value={"ahead_by": 1, "behind_by": 0, "status": "ahead", "hours_behind": 0.05},
+        ):
+            await detector.detect_once()
+
+        publish_calls = [
+            c for c in detector._publisher.publish.call_args_list
+            if c.kwargs.get("action") == "gitops-lag-detected"
+        ]
+        assert publish_calls == []
+
+    @patch("agentit.watchers.drift_detector.kube.list_custom_resources")
+    async def test_alerts_on_hours_threshold_alone_even_with_few_commits(self, mock_list):
+        """A single commit stuck for a long time is just as real an
+        incident as a burst of commits -- either threshold alone alerts."""
+        mock_list.return_value = [_AGENTIT_APP]
+        detector = _detector()
+
+        with patch(
+            "agentit.portal.github_pr.get_commits_behind",
+            return_value={"ahead_by": 1, "behind_by": 0, "status": "ahead", "hours_behind": 5.0},
+        ):
+            await detector.detect_once()
+
+        publish_calls = [
+            c for c in detector._publisher.publish.call_args_list
+            if c.kwargs.get("action") == "gitops-lag-detected"
+        ]
+        assert len(publish_calls) == 1
+
+    @patch("agentit.watchers.drift_detector.kube.list_custom_resources")
+    async def test_skips_non_agentit_apps(self, mock_list):
+        """Self-check only -- guessing another fleet app's default branch
+        would violate this repo's "never fabricate data" rule."""
+        other_app = {
+            "metadata": {"name": "some-other-app"},
+            "spec": {"source": {"repoURL": "https://github.com/example/other.git"}},
+            "status": {"sync": {"status": "Synced", "revision": "b" * 40}, "health": {"status": "Healthy"}},
+        }
+        mock_list.return_value = [other_app]
+        detector = _detector()
+
+        with patch("agentit.portal.github_pr.get_commits_behind") as mock_lag:
+            await detector.detect_once()
+
+        mock_lag.assert_not_called()
+
+    @patch("agentit.watchers.drift_detector.kube.list_custom_resources")
+    async def test_github_api_failure_does_not_crash_tick(self, mock_list):
+        mock_list.return_value = [_AGENTIT_APP]
+        detector = _detector()
+
+        with patch("agentit.portal.github_pr.get_commits_behind", return_value={}):
+            await detector.detect_once()  # must not raise
+
+
 class TestAutoSyncLogged:
     """docs/ledger-design-spec.md Phase 0: an auto-sync attempt (success or
     failure) must be persisted via log_event(), not only a click.echo() --

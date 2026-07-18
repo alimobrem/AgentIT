@@ -112,6 +112,34 @@ class AutoMode:
 
         return True, f"LLM classified as safe ({classification['confidence']:.2f}): {classification['reason']}"
 
+    async def should_auto_apply_and_log(
+        self,
+        auto_approve: bool,
+        manifests: list[str],
+        criticality: str,
+        app_name: str,
+        agent_name: str | None = None,
+    ) -> tuple[bool, str]:
+        """``should_auto_apply()`` plus the same ``"decision"`` event log
+        every caller needs for the Decisions page (``llm_decisions.py``'s
+        ``_auto_mode_decisions()`` parses this exact "AUTO-APPLY:"/"GATE:"
+        summary format) -- factored out of ``execute()`` below so a caller
+        that wants this safety classification without ``execute()``'s
+        full auto-apply-or-gate pipeline (e.g. onboarding's own Dry Run ->
+        Deliver chain, ``portal/delivery.py::auto_dry_run_then_deliver()``)
+        still gets identical Decisions-page visibility, not a silent,
+        unlogged classification.
+        """
+        can_apply, reason = await self.should_auto_apply(auto_approve, manifests, criticality, app_name)
+        await self._log_event(
+            agent_name or "auto-mode",
+            "decision",
+            app_name,
+            "info" if can_apply else "warning",
+            f"{'AUTO-APPLY' if can_apply else 'GATE'}: {reason}",
+        )
+        return can_apply, reason
+
     async def execute(
         self,
         assessment_id: str,
@@ -163,14 +191,8 @@ class AutoMode:
 
         manifests = [f["content"] for f in files if f["path"].endswith((".yaml", ".yml"))]
 
-        can_apply, reason = await self.should_auto_apply(auto_approve, manifests, criticality, app_name)
-
-        await self._log_event(
-            agent_name or "auto-mode",
-            "decision",
-            app_name,
-            "info" if can_apply else "warning",
-            f"{'AUTO-APPLY' if can_apply else 'GATE'}: {reason}",
+        can_apply, reason = await self.should_auto_apply_and_log(
+            auto_approve, manifests, criticality, app_name, agent_name,
         )
 
         if not can_apply:
@@ -282,10 +304,9 @@ class AutoMode:
                 "details": {"delivery": delivery, "gate_id": gate_id}}
 
     async def _complete_remediations(self, assessment_id: str) -> None:
-        remediations = await self._store.list_remediations(assessment_id)
-        for rem in remediations:
-            if rem["status"] != "completed":
-                await self._store.complete_remediation(rem["id"])
+        from agentit.portal.delivery import complete_remediations
+
+        await complete_remediations(self._store, assessment_id)
 
     async def _log_event(self, agent_id: str, action: str, target: str, severity: str, summary: str) -> None:
         try:

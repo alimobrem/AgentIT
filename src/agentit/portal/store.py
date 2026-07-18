@@ -63,7 +63,7 @@ def _recency_weight(created_at: Any, now: datetime, half_life_days: float) -> fl
 # via a single multi-statement `execute()` call — asyncpg uses the simple
 # query protocol (which permits multiple `;`-separated statements) whenever
 # `execute()` is called with no bind parameters.
-SCHEMA_SQL = """
+SCHEMA_SQL = r"""
 CREATE TABLE IF NOT EXISTS assessments (
     id TEXT PRIMARY KEY,
     repo_url TEXT NOT NULL,
@@ -85,6 +85,53 @@ CREATE TABLE IF NOT EXISTS apps (
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL
 );
+-- Additive, idempotent column (same no-migration-framework convention as
+-- `gates.pr_url` above): how often this app should be automatically
+-- re-assessed by watchers/reassess_scheduler.py, independent of the
+-- push-triggered/manual re-Assess paths that already existed. 'daily' is
+-- the default for every app (including ones onboarded before this column
+-- existed) so "default to 24 hours" holds without a separate backfill --
+-- see get_apps_due_for_reassessment()/set_assessment_cadence() below.
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS assessment_cadence TEXT NOT NULL DEFAULT 'daily';
+
+-- Structural (DB-layer) backstop for the whole "duplicate Fleet row" bug
+-- class -- see `normalize_repo_url()`'s docstring for the app-level
+-- version of this same logic, which this SQL mirrors exactly. Without
+-- this, `apps.repo_url`'s PRIMARY KEY only dedupes exact-string matches;
+-- two different raw spellings of the same repo (a `.git` suffix, a
+-- trailing slash) still land as two rows, since nothing forces a write
+-- to go through the Python `normalize_repo_url()` first. This trigger
+-- makes that structurally impossible for ANY future INSERT/UPDATE of
+-- `repo_url` on either table -- app code, a one-off migration script, a
+-- CI pipeline step with a stale hardcoded URL -- regardless of whether it
+-- remembers to normalize. (`assessments` intentionally allows many rows
+-- per app over time, so it can't carry its own uniqueness constraint the
+-- way `apps` can -- this trigger still keeps every one of those rows'
+-- `repo_url` canonical, which is what `get_fleet_data()`'s
+-- `GROUP BY repo_url` actually depends on.) Pre-existing non-normalized
+-- rows this can't retroactively fix are healed by
+-- `AssessmentStore.dedupe_repo_urls()`, run once at every `create()` and
+-- periodically by the background maintenance loop (see `app.py`).
+CREATE OR REPLACE FUNCTION agentit_normalize_repo_url(url TEXT) RETURNS TEXT AS $$
+    SELECT regexp_replace(rtrim(url, '/'), '\.git$', '', 'i');
+$$ LANGUAGE sql IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION agentit_normalize_repo_url_trigger() RETURNS TRIGGER AS $$
+BEGIN
+    NEW.repo_url := agentit_normalize_repo_url(NEW.repo_url);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS normalize_repo_url_before_write ON assessments;
+CREATE TRIGGER normalize_repo_url_before_write
+    BEFORE INSERT OR UPDATE OF repo_url ON assessments
+    FOR EACH ROW EXECUTE FUNCTION agentit_normalize_repo_url_trigger();
+
+DROP TRIGGER IF EXISTS normalize_repo_url_before_write ON apps;
+CREATE TRIGGER normalize_repo_url_before_write
+    BEFORE INSERT OR UPDATE OF repo_url ON apps
+    FOR EACH ROW EXECUTE FUNCTION agentit_normalize_repo_url_trigger();
 
 CREATE TABLE IF NOT EXISTS onboarding_results (
     id TEXT PRIMARY KEY,
@@ -416,6 +463,19 @@ def normalize_repo_url(repo_url: str) -> str:
     return url
 
 
+# How often watchers/reassess_scheduler.py automatically re-Assesses an app,
+# keyed by `apps.assessment_cadence`. 'manual' opts an app out of automatic
+# re-assessment entirely (push-triggered/manual re-Assess still work exactly
+# as before) -- it has no entry here on purpose, so it can never be treated
+# as "due".
+ASSESSMENT_CADENCE_INTERVALS: dict[str, timedelta] = {
+    "daily": timedelta(days=1),
+    "weekly": timedelta(days=7),
+    "monthly": timedelta(days=30),
+}
+ASSESSMENT_CADENCES = (*ASSESSMENT_CADENCE_INTERVALS, "manual")
+
+
 class AssessmentStore:
     """The one and only ``AssessmentStore``. Postgres-backed, fully async.
 
@@ -442,7 +502,16 @@ class AssessmentStore:
             )
         pool = await asyncpg.create_pool(dsn, min_size=min_size, max_size=max_size)
         await pool.execute(SCHEMA_SQL)
-        return cls(pool)
+        store = cls(pool)
+        # Heal any repo_url duplicates inherited from before the
+        # normalize_repo_url_before_write trigger existed (or from any
+        # other gap) right away, not just on the next 5-min maintenance
+        # tick -- see dedupe_repo_urls()'s docstring.
+        try:
+            await store.dedupe_repo_urls()
+        except Exception:
+            logger.warning("Startup repo_url dedupe failed (non-fatal)", exc_info=True)
+        return store
 
     async def close(self) -> None:
         await self._pool.close()
@@ -619,6 +688,70 @@ class AssessmentStore:
         await self._upsert_app(report.repo_url, report.repo_name, infra_repo_url)
         return _affected(result) > 0
 
+    async def get_assessment_cadence(self, repo_url: str) -> str:
+        """This app's configured automatic-re-assessment cadence --
+        ``'daily'`` (the schema default) if the app has no row yet, e.g. a
+        repo referenced before its first assessment ever completed."""
+        row = await self._pool.fetchrow(
+            "SELECT assessment_cadence FROM apps WHERE repo_url = $1", repo_url,
+        )
+        return row["assessment_cadence"] if row is not None else "daily"
+
+    async def set_assessment_cadence(self, repo_url: str, cadence: str) -> bool:
+        """Sets how often ``watchers/reassess_scheduler.py`` should
+        automatically re-Assess this app. Raises ``ValueError`` for any
+        cadence outside ``ASSESSMENT_CADENCES`` -- callers (the portal
+        route) are expected to have already validated user input against
+        that same tuple, so this is a defensive backstop, not the primary
+        validation.
+        """
+        if cadence not in ASSESSMENT_CADENCES:
+            raise ValueError(
+                f"Invalid assessment cadence {cadence!r} (must be one of {ASSESSMENT_CADENCES})"
+            )
+        result = await self._pool.execute(
+            "UPDATE apps SET assessment_cadence = $1, updated_at = $2 WHERE repo_url = $3",
+            cadence, _now(), repo_url,
+        )
+        return _affected(result) > 0
+
+    async def get_apps_due_for_reassessment(self) -> list[dict]:
+        """Apps whose configured ``assessment_cadence`` interval has
+        elapsed since their most recent assessment -- the real, DB-backed
+        query ``watchers/reassess_scheduler.py``'s tick loop uses to decide
+        which apps to automatically re-Assess. Apps on the ``'manual'``
+        cadence are always excluded (that's the opt-out).
+
+        The due/not-due comparison itself happens in Python against
+        ``ASSESSMENT_CADENCE_INTERVALS`` rather than as inline SQL interval
+        literals, so the two stay impossible to drift apart -- there is
+        exactly one place (that dict) where "weekly means 7 days" is
+        decided.
+        """
+        rows = await self._pool.fetch(
+            """
+            SELECT apps.repo_url, apps.repo_name, apps.assessment_cadence,
+                   latest.assessed_at AS last_assessed_at, latest.criticality
+            FROM apps
+            INNER JOIN (
+                SELECT repo_url, MAX(assessed_at) AS max_at
+                FROM assessments GROUP BY repo_url
+            ) newest ON newest.repo_url = apps.repo_url
+            INNER JOIN assessments latest
+                ON latest.repo_url = newest.repo_url AND latest.assessed_at = newest.max_at
+            WHERE apps.assessment_cadence != 'manual'
+            """
+        )
+        now = _now()
+        due = [
+            r for r in rows
+            if now - r["last_assessed_at"] >= ASSESSMENT_CADENCE_INTERVALS.get(
+                r["assessment_cadence"], timedelta(days=999999),
+            )
+        ]
+        due.sort(key=lambda r: r["last_assessed_at"])
+        return _rows_to_dicts(due)
+
     async def list_all(self) -> list[dict]:
         rows = await self._pool.fetch(
             """
@@ -681,6 +814,113 @@ class AssessmentStore:
                 )
                 status = await conn.execute("DELETE FROM assessments WHERE repo_url = $1", repo_url)
         return _affected(status) > 0
+
+    async def dedupe_repo_urls(self) -> list[dict[str, str]]:
+        """Self-heals any repo genuinely represented under two (or more)
+        different raw ``repo_url`` spellings that ``normalize_repo_url()``
+        would collapse to one -- a `.git` suffix, a trailing slash, ... --
+        by merging every non-canonical variant into the canonical
+        (normalized) form. The defense-in-depth complement to
+        ``SCHEMA_SQL``'s ``normalize_repo_url_before_write`` trigger: that
+        trigger stops any *future* write from landing a non-normalized
+        value, but can't retroactively fix rows written before it existed
+        -- exactly the real incident this backs up (a Tekton
+        ``register-self-in-fleet`` step posted a hardcoded `.git`-suffixed
+        ``repo-url`` before ``normalize_repo_url()`` was live, briefly
+        creating a second Fleet row for AgentIT itself that needed a
+        manual DB cleanup to remove).
+
+        Called once from ``create()`` (so a fresh deploy heals whatever it
+        inherited immediately) and periodically from the background
+        maintenance loop (``app.py::_background_maintenance``, alongside
+        ``reap_orphaned_jobs()``) -- so a duplicate introduced by any other
+        means self-heals too, on its own, with no one needing live DB
+        access to notice or fix it by hand.
+
+        Merges rather than deletes: every ``assessments`` row (and its
+        dependents, all keyed by ``assessment_id`` -- unaffected by a
+        ``repo_url`` change) simply changes identity, so no assessment
+        history is lost; only the ``apps`` row (keyed BY ``repo_url``)
+        needs an actual field-level merge -- see ``_merge_app_repo_url()``.
+        Safe to call repeatedly and concurrently from multiple replicas:
+        each merge is its own transaction, and by the time a second
+        replica reaches the same variant it finds nothing left to move
+        (Postgres's row-level locking + read-committed re-check naturally
+        serializes two overlapping merges of the same row without either
+        erroring). Returns every merge performed, as
+        ``{"from": <variant>, "to": <canonical>}``; empty when nothing
+        needed healing.
+        """
+        rows = await self._pool.fetch("SELECT DISTINCT repo_url FROM assessments")
+        variants_by_canonical: dict[str, set[str]] = {}
+        for row in rows:
+            raw = row["repo_url"]
+            variants_by_canonical.setdefault(normalize_repo_url(raw), set()).add(raw)
+
+        merged: list[dict[str, str]] = []
+        for canonical, variants in variants_by_canonical.items():
+            for variant in sorted(variants - {canonical}):
+                async with self._pool.acquire() as conn:
+                    async with conn.transaction():
+                        # Also fix the embedded `repo_url` inside each row's
+                        # `report_json` blob, not just the column -- `get()`
+                        # (and every caller that does `report.repo_url` after
+                        # it, e.g. `list_history(report.repo_url)`) reads
+                        # that embedded value, not this column. Leaving it
+                        # stale would just move this exact bug one layer
+                        # down instead of fixing it.
+                        await conn.execute(
+                            """
+                            UPDATE assessments
+                            SET repo_url = $1,
+                                report_json = jsonb_set(report_json, '{repo_url}', to_jsonb($1::text))
+                            WHERE repo_url = $2
+                            """,
+                            canonical, variant,
+                        )
+                        await self._merge_app_repo_url(conn, variant, canonical)
+                merged.append({"from": variant, "to": canonical})
+                logger.warning(
+                    "dedupe_repo_urls: merged non-canonical repo_url %r into %r",
+                    variant, canonical,
+                )
+        return merged
+
+    async def _merge_app_repo_url(self, conn: asyncpg.Connection, variant: str, canonical: str) -> None:
+        """Folds the ``apps`` row (if any) for a non-canonical ``variant``
+        into the canonical row. ``apps.repo_url`` is a PRIMARY KEY, so
+        (unlike ``assessments``) this can't always be a bare rename -- when
+        a canonical row already exists too, keeps the earliest
+        ``created_at`` (first time this app was ever assessed, under any
+        spelling) and the newest ``updated_at``/``infra_repo_url`` (the same
+        "most recent write wins" policy ``_upsert_app`` already uses for a
+        normal re-assessment).
+        """
+        variant_row = await conn.fetchrow("SELECT * FROM apps WHERE repo_url = $1", variant)
+        if variant_row is None:
+            return
+        canonical_row = await conn.fetchrow("SELECT * FROM apps WHERE repo_url = $1", canonical)
+        if canonical_row is None:
+            await conn.execute("UPDATE apps SET repo_url = $1 WHERE repo_url = $2", canonical, variant)
+            return
+        newer, older = (
+            (variant_row, canonical_row) if variant_row["updated_at"] > canonical_row["updated_at"]
+            else (canonical_row, variant_row)
+        )
+        await conn.execute(
+            """
+            UPDATE apps SET
+                infra_repo_url = COALESCE($1, $2),
+                created_at = $3,
+                updated_at = $4
+            WHERE repo_url = $5
+            """,
+            newer["infra_repo_url"], older["infra_repo_url"],
+            min(variant_row["created_at"], canonical_row["created_at"]),
+            max(variant_row["updated_at"], canonical_row["updated_at"]),
+            canonical,
+        )
+        await conn.execute("DELETE FROM apps WHERE repo_url = $1", variant)
 
     async def save_onboarding(
         self, assessment_id: str, files: list[dict], orchestration: dict | None = None,
