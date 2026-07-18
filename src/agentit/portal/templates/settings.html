@@ -145,7 +145,7 @@
     {% for e in recent_actions %}
     <tr>
       <td class="text-sm"><span data-timestamp="{{ e.timestamp }}">{{ e.timestamp[:19] }}</span></td>
-      <td class="text-bold">{{ e.action }}</td>
+      <td class="text-bold">{{ e.action | humanize_action }}</td>
       <td>{{ e.target_app or "—" }}</td>
       <td class="text-sm">{{ e.summary }}</td>
     </tr>

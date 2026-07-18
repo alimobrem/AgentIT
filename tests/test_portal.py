@@ -2211,6 +2211,18 @@ async def test_settings_and_schedules_are_tabs_of_each_other(client, _override_s
 # simplified behavior coverage.
 
 
+async def test_settings_recent_actions_table_shows_human_labels(client, _override_store):
+    """"Recent Auto-Mode Actions" rendered a raw events.action value
+    verbatim ("gitops-pr-opened", "auto-applied", ...)."""
+    store = _override_store
+    await store.log_event("auto-mode", "gitops-pr-opened", "auto-action-app", "info", "PR opened")
+
+    resp = await client.get("/settings")
+    assert resp.status_code == 200
+    assert ">GitOps PR opened<" in resp.text
+    assert ">gitops-pr-opened<" not in resp.text
+
+
 async def test_settings_page_no_longer_shows_allowlist_ui(client, _override_store):
     resp = await client.get("/settings")
     assert resp.status_code == 200

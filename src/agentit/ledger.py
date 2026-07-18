@@ -360,6 +360,11 @@ _ACTION_LABELS: dict[str, str] = {
     "check-removed": "Check removed",
     "skill-activated": "Skill activated",
     "skill-deprecated": "Skill deprecated",
+    # Settings' "Recent Auto-Mode Actions" table (agent_id="auto-mode").
+    "gitops-pr-opened": "GitOps PR opened",
+    "gitops-commit-failed": "GitOps commit failed",
+    "auto-applied": "Applied automatically",
+    "delivery-routing-error": "Delivery routing error",
 }
 
 
