@@ -112,6 +112,62 @@ def test_get_commit_info_api_failure_returns_empty_not_fabricated(monkeypatch):
     assert info == {}
 
 
+# ── portal/github_pr.py: get_commits_behind (GitOps lag detection) ─────
+
+
+def _compare_response(ahead_by: int, oldest_commit_date: str | None = None):
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            commits = []
+            if oldest_commit_date is not None:
+                commits = [{"sha": "c1", "commit": {"committer": {"date": oldest_commit_date}}}]
+            return {"ahead_by": ahead_by, "behind_by": 0, "status": "ahead" if ahead_by else "identical", "commits": commits}
+    return _Resp()
+
+
+def test_get_commits_behind_in_sync_reports_zero_ahead(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    with patch("agentit.portal.github_pr.requests.get", return_value=_compare_response(0)):
+        lag = github_pr.get_commits_behind("https://github.com/alimobrem/AgentIT.git", "a" * 40, "main")
+    assert lag["ahead_by"] == 0
+    assert lag["hours_behind"] is None
+
+
+def test_get_commits_behind_computes_hours_from_oldest_undeployed_commit(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    from datetime import datetime, timedelta, timezone
+    three_hours_ago = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with patch("agentit.portal.github_pr.requests.get", return_value=_compare_response(5, three_hours_ago)):
+        lag = github_pr.get_commits_behind("https://github.com/alimobrem/AgentIT.git", "a" * 40, "main")
+    assert lag["ahead_by"] == 5
+    assert lag["hours_behind"] == pytest.approx(3.0, abs=0.05)
+
+
+def test_get_commits_behind_works_without_a_github_token(monkeypatch):
+    """Unlike get_commit_info/create_onboarding_pr etc., this one call must
+    not require GITHUB_TOKEN -- GitHub's compare endpoint works
+    unauthenticated for public repos, and this check must not go dark just
+    because no token happens to be configured."""
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    with patch("agentit.portal.github_pr.requests.get", return_value=_compare_response(2)) as mock_get:
+        lag = github_pr.get_commits_behind("https://github.com/alimobrem/AgentIT.git", "a" * 40, "main")
+    assert lag["ahead_by"] == 2
+    _, kwargs = mock_get.call_args
+    assert "Authorization" not in kwargs["headers"]
+
+
+def test_get_commits_behind_api_failure_returns_empty_not_fabricated(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    with patch("agentit.portal.github_pr.requests.get", side_effect=Exception("network error")):
+        lag = github_pr.get_commits_behind("https://github.com/alimobrem/AgentIT.git", "a" * 40, "main")
+    assert lag == {}
+
+
 # ── routes/health.py::_get_deploy_status ───────────────────────────────
 
 

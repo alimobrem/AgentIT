@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -176,6 +177,55 @@ def get_commit_info(repo_url: str, sha: str) -> dict:
     except Exception:
         logger.warning("Failed to fetch commit info for %s@%s", repo_url, sha, exc_info=True)
         return {}
+
+
+def get_commits_behind(repo_url: str, base_sha: str, head_ref: str = "main") -> dict:
+    """How many commits (and how long) ``head_ref`` has moved ahead of
+    ``base_sha``, via GitHub's Compare API. Used by ``DriftDetector``
+    (watchers/drift_detector.py) to catch a stalled GitOps pipeline --
+    commits landing on ``head_ref`` but never reaching what's actually
+    deployed (the concrete gap in the 2026-07-17 incident: notify-argocd
+    stuck on pod scheduling/etcd pressure for hours with no signal that
+    main had stopped reaching the cluster).
+
+    Unlike every other function in this module, a ``GITHUB_TOKEN`` is
+    optional here: GitHub's compare endpoint works unauthenticated for
+    public repos, so a missing token never blocks this one check. Returns
+    ``{}`` (never a fabricated value) on any failure -- unreachable API,
+    unknown SHA, rate limit, etc. Callers must treat that as "lag unknown
+    this tick", never "in sync".
+    """
+    try:
+        owner, repo = _parse_owner_repo(repo_url)
+        token = os.environ.get("GITHUB_TOKEN", "")
+        hdrs = _headers(token) if token else {"Accept": "application/vnd.github+json"}
+        resp = requests.get(
+            f"{_API}/repos/{owner}/{repo}/compare/{base_sha}...{head_ref}",
+            headers=hdrs, timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.debug("get_commits_behind(%s, %s..%s) failed: %s", repo_url, base_sha, head_ref, exc)
+        return {}
+
+    ahead_by = data.get("ahead_by", 0)
+    hours_behind = None
+    commits = data.get("commits") or []
+    if ahead_by > 0 and commits:
+        oldest_date = commits[0].get("commit", {}).get("committer", {}).get("date", "")
+        if oldest_date:
+            try:
+                oldest = datetime.fromisoformat(oldest_date.replace("Z", "+00:00"))
+                hours_behind = (datetime.now(timezone.utc) - oldest).total_seconds() / 3600.0
+            except Exception:
+                logger.debug("Could not parse commit date %r", oldest_date)
+    return {
+        "ahead_by": ahead_by,
+        "behind_by": data.get("behind_by", 0),
+        "status": data.get("status", "unknown"),
+        "hours_behind": hours_behind,
+    }
 
 
 def create_onboarding_pr(
