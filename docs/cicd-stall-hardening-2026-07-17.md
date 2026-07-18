@@ -2,6 +2,43 @@
 
 **Status: implemented and shipped, fully self-contained.**
 
+**Update (2026-07-18, "enable all watchers" product decision):** this same
+day, `argocd/application.yaml` was changed to enable every remaining
+opt-in watcher/CronJob the chart ships (`agents.reassessScheduler` plus
+`cronJobs.{cveScan,complianceRescan,dependencyUpdate}` — `vuln-watcher`,
+`slo-tracker`, `drift-detector`, `skill-learner`, `capability-scout`, and
+`cronJobs.costReport` were already live). This raises the steady-state pod
+count and periodic CronJob burst load in the `agentit` namespace on the
+same topology this doc's **section B** describes (3 schedulable
+workers/3 tainted masters, one zone-pinned EBS PV per Tekton PipelineRun).
+Live signal captured *while making that change*, for the record: `oc adm
+top nodes` showed one control-plane master (`ip-10-0-64-50`) at
+**79-103% CPU / 84-93% memory** across repeated samples, and single-resource
+`oc get -o yaml` calls against the live `agentit` Argo CD `Application`
+intermittently hit `context deadline exceeded` / `Unauthorized` (auth
+errors that clear on retry are a known symptom of API-server/etcd
+pressure, not a real credential problem) before succeeding on a later
+retry — the same class of symptom section B's "0/6 nodes available" and
+"`etcdserver: request timed out`" findings describe, observed independent
+of any change made in this update. This doc's own risk-of-recurrence
+assessment did **not** model added watcher/CronJob background load as a
+variable — it was written assuming the lower pod count that predated this
+decision. None of the 6 watchers are CPU/memory-heavy in steady state
+(each requests 50-100m CPU / 128-256Mi memory; see `chart/values.yaml`),
+and the CronJobs are one-shot batch Jobs, not always-on pods, so the
+*steady-state* delta is small — but 3 of the 4 fleet-rescan CronJobs now
+fire full-fleet LLM re-assessment passes within the same Monday-morning
+window (04:00/06:00/06:00, `cveScan` moved to Tuesday to at least de-collide
+the exact 06:00 duplicate with `costReport` — see `chart/values.yaml`'s own
+comment), each spinning up a fresh batch pod plus outbound LLM calls per
+tracked app. On a cluster already showing intermittent control-plane
+pressure, a burst of concurrent CronJob pods scheduling at the same moment
+as CI PipelineRun activity is exactly the kind of added load this doc's
+section B/D already treats as a live risk, not a hypothetical one. Watch
+`oc get pods -n agentit` / `oc get cronjob -n agentit` and `oc adm top
+nodes` after the next few scheduled fires, same as this update's own
+post-deploy verification did.
+
 **Update (2026-07-18, self-containment pass):** AgentIT is a product
 deployed onto arbitrary customers' OpenShift clusters — we cannot assume
 any given customer's cluster has a well-configured (or even present)

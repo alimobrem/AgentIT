@@ -57,6 +57,14 @@ spec:
           value: "true"
         - name: agents.driftDetector.enabled
           value: "true"
+        # Per-app automatic re-assessment on the cadence set on the
+        # Assessment Detail page (apps.assessment_cadence:
+        # daily/weekly/monthly; manual opts an app out). Product decision
+        # 2026-07-18: every watcher/CronJob ships opt-in in the chart, but
+        # this live deployment now turns all of them on -- see README's
+        # "The agent fleet" section and this file's own header comment.
+        - name: agents.reassessScheduler.enabled
+          value: "true"
         - name: agents.skillLearner.enabled
           value: "true"
         - name: agents.skillLearner.interval
@@ -110,6 +118,25 @@ spec:
         # equivalent (vuln-watcher already covers CVEs continuously; this
         # covers the cost dimension weekly). See docs/deployment.md.
         - name: cronJobs.costReport.enabled
+          value: "true"
+        # The other 3 fleet-rescan CronJobs (`watch --rescan`, same as
+        # cost-report above) -- product decision 2026-07-18 to enable every
+        # watcher/CronJob the chart ships opt-in. NOTE: `--dimension` only
+        # filters which findings this job's summary line counts -- every one
+        # of these 4 CronJobs does a full LLM re-assessment pass over the
+        # *entire* tracked fleet regardless of dimension (see cli.py's
+        # `_rescan_fleet()`), so all 4 are functionally the same expensive
+        # operation under different names/schedules. cveScan's default
+        # schedule was moved off cost-report's exact time (see values.yaml)
+        # to avoid two full-fleet LLM sweeps firing in the same minute;
+        # dependency-update (Mon 04:00) still runs ~2h before cost-report
+        # (Mon 06:00) -- not an exact collision, left as-is, but worth
+        # knowing if fleet size/LLM rate limits become a constraint.
+        - name: cronJobs.cveScan.enabled
+          value: "true"
+        - name: cronJobs.complianceRescan.enabled
+          value: "true"
+        - name: cronJobs.dependencyUpdate.enabled
           value: "true"
         # External synthetic uptime probe + TLS cert-expiry watch against the
         # public Route -- see chart/templates/synthetic-probe-cronjob.yaml.

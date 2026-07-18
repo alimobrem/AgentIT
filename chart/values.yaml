@@ -44,9 +44,17 @@ gcp:
   credentialsSecret: ""
 
 cronJobs:
+  # NOTE: all 4 CronJobs below (cveScan/complianceRescan/dependencyUpdate/
+  # costReport) invoke the same `watch --rescan` full-fleet LLM
+  # re-assessment (see cli.py's `_rescan_fleet()`) -- `--dimension` only
+  # filters which findings get counted in the printed summary line, it does
+  # NOT skip re-assessing non-matching apps or dimensions. cveScan's
+  # schedule is deliberately offset from costReport's ("0 6 * * 1") below so
+  # two full-fleet LLM sweeps don't fire in the same minute now that both
+  # are enabled on the live deployment (argocd/application.yaml).
   cveScan:
     enabled: false
-    schedule: "0 6 * * 1"
+    schedule: "0 6 * * 2"
   complianceRescan:
     enabled: false
     schedule: "0 3 1 * *"
