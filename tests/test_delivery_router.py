@@ -226,6 +226,39 @@ class TestIsGitopsRegistered:
             namespace="openshift-gitops",
         )
 
+    async def test_registered_true_for_self_managed_app_with_matching_source(self):
+        """Apps that register themselves into their own fleet (e.g. AgentIT
+        via `register-self-in-fleet`) are deliberately excluded from the
+        shared apps/*-directory ApplicationSet (github_pr.
+        ensure_applicationset()) and instead run under a hand-crafted
+        Application named for the app itself, not `managed-{app}`. Falls
+        back to that literal name and counts it as registered when its
+        source repo actually matches this app's own repo."""
+        report = make_report(repo_name="test-app", repo_url="https://github.com/org/test-app")
+        with patch("agentit.portal.delivery.kube.get_custom_resource") as mock_get:
+            mock_get.side_effect = [
+                None,  # "managed-test-app" not found
+                {"spec": {"source": {"repoURL": "https://github.com/org/test-app.git"}}},
+            ]
+            registered, _url = await is_gitops_registered("test-app", report)
+        assert registered is True
+        assert mock_get.call_args_list[1].args == (
+            "argoproj.io", "v1alpha1", "applications", "test-app",
+        )
+
+    async def test_not_registered_when_same_named_app_source_does_not_match(self):
+        """A live Application that merely happens to share the app's name
+        (e.g. an unrelated demo Application pointed at a placeholder repo)
+        must not be mistaken for this app's own self-managed deployment."""
+        report = make_report(repo_name="test-app", repo_url="https://github.com/org/test-app")
+        with patch("agentit.portal.delivery.kube.get_custom_resource") as mock_get:
+            mock_get.side_effect = [
+                None,  # "managed-test-app" not found
+                {"spec": {"source": {"repoURL": "https://github.com/someone-else/test-app.git"}}},
+            ]
+            registered, _url = await is_gitops_registered("test-app", report)
+        assert registered is False
+
 
 class TestResolveClusterConfigMechanism:
     """Direct coverage of the shared decision function every mechanism-

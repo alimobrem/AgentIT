@@ -68,6 +68,8 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
         argo_status = {}
         try:
             items = kube.list_custom_resources("argoproj.io", "v1alpha1", "applications", namespace="openshift-gitops")
+            from agentit.portal.delivery import application_source_repo_url
+
             for a in items:
                 name = a.get("metadata", {}).get("name", "")
                 dest = a.get("spec", {}).get("destination", {})
@@ -78,6 +80,7 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
                     "health": a.get("status", {}).get("health", {}).get("status", "Unknown"),
                     "cluster": cluster,
                     "namespace": namespace,
+                    "repo_url": application_source_repo_url(a),
                 }
         except Exception:
             log.debug("Failed to fetch Argo CD apps for fleet enrichment", exc_info=True)
@@ -85,7 +88,7 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
             _argo_cache["data"] = argo_status
             _argo_cache["ts"] = now
 
-    from agentit.portal.delivery import gitops_application_name
+    from agentit.portal.delivery import gitops_application_name, is_self_managed_application
 
     for app_item in fleet:
         app_name = app_item["repo_name"].lower().replace("_", "-").replace(".", "-")
@@ -117,7 +120,17 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
         # the Argo CD list this enrichment pass already fetched once for
         # every app -- avoids an extra live per-row kube call for a signal
         # this loop already has in hand (docs/ui-redesign-proposal.md §4).
-        app_item["gitops_registered"] = gitops_application_name(app_name) in argo_status
+        # Also counts a literal-named Application (e.g. AgentIT's own
+        # `register-self-in-fleet` row, deliberately excluded from the
+        # apps/*-directory ApplicationSet -- see
+        # `delivery.is_self_managed_application()`) when its source repo
+        # actually matches this app's own repo.
+        app_item["gitops_registered"] = (
+            gitops_application_name(app_name) in argo_status
+            or is_self_managed_application(
+                argo.get("repo_url") if argo else None, app_item.get("repo_url"),
+            )
+        )
 
     return fleet
 

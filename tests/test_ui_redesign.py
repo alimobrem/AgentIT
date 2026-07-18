@@ -515,6 +515,63 @@ class TestGitOpsVisibility:
         assert resp.status_code == 200
         assert ">GitOps<" in resp.text
 
+    async def test_fleet_shows_gitops_badge_for_self_managed_app_with_matching_source(self, ui_client, _mock_kube):
+        """Apps that register themselves into their own fleet (e.g. AgentIT
+        via `register-self-in-fleet`) are deliberately excluded from the
+        shared apps/*-directory ApplicationSet (github_pr.
+        ensure_applicationset() excludes apps/agentit specifically, to avoid
+        a circular/duplicate Application) and instead run under a
+        hand-crafted Application named for the app itself, not
+        `managed-{app}`. Regression coverage for the bug where this showed
+        a permanently-stuck "GitOps (pending)" badge -- as if awaiting a
+        first delivery that, by design, can never happen via that path --
+        even though the app is genuinely GitOps-managed."""
+        client, store = ui_client
+        report = make_report(repo_name="self-managed-app")
+        aid = await store.save(report)
+        await store.set_infra_repo_url(aid, "https://github.com/org/gitops-infra")
+        _mock_kube["list_custom_resources"].return_value = [
+            {
+                "metadata": {"name": "self-managed-app"},
+                "spec": {
+                    "source": {"repoURL": report.repo_url + ".git"},
+                    "destination": {"server": "https://cluster", "namespace": "self-managed-app"},
+                },
+                "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}},
+            },
+        ]
+        with patch("agentit.portal.routes.fleet._argo_cache", {"data": {}, "ts": 0}):
+            resp = await client.get("/fleet")
+
+        assert resp.status_code == 200
+        assert ">GitOps<" in resp.text
+        assert "GitOps (pending)" not in resp.text
+
+    async def test_fleet_shows_pending_badge_when_same_named_app_source_does_not_match(self, ui_client, _mock_kube):
+        """A live Application that merely happens to share an app's name
+        (e.g. an unrelated, hand-created demo Application pointed at a
+        placeholder repo) must NOT be mistaken for that app's own
+        self-managed GitOps deployment -- only a source-repo match counts."""
+        client, store = ui_client
+        report = make_report(repo_name="lookalike-app")
+        aid = await store.save(report)
+        await store.set_infra_repo_url(aid, "https://github.com/org/gitops-infra")
+        _mock_kube["list_custom_resources"].return_value = [
+            {
+                "metadata": {"name": "lookalike-app"},
+                "spec": {
+                    "source": {"repoURL": "https://github.com/someone-else/lookalike-app.git"},
+                    "destination": {"server": "https://cluster", "namespace": "lookalike-app"},
+                },
+                "status": {"sync": {"status": "Unknown"}, "health": {"status": "Healthy"}},
+            },
+        ]
+        with patch("agentit.portal.routes.fleet._argo_cache", {"data": {}, "ts": 0}):
+            resp = await client.get("/fleet")
+
+        assert resp.status_code == 200
+        assert "GitOps (pending)" in resp.text
+
     async def test_fleet_shows_not_registered_badge_for_unregistered_app(self, ui_client):
         """Direct Apply has been removed as a concept entirely -- Fleet
         shows "Not GitOps-registered" for an app with no known infra repo,

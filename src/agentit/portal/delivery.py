@@ -298,6 +298,44 @@ def gitops_application_name(app_name: str) -> str:
     return f"managed-{_sanitize_app_name(app_name)}"
 
 
+def application_source_repo_url(application: dict) -> str | None:
+    """The code repo an Argo CD ``Application`` dict deploys from --
+    ``spec.source.repoURL``, falling back to ``spec.sources[0].repoURL`` for
+    multi-source Applications. Single place both ``is_gitops_registered()``
+    and the Fleet-wide enrichment (``routes/fleet.py``) read this from, so
+    the two stay in sync.
+    """
+    spec = application.get("spec") or {}
+    source = spec.get("source") or {}
+    if not source:
+        sources = spec.get("sources") or []
+        source = sources[0] if sources else {}
+    return source.get("repoURL")
+
+
+def is_self_managed_application(candidate_repo_url: str | None, app_repo_url: str | None) -> bool:
+    """Whether a literal-named Argo CD Application's own source repo
+    (``candidate_repo_url``, from ``application_source_repo_url()``)
+    actually matches ``app_repo_url`` (the fleet app's own code repo).
+
+    Apps that register themselves into their own fleet (e.g. AgentIT via
+    ``register-self-in-fleet``) are deliberately excluded from the shared
+    ``apps/*``-directory ApplicationSet (``github_pr.ensure_applicationset()``
+    excludes ``apps/agentit`` specifically, to avoid a circular/duplicate
+    Application) and instead run under a hand-crafted Application named for
+    the app itself (``argocd/application.yaml``'s ``agentit``, not
+    ``managed-agentit``). Comparing source repo URLs -- not just presence of
+    an Application with a matching name -- is what lets that literal-named
+    Application count as this app's own GitOps registration without also
+    matching an unrelated Application that just happens to share the name
+    (e.g. a hand-created demo Application pointed at a placeholder repo).
+    """
+    if not candidate_repo_url or not app_repo_url:
+        return False
+    from agentit.portal.store import normalize_repo_url
+    return normalize_repo_url(candidate_repo_url) == normalize_repo_url(app_repo_url)
+
+
 async def is_gitops_registered(
     app_name: str, report: AssessmentReport | None,
 ) -> tuple[bool, str | None]:
@@ -308,6 +346,11 @@ async def is_gitops_registered(
     cluster call itself fails (unreachable/offline cluster, e.g. tests) --
     a successful call that simply finds no ``Application`` is NOT registered
     regardless of ``infra_repo_url``.
+
+    Also counts as registered when a literal-named Application (rather than
+    the ``managed-{app}`` one) exists and actually sources from this app's
+    own repo -- see ``is_self_managed_application()`` for why (the
+    self-referential ``register-self-in-fleet`` case).
     """
     infra_repo_url = report.infra_repo_url if report is not None else None
     try:
@@ -316,6 +359,16 @@ async def is_gitops_registered(
             "argoproj.io", "v1alpha1", "applications", gitops_application_name(app_name),
             namespace="openshift-gitops",
         )
+        if app is None and report is not None and report.repo_url:
+            literal = await asyncio.to_thread(
+                kube.get_custom_resource,
+                "argoproj.io", "v1alpha1", "applications", _sanitize_app_name(app_name),
+                namespace="openshift-gitops",
+            )
+            if literal is not None and is_self_managed_application(
+                application_source_repo_url(literal), report.repo_url,
+            ):
+                app = literal
         return app is not None, infra_repo_url
     except Exception as exc:
         logger.debug(
