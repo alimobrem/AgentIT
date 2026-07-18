@@ -71,6 +71,19 @@ README's "CI run coalescing under concurrent pushes" section for the full
 mechanism; this note exists here because the contention it relieves is the
 same congestion class section B below already describes.
 
+**Live verification of the GitHub Actions half:** the commit that added
+`concurrency`/`cancel-in-progress` to `tests.yml`/`security.yml` was pushed
+directly to `main` while a prior push's `Tests` run was still `in_progress`
+under the *old* (no-concurrency) workflow definition -- that older run
+correctly kept running to completion, since GitHub Actions evaluates a
+run's own concurrency group from the workflow file as it existed at that
+run's own commit, not retroactively. This one-line doc commit is the
+follow-up push used to confirm the other direction: with the new
+concurrency block now present on `main` itself, this push's own `Tests`/
+`Security Scan` runs should cancel the still-`in_progress` run from the
+commit that introduced the concurrency block, since both now share the
+same `Tests-refs/heads/main` group.
+
 ## Incident recap
 
 On the night of 2026-07-17, commits merged to `main` stopped reaching the
