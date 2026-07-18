@@ -660,7 +660,20 @@ class FleetOrchestrator:
         return agents
 
     def _determine_gates(self) -> list[str]:
-        """Determine which human approval gates are needed."""
+        """Determine which human approval gates are needed.
+
+        This list is purely informational (rendered into the discarded
+        orchestration-summary.md checklist below and the CLI's plain echo)
+        -- nothing ever passes it to `store.create_gate()` or checks it
+        before delivery, so it has never been a real, resolvable gate a
+        human could act on. A `high`/`critical` "deploy-approval" entry
+        used to be appended here on the mistaken assumption that this list
+        was itself an enforcement mechanism; criticality's one real gating
+        effect on delivery is `_can_auto_approve()` below (consumed by
+        `AutoMode`/the onboarding auto-deliver chain), so that line was
+        removed as dead code rather than left to imply a gate that was
+        never actually created.
+        """
         gates = []
 
         critical_findings = sum(
@@ -670,9 +683,6 @@ class FleetOrchestrator:
 
         if critical_findings > 0:
             gates.append("security-review")
-
-        if self.report.criticality in ("high", "critical"):
-            gates.append("deploy-approval")
 
         gates.append("final-approval")
         return gates

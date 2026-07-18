@@ -67,6 +67,19 @@ class TestPlanSelectsAgents:
         plan = orch.plan()
         assert "codechange" not in plan.agents_to_run
 
+    def test_gates_required_no_longer_varies_by_criticality(self, tmp_path: Path) -> None:
+        """`gates_required` (`_determine_gates()`) was never wired to
+        `store.create_gate()` or any delivery check -- the `high`/`critical`
+        "deploy-approval" entry it used to add was dead code implying a
+        gate that was never actually created. Criticality's one real
+        gating effect on delivery is `auto_approve` (see TestAutoApprove
+        below), which is unaffected by this."""
+        for crit in ("low", "medium", "high", "critical"):
+            report = make_report(criticality=crit)
+            orch = FleetOrchestrator(report, tmp_path / f"gates-{crit}")
+            plan = orch.plan()
+            assert "deploy-approval" not in plan.gates_required
+
 
 class TestAutoApprove:
     def test_auto_approve_for_low_crit_high_score(self, tmp_path: Path) -> None:

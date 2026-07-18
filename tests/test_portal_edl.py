@@ -152,6 +152,29 @@ async def test_fleet_assess_modal_has_dialog_semantics(edl_client):
     assert "keydown.escape" in tag or "keydown.escape" in resp.text[max(0, m.start() - 400): m.end()]
 
 
+async def test_criticality_field_has_help_text_on_both_assess_entry_points(edl_client):
+    """Setting/changing Criticality must explain what it actually does today
+    (2026-07-18 re-verification -- see README's Criticality paragraph):
+    auto-approve eligibility and default SLO strictness are real; a
+    'deploy-approval' gate is not, so the help text must not claim one."""
+    client, store = edl_client
+
+    # Dashboard's empty-state hero form (no assessments yet).
+    resp = await client.get("/fleet")
+    assert resp.status_code == 200
+    assert "auto-open a GitOps PR" in resp.text
+    assert "deploy-approval" not in resp.text.lower()
+
+    # Fleet's own Assess modal (served once >=1 assessment exists).
+    await store.save(make_report())
+    resp = await client.get("/fleet")
+    assert resp.status_code == 200
+    assert 'id="criticality"' in resp.text
+    assert "auto-open a GitOps PR" in resp.text
+    assert "stricter default SLO targets" in resp.text
+    assert "deploy-approval" not in resp.text.lower()
+
+
 async def test_onboard_results_dry_run_apply_status_outside_button(edl_client):
     """EDL §7: Dry Run → deliver choice; 'No dry run yet' is a sibling chip."""
     client, store = edl_client

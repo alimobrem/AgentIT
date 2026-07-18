@@ -47,7 +47,7 @@
       <th>Trend</th>
       <th>Deployed</th>
       <th>Namespace</th>
-      <th title="How much oversight this app needs -- set at Assess time, not inferred. High/critical apps always require human deploy approval (never auto-approved) and get stricter default SLO targets.">Criticality</th>
+      <th title="How much oversight this app needs -- set at Assess time, not inferred. High/critical apps can never auto-deliver (a human must click Deliver, or approve a gate, before any PR opens) and get stricter default SLO targets.">Criticality</th>
       <th>Critical + High</th>
       <th title="PRs AgentIT has opened for this app against its code repo and/or GitOps infra repo">Open PRs / Total</th>
       <th></th>
@@ -132,7 +132,7 @@
       <td class="text-sm text-muted">{{ r.deploy_namespace | default("—") }}</td>
       <td>
         <span class="badge badge-{{ r.criticality }}"
-          title="How much oversight this app needs -- set at Assess time, not inferred. High/critical apps always require human deploy approval (never auto-approved) and get stricter default SLO targets.">{{ r.criticality }}</span>
+          title="How much oversight this app needs -- set at Assess time, not inferred. High/critical apps can never auto-deliver (a human must click Deliver, or approve a gate, before any PR opens) and get stricter default SLO targets.">{{ r.criticality }}</span>
       </td>
       <td class="{% if r.critical_count > 0 %}text-danger text-bold{% endif %}">{{ r.critical_count }}</td>
       <td class="text-sm">
@@ -240,6 +240,7 @@
           <option value="high">High</option>
           <option value="critical">Critical</option>
         </select>
+        <span class="text-muted text-xs">How much oversight this app needs. Low/Medium can auto-open a GitOps PR with no clicks (if Auto-Mode is on and the safety check passes); High/Critical always needs an explicit human Deliver click (or gate approval) before any PR opens. Higher criticality also sets stricter default SLO targets. Sticky across Re-scan -- change it here, or via a fresh Assess of the same repo.</span>
       </div>
       <button type="submit" class="btn">
         <span class="btn-label">Run Assessment</span>
