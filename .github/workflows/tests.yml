@@ -4,6 +4,17 @@ on:
     branches: [main]
   pull_request:
 
+# Many agents can push to main in quick succession -- without this, every
+# push gets its own full run-to-completion Tests workflow, piling up runner
+# minutes and queue time for commits that are already stale by the time
+# they'd finish. Scoping the group per-ref (not just per-workflow) means a
+# new push to main (or a new push to a PR branch) cancels any still-running
+# run for that *same* ref only -- concurrent runs on different branches/PRs
+# are unaffected.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
