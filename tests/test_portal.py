@@ -3597,6 +3597,12 @@ async def test_capabilities_page_shows_catalog_change_events(client, _override_s
     assert "Check removed: reliability/has-readiness-probe" in resp.text
     assert "badge-success" in resp.text
     assert "badge-warning" in resp.text
+    # The badge itself shows a real phrase, not the raw action string
+    # (Events' own full-detail page is still the place for the raw value).
+    assert ">Skill added<" in resp.text
+    assert ">Check removed<" in resp.text
+    assert ">skill-added<" not in resp.text
+    assert ">check-removed<" not in resp.text
 
 
 async def test_background_skill_inventory_diff_surfaces_on_events_page(client, _override_store, tmp_path, monkeypatch):

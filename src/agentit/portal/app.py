@@ -16,6 +16,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
+from agentit.ledger import humanize_action as _humanize_action
 from agentit.ledger import humanize_card_type as _humanize_card_type
 from agentit.ledger import humanize_delivery_mechanism as _humanize_mechanism
 from agentit.ledger import humanize_gate_type as _humanize_gate_type
@@ -374,6 +375,7 @@ templates.env.filters["clean_source"] = _clean_source
 templates.env.filters["humanize_mechanism"] = _humanize_mechanism
 templates.env.filters["humanize_card_type"] = _humanize_card_type
 templates.env.filters["humanize_gate_type"] = _humanize_gate_type
+templates.env.filters["humanize_action"] = _humanize_action
 
 
 @app.exception_handler(404)

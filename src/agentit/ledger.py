@@ -344,6 +344,40 @@ def humanize_gate_type(gate_type: str) -> str:
     return gate_type.replace("-", " ").replace("_", " ").strip().capitalize()
 
 
+# Human phrases for a raw events.action value -- Capabilities' "Recent
+# Catalog Changes" table (and any other page rendering a raw action
+# string straight from the events table) showed e.g. "skill-added",
+# "check-removed" verbatim. Not exhaustive by design (see
+# humanize_gate_type()'s docstring for why a graceful fallback beats a
+# table that must be kept in lockstep with every log_event() call site):
+# only the handful of actions a real template renders directly today are
+# listed; everything else degrades to a readable phrase instead of the
+# raw hyphenated identifier.
+_ACTION_LABELS: dict[str, str] = {
+    "skill-added": "Skill added",
+    "skill-removed": "Skill removed",
+    "check-added": "Check added",
+    "check-removed": "Check removed",
+    "skill-activated": "Skill activated",
+    "skill-deprecated": "Skill deprecated",
+}
+
+
+def humanize_action(action: str) -> str:
+    """Decode a raw events.action value into a readable phrase. Checks the
+    explicit table first, then degrades to Title Case with hyphens/
+    underscores turned into spaces -- never the raw identifier.
+
+    Public: also registered as the ``humanize_action`` Jinja filter (see
+    portal/app.py).
+    """
+    if not action:
+        return action
+    if action in _ACTION_LABELS:
+        return _ACTION_LABELS[action]
+    return action.replace("-", " ").replace("_", " ").strip().capitalize()
+
+
 _MECHANISM_SHORT_LABELS: dict[str, str] = {
     "direct-apply": "Applied directly",
     # These three all say plainly *which* repo the PR/commit targets --

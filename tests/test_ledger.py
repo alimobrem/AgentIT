@@ -10,6 +10,7 @@ from agentit.ledger import (
     get_chain_cards,
     get_ledger_cards,
     group_cards_by_app,
+    humanize_action,
     humanize_card_type,
     humanize_gate_type,
     recent_watcher_failures,
@@ -371,6 +372,22 @@ class TestHumanizeGateType:
 
     def test_empty_gate_type_does_not_crash(self):
         assert humanize_gate_type("") == ""
+
+
+class TestHumanizeAction:
+    """Capabilities' "Recent Catalog Changes" table rendered a raw
+    events.action value ("skill-added", "check-removed", ...) verbatim."""
+
+    def test_known_actions_get_a_real_phrase(self):
+        assert humanize_action("skill-added") == "Skill added"
+        assert humanize_action("check-removed") == "Check removed"
+        assert humanize_action("skill-activated") == "Skill activated"
+
+    def test_unknown_action_still_reads_as_a_phrase(self):
+        assert humanize_action("some-future-action") == "Some future action"
+
+    def test_empty_action_does_not_crash(self):
+        assert humanize_action("") == ""
 
 
 class TestRecentWatcherFailures:
