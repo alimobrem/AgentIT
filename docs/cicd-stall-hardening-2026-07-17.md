@@ -53,6 +53,37 @@ pruner recommendation this doc originally made is superseded — see "A.
 Cluster-level pruner" below for the full before/after and the one piece
 (registry blob storage GC) that's a genuine, structural exception.
 
+**Update (2026-07-18, CI run coalescing):** a separate, related contributor to
+node-resource congestion showed up while a real fix was stuck queued behind
+it: many agents pushing to `main` in quick succession each got their own
+full, independent CI run in both systems (GitHub Actions and this Tekton
+pipeline), so a burst of pushes could pile up several concurrent runs —
+retries and node pressure included — for commits that were already stale by
+the time their own run finished. GitHub Actions now sets a per-ref
+`concurrency`/`cancel-in-progress` group on both workflows (built-in,
+low-risk). Tekton has no equivalent primitive, so `agentit-ci`
+(`chart/templates/tekton/pipeline.yaml`) gained a new first task,
+`supersede-stale-runs`, that cancels other still-active `agentit-ci`
+PipelineRuns strictly older than itself — unless that run already started
+`build-image` (i.e. it may already be building/pushing an image on its way
+to `notify-argocd`), in which case it's deliberately left alone. See the
+README's "CI run coalescing under concurrent pushes" section for the full
+mechanism; this note exists here because the contention it relieves is the
+same congestion class section B below already describes.
+
+**Live verification of the GitHub Actions half:** the commit that added
+`concurrency`/`cancel-in-progress` to `tests.yml`/`security.yml` was pushed
+directly to `main` while a prior push's `Tests` run was still `in_progress`
+under the *old* (no-concurrency) workflow definition -- that older run
+correctly kept running to completion, since GitHub Actions evaluates a
+run's own concurrency group from the workflow file as it existed at that
+run's own commit, not retroactively. This one-line doc commit is the
+follow-up push used to confirm the other direction: with the new
+concurrency block now present on `main` itself, this push's own `Tests`/
+`Security Scan` runs should cancel the still-`in_progress` run from the
+commit that introduced the concurrency block, since both now share the
+same `Tests-refs/heads/main` group.
+
 ## Incident recap
 
 On the night of 2026-07-17, commits merged to `main` stopped reaching the

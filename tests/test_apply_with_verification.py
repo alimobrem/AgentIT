@@ -1,16 +1,20 @@
 """Tests for the shared apply-with-verification orchestration
 (``cluster_apply.apply_with_verification``).
 
-Direct Apply has been removed as a concept entirely -- the only remaining
-caller is the ``cluster-admin-review`` gate's approval path
-(``routes/gates.py``), for CI/CD manifests destined for a shared operator
-namespace. ``force_dry_run_first``/``record_outcomes_on_partial_failure``/
-``force`` (all specific to the now-removed direct-apply/``AutoMode``/
-``cluster-conflict-review`` call shapes) have been removed from this
-function's signature along with them -- this now covers only the one real
-caller's shape: a single ``apply_manifests_to_cluster()`` call, the
-consolidated side effects (``record_skill_outcomes()``, ``audit_log()``),
-and conflict-vs-error tracking.
+Direct Apply has been removed as a concept entirely, and (2026-07-18) so has
+this function's own last caller, the ``cluster-admin-review`` gate's
+approval path (``routes/gates.py``, for CI/CD manifests destined for a
+shared operator namespace -- that category now delivers via a GitOps PR
+instead, same as every other category). No live code path calls this
+function anymore; it's kept, unreachable, as a real, well-tested, general
+"apply YAML manifests to a cluster safely" primitive rather than deleted --
+see the function's own docstring. ``force_dry_run_first``/``record_outcomes_
+on_partial_failure``/``force`` (all specific to the earlier-removed direct-
+apply/``AutoMode``/``cluster-conflict-review`` call shapes) were removed
+from this function's signature along with them -- this covers a single
+``apply_manifests_to_cluster()`` call, the consolidated side effects
+(``record_skill_outcomes()``, ``audit_log()``), and conflict-vs-error
+tracking.
 """
 from __future__ import annotations
 

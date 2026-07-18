@@ -255,6 +255,134 @@ def _gate_card(gate: dict, *, known_app_name: str | None = None) -> dict:
     }
 
 
+# Human labels for the card_type letter (docs/ledger-design-spec.md §1's
+# A-P table) -- the letter itself stays the real filter value/query param
+# (ledger.html's <option value="{{ letter }}">, insights.py's card_type
+# query arg) so nothing about the underlying data model or route changes;
+# only what's ever shown to a user is affected. Deliberately a category
+# name distinct from a card's own humanized title (see
+# _EVENT_ACTION_TITLES below) rather than restating it -- "Gate opened" +
+# "GitOps PR pending" on the same card is two levels of real information,
+# not one fact said twice.
+CARD_TYPE_LABELS: dict[str, str] = {
+    "A": "Assessment",
+    "B": "Fix / onboard generated",
+    "C": "Classifier",
+    "D": "Gate opened",
+    "E": "Gate resolved",
+    "F": "Delivery",
+    "G": "Fix review",
+    "H": "Watcher tick",
+    "I": "Needs attention",
+    "J": "SLO breach",
+    "K": "Drift",
+    "L": "Self-correction",
+    "M": "Learning run",
+    "N": "Catalog change",
+    "O": "Self-improvement",
+    "P": "Setting change",
+}
+
+
+def humanize_card_type(card_type: str) -> str:
+    """Decode a card_type letter into its real category name (see
+    CARD_TYPE_LABELS above) -- never the bare letter, which means nothing
+    to a user without reading this module's own source. Falls back to the
+    letter itself for any value outside A-P (there shouldn't be one, but a
+    lookup miss should degrade to "unlabeled", not a blank/KeyError).
+
+    Public (not just this module's own Ledger badge use): also registered
+    as the ``humanize_card_type`` Jinja filter (see portal/app.py) so
+    ledger.html's "Card type" filter dropdown decodes the same table
+    instead of listing bare letters A-P with no explanation.
+    """
+    return CARD_TYPE_LABELS.get(card_type, card_type)
+
+
+# Human labels for a gate's real gate_type -- gate_card() (_macros.html)
+# used to render this as `{{ gate.gate_type | upper }}`, e.g.
+# "GITOPS-PR-PENDING-SHARED-NAMESPACE" or "AUTO-MODE-REVIEW", an all-caps
+# hyphenated internal identifier with no spaces, on both Admin Review and
+# every app's Actions tab. Deliberately not a strict dict-only lookup like
+# CARD_TYPE_LABELS above: gate types have changed more than once this
+# session (cluster-conflict-review and auto-mode-scope-review retired,
+# cluster-admin-review retired but still rendered for in-flight rows,
+# gitops-pr-pending-shared-namespace added) and the "finding-{category}"
+# family covers whichever check dimensions checks/ actually has -- a
+# fallback that degrades gracefully to a readable phrase (never a raw,
+# unhumanized value) matters more here than an exhaustive table that goes
+# stale the next time a gate type is renamed.
+GATE_TYPE_LABELS: dict[str, str] = {
+    "cluster-admin-review": "Cluster-admin review",
+    "gitops-pr-pending": "GitOps PR pending",
+    "gitops-pr-pending-shared-namespace": "GitOps PR pending (shared namespace)",
+    "auto-mode-review": "Auto-mode review",
+    "rollback-review": "Rollback review",
+    "finding-unresolved-escalation": "Unresolved finding escalation",
+}
+
+
+def humanize_gate_type(gate_type: str) -> str:
+    """Decode a gate's gate_type into a real, readable phrase -- never the
+    raw hyphenated identifier. Checks the explicit table first; a
+    "finding-{category}" gate (one per check dimension -- see
+    routes/webhooks.py's per-category dispatcher) becomes "{Category}
+    finding"; anything else degrades to Title Case with hyphens/
+    underscores turned into spaces, so an unrecognized or future gate type
+    still reads as a phrase instead of a raw identifier.
+
+    Public: also registered as the ``humanize_gate_type`` Jinja filter
+    (see portal/app.py) for _macros.html's shared ``gate_card()``.
+    """
+    if not gate_type:
+        return gate_type
+    if gate_type in GATE_TYPE_LABELS:
+        return GATE_TYPE_LABELS[gate_type]
+    if gate_type.startswith("finding-"):
+        category = gate_type[len("finding-"):].replace("-", " ").replace("_", " ").strip()
+        return f"{category.capitalize()} finding" if category else "Finding"
+    return gate_type.replace("-", " ").replace("_", " ").strip().capitalize()
+
+
+# Human phrases for a raw events.action value -- Capabilities' "Recent
+# Catalog Changes" table (and any other page rendering a raw action
+# string straight from the events table) showed e.g. "skill-added",
+# "check-removed" verbatim. Not exhaustive by design (see
+# humanize_gate_type()'s docstring for why a graceful fallback beats a
+# table that must be kept in lockstep with every log_event() call site):
+# only the handful of actions a real template renders directly today are
+# listed; everything else degrades to a readable phrase instead of the
+# raw hyphenated identifier.
+_ACTION_LABELS: dict[str, str] = {
+    "skill-added": "Skill added",
+    "skill-removed": "Skill removed",
+    "check-added": "Check added",
+    "check-removed": "Check removed",
+    "skill-activated": "Skill activated",
+    "skill-deprecated": "Skill deprecated",
+    # Settings' "Recent Auto-Mode Actions" table (agent_id="auto-mode").
+    "gitops-pr-opened": "GitOps PR opened",
+    "gitops-commit-failed": "GitOps commit failed",
+    "auto-applied": "Applied automatically",
+    "delivery-routing-error": "Delivery routing error",
+}
+
+
+def humanize_action(action: str) -> str:
+    """Decode a raw events.action value into a readable phrase. Checks the
+    explicit table first, then degrades to Title Case with hyphens/
+    underscores turned into spaces -- never the raw identifier.
+
+    Public: also registered as the ``humanize_action`` Jinja filter (see
+    portal/app.py).
+    """
+    if not action:
+        return action
+    if action in _ACTION_LABELS:
+        return _ACTION_LABELS[action]
+    return action.replace("-", " ").replace("_", " ").strip().capitalize()
+
+
 _MECHANISM_SHORT_LABELS: dict[str, str] = {
     "direct-apply": "Applied directly",
     # These three all say plainly *which* repo the PR/commit targets --

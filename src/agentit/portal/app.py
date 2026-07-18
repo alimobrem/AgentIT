@@ -16,7 +16,10 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
+from agentit.ledger import humanize_action as _humanize_action
+from agentit.ledger import humanize_card_type as _humanize_card_type
 from agentit.ledger import humanize_delivery_mechanism as _humanize_mechanism
+from agentit.ledger import humanize_gate_type as _humanize_gate_type
 from agentit.portal.helpers import (
     get_store,
     get_retention_days,
@@ -72,15 +75,14 @@ def _auth_context_processor(request: Request) -> dict:
 
 
 def _nav_badges_context_processor(request: Request) -> dict:
-    """Exposes the two gate-count nav badges to every template -- computed
-    by `nav_badges_middleware` below and stashed on `request.state`, since
+    """Exposes the gate-count nav badge to every template -- computed by
+    `nav_badges_middleware` below and stashed on `request.state`, since
     Jinja2Templates' context_processors run synchronously and can't
     themselves `await` the store. See `helpers.get_nav_gate_badge_counts`
-    for what each count means and why this exists (docs/ui-redesign-
+    for what this count means and why this exists (docs/ui-redesign-
     proposal.md §2/§5's nav-badge fix)."""
     return {
         "nav_pending_actions": getattr(request.state, "nav_pending_actions", 0),
-        "nav_admin_review_pending": getattr(request.state, "nav_admin_review_pending", 0),
     }
 
 
@@ -159,13 +161,11 @@ async def nav_badges_middleware(request: Request, call_next):
     metrics/oauth paths, which never render `base.html`'s nav and don't
     need this precomputed."""
     request.state.nav_pending_actions = 0
-    request.state.nav_admin_review_pending = 0
     if not request.url.path.startswith(_NAV_BADGE_SKIP_PREFIXES):
         try:
             s = await get_store()
             counts = await get_nav_gate_badge_counts(s)
             request.state.nav_pending_actions = counts["pending_actions"]
-            request.state.nav_admin_review_pending = counts["admin_review"]
         except Exception:
             log.debug("Failed to compute nav gate badge counts", exc_info=True)
     return await call_next(request)
@@ -373,6 +373,9 @@ templates.env.filters["dimension_label"] = _format_dimension
 templates.env.filters["tojson"] = _tojson_filter
 templates.env.filters["clean_source"] = _clean_source
 templates.env.filters["humanize_mechanism"] = _humanize_mechanism
+templates.env.filters["humanize_card_type"] = _humanize_card_type
+templates.env.filters["humanize_gate_type"] = _humanize_gate_type
+templates.env.filters["humanize_action"] = _humanize_action
 
 
 @app.exception_handler(404)

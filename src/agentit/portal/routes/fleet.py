@@ -68,6 +68,8 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
         argo_status = {}
         try:
             items = kube.list_custom_resources("argoproj.io", "v1alpha1", "applications", namespace="openshift-gitops")
+            from agentit.portal.delivery import application_source_repo_url
+
             for a in items:
                 name = a.get("metadata", {}).get("name", "")
                 dest = a.get("spec", {}).get("destination", {})
@@ -78,6 +80,7 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
                     "health": a.get("status", {}).get("health", {}).get("status", "Unknown"),
                     "cluster": cluster,
                     "namespace": namespace,
+                    "repo_url": application_source_repo_url(a),
                 }
         except Exception:
             log.debug("Failed to fetch Argo CD apps for fleet enrichment", exc_info=True)
@@ -85,7 +88,7 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
             _argo_cache["data"] = argo_status
             _argo_cache["ts"] = now
 
-    from agentit.portal.delivery import gitops_application_name
+    from agentit.portal.delivery import gitops_application_name, is_self_managed_application
 
     for app_item in fleet:
         app_name = app_item["repo_name"].lower().replace("_", "-").replace(".", "-")
@@ -117,7 +120,17 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
         # the Argo CD list this enrichment pass already fetched once for
         # every app -- avoids an extra live per-row kube call for a signal
         # this loop already has in hand (docs/ui-redesign-proposal.md §4).
-        app_item["gitops_registered"] = gitops_application_name(app_name) in argo_status
+        # Also counts a literal-named Application (e.g. AgentIT's own
+        # `register-self-in-fleet` row, deliberately excluded from the
+        # apps/*-directory ApplicationSet -- see
+        # `delivery.is_self_managed_application()`) when its source repo
+        # actually matches this app's own repo.
+        app_item["gitops_registered"] = (
+            gitops_application_name(app_name) in argo_status
+            or is_self_managed_application(
+                argo.get("repo_url") if argo else None, app_item.get("repo_url"),
+            )
+        )
 
     return fleet
 
@@ -127,10 +140,11 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
 
 async def _attach_pending_actions(fleet: list[dict], s: object) -> None:
     """"Needs action" badge per app (docs/ui-redesign-proposal.md §2) -- a
-    cheap ``GROUP BY repo_url`` count of pending, app-owner-scoped gates
-    (``cluster-admin-review`` excluded: that's a different audience's
-    concern, counted separately for the Admin Review nav badge). Mutates
-    each fleet row in place with ``pending_actions_count``.
+    cheap ``GROUP BY repo_url`` count of pending gates. Every gate type is
+    per-app now (``cluster-admin-review``, the one cross-app type this used
+    to exclude for a separate Admin Review nav badge, was retired
+    2026-07-18 -- see delivery.py). Mutates each fleet row in place with
+    ``pending_actions_count``.
 
     Keyed by ``repo_url`` (not ``assessment_id``): ``list_gates()`` joins
     each gate back to the specific historical assessment it was created
@@ -141,7 +155,6 @@ async def _attach_pending_actions(fleet: list[dict], s: object) -> None:
     re-assessed -- the same orphaned-gate-attribution bug fixed in
     ``store.py``/``store_pg.py``'s ``list_gates_for_assessment()``.
     """
-    from agentit.portal.delivery import ADMIN_REVIEW_GATE_TYPE
     try:
         pending_gates = await s.list_gates(status="pending")
     except Exception:
@@ -150,8 +163,6 @@ async def _attach_pending_actions(fleet: list[dict], s: object) -> None:
 
     counts: dict[str, int] = {}
     for g in pending_gates:
-        if g.get("gate_type") == ADMIN_REVIEW_GATE_TYPE:
-            continue
         repo_url = g.get("repo_url")
         if repo_url:
             counts[repo_url] = counts.get(repo_url, 0) + 1
@@ -286,7 +297,7 @@ async def home() -> RedirectResponse:
 
 @router.get("/fleet", response_class=HTMLResponse)
 async def fleet_page(request: Request) -> HTMLResponse:
-    """Portfolio scoreboard: apps, scores, Assess / Re-assess / Delete.
+    """Portfolio scoreboard: apps, scores, Assess / Scan (Re-scan) / Delete.
 
     Pending human gates are owned by Ledger Needs You — this page only
     offers a quiet pointer, never an ops-inbox badge column.

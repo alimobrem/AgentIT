@@ -1458,17 +1458,15 @@
     <div id="nav-primary" class="links" :class="{ 'links-open': navOpen }">
       {# Exclusive jobs (docs/portal-experience-design-language.md §1):
          Ledger = fleet-wide PR list/lifecycle (badge = PRs waiting for
-         your approval); Fleet = scoreboard only; Admin Review = elevated
-         queue (primary only when count > 0). #}
+         your approval); Fleet = scoreboard only. Admin Review (a third,
+         elevated-queue nav item) was retired 2026-07-18 along with the
+         `cluster-admin-review` gate type it existed solely for -- every
+         gate type is per-app now, so there's no longer a cross-app queue
+         to link here. #}
       <a href="/ledger" class="{{ 'nav-active' if request.url.path == '/' or request.url.path.startswith('/ledger') }}">Ledger
         {% if nav_pending_actions %}<span class="nav-badge">{{ nav_pending_actions }}</span>{% endif %}
       </a>
       <a href="/fleet" class="{{ 'nav-active' if request.url.path.startswith('/fleet') or request.url.path.startswith('/assessments') }}">Fleet</a>
-      {% if nav_admin_review_pending %}
-      <a href="/admin-review" class="{{ 'nav-active' if request.url.path.startswith('/admin-review') }}">Admin Review
-        <span class="nav-badge">{{ nav_admin_review_pending }}</span>
-      </a>
-      {% endif %}
       <a href="/health" class="{{ 'nav-active' if request.url.path.startswith('/health') }}">Health</a>
       <a href="/insights" class="{{ 'nav-active' if request.url.path == '/insights' }}">Insights</a>
     </div>
@@ -1524,18 +1522,12 @@
           <a href="/schedules" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/schedules' }}">Schedules</a>
           {# aria-label + aria-describedby (rather than letting the sub-span's
              text run into the link's accessible name by default) so a screen
-             reader announces "Decisions, Audit log — Ledger owns the stream"
+             reader announces "Decisions, Audit log — Events owns the stream"
              as label + description, not one run-on name. #}
           <a href="/decisions" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/decisions') }}"
              aria-label="Decisions" aria-describedby="user-menu-decisions-sub">Decisions
-            <span class="user-menu-item-sub" id="user-menu-decisions-sub">Audit log — Ledger owns the stream</span>
+            <span class="user-menu-item-sub" id="user-menu-decisions-sub">Audit log — Events owns the stream</span>
           </a>
-          {% if not nav_admin_review_pending %}
-          <a href="/admin-review" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/admin-review') }}"
-             aria-label="Admin Review" aria-describedby="user-menu-admin-review-sub">Admin Review
-            <span class="user-menu-item-sub" id="user-menu-admin-review-sub">Elevated approvals</span>
-          </a>
-          {% endif %}
           {% if is_authenticated %}
           <div class="user-menu-divider"></div>
           <div class="user-menu-info">Logged in as {{ current_user }}</div>
@@ -1621,8 +1613,9 @@
     <h3 id="confirm-modal-title" x-text="title" class="modal-title"></h3>
     <p x-text="message" class="modal-message"></p>
     {# Type-to-confirm: reserved for the highest-blast-radius actions only
-       (cluster-admin-review gate approval, Delete App) -- see _macros.html's
-       gate_card() and fleet.html's Delete button. Never applied to routine
+       (Delete App -- see fleet.html's Delete button; the gate-approval case
+       this used to also cover, cluster-admin-review, was retired
+       2026-07-18). Never applied to routine
        per-finding Fix/Deliver confirmations (GitHub Primer: "match friction
        to blast radius" / "using it for routine actions cheapens it"). The
        Confirm button stays disabled until the typed value matches exactly. #}
@@ -1688,7 +1681,7 @@
           </div>
           <div class="cmdk-item-actions" x-show="r.type === 'app'">
             <button type="button" class="btn btn-sm btn-outline" @click.stop="reassess(r)"
-                    x-text="r.everOnboarded ? 'Refresh Onboard' : 'Re-assess'"></button>
+                    x-text="r.everOnboarded ? 'Re-scan' : 'Scan'"></button>
           </div>
         </div>
       </template>
@@ -1965,12 +1958,15 @@ function eventsDrawer() {
       return '/events';
     },
     _badgeClass(e) {
-      // Always return a severity color class — unknown/empty → info.
+      // Always return a severity color class — unknown/empty → info. Events'
+      // own severity vocabulary (see every store.log_event() call site) is
+      // critical/error/warning/info -- "high"/"medium"/"low" are a
+      // finding's severity, never an event's, but stayed here from when
+      // this helper was first written against that assumption.
       var s = (e && e.severity) || 'info';
       if (s === 'critical') return 'badge badge-critical';
-      if (s === 'high') return 'badge badge-high';
-      if (s === 'medium' || s === 'warning') return 'badge badge-medium';
-      if (s === 'low' || s === 'success') return 'badge badge-low';
+      if (s === 'error') return 'badge badge-danger';
+      if (s === 'warning') return 'badge badge-warning';
       return 'badge badge-info';
     },
     _markSeen(rows) {
@@ -2075,12 +2071,11 @@ function commandPalette() {
     navItems: [
       { label: 'Ledger', href: '/ledger', hint: 'Morning inbox — Needs You and human gates' },
       { label: 'Fleet', href: '/fleet', hint: 'Portfolio scoreboard — apps and scores' },
-      { label: 'Admin Review', href: '/admin-review', hint: 'Elevated approvals only' },
       { label: 'Health', href: '/health', hint: 'Live infrastructure telemetry' },
       { label: 'Insights', href: '/insights', hint: 'Fleet-wide aggregate analytics' },
-      { label: 'Events', href: '/events', hint: 'Bell feed + DLQ (not ops home)' },
+      { label: 'Events', href: '/events', hint: 'Every system action, behind the scenes' },
       { label: 'Dead-Letter Queue', href: '/events/dlq', hint: 'Undeliverable events' },
-      { label: 'Decisions', href: '/decisions', hint: 'LLM decision audit — Ledger owns the stream' },
+      { label: 'Decisions', href: '/decisions', hint: 'LLM decision audit — Events owns the stream' },
       { label: 'Capabilities', href: '/capabilities', hint: 'Agent registry & catalog' },
       { label: 'Settings', href: '/settings', hint: 'Auto-mode & data retention' },
       { label: 'Schedules', href: '/schedules', hint: 'Scheduled operations' },
@@ -2153,7 +2148,7 @@ function commandPalette() {
       window.location.href = r.href;
     },
     // Same /assess endpoint as Fleet — posts continue_onboard=1 when the
-    // app was previously onboarded so assess→onboard chains (Refresh Onboard).
+    // app was previously onboarded so assess→onboard chains (Re-scan).
     async reassess(r) {
       this.close();
       try {

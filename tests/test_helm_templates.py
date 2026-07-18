@@ -322,6 +322,218 @@ class TestTektonPipeline:
 
 
 # ---------------------------------------------------------------------------
+# Tekton Pipeline's supersede-stale-runs task: coalesces concurrent pushes
+# to the same branch so only the latest commit's PipelineRun matters,
+# cancelling still-active OLDER agentit-ci PipelineRuns instead of letting
+# every one of them run to completion (the same congestion class as
+# ExceededNodeResources retries piling up under many concurrent agents).
+# ---------------------------------------------------------------------------
+
+class TestTektonSupersedeStaleRuns:
+    TEMPLATE = CHART_DIR / "tekton" / "pipeline.yaml"
+
+    def _tasks(self) -> dict:
+        doc = _load(self.TEMPLATE)
+        return {t["name"]: t for t in doc["spec"]["tasks"]}
+
+    def test_task_exists_and_runs_before_git_clone(self):
+        tasks = self._tasks()
+        assert "supersede-stale-runs" in tasks
+        assert "supersede-stale-runs" in tasks["git-clone"]["runAfter"]
+
+    def test_task_has_no_runafter_of_its_own(self):
+        """Must run first, immediately, before any real pipeline work
+        starts -- coalescing is only useful if it happens before git-clone/
+        run-tests do wasted work for a run about to be superseded."""
+        tasks = self._tasks()
+        assert "runAfter" not in tasks["supersede-stale-runs"]
+
+    def _script(self) -> str:
+        tasks = self._tasks()
+        return tasks["supersede-stale-runs"]["taskSpec"]["steps"][0]["script"]
+
+    def test_script_uses_creationtimestamp_not_listing_order(self):
+        """Regression guard: comparing by list order or by name would not
+        guarantee "newer supersedes older" -- generateName suffixes are
+        random, not chronological. Must compare real creationTimestamps."""
+        script = self._script()
+        assert "context.pipelineRun.name" in script
+        assert "creationTimestamp" in script
+        assert 'CREATED" \\< "$SELF_CREATED' in script
+
+    def test_script_never_cancels_a_run_past_build_image(self):
+        script = self._script()
+        assert 'pipelineTaskName=="build-image"' in script
+        assert "Leaving older PipelineRun" in script
+
+    def test_script_skips_already_completed_and_already_cancelling_runs(self):
+        script = self._script()
+        assert 'if [ -n "$COMPLETED" ]; then continue; fi' in script
+        assert "Cancelled|CancelledRunFinally" in script
+
+    def test_script_patches_status_cancelled_with_merge(self):
+        script = self._script()
+        assert "oc patch pipelinerun" in script
+        assert "--type=merge" in script
+        assert '{"spec":{"status":"Cancelled"}}' in script
+
+    def test_no_bare_for_loop_over_multi_field_command_substitution(self):
+        """Same regression class as TestTektonCleanup's identically-named
+        guard: the bulk PipelineRun listing emits 3 space-separated fields
+        per item and must be consumed via redirect-to-file + `while read`,
+        never a bare `for x in $(...)` (which would word-split the
+        NAME/CREATED/COMPLETED pairing apart)."""
+        script = self._script()
+        listing_lines = [
+            line for line in script.splitlines()
+            if "jsonpath=" in line and '{" "}' in line
+        ]
+        assert len(listing_lines) >= 1
+        assert "while read -r NAME CREATED COMPLETED" in script
+
+    def _run_supersede_script(self, tmp_path):
+        """Execute the real rendered script (Tekton's own
+        `$(context.pipelineRun.name)` substituted with a fixed "self-pr",
+        the same way the real Tekton controller would substitute it at
+        runtime) against a fake `oc` on PATH, against several canned
+        PipelineRun fixtures, and return which PipelineRuns got patched."""
+        import os
+        import subprocess
+        import textwrap
+
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        log_file = tmp_path / "oc-patches.log"
+        fake_oc = bin_dir / "oc"
+        fake_oc.write_text(textwrap.dedent(f"""\
+            #!/usr/bin/env python3
+            import sys
+
+            args = sys.argv[1:]
+            verb = args[0] if args else ""
+            resource = args[1] if len(args) > 1 else ""
+            log_path = {str(log_file)!r}
+
+            def log(line):
+                with open(log_path, "a") as f:
+                    f.write(line + "\\n")
+
+            SELF_CREATED = "2026-01-02T00:00:00Z"
+            # name -> (createdAt, completionTime, spec.status, build-image started?)
+            FIXTURES = {{
+                "older-pre-build": ("2026-01-01T00:00:00Z", "", "", False),
+                "older-past-build": ("2026-01-01T00:00:00Z", "", "", True),
+                "newer-pr": ("2026-01-03T00:00:00Z", "", "", False),
+                "completed-pr": ("2026-01-01T00:00:00Z", "2026-01-01T00:10:00Z", "", False),
+                "already-cancelling-pr": ("2026-01-01T00:00:00Z", "", "Cancelled", False),
+            }}
+
+            if verb == "get" and resource == "pipelinerun":
+                if len(args) > 2 and not args[2].startswith("-"):
+                    name = args[2]
+                    joined = " ".join(args)
+                    if name == "self-pr":
+                        if "creationTimestamp" in joined:
+                            print(SELF_CREATED)
+                        sys.exit(0)
+                    info = FIXTURES.get(name)
+                    if info is None:
+                        sys.exit(1)
+                    _created, _completed, status, build_started = info
+                    if "spec.status" in joined:
+                        print(status)
+                    elif "childReferences" in joined:
+                        if build_started:
+                            print("build-image")
+                    sys.exit(0)
+                else:
+                    # bulk listing: NAME CREATED COMPLETED, one per line
+                    print("self-pr " + SELF_CREATED + " ")
+                    for name, (created, completed, _status, _build) in FIXTURES.items():
+                        print(name + " " + created + " " + completed)
+                    sys.exit(0)
+            elif verb == "patch" and resource == "pipelinerun":
+                name = args[2] if len(args) > 2 else ""
+                log("patch " + name)
+                sys.exit(0)
+            sys.exit(0)
+        """))
+        fake_oc.chmod(0o755)
+
+        script = self._script().replace(
+            "{{ .Release.Namespace }}", "test-ns"
+        ).replace(
+            "$(context.pipelineRun.name)", "self-pr"
+        )
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, (
+            f"supersede script exited {result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        patched = log_file.read_text().splitlines() if log_file.exists() else []
+        return result, patched
+
+    def test_cancels_older_run_not_yet_at_build_image(self, tmp_path):
+        _result, patched = self._run_supersede_script(tmp_path)
+        assert any("older-pre-build" in line for line in patched), (
+            f"an older, still-active PipelineRun that hasn't reached "
+            f"build-image must be superseded; patches: {patched}"
+        )
+
+    def test_does_not_cancel_older_run_already_past_build_image(self, tmp_path):
+        _result, patched = self._run_supersede_script(tmp_path)
+        assert not any("older-past-build" in line for line in patched), (
+            f"a PipelineRun that already started build-image must never be "
+            f"cancelled -- it may be about to promote a live image; patches: {patched}"
+        )
+
+    def test_does_not_cancel_a_newer_run(self, tmp_path):
+        """Directionality guard: only strictly OLDER runs are ever
+        superseded -- this run must never cancel one created after it."""
+        _result, patched = self._run_supersede_script(tmp_path)
+        assert not any("newer-pr" in line for line in patched), (
+            f"a PipelineRun newer than self must never be cancelled; patches: {patched}"
+        )
+
+    def test_does_not_cancel_an_already_completed_run(self, tmp_path):
+        _result, patched = self._run_supersede_script(tmp_path)
+        assert not any("completed-pr" in line for line in patched), (
+            f"a PipelineRun that already finished must never be touched; patches: {patched}"
+        )
+
+    def test_does_not_repatch_an_already_cancelling_run(self, tmp_path):
+        _result, patched = self._run_supersede_script(tmp_path)
+        assert not any("already-cancelling-pr" in line for line in patched), (
+            f"a PipelineRun already being cancelled must not be re-patched; patches: {patched}"
+        )
+
+    def test_never_cancels_self(self, tmp_path):
+        _result, patched = self._run_supersede_script(tmp_path)
+        assert not any("self-pr" in line for line in patched)
+
+    def test_reports_exactly_one_supersede_in_output(self, tmp_path):
+        result, _patched = self._run_supersede_script(tmp_path)
+        assert "Superseded 1 older PipelineRun(s)." in result.stdout
+
+    def test_rbac_grants_patch_on_pipelineruns_to_the_pipeline_sa(self):
+        """The supersede task runs as the `pipeline` ServiceAccount (the
+        Pipeline's default, same as every other task here) and needs
+        `patch` on `pipelineruns.tekton.dev` to cancel a superseded run --
+        must come from this chart's own namespace-scoped Role, matching
+        the self-containment bar the rest of tekton/rbac.yaml already
+        holds itself to."""
+        docs = [d for d in yaml.safe_load_all(_render(CHART_DIR / "tekton" / "rbac.yaml")) if d]
+        role = next(d for d in docs if d.get("kind") == "Role" and d["metadata"]["name"] == "agentit-ci-cleanup")
+        assert role["metadata"].get("namespace"), "must stay a namespaced Role, not a ClusterRole"
+        tekton_rule = next(r for r in role["rules"] if r.get("apiGroups") == ["tekton.dev"])
+        assert set(tekton_rule["resources"]) >= {"pipelineruns"}
+        assert "patch" in tekton_rule["verbs"]
+
+
+# ---------------------------------------------------------------------------
 # Tekton PipelineRun trigger template: chart/templates/tekton/trigger.yaml
 # ---------------------------------------------------------------------------
 
@@ -368,6 +580,18 @@ class TestTektonTrigger:
         see the comment above it) must survive alongside it."""
         specs = {s["pipelineTaskName"]: s for s in self._task_run_specs()}
         assert specs["build-image"]["stepSpecs"][0]["name"] == "build"
+
+    def test_pipelinerun_labeled_for_supersede_selection(self):
+        """The Pipeline's supersede-stale-runs task (pipeline.yaml) selects
+        other in-flight agentit-ci PipelineRuns via `-l
+        tekton.dev/pipeline=agentit-ci` -- every PipelineRun this
+        TriggerTemplate creates must carry that label explicitly (not rely
+        on Tekton's own implicit labeling, which the supersede task's own
+        selector should not have to assume)."""
+        docs = self._docs()
+        tt = next(d for d in docs if d and d["kind"] == "TriggerTemplate")
+        pr_meta = tt["spec"]["resourcetemplates"][0]["metadata"]
+        assert pr_meta["labels"]["tekton.dev/pipeline"] == "agentit-ci"
 
 
 # ---------------------------------------------------------------------------

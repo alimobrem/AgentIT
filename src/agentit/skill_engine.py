@@ -335,6 +335,7 @@ class SkillEngine:
         """
         import yaml
         from agentit.agents.base import validate_manifest
+        from agentit.llm import _SKILL_GENERATION_MAX_TOKENS
 
         stack = ", ".join(l.name for l in report.stack.languages) if report.stack.languages else "unknown"
         platform_ctx = self.platform.to_prompt_context() if self.platform else "Unknown platform"
@@ -362,7 +363,7 @@ class SkillEngine:
             )
 
         for attempt in range(2):
-            raw = llm_client._chat(system, user)
+            raw = llm_client._chat(system, user, max_tokens=_SKILL_GENERATION_MAX_TOKENS)
             if raw is None:
                 return []
 

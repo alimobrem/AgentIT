@@ -29,7 +29,7 @@
   <div class="timeline-marker {% if card.severity == 'critical' %}marker-danger{% elif card.card_type in ('E', 'F') %}marker-success{% elif card.card_type == 'D' %}marker-info{% else %}marker-default{% endif %}"></div>
   <div class="timeline-content">
     <div class="timeline-header">
-      <span class="badge badge-muted">{{ card.card_type }}</span>
+      <span class="badge badge-muted" title="Card type {{ card.card_type }}">{{ card.card_type | humanize_card_type }}</span>
       <span class="badge badge-{{ card.severity | default('info') }}">{{ card.title }}</span>
       {% if link_to_app and card.target_app %}
         {% if card.assessment_id %}
@@ -52,15 +52,16 @@
 {% endmacro %}
 
 {% macro gate_card(gate) %}
-{# Approve & Deliver / Reject / Dismiss card for one pending gate. Shared by
-   the Admin Review page (cluster-admin-review gates only) and Assessment
-   Detail's Actions tab (every other, per-app gate type) so both surfaces
-   render gate resolution identically -- see docs/ui-redesign-proposal.md §2
+{# Approve & Deliver / Reject / Dismiss card for one pending gate. Every
+   gate type is per-app now and renders here, on Assessment Detail's Actions
+   tab (and Fleet's embedded copies) -- the separate Admin Review page this
+   macro used to also serve (cluster-admin-review gates only) was retired
+   2026-07-18 along with that gate type. See docs/ui-redesign-proposal.md §2
    ("reuse the same partial/macro, don't reinvent it"). #}
 <div class="card mb-1" x-data="{ showReason: false }">
   <div class="card-header">
     <div>
-      <span class="badge badge-{{ gate.severity | default('info') }}">{{ gate.gate_type | upper }}</span>
+      <span class="badge badge-{{ gate.severity | default('info') }}" title="Gate type: {{ gate.gate_type }}">{{ gate.gate_type | humanize_gate_type }}</span>
       <span class="text-muted text-sm" data-timestamp="{{ gate.created_at }}">{{ gate.created_at[:16] }}</span>
     </div>
     {% if gate.assessment_id %}
@@ -69,43 +70,35 @@
   </div>
 
   <p class="my-4">{{ gate.summary }}</p>
-  {# gitops-pr-pending gates carry the real PR URL as a structured field
-     (delivery.py's route_and_deliver() passes pr_url= to create_gate()),
+  {# gitops-pr-pending gates (and the CI/CD-shared-namespace variant of it)
+     carry the real PR URL as a structured field (delivery.py's
+     _deliver_via_gitops_pr_and_gate() passes pr_url= to create_gate()),
      not just embedded as plain text inside gate.summary above -- render a
      real, clickable <a href> instead of leaving the URL inert. #}
   {% if gate.pr_url %}
   <p class="text-sm mb-1"><a href="{{ gate.pr_url | safe_url }}" target="_blank" rel="noopener" hx-boost="false">View pull request &rarr;</a></p>
   {% endif %}
-  {# Several gate types (rollback-review, gitops-pr-pending, cluster-
-     admin-review) reuse gate.summary verbatim as delivery_confirmation
-     (see delivery.py's gate_delivery_confirmation()) -- for those, this
-     second line added no new information, just the same sentence restated
-     in muted text right below itself. Only show it when it actually says
-     something summary doesn't. #}
+  {# Several gate types (rollback-review, gitops-pr-pending, and formerly
+     cluster-admin-review) reuse gate.summary verbatim as delivery_
+     confirmation (see delivery.py's gate_delivery_confirmation()) -- for
+     those, this second line added no new information, just the same
+     sentence restated in muted text right below itself. Only show it when
+     it actually says something summary doesn't. #}
   {% if gate.delivery_confirmation and gate.delivery_confirmation != gate.summary %}
   <p class="text-sm text-muted mb-1"><strong>{{ gate.delivery_confirmation }}</strong></p>
   {% endif %}
 
-  {% set _is_admin_review = gate.gate_type == 'cluster-admin-review' %}
-  {% set _type_confirm_target = gate.app_name | default('cluster-admin-review', true) %}
   <div class="action-bar">
     <form method="POST" action="/gates/{{ gate.id }}/resolve" x-ref="approveForm">
       <input type="hidden" name="status" value="approved">
       <button type="button" class="btn btn-green"
         @click="$dispatch('show-confirm', {
           title: 'Approve & Deliver',
-          message: {{ gate.delivery_confirmation | default('This will apply the generated manifests to your cluster.', true) | tojson | forceescape }} + ' This action modifies production resources.'
-          {%- if _is_admin_review %} + ' This targets a SHARED operator namespace -- every app relying on that namespace is affected, not just this one.'{% endif %},
+          message: {{ gate.delivery_confirmation | default('This will apply the generated manifests to your cluster.', true) | tojson | forceescape }} + ' This action modifies production resources.',
           form: $refs.approveForm,
           opts: {
-            {%- if _is_admin_review %}
-            confirmText: 'I understand, apply to shared namespace',
-            danger: true,
-            typeToConfirm: {{ _type_confirm_target | tojson | forceescape }}
-            {%- else %}
             confirmText: 'Approve & Deliver',
             danger: false
-            {%- endif %}
           }
         })">
         Approve &amp; Deliver

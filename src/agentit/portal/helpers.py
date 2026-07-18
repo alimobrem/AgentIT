@@ -173,27 +173,30 @@ async def get_store():
 
 # ── Nav gate badges ───────────────────────────────────────────────────
 #
-# base.html's nav bar shows two gate-derived badges: Ledger's link carries
-# the fleet-wide count of PRs waiting for your approval (`gitops-pr-pending`
-# gates still `pending` -- the only gate type Ledger's PR-lifecycle view
-# renders/acts on, now that Ledger is strictly PR-focused, not every
-# app-owner-scoped gate type), and Admin Review's link carries the count of
-# pending `cluster-admin-review` gates only (docs/ui-redesign-proposal.md
+# base.html's nav bar shows the fleet-wide count of PRs waiting for your
+# approval on Ledger's link -- a pending `gitops-pr-pending`/
+# `gitops-pr-pending-shared-namespace` gate, the only gate types Ledger's
+# PR-lifecycle view renders/acts on, now that Ledger is strictly PR-focused
+# rather than every app-owner-scoped gate type (docs/ui-redesign-proposal.md
 # §2/§5). Every other app-owner gate type (`rollback-review`,
-# `finding-unresolved-escalation`) stays visible via Fleet's per-app
+# `finding-unresolved-escalation`, ...) stays visible via Fleet's per-app
 # "needs action"/escalation badges and Assessment Detail's Actions tab, not
 # this nav badge. This also closes a real pre-existing defect: the old nav
 # referenced a `pending_gates` template variable no context processor ever
 # actually supplied (only Insights' own page context computed it, so the
 # badge was silently blank everywhere else). Cached briefly since nav
-# renders on every page (Ledger + Admin Review badges).
+# renders on every page.
+#
+# Used to also split out a separate `admin_review` count for a second,
+# cross-app "Admin Review" nav link -- retired 2026-07-18 along with the
+# `cluster-admin-review` gate type it existed solely for.
 
-_nav_gate_badges_cache: dict = {"pending_actions": 0, "admin_review": 0, "ts": 0.0}
+_nav_gate_badges_cache: dict = {"pending_actions": 0, "ts": 0.0}
 _NAV_GATE_BADGES_CACHE_TTL = 20  # seconds
 # Double-checked locking, mirroring get_store() above: the `await
 # store.list_gates(...)` below is a genuine yield point, so without a lock,
 # multiple concurrent requests can all see a stale cache, all refresh, and
-# interleave their 3-key writes into a torn read for a third caller. This is
+# interleave their writes into a torn read for a third caller. This is
 # async-only (never invoked via asyncio.to_thread), so an `asyncio.Lock` --
 # not a `threading.Lock` -- is the correct primitive here.
 _nav_gate_badges_lock = asyncio.Lock()
@@ -202,31 +205,26 @@ _nav_gate_badges_lock = asyncio.Lock()
 async def get_nav_gate_badge_counts(store: object) -> dict[str, int]:
     now = _time.monotonic()
     if now - _nav_gate_badges_cache["ts"] < _NAV_GATE_BADGES_CACHE_TTL:
-        return {
-            "pending_actions": _nav_gate_badges_cache["pending_actions"],
-            "admin_review": _nav_gate_badges_cache["admin_review"],
-        }
+        return {"pending_actions": _nav_gate_badges_cache["pending_actions"]}
     async with _nav_gate_badges_lock:
         now = _time.monotonic()
         if now - _nav_gate_badges_cache["ts"] < _NAV_GATE_BADGES_CACHE_TTL:
-            return {
-                "pending_actions": _nav_gate_badges_cache["pending_actions"],
-                "admin_review": _nav_gate_badges_cache["admin_review"],
-            }
+            return {"pending_actions": _nav_gate_badges_cache["pending_actions"]}
         try:
             gates = await store.list_gates(status="pending")
         except Exception:
             log.debug("Failed to refresh nav gate badge counts", exc_info=True)
             gates = []
 
-        from agentit.portal.delivery import ADMIN_REVIEW_GATE_TYPE
-        admin_review = sum(1 for g in gates if g.get("gate_type") == ADMIN_REVIEW_GATE_TYPE)
-        pending_actions = sum(1 for g in gates if g.get("gate_type") == "gitops-pr-pending")
+        from agentit.portal.delivery import _CICD_SHARED_NAMESPACE_GATE_TYPE
+        pending_actions = sum(
+            1 for g in gates
+            if g.get("gate_type") in ("gitops-pr-pending", _CICD_SHARED_NAMESPACE_GATE_TYPE)
+        )
 
         _nav_gate_badges_cache["pending_actions"] = pending_actions
-        _nav_gate_badges_cache["admin_review"] = admin_review
         _nav_gate_badges_cache["ts"] = now
-        return {"pending_actions": pending_actions, "admin_review": admin_review}
+        return {"pending_actions": pending_actions}
 
 
 # ── Event publishing ──────────────────────────────────────────────────

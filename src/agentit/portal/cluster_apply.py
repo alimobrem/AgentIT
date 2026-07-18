@@ -224,13 +224,18 @@ def _classify_and_fix(
         apply, skip_non_k8s, skip_cluster_scope, skip_operator_ns,
         skip_crd_missing
 
-    ``allow_operator_namespaces=True`` is set only by the unified delivery
-    router's cluster-admin-review gate approval path
+    ``allow_operator_namespaces=True`` used to be set by the unified
+    delivery router's ``cluster-admin-review`` gate approval path
     (``portal/delivery.py``/``routes/gates.py``) -- a human holding elevated
-    RBAC has already explicitly approved this exact apply, so the manifest's
-    own declared operator namespace (e.g. ``openshift-pipelines``) is
-    preserved and applied as-is instead of being skipped or silently
-    rewritten to the app's own namespace.
+    RBAC explicitly approving this exact apply, so the manifest's own
+    declared operator namespace (e.g. ``openshift-pipelines``) was preserved
+    and applied as-is instead of being skipped or silently rewritten to the
+    app's own namespace. That gate type (and every direct-cluster-apply code
+    path in this app) was retired 2026-07-18 -- CI/CD manifests destined for
+    a shared operator namespace now deliver via a GitOps PR instead, same as
+    every other category (see the README). No live caller passes
+    ``allow_operator_namespaces=True`` anymore; kept only as documented,
+    still-correct behavior in case a future caller genuinely needs it again.
     """
     kind = doc.get("kind", "")
     api_version = doc.get("apiVersion", "")
@@ -275,13 +280,19 @@ def apply_manifests_to_cluster(
 ) -> dict:
     """Apply manifests to the cluster with pre-flight validation.
 
-    ``allow_operator_namespaces`` -- see ``_classify_and_fix`` -- is only set
-    by the cluster-admin-review gate's approval path in ``routes/gates.py``
-    -- the one remaining case this app ever applies directly to a cluster
-    (CI/CD manifests destined for a shared operator namespace, which are a
-    fundamentally different category from "cluster/app config" and were
-    never GitOps-routed even before Direct Apply was removed as a concept
-    entirely -- see docs/unified-apply-flow.md's taxonomy).
+    No live code path in this app calls this function anymore (2026-07-18):
+    its last caller, the ``cluster-admin-review`` gate's approval path
+    (``routes/gates.py``, for CI/CD manifests destined for a shared operator
+    namespace), was retired the same day that category started delivering
+    via a GitOps PR instead -- see ``portal/delivery.py``'s
+    ``CATEGORY_CICD_SHARED_NAMESPACE`` handling and the README. AgentIT no
+    longer performs a direct cluster apply for any delivery category, full
+    stop. This function (and ``allow_operator_namespaces`` -- see
+    ``_classify_and_fix``) is kept, unreachable, rather than deleted: it's a
+    real, well-tested, general "apply YAML manifests to a cluster safely"
+    primitive, not a delivery-mechanism-specific hack -- see
+    ``MECHANISM_DIRECT_APPLY``'s identical "kept but never selected"
+    precedent in ``delivery.py``.
 
     Conflicts (a genuine server-side-apply field-manager conflict, HTTP 409)
     are collected into the returned dict's ``conflicts`` list, kept separate
@@ -395,16 +406,16 @@ async def apply_with_verification(
 ) -> dict:
     """Shared "apply to cluster, with consistent side effects" sequence.
 
-    Direct Apply has been removed as a concept entirely -- the only
-    remaining caller is the ``cluster-admin-review`` gate's approval path
-    (``routes/gates.py``), for CI/CD manifests destined for a shared
-    operator namespace (a fundamentally different category from
-    "cluster/app config", never GitOps-routed even before Direct Apply's
-    removal -- see docs/unified-apply-flow.md's taxonomy). ``AutoMode``
-    and the manual Deliver route both now go through
+    Direct Apply has been removed as a concept entirely, and (2026-07-18)
+    so has this function's own last caller, the ``cluster-admin-review``
+    gate's approval path (``routes/gates.py``, for CI/CD manifests destined
+    for a shared operator namespace -- see ``apply_manifests_to_cluster``'s
+    own docstring). No live code path calls this function anymore.
+    ``AutoMode`` and the manual Deliver route both go through
     ``portal/delivery.py::route_and_deliver()`` instead, which never calls
-    this function at all for the cluster-config category (it either
-    commits to the GitOps infra repo or refuses outright).
+    this function at all for any category (it either commits to the GitOps
+    infra repo or refuses outright). Kept, unreachable, for the same reason
+    ``apply_manifests_to_cluster()`` is -- see that function's docstring.
 
     This previously had a second caller-selectable behavior
     (``force_dry_run_first``, ``AutoMode``'s own always-dry-run-first safety

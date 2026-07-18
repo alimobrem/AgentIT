@@ -8,10 +8,11 @@ metadata:
 {{- /*
 Minimal namespaced permissions for the "pipeline" SA. Of everything that runs as this SA
 (CI tasks, the tekton-cleanup CronJob, and the cve-scan/compliance-rescan/dependency-update/
-cost-report rescan CronJobs), only tekton-cleanup calls the Kubernetes API — the CI tasks
-(git-clone, tests, buildah) and the rescan CronJobs run local repo/DB commands only. The
-separate agentit-ci-argocd-patch Role below (in openshift-gitops) covers the notify-argocd
-step. Do not widen this back to ClusterRole "edit" without confirming a task actually needs it.
+cost-report rescan CronJobs), only tekton-cleanup and the CI pipeline's own
+supersede-stale-runs task call the Kubernetes API — the other CI tasks (git-clone, tests,
+buildah) and the rescan CronJobs run local repo/DB commands only. The separate
+agentit-ci-argocd-patch Role below (in openshift-gitops) covers the notify-argocd step. Do
+not widen this back to ClusterRole "edit" without confirming a task actually needs it.
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -33,7 +34,11 @@ rules:
     verbs: ["get", "list", "delete"]
   - apiGroups: ["tekton.dev"]
     resources: ["pipelineruns", "taskruns"]
-    verbs: ["get", "list", "delete"]
+    # "patch" is needed by the Pipeline's own supersede-stale-runs task
+    # (chart/templates/tekton/pipeline.yaml), which cancels a still-active
+    # OLDER agentit-ci PipelineRun (spec.status=Cancelled) once a newer push
+    # lands, instead of letting both run to completion.
+    verbs: ["get", "list", "delete", "patch"]
   - apiGroups: ["image.openshift.io"]
     resources: ["imagestreams"]
     verbs: ["get"]

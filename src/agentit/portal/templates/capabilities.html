@@ -78,9 +78,9 @@
       <td class="text-sm"><span data-timestamp="{{ change.timestamp }}">{{ change.timestamp[:16] if change.timestamp else '—' }}</span></td>
       <td>
         {% if change.action in ('skill-added', 'check-added') %}
-          <span class="badge badge-success">{{ change.action }}</span>
+          <span class="badge badge-success">{{ change.action | humanize_action }}</span>
         {% else %}
-          <span class="badge badge-warning">{{ change.action }}</span>
+          <span class="badge badge-warning">{{ change.action | humanize_action }}</span>
         {% endif %}
       </td>
       <td class="text-sm text-muted">{{ change.summary }}</td>

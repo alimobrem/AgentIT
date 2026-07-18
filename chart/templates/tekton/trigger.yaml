@@ -20,6 +20,14 @@ spec:
       metadata:
         generateName: agentit-ci-
         namespace: {{ .Release.Namespace }}
+        labels:
+          # Selected by the Pipeline's own supersede-stale-runs task
+          # (pipeline.yaml) to find other in-flight agentit-ci PipelineRuns
+          # to compare against and, if superseded, cancel -- authored
+          # explicitly here rather than relying on Tekton's own automatic
+          # tekton.dev/pipeline label so the selector is guaranteed
+          # regardless of controller version.
+          tekton.dev/pipeline: agentit-ci
       spec:
         pipelineRef:
           name: agentit-ci

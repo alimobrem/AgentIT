@@ -77,8 +77,7 @@
   Auto-mode is active. Safe changes (adding NetworkPolicies, ConfigMaps, ServiceMonitors) will be
   committed to the GitOps infra repo and opened as a PR automatically -- awaiting your merge.
   Destructive changes (deleting resources, modifying RBAC, scaling to zero)
-  will be flagged by the LLM and queued for your review on that app's Actions tab (or Admin Review,
-  for cluster-wide changes).
+  will be flagged by the LLM and queued for your review on that app's Actions tab.
   {% if not llm_available %}
   <strong>Warning:</strong> LLM is unavailable — all actions will be gated (fail-closed).
   {% endif %}
@@ -146,7 +145,7 @@
     {% for e in recent_actions %}
     <tr>
       <td class="text-sm"><span data-timestamp="{{ e.timestamp }}">{{ e.timestamp[:19] }}</span></td>
-      <td class="text-bold">{{ e.action }}</td>
+      <td class="text-bold">{{ e.action | humanize_action }}</td>
       <td>{{ e.target_app or "—" }}</td>
       <td class="text-sm">{{ e.summary }}</td>
     </tr>

@@ -6,12 +6,15 @@
    source of truth as the Findings tab, and posts `category` (a finding
    category), not `dimension`.
 3. Gate app attribution: `list_gates()`/`list_all_gates()` join back to the
-   assessment for an `app_name`; the 7 app-owner gate types surface on
-   Assessment Detail's Actions tab and Ledger Needs You (Fleet keeps only a
-   quiet pointer); `cluster-admin-review` stays on Admin Review.
+   assessment for an `app_name`; every gate type surfaces on Assessment
+   Detail's Actions tab and Ledger Needs You (Fleet keeps only a quiet
+   pointer) -- including a stale `cluster-admin-review` row, since that gate
+   type (and the separate Admin Review page it used to live on) was retired
+   2026-07-18.
 4. The orphaned `/apply` and `/create-pr` routes are gone (404).
 5. GitOps-registration visibility on Fleet and Assessment Detail.
-6. Nav: Gates retired as a standalone concept, Admin Review takes its place.
+6. Nav: Gates retired as a standalone concept (Admin Review briefly took its
+   place, then was itself retired 2026-07-18 -- see `TestNavUpdate`).
 7. Self-Improvement gets a manual "run now" trigger, matching Catalog's.
 """
 from __future__ import annotations
@@ -283,11 +286,14 @@ class TestGateAppAttributionAndActionsTab:
         assert "Auto-mode gated: low confidence" in resp.text
         assert "Approve &amp; Deliver" in resp.text or "Approve & Deliver" in resp.text
 
-    async def test_assessment_detail_actions_tab_excludes_cluster_admin_review(self, ui_client):
-        """cluster-admin-review is a different audience's gate -- it must
-        never show up embedded in an app owner's Actions tab (it can still
-        legitimately appear in the read-only, everything-that-happened
-        Timeline tab -- that's a different surface with a different job)."""
+    async def test_assessment_detail_actions_tab_includes_stale_cluster_admin_review(self, ui_client):
+        """`cluster-admin-review` (retired 2026-07-18 -- see delivery.py)
+        used to be a different audience's gate, excluded from an app
+        owner's Actions tab entirely. That audience split no longer exists
+        -- every gate type is per-app now, so a stale, already-persisted
+        pending row of this type surfaces on its own app's Actions tab like
+        any other gate, rather than being invisible everywhere but a now-
+        removed separate Admin Review page."""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="cicd-app"))
         await store.create_gate(aid, "cluster-admin-review", "CI/CD manifests need elevated review")
@@ -295,8 +301,7 @@ class TestGateAppAttributionAndActionsTab:
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
         actions_tab = resp.text.split('x-show="tab === \'actions\'"', 1)[1].split('x-show="tab === \'timeline\'"', 1)[0]
-        assert "CI/CD manifests need elevated review" not in actions_tab
-        assert "No pending actions for this app" in actions_tab
+        assert "CI/CD manifests need elevated review" in actions_tab
 
     async def test_assessment_detail_actions_tab_empty_state(self, ui_client):
         client, store = ui_client
@@ -366,6 +371,21 @@ class TestGateAppAttributionAndActionsTab:
         assert "assessment-complete" in ledger_tab
         assert "No Ledger activity yet for this app." not in ledger_tab
 
+    async def test_assessment_detail_ledger_tab_shows_human_card_type_label(self, ui_client):
+        """This per-app Ledger tab (unlike the fleet-wide /ledger page,
+        redesigned as a strictly PR-focused list -- see
+        routes/insights.py::ledger_page()) still renders the full A-P
+        card-type system via the shared ledger_card macro -- its badge must
+        decode the bare letter into ledger.py's humanize_card_type() label,
+        never a bare "A" a user would have to read the source to decode."""
+        client, store = ui_client
+        aid = await store.save(make_report(repo_name="card-label-app"))
+
+        resp = await client.get(f"/assessments/{aid}?tab=ledger")
+        assert resp.status_code == 200
+        ledger_tab = resp.text.split('x-show="tab === \'ledger\'"', 1)[1]
+        assert 'title="Card type A">Assessment<' in ledger_tab
+
     async def test_assessment_detail_tab_query_param_opens_ledger_tab(self, ui_client):
         client, store = ui_client
         aid = await store.save(make_report(repo_name="ledger-tab-param-app"))
@@ -379,7 +399,11 @@ class TestGateAppAttributionAndActionsTab:
         own job narrowed to strictly PRs -- see
         routes/insights.py::ledger_page()): auto-mode-review/dry-run-failed/
         cluster-admin-review must never inflate it, even though they're real
-        pending gates -- only a pending gitops-pr-pending gate does."""
+        pending gates -- only a pending gitops-pr-pending gate does. (Before
+        Ledger's PR redesign, every pending gate counted toward this banner
+        -- including, briefly, a legacy `cluster-admin-review` gate after
+        the standalone Admin Review page/gate type were retired 2026-07-18
+        -- this test's assertions supersede that intermediate behavior.)"""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="needs-action-app"))
         await store.create_gate(aid, "auto-mode-review", "gate 1")
@@ -390,9 +414,12 @@ class TestGateAppAttributionAndActionsTab:
         assert resp.status_code == 200
         assert "need your approval → Ledger" not in resp.text
         assert "Needs Action" not in resp.text
-        # The two non-admin-review, non-PR gates still show as this app's
-        # own real "pending action" row badge -- not silently dropped.
-        assert "2 pending action" in resp.text
+        # All three non-PR gates (including the now-legacy
+        # cluster-admin-review, which counts here like any other gate type
+        # since the standalone Admin Review page/exclusion were retired)
+        # still show as this app's own real "pending action" row badge --
+        # not silently dropped.
+        assert "3 pending action" in resp.text
 
     async def test_fleet_no_pending_pointer_when_no_pending_gates(self, ui_client):
         client, store = ui_client
@@ -519,6 +546,63 @@ class TestGitOpsVisibility:
 
         assert resp.status_code == 200
         assert ">GitOps<" in resp.text
+
+    async def test_fleet_shows_gitops_badge_for_self_managed_app_with_matching_source(self, ui_client, _mock_kube):
+        """Apps that register themselves into their own fleet (e.g. AgentIT
+        via `register-self-in-fleet`) are deliberately excluded from the
+        shared apps/*-directory ApplicationSet (github_pr.
+        ensure_applicationset() excludes apps/agentit specifically, to avoid
+        a circular/duplicate Application) and instead run under a
+        hand-crafted Application named for the app itself, not
+        `managed-{app}`. Regression coverage for the bug where this showed
+        a permanently-stuck "GitOps (pending)" badge -- as if awaiting a
+        first delivery that, by design, can never happen via that path --
+        even though the app is genuinely GitOps-managed."""
+        client, store = ui_client
+        report = make_report(repo_name="self-managed-app")
+        aid = await store.save(report)
+        await store.set_infra_repo_url(aid, "https://github.com/org/gitops-infra")
+        _mock_kube["list_custom_resources"].return_value = [
+            {
+                "metadata": {"name": "self-managed-app"},
+                "spec": {
+                    "source": {"repoURL": report.repo_url + ".git"},
+                    "destination": {"server": "https://cluster", "namespace": "self-managed-app"},
+                },
+                "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}},
+            },
+        ]
+        with patch("agentit.portal.routes.fleet._argo_cache", {"data": {}, "ts": 0}):
+            resp = await client.get("/fleet")
+
+        assert resp.status_code == 200
+        assert ">GitOps<" in resp.text
+        assert "GitOps (pending)" not in resp.text
+
+    async def test_fleet_shows_pending_badge_when_same_named_app_source_does_not_match(self, ui_client, _mock_kube):
+        """A live Application that merely happens to share an app's name
+        (e.g. an unrelated, hand-created demo Application pointed at a
+        placeholder repo) must NOT be mistaken for that app's own
+        self-managed GitOps deployment -- only a source-repo match counts."""
+        client, store = ui_client
+        report = make_report(repo_name="lookalike-app")
+        aid = await store.save(report)
+        await store.set_infra_repo_url(aid, "https://github.com/org/gitops-infra")
+        _mock_kube["list_custom_resources"].return_value = [
+            {
+                "metadata": {"name": "lookalike-app"},
+                "spec": {
+                    "source": {"repoURL": "https://github.com/someone-else/lookalike-app.git"},
+                    "destination": {"server": "https://cluster", "namespace": "lookalike-app"},
+                },
+                "status": {"sync": {"status": "Unknown"}, "health": {"status": "Healthy"}},
+            },
+        ]
+        with patch("agentit.portal.routes.fleet._argo_cache", {"data": {}, "ts": 0}):
+            resp = await client.get("/fleet")
+
+        assert resp.status_code == 200
+        assert "GitOps (pending)" in resp.text
 
     async def test_fleet_shows_not_registered_badge_for_unregistered_app(self, ui_client):
         """Direct Apply has been removed as a concept entirely -- Fleet
@@ -667,30 +751,34 @@ class TestNavUpdate:
         assert resp.status_code == 200
         assert 'href="/gates"' not in resp.text
 
-    async def test_nav_has_admin_review_link(self, ui_client):
-        client, _store = ui_client
-        # When count is 0, Admin Review is buried in the account menu.
-        resp = await client.get("/ledger")
-        assert resp.status_code == 200
-        assert 'href="/admin-review"' in resp.text
-
-    async def test_nav_admin_review_badge_reflects_cluster_admin_review_count_only(self, ui_client):
+    async def test_nav_has_no_admin_review_link(self, ui_client):
+        """Admin Review (the separate, elevated-approvals nav item) was
+        retired 2026-07-18 along with the `cluster-admin-review` gate type
+        it existed solely for -- every gate type is per-app now, so there's
+        no cross-app queue left to link here, even with a pending gate of
+        that (now-legacy) type in the fleet."""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="admin-badge-app"))
         await store.create_gate(aid, "cluster-admin-review", "needs elevated review")
-        await store.create_gate(aid, "auto-mode-review", "app-owner gate, must not count here")
 
-        # The nav badge counts are cached briefly at module scope (helpers.py)
-        # -- force a fresh computation so this test's own gates are what
-        # get counted, not whatever an earlier test in the same run left behind.
-        with patch("agentit.portal.helpers._nav_gate_badges_cache",
-                   {"pending_actions": 0, "admin_review": 0, "ts": 0.0}):
-            resp = await client.get("/ledger")
+        resp = await client.get("/ledger")
         assert resp.status_code == 200
-        # One cluster-admin-review gate -> nav badge shows "1" next to Admin
-        # Review, not 2 (the app-owner "auto-mode-review" gate must not
-        # count toward this badge).
-        assert re.search(r'Admin Review\s*<span class="nav-badge">1</span>', resp.text)
+        assert 'href="/admin-review"' not in resp.text
+        assert "Admin Review" not in resp.text
+
+    async def test_ledger_nav_badge_counts_every_pending_gate_including_legacy_types(self, ui_client):
+        """The single remaining nav badge (Ledger's) counts every pending
+        gate, including a stale `cluster-admin-review` one -- there's no
+        longer a second, separately-counted badge to split it out into."""
+        client, store = ui_client
+        aid = await store.save(make_report(repo_name="admin-badge-app-2"))
+        await store.create_gate(aid, "cluster-admin-review", "needs elevated review")
+        await store.create_gate(aid, "auto-mode-review", "app-owner gate")
+
+        with patch("agentit.portal.helpers._nav_gate_badges_cache", {"pending_actions": 0, "ts": 0.0}):
+            resp = await client.get("/fleet")
+        assert resp.status_code == 200
+        assert re.search(r'Ledger\s*<span class="nav-badge">2</span>', resp.text)
 
 
 # ── 7. Self-Improvement "run now" trigger ───────────────────────────────

@@ -1,4 +1,7 @@
-"""Exclusive IA ownership: Ledger's PR list vs Fleet scoreboard vs Admin Review.
+"""Exclusive IA ownership: Ledger's PR list vs Fleet scoreboard. (Admin
+Review, a third, elevated-approvals nav item, was retired 2026-07-18 along
+with the `cluster-admin-review` gate type it existed solely for -- see
+delivery.py/routes/gates.py.)
 
 See docs/portal-experience-design-language.md §1. Ledger's own job was
 redefined by product direction (docs/ledger-design-spec.md's original A-P
@@ -92,7 +95,7 @@ async def test_nav_needs_you_badge_on_ledger_reflects_pr_gates_only(ui_client):
     )
     with patch(
         "agentit.portal.helpers._nav_gate_badges_cache",
-        {"pending_actions": 0, "admin_review": 0, "ts": 0.0},
+        {"pending_actions": 0, "ts": 0.0},
     ):
         resp = await client.get("/ledger")
     assert resp.status_code == 200
@@ -117,7 +120,7 @@ async def test_fleet_quiet_pointer_to_ledger_counts_pr_gates_only(ui_client):
     )
     with patch(
         "agentit.portal.helpers._nav_gate_badges_cache",
-        {"pending_actions": 0, "admin_review": 0, "ts": 0.0},
+        {"pending_actions": 0, "ts": 0.0},
     ):
         resp = await client.get("/fleet")
     assert resp.status_code == 200, resp.text[:500]
@@ -130,48 +133,35 @@ async def test_fleet_quiet_pointer_to_ledger_counts_pr_gates_only(ui_client):
     assert "3 pending action" in resp.text
 
 
-async def test_admin_review_buried_in_menu_when_count_zero(ui_client):
-    client, _store = ui_client
-    with patch(
-        "agentit.portal.helpers._nav_gate_badges_cache",
-        {"pending_actions": 0, "admin_review": 0, "ts": 0.0},
-    ):
-        resp = await client.get("/ledger")
-    assert resp.status_code == 200
-    primary = resp.text.split('id="nav-primary"', 1)[1].split("links-secondary", 1)[0]
-    assert "Admin Review" not in primary
-    dropdown = resp.text.split("user-menu-dropdown", 1)[1]
-    assert 'href="/admin-review"' in dropdown
-    assert "Elevated approvals" in dropdown
-
-
-async def test_admin_review_primary_nav_when_count_positive(ui_client):
+async def test_admin_review_nav_and_page_are_gone(ui_client):
+    """Admin Review (nav link, account-menu entry, and page) was retired
+    2026-07-18 along with the `cluster-admin-review` gate type it existed
+    solely for -- every gate type is per-app now, so there's no cross-app
+    elevated-approvals queue left to link to, even with a pending gate of
+    that (now-legacy) type in the fleet."""
     client, store = ui_client
     aid = await store.save(make_report(repo_name="admin-nav-app"))
     await store.create_gate(aid, "cluster-admin-review", "needs elevated review")
     with patch(
         "agentit.portal.helpers._nav_gate_badges_cache",
-        {"pending_actions": 0, "admin_review": 0, "ts": 0.0},
+        {"pending_actions": 0, "ts": 0.0},
     ):
         resp = await client.get("/ledger")
     assert resp.status_code == 200
-    primary = resp.text.split('id="nav-primary"', 1)[1].split("links-secondary", 1)[0]
-    assert re.search(r'Admin Review\s*<span class="nav-badge">1</span>', primary)
-    dropdown = resp.text.split("user-menu-dropdown", 1)[1].split("deploy-status", 1)[0]
-    assert "Elevated approvals" not in dropdown
+    assert "Admin Review" not in resp.text
+    assert 'href="/admin-review"' not in resp.text
 
-
-async def test_admin_review_page_states_exclusive_job(ui_client):
-    client, _store = ui_client
-    resp = await client.get("/admin-review")
-    assert resp.status_code == 200
-    assert "<h1>Admin Review</h1>" in resp.text
-    assert "Elevated approvals" in resp.text
+    page_resp = await client.get("/admin-review", follow_redirects=False)
+    assert page_resp.status_code == 404
 
 
 async def test_events_page_does_not_claim_ops_home(ui_client):
+    """Events is the system-activity/audit-trail feed (every action the
+    system takes, behind the scenes) -- it must not claim to be the
+    primary destination for something that needs a human's attention,
+    and must point at Ledger for that instead."""
     client, _store = ui_client
     resp = await client.get("/events")
     assert resp.status_code == 200
-    assert "Ops home is" in resp.text
+    assert "Every action the system takes" in resp.text
     assert 'href="/ledger"' in resp.text

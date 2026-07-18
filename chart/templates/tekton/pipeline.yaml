@@ -27,9 +27,79 @@ spec:
   workspaces:
     - name: source
   tasks:
+    # Many agents can push to main in quick succession, and each push gets
+    # its own PipelineRun (trigger.yaml). Without this, every one of those
+    # runs to completion independently -- piling up retries/queue time and
+    # node-resource contention (the exact ExceededNodeResources congestion
+    # this task exists to relieve) for commits that are already stale by
+    # the time they'd finish. Runs first, before any real work starts:
+    # finds other still-active agentit-ci PipelineRuns strictly OLDER than
+    # this one (by creationTimestamp, never by listing order/name -- keeps
+    # the direction always "newer supersedes older", so two runs created
+    # around the same instant can never cancel each other) and cancels
+    # them, UNLESS they've already started build-image -- once that task's
+    # TaskRun exists, that run may already be building/pushing an image on
+    # its way to notify-argocd, and superseding it in favor of a run that
+    # hasn't even built yet could cancel the one whose image is about to go
+    # live. Deliberately best-effort/fail-safe: every external call is
+    # guarded so a transient API error here can never fail the pipeline --
+    # only skip the supersede check for that one run.
+    - name: supersede-stale-runs
+      retries: 1
+      timeout: "2m0s"
+      taskSpec:
+        steps:
+          - name: supersede
+            image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+            computeResources:
+              requests:
+                memory: 64Mi
+                cpu: 50m
+            script: |
+              set -euo pipefail
+              NS="{{ .Release.Namespace }}"
+              SELF="$(context.pipelineRun.name)"
+              echo "Checking whether to supersede older in-flight agentit-ci PipelineRuns (self: $SELF)..."
+
+              SELF_CREATED=$(oc get pipelinerun "$SELF" -n "$NS" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null || echo "")
+              if [ -z "$SELF_CREATED" ]; then
+                echo "Could not read own creationTimestamp -- skipping supersede check for this run."
+                exit 0
+              fi
+
+              CANCELLED=0
+              oc get pipelinerun -n "$NS" -l tekton.dev/pipeline=agentit-ci \
+                -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.creationTimestamp}{" "}{.status.completionTime}{"\n"}{end}' \
+                > /tmp/agentit-ci-pipelineruns.txt 2>/dev/null || true
+
+              while read -r NAME CREATED COMPLETED; do
+                if [ -z "$NAME" ] || [ "$NAME" = "$SELF" ]; then continue; fi
+                if [ -n "$COMPLETED" ]; then continue; fi
+                if [ -z "$CREATED" ] || ! [ "$CREATED" \< "$SELF_CREATED" ]; then continue; fi
+
+                EXISTING_STATUS=$(oc get pipelinerun "$NAME" -n "$NS" -o jsonpath='{.spec.status}' 2>/dev/null || echo "")
+                case "$EXISTING_STATUS" in
+                  Cancelled|CancelledRunFinally) continue ;;
+                esac
+
+                BUILD_STARTED=$(oc get pipelinerun "$NAME" -n "$NS" -o jsonpath='{.status.childReferences[?(@.pipelineTaskName=="build-image")].pipelineTaskName}' 2>/dev/null || echo "")
+                if [ -n "$BUILD_STARTED" ]; then
+                  echo "Leaving older PipelineRun $NAME running -- already past build-image."
+                  continue
+                fi
+
+                if oc patch pipelinerun "$NAME" -n "$NS" --type=merge -p '{"spec":{"status":"Cancelled"}}' 2>/dev/null; then
+                  CANCELLED=$((CANCELLED+1))
+                  echo "Superseded older PipelineRun $NAME (not yet past build-image)."
+                fi
+              done < /tmp/agentit-ci-pipelineruns.txt
+
+              echo "Superseded $CANCELLED older PipelineRun(s)."
+
     - name: git-clone
       retries: 2
       timeout: "5m0s"
+      runAfter: [supersede-stale-runs]
       taskRef:
         resolver: cluster
         params:

@@ -7,7 +7,7 @@
   {"href": "/events/dlq", "label": "Dead-Letter Queue"},
 ], request) }}
 <h1>Events</h1>
-<p class="text-muted text-sm mb-1">Bell feed + DLQ — filters and pagination. Ops home is <a href="/ledger">Ledger</a>.</p>
+<p class="text-muted text-sm mb-1">Every action the system takes, behind the scenes — watcher ticks, webhooks received, gates opened, drift detected, and more, in real time. Looking for PRs that need your attention instead? See <a href="/ledger">Ledger</a>.</p>
 <details class="filter-panel" open>
   <summary class="filter-panel-summary btn btn-sm btn-outline">Filters</summary>
   <form method="get" action="/events" class="filter-bar" role="search" aria-label="Filter events">
@@ -20,6 +20,7 @@
       <select id="filter-events-severity" name="severity">
         <option value="">All severities</option>
         <option value="critical" {{ 'selected' if severity_filter == 'critical' }}>Critical</option>
+        <option value="error" {{ 'selected' if severity_filter == 'error' }}>Error</option>
         <option value="warning" {{ 'selected' if severity_filter == 'warning' }}>Warning</option>
         <option value="info" {{ 'selected' if severity_filter == 'info' }}>Info</option>
       </select>
@@ -57,12 +58,21 @@
         {% if e.target_app and e.assessment_id %}<a href="/assessments/{{ e.assessment_id }}">{{ e.target_app }}</a>{% else %}{{ e.target_app or "-" }}{% endif %}
       </td>
       <td>
+        {# Events' own real severity vocabulary is critical/error/warning/info
+           (see every log_event() call site) -- distinct from a finding's
+           critical/high/medium/low. This badge previously checked for
+           "high"/"medium" (dead branches an event severity never sets) and
+           had no "warning"/"error" case at all, so every warning- or
+           error-severity event (tick-failed, build-failed, an auto-mode
+           deliver gated for review, ...) silently rendered as a plain
+           "info" badge -- even though the Severity filter dropdown above
+           could already filter for exactly those values. #}
         {% if e.severity == "critical" %}
           <span class="badge badge-critical">critical</span>
-        {% elif e.severity == "high" %}
-          <span class="badge badge-high">high</span>
-        {% elif e.severity == "medium" %}
-          <span class="badge badge-medium">medium</span>
+        {% elif e.severity == "error" %}
+          <span class="badge badge-danger">error</span>
+        {% elif e.severity == "warning" %}
+          <span class="badge badge-warning">warning</span>
         {% else %}
           <span class="badge badge-info">info</span>
         {% endif %}
@@ -91,7 +101,7 @@
 {% else %}
 <div class="empty-state">
   <h3>No events recorded yet</h3>
-  <p class="text-muted">Agent activity will appear here as assessments, deliveries, and other actions occur.</p>
+  <p class="text-muted">System activity will appear here as assessments, watcher ticks, deliveries, and other actions occur.</p>
 </div>
 {% endif %}
 </div>

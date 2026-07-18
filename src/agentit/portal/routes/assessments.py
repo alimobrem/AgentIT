@@ -194,7 +194,7 @@ async def assess_submit(
             )
     s = await get_store()
     # Chaining into onboarding is now the default for every Assess, not
-    # just Fleet's "Refresh Onboard" button (docs/onboarding-loop-vision-
+    # just Fleet's "Re-scan" button (docs/onboarding-loop-vision-
     # gap-analysis.md §2/§8: the vision's "no difference between assessment
     # and onboarding" step, confirmed as a deliberate product decision, not
     # a free consolidation -- it removes the one point a human sees raw
@@ -358,49 +358,6 @@ def _auto_create_infra_repo(repo_url: str) -> str | None:
     return None
 
 
-@router.post("/self-assess", response_model=None)
-async def self_assess_route(request: Request):
-    """One-click self-assessment -- AgentIT assesses its own repo."""
-    repo_url = "https://github.com/alimobrem/AgentIT"
-    check_results: list[dict] = []
-    secret_decisions: list[dict] = []
-    try:
-        # Mandatory-registration gate (no Direct Apply fallback) applies here
-        # exactly like the main Assess path -- see
-        # `_resolve_mandatory_infra_repo_url()`/`InfraRepoRequiredError`.
-        infra = await asyncio.to_thread(_resolve_mandatory_infra_repo_url, repo_url, None)
-        report = await with_timeout(
-            asyncio.to_thread(
-                _clone_assess_cleanup, repo_url, "high", infra,
-                check_results_out=check_results, secret_decisions_out=secret_decisions,
-            )
-        )
-    except InfraRepoRequiredError as exc:
-        log.warning("Self-assess blocked: %s", exc)
-        s = await get_store()
-        await s.log_event("portal", "infra-repo-creation-failed", "AgentIT", "critical",
-                           f"Self-assess blocked: {exc}")
-        return RedirectResponse(url=f"/?error={quote(str(exc)[:280])}", status_code=303)
-    except Exception as exc:
-        log.exception("Self-assessment failed")
-        return RedirectResponse(url=f"/?error={quote(str(exc)[:200])}", status_code=303)
-    s = await get_store()
-    assessment_id = await s.save(report)
-    await s.save_check_results(assessment_id, check_results)
-    from agentit.llm_decisions import build_secret_classify_events
-    for ev in build_secret_classify_events(secret_decisions, report.repo_name):
-        await s.log_event(**ev, correlation_id=assessment_id)
-    await s.log_event("self-assess", "assessment-complete", report.repo_name, "info",
-                       f"Self-assessment complete: {report.overall_score:.0f}/100")
-    from agentit.events import TOPIC_ASSESSMENTS as _TOPIC_ASSESS
-    publish_event("assessment-complete", report.repo_name,
-                   f"Self-assessment: {report.overall_score:.0f}/100",
-                   {"assessment_id": assessment_id, "score": report.overall_score},
-                   correlation_id=assessment_id,
-                   extra_topic=_TOPIC_ASSESS)
-    return RedirectResponse(url=f"/assessments/{assessment_id}", status_code=303)
-
-
 @router.get("/assessments/{assessment_id}", response_class=HTMLResponse)
 async def assessment_detail(request: Request, assessment_id: str) -> HTMLResponse:
     s = await get_store()
@@ -429,19 +386,18 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     all_findings = [f for sc in report.scores for f in sc.findings]
     fixable_categories = {f.category for f in all_findings if lookup(f.category) is not None}
 
-    # The 7 app-owner-scoped gate types now live here (Actions tab) instead
-    # of the retired global Gates page -- cluster-admin-review is excluded,
-    # it's the one gate type for a genuinely different audience and stays
-    # on the separate Admin Review page (docs/ui-redesign-proposal.md §2).
+    # Every gate type now lives here (Actions tab) instead of the retired
+    # global Gates page -- including a stale ``cluster-admin-review`` row, if
+    # one somehow still exists (that type, and the separate Admin Review
+    # page it used to live on, were retired 2026-07-18 -- see delivery.py).
     from agentit.portal.delivery import (
-        ADMIN_REVIEW_GATE_TYPE,
         gate_delivery_confirmation,
         get_next_action_state,
         is_gitops_registered,
     )
     assessment_gates = await s.list_gates_for_assessment(assessment_id, status="pending") \
         if hasattr(s, "list_gates_for_assessment") else []
-    pending_actions = [g for g in assessment_gates if g["gate_type"] != ADMIN_REVIEW_GATE_TYPE]
+    pending_actions = assessment_gates
     for g in pending_actions:
         g["delivery_confirmation"] = await gate_delivery_confirmation(s, g)
 
@@ -463,8 +419,7 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         recently_resolved_actions_count = sum(
             1 for g in all_app_gates
-            if g["gate_type"] != ADMIN_REVIEW_GATE_TYPE
-            and g["status"] in ("approved", "rejected", "expired", "cancelled")
+            if g["status"] in ("approved", "rejected", "expired", "cancelled")
             and (g.get("resolved_at") or g.get("created_at") or "") >= cutoff
         )
 

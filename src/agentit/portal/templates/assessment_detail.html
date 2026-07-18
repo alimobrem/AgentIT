@@ -148,8 +148,8 @@
   <span class="next-step-icon" aria-hidden="true">&#9679;</span>
   <span>
     {% if prior_onboarded %}
-    New scorecard after re-assess — click <strong>Onboard This App</strong> below to regenerate manifests
-    (next time use Fleet <strong>Refresh Onboard</strong> to re-assess and onboard in one step).
+    New scorecard after re-scan — click <strong>Onboard This App</strong> below to regenerate manifests
+    (next time use Fleet <strong>Re-scan</strong> to re-assess and onboard in one step).
     {% else %}
     Next step: click <strong>Onboard This App</strong> below.
     Onboard generates remediations for all findings — do not fix them one-by-one on the Actions tab first.
@@ -240,17 +240,16 @@
     </button>
   </form>
   {% endif %}
-  {# Manual re-assess trigger for this exact app -- same underlying POST
+  {# Manual Scan/Re-scan trigger for this exact app -- same underlying POST
      /assess Fleet's own row action already uses (repo_url + criticality,
      re-scored from scratch), just reachable from the app's own detail page
      too instead of only from the Fleet table. Re-onboard above regenerates
      manifests for the CURRENT score; this re-scores the app first (then
-     auto-chains into onboard, same default every Assess/Re-assess entry
-     point in the app already has -- see assess_submit()'s continue_onboard
-     default). Mirrors Fleet's own ever_onboarded split exactly: a never-
-     onboarded app's plain "Re-assess" skips a confirm dialog; the more
-     consequential re-assess+auto-onboard case (Fleet's "Refresh Onboard")
-     gets one. #}
+     auto-chains into onboard, same default every Assess/Scan entry point in
+     the app already has -- see assess_submit()'s continue_onboard default).
+     Mirrors Fleet's own ever_onboarded split exactly: a never-onboarded
+     app's plain "Scan" skips a confirm dialog; the more consequential
+     re-assess+auto-onboard case ("Re-scan") gets one. #}
   {% set ever_onboarded = lifecycle_stage != "assessed" or prior_onboarded %}
   <form method="post" action="/assess" class="inline-form"
         x-data x-ref="reassessForm">
@@ -259,18 +258,18 @@
     {% if ever_onboarded %}
     <button type="button" class="btn btn-outline btn-sm"
       @click="$dispatch('show-confirm', {
-        title: 'Re-Assess',
-        message: 'Re-assess ' + {{ report.repo_name | tojson | forceescape }} + ' and regenerate onboard manifests in one step. You will land on Onboard Results to Dry Run \u2192 Apply.',
+        title: 'Re-scan',
+        message: 'Re-scan ' + {{ report.repo_name | tojson | forceescape }} + ' and regenerate onboard manifests in one step. You will land on Onboard Results to Dry Run \u2192 Apply.',
         form: $refs.reassessForm,
-        opts: { confirmText: 'Re-Assess' }
+        opts: { confirmText: 'Re-scan' }
       })">
-      <span class="btn-label">Re-Assess</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
+      <span class="btn-label">Re-scan</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Scanning&hellip;</span>
     </button>
     {% else %}
     <button type="submit" class="btn btn-outline btn-sm">
-      <span class="btn-label">Re-Assess</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
+      <span class="btn-label">Scan</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Scanning&hellip;</span>
     </button>
     {% endif %}
   </form>
@@ -289,20 +288,20 @@
 {# Real, per-app setting -- read by watchers/reassess_scheduler.py's tick
    loop (get_apps_due_for_reassessment()) to decide when to automatically
    re-Assess this app, via the same /api/webhook/assess route the Fleet
-   page's Re-assess/Refresh Onboard buttons use. Saving this is always real
+   page's Scan/Re-scan buttons use. Saving this is always real
    (persisted on the app row) -- the note below is honest about whether
    anything is currently deployed to act on it. #}
 <div class="mb-2">
   <h2 class="section-title">Automatic re-assessment</h2>
   {% if reassess_scheduler_active %}
   <p class="text-muted text-sm mb-1">
-    AgentIT automatically re-Assesses this app on the cadence below (in addition to the manual Re-Assess button above and push-triggered re-checks).
+    AgentIT automatically re-Assesses this app on the cadence below (in addition to the manual Scan button above and push-triggered re-checks).
   </p>
   {% else %}
   <p class="text-muted text-sm mb-1">
     Cadence saved here is real, but no re-assessment scheduler is currently running in this deployment to act on it yet
     (the <code>reassess-scheduler</code> agent is disabled or hasn't ticked) -- until it's enabled, this app is only
-    re-checked via the manual Re-Assess button above (or from <a href="/fleet">Fleet</a>) or a push to its repo.
+    re-checked via the manual Scan button above (or from <a href="/fleet">Fleet</a>) or a push to its repo.
   </p>
   {% endif %}
   <form method="post" action="/assessments/{{ assessment_id }}/set-cadence" class="inline-form">

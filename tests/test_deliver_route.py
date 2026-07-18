@@ -287,7 +287,7 @@ class TestOnboardResultsWarnsBeforeDryRun:
     async def test_onboard_results_fewer_stacked_alerts_after_gitops_dry_run(
         self, deliver_client, _mock_kube,
     ):
-        """Primary status alert only; GitOps/admin-review are secondary details."""
+        """Primary status alert only; GitOps/shared-namespace callouts are secondary details."""
         client, store, aid = deliver_client
         await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
         with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}):

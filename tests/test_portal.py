@@ -124,34 +124,6 @@ async def client():
         yield c
 
 
-async def test_self_assess_logs_events_with_repo_name_casing(client, _override_store):
-    """self_assess_route's own extra "Self-assessment complete: X/100"
-    log_event call (distinct from store.save()'s own generic "Assessment
-    complete" event, which already correctly uses report.repo_name)
-    hardcoded the lowercase literal "agentit" as target_app -- while
-    every other event for the same app used report.repo_name ("AgentIT",
-    the real GitHub casing). The Ledger then showed the same app under
-    two different casings. Must use report.repo_name consistently."""
-    from unittest.mock import patch
-    from agentit.portal.routes import assessments
-
-    store = _override_store
-    report = _make_report_with_findings("AgentIT")
-    with patch.object(assessments, "_auto_create_infra_repo",
-                      return_value="https://github.com/org/agentit-gitops"), \
-         patch.object(assessments, "_clone_assess_cleanup", return_value=report):
-        resp = await client.post("/self-assess")
-    assert resp.status_code in (200, 303)
-
-    events = await store.list_events(limit=200)
-    self_assess_events = [e for e in events if e["agent_id"] == "self-assess"]
-    assert self_assess_events, "self_assess_route's own log_event call never fired"
-    assert all(e["target_app"] == "AgentIT" for e in self_assess_events), (
-        f"self-assess event(s) logged under the wrong casing: "
-        f"{[(e['action'], e['target_app']) for e in self_assess_events]}"
-    )
-
-
 async def test_dashboard_empty(client):
     resp = await client.get("/fleet")
     assert resp.status_code == 200
@@ -849,6 +821,36 @@ async def test_events_page_filters_by_correlation_id(client, _override_store):
     assert "other event" not in resp.text
 
 
+async def test_events_severity_badges_match_events_real_vocabulary(client, _override_store):
+    """Events' own severity vocabulary is critical/error/warning/info (see
+    every store.log_event() call site) -- distinct from a finding's
+    critical/high/medium/low. Before this, the row badge only recognized
+    "critical"/"high"/"medium" (the latter two never set by a real event)
+    and had no "warning"/"error" case, so a warning- or error-severity
+    event silently rendered as a plain "info" badge even though the
+    Severity filter dropdown could already filter for exactly those
+    values."""
+    store = _override_store
+    await store.log_event("dispatcher", "no-fix-available", "warn-app", "warning", "no fix found")
+    await store.log_event("vuln-watcher", "tick-failed", None, "error", "watcher tick failed")
+    await store.log_event("secret-check", "secret-missing", "agentit", "critical", "secret missing")
+
+    resp = await client.get("/events")
+    assert resp.status_code == 200
+    assert '<span class="badge badge-warning">warning</span>' in resp.text
+    assert '<span class="badge badge-danger">error</span>' in resp.text
+    assert '<span class="badge badge-critical">critical</span>' in resp.text
+
+    # The filter dropdown now offers "Error" alongside the pre-existing three.
+    assert '<option value="error"' in resp.text
+
+    # Each severity is independently filterable, and returns only its own rows.
+    resp = await client.get("/events?severity=warning")
+    assert "no fix found" in resp.text and "watcher tick failed" not in resp.text
+    resp = await client.get("/events?severity=error")
+    assert "watcher tick failed" in resp.text and "no fix found" not in resp.text
+
+
 async def test_events_target_app_links_to_assessment_when_resolvable(client, _override_store):
     """Every other page (Fleet, Remediations, Decisions) links an app name
     to its Assessment Detail page -- Events showed plain text instead."""
@@ -1262,52 +1264,24 @@ async def test_api_events_filter_target_app(client, _override_store):
 # Gate queue tests
 #
 # The global "/gates" page is retired (docs/ui-redesign-proposal.md §2/§5):
-# it now redirects to "/admin-review", which shows only `cluster-admin-review`
-# gates -- the one gate type that's genuinely cross-app, for a genuinely
-# different audience than an app owner. The other 7 (app-owner-scoped) gate
-# types now live on Assessment Detail's Actions tab -- see
-# test_admin_review_and_actions_tab.py for that behavior.
+# it now redirects to "/ledger" (previously "/admin-review", which used to
+# show only `cluster-admin-review` gates -- the one gate type that used to
+# be genuinely cross-app, for a genuinely different audience than an app
+# owner; both that gate type and the Admin Review page it lived on were
+# retired 2026-07-18 -- see delivery.py/routes/gates.py). Every gate type
+# now lives on Assessment Detail's Actions tab.
 # ------------------------------------------------------------------
 
 
-async def test_gates_redirects_to_admin_review(client):
+async def test_gates_redirects_to_ledger(client):
     resp = await client.get("/gates", follow_redirects=False)
     assert resp.status_code == 301
-    assert resp.headers["location"] == "/admin-review"
+    assert resp.headers["location"] == "/ledger"
 
 
-async def test_admin_review_page_empty(client):
-    resp = await client.get("/admin-review")
-    assert resp.status_code == 200
-    assert "No pending gates" in resp.text
-
-
-async def test_admin_review_page_with_pending(client, _override_store):
-    store = _override_store
-    report = _make_report()
-    aid = await store.save(report)
-    await store.create_gate(aid, "cluster-admin-review", "Approve deployment of test-repo")
-
-    resp = await client.get("/admin-review")
-    assert resp.status_code == 200
-    assert "Approve deployment of test-repo" in resp.text
-    assert "Approve" in resp.text
-    assert "Reject" in resp.text
-
-
-async def test_admin_review_page_excludes_app_owner_gate_types(client, _override_store):
-    """A "deploy"-style app-owner gate must never show up on Admin Review --
-    that's exactly the audience split docs/ui-redesign-proposal.md §2 makes.
-    It belongs on that app's own Assessment Detail Actions tab instead."""
-    store = _override_store
-    report = _make_report()
-    aid = await store.save(report)
-    await store.create_gate(aid, "deploy", "Approve deployment of test-repo")
-
-    resp = await client.get("/admin-review")
-    assert resp.status_code == 200
-    assert "Approve deployment of test-repo" not in resp.text
-    assert "No pending gates" in resp.text
+async def test_admin_review_page_is_gone(client):
+    resp = await client.get("/admin-review", follow_redirects=False)
+    assert resp.status_code == 404
 
 
 async def test_resolve_gate_approve(client, _override_store):
@@ -1337,7 +1311,11 @@ async def test_resolve_gate_approve(client, _override_store):
     assert approved[0]["resolved_by"] == "tester"
 
 
-async def test_resolve_cluster_admin_review_gate_redirects_to_admin_review(client, _override_store):
+async def test_resolve_stale_cluster_admin_review_gate_redirects_to_own_actions_tab(client, _override_store):
+    """`cluster-admin-review`'s own cross-app redirect target (the now-
+    removed Admin Review page) was retired 2026-07-18 -- a gate of this
+    type is per-app like any other now, so rejecting one redirects to its
+    own app's Actions tab, same as every other gate type."""
     store = _override_store
     report = _make_report()
     aid = await store.save(report)
@@ -1349,7 +1327,23 @@ async def test_resolve_cluster_admin_review_gate_redirects_to_admin_review(clien
         follow_redirects=False,
     )
     assert resp.status_code == 303
-    assert resp.headers["location"] == "/admin-review"
+    assert resp.headers["location"] == f"/assessments/{aid}?tab=actions"
+
+
+async def test_gate_card_badge_shows_human_label_not_raw_gate_type(client, _override_store):
+    """gate_card() (Assessment Detail's Actions tab, shared with the
+    now-retired Admin Review page) rendered a gate's real gate_type as
+    `{{ gate.gate_type | upper }}` -- an all-caps hyphenated identifier
+    with no explanation. Fixed via ledger.py's humanize_gate_type()."""
+    store = _override_store
+    report = _make_report_with_findings("gate-label-app")
+    aid = await store.save(report)
+    await store.create_gate(aid, "auto-mode-review", "needs review")
+
+    resp = await client.get(f"/assessments/{aid}?tab=actions")
+    assert resp.status_code == 200
+    assert "AUTO-MODE-REVIEW" not in resp.text
+    assert 'title="Gate type: auto-mode-review">Auto-mode review<' in resp.text
 
 
 async def test_list_gates_includes_app_name(client, _override_store):
@@ -1589,7 +1583,7 @@ async def test_no_inline_styles_gates(client, _override_store):
     report = _make_report()
     aid = await store.save(report)
     await store.create_gate(aid, "cluster-admin-review", "Test gate")
-    resp = await client.get("/admin-review")
+    resp = await client.get(f"/assessments/{aid}?tab=actions")
     html = resp.text
     for line in html.split("\n"):
         if "style=" in line.lower() and 'style="--pct' not in line:
@@ -1616,28 +1610,30 @@ async def test_dashboard_uses_design_system_classes(client, _override_store):
     assert "<h1>Fleet</h1>" in resp.text
     assert "css-app" in resp.text
     assert "<table>" in resp.text
-    assert "Re-assess" in resp.text
+    assert "Scan" in resp.text
 
 
-async def test_fleet_refresh_onboard_cta_when_ever_onboarded(client, _override_store):
-    """Previously onboarded apps get one primary Refresh Onboard CTA on Fleet."""
+async def test_fleet_rescan_cta_when_ever_onboarded(client, _override_store):
+    """Previously onboarded apps get one primary Re-scan CTA on Fleet --
+    same consolidated action as never-onboarded apps' plain Scan, just with
+    a confirm dialog since it also regenerates onboard manifests."""
     store = _override_store
     old_id = await store.save(_make_report_scored("refresh-me", 55))
     await store.save_onboarding(old_id, [{
         "category": "hardening", "path": "deploy.yaml",
         "content": "kind: Deployment\n", "description": "deploy",
     }])
-    # New assessment (as Re-assess would create) — lifecycle back to assessed,
+    # New assessment (as a Scan would create) — lifecycle back to assessed,
     # but fleet still knows this repo was onboarded before.
     await store.save(_make_report_scored("refresh-me", 60))
     resp = await client.get("/fleet")
-    assert "Refresh Onboard" in resp.text
+    assert "Re-scan" in resp.text
     assert 'name="continue_onboard" value="1"' in resp.text
-    # Never-onboarded sibling still uses plain Re-assess.
+    # Never-onboarded sibling still uses plain Scan (no confirm dialog).
     await store.save(_make_report_scored("fresh-only", 70))
     resp2 = await client.get("/fleet")
-    assert "Re-assess" in resp2.text
-    assert "Refresh Onboard" in resp2.text
+    assert "Scan" in resp2.text
+    assert "Re-scan" in resp2.text
 
 
 async def test_assess_progress_chains_to_onboard_when_continue_flag(
@@ -1675,8 +1671,8 @@ async def test_assessment_detail_prior_onboarded_hint(client, _override_store):
     }])
     new_id = await store.save(_make_report_scored("prior-onboard", 45))
     resp = await client.get(f"/assessments/{new_id}")
-    assert "New scorecard after re-assess" in resp.text
-    assert "Refresh Onboard" in resp.text
+    assert "New scorecard after re-scan" in resp.text
+    assert "Re-scan" in resp.text
     assert "Onboard This App" in resp.text
 
 
@@ -1719,7 +1715,7 @@ async def test_gates_uses_design_system_classes(client, _override_store):
     report = _make_report()
     aid = await store.save(report)
     await store.create_gate(aid, "cluster-admin-review", "Gate test")
-    resp = await client.get("/admin-review")
+    resp = await client.get(f"/assessments/{aid}?tab=actions")
     assert "gate-actions" in resp.text
     assert "btn-approve" in resp.text
     assert "btn-danger-outline" in resp.text
@@ -2115,14 +2111,16 @@ async def test_settings_nav_link(client):
 async def test_settings_auto_mode_banner_does_not_reference_retired_gates_page(client, _override_store):
     """Regression: the Auto-Mode banner said destructive changes get
     "queued in Gates for your review" -- Gates no longer exists as a
-    standalone page (split into per-app Actions tabs + Admin Review)."""
+    standalone page (split into per-app Actions tabs; the banner's other
+    original destination, Admin Review, was itself retired 2026-07-18 along
+    with the `cluster-admin-review` gate type it existed solely for)."""
     store = _override_store
     await store.set_setting("auto_mode", "true")
     resp = await client.get("/settings")
     assert resp.status_code == 200
     assert "queued in Gates" not in resp.text
     assert "Actions tab" in resp.text
-    assert "Admin Review" in resp.text
+    assert "Admin Review" not in resp.text
 
 
 async def test_settings_and_schedules_are_tabs_of_each_other(client, _override_store):
@@ -2145,6 +2143,18 @@ async def test_settings_and_schedules_are_tabs_of_each_other(client, _override_s
 # live terminal action for cluster-config is now a GitOps commit+PR gated
 # on a human merge). See test_automode_extended.py for AutoMode's own
 # simplified behavior coverage.
+
+
+async def test_settings_recent_actions_table_shows_human_labels(client, _override_store):
+    """"Recent Auto-Mode Actions" rendered a raw events.action value
+    verbatim ("gitops-pr-opened", "auto-applied", ...)."""
+    store = _override_store
+    await store.log_event("auto-mode", "gitops-pr-opened", "auto-action-app", "info", "PR opened")
+
+    resp = await client.get("/settings")
+    assert resp.status_code == 200
+    assert ">GitOps PR opened<" in resp.text
+    assert ">gitops-pr-opened<" not in resp.text
 
 
 async def test_settings_page_no_longer_shows_allowlist_ui(client, _override_store):
@@ -2604,7 +2614,6 @@ async def test_all_pages_return_200(client, _override_store):
         "/assess",
         "/events",
         "/gates",
-        "/admin-review",
         "/agents",
         "/schedules",
         "/settings",
@@ -3523,6 +3532,12 @@ async def test_capabilities_page_shows_catalog_change_events(client, _override_s
     assert "Check removed: reliability/has-readiness-probe" in resp.text
     assert "badge-success" in resp.text
     assert "badge-warning" in resp.text
+    # The badge itself shows a real phrase, not the raw action string
+    # (Events' own full-detail page is still the place for the raw value).
+    assert ">Skill added<" in resp.text
+    assert ">Check removed<" in resp.text
+    assert ">skill-added<" not in resp.text
+    assert ">check-removed<" not in resp.text
 
 
 async def test_background_skill_inventory_diff_surfaces_on_events_page(client, _override_store, tmp_path, monkeypatch):

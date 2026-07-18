@@ -295,11 +295,15 @@ class TestDeliverButtonClickAttributeIntact:
             f"complete function call -- looks truncated:\n{click!r}"
         )
 
-    async def test_admin_review_gate_card_click_attr_is_unbroken(self, portal_client):
+    async def test_gate_card_click_attr_is_unbroken(self, portal_client):
+        """Was previously exercised via the (now-removed, 2026-07-18) Admin
+        Review page's `cluster-admin-review` gate card -- `gate_card()` is
+        shared, so any pending gate on Assessment Detail's Actions tab
+        exercises the exact same macro/click-attribute rendering."""
         client, store, aid = portal_client
-        await store.create_gate(aid, "cluster-admin-review", "Approve deployment of test-app")
+        await store.create_gate(aid, "auto-mode-review", "Approve deployment of test-app")
 
-        resp = await client.get("/admin-review")
+        resp = await client.get(f"/assessments/{aid}?tab=actions")
         assert resp.status_code == 200
 
         parser = _ClickAttrCapture()

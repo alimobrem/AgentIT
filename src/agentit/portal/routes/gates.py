@@ -6,18 +6,14 @@ import logging
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from agentit.audit import audit_log
-from agentit.portal.cluster_apply import apply_with_verification
 from agentit.portal.delivery import (
-    ADMIN_REVIEW_GATE_TYPE,
-    CATEGORY_CICD_SHARED_NAMESPACE,
-    classify_file,
-    gate_delivery_confirmation,
+    _CICD_SHARED_NAMESPACE_GATE_TYPE,
     route_and_deliver,
 )
-from agentit.portal.helpers import get_current_user, get_store, get_templates
+from agentit.portal.helpers import get_current_user, get_store
 
 log = logging.getLogger(__name__)
 
@@ -28,85 +24,27 @@ def _gate_redirect_target(gate: dict) -> str:
     """Where a human lands after resolving a gate that doesn't already
     redirect somewhere more specific (approved gates with an assessment_id
     mostly redirect straight to that app's onboard-results -- see below).
-    Cluster-admin-review gates are cross-app and resolved from Admin
-    Review; every other gate type is per-app and resolved from that app's
-    own Assessment Detail Actions tab -- lands with ``?tab=actions`` so
-    the NEXT pending gate in that same queue is immediately visible
-    instead of dropping the reviewer back on the Overview tab
-    (docs/ux-design-requirements.md checklist #12: "redirect to the next
-    actionable item, not back to the same page")."""
-    if gate.get("gate_type") == ADMIN_REVIEW_GATE_TYPE:
-        return "/admin-review"
+    Every gate type is per-app now (the cross-app ``cluster-admin-review``
+    gate type / Admin Review page were removed 2026-07-18 -- see delivery.py)
+    and resolved from that app's own Assessment Detail Actions tab -- lands
+    with ``?tab=actions`` so the NEXT pending gate in that same queue is
+    immediately visible instead of dropping the reviewer back on the
+    Overview tab (docs/ux-design-requirements.md checklist #12: "redirect to
+    the next actionable item, not back to the same page")."""
     assessment_id = gate.get("assessment_id")
     if assessment_id:
         return f"/assessments/{assessment_id}?tab=actions"
-    return "/admin-review"
-
-
-async def _admin_review_redirect_after_resolve(store: object, applied: int | None = None) -> str | None:
-    """After resolving a cluster-admin-review gate: if another one is
-    still pending, jump straight back to the Admin Review queue (the next
-    actionable item, matching checklist #12) instead of onboard-results --
-    a reviewer working through several pending elevated-review gates in a
-    row never has to manually navigate back. Returns ``None`` once the
-    queue is genuinely empty, so the caller falls through to its normal
-    onboard-results redirect (showing the delivery outcome instead)."""
-    remaining = await store.list_gates(status="pending")
-    if any(g.get("gate_type") == ADMIN_REVIEW_GATE_TYPE for g in remaining):
-        params = "gate_approved=true"
-        if applied is not None:
-            params += f"&applied={applied}"
-        return f"/admin-review?{params}"
-    return None
+    return "/ledger"
 
 
 @router.get("/gates")
 async def gates_page_redirect():
     """The global Gates page is retired (docs/ui-redesign-proposal.md §2/§5)
-    -- the 7 app-owner gate types now live on Fleet + Assessment Detail;
-    only `cluster-admin-review` still gets a standalone page. Kept as a
-    redirect, not a 404, for any stale bookmark/link."""
-    return RedirectResponse(url="/admin-review", status_code=301)
-
-
-@router.get("/admin-review", response_class=HTMLResponse)
-async def admin_review_page(request: Request):
-    """Show pending cluster-admin-review gates only -- the one gate type
-    that's genuinely cross-app, for a genuinely different audience than an
-    app owner. Auto-expires gates older than 24h, same as the retired
-    global Gates page did."""
-    s = await get_store()
-    expired_count = await s.expire_stale_gates(hours=24)
-    if expired_count:
-        await s.log_event("portal", "gates-expired", None, "info",
-                           f"Auto-expired {expired_count} stale gate(s)")
-
-    all_gates = await s.list_all_gates()
-    pending = [g for g in all_gates if g["status"] == "pending" and g["gate_type"] == ADMIN_REVIEW_GATE_TYPE]
-    resolved = [g for g in all_gates if g["status"] in ("approved", "rejected", "expired") and g["gate_type"] == ADMIN_REVIEW_GATE_TYPE]
-    stale = await s.get_stale_gates(hours=4)
-    stale_ids = {g["id"] for g in stale}
-    for g in pending:
-        g["stale"] = g["id"] in stale_ids
-        g["delivery_confirmation"] = await gate_delivery_confirmation(s, g)
-    resolved.sort(key=lambda g: g.get("resolved_at") or g.get("created_at", ""), reverse=True)
-
-    # Real, specific empty-state copy (docs/ux-design-requirements.md
-    # checklist #10) instead of a bare "all clear" -- how many of THIS
-    # gate type were actually resolved in the last 24h, sourced from the
-    # same `resolved` list already computed above, never fabricated.
-    from datetime import datetime, timedelta, timezone
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-    recently_resolved_count = sum(
-        1 for g in resolved if (g.get("resolved_at") or g.get("created_at") or "") >= cutoff
-    )
-
-    return get_templates().TemplateResponse(request, "admin_review.html", {
-        "pending": pending, "resolved": resolved[:20],
-        "stale_count": sum(1 for g in pending if g["id"] in stale_ids),
-        "expired_count": expired_count,
-        "recently_resolved_count": recently_resolved_count,
-    })
+    -- every gate type now lives on Fleet + Assessment Detail (Admin Review,
+    the last standalone gate page, was retired 2026-07-18 along with
+    `cluster-admin-review`). Kept as a redirect, not a 404, for any stale
+    bookmark/link."""
+    return RedirectResponse(url="/ledger", status_code=301)
 
 
 @router.post("/gates/{gate_id}/resolve", response_model=None)
@@ -177,12 +115,18 @@ async def resolve_gate(request: Request, gate_id: str):
                 status_code=303,
             )
 
-        if gate.get("gate_type") == "gitops-pr-pending":
+        if gate.get("gate_type") in ("gitops-pr-pending", _CICD_SHARED_NAMESPACE_GATE_TYPE):
             # AutoMode already opened the PR autonomously when it created
             # this gate (automode.py::execute) -- approving it is a merge,
             # never a re-delivery, since these manifests were never meant
             # to be applied directly for this GitOps-registered app at all
-            # (see docs/unified-apply-flow.md section (B)).
+            # (see docs/unified-apply-flow.md section (B)). The CI/CD-
+            # shared-namespace variant (2026-07-18) is treated identically
+            # here -- it's the exact same "merge the PR named in this
+            # gate's own summary" action, just under a distinct gate_type
+            # so it can coexist with a same-app, same-call cluster-config
+            # gate without store.create_gate()'s dedup colliding the two
+            # (see delivery.py's _deliver_via_gitops_pr_and_gate()).
             from agentit.portal.github_pr import merge_pr
 
             pr_url = ""
@@ -227,62 +171,24 @@ async def resolve_gate(request: Request, gate_id: str):
                 status_code=303,
             )
 
-        if gate.get("gate_type") == "cluster-admin-review":
-            # A human holding elevated RBAC has explicitly approved applying
-            # directly into a shared operator namespace -- the one case
-            # where the delivery router's own "never a direct apply into a
-            # shared operator namespace" rule is deliberately bypassed, by
-            # explicit human approval, not a code path that decides this on
-            # its own (see docs/unified-apply-flow.md's "CI/CD needs its
-            # own lane" section).
-            files = await s.get_onboarding(assessment_id)
-            report = await s.get(assessment_id)
-            if files and report:
-                cicd_files = [f for f in files if classify_file(f) == CATEGORY_CICD_SHARED_NAMESPACE]
-                namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
-                try:
-                    results = await apply_with_verification(
-                        cicd_files, namespace, False,
-                        store=s, app_name=report.repo_name,
-                        skill_outcome_reason=f"cluster-admin-review gate {gate_id} approved by {resolved_by}",
-                        actor=str(resolved_by), action="cluster-admin-apply",
-                        resource=f"assessment:{assessment_id}",
-                        allow_operator_namespaces=True,
-                    )
-                except Exception as exc:
-                    await s.reopen_gate(gate_id, status)
-                    log.exception("Elevated apply failed for gate %s (assessment %s)", gate_id, assessment_id)
-                    return RedirectResponse(
-                        url=(
-                            f"/assessments/{assessment_id}/onboard-results?error="
-                            f"{quote(f'Elevated apply failed: {str(exc)[:150]}. The gate remains pending — fix the issue and re-approve, or Reject with a reason.')}"
-                        ),
-                        status_code=303,
-                    )
-                applied = len(results["applied"])
-                # Redirect to the NEXT pending cluster-admin-review gate (if
-                # any) rather than always landing on this app's own
-                # onboard-results -- a reviewer working through several
-                # elevated-review gates in a row shouldn't have to
-                # manually navigate back each time (docs/ux-design-
-                # requirements.md checklist #12).
-                next_url = await _admin_review_redirect_after_resolve(s, applied=applied)
-                return RedirectResponse(
-                    url=next_url or f"/assessments/{assessment_id}/onboard-results?applied={applied}&gate_approved=true",
-                    status_code=303,
-                )
-
         # cluster-conflict-review (a server-side-apply field-manager
-        # conflict, surfaced through apply_with_verification()'s force=True
-        # re-apply) has been removed along with Direct Apply as a concept
-        # entirely -- apply_manifests_to_cluster()/kube.apply_yaml() are
-        # never called for the cluster-config category anymore, so this
-        # conflict can no longer genuinely occur (see
-        # route_and_deliver()/resolve_cluster_config_mechanism()). This gate
-        # type can no longer be created by any code path in this app; if one
-        # somehow still exists (e.g. stale data from before this directive),
-        # it now falls through to the generic delivery branch below, same as
-        # any other unrecognized gate type.
+        # conflict, previously surfaced through a force=True re-apply) and
+        # cluster-admin-review (CI/CD manifests destined for a shared
+        # operator namespace, previously an elevated-RBAC direct apply via
+        # apply_with_verification(..., allow_operator_namespaces=True)) have
+        # both been removed along with Direct Apply as a concept entirely --
+        # apply_manifests_to_cluster()/kube.apply_yaml() are no longer called
+        # anywhere in this app for delivery purposes (see
+        # route_and_deliver()/resolve_cluster_config_mechanism()); CI/CD
+        # manifests for a shared namespace now resolve to
+        # MECHANISM_INFRA_REPO_COMMIT exactly like cluster-config (see
+        # delivery.py's CATEGORY_CICD_SHARED_NAMESPACE handling). Neither
+        # gate type can be created by any code path in this app anymore; if
+        # one somehow still exists (e.g. stale data from before this
+        # directive), it now falls through to the generic delivery branch
+        # below, same as any other unrecognized gate type -- re-classifying
+        # this assessment's files fresh and routing any still-cicd ones
+        # through the same GitOps PR path a brand-new delivery would use.
 
         files = await s.get_onboarding(assessment_id)
         report = await s.get(assessment_id)
@@ -354,7 +260,7 @@ async def cancel_gate(request: Request, gate_id: str):
     gates = await s.list_gates(status="pending")
     gate = next((g for g in gates if g["id"] == gate_id), None)
     await s.resolve_gate(gate_id, "cancelled", get_current_user(request))
-    target = _gate_redirect_target(gate) if gate else "/admin-review"
+    target = _gate_redirect_target(gate) if gate else "/ledger"
     sep = "&" if "?" in target else "?"
     return RedirectResponse(url=f"{target}{sep}success=Gate+dismissed", status_code=303)
 

@@ -9,7 +9,15 @@ from pathlib import Path
 import pytest
 
 from agentit.platform_context import offline_context
-from agentit.skill_engine import Skill, SkillEngine, UnresolvedPlaceholderError, _pluralize_kind, _render_template
+from agentit.skill_engine import (
+    Skill,
+    SkillEngine,
+    UnresolvedPlaceholderError,
+    _pluralize_kind,
+    _render_template,
+    load_skill,
+    verify_skill,
+)
 from conftest import make_report
 
 
@@ -89,14 +97,18 @@ class TestPlatformGating:
 
 
 class _FakeLLMClient:
-    """Stub LLM client recording calls and returning a canned manifest."""
+    """Stub LLM client recording calls (incl. kwargs like max_tokens, so
+    callers can assert on the token budget requested) and returning a
+    canned manifest."""
 
     def __init__(self, response: str) -> None:
         self.response = response
         self.calls: list[tuple[str, str]] = []
+        self.max_tokens_requested: list[int | None] = []
 
-    def _chat(self, system: str, user: str) -> str:
+    def _chat(self, system: str, user: str, max_tokens: int | None = None, **_kwargs) -> str:
         self.calls.append((system, user))
+        self.max_tokens_requested.append(max_tokens)
         return self.response
 
 
@@ -400,3 +412,206 @@ class TestRunAllStoreWiring:
         files = engine.run_all(report, store=None, llm_client=fake_llm)
 
         assert len(files) == 1
+
+
+# ── Live bug repro: "skill matched the verification fixture but generated
+# no output" (resourcequota-contextual, blocked in the live portal
+# 2026-07-18T16:41-16:42Z) ──────────────────────────────────────────────
+#
+# Root cause traced via the live pod's own logs: SkillEngine._generate_with_llm()
+# called llm_client._chat(system, user) with no max_tokens override, silently
+# inheriting agentit.llm._DEFAULT_MAX_TOKENS (512) -- sized for short,
+# fixed-shape classifier JSON, not a full K8s manifest. The live LLM call hit
+# stop_reason=max_tokens on every attempt, so validate_manifest() rejected the
+# truncated content twice and generate() returned no files at all -- and
+# since this skill (mode: llm, no ```yaml block in its body) has no template
+# to fall back to, verify_skill() had nothing left to check and reported
+# "generated no output". The exact real skill body below is copied verbatim
+# from the live pod (`oc exec ... cat skills/infrastructure/
+# resourcequota-contextual.md`) -- including its own draft-generation
+# truncation (missing Constraints/Verification sections, cut off mid-sentence
+# at "avoid spike-driven"), a second live symptom of the identical
+# too-small-token-budget bug in learning_agent.py's generate_skill_from_research()
+# (see test_llm.py's sibling regression test).
+_REAL_RESOURCEQUOTA_CONTEXTUAL_MD = (
+    "---\n"
+    "name: resourcequota-contextual\n"
+    "domain: infrastructure\n"
+    "version: 1\n"
+    "triggers:\n"
+    "  - resourcequota\n"
+    "  - resource quota\n"
+    "  - namespace quota\n"
+    "  - quota\n"
+    "  - namespace limits\n"
+    "  - cpu limit\n"
+    "  - memory limit\n"
+    "  - namespace resource limits\n"
+    "  - quota policy\n"
+    "  - namespace governance\n"
+    "  - resource constraints\n"
+    "  - limitrange\n"
+    "  - limit range\n"
+    "  - namespace capacity\n"
+    "  - quota tuning\n"
+    "outputs:\n"
+    "  - ResourceQuota\n"
+    "  - LimitRange\n"
+    "property: >\n"
+    "  Generate contextually grounded ResourceQuota and LimitRange manifests by first\n"
+    "  inspecting actual namespace workload declarations and live consumption metrics,\n"
+    "  then deriving tiered quota values with explicit headroom buffers and inline\n"
+    "  justifications rather than emitting generic placeholder figures.\n"
+    "mode: llm\n"
+    "status: draft\n"
+    "source: learning-agent\n"
+    'created_at: "2025-01-30"\n'
+    "---\n"
+    "\n"
+    "## Property\n"
+    "\n"
+    "Generate contextually grounded ResourceQuota and LimitRange manifests by first "
+    "inspecting actual namespace workload declarations and live consumption metrics, "
+    "then deriving tiered quota values with explicit headroom buffers and inline "
+    "justifications rather than emitting generic placeholder figures.\n"
+    "\n"
+    "---\n"
+    "\n"
+    "## Key Decisions for the LLM\n"
+    "\n"
+    "### 1. Namespace Workload Inspection (Pre-generation Required)\n"
+    "\n"
+    "Before emitting any manifest, the LLM **must** gather the following signals from "
+    "the target namespace. If a signal is unavailable, it must be noted explicitly in "
+    "the output and a conservative fallback assumption must be stated.\n"
+    "\n"
+    "**Declared resource signals:**\n"
+    "- List all `Deployment`, `StatefulSet`, and `DaemonSet` objects and extract their "
+    "`resources.requests` and `resources.limits` per container.\n"
+    "- Check for existing `HorizontalPodAutoscaler` objects and note `maxReplicas` to "
+    "understand burst capacity.\n"
+    "- Check for any existing `ResourceQuota` or `LimitRange` objects to understand "
+    "current policy and avoid regressions.\n"
+    "\n"
+    "**Live consumption signals (if available):**\n"
+    "- Query `metrics-server` via `kubectl top pods -n <namespace>` to obtain current "
+    "CPU and memory consumption per pod.\n"
+    "- If Prometheus is available, prefer p95 CPU and memory over a 7-day window to "
+    "avoid spike-driven"
+)
+
+# A complete, valid multi-document manifest of the shape a real (untruncated)
+# LLM response would produce for this skill's declared outputs
+# (ResourceQuota + LimitRange) -- used to prove verify_skill() now passes
+# once generation is actually given room to finish.
+_REAL_RESOURCEQUOTA_CONTEXTUAL_MANIFEST = (
+    "apiVersion: v1\n"
+    "kind: ResourceQuota\n"
+    "metadata:\n"
+    "  name: skill-verify-tier1-quota\n"
+    "  namespace: skill-verify\n"
+    "spec:\n"
+    "  hard:\n"
+    "    requests.cpu: \"4\"\n"
+    "    requests.memory: 8Gi\n"
+    "    limits.cpu: \"8\"\n"
+    "    limits.memory: 16Gi\n"
+    "---\n"
+    "apiVersion: v1\n"
+    "kind: LimitRange\n"
+    "metadata:\n"
+    "  name: skill-verify-default-limits\n"
+    "  namespace: skill-verify\n"
+    "spec:\n"
+    "  limits:\n"
+    "    - type: Container\n"
+    "      defaultRequest:\n"
+    "        cpu: 100m\n"
+    "        memory: 128Mi\n"
+    "      default:\n"
+    "        cpu: 500m\n"
+    "        memory: 512Mi\n"
+)
+
+
+class TestResourceQuotaContextualLiveBugRepro:
+    """Regression coverage for the exact live activation-blocked toast:
+    'Activation blocked — skill failed verification: skill matched the
+    verification fixture but generated no output', reported against the
+    real 'resourcequota-contextual' draft skill."""
+
+    def _write_real_skill(self, tmp_path: Path) -> Path:
+        skills_dir = tmp_path / "skills" / "infrastructure"
+        skills_dir.mkdir(parents=True)
+        path = skills_dir / "resourcequota-contextual.md"
+        path.write_text(_REAL_RESOURCEQUOTA_CONTEXTUAL_MD, encoding="utf-8")
+        return path
+
+    def test_real_skill_parses_as_llm_mode_draft_with_no_template_fallback(self, tmp_path: Path) -> None:
+        """Sanity check that this fixture really does reproduce the live
+        skill's shape: mode: llm, status: draft, and -- because its body has
+        no ```yaml block -- no template to fall back to if LLM generation
+        fails."""
+        from agentit.skill_engine import _extract_template
+
+        skill = load_skill(self._write_real_skill(tmp_path))
+        assert skill is not None
+        assert skill.name == "resourcequota-contextual"
+        assert skill.mode == "llm"
+        assert skill.status == "draft"
+        assert skill.outputs == ["ResourceQuota", "LimitRange"]
+        assert _extract_template(skill.body) is None
+
+    def test_verify_skill_blocked_when_llm_output_is_truncated(self, tmp_path: Path) -> None:
+        """Negative control: confirms this fixture genuinely reproduces the
+        live failure mode when the LLM response is truncated (the pre-fix
+        512-token behavior observed live: stop_reason=max_tokens on every
+        attempt) -- i.e. this is a real repro, not a fixture that would have
+        passed regardless of the fix."""
+        skill = load_skill(self._write_real_skill(tmp_path))
+        assert skill is not None
+        truncated_response = "apiVersion: v1\nkind: ResourceQuota\nmetadata:\n  labels:\n    tier: mid-sen"
+        fake_llm = _FakeLLMClient(truncated_response)
+
+        passed, issues, warnings = verify_skill(skill, llm_client=fake_llm)
+
+        assert passed is False
+        assert any("generated no output" in i for i in issues)
+
+    def test_verify_skill_passes_with_a_complete_llm_response(self, tmp_path: Path) -> None:
+        """The actual fix: once generation is given a real manifest-sized
+        token budget instead of the 512-token classifier default, a complete
+        LLM response for this exact real skill produces real, valid,
+        non-empty output and verify_skill() passes -- no more
+        'generated no output', no more blocked activation."""
+        skill = load_skill(self._write_real_skill(tmp_path))
+        assert skill is not None
+        fake_llm = _FakeLLMClient(_REAL_RESOURCEQUOTA_CONTEXTUAL_MANIFEST)
+
+        passed, issues, warnings = verify_skill(skill, llm_client=fake_llm)
+
+        assert passed is True, f"verify_skill still blocked: {issues}"
+        assert issues == []
+        assert "generated no output" not in "; ".join(issues)
+
+    def test_generation_requests_manifest_sized_token_budget_not_classifier_default(self, tmp_path: Path) -> None:
+        """The actual mechanism of the fix: generation for this skill must
+        request a real manifest-sized token budget, not silently inherit the
+        512-token default sized for short classifier JSON responses."""
+        import dataclasses
+
+        from agentit.llm import _SKILL_GENERATION_MAX_TOKENS
+
+        skill = load_skill(self._write_real_skill(tmp_path))
+        assert skill is not None
+        skill_active = dataclasses.replace(skill, status="active")
+        engine = SkillEngine(tmp_path, platform=None)
+        fake_llm = _FakeLLMClient(_REAL_RESOURCEQUOTA_CONTEXTUAL_MANIFEST)
+        report = make_report(repo_name="skill-verify")
+
+        files = engine.generate(skill_active, report, llm_client=fake_llm)
+
+        assert len(files) == 1
+        assert fake_llm.max_tokens_requested, "LLM was never called"
+        assert fake_llm.max_tokens_requested[0] == _SKILL_GENERATION_MAX_TOKENS
+        assert fake_llm.max_tokens_requested[0] > 512

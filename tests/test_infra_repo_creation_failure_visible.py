@@ -108,19 +108,6 @@ class TestInfraRepoCreationFailureHardStopsAssess:
         assert not [e for e in events if e["action"] == "infra-repo-creation-failed"]
 
 
-class TestSelfAssessInfraRepoRequired:
-    async def test_self_assess_blocked_when_auto_create_fails(self, portal_client):
-        _client, store, _seed_aid = portal_client
-        with patch.object(assessments, "_auto_create_infra_repo", return_value=None):
-            response = await assessments.self_assess_route(request=None)
-        assert response.status_code == 303
-        assert "error=" in response.headers["location"]
-        assert "GitOps" in response.headers["location"]
-
-        events = await store.list_events(target_app="AgentIT")
-        assert any(e["action"] == "infra-repo-creation-failed" for e in events)
-
-
 class TestAssessmentDetailShowsFailureBanner:
     async def test_banner_shown_after_auto_create_failure(self, portal_client):
         client, store, _seed_aid = portal_client
