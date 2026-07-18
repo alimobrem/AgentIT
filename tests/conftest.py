@@ -177,7 +177,7 @@ def _reset_kube_breaker() -> None:
 # cannot be driven from a different one) -- see
 # `asyncio_default_fixture_loop_scope`/`asyncio_default_test_loop_scope`
 # in pyproject.toml, both set to "session" for exactly this reason.
-_CONTAINER_NAME = f"agentit-pg-test-{uuid.uuid4().hex[:8]}"
+_CONTAINER_NAME = "agentit-pg-test"
 _container_started = False
 
 
@@ -202,7 +202,14 @@ def _resolve_postgres_dsn() -> str | None:
         return None
 
     port = 55433
+    # Always remove by the fixed name so stale containers from previous
+    # sessions are cleaned up -- the old random-suffix name meant each
+    # session left a stopped container that held a network proxy process,
+    # causing "proxy already running" on the next run.
     subprocess.run([runtime, "rm", "-f", _CONTAINER_NAME], capture_output=True)
+    # Prune unused networks to release any lingering proxy processes from
+    # previously killed containers (common on macOS/podman after a crash).
+    subprocess.run([runtime, "network", "prune", "-f"], capture_output=True)
     result = subprocess.run(
         [
             runtime, "run", "-d", "--name", _CONTAINER_NAME,
@@ -215,6 +222,12 @@ def _resolve_postgres_dsn() -> str | None:
         capture_output=True, text=True,
     )
     if result.returncode != 0:
+        print(
+            f"\nWARNING: could not start Postgres container ({runtime} exited {result.returncode}):\n"
+            f"  {result.stderr.strip()}\n"
+            f"Set AGENTIT_TEST_PG_DSN to skip auto-start.",
+            flush=True,
+        )
         return None
     _container_started = True
 
@@ -246,7 +259,14 @@ def postgres_dsn():
     """
     dsn = _resolve_postgres_dsn()
     if dsn is None:
-        pytest.skip("no AGENTIT_TEST_PG_DSN and no podman/docker on PATH to start one")
+        runtime = _container_runtime()
+        if runtime:
+            pytest.skip(
+                f"no AGENTIT_TEST_PG_DSN and {runtime} failed to start a Postgres container "
+                f"(see WARNING above; try: {runtime} machine restart, or set AGENTIT_TEST_PG_DSN)"
+            )
+        else:
+            pytest.skip("no AGENTIT_TEST_PG_DSN and no podman/docker on PATH to start one")
     os.environ["AGENTIT_DB_DSN"] = dsn
     yield dsn
 
@@ -261,6 +281,7 @@ def _pg_session_cleanup():
         runtime = _container_runtime()
         if runtime:
             subprocess.run([runtime, "rm", "-f", _CONTAINER_NAME], capture_output=True)
+            subprocess.run([runtime, "network", "prune", "-f"], capture_output=True)
 
 
 _ALL_STORE_TABLES = (
