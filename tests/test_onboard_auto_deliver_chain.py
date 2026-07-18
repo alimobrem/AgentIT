@@ -26,7 +26,7 @@ Covers:
 """
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -69,6 +69,38 @@ def _placeholder_file(path: str = "cost-cronjob.yaml") -> dict:
 
 
 _ORCH_SUMMARY = {"agents": [], "conflicts": [], "recommendation": "READY", "auto_approve": False, "gates": []}
+
+# Most of this file's scenarios exercise the chain from the point manifests
+# are already generated -- they need the orchestrator's own plan to have
+# called this batch auto-approvable (`AutoMode.should_auto_apply()`'s
+# "orchestrator says no auto_approve -> gate" rule, same as every other
+# AutoMode caller) to reach Dry Run/Deliver at all now that the safety
+# check below gates entry into the chain.
+_ORCH_SUMMARY_AUTO_APPROVE = {**_ORCH_SUMMARY, "auto_approve": True}
+
+
+def _safe_llm() -> MagicMock:
+    llm = MagicMock()
+    llm.classify_action.return_value = {
+        "is_destructive": False, "confidence": 0.95, "reason": "Adds a NetworkPolicy",
+    }
+    return llm
+
+
+def _destructive_llm() -> MagicMock:
+    llm = MagicMock()
+    llm.classify_action.return_value = {
+        "is_destructive": True, "confidence": 0.95, "reason": "Deletes the production namespace",
+    }
+    return llm
+
+
+def _low_confidence_llm() -> MagicMock:
+    llm = MagicMock()
+    llm.classify_action.return_value = {
+        "is_destructive": False, "confidence": 0.4, "reason": "Unsure what this manifest does",
+    }
+    return llm
 
 
 @pytest.fixture
@@ -162,8 +194,10 @@ class TestFullAutoChainSucceeds:
             infra_repo_url="https://github.com/org/auto-chain-success-app-gitops",
         )
         job_id = await store.create_remediation_job(aid, auto_deliver=True)
+        await store.set_setting("auto_mode", "true")
 
-        with patch.object(assessments, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY)), \
+        with patch.object(assessments, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY_AUTO_APPROVE)), \
+             patch("agentit.portal.routes.assessments.get_llm_client", return_value=_safe_llm()), \
              patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None), \
              patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
              patch("agentit.portal.github_pr.ensure_applicationset") as mock_ensure:
@@ -205,8 +239,10 @@ class TestFullAutoChainSucceeds:
             infra_repo_url="https://github.com/org/auto-chain-flash-app-gitops",
         )
         job_id = await store.create_remediation_job(aid, auto_deliver=True)
+        await store.set_setting("auto_mode", "true")
 
-        with patch.object(assessments, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY)), \
+        with patch.object(assessments, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY_AUTO_APPROVE)), \
+             patch("agentit.portal.routes.assessments.get_llm_client", return_value=_safe_llm()), \
              patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None), \
              patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
              patch("agentit.portal.github_pr.ensure_applicationset"):
@@ -239,8 +275,10 @@ class TestFailingDryRunHaltsTheChain:
         # can only produce MECHANISM_NONE, a real dry-run "error" outcome.
         aid = await _seed_assessment(store, repo_name="auto-chain-dryfail-app", infra_repo_url=None)
         job_id = await store.create_remediation_job(aid, auto_deliver=True)
+        await store.set_setting("auto_mode", "true")
 
-        with patch.object(assessments, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY)), \
+        with patch.object(assessments, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY_AUTO_APPROVE)), \
+             patch("agentit.portal.routes.assessments.get_llm_client", return_value=_safe_llm()), \
              patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit:
             await assessments._run_onboarding_job(job_id, aid, "http://testserver", True)
 
@@ -266,8 +304,10 @@ class TestFailingDryRunHaltsTheChain:
         client, store = auto_deliver_client
         aid = await _seed_assessment(store, repo_name="auto-chain-dryfail-redirect-app", infra_repo_url=None)
         job_id = await store.create_remediation_job(aid, auto_deliver=True)
+        await store.set_setting("auto_mode", "true")
 
-        with patch.object(assessments, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY)):
+        with patch.object(assessments, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY_AUTO_APPROVE)), \
+             patch("agentit.portal.routes.assessments.get_llm_client", return_value=_safe_llm()):
             await assessments._run_onboarding_job(job_id, aid, "http://testserver", True)
 
         resp = await client.get(f"/assessments/{aid}/onboard/progress/{job_id}", follow_redirects=False)
@@ -290,8 +330,10 @@ class TestFailingDryRunHaltsTheChain:
             infra_repo_url="https://github.com/org/auto-chain-deliverfail-app-gitops",
         )
         job_id = await store.create_remediation_job(aid, auto_deliver=True)
+        await store.set_setting("auto_mode", "true")
 
-        with patch.object(assessments, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY)), \
+        with patch.object(assessments, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY_AUTO_APPROVE)), \
+             patch("agentit.portal.routes.assessments.get_llm_client", return_value=_safe_llm()), \
              patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None), \
              patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit:
             mock_commit.return_value = {"error": "GitHub API error: 500 Internal Server Error"}
@@ -316,9 +358,11 @@ class TestSecretAndPlaceholderGuardsApplyAutomatically:
             infra_repo_url="https://github.com/org/auto-chain-guard-app-gitops",
         )
         job_id = await store.create_remediation_job(aid, auto_deliver=True)
+        await store.set_setting("auto_mode", "true")
 
         files = [_secret_file(), _placeholder_file(), _cluster_config_file(path="clean-netpol.yaml")]
-        with patch.object(assessments, "_run_onboarding", return_value=(files, _ORCH_SUMMARY)), \
+        with patch.object(assessments, "_run_onboarding", return_value=(files, _ORCH_SUMMARY_AUTO_APPROVE)), \
+             patch("agentit.portal.routes.assessments.get_llm_client", return_value=_safe_llm()), \
              patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None), \
              patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
              patch("agentit.portal.github_pr.ensure_applicationset"):
@@ -348,6 +392,177 @@ class TestSecretAndPlaceholderGuardsApplyAutomatically:
         deliveries = await store.list_deliveries(aid)
         dry_run_delivery = next(d for d in deliveries if d["details"]["dry_run"])
         assert dry_run_delivery["details"]["outcomes"]["cluster_config"]["files"] == ["clean-netpol.yaml"]
+
+
+class TestAutoModeSafetyCheckGatesOnboarding:
+    """Closes the reinstated-safety-check gap: onboarding's own auto-deliver
+    chain used to call `auto_dry_run_then_deliver()` with zero LLM review at
+    all -- unlike the vuln-watcher/webhook auto-remediation paths, which
+    always call `AutoMode.should_auto_apply()`/`classify_action` first. A
+    low-confidence or destructive classification must fall back to
+    requiring an explicit human Deliver click (never fail onboarding
+    itself -- the manifests already exist); a safe, high-confidence one
+    must still auto-deliver exactly as before."""
+
+    async def test_destructive_classification_does_not_auto_deliver(self, auto_deliver_client):
+        client, store = auto_deliver_client
+        aid = await _seed_assessment(
+            store, repo_name="auto-chain-destructive-app",
+            infra_repo_url="https://github.com/org/auto-chain-destructive-app-gitops",
+        )
+        job_id = await store.create_remediation_job(aid, auto_deliver=True)
+        await store.set_setting("auto_mode", "true")
+
+        with patch.object(assessments, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY_AUTO_APPROVE)), \
+             patch("agentit.portal.routes.assessments.get_llm_client", return_value=_destructive_llm()), \
+             patch("agentit.portal.delivery.route_and_deliver") as mock_route:
+            await assessments._run_onboarding_job(job_id, aid, "http://testserver", True)
+
+        # The classification alone is enough to stop the chain -- Dry Run/
+        # Deliver (route_and_deliver) must never even be attempted.
+        mock_route.assert_not_called()
+
+        job = await store.get_remediation_job(job_id)
+        assert job["status"] == "gated_for_review"
+        assert "destructive" in job["current_step"]
+
+        deliveries = await store.list_deliveries(aid)
+        assert deliveries == []
+
+        events = await store.list_events(target_app="auto-chain-destructive-app")
+        assert any(e["action"] == "onboard-auto-deliver-gated" for e in events)
+
+    async def test_low_confidence_classification_does_not_auto_deliver(self, auto_deliver_client):
+        client, store = auto_deliver_client
+        aid = await _seed_assessment(
+            store, repo_name="auto-chain-lowconf-app",
+            infra_repo_url="https://github.com/org/auto-chain-lowconf-app-gitops",
+        )
+        job_id = await store.create_remediation_job(aid, auto_deliver=True)
+        await store.set_setting("auto_mode", "true")
+
+        with patch.object(assessments, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY_AUTO_APPROVE)), \
+             patch("agentit.portal.routes.assessments.get_llm_client", return_value=_low_confidence_llm()), \
+             patch("agentit.portal.delivery.route_and_deliver") as mock_route:
+            await assessments._run_onboarding_job(job_id, aid, "http://testserver", True)
+
+        mock_route.assert_not_called()
+        job = await store.get_remediation_job(job_id)
+        assert job["status"] == "gated_for_review"
+        assert "confidence" in job["current_step"]
+
+    async def test_gated_run_still_reaches_onboard_results_with_a_warning_not_an_error(self, auto_deliver_client):
+        """Requirement: gating is not a failure -- manifests exist and a
+        human can still deliver manually, so the redirect must use the
+        warning flash, never the error flash reserved for genuine
+        failures."""
+        client, store = auto_deliver_client
+        aid = await _seed_assessment(
+            store, repo_name="auto-chain-gated-redirect-app",
+            infra_repo_url="https://github.com/org/auto-chain-gated-redirect-app-gitops",
+        )
+        job_id = await store.create_remediation_job(aid, auto_deliver=True)
+        await store.set_setting("auto_mode", "true")
+
+        with patch.object(assessments, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY_AUTO_APPROVE)), \
+             patch("agentit.portal.routes.assessments.get_llm_client", return_value=_destructive_llm()):
+            await assessments._run_onboarding_job(job_id, aid, "http://testserver", True)
+
+        resp = await client.get(f"/assessments/{aid}/onboard/progress/{job_id}", follow_redirects=False)
+        assert resp.status_code == 303
+        location = resp.headers["location"]
+        assert f"/assessments/{aid}/onboard-results" in location
+        assert "warning=" in location
+        assert "error=" not in location
+
+        flash = await client.get(location)
+        assert flash.status_code == 200
+        assert "manifest-card" in flash.text  # the generated manifest is still shown for a manual Deliver
+
+    async def test_safe_high_confidence_classification_still_auto_delivers(self, auto_deliver_client):
+        """The other half of the requirement: a safe classification must
+        not regress the existing, already-tested auto-chain behavior."""
+        client, store = auto_deliver_client
+        aid = await _seed_assessment(
+            store, repo_name="auto-chain-safe-app",
+            infra_repo_url="https://github.com/org/auto-chain-safe-app-gitops",
+        )
+        job_id = await store.create_remediation_job(aid, auto_deliver=True)
+        await store.set_setting("auto_mode", "true")
+
+        with patch.object(assessments, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY_AUTO_APPROVE)), \
+             patch("agentit.portal.routes.assessments.get_llm_client", return_value=_safe_llm()), \
+             patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"):
+            mock_commit.return_value = {
+                "pr_url": "https://github.com/org/auto-chain-safe-app-gitops/pull/13",
+                "commit_url": "https://github.com/org/auto-chain-safe-app-gitops/commit/f00dcafe",
+                "files_committed": 1,
+            }
+            await assessments._run_onboarding_job(job_id, aid, "http://testserver", True)
+
+        mock_commit.assert_called_once()
+        job = await store.get_remediation_job(job_id)
+        assert job["status"] == "completed"
+        assert "pull/13" in job["current_step"]
+
+    async def test_gating_disabled_without_auto_mode_enabled(self, auto_deliver_client):
+        """`should_auto_apply()`'s own decision matrix applies here exactly
+        as it does for every other AutoMode caller -- the fleet's
+        `auto_mode` setting is the one shared kill-switch, so a safe LLM
+        classification still gates (never auto-delivers) while it's off,
+        matching the vuln-watcher/webhook paths' documented behavior."""
+        client, store = auto_deliver_client
+        aid = await _seed_assessment(
+            store, repo_name="auto-chain-automode-off-app",
+            infra_repo_url="https://github.com/org/auto-chain-automode-off-app-gitops",
+        )
+        job_id = await store.create_remediation_job(aid, auto_deliver=True)
+        # auto_mode deliberately left at its default (disabled).
+
+        with patch.object(assessments, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY_AUTO_APPROVE)), \
+             patch("agentit.portal.routes.assessments.get_llm_client", return_value=_safe_llm()), \
+             patch("agentit.portal.delivery.route_and_deliver") as mock_route:
+            await assessments._run_onboarding_job(job_id, aid, "http://testserver", True)
+
+        mock_route.assert_not_called()
+        job = await store.get_remediation_job(job_id)
+        assert job["status"] == "gated_for_review"
+        assert "auto-mode is disabled" in job["current_step"]
+
+    async def test_classification_is_logged_to_the_decisions_page_for_onboarding(self, auto_deliver_client):
+        """Requirement: this classification must show up on the Decisions
+        page exactly like every other AutoMode caller's does -- previously
+        the onboarding path never logged a `decision` event at all."""
+        import asyncio as _asyncio
+
+        from agentit.llm_decisions import DECISION_TYPE_AUTO_MODE, list_llm_decisions
+
+        client, store = auto_deliver_client
+        aid = await _seed_assessment(
+            store, repo_name="auto-chain-decision-logged-app",
+            infra_repo_url="https://github.com/org/auto-chain-decision-logged-app-gitops",
+        )
+        job_id = await store.create_remediation_job(aid, auto_deliver=True)
+        await store.set_setting("auto_mode", "true")
+
+        with patch.object(assessments, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY_AUTO_APPROVE)), \
+             patch("agentit.portal.routes.assessments.get_llm_client", return_value=_destructive_llm()), \
+             patch("agentit.portal.delivery.route_and_deliver"):
+            await assessments._run_onboarding_job(job_id, aid, "http://testserver", True)
+
+        # Mirrors routes/insights.py's own call site exactly (list_llm_decisions
+        # runs its store calls in a worker thread, bridged back onto this
+        # coroutine's event loop -- see llm_decisions.py's `_bridge`).
+        loop = _asyncio.get_running_loop()
+        decisions = await _asyncio.to_thread(
+            list_llm_decisions, store, 500, DECISION_TYPE_AUTO_MODE, "", loop,
+        )
+        matching = [d for d in decisions if d["target_app"] == "auto-chain-decision-logged-app"]
+        assert matching
+        assert matching[0]["outcome"] == "gated"
+        assert "destructive" in matching[0]["reason"]
 
 
 class TestProgressStreamReflectsChainStages:
@@ -417,6 +632,16 @@ class TestOnboardTerminalRedirectUrl:
         job = {"status": "dry_run_failed", "error": "no infra repo", "steps_completed": ["auto_deliver"]}
         url = await assessments._onboard_terminal_redirect_url(store, aid, job)
         assert url == f"/assessments/{aid}/onboard-results?error=no%20infra%20repo"
+
+    async def test_gated_for_review_goes_to_onboard_results_with_a_warning_not_an_error(self, auto_deliver_client):
+        _client, store = auto_deliver_client
+        aid = await _seed_assessment(store, repo_name="redirect-gated-app")
+        job = {
+            "status": "gated_for_review", "error": "", "current_step": "LLM flagged as destructive",
+            "steps_completed": ["auto_deliver"],
+        }
+        url = await assessments._onboard_terminal_redirect_url(store, aid, job)
+        assert url == f"/assessments/{aid}/onboard-results?warning=LLM%20flagged%20as%20destructive"
 
     async def test_completed_without_auto_deliver_is_a_bare_redirect(self, auto_deliver_client):
         _client, store = auto_deliver_client
