@@ -7,11 +7,29 @@ import logging
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from agentit.portal.delivery import ADMIN_REVIEW_GATE_TYPE
 from agentit.portal.helpers import get_store, get_templates
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Gate types a real code path can still create today: ADMIN_REVIEW_GATE_TYPE
+# ("cluster-admin-review", delivery.py), "gitops-pr-pending"/"auto-mode-review"
+# (delivery.py/automode.py), "rollback-review" (watchers/slo_tracker.py), and
+# the "finding-" prefix, which covers both delivery.py's ESCALATION_GATE_TYPE
+# ("finding-unresolved-escalation", Phase 4) and routes/webhooks.py's
+# per-category dispatcher gates ("finding-{category}"). Direct Apply and its
+# "cluster-conflict-review" gate are already gone (routes/gates.py). This
+# checks "can this type still be created" rather than naming any type as
+# retired, so if ADMIN_REVIEW_GATE_TYPE is retired next, its matches simply
+# stop appearing in `pending`/`s.list_gates(...)` on their own -- no future
+# edit to this list is needed either way.
+_LIVE_GATE_TYPES = {ADMIN_REVIEW_GATE_TYPE, "gitops-pr-pending", "auto-mode-review", "rollback-review"}
+
+
+def _is_live_gate_type(gate_type: str) -> bool:
+    return gate_type in _LIVE_GATE_TYPES or gate_type.startswith("finding-")
 
 
 @router.get("/insights", response_class=HTMLResponse)
@@ -23,6 +41,16 @@ async def insights_page(request: Request) -> HTMLResponse:
     low_skills = await s.get_low_effectiveness_skills()
     check_compliance = await s.get_check_compliance()
     loop_health = await s.get_loop_health()
+
+    # get_fleet_insights()'s own `pending_gates` is a blind
+    # `COUNT(*) FROM gates WHERE status = 'pending'` -- recompute it here
+    # from the real gate list, filtered to gate types that can still
+    # actually be created, so a leftover pending row of a since-removed
+    # gate type (e.g. a stale `cluster-conflict-review`, per routes/
+    # gates.py's own comment on it) can't inflate this fleet-wide stat.
+    pending_gates = await s.list_gates(status="pending")
+    fleet_insights["pending_gates"] = sum(1 for g in pending_gates if _is_live_gate_type(g.get("gate_type", "")))
+
     return get_templates().TemplateResponse(request, "insights.html", {
         "insights": fleet_insights,
         "agent_stats": agent_stats,
