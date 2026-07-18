@@ -430,6 +430,78 @@ class TestRouteAndDeliverCicdLane:
         assert "gate_id" not in outcome
         assert outcome["files"] == ["pipeline.yaml"]
 
+    async def test_cicd_lane_is_unaffected_by_gitops_registration_status(self):
+        """The product-owner question this guards against: now that GitOps
+        registration is mandatory for the CLUSTER_CONFIG category, does the
+        CICD_SHARED_NAMESPACE classification/gate-creation logic still fire,
+        or did it silently become entangled with (and short-circuited by)
+        the GitOps-registered branch? Answer: it's a structurally separate
+        taxonomy bucket (see classify_file()) whose mechanism assignment
+        (`mechanisms[CATEGORY_CICD_SHARED_NAMESPACE] =
+        MECHANISM_CLUSTER_ADMIN_REVIEW_GATE`) never consults `registered`/
+        `infra_repo_url` at all -- a single mixed batch containing both a
+        cluster-config file (which DOES resolve based on GitOps
+        registration) and a cicd-shared-namespace file must route each
+        independently: the former to an infra-repo commit+PR, the latter to
+        a cluster-admin-review gate, in the very same `route_and_deliver()`
+        call, for the very same fully-GitOps-registered app."""
+        store, raw = await make_async_store()
+        report = make_report()
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
+        aid = await raw.save(report)
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {"name": "managed-test-app"}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"), \
+             patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
+            result = await route_and_deliver(
+                [_cluster_config_file(), _cicd_file()], app_name=report.repo_name, namespace="ns",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=False,
+            )
+        # Fully GitOps-registered (a live Application exists) -- the
+        # cluster-config file still goes to the infra repo, never a direct
+        # apply.
+        assert result["registered"] is True
+        assert result["mechanisms"][CATEGORY_CLUSTER_CONFIG] == MECHANISM_INFRA_REPO_COMMIT
+        mock_commit.assert_called_once()
+        # The cicd-shared-namespace file, in the SAME call, for the SAME
+        # GitOps-registered app, still creates a cluster-admin-review gate
+        # -- registration status never enters this decision.
+        assert result["mechanisms"][CATEGORY_CICD_SHARED_NAMESPACE] == MECHANISM_CLUSTER_ADMIN_REVIEW_GATE
+        gates = await raw.list_gates(status="pending")
+        gate_types = {g["gate_type"] for g in gates}
+        assert "cluster-admin-review" in gate_types
+        # Neither branch has performed a cluster apply yet -- the cicd gate
+        # is still pending human approval; only approving IT (routes/
+        # gates.py::resolve_gate, tested separately) triggers the real
+        # apply_manifests_to_cluster call.
+        mock_apply.assert_not_called()
+
+    def test_a_real_current_skill_output_still_classifies_as_cicd_shared_namespace(self):
+        """Not a synthetic fixture: this is exactly what
+        skills/cicd/argocd-application.md's own template renders (namespace:
+        openshift-gitops hardcoded in the skill itself) -- proof that
+        CATEGORY_CICD_SHARED_NAMESPACE classification is reachable via a
+        real, currently-shipped skill, not dead code nobody can trigger
+        anymore."""
+        entry = {
+            "category": "skills",
+            "path": "argocd-application.yaml",
+            "content": (
+                "apiVersion: argoproj.io/v1alpha1\n"
+                "kind: Application\n"
+                "metadata:\n"
+                "  name: myapp\n"
+                "  namespace: openshift-gitops\n"
+                "spec:\n"
+                "  project: default\n"
+            ),
+            "description": "Argo CD Application",
+        }
+        assert classify_file(entry) == CATEGORY_CICD_SHARED_NAMESPACE
+
 
 class TestRouteAndDeliverSourcePatch:
     async def test_source_patch_routes_to_source_repo_pr_with_target_path(self):

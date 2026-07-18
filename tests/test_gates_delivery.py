@@ -237,6 +237,42 @@ class TestClusterAdminReviewGate:
         approved = await store.list_gates(status="approved")
         assert len(approved) == 1
 
+    async def test_approve_still_applies_directly_even_when_app_is_gitops_registered(
+        self, gitops_gate_client, _mock_kube,
+    ):
+        """The question this guards against: now that GitOps registration is
+        mandatory for an app's own cluster/app config, is cluster-admin-
+        review's elevated-direct-apply justification stale? Answer: no --
+        it's a structurally separate lane (CI/CD manifests destined for a
+        shared operator namespace this service account was never granted
+        write RBAC to), completely independent of whether THIS app has its
+        own GitOps registration (``report.infra_repo_url`` is set here,
+        exactly like ``gate_client``'s GitOps-registered sibling). Approving
+        this gate still performs a real, direct ``kube.apply_yaml`` call --
+        never a GitOps commit, never a no-op -- regardless of the app's own
+        registration state."""
+        client, store, aid = gitops_gate_client
+        await store.save_onboarding(aid, [_cicd_file()])
+        gate_id = await store.create_gate(aid, "cluster-admin-review", "Needs elevated RBAC")
+
+        with patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit:
+            resp = await client.post(
+                f"/gates/{gate_id}/resolve",
+                data={"status": "approved", "resolved_by": "admin"},
+                follow_redirects=False,
+            )
+        assert resp.status_code == 303
+        assert "gate_approved=true" in resp.headers["location"]
+        # A real, direct cluster apply -- not a GitOps commit -- happened,
+        # even though this app has a known infra_repo_url.
+        _mock_kube.apply_yaml.assert_called_once()
+        call_args = _mock_kube.apply_yaml.call_args
+        assert "openshift-pipelines" in call_args[0][0]
+        mock_commit.assert_not_called()
+
+        approved = await store.list_gates(status="approved")
+        assert len(approved) == 1
+
 
 class TestClusterConflictReviewGateTypeRemoved:
     """`cluster-conflict-review` (approving it used to be the ONE code path
