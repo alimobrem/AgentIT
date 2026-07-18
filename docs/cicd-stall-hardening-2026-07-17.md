@@ -53,6 +53,24 @@ pruner recommendation this doc originally made is superseded — see "A.
 Cluster-level pruner" below for the full before/after and the one piece
 (registry blob storage GC) that's a genuine, structural exception.
 
+**Update (2026-07-18, CI run coalescing):** a separate, related contributor to
+node-resource congestion showed up while a real fix was stuck queued behind
+it: many agents pushing to `main` in quick succession each got their own
+full, independent CI run in both systems (GitHub Actions and this Tekton
+pipeline), so a burst of pushes could pile up several concurrent runs —
+retries and node pressure included — for commits that were already stale by
+the time their own run finished. GitHub Actions now sets a per-ref
+`concurrency`/`cancel-in-progress` group on both workflows (built-in,
+low-risk). Tekton has no equivalent primitive, so `agentit-ci`
+(`chart/templates/tekton/pipeline.yaml`) gained a new first task,
+`supersede-stale-runs`, that cancels other still-active `agentit-ci`
+PipelineRuns strictly older than itself — unless that run already started
+`build-image` (i.e. it may already be building/pushing an image on its way
+to `notify-argocd`), in which case it's deliberately left alone. See the
+README's "CI run coalescing under concurrent pushes" section for the full
+mechanism; this note exists here because the contention it relieves is the
+same congestion class section B below already describes.
+
 ## Incident recap
 
 On the night of 2026-07-17, commits merged to `main` stopped reaching the
