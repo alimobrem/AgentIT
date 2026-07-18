@@ -1521,11 +1521,11 @@
           <a href="/schedules" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/schedules' }}">Schedules</a>
           {# aria-label + aria-describedby (rather than letting the sub-span's
              text run into the link's accessible name by default) so a screen
-             reader announces "Decisions, Audit log — Ledger owns the stream"
+             reader announces "Decisions, Audit log — Events owns the stream"
              as label + description, not one run-on name. #}
           <a href="/decisions" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/decisions') }}"
              aria-label="Decisions" aria-describedby="user-menu-decisions-sub">Decisions
-            <span class="user-menu-item-sub" id="user-menu-decisions-sub">Audit log — Ledger owns the stream</span>
+            <span class="user-menu-item-sub" id="user-menu-decisions-sub">Audit log — Events owns the stream</span>
           </a>
           {% if is_authenticated %}
           <div class="user-menu-divider"></div>
@@ -1957,12 +1957,15 @@ function eventsDrawer() {
       return '/events';
     },
     _badgeClass(e) {
-      // Always return a severity color class — unknown/empty → info.
+      // Always return a severity color class — unknown/empty → info. Events'
+      // own severity vocabulary (see every store.log_event() call site) is
+      // critical/error/warning/info -- "high"/"medium"/"low" are a
+      // finding's severity, never an event's, but stayed here from when
+      // this helper was first written against that assumption.
       var s = (e && e.severity) || 'info';
       if (s === 'critical') return 'badge badge-critical';
-      if (s === 'high') return 'badge badge-high';
-      if (s === 'medium' || s === 'warning') return 'badge badge-medium';
-      if (s === 'low' || s === 'success') return 'badge badge-low';
+      if (s === 'error') return 'badge badge-danger';
+      if (s === 'warning') return 'badge badge-warning';
       return 'badge badge-info';
     },
     _markSeen(rows) {
@@ -2069,9 +2072,9 @@ function commandPalette() {
       { label: 'Fleet', href: '/fleet', hint: 'Portfolio scoreboard — apps and scores' },
       { label: 'Health', href: '/health', hint: 'Live infrastructure telemetry' },
       { label: 'Insights', href: '/insights', hint: 'Fleet-wide aggregate analytics' },
-      { label: 'Events', href: '/events', hint: 'Bell feed + DLQ (not ops home)' },
+      { label: 'Events', href: '/events', hint: 'Every system action, behind the scenes' },
       { label: 'Dead-Letter Queue', href: '/events/dlq', hint: 'Undeliverable events' },
-      { label: 'Decisions', href: '/decisions', hint: 'LLM decision audit — Ledger owns the stream' },
+      { label: 'Decisions', href: '/decisions', hint: 'LLM decision audit — Events owns the stream' },
       { label: 'Capabilities', href: '/capabilities', hint: 'Agent registry & catalog' },
       { label: 'Settings', href: '/settings', hint: 'Auto-mode & data retention' },
       { label: 'Schedules', href: '/schedules', hint: 'Scheduled operations' },

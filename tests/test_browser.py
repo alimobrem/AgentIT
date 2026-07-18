@@ -480,10 +480,9 @@ class TestNavigation:
         url, _, _ = app_url
         page.goto(url)
         expect(page.locator("nav >> text=Fleet")).to_be_visible()
-        # Plain `text=Ledger` is ambiguous -- the user menu's (hidden but
-        # still DOM-present) Decisions item sub-text happens to also
-        # contain "Ledger" ("Audit log — Ledger owns the stream"). Scope
-        # to the actual nav link.
+        # Plain `text=Ledger` is ambiguous -- the user menu's hidden-but-
+        # still-DOM-present Decisions item sub-text also mentions "Ledger"
+        # in passing. Scope to the actual nav link.
         expect(page.locator('nav a[href="/ledger"]')).to_be_visible()
         # Admin Review (a third, elevated-approvals nav item) was retired
         # 2026-07-18 along with the `cluster-admin-review` gate type it

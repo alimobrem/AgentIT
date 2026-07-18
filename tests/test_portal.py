@@ -823,6 +823,36 @@ async def test_events_page_filters_by_correlation_id(client, _override_store):
     assert "other event" not in resp.text
 
 
+async def test_events_severity_badges_match_events_real_vocabulary(client, _override_store):
+    """Events' own severity vocabulary is critical/error/warning/info (see
+    every store.log_event() call site) -- distinct from a finding's
+    critical/high/medium/low. Before this, the row badge only recognized
+    "critical"/"high"/"medium" (the latter two never set by a real event)
+    and had no "warning"/"error" case, so a warning- or error-severity
+    event silently rendered as a plain "info" badge even though the
+    Severity filter dropdown could already filter for exactly those
+    values."""
+    store = _override_store
+    await store.log_event("dispatcher", "no-fix-available", "warn-app", "warning", "no fix found")
+    await store.log_event("vuln-watcher", "tick-failed", None, "error", "watcher tick failed")
+    await store.log_event("secret-check", "secret-missing", "agentit", "critical", "secret missing")
+
+    resp = await client.get("/events")
+    assert resp.status_code == 200
+    assert '<span class="badge badge-warning">warning</span>' in resp.text
+    assert '<span class="badge badge-danger">error</span>' in resp.text
+    assert '<span class="badge badge-critical">critical</span>' in resp.text
+
+    # The filter dropdown now offers "Error" alongside the pre-existing three.
+    assert '<option value="error"' in resp.text
+
+    # Each severity is independently filterable, and returns only its own rows.
+    resp = await client.get("/events?severity=warning")
+    assert "no fix found" in resp.text and "watcher tick failed" not in resp.text
+    resp = await client.get("/events?severity=error")
+    assert "watcher tick failed" in resp.text and "no fix found" not in resp.text
+
+
 async def test_events_target_app_links_to_assessment_when_resolvable(client, _override_store):
     """Every other page (Fleet, Remediations, Decisions) links an app name
     to its Assessment Detail page -- Events showed plain text instead."""

@@ -115,8 +115,12 @@ async def test_admin_review_nav_and_page_are_gone(ui_client):
 
 
 async def test_events_page_does_not_claim_ops_home(ui_client):
+    """Events is the system-activity/audit-trail feed (every action the
+    system takes, behind the scenes) -- it must not claim to be the
+    primary destination for something that needs a human's attention,
+    and must point at Ledger for that instead."""
     client, _store = ui_client
     resp = await client.get("/events")
     assert resp.status_code == 200
-    assert "Ops home is" in resp.text
+    assert "Every action the system takes" in resp.text
     assert 'href="/ledger"' in resp.text

@@ -22,7 +22,7 @@ Shipped pattern (do not regress):
 |---|---|---|
 | **Ledger**, **Fleet**, Health, Insights | Primary nav (`#nav-primary`) | `/` redirects to Ledger (ops home) |
 | **Cmd+K search** (`.cmdk-trigger`) | Right masthead cluster (`.nav-end`) with Events / Menu | MUST NOT be a center overlay or absolute-centered over primary nav |
-| **Events** | Bell control → slide-over drawer | Full `/events` (+ DLQ) remains for filters/pagination — not ops home |
+| **Events** | Bell control → slide-over drawer | Full `/events` (+ DLQ) remains for filters/pagination — the system's real-time activity/audit-trail feed (every action the system takes, behind the scenes), not ops home |
 | **Decisions**, Capabilities, Settings, Schedules | Account / main menu | Not primary-nav text links |
 
 Admin Review (a fifth primary-nav surface, an elevated RBAC queue for
@@ -39,8 +39,8 @@ regressions.
 |---|---|---|
 | **Ledger** (`/ledger`, home via `/`) | Morning inbox: Needs You, what happened, human gates needing action | Be demoted behind Fleet as the ops entry; hide the Needs You default |
 | **Fleet** (`/fleet`) | Portfolio scoreboard: apps table, scores, Assess / Scan (Re-scan) / Delete | Own pending-ops inbox UI (no primary “N pending” badge/column competing with Ledger) |
-| **Events** | Bell feed + DLQ filters/pagination | Claim “ops home” or duplicate Ledger Needs You |
-| **Decisions** | LLM decide-point audit log (menu) | Compete with Ledger for the chronological stream |
+| **Events** | System activity/audit-trail feed (every action the system takes, behind the scenes) + DLQ filters/pagination | Claim “ops home” or duplicate Ledger Needs You |
+| **Decisions** | LLM decide-point audit log (menu) | Compete with Events for the chronological stream |
 | **Health** | Live infrastructure telemetry | Become an activity/ops inbox |
 | **Insights** | Fleet-wide aggregate analytics | Become an activity/ops inbox |
 
