@@ -319,6 +319,15 @@ DIMENSION_LABELS: dict[str, str] = {
     "ha_dr": "HA/DR",
     "cicd": "CI/CD",
     "data_governance": "Data Governance",
+    # Delivery/PR categories (delivery.py's CATEGORY_* constants) reuse this
+    # same filter for Ledger's category filter/badges (routes/insights.py::
+    # ledger_page(), templates/ledger.html) -- not just assessment
+    # dimensions -- so acronym-bearing category names need the same
+    # explicit mapping a bare Title Case fallback would get wrong.
+    "cicd_shared_namespace": "CI/CD (shared namespace)",
+    "cluster_config": "Cluster config",
+    "source_patch": "Source patch",
+    "manifest_at_rest": "Manifest at rest",
 }
 
 

@@ -2,9 +2,13 @@
 three places a ``pr_url`` can land today (see ``store.py``'s schema comments
 on the ``gates``/``deliveries``/``onboarding_results`` tables):
 
-- ``gates.pr_url`` on a ``gitops-pr-pending`` gate -- the
-  ``infra-repo-commit`` category's PR (the GitOps infra repo). This is the
-  one PR record with a genuinely reliable, already-known outcome with no
+- ``gates.pr_url`` on a ``gitops-pr-pending`` (``cluster_config``) or
+  ``gitops-pr-pending-shared-namespace`` (``cicd_shared_namespace``) gate --
+  both commit to the GitOps infra repo and open a PR (see
+  ``delivery.py``'s ``_deliver_via_gitops_pr_and_gate()``; the two gate
+  types exist only so ``store.create_gate()``'s ``(repo_url, gate_type)``
+  dedup never collides a same-app, same-call pair of them). Gate-tracked
+  PRs are the ones with a genuinely reliable, already-known outcome with no
   live GitHub call needed: the gate's own ``status`` (``pending`` -> still
   open; ``approved`` -> merged, since approving *is* the merge action per
   ``routes/gates.py::resolve_gate``; ``rejected``/``dismissed``/``expired``
@@ -31,17 +35,31 @@ import threading
 import time
 from typing import Any
 
-from agentit.portal.delivery import CATEGORY_CLUSTER_CONFIG, repo_kind_for_mechanism
+from agentit.portal.delivery import (
+    CATEGORY_CICD_SHARED_NAMESPACE,
+    CATEGORY_CLUSTER_CONFIG,
+    _CICD_SHARED_NAMESPACE_GATE_TYPE,
+    repo_kind_for_mechanism,
+)
 
 _GITOPS_PR_GATE_TYPE = "gitops-pr-pending"
 
-# The one, real category a gitops-pr-pending gate's PR always belongs to
-# (route_and_deliver() only ever creates this gate type for
-# CATEGORY_CLUSTER_CONFIG -- see delivery.py) -- gate_pr_records() below
-# stamps every record with it so a fleet-wide caller (the Ledger) can
+# Every gate type that carries a real, gate-tracked PR (a reliably-known
+# outcome, no live GitHub call needed -- see this module's docstring), and
+# the one real category each always belongs to (route_and_deliver() only
+# ever creates each for its own fixed category -- see delivery.py). Two
+# gate types exist so a same-app, same-call cluster-config PR and CI/CD-
+# shared-namespace PR can never collide under store.create_gate()'s
+# (repo_url, gate_type) dedup -- gate_pr_records() below stamps every
+# record with its real category so a fleet-wide caller (the Ledger) can
 # filter "by category" the same way for gate-sourced and delivery-sourced
-# records, without a caller needing to know gates don't carry their own
-# category column.
+# records, without needing to know gates don't carry their own category
+# column.
+_GATE_TYPE_CATEGORY: dict[str, str] = {
+    _GITOPS_PR_GATE_TYPE: CATEGORY_CLUSTER_CONFIG,
+    _CICD_SHARED_NAMESPACE_GATE_TYPE: CATEGORY_CICD_SHARED_NAMESPACE,
+}
+
 CATEGORY_ONBOARDING = "onboarding"
 
 
@@ -61,12 +79,14 @@ def _dedup_by_pr_url(records: list[dict]) -> list[dict]:
 
 
 def gate_pr_records(gates: list[dict]) -> list[dict]:
-    """Normalize every ``gitops-pr-pending`` gate carrying a ``pr_url`` into
-    a PR record whose state is already known -- no live GitHub call needed."""
+    """Normalize every gate-tracked PR (``gitops-pr-pending`` and
+    ``gitops-pr-pending-shared-namespace``) carrying a ``pr_url`` into a PR
+    record whose state is already known -- no live GitHub call needed."""
     records = []
     for g in gates:
         pr_url = g.get("pr_url")
-        if g.get("gate_type") != _GITOPS_PR_GATE_TYPE or not pr_url:
+        category = _GATE_TYPE_CATEGORY.get(g.get("gate_type"))
+        if category is None or not pr_url:
             continue
         status = g.get("status")
         if status == "pending":
@@ -79,7 +99,7 @@ def gate_pr_records(gates: list[dict]) -> list[dict]:
             "pr_url": pr_url,
             "repo_kind": "gitops",
             "source": "gate",
-            "category": CATEGORY_CLUSTER_CONFIG,
+            "category": category,
             "gate_id": g.get("id"),
             "gate_status": status,
             "assessment_id": g.get("assessment_id"),
@@ -108,7 +128,11 @@ def delivery_pr_records(deliveries: list[dict]) -> list[dict]:
                 cat, mech = pair.split(":", 1)
                 cat_to_mechanism[cat] = mech
         for category, outcome in outcomes.items():
-            if category == CATEGORY_CLUSTER_CONFIG or not isinstance(outcome, dict):
+            # Both categories already covered by gate_pr_records(), with a
+            # reliably-known outcome -- including them again here would
+            # double-count the same PR under two different confidence
+            # levels (see this module's docstring).
+            if category in _GATE_TYPE_CATEGORY.values() or not isinstance(outcome, dict):
                 continue
             pr_url = outcome.get("pr_url")
             if not pr_url:
@@ -193,8 +217,8 @@ async def resolve_pr_states(records: list[dict], status_cache: dict[str, dict] |
 
 
 async def attach_reject_reasons(store: object, app_name: str, records: list[dict]) -> list[dict]:
-    """Best-effort correlation of each rejected ``gitops-pr-pending`` gate's
-    real rejection reason from ``agent_feedback.human_reason`` --
+    """Best-effort correlation of each rejected gate-tracked PR's real
+    rejection reason from ``agent_feedback.human_reason`` --
     ``resolve_gate()`` (``routes/gates.py``) records it there via
     ``record_feedback(finding_category=gate_type, action="rejected")`` in
     the same request that resolves the gate, but ``gates`` has no
@@ -202,27 +226,37 @@ async def attach_reject_reasons(store: object, app_name: str, records: list[dict
     directly (see ``store.py``'s schema -- a real, currently-unfilled
     wiring gap this correlates around rather than papering over).
 
-    Matched positionally by chronological order (oldest-first), not by
-    nearest timestamp: ``resolve_gate()`` writes exactly one feedback row
-    per rejected ``gitops-pr-pending`` gate for this app, in the same order
-    the gates themselves were rejected, so the Nth rejected gate lines up
-    with the Nth ``gitops-pr-pending`` feedback row. Only applies the match
-    when the two lists are the same length -- if they ever disagree (e.g. a
-    gate rejected before this correlation existed, or a feedback row from
-    some other path), this leaves ``reject_reason`` unset rather than
-    risking a wrong pairing.
+    Matched positionally by chronological order (oldest-first) within each
+    real ``gate_type`` separately (``gitops-pr-pending`` and
+    ``gitops-pr-pending-shared-namespace`` each dedup and get rejected
+    independently -- see ``_GATE_TYPE_CATEGORY`` above -- so their feedback
+    rows must never be cross-matched), not by nearest timestamp:
+    ``resolve_gate()`` writes exactly one feedback row per rejected gate of
+    a given type for this app, in the same order the gates themselves were
+    rejected, so the Nth rejected gate of that type lines up with the Nth
+    feedback row of that same type. Only applies the match within a
+    gate_type when its two lists are the same length -- if they ever
+    disagree (e.g. a gate rejected before this correlation existed, or a
+    feedback row from some other path), this leaves that gate_type's
+    ``reject_reason`` unset rather than risking a wrong pairing.
     """
     rejected = [r for r in records if r.get("source") == "gate" and r.get("gate_status") == "rejected"]
     if not rejected or not hasattr(store, "get_feedback_for_app"):
         return records
-    feedback = await store.get_feedback_for_app(app_name, finding_category=_GITOPS_PR_GATE_TYPE)
-    feedback = [f for f in feedback if f.get("action") == "rejected"]
-    if len(feedback) != len(rejected):
-        return records
-    rejected_oldest_first = sorted(rejected, key=lambda r: r.get("resolved_at") or "")
-    feedback_oldest_first = sorted(feedback, key=lambda f: f.get("created_at") or "")
-    for gate_record, fb in zip(rejected_oldest_first, feedback_oldest_first):
-        gate_record["reject_reason"] = fb.get("human_reason") or ""
+    rejected_by_gate_type: dict[str, list[dict]] = {}
+    for r in rejected:
+        gate_type = (r.get("raw") or {}).get("gate_type") or _GITOPS_PR_GATE_TYPE
+        rejected_by_gate_type.setdefault(gate_type, []).append(r)
+
+    for gate_type, gate_type_rejected in rejected_by_gate_type.items():
+        feedback = await store.get_feedback_for_app(app_name, finding_category=gate_type)
+        feedback = [f for f in feedback if f.get("action") == "rejected"]
+        if len(feedback) != len(gate_type_rejected):
+            continue
+        rejected_oldest_first = sorted(gate_type_rejected, key=lambda r: r.get("resolved_at") or "")
+        feedback_oldest_first = sorted(feedback, key=lambda f: f.get("created_at") or "")
+        for gate_record, fb in zip(rejected_oldest_first, feedback_oldest_first):
+            gate_record["reject_reason"] = fb.get("human_reason") or ""
     return records
 
 

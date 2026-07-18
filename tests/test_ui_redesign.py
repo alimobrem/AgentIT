@@ -766,10 +766,15 @@ class TestNavUpdate:
         assert 'href="/admin-review"' not in resp.text
         assert "Admin Review" not in resp.text
 
-    async def test_ledger_nav_badge_counts_every_pending_gate_including_legacy_types(self, ui_client):
-        """The single remaining nav badge (Ledger's) counts every pending
-        gate, including a stale `cluster-admin-review` one -- there's no
-        longer a second, separately-counted badge to split it out into."""
+    async def test_ledger_nav_badge_ignores_legacy_and_app_owner_gate_types(self, ui_client):
+        """The single remaining nav badge (Ledger's) is PR-approval-specific
+        now (Ledger's own job narrowed to strictly PRs -- see
+        routes/insights.py::ledger_page()) -- neither a stale
+        `cluster-admin-review` gate nor an ordinary app-owner
+        `auto-mode-review` gate is a PR, so neither moves it. (Before
+        Ledger's PR redesign, every pending gate counted toward this badge
+        once the separate Admin Review badge was retired -- this test's
+        assertion supersedes that intermediate behavior.)"""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="admin-badge-app-2"))
         await store.create_gate(aid, "cluster-admin-review", "needs elevated review")
@@ -778,7 +783,10 @@ class TestNavUpdate:
         with patch("agentit.portal.helpers._nav_gate_badges_cache", {"pending_actions": 0, "ts": 0.0}):
             resp = await client.get("/fleet")
         assert resp.status_code == 200
-        assert re.search(r'Ledger\s*<span class="nav-badge">2</span>', resp.text)
+        assert not re.search(r'Ledger\s*<span class="nav-badge">', resp.text)
+        # Both gates are still real pending actions -- visible via this
+        # app's own row badge instead.
+        assert "2 pending action" in resp.text
 
 
 # ── 7. Self-Improvement "run now" trigger ───────────────────────────────
