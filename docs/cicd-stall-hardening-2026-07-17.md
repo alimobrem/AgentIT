@@ -1,8 +1,20 @@
 # CI/CD stall hardening — 2026-07-17 incident follow-up
 
-**Status: implemented and shipped (this pass) for everything safely doable
-from the app repo; one item below is a documented cluster-admin
-recommendation, not applied live.**
+**Status: implemented and shipped, fully self-contained.**
+
+**Update (2026-07-18, self-containment pass):** AgentIT is a product
+deployed onto arbitrary customers' OpenShift clusters — we cannot assume
+any given customer's cluster has a well-configured (or even present)
+cluster-wide `TektonConfig` pruner, or a cluster-admin who's scheduled `oc
+adm prune images`. This pass closed that assumption out: AgentIT's own
+namespace-scoped `tekton-cleanup` CronJob (`chart/templates/tekton/
+cleanup-cronjob.yaml`) is now fully self-sufficient for the `agentit`
+namespace's own object hygiene — nothing it relies on for its own
+correctness depends on any cluster-level configuration outside what
+AgentIT itself ships and manages via its own chart. The cluster-wide
+pruner recommendation this doc originally made is superseded — see "A.
+Cluster-level pruner" below for the full before/after and the one piece
+(registry blob storage GC) that's a genuine, structural exception.
 
 ## Incident recap
 
@@ -82,9 +94,18 @@ TestTektonCleanup`) that executes the real rendered script against a fake
 `oc` on `PATH` — confirmed to fail against the pre-fix script (7 of 10 new
 assertions failed) and pass against the fix.
 
-### Cluster-level pruner (recommendation, not applied)
+### Cluster-level pruner — superseded, no longer a meaningful gap (update 2026-07-18)
 
-`oc get tektonconfig config -o yaml` shows:
+This subsection originally documented a cluster-admin recommendation as a
+"defense-in-depth" backstop. It's been superseded: AgentIT cannot assume
+any given customer's cluster has this configured, or even has the Tekton
+operator's `TektonConfig` CRD installed at all — a real dependency on
+something entirely outside AgentIT's own control. The two real gaps
+originally found here are now both closed **inside AgentIT's own
+namespace-scoped CronJob** instead:
+
+`oc get tektonconfig config -o yaml` (on a cluster that has this CRD)
+showed:
 
 ```yaml
 spec:
@@ -96,27 +117,28 @@ spec:
     schedule: 0 8 * * *
 ```
 
-Two real gaps here, independent of the app-repo bug above:
+- **Gap 1 — `schedule: 0 8 * * *` (once a day).** Already covered: the
+  `tekton-cleanup` CronJob (this app repo) runs every 10 minutes in the
+  `agentit` namespace, independent of whatever schedule (or absence
+  thereof) any cluster-wide pruner uses.
+- **Gap 2 — `resources: [pipelinerun]` only.** TaskRuns owned by a pruned
+  PipelineRun cascade-delete via Kubernetes owner-reference GC, so a
+  `pipelinerun`-only pruner is *usually* fine — but it has no independent
+  backstop for standalone TaskRuns (never part of a Pipeline) or for a
+  PipelineRun whose owner-ref GC is delayed/stuck (e.g. during the exact
+  kind of etcd/control-plane pressure this incident already involved).
+  **Closed in this pass**: `cleanup-cronjob.yaml` gained its own
+  standalone/orphaned-TaskRun loop (`tests/test_helm_templates.py::
+  TestTektonCleanup`, the `*taskrun*` tests) that deletes both cases
+  directly, on the same 24-hour age basis as the PipelineRun loop, using
+  its own cutoff computation — it doesn't wait on, or need, the
+  PipelineRun loop above it to have run first, and it doesn't care whether
+  any cluster-wide `TektonConfig` pruner exists, is configured, or is even
+  installed.
 
-- `schedule: 0 8 * * *` is **once a day**. Between runs, PipelineRuns (and
-  their owned TaskRuns/pods) can accumulate for up to 24 hours before this
-  cluster-level pruner ever looks at them — most of the "100+ un-GC'd"
-  objects seen during the incident accumulated in that window. The
-  namespace-level fix in this PR (10-minute CronJob, now actually working)
-  covers this going forward for the `agentit` namespace specifically, but
-  this cluster-wide default stays lax for every other namespace on the
-  cluster too.
-- `resources: [pipelinerun]` only. TaskRuns owned by a pruned PipelineRun
-  do cascade-delete via Kubernetes owner-reference GC, so this is *usually*
-  fine — but it means the pruner has no independent backstop for
-  standalone TaskRuns (not part of a Pipeline) or for a PipelineRun whose
-  owner-ref GC is delayed/stuck (e.g. during the exact kind of
-  etcd/control-plane pressure this incident already involved).
-
-**Recommended change** (cluster-admin action — this is a cluster-singleton
-`TektonConfig`, not a namespaced object, so it affects every namespace on
-the cluster, not just `agentit`; deliberately not applied live in this
-pass):
+Applying the previously-recommended cluster-admin patch below is now
+**genuinely optional, redundant defense-in-depth at best** — not a gap
+AgentIT depends on being closed:
 
 ```bash
 oc patch tektonconfig config --type=merge -p '{
@@ -130,21 +152,48 @@ oc patch tektonconfig config --type=merge -p '{
 }'
 ```
 
-- `keep: 50` (down from 100) — 50 completed PipelineRuns is generous
-  headroom for any namespace's history/debugging needs while meaningfully
-  bounding etcd object count.
-- `resources: ["pipelinerun", "taskrun"]` — adds the independent TaskRun
-  backstop described above.
-- `schedule: "*/30 * * * *"` (every 30 minutes, down from daily) — keeps
-  the cluster-wide safety net from ever letting a full day's backlog build
-  up, without running so often it competes for API-server time with actual
-  workloads.
+If a cluster admin wants cluster-wide coverage for namespaces *other than*
+`agentit` too, this patch is still safe, low-risk, additive Tekton-operator
+configuration (no pod restarts, no data loss). But `agentit`'s own object
+hygiene no longer depends on it — or on the `TektonConfig` CRD existing on
+the cluster at all.
 
-This is standard, low-risk, additive Tekton-operator configuration (no
-pods restart, no data loss — it only changes retention going forward), but
-it's genuinely cluster-wide-scoped, so it should go through whatever
-change process this cluster's admin(s) use rather than being applied
-unilaterally from an app-repo PR.
+### Image-tag accumulation — same gap shape, found in this pass, closed the same way
+
+Auditing for other places that implicitly assumed a cluster-provided
+backstop surfaced one more: `build-image` (`chart/templates/tekton/
+pipeline.yaml`) pushes a new, uniquely-tagged image (the git revision) to
+the `agentit` ImageStream on every CI run — the exact same unbounded
+per-run accumulation shape as PipelineRuns/TaskRuns, normally bounded on a
+real OpenShift cluster by a cluster-admin-run `oc adm prune images`. That
+command is no more guaranteed to be scheduled on an arbitrary customer
+cluster than the `TektonConfig` pruner is — same class of assumption,
+same fix approach: `cleanup-cronjob.yaml` gained a namespace-scoped
+image-tag-retention loop that keeps the 10 most recent tags on the
+`agentit` ImageStream and prunes the rest, needing only a namespaced RBAC
+grant (`imagestreams`: get, `imagestreamtags`: delete) this chart already
+ships for the `pipeline` ServiceAccount (`chart/templates/tekton/
+rbac.yaml`).
+
+**One piece of this genuinely can't be made fully self-contained, and
+that's a structural fact, not a missed effort**: `oc adm prune images`
+also reclaims the underlying shared *blob storage* in the registry, which
+requires inspecting every namespace's image references to know which
+blobs are safe to delete (layers are content-addressed and shared across
+images/namespaces) — that needs the cluster-scoped `system:image-pruner`
+role. AgentIT's own namespaced `pipeline` ServiceAccount will never hold
+that on an arbitrary customer cluster, by design (granting it would mean
+every AgentIT install needs a cluster-admin-level grant just to run CI,
+which is a far bigger ask than anything else this chart requires). What
+this pass's loop *does* fully own, self-contained: bounding the
+`agentit` ImageStream's own tag/object count — the etcd-object-growth
+analog to the PipelineRun/TaskRun problem, and the part that's actually
+namespace-scoped. Underlying blob reclaim remains a cluster-admin action,
+exactly like registry storage housekeeping on any Kubernetes distribution
+that isn't OpenShift (which has no ImageStream concept at all — this loop
+already tolerates that by treating a missing `imagestream` kind or object
+as a no-op, same as every other loop in this CronJob tolerates a missing
+resource).
 
 ## B. Node scheduling fragility for CI pods (fixed)
 
@@ -265,7 +314,10 @@ pressure if the underlying cause hasn't cleared.
 | Item | Disposition |
 | --- | --- |
 | A: cleanup CronJob word-splitting bug | **Fixed** (app repo, `chart/templates/tekton/cleanup-cronjob.yaml`) |
-| A: cluster `TektonConfig` pruner (`keep`, `resources`, `schedule`) | **Recommended only** — cluster-admin action, exact patch above |
+| A: standalone/orphaned TaskRun cleanup | **Fixed** (app repo, `cleanup-cronjob.yaml`, self-contained — closes the gap the cluster pruner recommendation below used to cover) |
+| A: `agentit` ImageStream tag-count retention | **Fixed** (app repo, `cleanup-cronjob.yaml`, self-contained — keeps the 10 most recent tags) |
+| A: cluster `TektonConfig` pruner (`keep`, `resources`, `schedule`) | **Superseded — now optional, redundant defense-in-depth** (AgentIT's own CronJob no longer depends on it; patch still documented above for admins who want cluster-wide coverage) |
+| A: registry blob-storage GC (`oc adm prune images`) | **Structurally cluster-admin-only** — needs the cluster-scoped `system:image-pruner` role to inspect blob references across every namespace; AgentIT's namespaced ServiceAccount cannot do this on any customer cluster, by design. Not a gap in AgentIT's own namespace hygiene (tag-count retention above already bounds that) |
 | B: `notify-argocd` PV-affinity/taint scheduling | **Fixed** (app repo, `chart/templates/tekton/trigger.yaml` toleration) |
 | C: stuck-GitOps-pipeline alerting | **Fixed** (app repo, `DriftDetector` + `github_pr.get_commits_behind`, reuses existing events badge UI) |
 | D: `notify-argocd` timeout/retries | **Fixed** (app repo, timeout only; retries deliberately unchanged) |
@@ -288,8 +340,17 @@ pressure if the underlying cause hasn't cleared.
   existing 10-minute tick) instead of unbounded ("until a human notices").
   The 3-commits/1-hour thresholds are a reasonable first cut, not
   scientifically tuned — worth revisiting after this fires for real once.
-- **The cluster-wide pruner gap remains open** until a cluster admin
-  applies the recommended patch. The namespace-level CronJob fix (item A)
-  substantially reduces the practical impact of that gap for the `agentit`
-  namespace specifically (10-minute cadence vs. daily), so this is a
-  defense-in-depth follow-up, not a blocking gap.
+- **The cluster-wide pruner gap is closed, not just reduced.** As of this
+  pass, `agentit`'s own object hygiene (PipelineRuns, standalone/orphaned
+  TaskRuns, and now ImageStream tag count) is fully self-contained inside
+  AgentIT's own namespace-scoped CronJob — it does not depend on any
+  cluster-admin action, any cluster-wide `TektonConfig` pruner existing or
+  being configured a particular way, or that CRD even being installed.
+  This matters specifically because AgentIT ships to arbitrary customers'
+  OpenShift clusters, where none of that can be assumed. The one genuinely
+  structural exception — registry blob-storage GC via `oc adm prune
+  images` — needs cluster-scoped RBAC AgentIT's own ServiceAccount will
+  never hold on a customer cluster; that's a real, explained limit, not an
+  oversight, and it doesn't affect the etcd-object-count problem this
+  incident was actually about (that's fully covered by the tag-count
+  retention loop, which is namespace-scoped).
