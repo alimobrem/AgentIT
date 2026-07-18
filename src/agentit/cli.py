@@ -88,6 +88,7 @@ def main() -> None:
       vuln-watch     Start vulnerability watcher
       slo-track      Start SLO tracker
       drift-detect   Start drift detector
+      reassess-watch Start re-assessment scheduler (per-app cadence)
       learn-watch    Start skill learner (periodic CVE research)
       propose-watch  Start capability-scout (proposes changes to AgentIT itself)
       propose-once   Run one capability-scout cycle (dogfood / debug)
@@ -481,6 +482,26 @@ async def drift_detect(interval: int) -> None:
     store = await create_store()
     detector = DriftDetector(publisher=get_publisher(), interval=interval, store=store)
     await detector.run()
+
+
+@main.command("reassess-watch")
+@click.option(
+    "--interval", default=3600, type=int,
+    help="Tick interval in seconds (default: 1 hour) -- how often to check which apps are due for automatic re-assessment.",
+)
+@_run_async
+async def reassess_watch(interval: int) -> None:
+    """Long-lived re-assessment scheduler — automatically re-Assesses apps
+    once their configured cadence (apps.assessment_cadence: daily/weekly/
+    monthly) has elapsed, via the same /api/webhook/assess route the manual
+    Fleet Re-assess button and RemediationLoop already use. Apps on the
+    'manual' cadence are never touched.
+    """
+    from agentit.watchers.reassess_scheduler import ReassessScheduler
+
+    store = await create_store()
+    scheduler = ReassessScheduler(store=store, interval=interval)
+    await scheduler.run()
 
 
 @main.command("learn-watch")

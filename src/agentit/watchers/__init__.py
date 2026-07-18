@@ -1,4 +1,5 @@
-"""Long-lived watcher agents (vuln-watcher, slo-tracker, drift-detector, skill-learner).
+"""Long-lived watcher agents (vuln-watcher, slo-tracker, drift-detector,
+skill-learner, reassess-scheduler).
 
 This package intentionally has shared telemetry helpers so every watcher
 records the same "did the last tick succeed, and when did it last run"
