@@ -151,6 +151,24 @@ class TestTektonPipeline:
             "git-clone has lowercase 'revision' — must be 'REVISION'"
         )
 
+    def test_repo_url_default_has_no_dotgit_suffix(self):
+        """Regression: this default feeds both `git-clone`'s URL param AND
+        `register-self-in-fleet`'s webhook body verbatim (the latter never
+        normalizes it) -- a `.git`-suffixed default briefly created a
+        second, duplicate Fleet row for AgentIT itself (a distinct
+        `repo_url` string from every other write path's `.git`-less form)
+        before `normalize_repo_url()` (store.py) existed to collapse it.
+        Keeping this default pre-normalized closes that specific source
+        for good, independent of the general DB-layer/self-healing
+        safeguards in store.py."""
+        doc = _load(self.TEMPLATE)
+        params = {p["name"]: p for p in doc["spec"]["params"]}
+        assert "repo-url" in params
+        default = params["repo-url"]["default"]
+        assert not default.lower().endswith(".git"), (
+            f"Pipeline repo-url default must not have a '.git' suffix, got: {default!r}"
+        )
+
     def test_run_tests_working_dir_no_agentit_suffix(self):
         """Bug: workingDir had '/agentit' suffix that breaks cloned repo layout."""
         doc = _load(self.TEMPLATE)
