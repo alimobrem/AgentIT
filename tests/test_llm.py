@@ -518,3 +518,79 @@ def test_review_fix_low_confidence_is_not_silently_upgraded_to_approved():
     assert result is not None
     assert result["confidence"] == pytest.approx(0.3)
     assert result["approved"] is True
+
+
+# ── max_tokens budget wiring: skill-lifecycle callers outside this module ──
+#
+# Live bug: "Activation blocked — skill failed verification: skill matched
+# the verification fixture but generated no output" (resourcequota-contextual,
+# 2026-07-18). learning_agent.generate_skill_from_research() and
+# skill_engine.SkillEngine._generate_with_llm() are both external callers
+# that invoke llm_client._chat(system, user) directly (not a method on
+# LLMClient itself, unlike propose_capability_improvement/detect_eol_risks
+# above) -- so neither got a max_tokens override for free and both silently
+# inherited the 512-token classifier default. Confirmed live: this truncated
+# a learning-agent-drafted skill's own body (missing its Constraints/
+# Verification sections) and, separately, truncated that skill's generated
+# manifest until generation gave up and produced no output at all.
+
+
+def test_generate_skill_from_research_uses_manifest_sized_token_budget():
+    from agentit.learning_agent import generate_skill_from_research
+    from agentit.llm import _SKILL_GENERATION_MAX_TOKENS
+
+    skill_md = (
+        "---\nname: x\ndomain: security\nversion: 1\ntriggers: [x]\noutputs: [Pod]\n"
+        "property: x\nmode: template\nstatus: draft\nsource: learning-agent\n"
+        'created_at: "2026-01-01"\n---\n\n## Property\n\nx\n\n## Constraints\n\nx\n\n'
+        "## Verification\n\nx\n"
+    )
+    mock_create = MagicMock(return_value=_mock_response(skill_md))
+    client = _make_client(mock_create)
+
+    result = generate_skill_from_research(
+        client, {"title": "t", "description": "d", "category": "security",
+                 "priority": "high", "fix_approach": "f"},
+    )
+
+    assert result == skill_md.strip()
+    _, kwargs = mock_create.call_args
+    assert kwargs["max_tokens"] == _SKILL_GENERATION_MAX_TOKENS
+    assert kwargs["max_tokens"] > 512
+
+
+def test_skill_engine_generate_with_llm_uses_manifest_sized_token_budget():
+    """End-to-end through the real LLMClient (only the Anthropic transport is
+    mocked) -- proves SkillEngine._generate_with_llm() requests the same
+    higher budget when driven by the actual production client, not just a
+    test double's `_chat` stub."""
+    from pathlib import Path
+
+    from agentit.llm import _SKILL_GENERATION_MAX_TOKENS
+    from agentit.skill_engine import Skill, SkillEngine
+    from conftest import make_report
+
+    manifest = (
+        "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n"
+        "  name: my-app-netpol\nspec:\n  podSelector: {}\n  policyTypes:\n    - Ingress\n"
+    )
+    mock_create = MagicMock(return_value=_mock_response(manifest))
+    client = _make_client(mock_create)
+
+    engine = SkillEngine(Path("skill-verification-fixture-nonexistent"), platform=None)
+    skill = Skill(
+        name="network-policy-llm", domain="security", version=1,
+        triggers=["network"], outputs=["NetworkPolicy"],
+        property_description="network-policy-llm property",
+        body="# LLM-only skill, no template block",
+        file_path="skills/security/network-policy-llm.md",
+        mode="llm", status="active",
+    )
+    report = make_report(repo_name="my-app")
+
+    files = engine.generate(skill, report, llm_client=client)
+
+    assert len(files) == 1
+    _, kwargs = mock_create.call_args
+    assert kwargs["max_tokens"] == _SKILL_GENERATION_MAX_TOKENS
+    assert kwargs["max_tokens"] > 512

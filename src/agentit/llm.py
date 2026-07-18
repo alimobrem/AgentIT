@@ -79,6 +79,24 @@ _CAPABILITY_PROPOSAL_MAX_TOKENS = 2048
 _CAPABILITY_FILES_MAX_TOKENS = 16384
 _CAPABILITY_FILES_TIMEOUT_SECONDS = 120.0
 
+# Two skill-lifecycle callers outside this module -- learning_agent.py's
+# generate_skill_from_research() (drafts a complete skill Markdown file:
+# frontmatter + Property/Key-decisions/Constraints/Verification sections)
+# and skill_engine.py's SkillEngine._generate_with_llm() (renders a matched
+# skill's full manifest, potentially several K8s resources across the
+# skill's declared output kinds) -- call llm_client._chat(system, user) with
+# no override, so they silently inherited the 512-token classifier default
+# above. Confirmed live: this truncated a learning-agent-drafted skill's own
+# body mid-sentence (missing its Constraints/Verification sections
+# entirely, stop_reason=max_tokens) and, separately, truncated that same
+# skill's generated manifest on every retry attempt until
+# SkillEngine.generate() gave up and returned no files at all --
+# `verify_skill()` then correctly, but confusingly, reported this as
+# "skill matched the verification fixture but generated no output" and
+# blocked activation. Sized like _CAPABILITY_PROPOSAL_MAX_TOKENS's prose
+# budget plus real headroom for a multi-resource YAML manifest body.
+_SKILL_GENERATION_MAX_TOKENS = 4096
+
 _CLASSIFY_SYSTEM = (
     "You are a security analyst reviewing source code for hardcoded secrets. "
     'Respond ONLY with valid JSON: {"is_secret": bool, "confidence": float, "reason": str}. '

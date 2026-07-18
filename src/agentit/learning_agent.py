@@ -217,7 +217,8 @@ def generate_skill_from_research(
         "Output the complete .md file content with YAML frontmatter (---) and body."
     )
 
-    raw = llm_client._chat(system, user)
+    from agentit.llm import _SKILL_GENERATION_MAX_TOKENS
+    raw = llm_client._chat(system, user, max_tokens=_SKILL_GENERATION_MAX_TOKENS)
     if raw is None:
         logger.warning("LLM returned no skill content")
         return ""
