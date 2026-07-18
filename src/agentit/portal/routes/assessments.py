@@ -358,49 +358,6 @@ def _auto_create_infra_repo(repo_url: str) -> str | None:
     return None
 
 
-@router.post("/self-assess", response_model=None)
-async def self_assess_route(request: Request):
-    """One-click self-assessment -- AgentIT assesses its own repo."""
-    repo_url = "https://github.com/alimobrem/AgentIT"
-    check_results: list[dict] = []
-    secret_decisions: list[dict] = []
-    try:
-        # Mandatory-registration gate (no Direct Apply fallback) applies here
-        # exactly like the main Assess path -- see
-        # `_resolve_mandatory_infra_repo_url()`/`InfraRepoRequiredError`.
-        infra = await asyncio.to_thread(_resolve_mandatory_infra_repo_url, repo_url, None)
-        report = await with_timeout(
-            asyncio.to_thread(
-                _clone_assess_cleanup, repo_url, "high", infra,
-                check_results_out=check_results, secret_decisions_out=secret_decisions,
-            )
-        )
-    except InfraRepoRequiredError as exc:
-        log.warning("Self-assess blocked: %s", exc)
-        s = await get_store()
-        await s.log_event("portal", "infra-repo-creation-failed", "AgentIT", "critical",
-                           f"Self-assess blocked: {exc}")
-        return RedirectResponse(url=f"/?error={quote(str(exc)[:280])}", status_code=303)
-    except Exception as exc:
-        log.exception("Self-assessment failed")
-        return RedirectResponse(url=f"/?error={quote(str(exc)[:200])}", status_code=303)
-    s = await get_store()
-    assessment_id = await s.save(report)
-    await s.save_check_results(assessment_id, check_results)
-    from agentit.llm_decisions import build_secret_classify_events
-    for ev in build_secret_classify_events(secret_decisions, report.repo_name):
-        await s.log_event(**ev, correlation_id=assessment_id)
-    await s.log_event("self-assess", "assessment-complete", report.repo_name, "info",
-                       f"Self-assessment complete: {report.overall_score:.0f}/100")
-    from agentit.events import TOPIC_ASSESSMENTS as _TOPIC_ASSESS
-    publish_event("assessment-complete", report.repo_name,
-                   f"Self-assessment: {report.overall_score:.0f}/100",
-                   {"assessment_id": assessment_id, "score": report.overall_score},
-                   correlation_id=assessment_id,
-                   extra_topic=_TOPIC_ASSESS)
-    return RedirectResponse(url=f"/assessments/{assessment_id}", status_code=303)
-
-
 @router.get("/assessments/{assessment_id}", response_class=HTMLResponse)
 async def assessment_detail(request: Request, assessment_id: str) -> HTMLResponse:
     s = await get_store()

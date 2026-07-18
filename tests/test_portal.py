@@ -125,34 +125,6 @@ async def client():
         yield c
 
 
-async def test_self_assess_logs_events_with_repo_name_casing(client, _override_store):
-    """self_assess_route's own extra "Self-assessment complete: X/100"
-    log_event call (distinct from store.save()'s own generic "Assessment
-    complete" event, which already correctly uses report.repo_name)
-    hardcoded the lowercase literal "agentit" as target_app -- while
-    every other event for the same app used report.repo_name ("AgentIT",
-    the real GitHub casing). The Ledger then showed the same app under
-    two different casings. Must use report.repo_name consistently."""
-    from unittest.mock import patch
-    from agentit.portal.routes import assessments
-
-    store = _override_store
-    report = _make_report_with_findings("AgentIT")
-    with patch.object(assessments, "_auto_create_infra_repo",
-                      return_value="https://github.com/org/agentit-gitops"), \
-         patch.object(assessments, "_clone_assess_cleanup", return_value=report):
-        resp = await client.post("/self-assess")
-    assert resp.status_code in (200, 303)
-
-    events = await store.list_events(limit=200)
-    self_assess_events = [e for e in events if e["agent_id"] == "self-assess"]
-    assert self_assess_events, "self_assess_route's own log_event call never fired"
-    assert all(e["target_app"] == "AgentIT" for e in self_assess_events), (
-        f"self-assess event(s) logged under the wrong casing: "
-        f"{[(e['action'], e['target_app']) for e in self_assess_events]}"
-    )
-
-
 async def test_dashboard_empty(client):
     resp = await client.get("/fleet")
     assert resp.status_code == 200

@@ -71,7 +71,7 @@
 {% else %}
 <div class="hero-cta">
   <h2>Assess your first app</h2>
-  <p>AgentIT assesses your repository across 7 enterprise readiness dimensions — security, observability, CI/CD, infrastructure, compliance, data governance, and HA/DR — generates Kubernetes manifests to close gaps, and monitors your apps continuously. Start by entering a repo URL below.</p>
+  <p>AgentIT assesses your repository across 7 enterprise readiness dimensions — security, observability, CI/CD, infrastructure, compliance, data governance, and HA/DR — generates Kubernetes manifests to close gaps, and monitors your apps continuously. Start by entering a repo URL below — including AgentIT's own repo, if you want AgentIT to assess itself.</p>
   <form method="post" action="/assess" class="form-narrow"
         onsubmit="var b=this.querySelector('button');b.disabled=true;b.classList.add('submitting')">
     <div class="form-group">
@@ -88,15 +88,6 @@
     <div class="action-bar">
       <button type="submit" class="btn btn-lg">
         <span class="btn-label">Run Assessment</span>
-        <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
-      </button>
-    </div>
-  </form>
-  <form method="post" action="/self-assess" class="inline-form"
-        onsubmit="var b=this.querySelector('button');b.disabled=true;b.classList.add('submitting')">
-    <div class="action-bar">
-      <button type="submit" class="btn btn-lg btn-outline">
-        <span class="btn-label">Assess AgentIT</span>
         <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
       </button>
     </div>

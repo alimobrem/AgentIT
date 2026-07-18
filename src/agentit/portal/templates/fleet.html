@@ -8,12 +8,6 @@
 
 <div class="action-bar">
   <button class="btn" @click="assessOpen = true; $nextTick(() => $refs.repoUrlInput.focus())">Assess New App</button>
-  <form method="post" action="/self-assess" class="inline-form">
-    <button type="submit" class="btn btn-outline btn-sm">
-      <span class="btn-label">Self-Assess</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
-    </button>
-  </form>
   {% if pending_need_you %}
   <a href="/ledger" class="text-muted text-sm">{{ pending_need_you }} need you → Ledger</a>
   {% endif %}
