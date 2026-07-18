@@ -1436,7 +1436,7 @@ async def test_fleet_dashboard_shows_portfolio_summary(client, _override_store):
     assert "alpha-svc" in resp.text
     assert "beta-svc" in resp.text
     assert "gamma-svc" in resp.text
-    assert "Assess New Repo" in resp.text
+    assert "Assess New App" in resp.text
     assert "<h1>Fleet</h1>" in resp.text
 
 

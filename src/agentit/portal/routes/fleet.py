@@ -27,6 +27,16 @@ _ARGO_CACHE_TTL = 60  # seconds
 # coroutines on the same event loop thread, not other OS threads.
 _argo_cache_lock = threading.Lock()
 
+# Live GitHub PR state (open/merged/closed) for every PR that isn't already
+# tracked by a gate's own status (see pr_tracking.py) -- cached fleet-wide,
+# not per-app, so N apps x M PRs on one Fleet page load means one batched
+# round of concurrent GitHub calls per TTL window, not N*M live calls per
+# request. A longer TTL than Argo's cache above: PR merge/close state
+# changes far less often than a live sync/health status.
+_pr_status_cache: dict = {"data": {}, "ts": 0}
+_PR_STATUS_CACHE_TTL = 120  # seconds
+_pr_status_cache_lock = threading.Lock()
+
 
 def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None) -> list[dict]:
     """Check cluster for each app's deployment status. Caches Argo CD data for 60s.
@@ -184,6 +194,90 @@ async def _attach_next_action_state(fleet: list[dict], s: object) -> None:
         app_item["next_action"] = state if state and state["state"] != NEXT_ACTION_NONE else None
 
 
+async def _attach_pr_counts(fleet: list[dict], s: object) -> None:
+    """"Total PRs"/"Open PRs" per app -- real DB/GitHub-backed data (see
+    pr_tracking.py's module docstring for exactly what's tracked). "Total"
+    is a pure DB count, no GitHub call. "Open" additionally needs to know
+    the live state of every PR that isn't already tracked by a gate's own
+    status; those are batched into ONE round of concurrent GitHub calls
+    across the whole fleet (never one call per app) and cached fleet-wide
+    for ``_PR_STATUS_CACHE_TTL`` seconds -- a per-app-per-request live check
+    would be too slow/rate-limit-prone for a list view at any real fleet
+    size. Mutates each fleet row in place with ``total_prs``/``open_prs``.
+    """
+    import time as _t
+
+    from agentit.portal.pr_tracking import collect_pr_records, resolve_pr_states
+
+    try:
+        all_gates = await s.list_all_gates()
+    except Exception:
+        log.debug("Failed to fetch gates for fleet PR counts", exc_info=True)
+        all_gates = []
+    try:
+        all_deliveries = await s.list_all_deliveries(limit=5000)
+    except Exception:
+        log.debug("Failed to fetch deliveries for fleet PR counts", exc_info=True)
+        all_deliveries = []
+    try:
+        all_onboarding_prs = await s.list_all_onboarding_pr_urls() if hasattr(s, "list_all_onboarding_pr_urls") else []
+    except Exception:
+        log.debug("Failed to fetch onboarding PR URLs for fleet PR counts", exc_info=True)
+        all_onboarding_prs = []
+
+    gates_by_repo: dict[str, list[dict]] = {}
+    for g in all_gates:
+        if g.get("repo_url"):
+            gates_by_repo.setdefault(g["repo_url"], []).append(g)
+    deliveries_by_app: dict[str, list[dict]] = {}
+    for d in all_deliveries:
+        if d.get("app_name"):
+            deliveries_by_app.setdefault(d["app_name"], []).append(d)
+    onboardings_by_repo: dict[str, list[dict]] = {}
+    for ob in all_onboarding_prs:
+        if ob.get("repo_url"):
+            onboardings_by_repo.setdefault(ob["repo_url"], []).append(ob)
+
+    records_by_repo: dict[str, list[dict]] = {}
+    for app_item in fleet:
+        records_by_repo[app_item["repo_url"]] = collect_pr_records(
+            gates_by_repo.get(app_item["repo_url"], []),
+            deliveries_by_app.get(app_item["repo_name"], []),
+            onboardings_by_repo.get(app_item["repo_url"], []),
+        )
+
+    now = _t.monotonic()
+    with _pr_status_cache_lock:
+        cache_fresh = (now - _pr_status_cache["ts"]) < _PR_STATUS_CACHE_TTL
+        status_cache = _pr_status_cache["data"] if cache_fresh else {}
+        if not cache_fresh:
+            _pr_status_cache["data"] = status_cache
+            _pr_status_cache["ts"] = now
+
+    # One batched round of concurrent GitHub calls for every not-yet-cached
+    # PR across the ENTIRE fleet, not one round per app -- resolve_pr_states()
+    # below then finds everything it needs already in status_cache and makes
+    # no further GitHub calls of its own.
+    unresolved_urls = list({
+        r["pr_url"]
+        for records in records_by_repo.values()
+        for r in records
+        if r["known_state"] is None and r["pr_url"] not in status_cache
+    })
+    if unresolved_urls:
+        from agentit.portal.github_pr import get_pr_status
+        results = await asyncio.gather(*(asyncio.to_thread(get_pr_status, u) for u in unresolved_urls))
+        status_cache.update(dict(zip(unresolved_urls, results)))
+
+    for records in records_by_repo.values():
+        await resolve_pr_states(records, status_cache=status_cache)
+
+    for app_item in fleet:
+        records = records_by_repo.get(app_item["repo_url"], [])
+        app_item["total_prs"] = len(records)
+        app_item["open_prs"] = sum(1 for r in records if r["state"] == "open")
+
+
 @router.get("/")
 async def home() -> RedirectResponse:
     """Ops home is the Ledger (Needs You inbox) — Fleet is the scoreboard at /fleet."""
@@ -203,6 +297,7 @@ async def fleet_page(request: Request) -> HTMLResponse:
     fleet = await asyncio.to_thread(_enrich_fleet_with_cluster_status, fleet, s, loop)
     await _attach_pending_actions(fleet, s)
     await _attach_next_action_state(fleet, s)
+    await _attach_pr_counts(fleet, s)
     total_apps = len(fleet)
     if total_apps == 0:
         return get_templates().TemplateResponse(request, "dashboard.html", {

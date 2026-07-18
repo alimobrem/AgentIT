@@ -805,6 +805,60 @@ class AssessmentStore:
             })
         return result
 
+    async def list_onboardings_for_repo(self, repo_url: str) -> list[dict]:
+        """Every onboarding_results row with a real ``pr_url``, across EVERY
+        historical assessment of ``repo_url`` -- not just one assessment_id.
+        Joined by ``repo_url`` (not an exact ``assessment_id`` match), the
+        same "apps outlive a single assessment run" convention
+        ``list_gates_for_assessment()`` already uses (docs/architecture.md).
+        Used by ``pr_tracking.py`` to build one app's full PR History --
+        ``onboarding_results.pr_url`` may itself be several ``|``-joined
+        URLs (Per-Agent PRs writes multiple back into this one column, see
+        ``routes/assessments.py::create_agent_prs_route``); this returns the
+        raw field as-is and leaves splitting it to the caller.
+        """
+        rows = await self._pool.fetch(
+            """
+            SELECT onboarding_results.id, onboarding_results.assessment_id,
+                   onboarding_results.created_at, onboarding_results.pr_url
+            FROM onboarding_results
+            INNER JOIN assessments ON onboarding_results.assessment_id = assessments.id
+            WHERE assessments.repo_url = $1 AND onboarding_results.pr_url != ''
+            ORDER BY onboarding_results.created_at DESC
+            """,
+            repo_url,
+        )
+        return [
+            {"id": r["id"], "assessment_id": r["assessment_id"],
+             "created_at": r["created_at"].isoformat(), "pr_url": r["pr_url"]}
+            for r in rows
+        ]
+
+    async def list_all_onboarding_pr_urls(self) -> list[dict]:
+        """Fleet-wide equivalent of ``list_onboardings_for_repo()`` -- every
+        onboarding_results row with a real ``pr_url``, across every app, in
+        one query (mirrors ``list_all_gates()``/``list_all_deliveries()``'s
+        existing fleet-wide-in-one-query convention). Used by Fleet's
+        "Total PRs"/"Open PRs" columns so that enrichment never issues one
+        onboarding query per app.
+        """
+        rows = await self._pool.fetch(
+            """
+            SELECT onboarding_results.id, onboarding_results.assessment_id,
+                   onboarding_results.created_at, onboarding_results.pr_url,
+                   assessments.repo_url AS repo_url
+            FROM onboarding_results
+            INNER JOIN assessments ON onboarding_results.assessment_id = assessments.id
+            WHERE onboarding_results.pr_url != ''
+            ORDER BY onboarding_results.created_at DESC
+            """,
+        )
+        return [
+            {"id": r["id"], "assessment_id": r["assessment_id"], "repo_url": r["repo_url"],
+             "created_at": r["created_at"].isoformat(), "pr_url": r["pr_url"]}
+            for r in rows
+        ]
+
     # ── Events ──────────────────────────────────────────────────────────
 
     async def log_event(
@@ -1346,6 +1400,21 @@ class AssessmentStore:
         rows = await self._pool.fetch(
             "SELECT * FROM deliveries WHERE mechanism = 'infra-repo-commit' AND verification = 'unknown' "
             "ORDER BY created_at ASC",
+        )
+        return [_delivery_row_to_dict(r) for r in rows]
+
+    async def list_deliveries_for_app(self, app_name: str) -> list[dict]:
+        """Every delivery for this app, across every one of its historical
+        assessments -- ``deliveries.app_name`` is a plain column (not just
+        reachable via an ``assessment_id`` join), so this is a direct
+        lookup, the same shape ``list_deliveries_pending_finding_check()``
+        below already uses for its own ``WHERE app_name = $1``. Used by
+        ``pr_tracking.py`` to build one app's full PR History from every
+        ``source-repo-pr``/``app-repo-pr`` delivery outcome, not just the
+        current assessment's own deliveries (``list_deliveries()`` above).
+        """
+        rows = await self._pool.fetch(
+            "SELECT * FROM deliveries WHERE app_name = $1 ORDER BY created_at DESC", app_name,
         )
         return [_delivery_row_to_dict(r) for r in rows]
 

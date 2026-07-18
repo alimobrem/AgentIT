@@ -149,7 +149,7 @@ async def resolve_gate(request: Request, gate_id: str):
         if gate.get("gate_type") == "rollback-review":
             await s.log_event(
                 "gate-resolver", "rollback-approved",
-                gate.get("target_app"), "warning",
+                gate.get("app_name"), "warning",
                 f"Rollback approved for assessment {assessment_id} — manual intervention required",
             )
             return RedirectResponse(
@@ -168,7 +168,7 @@ async def resolve_gate(request: Request, gate_id: str):
             # should do.
             await s.log_event(
                 "gate-resolver", "finding-escalation-acknowledged",
-                gate.get("target_app"), "info",
+                gate.get("app_name"), "info",
                 f"Escalated finding acknowledged for assessment {assessment_id} — "
                 "no automatic re-delivery was triggered by this approval.",
             )
@@ -206,7 +206,7 @@ async def resolve_gate(request: Request, gate_id: str):
                     status_code=303,
                 )
             await s.log_event(
-                "gate-resolver", "gitops-pr-merged", gate.get("target_app"), "info",
+                "gate-resolver", "gitops-pr-merged", gate.get("app_name"), "info",
                 f"Merged GitOps PR {pr_url} for assessment {assessment_id}",
             )
             return RedirectResponse(
@@ -305,8 +305,15 @@ async def resolve_gate(request: Request, gate_id: str):
 
     if status == "rejected":
         reject_reason = str(form.get("reason", ""))
+        # Bug fix: `gate` comes from `list_gates()` (store.py), whose join
+        # aliases the app name as `app_name`, not `target_app` -- reading
+        # `target_app` here (a column that exists on `events`, not on this
+        # gate dict) always evaluated to "", so every gate-rejection
+        # feedback row was silently recorded against no app at all,
+        # invisible to any per-app lookup (e.g. pr_tracking.py's rejection-
+        # reason correlation for PR History).
         await s.record_feedback(
-            app_name=gate.get("target_app", ""),
+            app_name=gate.get("app_name", ""),
             agent_name=gate.get("agent_name", "gate"),
             finding_category=gate.get("gate_type", ""),
             action="rejected",

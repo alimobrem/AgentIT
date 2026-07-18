@@ -7,7 +7,7 @@
 <p class="text-muted text-sm mb-1">Portfolio scoreboard — apps, scores, Assess / Re-assess (or Refresh Onboard) / Delete.</p>
 
 <div class="action-bar">
-  <button class="btn" @click="assessOpen = true; $nextTick(() => $refs.repoUrlInput.focus())">Assess New Repo</button>
+  <button class="btn" @click="assessOpen = true; $nextTick(() => $refs.repoUrlInput.focus())">Assess New App</button>
   <form method="post" action="/self-assess" class="inline-form">
     <button type="submit" class="btn btn-outline btn-sm">
       <span class="btn-label">Self-Assess</span>
@@ -48,13 +48,14 @@
 <table>
   <thead>
     <tr>
-      <th>Repository</th>
+      <th>Application</th>
       <th>Score</th>
       <th>Trend</th>
       <th>Deployed</th>
       <th>Namespace</th>
-      <th>Criticality</th>
+      <th title="How much oversight this app needs -- set at Assess time, not inferred. High/critical apps always require human deploy approval (never auto-approved) and get stricter default SLO targets.">Criticality</th>
       <th>Critical + High</th>
+      <th title="PRs AgentIT has opened for this app against its code repo and/or GitOps infra repo">Open PRs / Total</th>
       <th></th>
     </tr>
   </thead>
@@ -135,8 +136,23 @@
         {% endif %}
       </td>
       <td class="text-sm text-muted">{{ r.deploy_namespace | default("—") }}</td>
-      <td><span class="badge badge-{{ r.criticality }}">{{ r.criticality }}</span></td>
+      <td>
+        <span class="badge badge-{{ r.criticality }}"
+          title="How much oversight this app needs -- set at Assess time, not inferred. High/critical apps always require human deploy approval (never auto-approved) and get stricter default SLO targets.">{{ r.criticality }}</span>
+      </td>
       <td class="{% if r.critical_count > 0 %}text-danger text-bold{% endif %}">{{ r.critical_count }}</td>
+      <td class="text-sm">
+        {# Open PRs AgentIT has tracked for this app, out of every PR ever opened
+           (code repo + GitOps infra repo) -- see pr_tracking.py. Total is a pure
+           DB count; Open additionally reflects a live, fleet-wide-cached GitHub
+           check for any PR not already tracked by a gate's own status
+           (routes/fleet.py::_attach_pr_counts). #}
+        {% if r.total_prs %}
+        <a href="/assessments/{{ r.id }}?tab=prs" class="{% if r.open_prs > 0 %}text-warning text-bold{% else %}text-muted{% endif %}">{{ r.open_prs }} / {{ r.total_prs }}</a>
+        {% else %}
+        <span class="text-muted">—</span>
+        {% endif %}
+      </td>
       <td>
         <div class="gate-actions">
           {# Previously onboarded apps: one primary "Refresh Onboard" that
@@ -177,7 +193,7 @@
                irreversibly removes the app's entire history (assessments,
                onboarding, gates, remediations, SLOs), the widest blast
                radius any single-click action in the fleet table has. #}
-            <button type="button" class="btn btn-sm btn-danger-outline" aria-label="Delete {{ r.repo_name }}"
+            <button type="button" class="btn btn-sm btn-danger-outline" aria-label="Delete {{ r.repo_name }}" title="Delete App"
               @click="$dispatch('show-confirm', {
                 title: 'Delete App',
                 message: 'Delete ' + {{ r.repo_name | tojson | forceescape }} + ' and ALL related data (assessments, onboarding, gates, remediations, SLOs)? This cannot be undone.',
@@ -195,7 +211,7 @@
 {% if not fleet %}
 <div class="empty-state">
   <h3>No apps assessed yet</h3>
-  <p class="text-muted">Click "Assess New Repo" to evaluate your first application across 7 enterprise readiness dimensions.</p>
+  <p class="text-muted">Click "Assess New App" to evaluate your first application across 7 enterprise readiness dimensions.</p>
 </div>
 {% endif %}
 
