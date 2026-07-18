@@ -226,6 +226,14 @@ def _get_deploy_status_bounded(include_commit_info: bool = False) -> dict:
     return status
 
 
+# Tekton reasons meaning the PipelineRun controller couldn't even resolve
+# the Pipeline/Task definitions -- verified live (2026-07-18 etcd-timeout
+# incident): these terminate with an empty/absent `childReferences`, i.e.
+# not a single TaskRun was ever created, so the run never reached
+# build-image/image-push and cannot have affected what's actually live.
+_TASK_RESOLUTION_FAILURE_REASONS = ("CouldntGetTask", "CouldntGetPipeline")
+
+
 def _get_deploy_status(include_commit_info: bool = False) -> dict:
     """"Is a deploy in progress, and what's changing" -- combines the
     currently-running build (`agentit_build` Info metric, via
@@ -250,6 +258,7 @@ def _get_deploy_status(include_commit_info: bool = False) -> dict:
         "stage": None,
         "reason": None,
         "resolved": None,
+        "unreleased_ci_failure": None,
         "errors": [],
     }
 
@@ -299,6 +308,13 @@ def _get_deploy_status(include_commit_info: bool = False) -> dict:
             # to free the node), not a deploy failure. Surface the run but leave
             # state idle so Argo/Rollout decide the real outcome.
             pass
+        elif reason in _TASK_RESOLUTION_FAILURE_REASONS and not tasks:
+            # Never created a single TaskRun for this commit (confirmed by
+            # `not tasks`, i.e. an empty childReferences) -- nothing was ever
+            # built or pushed, so this can't be a regression in what's live.
+            # Record it separately and let Argo/Rollout (checked below)
+            # decide the real live state, same as the Cancelled carve-out.
+            status["unreleased_ci_failure"] = {"reason": reason, "revision": revision}
         elif reason not in ("Succeeded", "Completed"):
             status["state"] = "failed"
             status["reason"] = f"CI pipeline {reason}"
@@ -349,6 +365,13 @@ def _get_deploy_status(include_commit_info: bool = False) -> dict:
             elif sync_status != "Synced":
                 status["state"] = "deploying"
                 status["stage"] = "syncing"
+
+    # Only worth surfacing the unreleased-CI-build note when the live
+    # deploy really is idle/healthy -- if Argo/Rollout turned out Degraded
+    # for a genuinely unrelated reason, that real failure should be the
+    # one message shown, not a distraction alongside it.
+    if status["state"] != "idle":
+        status["unreleased_ci_failure"] = None
 
     # Resolved outcome: once the latest PipelineRun succeeded and nothing is
     # actively deploying/failed, check whether this running instance's own

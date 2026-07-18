@@ -516,6 +516,24 @@ async def test_health_page_deployment_status_shows_pipeline_stepper(client):
     assert "feat: add ambient deploy status" in resp.text
 
 
+async def test_deploy_status_badge_route_task_resolution_failure_not_deploy_failed(client):
+    """The ambient badge must stay honest for a real live Rollout/Application
+    while showing a task-resolution-failed CI run for a newer, unreleased
+    commit -- never render "Deploy failed" in that case."""
+    revision = "9bdf90509e51d4179f87ae0b05a2c64b349c089f"
+    failed_pr = _pipelinerun("CouldntGetTask", "False", revision=revision)
+    with patch("agentit.portal.routes.health.kube") as mock_kube:
+        mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
+            [failed_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
+        )
+        resp = await client.get("/api/deploy-status")
+
+    assert resp.status_code == 200
+    assert "Deploy failed" not in resp.text
+    assert "deploy-status-idle" in resp.text
+    assert "CI build failed for newer commit" in resp.text
+
+
 async def test_health_page_deployment_status_reports_pipeline_failure():
     """The Health page's detail section must not silently show 'Idle' when
     the underlying PipelineRun actually failed."""
@@ -530,6 +548,28 @@ async def test_health_page_deployment_status_reports_pipeline_failure():
 
     assert resp.status_code == 200
     assert "Failed" in resp.text
+
+
+async def test_health_page_shows_unreleased_ci_failure_note_not_deploy_failed():
+    """The Health page's detailed section must distinguish "live deploy is
+    healthy" from "the latest CI build failed before it built anything" --
+    never show the panel's Failed state for a live, Healthy/Synced Argo
+    Application just because a newer commit's CI build hit a Task-resolution
+    error."""
+    c = AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True)
+    await prime_csrf(c)
+    revision = "9bdf90509e51d4179f87ae0b05a2c64b349c089f"
+    failed_pr = _pipelinerun("CouldntGetTask", "False", revision=revision)
+    with patch("agentit.portal.routes.health.kube") as mock_kube:
+        mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
+            [failed_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
+        )
+        resp = await c.get("/health")
+
+    assert resp.status_code == 200
+    assert "deploy-status-panel-idle" in resp.text
+    assert "Live deploy above is healthy and unaffected" in resp.text
+    assert revision[:12] in resp.text
 
 
 async def test_nav_badge_present_on_every_page(client):
@@ -549,6 +589,64 @@ def test_deploy_status_cancelled_pipeline_is_not_failed():
         status = _get_deploy_status()
     assert status["state"] == "idle"
     assert status["pipeline"]["reason"] == "Cancelled"
+
+
+def test_deploy_status_task_resolution_failure_is_not_deploy_failed():
+    """Regression guard for the 2026-07-18 etcd-timeout incident: a
+    PipelineRun that failed at Task-resolution (`CouldntGetTask`, e.g. an
+    overloaded etcd) before a single TaskRun was ever created must not pin
+    the ambient badge/Health page to "Deploy failed" when the actually-live
+    Rollout/Application (Argo, checked here) is healthy -- nothing was ever
+    built or pushed for that commit, so it can't be a live regression."""
+    revision = "9bdf90509e51d4179f87ae0b05a2c64b349c089f"
+    failed_pr = _pipelinerun("CouldntGetTask", "False", revision=revision)
+    with patch("agentit.portal.routes.health.kube") as mock_kube:
+        mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
+            [failed_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
+        )
+        status = _get_deploy_status()
+
+    assert status["state"] == "idle"
+    assert status["reason"] is None
+    assert status["pipeline"]["reason"] == "CouldntGetTask"
+    assert status["unreleased_ci_failure"] == {"reason": "CouldntGetTask", "revision": revision}
+
+
+def test_deploy_status_task_resolution_failure_reason_with_tasks_still_reported_failed():
+    """Defensive guard: if a resolution-failure reason (`CouldntGetTask`)
+    somehow appears on a run that *did* start at least one TaskRun (not
+    expected in practice -- resolution failures precede TaskRun creation),
+    don't apply the unreleased-build carve-out. Never assume "safe to
+    downgrade" without the same evidence (empty childReferences) that makes
+    the real incident provably safe."""
+    failed_pr = _pipelinerun("CouldntGetTask", "False", task_names=["git-clone"])
+    with patch("agentit.portal.routes.health.kube") as mock_kube:
+        mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
+            [failed_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
+        )
+        mock_kube.get_custom_resource.side_effect = _taskrun_get_custom_resource({"git-clone": "Succeeded"})
+        status = _get_deploy_status()
+
+    assert status["state"] == "failed"
+    assert "CouldntGetTask" in status["reason"]
+    assert status["unreleased_ci_failure"] is None
+
+
+def test_deploy_status_unreleased_ci_failure_cleared_when_argo_actually_degraded():
+    """If Argo/Rollout is genuinely Degraded for an unrelated reason, that
+    real failure must be the one message shown -- don't also carry the
+    softer unreleased-CI-build note alongside a real live failure."""
+    failed_pr = _pipelinerun("CouldntGetTask", "False")
+    with patch("agentit.portal.routes.health.kube") as mock_kube:
+        mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
+            [failed_pr] if "tekton" in group
+            else [_argo_app("Synced", "Degraded", health_message="Rollout has degraded")]
+        )
+        status = _get_deploy_status()
+
+    assert status["state"] == "failed"
+    assert status["reason"] == "Rollout has degraded"
+    assert status["unreleased_ci_failure"] is None
 
 
 def test_deploy_status_picks_newest_pipelinerun_by_creation_timestamp():

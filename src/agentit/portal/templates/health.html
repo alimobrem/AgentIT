@@ -141,6 +141,12 @@
   <p class="text-danger mt-1">{{ deploy_status.reason }}</p>
   {% endif %}
 
+  {% if deploy_status.unreleased_ci_failure %}
+  <p class="text-warning mt-1">Live deploy above is healthy and unaffected. The latest CI build (commit
+    <code>{{ deploy_status.unreleased_ci_failure.revision[:12] if deploy_status.unreleased_ci_failure.revision else 'unknown' }}</code>)
+    failed before it could build an image: {{ deploy_status.unreleased_ci_failure.reason }}.</p>
+  {% endif %}
+
   {% if deploy_status.resolved %}
   <p class="mt-1 {% if deploy_status.resolved.outcome == 'healthy' %}text-success{% else %}text-warning{% endif %}">{{ deploy_status.resolved.message }}</p>
   {% endif %}
