@@ -151,6 +151,24 @@ class TestTektonPipeline:
             "git-clone has lowercase 'revision' — must be 'REVISION'"
         )
 
+    def test_repo_url_default_has_no_dotgit_suffix(self):
+        """Regression: this default feeds both `git-clone`'s URL param AND
+        `register-self-in-fleet`'s webhook body verbatim (the latter never
+        normalizes it) -- a `.git`-suffixed default briefly created a
+        second, duplicate Fleet row for AgentIT itself (a distinct
+        `repo_url` string from every other write path's `.git`-less form)
+        before `normalize_repo_url()` (store.py) existed to collapse it.
+        Keeping this default pre-normalized closes that specific source
+        for good, independent of the general DB-layer/self-healing
+        safeguards in store.py."""
+        doc = _load(self.TEMPLATE)
+        params = {p["name"]: p for p in doc["spec"]["params"]}
+        assert "repo-url" in params
+        default = params["repo-url"]["default"]
+        assert not default.lower().endswith(".git"), (
+            f"Pipeline repo-url default must not have a '.git' suffix, got: {default!r}"
+        )
+
     def test_run_tests_working_dir_no_agentit_suffix(self):
         """Bug: workingDir had '/agentit' suffix that breaks cloned repo layout."""
         doc = _load(self.TEMPLATE)
@@ -513,6 +531,21 @@ class TestTektonCleanup:
                 elif resource == "jobs":
                     print("old-job " + OLD)
                     print("new-job " + NEW)
+                elif resource == "taskrun":
+                    # NAME COMPLETED OWNER_PR (OWNER_PR empty => standalone,
+                    # i.e. never part of a Pipeline at all)
+                    print("old-standalone-tr " + OLD + " ")
+                    print("new-standalone-tr " + NEW + " ")
+                    print("old-orphaned-tr " + OLD + " gone-pr")
+                    print("old-owned-tr " + OLD + " live-pr")
+                elif resource == "imagestream":
+                    # CREATED TAG -- 10 "recent" tags (within the keep window)
+                    # and 2 much older ones that must be pruned once the
+                    # ImageStream has more than IMAGE_TAG_KEEP tags.
+                    for i in range(1, 11):
+                        print("2025-01-%02dT00:00:00Z keep-tag-%02d" % (i, i))
+                    print("2020-01-02T00:00:00Z prune-tag-02")
+                    print("2020-01-01T00:00:00Z prune-tag-01")
                 sys.exit(0)
             elif verb == "delete":
                 if resource.startswith(("pod/", "pipelinerun/")):
@@ -567,6 +600,130 @@ class TestTektonCleanup:
         )
         assert not any("new-pr" in line for line in deleted)
 
+    def test_deletes_standalone_taskrun_older_than_cutoff(self, tmp_path):
+        """Self-containment gap this loop closes: a TaskRun that was never
+        part of a Pipeline (no owning PipelineRun at all) has no owner-ref
+        GC to rely on -- a cluster-wide TektonConfig pruner covering only
+        `pipelinerun` wouldn't touch it either. AgentIT's own CronJob must
+        delete it directly once it's past retention."""
+        _result, deleted = self._run_cleanup_script(tmp_path)
+        assert any("old-standalone-tr" in line for line in deleted), (
+            f"standalone TaskRun completed >24h ago must be deleted; deletes: {deleted}"
+        )
+
+    def test_does_not_delete_recent_standalone_taskrun(self, tmp_path):
+        _result, deleted = self._run_cleanup_script(tmp_path)
+        assert not any("new-standalone-tr" in line for line in deleted), (
+            f"a standalone TaskRun from the far future must never be deleted; deletes: {deleted}"
+        )
+
+    def test_deletes_orphaned_taskrun_whose_owner_pipelinerun_is_gone(self, tmp_path):
+        """The other half of the same gap: a TaskRun whose owning
+        PipelineRun *reference* still exists in its labels, but that
+        PipelineRun object itself is already gone (owner-ref GC delayed or
+        stuck -- the exact etcd/control-plane-pressure scenario this
+        incident already involved). Must be deleted directly, not left
+        waiting on Kubernetes GC to eventually catch up."""
+        _result, deleted = self._run_cleanup_script(tmp_path)
+        assert any("old-orphaned-tr" in line for line in deleted), (
+            f"TaskRun whose owning PipelineRun no longer exists must be deleted; deletes: {deleted}"
+        )
+
+    def test_does_not_delete_taskrun_still_owned_by_a_live_pipelinerun(self, tmp_path):
+        """A TaskRun still owned by a PipelineRun that has NOT been pruned
+        yet is deliberately left alone by this loop -- it cascades away
+        naturally once its owning PipelineRun's own turn comes (via the
+        loop above, or a later run of this CronJob), so this loop must not
+        race ahead and delete task history for a still-tracked run."""
+        _result, deleted = self._run_cleanup_script(tmp_path)
+        assert not any("old-owned-tr" in line for line in deleted), (
+            f"TaskRun owned by a still-existing PipelineRun must not be deleted; deletes: {deleted}"
+        )
+
+    def _taskrun_cleanup_section(self) -> str:
+        """Extract just the standalone/orphaned-TaskRun loop's own shell
+        text, verbatim, from the full rendered script -- used to prove this
+        loop is fully self-contained (computes its own cutoff, needs
+        nothing set up by any earlier loop) rather than merely passing when
+        run as part of the whole script."""
+        script = self._cleanup_script()
+        start_marker = 'echo "Cleaning standalone/orphaned TaskRuns'
+        end_marker = 'echo "Deleted $TR_DELETED standalone/orphaned TaskRuns"'
+        start = script.index(start_marker)
+        end = script.index(end_marker) + len(end_marker)
+        return "set -eu\n" + script[start:end]
+
+    def test_taskrun_cleanup_is_self_contained_independent_of_pipelinerun_loop(self, tmp_path):
+        """Regression guard for the actual task requirement: this loop must
+        not depend on the PipelineRun-cleanup loop (above it in the script)
+        having already run. Extracts and executes *only* the TaskRun
+        section in isolation, against a fake `oc` that hard-fails on the
+        PipelineRun loop's bulk-listing query shape (`-o jsonpath=...`) --
+        proving the section never needs that query to have run, and still
+        correctly cleans up standalone/orphaned TaskRuns purely from its own
+        per-TaskRun owner-existence check."""
+        import os
+        import subprocess
+        import textwrap
+
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        log_file = tmp_path / "oc-deletes.log"
+        fake_oc = bin_dir / "oc"
+        fake_oc.write_text(textwrap.dedent(f"""\
+            #!/usr/bin/env python3
+            import sys
+
+            args = sys.argv[1:]
+            verb = args[0] if args else ""
+            resource = args[1] if len(args) > 1 else ""
+            log_path = {str(log_file)!r}
+
+            def log(line):
+                with open(log_path, "a") as f:
+                    f.write(line + "\\n")
+
+            OLD = "2020-01-01T00:00:00Z"
+
+            if verb == "get" and resource == "pipelinerun":
+                if any("jsonpath=" in a for a in args):
+                    # The PipelineRun loop's own bulk-listing query shape --
+                    # the isolated TaskRun section must never issue this.
+                    sys.stderr.write("unexpected bulk pipelinerun listing call\\n")
+                    sys.exit(2)
+                name = args[2] if len(args) > 2 else ""
+                if name == "live-pr":
+                    print("pipelinerun.tekton.dev/" + name)
+                    sys.exit(0)
+                sys.exit(1)
+            elif verb == "get" and resource == "taskrun":
+                print("old-standalone-tr " + OLD + " ")
+                print("old-orphaned-tr " + OLD + " gone-pr")
+                print("old-owned-tr " + OLD + " live-pr")
+                sys.exit(0)
+            elif verb == "delete":
+                name = args[2] if len(args) > 2 else ""
+                log("delete " + resource + " " + name)
+                sys.exit(0)
+            sys.exit(0)
+        """))
+        fake_oc.chmod(0o755)
+
+        section = self._taskrun_cleanup_section().replace("{{ .Release.Namespace }}", "test-ns")
+        result = subprocess.run(
+            ["bash", "-c", section],
+            env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, (
+            f"isolated TaskRun-cleanup section exited {result.returncode}\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        deleted = log_file.read_text().splitlines() if log_file.exists() else []
+        assert any("old-standalone-tr" in line for line in deleted)
+        assert any("old-orphaned-tr" in line for line in deleted)
+        assert not any("old-owned-tr" in line for line in deleted)
+
     def test_deletes_old_orphaned_jobs_only(self, tmp_path):
         _result, deleted = self._run_cleanup_script(tmp_path)
         assert any("old-job" in line for line in deleted), (
@@ -583,6 +740,64 @@ class TestTektonCleanup:
         assert "Deleted 1 orphaned affinity-assistant pods" in result.stdout
         assert "Deleted 1 orphaned affinity-assistant StatefulSets" in result.stdout
         assert "Deleted 1 old PipelineRuns" in result.stdout
+        assert "Deleted 2 standalone/orphaned TaskRuns" in result.stdout
+        assert "Deleted 2 old image tags" in result.stdout
+
+    def test_prunes_image_tags_beyond_the_keep_window(self, tmp_path):
+        """Self-containment gap: `build-image` pushes a new, uniquely-named
+        tag to the `agentit` ImageStream on every CI run -- the same
+        unbounded-accumulation shape as PipelineRuns/TaskRuns, normally
+        bounded on a real OpenShift cluster by a cluster-admin-run `oc adm
+        prune images` that a customer's cluster is no more guaranteed to
+        have scheduled than the TektonConfig pruner. This loop must prune
+        the oldest tags itself once there are more than IMAGE_TAG_KEEP."""
+        _result, deleted = self._run_cleanup_script(tmp_path)
+        assert any("imagestreamtag agentit:prune-tag-01" in line for line in deleted), (
+            f"oldest image tag beyond the keep window must be pruned; deletes: {deleted}"
+        )
+        assert any("imagestreamtag agentit:prune-tag-02" in line for line in deleted)
+
+    def test_keeps_the_most_recent_image_tags(self, tmp_path):
+        _result, deleted = self._run_cleanup_script(tmp_path)
+        assert not any("keep-tag" in line for line in deleted), (
+            f"the 10 most recent image tags must never be pruned; deletes: {deleted}"
+        )
+
+    def test_taskrun_rbac_is_namespaced_and_shipped_by_the_chart_itself(self):
+        """The new TaskRun-cleanup loop needs `get`/`list`/`delete` on
+        `taskruns.tekton.dev`. This must come from the same namespace-scoped
+        Role AgentIT's own chart already creates for the `pipeline`
+        ServiceAccount -- not a cluster-scoped grant, and not something a
+        customer's cluster-admin has to add by hand -- so the loop's RBAC
+        is exactly as self-contained as the loop itself."""
+        docs = [d for d in yaml.safe_load_all(_render(CHART_DIR / "tekton" / "rbac.yaml")) if d]
+        role = next(d for d in docs if d.get("kind") == "Role" and d["metadata"]["name"] == "agentit-ci-cleanup")
+        assert role["metadata"].get("namespace"), "must stay a namespaced Role, not a ClusterRole"
+        tekton_rule = next(r for r in role["rules"] if r.get("apiGroups") == ["tekton.dev"])
+        assert set(tekton_rule["resources"]) >= {"pipelineruns", "taskruns"}
+        assert set(tekton_rule["verbs"]) >= {"get", "list", "delete"}
+        assert not any(d.get("kind") == "ClusterRole" for d in docs), (
+            "TaskRun cleanup RBAC must stay namespace-scoped, shipped entirely "
+            "by this chart -- never a cluster-scoped grant"
+        )
+
+    def test_image_tag_pruning_rbac_is_namespaced_and_shipped_by_the_chart_itself(self):
+        """Same self-containment requirement for the image-tag-pruning loop:
+        `imagestreams` (get) + `imagestreamtags` (delete) must be granted by
+        this same namespaced Role, not require a customer's cluster-admin to
+        add anything (e.g. the `system:image-pruner` ClusterRole `oc adm
+        prune images` needs -- see the doc's note on why that broader,
+        cluster-wide blob-GC action is structurally out of reach here)."""
+        docs = [d for d in yaml.safe_load_all(_render(CHART_DIR / "tekton" / "rbac.yaml")) if d]
+        role = next(d for d in docs if d.get("kind") == "Role" and d["metadata"]["name"] == "agentit-ci-cleanup")
+        image_rules = [r for r in role["rules"] if r.get("apiGroups") == ["image.openshift.io"]]
+        resources_covered = {res for r in image_rules for res in r["resources"]}
+        assert {"imagestreams", "imagestreamtags"} <= resources_covered
+        for r in image_rules:
+            if r["resources"] == ["imagestreamtags"]:
+                assert "delete" in r["verbs"]
+            if r["resources"] == ["imagestreams"]:
+                assert "get" in r["verbs"]
 
 
 # ---------------------------------------------------------------------------

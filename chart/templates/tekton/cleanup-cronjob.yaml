@@ -66,6 +66,38 @@ spec:
                   done < /tmp/old-pipelineruns.txt
                   echo "Deleted $PR_DELETED old PipelineRuns"
 
+                  echo "Cleaning standalone/orphaned TaskRuns older than 24 hours..."
+                  # TaskRuns owned by a PipelineRun normally cascade-delete via
+                  # Kubernetes owner-reference GC once that PipelineRun is pruned
+                  # above. That leaves two gaps this cluster can't be assumed to
+                  # cover on AgentIT's behalf: standalone TaskRuns that were never
+                  # part of a Pipeline (no owner at all), and TaskRuns whose owning
+                  # PipelineRun's owner-ref GC is delayed/stuck (e.g. control-plane
+                  # pressure -- exactly what this incident already involved). This
+                  # loop deletes both directly, on its own age cutoff, so it never
+                  # depends on the PipelineRun loop above having already run or
+                  # succeeded -- nor on any cluster-wide TektonConfig pruner
+                  # existing at all (AgentIT ships to arbitrary customer clusters
+                  # and cannot assume one is configured, or even present). A
+                  # TaskRun still owned by a live (not-yet-pruned) PipelineRun is
+                  # deliberately left alone here -- it will cascade-delete when
+                  # that PipelineRun's own turn comes, whether via the loop above
+                  # or a later run of this same CronJob.
+                  TR_DELETED=0
+                  TR_CUTOFF=$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-24H '+%Y-%m-%dT%H:%M:%SZ')
+                  oc get taskrun -n {{ .Release.Namespace }} -o jsonpath='{range .items[?(@.status.completionTime)]}{.metadata.name}{" "}{.status.completionTime}{" "}{.metadata.labels.tekton\.dev/pipelineRun}{"\n"}{end}' > /tmp/old-taskruns.txt 2>/dev/null || true
+                  while read -r NAME COMPLETED OWNER_PR; do
+                    if [ -z "$NAME" ] || [ -z "$COMPLETED" ]; then continue; fi
+                    if [ "$COMPLETED" \< "$TR_CUTOFF" ]; then
+                      if [ -n "$OWNER_PR" ]; then
+                        OWNER_EXISTS=$(oc get pipelinerun "$OWNER_PR" -n {{ .Release.Namespace }} -o name 2>/dev/null || echo "")
+                        if [ -n "$OWNER_EXISTS" ]; then continue; fi
+                      fi
+                      oc delete taskrun "$NAME" -n {{ .Release.Namespace }} --wait=false 2>/dev/null && TR_DELETED=$((TR_DELETED+1))
+                    fi
+                  done < /tmp/old-taskruns.txt
+                  echo "Deleted $TR_DELETED standalone/orphaned TaskRuns"
+
                   echo "Cleaning orphaned affinity-assistant pods..."
                   AA_DELETED=0
                   oc get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/managed-by=tekton-pipelines -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.labels.tekton\.dev/pipelineRun}{"\n"}{end}' > /tmp/aa-pods.txt 2>/dev/null || true
@@ -114,6 +146,30 @@ spec:
                     fi
                   done < /tmp/orphan-jobs.txt
                   echo "Deleted $JOB_DELETED orphaned agent Jobs"
+
+                  # build-image pushes a new, uniquely-named tag (the git revision)
+                  # to this ImageStream on every CI run -- same accumulation shape
+                  # as PipelineRuns/TaskRuns above, and normally bounded on an
+                  # OpenShift cluster by a cluster-admin-run `oc adm prune images`,
+                  # which (like the TektonConfig pruner) is not something a
+                  # customer's cluster is guaranteed to have scheduled, or even
+                  # support (non-OpenShift Kubernetes has no ImageStream API at
+                  # all). Retention-count-based, same as the other loops here --
+                  # tolerates the ImageStream not existing yet (no build has run)
+                  # or this being a non-OpenShift cluster (no `imagestream` kind).
+                  IMAGE_TAG_KEEP=10
+                  echo "Pruning old image tags on the agentit ImageStream (keeping the $IMAGE_TAG_KEEP most recent)..."
+                  IS_DELETED=0
+                  oc get imagestream agentit -n {{ .Release.Namespace }} -o jsonpath='{range .status.tags[*]}{.items[0].created}{" "}{.tag}{"\n"}{end}' 2>/dev/null | sort -r > /tmp/image-tags.txt || true
+                  SEEN=0
+                  while read -r CREATED TAG; do
+                    if [ -z "$TAG" ]; then continue; fi
+                    SEEN=$((SEEN+1))
+                    if [ "$SEEN" -gt "$IMAGE_TAG_KEEP" ]; then
+                      oc delete imagestreamtag "agentit:$TAG" -n {{ .Release.Namespace }} --wait=false 2>/dev/null && IS_DELETED=$((IS_DELETED+1))
+                    fi
+                  done < /tmp/image-tags.txt
+                  echo "Deleted $IS_DELETED old image tags"
               resources:
                 requests:
                   cpu: 50m

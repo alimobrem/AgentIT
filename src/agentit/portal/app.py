@@ -199,10 +199,35 @@ async def _reap_orphaned_jobs() -> None:
         log.debug("Background orphaned-job reap failed", exc_info=True)
 
 
+async def _dedupe_repo_urls() -> None:
+    """Self-heals any duplicate Fleet row caused by the same repo being
+    stored under two different raw ``repo_url`` spellings (see
+    ``AssessmentStore.dedupe_repo_urls``) -- called at startup (via
+    ``AssessmentStore.create()`` itself) and every 5 min after, so a
+    duplicate introduced between deploys (e.g. a misconfigured webhook
+    caller, a one-off script) heals itself without anyone needing live DB
+    access to notice or fix it."""
+    try:
+        s = await get_store()
+        merged = await s.dedupe_repo_urls()
+        for m in merged:
+            log.warning(
+                "Merged duplicate repo_url %r into %r (self-healed, no action needed)",
+                m["from"], m["to"],
+            )
+            await s.log_event(
+                "portal", "repo-url-deduped", None, "warning",
+                f"Self-healed a duplicate Fleet entry: merged {m['from']!r} into {m['to']!r}.",
+            )
+    except Exception:
+        log.debug("Background repo_url dedupe failed", exc_info=True)
+
+
 async def _background_maintenance() -> None:
     """Every 5 min: refresh DB/event-buffer size metrics, reap orphaned
-    assess/onboard jobs. Hourly: expire stale gates, diff the skill/check
-    inventory, prune stale agent_registry rows. Daily: purge old data."""
+    assess/onboard jobs, self-heal duplicate repo_urls. Hourly: expire
+    stale gates, diff the skill/check inventory, prune stale
+    agent_registry rows. Daily: purge old data."""
     tick = 0
     while True:
         await asyncio.sleep(300)
@@ -216,6 +241,7 @@ async def _background_maintenance() -> None:
             log.debug("Background DB metrics refresh failed", exc_info=True)
 
         await _reap_orphaned_jobs()
+        await _dedupe_repo_urls()
 
         if tick % 12 != 0:
             continue  # everything below this line only runs hourly (12 * 5min)

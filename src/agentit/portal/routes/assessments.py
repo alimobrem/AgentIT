@@ -810,13 +810,19 @@ async def _run_onboarding_job(
     never resolves it stays off) chains the once-manifests-are-saved
     onboarding job straight into the same automatic Dry Run -> Deliver
     sequence a human otherwise clicks by hand on Onboard Results (see
-    ``delivery.auto_dry_run_then_deliver()``). Job status moves through
-    ``dry_run`` -> ``delivering`` -> ``completed`` on a clean run; a real
-    Dry Run failure (no infra repo known, etc.) halts at ``dry_run_failed``
-    and a Deliver-stage failure at ``deliver_failed`` -- both terminal, both
-    routed to Onboard Results (never back to Assessment Detail, since
-    manifests already exist by this point) with the failure surfaced, per
-    the "Dry Run is a real, respected gate" requirement.
+    ``delivery.auto_dry_run_then_deliver()``) -- but only once
+    ``AutoMode.should_auto_apply_and_log()`` (the same LLM confidence/
+    destructive-action safety check the vuln-watcher/webhook auto-apply
+    paths already require) classifies the generated manifests as safe; a
+    low-confidence or destructive classification halts at
+    ``gated_for_review`` instead of chaining, falling back to requiring an
+    explicit human Deliver click. Job status moves through ``dry_run`` ->
+    ``delivering`` -> ``completed`` on a clean run; a real Dry Run failure
+    (no infra repo known, etc.) halts at ``dry_run_failed`` and a Deliver-
+    stage failure at ``deliver_failed`` -- both terminal, both routed to
+    Onboard Results (never back to Assessment Detail, since manifests
+    already exist by this point) with the failure surfaced, per the "Dry
+    Run is a real, respected gate" requirement.
 
     Uses its own store handle (not the request-scoped one) since this
     coroutine keeps running after the request/response cycle that started
@@ -891,6 +897,38 @@ async def _run_onboarding_job(
         # actually persisted them, and this operates on the exact persisted
         # shape (`edited` defaults False) `route_and_deliver()` expects.
         chain_files = await s.get_onboarding(assessment_id) or []
+
+        # AutoMode's LLM safety classification -- the same confidence-
+        # threshold/destructive-action gate the vuln-watcher/webhook auto-
+        # apply paths (routes/webhooks.py's webhook_auto_apply/dispatcher
+        # loop) already require before opening a real PR. Onboarding's
+        # auto_dry_run_then_deliver() below is deliberately narrow (see its
+        # own docstring) and never re-decides this on its own, so without
+        # this check onboarding's main auto-deliver flow opened a GitOps PR
+        # with no LLM review at all. A low-confidence/destructive
+        # classification here doesn't fail onboarding -- the manifests
+        # already exist -- it just falls back to requiring an explicit
+        # human "Deliver" click on Onboard Results instead of auto-opening
+        # the PR.
+        from agentit.automode import AutoMode
+
+        auto = AutoMode(store=s, publisher=None, llm_client=get_llm_client())
+        chain_manifests = [f["content"] for f in chain_files if f["path"].endswith((".yaml", ".yml"))]
+        can_auto_deliver, safety_reason = await auto.should_auto_apply_and_log(
+            orch_summary.get("auto_approve", False), chain_manifests, report.criticality, report.repo_name,
+        )
+        if not can_auto_deliver:
+            message = (
+                f"Automatic delivery skipped after onboarding -- AutoMode's safety check gated "
+                f"this batch for human review: {safety_reason}. Review and click Deliver on "
+                "Onboard Results to proceed manually."
+            )
+            await s.log_event(
+                "portal", "onboard-auto-deliver-gated", report.repo_name, "warning",
+                message, correlation_id=assessment_id,
+            )
+            await s.update_remediation_job(job_id, "gated_for_review", message[:280])
+            return
 
         async def _on_stage(stage: str) -> None:
             label = {
@@ -983,7 +1021,11 @@ async def onboard_submit(
 # polling/SSE ticks matter once one of these is reached. "completed"/
 # "failed" predate the automatic Dry Run -> Deliver chain; "dry_run_failed"/
 # "deliver_failed" are new (see ``_run_onboarding_job``'s docstring).
-_ONBOARD_JOB_TERMINAL_STATUSES = ("completed", "failed", "dry_run_failed", "deliver_failed")
+# "gated_for_review" is AutoMode's LLM safety check declining to auto-
+# deliver (low confidence or a destructive classification) -- distinct from
+# the two failure states above: onboarding itself succeeded and nothing
+# was attempted or failed, a human just needs to click Deliver by hand.
+_ONBOARD_JOB_TERMINAL_STATUSES = ("completed", "failed", "dry_run_failed", "deliver_failed", "gated_for_review")
 
 
 async def _onboard_terminal_redirect_url(store: object, assessment_id: str, job: dict) -> str:
@@ -1004,6 +1046,10 @@ async def _onboard_terminal_redirect_url(store: object, assessment_id: str, job:
       same error flash -- a human reviews/retries from there, never
       bounced back to Assessment Detail once there's something real to
       look at (requirement: Dry Run stays a real, respected gate).
+    - ``"gated_for_review"`` (manifests exist; AutoMode's LLM safety check
+      declined to auto-deliver) -> Onboard Results, with a warning flash
+      (not the error flash -- nothing failed) explaining the fix still
+      needs a manual Deliver click.
     - ``"completed"`` -> Onboard Results, decorated with ``pr_url``/
       ``pr_url_repo`` (reusing ``repo_kind_for_mechanism()``) when this was
       an auto-chained run that actually opened a PR, so the same green
@@ -1017,6 +1063,8 @@ async def _onboard_terminal_redirect_url(store: object, assessment_id: str, job:
     base_url = f"/assessments/{assessment_id}/onboard-results"
     if job["status"] in ("dry_run_failed", "deliver_failed"):
         return f"{base_url}?error={quote(job.get('error') or 'Automatic delivery failed')}"
+    if job["status"] == "gated_for_review":
+        return f"{base_url}?warning={quote(job.get('current_step') or 'Automatic delivery needs human review')}"
 
     # "completed" -- only decorated further when this run was auto-chained.
     if "auto_deliver" not in (job.get("steps_completed") or []):
