@@ -282,10 +282,9 @@ class AutoMode:
                 "details": {"delivery": delivery, "gate_id": gate_id}}
 
     async def _complete_remediations(self, assessment_id: str) -> None:
-        remediations = await self._store.list_remediations(assessment_id)
-        for rem in remediations:
-            if rem["status"] != "completed":
-                await self._store.complete_remediation(rem["id"])
+        from agentit.portal.delivery import complete_remediations
+
+        await complete_remediations(self._store, assessment_id)
 
     async def _log_event(self, agent_id: str, action: str, target: str, severity: str, summary: str) -> None:
         try:

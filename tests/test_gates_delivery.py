@@ -375,3 +375,102 @@ class TestGitopsPrPendingGate:
         assert "error=" in resp.headers["location"]
         assert len(await store.list_gates(status="pending")) == 1
         assert len(await store.list_gates(status="approved")) == 0
+
+
+class TestGitopsPrPendingGateCompletesRemediations:
+    """Closes the remediation-completion gap: a cluster-config fix
+    delivered via a GitOps PR must have its `remediations` row marked
+    completed once the PR is confirmed MERGED here -- not merely opened
+    (see test_automode_extended.py's
+    test_remediations_stay_pending_until_gitops_pr_is_merged, which proves
+    AutoMode opening the PR alone must NOT complete it -- this is the one
+    other place a cluster-config remediation's completion can honestly be
+    wired to)."""
+
+    async def test_merge_completes_the_remediation(self, gate_client, _mock_kube):
+        client, store, aid = gate_client
+        rem_id = await store.save_remediation(aid, "security", "Add NetworkPolicy")
+        gate_id = await store.create_gate(
+            aid, "gitops-pr-pending",
+            "PR opened: https://github.com/org/infra-gitops/pull/9. Approving merges the PR.",
+        )
+
+        with patch("agentit.portal.github_pr.merge_pr") as mock_merge:
+            mock_merge.return_value = {"merged": True, "sha": "abc123"}
+            resp = await client.post(
+                f"/gates/{gate_id}/resolve",
+                data={"status": "approved", "resolved_by": "tester"},
+                follow_redirects=False,
+            )
+
+        assert resp.status_code == 303
+        assert "gate_approved=true" in resp.headers["location"]
+        remediations = await store.list_remediations(aid)
+        assert remediations[0]["id"] == rem_id
+        assert remediations[0]["status"] == "completed"
+        assert remediations[0]["completed_at"] is not None
+
+    async def test_failed_merge_leaves_the_remediation_unfinished(self, gate_client, _mock_kube):
+        """The merge failed -- nothing landed -- so the remediation must
+        stay exactly as un-finished as it was before this approval
+        attempt, matching the gate itself staying pending."""
+        client, store, aid = gate_client
+        rem_id = await store.save_remediation(aid, "security", "Add NetworkPolicy")
+        gate_id = await store.create_gate(
+            aid, "gitops-pr-pending",
+            "PR opened: https://github.com/org/infra-gitops/pull/9. Approving merges the PR.",
+        )
+
+        with patch("agentit.portal.github_pr.merge_pr") as mock_merge:
+            mock_merge.return_value = {"error": "merge conflict"}
+            resp = await client.post(
+                f"/gates/{gate_id}/resolve",
+                data={"status": "approved", "resolved_by": "tester"},
+                follow_redirects=False,
+            )
+
+        assert resp.status_code == 303
+        assert "error=" in resp.headers["location"]
+        remediations = await store.list_remediations(aid)
+        assert remediations[0]["id"] == rem_id
+        assert remediations[0]["status"] != "completed"
+
+    async def test_no_pr_url_on_gate_never_completes_the_remediation(self, gate_client, _mock_kube):
+        """A malformed/stale gate with no PR URL in its summary refuses to
+        merge at all (existing behavior) -- it must not fall through to
+        completing the remediation anyway."""
+        client, store, aid = gate_client
+        rem_id = await store.save_remediation(aid, "security", "Add NetworkPolicy")
+        gate_id = await store.create_gate(aid, "gitops-pr-pending", "No PR URL in this summary at all.")
+
+        resp = await client.post(
+            f"/gates/{gate_id}/resolve",
+            data={"status": "approved", "resolved_by": "tester"},
+            follow_redirects=False,
+        )
+
+        assert resp.status_code == 303
+        assert "error=" in resp.headers["location"]
+        remediations = await store.list_remediations(aid)
+        assert remediations[0]["id"] == rem_id
+        assert remediations[0]["status"] != "completed"
+
+    async def test_complete_remediations_helper_is_idempotent(self, gate_client, _mock_kube):
+        """Direct unit coverage for the shared helper itself: calling it
+        twice for the same assessment (e.g. two merged PRs against the
+        same app) never errors and never re-flips an already-completed
+        remediation's ``completed_at``."""
+        from agentit.portal.delivery import complete_remediations
+
+        _client, store, aid = gate_client
+        await store.save_remediation(aid, "security", "Add NetworkPolicy")
+
+        await complete_remediations(store, aid)
+        first = await store.list_remediations(aid)
+        assert first[0]["status"] == "completed"
+        completed_at_first = first[0]["completed_at"]
+
+        await complete_remediations(store, aid)
+        second = await store.list_remediations(aid)
+        assert second[0]["status"] == "completed"
+        assert second[0]["completed_at"] == completed_at_first
