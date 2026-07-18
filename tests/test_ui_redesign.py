@@ -104,9 +104,13 @@ class TestFixFindingIsPureGeneration:
 
         assert await store.get_apply_results(aid) is None
 
-    async def test_fix_still_saves_remediation_and_generates_files(self, ui_client):
+    async def test_fix_generates_files(self, ui_client):
         """The generation half of fix_finding() is unchanged -- only the
-        direct-apply side effect was removed."""
+        direct-apply side effect was removed. (A prior version of this test
+        also asserted a `remediations` row was saved -- that table has
+        since been removed as a standalone concept entirely; the
+        `fix_generated=` redirect param below is itself the real,
+        already-asserted-elsewhere signal that generation succeeded.)"""
         client, store = ui_client
         aid = await store.save(_report_with_network_finding())
 
@@ -118,8 +122,6 @@ class TestFixFindingIsPureGeneration:
 
         assert resp.status_code == 303
         assert "fix_generated=" in resp.headers["location"]
-        remediations = await store.list_remediations(aid)
-        assert len(remediations) > 0
 
     async def test_onboard_results_flash_message_says_deliver_not_apply_or_pr(self, ui_client):
         """Regression test for the stale copy docs/ui-redesign-proposal.md
@@ -372,9 +374,12 @@ class TestGateAppAttributionAndActionsTab:
         assert resp.status_code == 200
         assert "x-data=\"{ tab: 'ledger', findingsCount: 0 }\"" in resp.text
 
-    async def test_fleet_quiet_ledger_pointer_counts_app_owner_gates_only(self, ui_client):
-        """Fleet is scoreboard-only: pending ops → quiet Ledger link, not a
-        Needs Action column. cluster-admin-review must not inflate the count."""
+    async def test_fleet_quiet_ledger_pointer_counts_pr_gates_only(self, ui_client):
+        """Fleet's quiet Ledger pointer is PR-approval-specific now (Ledger's
+        own job narrowed to strictly PRs -- see
+        routes/insights.py::ledger_page()): auto-mode-review/dry-run-failed/
+        cluster-admin-review must never inflate it, even though they're real
+        pending gates -- only a pending gitops-pr-pending gate does."""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="needs-action-app"))
         await store.create_gate(aid, "auto-mode-review", "gate 1")
@@ -383,8 +388,11 @@ class TestGateAppAttributionAndActionsTab:
 
         resp = await client.get("/fleet")
         assert resp.status_code == 200
-        assert "2 need you → Ledger" in resp.text
+        assert "need your approval → Ledger" not in resp.text
         assert "Needs Action" not in resp.text
+        # The two non-admin-review, non-PR gates still show as this app's
+        # own real "pending action" row badge -- not silently dropped.
+        assert "2 pending action" in resp.text
 
     async def test_fleet_no_pending_pointer_when_no_pending_gates(self, ui_client):
         client, store = ui_client
@@ -392,19 +400,23 @@ class TestGateAppAttributionAndActionsTab:
 
         resp = await client.get("/fleet")
         assert resp.status_code == 200
-        assert "need you → Ledger" not in resp.text
+        assert "need your approval → Ledger" not in resp.text
+        assert "pending action" not in resp.text
 
-    async def test_fleet_pending_pointer_links_to_ledger(self, ui_client):
-        """Pending ops are Ledger's job — Fleet only offers a quiet pointer."""
+    async def test_fleet_pending_pointer_links_to_ledger_for_pr_gates_only(self, ui_client):
+        """A non-PR pending gate (auto-mode-review) never moves the
+        fleet-wide "→ Ledger" pointer -- it shows via this app's own
+        per-row "pending action" badge (linking straight to its Actions
+        tab) instead, since it's not a PR Ledger would ever list."""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="linked-badge-app"))
         await store.create_gate(aid, "auto-mode-review", "needs review")
 
         resp = await client.get("/fleet")
         assert resp.status_code == 200
-        assert 'href="/ledger"' in resp.text
-        assert "1 need you → Ledger" in resp.text
-        assert f'?tab=actions' not in resp.text or f'/assessments/{aid}?tab=actions' not in resp.text
+        assert "need your approval → Ledger" not in resp.text
+        assert "1 pending action" in resp.text
+        assert f'/assessments/{aid}?tab=actions' in resp.text
 
     async def test_assessment_detail_tab_query_param_opens_actions_tab(self, ui_client):
         """The badge above links with ?tab=actions -- the Alpine tab state

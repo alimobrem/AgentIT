@@ -14,8 +14,15 @@
       <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
     </button>
   </form>
+  {# pending_need_you is now specifically "PRs waiting for your approval"
+     -- Ledger is strictly PR-focused (see
+     routes/insights.py::ledger_page()'s docstring), so this banner always
+     agrees with what clicking through actually shows. Every other
+     pending, app-owner-scoped gate type still shows via each app's own
+     "pending action" row badge below and Assessment Detail's Actions tab
+     -- never silently dropped, just not a PR. #}
   {% if pending_need_you %}
-  <a href="/ledger" class="text-muted text-sm">{{ pending_need_you }} need you → Ledger</a>
+  <a href="/ledger" class="text-muted text-sm">{{ pending_need_you }} PR(s) need your approval → Ledger</a>
   {% endif %}
 </div>
 
@@ -40,7 +47,6 @@
 </div>
 <div class="action-bar">
   <a href="/fleet/slos" class="btn btn-sm btn-outline">Fleet SLOs</a>
-  <a href="/fleet/remediations" class="btn btn-sm btn-outline">Fleet Remediations</a>
 </div>
 {% endif %}
 
@@ -96,6 +102,20 @@
           {% else %}
           <span class="badge badge-info" title="{{ r.next_action.message }}">{{ r.next_action.label }}</span>
           {% endif %}
+        </div>
+        {% elif r.pending_actions_count %}
+        {# Real, already-computed pending-gate count (fleet.py's own
+           _attach_pending_actions(), unchanged) that had no per-app render
+           anywhere until now -- the fleet-wide "N need you -> Ledger"
+           pointer above this table used to be its only surface, and that
+           pointer is now PR-approval-specific (Ledger's own job narrowed to
+           strictly PRs -- see routes/insights.py::ledger_page()). A
+           rollback-review/finding/auto-mode-review gate is still a real
+           pending action on this app even though it's never a PR; this
+           closes that gap rather than leaving it only reachable by opening
+           this app's Actions tab unprompted. #}
+        <div class="mt-1">
+          <a href="/assessments/{{ r.id }}?tab=actions" class="badge badge-accent" title="{{ r.pending_actions_count }} pending gate(s) awaiting your review on this app's Actions tab">{{ r.pending_actions_count }} pending action{{ 's' if r.pending_actions_count != 1 }}</a>
         </div>
         {% endif %}
       </td>
@@ -191,12 +211,12 @@
                whole app reserved for this heaviest friction pattern (the
                other is the cluster-admin-review gate approval) -- it
                irreversibly removes the app's entire history (assessments,
-               onboarding, gates, remediations, SLOs), the widest blast
+               onboarding, gates, SLOs), the widest blast
                radius any single-click action in the fleet table has. #}
             <button type="button" class="btn btn-sm btn-danger-outline" aria-label="Delete {{ r.repo_name }}" title="Delete App"
               @click="$dispatch('show-confirm', {
                 title: 'Delete App',
-                message: 'Delete ' + {{ r.repo_name | tojson | forceescape }} + ' and ALL related data (assessments, onboarding, gates, remediations, SLOs)? This cannot be undone.',
+                message: 'Delete ' + {{ r.repo_name | tojson | forceescape }} + ' and ALL related data (assessments, onboarding, gates, SLOs)? This cannot be undone.',
                 form: $refs.deleteForm{{ r.id }},
                 opts: { confirmText: 'I understand, delete this app', danger: true, typeToConfirm: {{ r.repo_name | tojson | forceescape }} }
               })">×</button>

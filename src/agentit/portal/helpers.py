@@ -173,15 +173,20 @@ async def get_store():
 
 # ── Nav gate badges ───────────────────────────────────────────────────
 #
-# base.html's nav bar shows two gate-derived badges: Fleet's link carries
-# the fleet-wide count of pending, app-owner-scoped gates (the 7 types that
-# now live on Fleet rows + Assessment Detail's Actions tab), and Admin
-# Review's link carries the count of pending `cluster-admin-review` gates
-# only (docs/ui-redesign-proposal.md §2/§5). This closes a real pre-existing
-# defect: the old nav referenced a `pending_gates` template variable no
-# context processor ever actually supplied (only Insights' own page context
-# computed it, so the badge was silently blank everywhere else). Cached
-# briefly since nav renders on every page (Ledger Needs You + Admin Review).
+# base.html's nav bar shows two gate-derived badges: Ledger's link carries
+# the fleet-wide count of PRs waiting for your approval (`gitops-pr-pending`
+# gates still `pending` -- the only gate type Ledger's PR-lifecycle view
+# renders/acts on, now that Ledger is strictly PR-focused, not every
+# app-owner-scoped gate type), and Admin Review's link carries the count of
+# pending `cluster-admin-review` gates only (docs/ui-redesign-proposal.md
+# §2/§5). Every other app-owner gate type (`rollback-review`,
+# `finding-unresolved-escalation`) stays visible via Fleet's per-app
+# "needs action"/escalation badges and Assessment Detail's Actions tab, not
+# this nav badge. This also closes a real pre-existing defect: the old nav
+# referenced a `pending_gates` template variable no context processor ever
+# actually supplied (only Insights' own page context computed it, so the
+# badge was silently blank everywhere else). Cached briefly since nav
+# renders on every page (Ledger + Admin Review badges).
 
 _nav_gate_badges_cache: dict = {"pending_actions": 0, "admin_review": 0, "ts": 0.0}
 _NAV_GATE_BADGES_CACHE_TTL = 20  # seconds
@@ -216,7 +221,7 @@ async def get_nav_gate_badge_counts(store: object) -> dict[str, int]:
 
         from agentit.portal.delivery import ADMIN_REVIEW_GATE_TYPE
         admin_review = sum(1 for g in gates if g.get("gate_type") == ADMIN_REVIEW_GATE_TYPE)
-        pending_actions = len(gates) - admin_review
+        pending_actions = sum(1 for g in gates if g.get("gate_type") == "gitops-pr-pending")
 
         _nav_gate_badges_cache["pending_actions"] = pending_actions
         _nav_gate_badges_cache["admin_review"] = admin_review

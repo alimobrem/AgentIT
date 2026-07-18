@@ -18,8 +18,9 @@
 <p class="text-muted">
   CI/CD manifests that target a shared operator namespace (<code>openshift-gitops</code>,
   <code>openshift-pipelines</code>, etc.) need elevated RBAC this service account doesn't have
-  by default -- these are never silently skipped. App-owner gates belong on
-  <a href="/ledger">Ledger</a> Needs You, not here.
+  by default -- these are never silently skipped. A pending GitOps PR approval belongs on
+  <a href="/ledger">Ledger</a>; every other app-owner gate belongs on
+  <a href="/fleet">Fleet</a> or that app's own Assessment Detail Actions tab, not here.
 </p>
 
 <h2>Pending Review ({{ pending | length }})</h2>

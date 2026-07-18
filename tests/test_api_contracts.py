@@ -55,7 +55,7 @@ class TestAPIContracts:
     async def test_export_shape(self, portal_client):
         client, _, _ = portal_client
         data = (await client.get("/api/export")).json()
-        for key in ("assessments", "events", "gates", "remediations", "slos"):
+        for key in ("assessments", "events", "gates", "slos", "deliveries"):
             assert key in data
             assert isinstance(data[key], list)
 

@@ -416,7 +416,6 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
         if f.severity in (Severity.critical, Severity.high)
     ]
 
-    remediations = await s.list_remediations(assessment_id)
     slos = await s.list_slos(assessment_id)
     onboardings = await s.list_onboardings(assessment_id)
 
@@ -549,7 +548,6 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "scores_sorted": scores_sorted,
             "urgent_findings": urgent_findings,
             "assessment_id": assessment_id,
-            "remediation_count": len(remediations),
             "slo_count": len(slos),
             "onboarding_count": len(onboardings),
             "fixable_categories": fixable_categories,
@@ -710,12 +708,11 @@ async def fix_finding(request: Request, assessment_id: str):
         # A prior version ran a raw, unaudited
         # apply_manifests_to_cluster(dry_run=True) here -- dead work whose
         # result was immediately superseded by Deliver, and a bypass of the
-        # unified delivery router for a GitOps-registered app.
-        for f in result["files"]:
-            await s.save_remediation(
-                assessment_id, result["agent"], f["description"],
-                status="generated", manifest_path=f["path"],
-            )
+        # unified delivery router for a GitOps-registered app. This no
+        # longer persists a separate `remediations` row either -- the
+        # "fix-generated" event below is the durable record, and the real
+        # outcome is tracked by Deliver's own `deliveries`/`gates` rows once
+        # a human actually delivers it.
         await s.log_event(
             "dispatcher", "fix-generated", report.repo_name, "info",
             f"Generated {len(result['files'])} fix(es) for '{category}' via {result['agent']}",
@@ -1677,4 +1674,54 @@ async def verify_properties(assessment_id: str):
         "results": [{"property": r.property_name, "passed": r.passed,
                      "checks": r.checks, "summary": r.summary()} for r in results],
         "all_passed": all(r.passed for r in results),
+    }
+
+
+@router.get("/api/assessments/{assessment_id}/resource-recommendations")
+async def resource_recommendations(assessment_id: str):
+    """Get resource tuning recommendations based on Prometheus data."""
+    from agentit.resource_tuner import analyze_resource_usage
+
+    s = await get_store()
+    report = await s.get(assessment_id)
+    if not report:
+        raise HTTPException(404, "Assessment not found")
+    recs = analyze_resource_usage(report.repo_name, report.repo_name)
+    return {
+        "recommendations": [
+            {
+                "type": r.resource_type,
+                "current": r.current_value,
+                "recommended": r.recommended_value,
+                "reason": r.reason,
+                "confidence": r.confidence,
+            }
+            for r in recs
+        ]
+    }
+
+
+@router.get("/api/assessments/{assessment_id}/dependencies")
+async def dependency_status(assessment_id: str):
+    """Get dependency update status from GitHub PRs."""
+    from agentit.dependency_manager import process_dependency_prs
+
+    s = await get_store()
+    report = await s.get(assessment_id)
+    if not report:
+        raise HTTPException(404, "Assessment not found")
+    updates = process_dependency_prs(report.repo_url)
+    return {
+        "updates": [
+            {
+                "name": u.name,
+                "old": u.old_version,
+                "new": u.new_version,
+                "type": u.update_type,
+                "risk": u.risk_level,
+                "auto_mergeable": u.auto_mergeable,
+                "pr_url": u.pr_url,
+            }
+            for u in updates
+        ]
     }

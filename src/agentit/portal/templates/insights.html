@@ -19,11 +19,17 @@
     <div class="stat-label">Onboardings</div>
     <div class="stat-value">{{ insights.total_onboardings }}</div>
   </div>
-  <a class="stat-card" href="/fleet/remediations" title="Open fleet remediations">
-    <div class="stat-label">Remediations</div>
-    <div class="stat-value">{{ insights.total_remediations }}</div>
+  <a class="stat-card" href="/fleet" title="Open Fleet -- Open PRs / Total PRs columns per app">
+    <div class="stat-label">Total PRs</div>
+    <div class="stat-value">{{ insights.total_prs }}</div>
   </a>
-  <a class="stat-card" href="/ledger?needs_you=1" title="Open Ledger Needs You">
+  {# Spans every live gate type (PR approvals, cluster-admin-review,
+     rollback-review, finding-escalation) -- Ledger now only ever shows the
+     PR-approval subset (see routes/insights.py::ledger_page()), so this
+     rolls up to Fleet, where every app's own "needs action"/escalation
+     badge lives, rather than a page that would only show part of this
+     number. #}
+  <a class="stat-card" href="/fleet" title="Open Fleet -- per-app needs-action badges">
     <div class="stat-label">Pending Gates</div>
     <div class="stat-value {% if insights.pending_gates > 0 %}text-warning{% else %}text-success{% endif %}">{{ insights.pending_gates }}</div>
   </a>

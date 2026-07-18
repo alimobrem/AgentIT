@@ -171,7 +171,7 @@ class TestAssessments:
     async def test_delete_removes_every_historical_assessment_for_the_app(self, store):
         """A Delete on the app's LATEST assessment must remove every prior
         assessment of that same repo_url too (plus their gates/
-        remediations/slos/onboarding), not just the one id passed in --
+        slos/onboarding), not just the one id passed in --
         otherwise get_fleet_data()'s MAX(assessed_at) join resurrects the
         "deleted" app via an older surviving assessment row, contradicting
         fleet.html's "cannot be undone" confirm text."""
@@ -179,7 +179,6 @@ class TestAssessments:
         new_id = await store.save(_make_report("multi-run-app"))
 
         gate_id = await store.create_gate(old_id, "rollback-review", "old gate")
-        rem_id = await store.save_remediation(old_id, "security", "old remediation")
         slo_id = await store.save_slo(old_id, "latency_p99_ms", 200)
         await store.save_onboarding(old_id, [{"category": "x", "path": "a.yaml", "content": "", "description": ""}])
 
@@ -199,13 +198,10 @@ class TestAssessments:
 
         # Every dependent of the OLD assessment (not just the latest) is gone too.
         assert await store.list_gates_for_assessment(old_id) == []
-        assert await store.list_remediations(old_id) == []
         assert await store.list_slos(old_id) == []
         assert await store.get_onboarding(old_id) is None
         gate_row = await store._pool.fetchrow("SELECT 1 FROM gates WHERE id = $1", gate_id)
         assert gate_row is None
-        rem_row = await store._pool.fetchrow("SELECT 1 FROM remediations WHERE id = $1", rem_id)
-        assert rem_row is None
         slo_row = await store._pool.fetchrow("SELECT 1 FROM slos WHERE id = $1", slo_id)
         assert slo_row is None
 
@@ -528,7 +524,7 @@ class TestDedupeRepoUrls:
         assert gone is None
 
     async def test_dependents_of_the_merged_variant_survive_the_merge(self, store):
-        """Gates/remediations/SLOs/onboarding hanging off the non-canonical
+        """Gates/SLOs/onboarding hanging off the non-canonical
         variant's assessment id must still resolve after the merge --
         they're keyed by `assessment_id`, which never changes; only the
         parent assessment's `repo_url` string does."""
@@ -760,45 +756,6 @@ class TestApps:
         )
         assert fleet_row["id"] == new_id
         assert fleet_row["infra_repo_url"] == "https://github.com/org/infra"
-
-
-class TestRemediations:
-    async def test_save_list_complete_delete(self, store):
-        assessment_id = await store.save(_make_report())
-        await store.save_remediation(assessment_id, "hardening", "Add NetworkPolicy")
-        remediations = await store.list_remediations(assessment_id)
-        assert len(remediations) == 1
-        rem_id = remediations[0]["id"]
-
-        assert await store.complete_remediation(rem_id) is True
-        remediations = await store.list_remediations(assessment_id)
-        assert remediations[0]["status"] == "completed"
-
-        assert await store.delete_remediation(rem_id, assessment_id) is True
-        assert await store.list_remediations(assessment_id) == []
-
-    async def test_delete_remediation_wrong_assessment_returns_false(self, store):
-        assessment_id = await store.save(_make_report())
-        other_id = await store.save(_make_report("other-app"))
-        await store.save_remediation(assessment_id, "hardening", "Add NetworkPolicy")
-        rem_id = (await store.list_remediations(assessment_id))[0]["id"]
-        assert await store.delete_remediation(rem_id, other_id) is False
-
-    async def test_save_remediation_concurrent_calls_create_only_one_live_row(self, store):
-        """Regression guard for the check-then-act save_remediation race
-        (Priority 1c): genuinely concurrent callers for the same
-        (assessment_id, agent_name, description) must not both see "no
-        live remediation" and both insert one. The advisory lock inside
-        save_remediation() serializes them instead."""
-        import asyncio
-
-        assessment_id = await store.save(_make_report())
-        ids = await asyncio.gather(
-            *(store.save_remediation(assessment_id, "hardening", "Add NetworkPolicy") for _ in range(10))
-        )
-        assert len(set(ids)) == 1
-        remediations = await store.list_remediations(assessment_id)
-        assert len(remediations) == 1
 
 
 class TestAgentRegistry:

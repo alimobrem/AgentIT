@@ -156,8 +156,8 @@ async def schedules_page(request: Request) -> HTMLResponse:
     schedules: list[dict] = []
     # repo_name -> latest assessment id, used to link "App Name" to that
     # app's Assessment Detail page wherever a real assessment_id can be
-    # resolved (every other page -- Fleet, Remediations, Decisions --
-    # already does this; Schedules didn't).
+    # resolved (every other page -- Fleet, Decisions -- already does this;
+    # Schedules didn't).
     app_ids_by_name = {app_data["repo_name"]: app_data["id"] for app_data in fleet}
 
     for app_data in fleet:

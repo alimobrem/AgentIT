@@ -74,7 +74,10 @@ async def test_pending_gates_mixes_live_and_dead_gate_types_correctly(portal_cli
     resp = await client.get("/insights")
     assert resp.status_code == 200
     assert _pending_gates_value(resp.text) == "1"
-    assert 'href="/ledger?needs_you=1"' in resp.text
+    # "Pending Gates" spans every live gate type, not just PR approvals --
+    # Ledger is now strictly PR-focused (routes/insights.py::ledger_page()),
+    # so this rolls up to Fleet (per-app "needs action" badges) instead.
+    assert 'href="/fleet"' in resp.text
 
 
 async def test_pending_gates_zero_when_no_gates_pending(portal_client):

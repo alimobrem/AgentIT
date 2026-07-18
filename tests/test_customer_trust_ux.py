@@ -161,4 +161,4 @@ class TestSeverityGatedEventsBadge:
         assert resp.status_code == 200
         assert "_eventHref" in resp.text
         assert "?tab=actions" in resp.text
-        assert "needs_you=1" in resp.text
+        assert "/ledger?app=" in resp.text

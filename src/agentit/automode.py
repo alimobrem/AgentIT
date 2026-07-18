@@ -288,7 +288,6 @@ class AutoMode:
                 "auto-mode", "auto-applied", app_name, "info",
                 "Delivered via the unified router -- no cluster/app-config files in this batch",
             )
-            await self._complete_remediations(assessment_id)
             return {"action": "applied", "reason": reason, "details": {"delivery": delivery}}
 
         error = cluster_outcome.get("error", "unknown error") if isinstance(cluster_outcome, dict) else "unknown error"
@@ -302,11 +301,6 @@ class AutoMode:
         )
         return {"action": "gated", "reason": "delivery routing error",
                 "details": {"delivery": delivery, "gate_id": gate_id}}
-
-    async def _complete_remediations(self, assessment_id: str) -> None:
-        from agentit.portal.delivery import complete_remediations
-
-        await complete_remediations(self._store, assessment_id)
 
     async def _log_event(self, agent_id: str, action: str, target: str, severity: str, summary: str) -> None:
         try:

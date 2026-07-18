@@ -32,7 +32,6 @@ async def fleet_client():
          patch("agentit.portal.routes.capabilities.get_store", return_value=async_store), \
          patch("agentit.portal.routes.settings.get_store", return_value=async_store), \
          patch("agentit.portal.routes.insights.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.remediations.get_store", return_value=async_store), \
          patch("agentit.portal.routes.slos.get_store", return_value=async_store):
         yield AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True), store, ids
 
@@ -78,9 +77,12 @@ class TestFleetOperations:
 
     async def test_needs_you_pointer_survives_reassessment(self, fleet_client):
         """Orphaned-gate-attribution regression: a gate created against
-        "frontend"'s OLD assessment must still count toward Fleet's quiet
-        Ledger pointer after re-assessment (`repo_url` keying in
-        `_attach_pending_actions`).
+        "frontend"'s OLD assessment must still count toward that app's own
+        "pending action" row badge after re-assessment (`repo_url` keying
+        in `_attach_pending_actions`) -- this gate type (`security`) isn't
+        a PR, so it shows via the per-row badge, not Ledger (strictly
+        PR-focused -- see routes/insights.py::ledger_page()) or the
+        fleet-wide banner (PR-approval-specific too).
         """
         client, store, ids = fleet_client
         frontend_id = None
@@ -99,5 +101,5 @@ class TestFleetOperations:
         assert new_frontend_id != frontend_id
 
         text = (await client.get("/fleet")).text
-        assert "1 need you → Ledger" in text
-        assert 'href="/ledger"' in text
+        assert "1 pending action" in text
+        assert f'href="/assessments/{new_frontend_id}?tab=actions"' in text

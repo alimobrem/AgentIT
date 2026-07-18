@@ -405,7 +405,6 @@ from agentit.portal.routes.gates import router as gates_router  # noqa: E402
 from agentit.portal.routes.capabilities import router as capabilities_router  # noqa: E402
 from agentit.portal.routes.settings import router as settings_router  # noqa: E402
 from agentit.portal.routes.insights import router as insights_router  # noqa: E402
-from agentit.portal.routes.remediations import router as remediations_router  # noqa: E402
 from agentit.portal.routes.slos import router as slos_router  # noqa: E402
 
 app.include_router(webhooks_router)
@@ -417,6 +416,5 @@ app.include_router(gates_router)
 app.include_router(capabilities_router)
 app.include_router(settings_router)
 app.include_router(insights_router)
-app.include_router(remediations_router)
 app.include_router(slos_router)
 

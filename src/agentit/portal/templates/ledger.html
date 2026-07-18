@@ -1,151 +1,139 @@
 {% extends "base.html" %}
-{% from "_macros.html" import ledger_card %}
+{% from "_macros.html" import gate_card %}
 {% block title %}Ledger - AgentIT{% endblock %}
 {% block content %}
 <h1>Ledger</h1>
 <p class="text-muted text-sm mb-1">
-  Morning inbox — Needs You, what happened, and human gates needing action.
-  Elevated <code>cluster-admin-review</code> gates point to
-  <a href="/admin-review">Admin Review</a>; the portfolio table lives on
-  <a href="/fleet">Fleet</a>.
+  Every PR AgentIT has opened, across every app — what's waiting for your
+  approval, and what happened to every PR since. Behind-the-scenes system
+  activity (watcher ticks, drift checks, ...) lives on <a href="/events">Events</a>;
+  LLM/AutoMode decisions live on <a href="/decisions">Decisions</a>.
 </p>
-
-{% if watcher_alerts %}
-<div class="card mb-1 needs-you-banner">
-  <strong>{{ watcher_alerts | length }} watcher tick failure(s) in the last 4 hours:</strong>
-  {% for w in watcher_alerts[:5] %}
-  <span class="badge badge-danger">{{ w.agent_id }}</span>
-  {% endfor %}
-  <span class="text-muted text-sm">— see <a href="/schedules">Schedules</a> for watcher status.</span>
-</div>
-{% endif %}
 
 <details class="filter-panel" open>
   <summary class="filter-panel-summary btn btn-sm btn-outline">Filters</summary>
-  <form method="get" action="/ledger" class="filter-bar" role="search" aria-label="Filter ledger">
+  <form method="get" action="/ledger" class="filter-bar" role="search" aria-label="Filter Ledger">
     <div class="filter-field filter-field-wide">
       <label for="filter-ledger-q">Search</label>
-      <input type="text" id="filter-ledger-q" name="q" value="{{ q | default('') }}" placeholder="App, title, or summary…" class="filter-input">
+      <input type="text" id="filter-ledger-q" name="q" value="{{ q | default('') }}" placeholder="App, category, or PR…" class="filter-input">
     </div>
     <div class="filter-field">
       <label for="filter-ledger-app">App</label>
-      <input type="text" id="filter-ledger-app" name="app" value="{{ app_filter | default('') }}" placeholder="App name…">
-    </div>
-    <div class="filter-field">
-      <label for="filter-ledger-severity">Severity</label>
-      <select id="filter-ledger-severity" name="severity">
-        <option value="">All severities</option>
-        <option value="critical" {{ 'selected' if severity_filter == 'critical' }}>Critical</option>
-        <option value="warning" {{ 'selected' if severity_filter == 'warning' }}>Warning</option>
-        <option value="info" {{ 'selected' if severity_filter == 'info' }}>Info</option>
-      </select>
-    </div>
-    <div class="filter-field">
-      <label for="filter-ledger-card-type">Card type</label>
-      <select id="filter-ledger-card-type" name="card_type">
-        <option value="">All card types</option>
-        {% for letter in ('A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P') %}
-        <option value="{{ letter }}" {{ 'selected' if card_type_filter == letter }}>{{ letter }}</option>
+      <select id="filter-ledger-app" name="app">
+        <option value="">All apps</option>
+        {% for a in apps %}
+        <option value="{{ a }}" {{ 'selected' if app_filter == a }}>{{ a }}</option>
         {% endfor %}
       </select>
     </div>
-    {% if mode == 'grouped' %}
-    <input type="hidden" name="needs_you" value="{{ needs_you_filter }}">
-    {% else %}
-    <input type="hidden" name="view" value="flat">
-    {% endif %}
+    <div class="filter-field">
+      <label for="filter-ledger-category">Category</label>
+      <select id="filter-ledger-category" name="category">
+        <option value="">All categories</option>
+        {% for c in categories %}
+        <option value="{{ c }}" {{ 'selected' if category_filter == c }}>{{ c | dimension_label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="filter-field">
+      <label for="filter-ledger-lifecycle">Status</label>
+      <select id="filter-ledger-lifecycle" name="lifecycle">
+        <option value="">Any status</option>
+        <option value="needs_approval" {{ 'selected' if lifecycle_filter == 'needs_approval' }}>Waiting for approval</option>
+        <option value="open" {{ 'selected' if lifecycle_filter == 'open' }}>Open</option>
+        <option value="merged" {{ 'selected' if lifecycle_filter == 'merged' }}>Merged</option>
+        <option value="rejected" {{ 'selected' if lifecycle_filter == 'rejected' }}>Rejected</option>
+        <option value="closed" {{ 'selected' if lifecycle_filter == 'closed' }}>Closed</option>
+      </select>
+    </div>
     <div class="filter-actions">
       <button type="submit" class="btn btn-sm btn-outline">Filter</button>
-      {% if q or severity_filter or card_type_filter or app_filter %}<a href="/ledger" class="btn btn-sm btn-outline">Clear</a>{% endif %}
+      {% if q or category_filter or app_filter or lifecycle_filter %}<a href="/ledger" class="btn btn-sm btn-outline">Clear</a>{% endif %}
     </div>
   </form>
 </details>
 
-{% if mode == 'grouped' %}
-{# docs/ledger-design-spec.md §2 rules 2-3: fleet-wide default is grouped
-   by app, collapsed to one row, "Needs You" filtering to actionable apps
-   by default. #}
-<div class="action-bar mb-1">
-  {% if needs_you_filter != '0' %}
-  <span class="badge badge-accent">Needs You: {{ needs_you_count }} of {{ total_apps }} app(s)</span>
-  <a href="/ledger?needs_you=0&q={{ q|default('') }}&severity={{ severity_filter|default('') }}&card_type={{ card_type_filter|default('') }}" class="btn btn-sm btn-outline">Show all apps</a>
-  {% else %}
-  <span class="badge badge-muted">Showing all {{ total_apps }} app(s)</span>
-  <a href="/ledger?needs_you=1&q={{ q|default('') }}&severity={{ severity_filter|default('') }}&card_type={{ card_type_filter|default('') }}" class="btn btn-sm btn-outline">Needs You only</a>
-  {% endif %}
-  <a href="/ledger?view=flat" class="btn btn-sm btn-outline">View as flat stream</a>
+<div class="stat-grid">
+  <div class="stat-card">
+    <div class="stat-label">Waiting for your approval</div>
+    <div class="stat-value {% if needs_approval|length > 0 %}text-warning{% else %}text-success{% endif %}">{{ needs_approval|length }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Total PRs (matching filters)</div>
+    <div class="stat-value">{{ total_records }}</div>
+  </div>
 </div>
 
-{% if rows %}
-{% for row in rows %}
-<details class="ledger-app-row">
-  <summary>
-    <span class="ledger-app-row-summary">
-      {% if row.needs_you %}<span class="badge badge-accent">Needs You</span>{% endif %}
-      <a href="/assessments/{{ row.assessment_id }}?tab=ledger">{{ row.repo_name }}</a>
-      <span class="badge badge-muted">score {{ row.score }}</span>
-      {% if row.pending_actions_count > 0 %}<span class="badge badge-accent">{{ row.pending_actions_count }} pending</span>{% endif %}
-      {% if row.breached_slo_count > 0 %}<span class="badge badge-critical">{{ row.breached_slo_count }} SLO breach(es)</span>{% endif %}
-      {% if row.latest_card %}
-      <span class="text-muted text-sm">{{ row.latest_card.title }} — {{ row.latest_card.timestamp[:16] }}</span>
-      {% else %}
-      <span class="text-muted text-sm">no Ledger activity yet</span>
-      {% endif %}
-      <span class="text-muted text-sm">({{ row.card_count }} card(s))</span>
-    </span>
-  </summary>
-  <div class="ledger-app-row-detail">
-    {% if row.cards %}
-    <div class="timeline">
-      {% for card in row.cards %}
-      {{ ledger_card(card, link_to_app=False) }}
-      {% endfor %}
-    </div>
-    {% if row.card_count > row.cards|length %}
-    <a href="/ledger?app={{ row.repo_name }}" class="text-sm">View this app's full stream ({{ row.card_count }} cards) &rarr;</a>
-    {% endif %}
-    {% else %}
-    <p class="text-muted text-sm">No Ledger activity yet for this app.</p>
-    {% endif %}
-  </div>
-</details>
+{% if not lifecycle_filter or lifecycle_filter == 'needs_approval' %}
+<h2 class="section-title mt-2">Waiting for your approval ({{ needs_approval|length }})</h2>
+{% if needs_approval %}
+{% for r in needs_approval %}
+{{ gate_card(r.raw) }}
 {% endfor %}
 {% else %}
 <div class="empty-state">
-  {% if total_apps > 0 and needs_you_filter != '0' %}
-  <h3>No apps need you right now</h3>
-  <p class="text-muted">Every app is caught up — no pending gates, stale gates, or SLO breaches.</p>
-  {% else %}
-  <h3>No Ledger activity yet</h3>
-  <p class="text-muted">Assessments, gates, deliveries, and fix-review decisions across the fleet will appear here as they happen.</p>
-  {% endif %}
+  <h3>Nothing waiting on you</h3>
+  <p class="text-muted">Every GitOps PR AgentIT has opened is either already merged/rejected, or still open on GitHub with no AgentIT approval step of its own.</p>
 </div>
+{% endif %}
 {% endif %}
 
-{% else %}
-{# Flat, chronological stream -- either a per-app drill-in (`?app=`) or an
-   explicit `?view=flat` opt-out of the grouped default. #}
-{% if cards %}
-<div class="timeline">
-  {% for card in cards %}
-  {{ ledger_card(card, link_to_app=True) }}
-  {% endfor %}
-</div>
+<h2 class="section-title mt-2">PR history{% if lifecycle_filter and lifecycle_filter != 'needs_approval' %} — {{ lifecycle_filter }}{% endif %} ({{ total_history }})</h2>
+{% if history %}
+<table>
+  <thead><tr><th>App</th><th>Category</th><th>PR</th><th>Opened</th><th>Status</th><th>Outcome</th></tr></thead>
+  <tbody>
+    {% for r in history %}
+    <tr>
+      <td>
+        {% if r.assessment_id %}<a href="/assessments/{{ r.assessment_id }}?tab=prs">{{ r.app_name }}</a>{% else %}{{ r.app_name }}{% endif %}
+      </td>
+      <td><span class="badge badge-muted">{{ r.category | dimension_label }}</span></td>
+      <td><a href="{{ r.html_url | safe_url }}" target="_blank" hx-boost="false">{{ r.title or r.pr_url }}</a></td>
+      <td class="text-sm"><span data-timestamp="{{ r.created_at }}">{{ (r.created_at or '')[:10] }}</span></td>
+      <td>
+        {% if r.lifecycle == 'open' %}
+        <span class="badge badge-info">Open</span>
+        {% elif r.lifecycle == 'merged' %}
+        <span class="badge badge-success">Merged</span>
+        {% elif r.lifecycle == 'rejected' %}
+        <span class="badge badge-critical">Rejected</span>
+        {% elif r.lifecycle == 'closed' %}
+        <span class="badge badge-muted">Closed</span>
+        {% else %}
+        <span class="badge badge-muted" title="No live GitHub status could be determined for this PR (e.g. GITHUB_TOKEN not configured, or the API call failed)">Unknown</span>
+        {% endif %}
+      </td>
+      <td class="text-sm text-muted">
+        {% if r.lifecycle == 'merged' and r.merged_at %}
+        Merged <span data-timestamp="{{ r.merged_at }}">{{ r.merged_at[:10] }}</span>
+        {% elif r.lifecycle == 'rejected' %}
+        Rejected{% if r.reject_reason %} &mdash; {{ r.reject_reason }}{% endif %}
+        {% elif r.lifecycle == 'closed' %}
+        Closed without merging{% if r.source == 'gate' %} ({{ r.gate_status }}){% else %} &mdash; no rejection reason is captured for this PR type today{% endif %}
+        {% elif r.lifecycle == 'unknown' %}
+        Not tracked &mdash; see the badge tooltip
+        {% else %}
+        &mdash;
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
 <div class="pagination">
   {% if page > 1 %}
-  <a href="/ledger?view=flat&page={{ page - 1 }}&q={{ q | default('') }}&severity={{ severity_filter | default('') }}&card_type={{ card_type_filter | default('') }}&app={{ app_filter | default('') }}" class="btn btn-sm btn-outline">&larr; Previous</a>
+  <a href="/ledger?page={{ page - 1 }}&q={{ q | default('') }}&category={{ category_filter | default('') }}&app={{ app_filter | default('') }}&lifecycle={{ lifecycle_filter | default('') }}" class="btn btn-sm btn-outline">&larr; Previous</a>
   {% endif %}
-  <span class="text-muted text-sm">Page {{ page }} of {{ total_pages }} ({{ total }} total)</span>
+  <span class="text-muted text-sm">Page {{ page }} of {{ total_pages }} ({{ total_history }} total)</span>
   {% if page < total_pages %}
-  <a href="/ledger?view=flat&page={{ page + 1 }}&q={{ q | default('') }}&severity={{ severity_filter | default('') }}&card_type={{ card_type_filter | default('') }}&app={{ app_filter | default('') }}" class="btn btn-sm btn-outline">Next &rarr;</a>
+  <a href="/ledger?page={{ page + 1 }}&q={{ q | default('') }}&category={{ category_filter | default('') }}&app={{ app_filter | default('') }}&lifecycle={{ lifecycle_filter | default('') }}" class="btn btn-sm btn-outline">Next &rarr;</a>
   {% endif %}
 </div>
-{% if not app_filter %}<a href="/ledger" class="text-sm">&larr; Back to grouped-by-app view</a>{% endif %}
 {% else %}
 <div class="empty-state">
-  <h3>No Ledger activity yet</h3>
-  <p class="text-muted">Assessments, gates, deliveries, and fix-review decisions across the fleet will appear here as they happen.</p>
+  <h3>No PR history yet</h3>
+  <p class="text-muted">AgentIT opens a PR against the code repo or GitOps infra repo whenever a fix or onboarding manifest is delivered — they'll show up here as they happen.</p>
 </div>
-{% endif %}
 {% endif %}
 {% endblock %}

@@ -280,16 +280,13 @@ async def webhook_github_push(request: Request):
                             continue
                         if not dispatch_result["files"]:
                             continue
-                        # Persist the same way fix_finding() (assessments.py)
-                        # does for its human-initiated equivalent -- a saved
-                        # `remediations` row is the durable record that a fix
-                        # was generated, not just an in-memory dict this
-                        # handler used to discard once dispatch() returned.
-                        for f in dispatch_result["files"]:
-                            await s.save_remediation(
-                                assessment_id, dispatch_result["agent"], f["description"],
-                                status="generated", manifest_path=f["path"],
-                            )
+                        # The "fix-generated" event below is the durable
+                        # record that a fix was generated, not just an
+                        # in-memory dict this handler used to discard once
+                        # dispatch() returned -- the real fix/PR outcome is
+                        # tracked by the delivery this branch triggers next
+                        # (`deliveries`/`gates`, see pr_tracking.py), not a
+                        # separate hand-maintained `remediations` row.
                         await s.log_event(
                             "dispatcher", "fix-generated", managed["repo_name"], "info",
                             f"Generated {len(dispatch_result['files'])} fix(es) for '{finding.category}' via {dispatch_result['agent']}",
