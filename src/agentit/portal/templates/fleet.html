@@ -4,7 +4,7 @@
 <div x-data="{ assessOpen: {{ 'true' if request.query_params.get('assess') else 'false' }} }" @keydown.escape.window="assessOpen = false"
      x-init="if (assessOpen) $nextTick(() => $refs.repoUrlInput.focus())">
 <h1>Fleet</h1>
-<p class="text-muted text-sm mb-1">Portfolio scoreboard — apps, scores, Assess / Re-assess (or Refresh Onboard) / Delete.</p>
+<p class="text-muted text-sm mb-1">Portfolio scoreboard — apps, scores, Scan (or Re-scan) / Delete.</p>
 
 <div class="action-bar">
   <button class="btn" @click="assessOpen = true; $nextTick(() => $refs.repoUrlInput.focus())">Assess New App</button>
@@ -149,24 +149,29 @@
       </td>
       <td>
         <div class="gate-actions">
-          {# Previously onboarded apps: one primary "Refresh Onboard" that
-             re-assesses then auto-chains into onboard (continue_onboard=1).
-             Never-onboarded apps keep plain Re-assess → Assessment Detail. #}
+          {# One consolidated Scan action per row -- both branches POST the
+             same /assess route and both auto-chain into Onboard→Dry Run→
+             Deliver (assess_submit()'s continue_onboard default now covers
+             every Assess, not just this ever_onboarded case). The only real
+             remaining difference is the confirm dialog: shown for
+             ever_onboarded apps ("Re-scan", since re-scanning regenerates
+             existing onboard manifests), skipped for never-onboarded apps
+             ("Scan", nothing to overwrite yet). #}
           {% if r.ever_onboarded %}
           <form method="post" action="/assess" class="inline-form"
-                x-data x-ref="refreshOnboard{{ r.id }}">
+                x-data x-ref="rescanForm{{ r.id }}">
             <input type="hidden" name="repo_url" value="{{ r.repo_url }}">
             <input type="hidden" name="criticality" value="{{ r.criticality }}">
             <input type="hidden" name="continue_onboard" value="1">
             <button type="button" class="btn btn-sm btn-action"
               @click="$dispatch('show-confirm', {
-                title: 'Refresh Onboard',
-                message: 'Re-assess ' + {{ r.repo_name | tojson | forceescape }} + ' and regenerate onboard manifests in one step. You will land on Onboard Results to Dry Run → Apply.',
-                form: $refs.refreshOnboard{{ r.id }},
-                opts: { confirmText: 'Refresh Onboard' }
+                title: 'Re-scan',
+                message: 'Re-scan ' + {{ r.repo_name | tojson | forceescape }} + ' and regenerate onboard manifests in one step. You will land on Onboard Results to Dry Run → Apply.',
+                form: $refs.rescanForm{{ r.id }},
+                opts: { confirmText: 'Re-scan' }
               })">
-              <span class="btn-label">Refresh Onboard</span>
-              <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Refreshing&hellip;</span>
+              <span class="btn-label">Re-scan</span>
+              <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Scanning&hellip;</span>
             </button>
           </form>
           {% else %}
@@ -174,8 +179,8 @@
             <input type="hidden" name="repo_url" value="{{ r.repo_url }}">
             <input type="hidden" name="criticality" value="{{ r.criticality }}">
             <button type="submit" class="btn btn-sm">
-              <span class="btn-label">Re-assess</span>
-              <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
+              <span class="btn-label">Scan</span>
+              <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Scanning&hellip;</span>
             </button>
           </form>
           {% endif %}

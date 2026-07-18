@@ -1687,7 +1687,7 @@
           </div>
           <div class="cmdk-item-actions" x-show="r.type === 'app'">
             <button type="button" class="btn btn-sm btn-outline" @click.stop="reassess(r)"
-                    x-text="r.everOnboarded ? 'Refresh Onboard' : 'Re-assess'"></button>
+                    x-text="r.everOnboarded ? 'Re-scan' : 'Scan'"></button>
           </div>
         </div>
       </template>
@@ -2153,7 +2153,7 @@ function commandPalette() {
       window.location.href = r.href;
     },
     // Same /assess endpoint as Fleet — posts continue_onboard=1 when the
-    // app was previously onboarded so assess→onboard chains (Refresh Onboard).
+    // app was previously onboarded so assess→onboard chains (Re-scan).
     async reassess(r) {
       this.close();
       try {

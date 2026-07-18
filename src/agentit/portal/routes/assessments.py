@@ -194,7 +194,7 @@ async def assess_submit(
             )
     s = await get_store()
     # Chaining into onboarding is now the default for every Assess, not
-    # just Fleet's "Refresh Onboard" button (docs/onboarding-loop-vision-
+    # just Fleet's "Re-scan" button (docs/onboarding-loop-vision-
     # gap-analysis.md §2/§8: the vision's "no difference between assessment
     # and onboarding" step, confirmed as a deliberate product decision, not
     # a free consolidation -- it removes the one point a human sees raw

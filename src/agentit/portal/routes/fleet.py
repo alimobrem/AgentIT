@@ -286,7 +286,7 @@ async def home() -> RedirectResponse:
 
 @router.get("/fleet", response_class=HTMLResponse)
 async def fleet_page(request: Request) -> HTMLResponse:
-    """Portfolio scoreboard: apps, scores, Assess / Re-assess / Delete.
+    """Portfolio scoreboard: apps, scores, Assess / Scan (Re-scan) / Delete.
 
     Pending human gates are owned by Ledger Needs You — this page only
     offers a quiet pointer, never an ops-inbox badge column.

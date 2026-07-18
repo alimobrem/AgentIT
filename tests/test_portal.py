@@ -1608,28 +1608,30 @@ async def test_dashboard_uses_design_system_classes(client, _override_store):
     assert "<h1>Fleet</h1>" in resp.text
     assert "css-app" in resp.text
     assert "<table>" in resp.text
-    assert "Re-assess" in resp.text
+    assert "Scan" in resp.text
 
 
-async def test_fleet_refresh_onboard_cta_when_ever_onboarded(client, _override_store):
-    """Previously onboarded apps get one primary Refresh Onboard CTA on Fleet."""
+async def test_fleet_rescan_cta_when_ever_onboarded(client, _override_store):
+    """Previously onboarded apps get one primary Re-scan CTA on Fleet --
+    same consolidated action as never-onboarded apps' plain Scan, just with
+    a confirm dialog since it also regenerates onboard manifests."""
     store = _override_store
     old_id = await store.save(_make_report_scored("refresh-me", 55))
     await store.save_onboarding(old_id, [{
         "category": "hardening", "path": "deploy.yaml",
         "content": "kind: Deployment\n", "description": "deploy",
     }])
-    # New assessment (as Re-assess would create) — lifecycle back to assessed,
+    # New assessment (as a Scan would create) — lifecycle back to assessed,
     # but fleet still knows this repo was onboarded before.
     await store.save(_make_report_scored("refresh-me", 60))
     resp = await client.get("/fleet")
-    assert "Refresh Onboard" in resp.text
+    assert "Re-scan" in resp.text
     assert 'name="continue_onboard" value="1"' in resp.text
-    # Never-onboarded sibling still uses plain Re-assess.
+    # Never-onboarded sibling still uses plain Scan (no confirm dialog).
     await store.save(_make_report_scored("fresh-only", 70))
     resp2 = await client.get("/fleet")
-    assert "Re-assess" in resp2.text
-    assert "Refresh Onboard" in resp2.text
+    assert "Scan" in resp2.text
+    assert "Re-scan" in resp2.text
 
 
 async def test_assess_progress_chains_to_onboard_when_continue_flag(
@@ -1667,8 +1669,8 @@ async def test_assessment_detail_prior_onboarded_hint(client, _override_store):
     }])
     new_id = await store.save(_make_report_scored("prior-onboard", 45))
     resp = await client.get(f"/assessments/{new_id}")
-    assert "New scorecard after re-assess" in resp.text
-    assert "Refresh Onboard" in resp.text
+    assert "New scorecard after re-scan" in resp.text
+    assert "Re-scan" in resp.text
     assert "Onboard This App" in resp.text
 
 

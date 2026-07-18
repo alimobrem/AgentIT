@@ -33,7 +33,7 @@ regressions.
 | Surface | Exclusive job | MUST NOT |
 |---|---|---|
 | **Ledger** (`/ledger`, home via `/`) | Morning inbox: Needs You, what happened, human gates needing action | Be demoted behind Fleet as the ops entry; hide the Needs You default |
-| **Fleet** (`/fleet`) | Portfolio scoreboard: apps table, scores, Assess / Re-assess / Delete | Own pending-ops inbox UI (no primary “N pending” badge/column competing with Ledger) |
+| **Fleet** (`/fleet`) | Portfolio scoreboard: apps table, scores, Assess / Scan (Re-scan) / Delete | Own pending-ops inbox UI (no primary “N pending” badge/column competing with Ledger) |
 | **Admin Review** | Elevated RBAC queue (`cluster-admin-review` only) | Absorb app-owner gates; stay in primary nav when count is 0 (bury in account menu with “Elevated approvals”) |
 | **Events** | Bell feed + DLQ filters/pagination | Claim “ops home” or duplicate Ledger Needs You |
 | **Decisions** | LLM decide-point audit log (menu) | Compete with Ledger for the chronological stream |
