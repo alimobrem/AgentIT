@@ -524,6 +524,13 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
         h["overall_score"] >= 100 for h in score_history if h["id"] != assessment_id
     )
 
+    # Open PRs section + PR History tab (real GitHub/DB-backed data only --
+    # see pr_tracking.py's module docstring for exactly what's tracked vs.
+    # what still needs a live GitHub call).
+    from agentit.portal.pr_tracking import get_app_pr_history
+    pr_history = await get_app_pr_history(s, assessment_id, report.repo_url, report.repo_name)
+    open_prs = [pr for pr in pr_history if pr["state"] == "open"]
+
     return get_templates().TemplateResponse(
         request,
         "assessment_detail.html",
@@ -550,6 +557,8 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "suppressions": suppressions,
             "celebrate_first_perfect_score": celebrate_first_perfect_score,
             "recently_resolved_actions_count": recently_resolved_actions_count,
+            "open_prs": open_prs,
+            "pr_history": pr_history,
         },
     )
 

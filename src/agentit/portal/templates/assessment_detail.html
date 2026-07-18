@@ -19,7 +19,8 @@
   <a href="{{ infra_repo_url | safe_url }}" target="_blank" hx-boost="false">{{ infra_repo_url }}</a>
   {% endif %}
   &nbsp;
-  <span class="badge badge-{{ report.criticality }}">{{ report.criticality }}</span>
+  <span class="badge badge-{{ report.criticality }}"
+    title="How much oversight this app needs -- set at Assess time, not inferred. High/critical apps always require human deploy approval (never auto-approved) and get stricter default SLO targets.">{{ report.criticality }}</span>
   &nbsp;
   {% if gitops_registered %}
   <span class="badge badge-info" title="Changes to this app go through PR review + Argo CD sync">GitOps</span>
@@ -239,6 +240,40 @@
     </button>
   </form>
   {% endif %}
+  {# Manual re-assess trigger for this exact app -- same underlying POST
+     /assess Fleet's own row action already uses (repo_url + criticality,
+     re-scored from scratch), just reachable from the app's own detail page
+     too instead of only from the Fleet table. Re-onboard above regenerates
+     manifests for the CURRENT score; this re-scores the app first (then
+     auto-chains into onboard, same default every Assess/Re-assess entry
+     point in the app already has -- see assess_submit()'s continue_onboard
+     default). Mirrors Fleet's own ever_onboarded split exactly: a never-
+     onboarded app's plain "Re-assess" skips a confirm dialog; the more
+     consequential re-assess+auto-onboard case (Fleet's "Refresh Onboard")
+     gets one. #}
+  {% set ever_onboarded = lifecycle_stage != "assessed" or prior_onboarded %}
+  <form method="post" action="/assess" class="inline-form"
+        x-data x-ref="reassessForm">
+    <input type="hidden" name="repo_url" value="{{ report.repo_url }}">
+    <input type="hidden" name="criticality" value="{{ report.criticality }}">
+    {% if ever_onboarded %}
+    <button type="button" class="btn btn-outline btn-sm"
+      @click="$dispatch('show-confirm', {
+        title: 'Re-Assess',
+        message: 'Re-assess ' + {{ report.repo_name | tojson | forceescape }} + ' and regenerate onboard manifests in one step. You will land on Onboard Results to Dry Run \u2192 Apply.',
+        form: $refs.reassessForm,
+        opts: { confirmText: 'Re-Assess' }
+      })">
+      <span class="btn-label">Re-Assess</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
+    </button>
+    {% else %}
+    <button type="submit" class="btn btn-outline btn-sm">
+      <span class="btn-label">Re-Assess</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Assessing&hellip;</span>
+    </button>
+    {% endif %}
+  </form>
   <form method="post" action="/assessments/{{ assessment_id }}/delete" class="inline-form danger-zone"
         x-data x-ref="deleteAssessment">
     <button type="button" class="btn btn-sm btn-danger-outline"
@@ -260,7 +295,7 @@
    keys below rather than interpolating the raw query param into the
    Alpine expression. #}
 {% set _requested_tab = request.query_params.get('tab', 'overview') %}
-{% set _initial_tab = _requested_tab if _requested_tab in ('overview', 'findings', 'actions', 'timeline', 'ledger') else 'overview' %}
+{% set _initial_tab = _requested_tab if _requested_tab in ('overview', 'findings', 'actions', 'timeline', 'ledger', 'prs') else 'overview' %}
 <div x-data="{ tab: '{{ _initial_tab }}', findingsCount: {{ urgent_findings|length }} }">
 {{ client_tab_nav([
   {"key": "overview", "label": "Overview"},
@@ -268,9 +303,28 @@
   {"key": "actions", "label": "Actions" ~ (" (" ~ pending_actions|length ~ ")" if pending_actions and lifecycle_stage != "assessed" else "")},
   {"key": "timeline", "label": "Timeline"},
   {"key": "ledger", "label": "Ledger"},
+  {"key": "prs", "label": "PR History" ~ (" (" ~ pr_history|length ~ ")" if pr_history else "")},
 ]) }}
 
 <div x-show="tab === 'overview'">
+  {# Open PRs -- currently-open PRs only (code repo + GitOps infra repo);
+     see the PR History tab below for every PR ever opened and its final
+     outcome. Omitted entirely when there are none, same "don't show an
+     empty fact" convention as next_action above. #}
+  {% if open_prs %}
+  <h2 class="section-title mt-0">Open PRs ({{ open_prs|length }})</h2>
+  <ul class="finding-list mb-2">
+    {% for pr in open_prs %}
+    <li class="finding-item">
+      <span class="badge badge-info" title="{{ 'The GitOps infra repo for this app' if pr.repo_kind == 'gitops' else 'The code repo for this app' }}">{{ 'GitOps' if pr.repo_kind == 'gitops' else 'Code' }}</span>
+      <a href="{{ pr.html_url | safe_url }}" target="_blank" hx-boost="false">{{ pr.title or pr.pr_url }}</a>
+      {% if pr.source == 'gate' %}
+      <span class="text-muted text-sm">&middot; awaiting your approval on the <a href="/assessments/{{ assessment_id }}?tab=actions">Actions tab</a></span>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
   {% for s in scores_sorted %}
   <div class="dimension-row">
     <div class="dimension-label">{{ s.dimension | dimension_label }}</div>
@@ -558,6 +612,64 @@
   {% else %}
   <div class="empty-state">
     <p>No Ledger activity yet for this app.</p>
+  </div>
+  {% endif %}
+</div>
+
+<div x-show="tab === 'prs'" x-cloak>
+{# Every PR AgentIT has ever opened for this app (code repo + GitOps infra
+   repo), newest first, with its final outcome (see pr_tracking.py's module
+   docstring for exactly what's DB-tracked vs. live-GitHub-checked). A
+   `gitops-pr-pending` gate's own status is a reliable, already-known
+   outcome (no live check); a source-repo-pr/app-repo-pr/onboarding PR has
+   no stored outcome at all today, so its Outcome column reflects a live
+   GitHub check made for this page load -- "Unknown" (rather than a
+   fabricated status) when that check itself couldn't determine one (e.g.
+   no GITHUB_TOKEN configured). #}
+  {% if pr_history %}
+  <table>
+    <thead><tr><th>PR</th><th>Repo</th><th>Opened</th><th>Status</th><th>Outcome</th></tr></thead>
+    <tbody>
+      {% for pr in pr_history %}
+      <tr>
+        <td><a href="{{ pr.html_url | safe_url }}" target="_blank" hx-boost="false">{{ pr.title or pr.pr_url }}</a></td>
+        <td><span class="badge badge-muted" title="{{ 'The GitOps infra repo for this app' if pr.repo_kind == 'gitops' else 'The code repo for this app' }}">{{ 'GitOps' if pr.repo_kind == 'gitops' else 'Code' }}</span></td>
+        <td class="text-sm"><span data-timestamp="{{ pr.created_at }}">{{ (pr.created_at or '')[:10] }}</span></td>
+        <td>
+          {% if pr.state == 'open' %}
+          <span class="badge badge-info">Open</span>
+          {% elif pr.state == 'merged' %}
+          <span class="badge badge-success">Merged</span>
+          {% elif pr.state == 'closed' %}
+          <span class="badge badge-muted">Closed</span>
+          {% else %}
+          <span class="badge badge-muted" title="No live GitHub status could be determined for this PR (e.g. GITHUB_TOKEN not configured, or the API call failed)">Unknown</span>
+          {% endif %}
+        </td>
+        <td class="text-sm text-muted">
+          {% if pr.state == 'merged' and pr.merged_at %}
+          Merged <span data-timestamp="{{ pr.merged_at }}">{{ pr.merged_at[:10] }}</span>
+          {% elif pr.gate_status == 'rejected' %}
+          Rejected{% if pr.reject_reason %} &mdash; {{ pr.reject_reason }}{% endif %}
+          {% elif pr.gate_status == 'dismissed' %}
+          Dismissed
+          {% elif pr.gate_status == 'expired' %}
+          Expired (stale, never approved or rejected)
+          {% elif pr.state == 'closed' %}
+          Closed without merging &mdash; no rejection reason is captured for this PR type today
+          {% elif pr.state == 'unknown' %}
+          Not tracked &mdash; see the badge tooltip
+          {% else %}
+          &mdash;
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty-state">
+    <p>No PRs opened for this app yet. AgentIT opens a PR against the code repo or GitOps infra repo whenever a fix or onboarding manifest is delivered.</p>
   </div>
   {% endif %}
 </div>
