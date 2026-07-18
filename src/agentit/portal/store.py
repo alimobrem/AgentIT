@@ -85,6 +85,14 @@ CREATE TABLE IF NOT EXISTS apps (
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL
 );
+-- Additive, idempotent column (same no-migration-framework convention as
+-- `gates.pr_url` above): how often this app should be automatically
+-- re-assessed by watchers/reassess_scheduler.py, independent of the
+-- push-triggered/manual re-Assess paths that already existed. 'daily' is
+-- the default for every app (including ones onboarded before this column
+-- existed) so "default to 24 hours" holds without a separate backfill --
+-- see get_apps_due_for_reassessment()/set_assessment_cadence() below.
+ALTER TABLE apps ADD COLUMN IF NOT EXISTS assessment_cadence TEXT NOT NULL DEFAULT 'daily';
 
 CREATE TABLE IF NOT EXISTS onboarding_results (
     id TEXT PRIMARY KEY,
@@ -416,6 +424,19 @@ def normalize_repo_url(repo_url: str) -> str:
     return url
 
 
+# How often watchers/reassess_scheduler.py automatically re-Assesses an app,
+# keyed by `apps.assessment_cadence`. 'manual' opts an app out of automatic
+# re-assessment entirely (push-triggered/manual re-Assess still work exactly
+# as before) -- it has no entry here on purpose, so it can never be treated
+# as "due".
+ASSESSMENT_CADENCE_INTERVALS: dict[str, timedelta] = {
+    "daily": timedelta(days=1),
+    "weekly": timedelta(days=7),
+    "monthly": timedelta(days=30),
+}
+ASSESSMENT_CADENCES = (*ASSESSMENT_CADENCE_INTERVALS, "manual")
+
+
 class AssessmentStore:
     """The one and only ``AssessmentStore``. Postgres-backed, fully async.
 
@@ -618,6 +639,70 @@ class AssessmentStore:
         )
         await self._upsert_app(report.repo_url, report.repo_name, infra_repo_url)
         return _affected(result) > 0
+
+    async def get_assessment_cadence(self, repo_url: str) -> str:
+        """This app's configured automatic-re-assessment cadence --
+        ``'daily'`` (the schema default) if the app has no row yet, e.g. a
+        repo referenced before its first assessment ever completed."""
+        row = await self._pool.fetchrow(
+            "SELECT assessment_cadence FROM apps WHERE repo_url = $1", repo_url,
+        )
+        return row["assessment_cadence"] if row is not None else "daily"
+
+    async def set_assessment_cadence(self, repo_url: str, cadence: str) -> bool:
+        """Sets how often ``watchers/reassess_scheduler.py`` should
+        automatically re-Assess this app. Raises ``ValueError`` for any
+        cadence outside ``ASSESSMENT_CADENCES`` -- callers (the portal
+        route) are expected to have already validated user input against
+        that same tuple, so this is a defensive backstop, not the primary
+        validation.
+        """
+        if cadence not in ASSESSMENT_CADENCES:
+            raise ValueError(
+                f"Invalid assessment cadence {cadence!r} (must be one of {ASSESSMENT_CADENCES})"
+            )
+        result = await self._pool.execute(
+            "UPDATE apps SET assessment_cadence = $1, updated_at = $2 WHERE repo_url = $3",
+            cadence, _now(), repo_url,
+        )
+        return _affected(result) > 0
+
+    async def get_apps_due_for_reassessment(self) -> list[dict]:
+        """Apps whose configured ``assessment_cadence`` interval has
+        elapsed since their most recent assessment -- the real, DB-backed
+        query ``watchers/reassess_scheduler.py``'s tick loop uses to decide
+        which apps to automatically re-Assess. Apps on the ``'manual'``
+        cadence are always excluded (that's the opt-out).
+
+        The due/not-due comparison itself happens in Python against
+        ``ASSESSMENT_CADENCE_INTERVALS`` rather than as inline SQL interval
+        literals, so the two stay impossible to drift apart -- there is
+        exactly one place (that dict) where "weekly means 7 days" is
+        decided.
+        """
+        rows = await self._pool.fetch(
+            """
+            SELECT apps.repo_url, apps.repo_name, apps.assessment_cadence,
+                   latest.assessed_at AS last_assessed_at, latest.criticality
+            FROM apps
+            INNER JOIN (
+                SELECT repo_url, MAX(assessed_at) AS max_at
+                FROM assessments GROUP BY repo_url
+            ) newest ON newest.repo_url = apps.repo_url
+            INNER JOIN assessments latest
+                ON latest.repo_url = newest.repo_url AND latest.assessed_at = newest.max_at
+            WHERE apps.assessment_cadence != 'manual'
+            """
+        )
+        now = _now()
+        due = [
+            r for r in rows
+            if now - r["last_assessed_at"] >= ASSESSMENT_CADENCE_INTERVALS.get(
+                r["assessment_cadence"], timedelta(days=999999),
+            )
+        ]
+        due.sort(key=lambda r: r["last_assessed_at"])
+        return _rows_to_dicts(due)
 
     async def list_all(self) -> list[dict]:
         rows = await self._pool.fetch(

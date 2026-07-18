@@ -973,3 +973,140 @@ class TestBackgroundMaintenanceAsyncHelpers:
         first = await diff_and_log_inventory_changes(store, skills_dir=skills_dir, checks_dir=checks_dir)
         assert not first.has_changes
         assert await store.get_last_skill_inventory_snapshot() is not None
+
+
+class TestAssessmentCadence:
+    """apps.assessment_cadence -- the per-app setting
+    watchers/reassess_scheduler.py's tick loop reads via
+    get_apps_due_for_reassessment() to decide which apps to automatically
+    re-Assess. See assessments.py::set_assessment_cadence (the portal
+    route the Assessment Detail page's dropdown posts to)."""
+
+    async def test_new_app_defaults_to_daily(self, store):
+        """'daily' is the schema default (ALTER TABLE ... DEFAULT 'daily')
+        so 'default to 24 hours' holds for every app, including ones that
+        existed before this column did -- not just ones onboarded after."""
+        await store.save(_make_report("cadence-default-app"))
+        cadence = await store.get_assessment_cadence("https://github.com/org/cadence-default-app")
+        assert cadence == "daily"
+
+    async def test_unknown_repo_url_also_defaults_to_daily(self, store):
+        """No apps row at all (e.g. a repo_url that was never assessed) --
+        still returns the schema default rather than raising or returning
+        None, so callers never need a None-check before comparing."""
+        assert await store.get_assessment_cadence("https://github.com/org/never-assessed") == "daily"
+
+    async def test_set_and_get_roundtrip(self, store):
+        await store.save(_make_report("cadence-roundtrip-app"))
+        repo_url = "https://github.com/org/cadence-roundtrip-app"
+
+        assert await store.set_assessment_cadence(repo_url, "weekly") is True
+        assert await store.get_assessment_cadence(repo_url) == "weekly"
+
+        assert await store.set_assessment_cadence(repo_url, "monthly") is True
+        assert await store.get_assessment_cadence(repo_url) == "monthly"
+
+    async def test_set_on_unknown_repo_url_returns_false(self, store):
+        assert await store.set_assessment_cadence("https://github.com/org/never-assessed", "weekly") is False
+
+    async def test_set_rejects_invalid_cadence(self, store):
+        await store.save(_make_report("cadence-invalid-app"))
+        with pytest.raises(ValueError):
+            await store.set_assessment_cadence("https://github.com/org/cadence-invalid-app", "hourly")
+
+
+class TestGetAppsDueForReassessment:
+    """The real query watchers/reassess_scheduler.py's tick loop runs every
+    tick -- must return exactly the apps whose cadence interval has
+    elapsed, and nothing else."""
+
+    async def test_freshly_assessed_daily_app_is_not_due(self, store):
+        await store.save(_make_report("fresh-daily-app"))
+        due = await store.get_apps_due_for_reassessment()
+        assert "https://github.com/org/fresh-daily-app" not in {d["repo_url"] for d in due}
+
+    async def test_daily_app_assessed_two_days_ago_is_due(self, store):
+        report = _make_report("stale-daily-app")
+        report.assessed_at = datetime.now(timezone.utc) - timedelta(days=2)
+        await store.save(report)
+
+        due = await store.get_apps_due_for_reassessment()
+        due_row = next(d for d in due if d["repo_url"] == "https://github.com/org/stale-daily-app")
+        assert due_row["assessment_cadence"] == "daily"
+
+    async def test_weekly_app_assessed_three_days_ago_is_not_due(self, store):
+        report = _make_report("recent-weekly-app")
+        report.assessed_at = datetime.now(timezone.utc) - timedelta(days=3)
+        await store.save(report)
+        await store.set_assessment_cadence(report.repo_url, "weekly")
+
+        due = await store.get_apps_due_for_reassessment()
+        assert report.repo_url not in {d["repo_url"] for d in due}
+
+    async def test_weekly_app_assessed_ten_days_ago_is_due(self, store):
+        report = _make_report("stale-weekly-app")
+        report.assessed_at = datetime.now(timezone.utc) - timedelta(days=10)
+        await store.save(report)
+        await store.set_assessment_cadence(report.repo_url, "weekly")
+
+        due = await store.get_apps_due_for_reassessment()
+        assert report.repo_url in {d["repo_url"] for d in due}
+
+    async def test_monthly_app_assessed_ten_days_ago_is_not_due(self, store):
+        report = _make_report("recent-monthly-app")
+        report.assessed_at = datetime.now(timezone.utc) - timedelta(days=10)
+        await store.save(report)
+        await store.set_assessment_cadence(report.repo_url, "monthly")
+
+        due = await store.get_apps_due_for_reassessment()
+        assert report.repo_url not in {d["repo_url"] for d in due}
+
+    async def test_manual_cadence_app_is_never_due_regardless_of_age(self, store):
+        """The opt-out: even an app that hasn't been assessed in a year
+        must never appear here while its cadence is 'manual'."""
+        report = _make_report("manual-cadence-app")
+        report.assessed_at = datetime.now(timezone.utc) - timedelta(days=400)
+        await store.save(report)
+        await store.set_assessment_cadence(report.repo_url, "manual")
+
+        due = await store.get_apps_due_for_reassessment()
+        assert report.repo_url not in {d["repo_url"] for d in due}
+
+    async def test_only_the_latest_assessment_counts_for_staleness(self, store):
+        """An app re-assessed recently (a fresh row) must not show as due
+        just because an OLDER assessment of the same repo is stale --
+        get_fleet_data() already has this same "latest per repo_url"
+        guarantee; this query must not regress it."""
+        old = _make_report("multi-assessed-app")
+        old.assessed_at = datetime.now(timezone.utc) - timedelta(days=5)
+        await store.save(old)
+        fresh = _make_report("multi-assessed-app")
+        fresh.assessed_at = datetime.now(timezone.utc)
+        await store.save(fresh)
+
+        due = await store.get_apps_due_for_reassessment()
+        assert fresh.repo_url not in {d["repo_url"] for d in due}
+
+    async def test_results_sorted_oldest_first(self, store):
+        newer = _make_report("due-app-newer")
+        newer.assessed_at = datetime.now(timezone.utc) - timedelta(days=3)
+        await store.save(newer)
+        older = _make_report("due-app-older")
+        older.assessed_at = datetime.now(timezone.utc) - timedelta(days=5)
+        await store.save(older)
+
+        due = await store.get_apps_due_for_reassessment()
+        due_urls = [d["repo_url"] for d in due]
+        assert due_urls.index("https://github.com/org/due-app-older") < due_urls.index(
+            "https://github.com/org/due-app-newer"
+        )
+
+    async def test_includes_criticality_from_latest_assessment(self, store):
+        report = _make_report("critical-due-app")
+        report.criticality = "critical"
+        report.assessed_at = datetime.now(timezone.utc) - timedelta(days=2)
+        await store.save(report)
+
+        due = await store.get_apps_due_for_reassessment()
+        due_row = next(d for d in due if d["repo_url"] == report.repo_url)
+        assert due_row["criticality"] == "critical"
