@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from agentit import kube
 from agentit.portal.delivery import (
+    _CICD_SHARED_NAMESPACE_GATE_TYPE,
     CATEGORY_CICD_SHARED_NAMESPACE,
     CATEGORY_CLUSTER_CONFIG,
     CATEGORY_MANIFEST_AT_REST,
@@ -16,7 +17,6 @@ from agentit.portal.delivery import (
     CATEGORY_SECRET_BLOCKED,
     CATEGORY_SOURCE_PATCH,
     MECHANISM_APP_REPO_PR,
-    MECHANISM_CLUSTER_ADMIN_REVIEW_GATE,
     MECHANISM_DIRECT_APPLY,
     MECHANISM_INFRA_REPO_COMMIT,
     MECHANISM_NONE,
@@ -390,39 +390,94 @@ class TestRouteAndDeliverClusterConfig:
 
 
 class TestRouteAndDeliverCicdLane:
-    async def test_cicd_files_create_admin_review_gate_never_silent_skip(self):
+    """CI/CD manifests destined for a shared operator namespace (2026-07-18,
+    replacing the removed ``cluster-admin-review`` direct-apply gate): now
+    delivers via the exact same GitOps-commit-and-gate mechanism as the
+    cluster/app-config category, verified live to be within ArgoCD's own
+    reconciler RBAC (see the README) -- AgentIT itself never applies
+    directly to a cluster for this category (or any other) anymore."""
+
+    async def test_cicd_files_deliver_via_gitops_pr_never_a_direct_apply(self):
         store, raw = await make_async_store()
         report = make_report()
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
         aid = await raw.save(report)
-        result = await route_and_deliver(
-            [_cicd_file()], app_name=report.repo_name, namespace="ns",
-            report=report, store=store, assessment_id=aid,
-            actor="tester", dry_run=False,
-        )
-        assert result["mechanisms"][CATEGORY_CICD_SHARED_NAMESPACE] == MECHANISM_CLUSTER_ADMIN_REVIEW_GATE
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"), \
+             patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
+            result = await route_and_deliver(
+                [_cicd_file()], app_name=report.repo_name, namespace="ns",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=False,
+            )
+        assert result["mechanisms"][CATEGORY_CICD_SHARED_NAMESPACE] == MECHANISM_INFRA_REPO_COMMIT
+        mock_commit.assert_called_once()
+        outcome = result["outcomes"][CATEGORY_CICD_SHARED_NAMESPACE]
+        assert outcome["pr_url"] == "https://github.com/org/infra-gitops/pull/1"
         gates = await raw.list_gates(status="pending")
         assert len(gates) == 1
-        assert gates[0]["gate_type"] == "cluster-admin-review"
+        # Its own distinct gate type -- see _CICD_SHARED_NAMESPACE_GATE_TYPE
+        # -- not the standard "gitops-pr-pending" (avoids colliding with a
+        # same-app cluster-config gate in a mixed batch; see the mixed-
+        # batch test below).
+        assert gates[0]["gate_type"] == _CICD_SHARED_NAMESPACE_GATE_TYPE
         assert "openshift-pipelines" in gates[0]["summary"]
-        outcome = result["outcomes"][CATEGORY_CICD_SHARED_NAMESPACE]
+        assert "shared, cluster-wide operator namespace" in gates[0]["summary"]
         assert outcome["gate_id"] == gates[0]["id"]
+        # Never a direct apply -- this is now a plain GitOps PR merge-review
+        # gate, same as cluster-config's, not an elevated-RBAC apply.
+        mock_apply.assert_not_called()
 
-    async def test_dry_run_never_creates_a_real_gate(self):
+    async def test_cicd_commit_uses_a_distinct_path_prefix_and_branch(self):
+        """A human reviewer must be able to tell, from the PR/branch alone,
+        that this touches a shared cluster-wide namespace, not the app's own
+        -- see _CICD_SHARED_NAMESPACE_PATH_PREFIX's rationale. Asserted
+        directly against commit_to_infra_repo()'s real call args rather than
+        just the gate summary, since a distinct branch is also what
+        prevents this commit from clobbering a same-call cluster-config
+        commit to the app's own `agentit/{app}` branch (see the mixed-batch
+        test below)."""
+        store, raw = await make_async_store()
+        report = make_report()
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
+        aid = await raw.save(report)
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"):
+            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
+            await route_and_deliver(
+                [_cicd_file()], app_name=report.repo_name, namespace="ns",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=False,
+            )
+        mock_commit.assert_called_once()
+        call_args = mock_commit.call_args[0]
+        committed_files, branch_name = call_args[2], call_args[3]
+        assert branch_name == f"agentit/{report.repo_name}-cicd-shared-namespace"
+        assert all(f["category"] == "cicd-shared-namespace" for f in committed_files)
+
+    async def test_dry_run_never_creates_a_real_commit_or_gate(self):
         """A real Dry Run must stay a pure preview -- no side effects --
         exactly like every other category. Found via the automatic Dry Run
         -> Deliver chain (assessments.py's onboarding auto-chain): a Dry
         Run that now runs unconditionally after every onboarding surfaced
         that this branch had no such guard, unlike every other mechanism
-        here -- a "preview" call was silently opening a real, pending
-        cluster-admin-review gate."""
+        here -- a "preview" call was silently opening a real, pending gate."""
         store, raw = await make_async_store()
         report = make_report()
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
         aid = await raw.save(report)
-        result = await route_and_deliver(
-            [_cicd_file()], app_name=report.repo_name, namespace="ns",
-            report=report, store=store, assessment_id=aid,
-            actor="tester", dry_run=True,
-        )
+        with patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit:
+            result = await route_and_deliver(
+                [_cicd_file()], app_name=report.repo_name, namespace="ns",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=True,
+            )
+        mock_commit.assert_not_called()
         gates = await raw.list_gates(status="pending")
         assert gates == []
         outcome = result["outcomes"][CATEGORY_CICD_SHARED_NAMESPACE]
@@ -430,21 +485,40 @@ class TestRouteAndDeliverCicdLane:
         assert "gate_id" not in outcome
         assert outcome["files"] == ["pipeline.yaml"]
 
-    async def test_cicd_lane_is_unaffected_by_gitops_registration_status(self):
-        """The product-owner question this guards against: now that GitOps
-        registration is mandatory for the CLUSTER_CONFIG category, does the
-        CICD_SHARED_NAMESPACE classification/gate-creation logic still fire,
-        or did it silently become entangled with (and short-circuited by)
-        the GitOps-registered branch? Answer: it's a structurally separate
-        taxonomy bucket (see classify_file()) whose mechanism assignment
-        (`mechanisms[CATEGORY_CICD_SHARED_NAMESPACE] =
-        MECHANISM_CLUSTER_ADMIN_REVIEW_GATE`) never consults `registered`/
-        `infra_repo_url` at all -- a single mixed batch containing both a
-        cluster-config file (which DOES resolve based on GitOps
-        registration) and a cicd-shared-namespace file must route each
-        independently: the former to an infra-repo commit+PR, the latter to
-        a cluster-admin-review gate, in the very same `route_and_deliver()`
-        call, for the very same fully-GitOps-registered app."""
+    async def test_no_infra_repo_refuses_cicd_delivery_with_no_direct_apply_fallback(self):
+        """Same refusal as the cluster-config category (see
+        resolve_cluster_config_mechanism()): CI/CD manifests destined for a
+        shared namespace can no longer fall back to a direct apply either,
+        now that the elevated-RBAC direct-apply gate is gone -- an
+        assessment with no known infra repo at all (only possible pre-
+        GitOps-mandatory) must refuse outright, never mutate the cluster."""
+        store, raw = await make_async_store()
+        report = make_report()
+        aid = await raw.save(report)
+        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            result = await route_and_deliver(
+                [_cicd_file()], app_name=report.repo_name, namespace="ns",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=False,
+            )
+        assert result["mechanisms"][CATEGORY_CICD_SHARED_NAMESPACE] == MECHANISM_NONE
+        mock_apply.assert_not_called()
+        outcome = result["outcomes"][CATEGORY_CICD_SHARED_NAMESPACE]
+        assert "error" in outcome
+        assert "GitOps" in outcome["error"]
+        gates = await raw.list_gates(status="pending")
+        assert gates == []
+
+    async def test_cicd_and_cluster_config_lanes_both_deliver_via_gitops_independently(self):
+        """The product-owner question this guards against (originally about
+        gate independence, now about mechanism independence): a single
+        mixed batch containing both a cluster-config file and a cicd-
+        shared-namespace file must still route/deliver each independently
+        -- two separate commit_to_infra_repo() calls (different branches/
+        paths), two separate gitops-pr-pending gates -- not merged into one
+        commit (which would risk one clobbering the other, since
+        commit_to_infra_repo() force-pushes whatever branch it's given) and
+        not short-circuited by each other's registration/commit outcome."""
         store, raw = await make_async_store()
         report = make_report()
         report.infra_repo_url = "https://github.com/org/infra-gitops"
@@ -453,30 +527,36 @@ class TestRouteAndDeliverCicdLane:
              patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
              patch("agentit.portal.github_pr.ensure_applicationset"), \
              patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
-            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
-                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
+            mock_commit.side_effect = [
+                {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                 "commit_url": "https://github.com/org/infra-gitops/commit/aaa", "files_committed": 1},
+                {"pr_url": "https://github.com/org/infra-gitops/pull/2",
+                 "commit_url": "https://github.com/org/infra-gitops/commit/bbb", "files_committed": 1},
+            ]
             result = await route_and_deliver(
                 [_cluster_config_file(), _cicd_file()], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
                 actor="tester", dry_run=False,
             )
-        # Fully GitOps-registered (a live Application exists) -- the
-        # cluster-config file still goes to the infra repo, never a direct
-        # apply.
         assert result["registered"] is True
         assert result["mechanisms"][CATEGORY_CLUSTER_CONFIG] == MECHANISM_INFRA_REPO_COMMIT
-        mock_commit.assert_called_once()
-        # The cicd-shared-namespace file, in the SAME call, for the SAME
-        # GitOps-registered app, still creates a cluster-admin-review gate
-        # -- registration status never enters this decision.
-        assert result["mechanisms"][CATEGORY_CICD_SHARED_NAMESPACE] == MECHANISM_CLUSTER_ADMIN_REVIEW_GATE
+        assert result["mechanisms"][CATEGORY_CICD_SHARED_NAMESPACE] == MECHANISM_INFRA_REPO_COMMIT
+        assert mock_commit.call_count == 2
+        # cluster-config passes no explicit branch_name (commit_to_infra_
+        # repo()'s own default applies -- not exercised here since the call
+        # itself is mocked); cicd-shared-namespace always passes its own
+        # distinct, explicit one -- see _CICD_SHARED_NAMESPACE_PATH_PREFIX.
+        branches = {call.args[3] for call in mock_commit.call_args_list}
+        assert branches == {None, f"agentit/{report.repo_name}-cicd-shared-namespace"}
+        # Two distinct PRs -> two distinct gitops-pr-pending gates.
+        cluster_pr = result["outcomes"][CATEGORY_CLUSTER_CONFIG]["pr_url"]
+        cicd_pr = result["outcomes"][CATEGORY_CICD_SHARED_NAMESPACE]["pr_url"]
+        assert cluster_pr != cicd_pr
         gates = await raw.list_gates(status="pending")
-        gate_types = {g["gate_type"] for g in gates}
-        assert "cluster-admin-review" in gate_types
-        # Neither branch has performed a cluster apply yet -- the cicd gate
-        # is still pending human approval; only approving IT (routes/
-        # gates.py::resolve_gate, tested separately) triggers the real
-        # apply_manifests_to_cluster call.
+        assert len(gates) == 2
+        assert {g["gate_type"] for g in gates} == {"gitops-pr-pending", _CICD_SHARED_NAMESPACE_GATE_TYPE}
+        assert {g["pr_url"] for g in gates} == {cluster_pr, cicd_pr}
+        # Neither branch performed a direct cluster apply.
         mock_apply.assert_not_called()
 
     def test_a_real_current_skill_output_still_classifies_as_cicd_shared_namespace(self):

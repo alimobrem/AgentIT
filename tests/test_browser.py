@@ -279,14 +279,16 @@ class TestEveryPageLoads:
         page.goto(f"{url}/assessments/{aid}/slos")
         expect(page.locator("h1")).to_be_visible()
 
-    def test_gates_page_redirects_to_admin_review(self, page: Page, app_url):
-        """The global Gates page is retired -- /gates now 301s to
-        /admin-review (kept as a redirect, not a 404, for any stale
-        bookmark/link -- see routes/gates.py's gates_page_redirect())."""
+    def test_gates_page_redirects_to_ledger(self, page: Page, app_url):
+        """The global Gates page is retired -- /gates now 301s to /ledger
+        (previously /admin-review, itself retired 2026-07-18 along with the
+        `cluster-admin-review` gate type it existed solely for -- kept as a
+        redirect, not a 404, for any stale bookmark/link -- see routes/
+        gates.py's gates_page_redirect())."""
         url, _, _ = app_url
         page.goto(f"{url}/gates")
-        assert page.url == f"{url}/admin-review"
-        expect(page.locator("h1")).to_contain_text("Admin Review")
+        assert page.url == f"{url}/ledger"
+        expect(page.locator("h1")).to_contain_text("Ledger")
 
     def test_events_page(self, page: Page, app_url):
         url, _, _ = app_url
@@ -483,18 +485,17 @@ class TestNavigation:
         # contain "Ledger" ("Audit log — Ledger owns the stream"). Scope
         # to the actual nav link.
         expect(page.locator('nav a[href="/ledger"]')).to_be_visible()
-        # Admin Review is only primary in the top-level nav when a
-        # cluster-admin-review gate is pending (docs/portal-experience-
-        # design-language.md §1); otherwise it's demoted into the user
-        # menu dropdown -- open that first, matching this fixture's app
-        # (which has no pending cluster-admin-review gate).
+        # Admin Review (a third, elevated-approvals nav item) was retired
+        # 2026-07-18 along with the `cluster-admin-review` gate type it
+        # existed solely for -- every gate type is per-app now, so it's
+        # gone from both the primary nav and the user menu dropdown.
         page.click("button[aria-label='Open account and settings menu']")
-        expect(page.locator(".user-menu-dropdown >> text=Admin Review")).to_be_visible()
-        # Gates was retired as a standalone nav concept -- the 7 app-owner
-        # gate types now surface via Fleet's "Needs Action" badge + each
-        # app's own Actions tab; only cluster-admin-review still gets a
-        # dedicated page/nav entry (Admin Review).
+        assert page.locator(".user-menu-dropdown >> text=Admin Review").count() == 0
+        # Gates was retired as a standalone nav concept -- every gate type
+        # now surfaces via Fleet's "Needs Action" badge + each app's own
+        # Actions tab.
         assert page.locator('nav a[href="/gates"]').count() == 0
+        assert page.locator('a[href="/admin-review"]').count() == 0
         # Events is a bell icon (not a primary-nav text link); Decisions
         # lives in the user/main menu -- neither is a top-level text item.
         assert page.locator('nav .links a[href="/events"]').count() == 0
@@ -508,7 +509,7 @@ class TestNavigation:
         # c274055 paired them into Capabilities (Registry/Catalog tabs,
         # base.html) as part of the 9->7 top-level-items consolidation
         # docs/ui-redesign-proposal.md builds on -- check the current
-        # top-level items instead (Fleet/Admin Review/Ledger are covered by
+        # top-level items instead (Fleet/Ledger are covered by
         # test_primary_nav_links above).
         for link in ["Health", "Insights"]:
             expect(page.locator(f"nav >> text={link}")).to_be_visible()
@@ -777,22 +778,31 @@ class TestAccessibility:
 
 # ── Admin Review Page Tests ──────────────────────────────────────────
 #
-# docs/ui-redesign-proposal.md §2/§5: the retired global Gates page's
-# replacement. Intentionally narrow -- only `cluster-admin-review` gates,
-# for whoever holds the elevated RBAC that gate type needs; every other
-# gate type now lives on Fleet's "Needs Action" badge + each app's own
-# Assessment Detail Actions tab (see TestAssessmentDetailActionsTab below).
+# The Admin Review page (docs/ui-redesign-proposal.md §2/§5's retired global
+# Gates page replacement, narrowed to `cluster-admin-review` gates only) was
+# itself retired 2026-07-18 along with that gate type -- every gate type
+# lives on Fleet's "Needs Action" badge + each app's own Assessment Detail
+# Actions tab now (see TestAssessmentDetailActionsTab below), including a
+# stale, already-persisted `cluster-admin-review` row.
 
 
 class TestAdminReviewPage:
-    def test_admin_review_shows_cluster_admin_review_gate(self, page: Page, app_url):
+    def test_admin_review_page_returns_404(self, page: Page, app_url):
+        url, _, _store = app_url
+        response = page.goto(f"{url}/admin-review")
+        assert response.status == 404
+
+    def test_stale_cluster_admin_review_gate_shows_on_own_actions_tab(self, page: Page, app_url):
+        """A stale, already-persisted `cluster-admin-review` gate now
+        surfaces on its own app's Actions tab like any other gate type --
+        there's no separate cross-app page left for it to live on."""
         url, _, store = app_url
         aid = store.save(make_report(repo_name="browser-admin-review-app"))
         store.create_gate(aid, "cluster-admin-review",
                            "Browser test: CI/CD manifests need elevated review")
 
-        page.goto(f"{url}/admin-review")
-        expect(page.locator("h1")).to_contain_text("Admin Review")
+        page.goto(f"{url}/assessments/{aid}")
+        page.click(".tab-nav >> text=Actions")
         gate_card = page.locator(".card", has_text="Browser test: CI/CD manifests need elevated review")
         expect(gate_card).to_be_visible()
         # cluster-admin-review's delivery_confirmation echoes its own
@@ -800,20 +810,6 @@ class TestAdminReviewPage:
         # gate_card only renders that second line when it says something
         # summary doesn't, so the text must appear exactly once, not twice.
         expect(gate_card.get_by_text("Browser test: CI/CD manifests need elevated review")).to_have_count(1)
-
-    def test_admin_review_excludes_app_owner_gate_types(self, page: Page, app_url):
-        """A gate type other than cluster-admin-review must never show up
-        on this page -- it belongs on that app's own Actions tab instead."""
-        url, _, store = app_url
-        aid = store.save(make_report(repo_name="browser-app-owner-gate-app"))
-        store.create_gate(aid, "auto-mode-review",
-                           "Browser test: app-owner gate, must not appear on Admin Review")
-
-        page.goto(f"{url}/admin-review")
-        expect(page.locator("h1")).to_contain_text("Admin Review")
-        assert page.locator(
-            "text=Browser test: app-owner gate, must not appear on Admin Review"
-        ).count() == 0
 
 
 # ── Fleet "Needs Action" / GitOps Badge Tests ────────────────────────
@@ -827,18 +823,19 @@ class TestFleetBadges:
         page.goto(f"{url}/fleet")
         expect(page.locator("text=need you → Ledger")).to_be_visible()
 
-    def test_no_ledger_pointer_when_only_admin_review_gate_pending(self, page: Page, app_url):
-        """cluster-admin-review gates must not inflate Fleet's Ledger pointer."""
+    def test_no_per_row_pending_badge_on_fleet_regardless_of_gate_type(self, page: Page, app_url):
+        """Fleet never shows a per-row pending badge for ANY gate type
+        (removed as a concept -- pending ops are Ledger's job, a quiet
+        pointer is all Fleet offers). Was previously phrased around
+        `cluster-admin-review` specifically ("must not inflate Fleet's
+        Ledger pointer") back when that gate type was excluded from the
+        per-app pending count -- retired 2026-07-18, it counts like any
+        other gate type now, but the per-row badge itself is still gone."""
         url, _, store = app_url
-        # Resolve the fixture app's pending app-owner gate so only admin-review remains.
-        # (Fixture creates a pending deploy-style gate on test-app.)
-        store.save(make_report(repo_name="browser-admin-only-fleet-app-2"))
         aid2 = store.save(make_report(repo_name="browser-admin-only-fleet-app-2"))
         store.create_gate(aid2, "cluster-admin-review", "Browser test: elevated review only")
 
         page.goto(f"{url}/fleet")
-        # Pointer may still exist for the fixture app's own pending gate; the
-        # admin-only app must not add a per-row pending badge (removed).
         assert page.locator("tr", has_text="browser-admin-only-fleet-app-2").locator("text=pending").count() == 0
 
     def test_gitops_badge_for_registered_app(self, page: Page, app_url):
@@ -873,10 +870,11 @@ class TestFleetBadges:
 
 # ── Assessment Detail Actions Tab Tests ──────────────────────────────
 #
-# The Actions tab reuses the exact same gate_card() macro/UI as the Admin
-# Review page (docs/ui-redesign-proposal.md §2's "reuse the same
-# partial, don't reinvent it") -- for every gate type except
-# cluster-admin-review, which stays on the separate Admin Review page.
+# The Actions tab reuses the exact same gate_card() macro/UI the (now-
+# retired) Admin Review page used to (docs/ui-redesign-proposal.md §2's
+# "reuse the same partial, don't reinvent it") -- for every gate type,
+# including a stale `cluster-admin-review` row (see
+# test_stale_cluster_admin_review_gate_shows_on_own_actions_tab above).
 
 
 class TestAssessmentDetailActionsTab:
@@ -903,24 +901,6 @@ class TestAssessmentDetailActionsTab:
         # (always-visible) one is being asserted on here.
         expect(gate_card.locator("button:has-text('Reject')").first).to_be_visible()
         expect(gate_card.locator("button:has-text('Dismiss')")).to_be_visible()
-
-    def test_actions_tab_excludes_cluster_admin_review_gate(self, page: Page, app_url):
-        url, _, store = app_url
-        aid = store.save(make_report(repo_name="browser-gate-exclude-app"))
-        store.create_gate(aid, "cluster-admin-review",
-                           "Browser test: elevated review, must not show on Actions tab")
-
-        page.goto(f"{url}/assessments/{aid}")
-        page.click(".tab-nav >> text=Actions")
-        # Same caveat as above: the gate's summary can legitimately appear
-        # in the Timeline tab's pseudo-event list -- what must be absent is
-        # a gate_card() *card* for it (i.e. it must never be resolvable
-        # from the Actions tab UI).
-        assert page.locator(
-            ".card", has_text="Browser test: elevated review, must not show on Actions tab"
-        ).count() == 0
-        expect(page.locator("text=No pending actions for this app")).to_be_visible()
-
 
 # ── Retired Routes Tests ─────────────────────────────────────────────
 #
@@ -1065,10 +1045,11 @@ class TestFixButtonVisibility:
 #
 # docs/ux-design-requirements.md checklist #2: Cancel must receive default
 # focus on every confirm, destructive or not (a reflexive Enter must never
-# fire the guarded action). #1: type-to-confirm is reserved for the two
-# highest-blast-radius actions in the app (Delete App, cluster-admin-review
-# gate approval) -- both genuinely interaction-level, so covered here rather
-# than only asserting markup presence in the TestClient-level tests.
+# fire the guarded action). #1: type-to-confirm is reserved for the one
+# highest-blast-radius action left in the app (Delete App -- the other case
+# that used to warrant it, cluster-admin-review gate approval, was retired
+# 2026-07-18), genuinely interaction-level, so covered here rather than
+# only asserting markup presence in the TestClient-level tests.
 
 
 class TestConfirmModalFocusAndTypeToConfirm:
@@ -1198,9 +1179,9 @@ class TestCommandPalette:
         url, _, _ = app_url
         page.goto(url)
         page.keyboard.press("Control+k")
-        page.locator("#command-palette input").fill("admin")
+        page.locator("#command-palette input").fill("insight")
         results = page.locator("#command-palette .cmdk-item")
-        expect(results.first).to_contain_text("Admin Review")
+        expect(results.first).to_contain_text("Insights")
 
     def test_search_finds_real_fleet_app_and_navigates(self, page: Page, app_url):
         url, _, store = app_url

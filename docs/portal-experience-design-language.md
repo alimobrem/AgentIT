@@ -20,10 +20,15 @@ Shipped pattern (do not regress):
 
 | Surface | Placement | Notes |
 |---|---|---|
-| **Ledger**, **Fleet**, Admin Review (when count&gt;0), Health, Insights | Primary nav (`#nav-primary`) | `/` redirects to Ledger (ops home) |
+| **Ledger**, **Fleet**, Health, Insights | Primary nav (`#nav-primary`) | `/` redirects to Ledger (ops home) |
 | **Cmd+K search** (`.cmdk-trigger`) | Right masthead cluster (`.nav-end`) with Events / Menu | MUST NOT be a center overlay or absolute-centered over primary nav |
 | **Events** | Bell control → slide-over drawer | Full `/events` (+ DLQ) remains for filters/pagination — not ops home |
-| **Decisions**, Capabilities, Settings, Schedules; Admin Review when count=0 | Account / main menu | Not primary-nav text links |
+| **Decisions**, Capabilities, Settings, Schedules | Account / main menu | Not primary-nav text links |
+
+Admin Review (a fifth primary-nav surface, an elevated RBAC queue for
+`cluster-admin-review` gates) was retired 2026-07-18 along with that gate
+type -- every gate type is per-app now, so there's no cross-app queue left
+to give a dedicated surface to.
 
 ### Exclusive ownership (MUST NOT duplicate jobs)
 
@@ -34,7 +39,6 @@ regressions.
 |---|---|---|
 | **Ledger** (`/ledger`, home via `/`) | Morning inbox: Needs You, what happened, human gates needing action | Be demoted behind Fleet as the ops entry; hide the Needs You default |
 | **Fleet** (`/fleet`) | Portfolio scoreboard: apps table, scores, Assess / Scan (Re-scan) / Delete | Own pending-ops inbox UI (no primary “N pending” badge/column competing with Ledger) |
-| **Admin Review** | Elevated RBAC queue (`cluster-admin-review` only) | Absorb app-owner gates; stay in primary nav when count is 0 (bury in account menu with “Elevated approvals”) |
 | **Events** | Bell feed + DLQ filters/pagination | Claim “ops home” or duplicate Ledger Needs You |
 | **Decisions** | LLM decide-point audit log (menu) | Compete with Ledger for the chronological stream |
 | **Health** | Live infrastructure telemetry | Become an activity/ops inbox |

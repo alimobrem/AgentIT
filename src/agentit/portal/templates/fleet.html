@@ -186,12 +186,13 @@
           {% endif %}
           <form method="post" action="/assessments/{{ r.id }}/delete" class="inline-form"
                 x-data x-ref="deleteForm{{ r.id }}">
-            {# Type-to-confirm: Delete App is one of only two actions in the
-               whole app reserved for this heaviest friction pattern (the
-               other is the cluster-admin-review gate approval) -- it
-               irreversibly removes the app's entire history (assessments,
-               onboarding, gates, remediations, SLOs), the widest blast
-               radius any single-click action in the fleet table has. #}
+            {# Type-to-confirm: Delete App is the one action in the whole
+               app reserved for this heaviest friction pattern (the other
+               case that used to warrant it, the cluster-admin-review gate
+               approval, was retired 2026-07-18) -- it irreversibly removes
+               the app's entire history (assessments, onboarding, gates,
+               remediations, SLOs), the widest blast radius any single-click
+               action in the fleet table has. #}
             <button type="button" class="btn btn-sm btn-danger-outline" aria-label="Delete {{ r.repo_name }}" title="Delete App"
               @click="$dispatch('show-confirm', {
                 title: 'Delete App',

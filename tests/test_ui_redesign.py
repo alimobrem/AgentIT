@@ -6,12 +6,15 @@
    source of truth as the Findings tab, and posts `category` (a finding
    category), not `dimension`.
 3. Gate app attribution: `list_gates()`/`list_all_gates()` join back to the
-   assessment for an `app_name`; the 7 app-owner gate types surface on
-   Assessment Detail's Actions tab and Ledger Needs You (Fleet keeps only a
-   quiet pointer); `cluster-admin-review` stays on Admin Review.
+   assessment for an `app_name`; every gate type surfaces on Assessment
+   Detail's Actions tab and Ledger Needs You (Fleet keeps only a quiet
+   pointer) -- including a stale `cluster-admin-review` row, since that gate
+   type (and the separate Admin Review page it used to live on) was retired
+   2026-07-18.
 4. The orphaned `/apply` and `/create-pr` routes are gone (404).
 5. GitOps-registration visibility on Fleet and Assessment Detail.
-6. Nav: Gates retired as a standalone concept, Admin Review takes its place.
+6. Nav: Gates retired as a standalone concept (Admin Review briefly took its
+   place, then was itself retired 2026-07-18 -- see `TestNavUpdate`).
 7. Self-Improvement gets a manual "run now" trigger, matching Catalog's.
 """
 from __future__ import annotations
@@ -281,11 +284,14 @@ class TestGateAppAttributionAndActionsTab:
         assert "Auto-mode gated: low confidence" in resp.text
         assert "Approve &amp; Deliver" in resp.text or "Approve & Deliver" in resp.text
 
-    async def test_assessment_detail_actions_tab_excludes_cluster_admin_review(self, ui_client):
-        """cluster-admin-review is a different audience's gate -- it must
-        never show up embedded in an app owner's Actions tab (it can still
-        legitimately appear in the read-only, everything-that-happened
-        Timeline tab -- that's a different surface with a different job)."""
+    async def test_assessment_detail_actions_tab_includes_stale_cluster_admin_review(self, ui_client):
+        """`cluster-admin-review` (retired 2026-07-18 -- see delivery.py)
+        used to be a different audience's gate, excluded from an app
+        owner's Actions tab entirely. That audience split no longer exists
+        -- every gate type is per-app now, so a stale, already-persisted
+        pending row of this type surfaces on its own app's Actions tab like
+        any other gate, rather than being invisible everywhere but a now-
+        removed separate Admin Review page."""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="cicd-app"))
         await store.create_gate(aid, "cluster-admin-review", "CI/CD manifests need elevated review")
@@ -293,8 +299,7 @@ class TestGateAppAttributionAndActionsTab:
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
         actions_tab = resp.text.split('x-show="tab === \'actions\'"', 1)[1].split('x-show="tab === \'timeline\'"', 1)[0]
-        assert "CI/CD manifests need elevated review" not in actions_tab
-        assert "No pending actions for this app" in actions_tab
+        assert "CI/CD manifests need elevated review" in actions_tab
 
     async def test_assessment_detail_actions_tab_empty_state(self, ui_client):
         client, store = ui_client
@@ -372,9 +377,11 @@ class TestGateAppAttributionAndActionsTab:
         assert resp.status_code == 200
         assert "x-data=\"{ tab: 'ledger', findingsCount: 0 }\"" in resp.text
 
-    async def test_fleet_quiet_ledger_pointer_counts_app_owner_gates_only(self, ui_client):
+    async def test_fleet_quiet_ledger_pointer_counts_every_pending_gate(self, ui_client):
         """Fleet is scoreboard-only: pending ops → quiet Ledger link, not a
-        Needs Action column. cluster-admin-review must not inflate the count."""
+        Needs Action column. Every gate type counts now -- the separate
+        cross-app `cluster-admin-review` exclusion was retired 2026-07-18
+        along with that gate type and the Admin Review page it lived on."""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="needs-action-app"))
         await store.create_gate(aid, "auto-mode-review", "gate 1")
@@ -383,7 +390,7 @@ class TestGateAppAttributionAndActionsTab:
 
         resp = await client.get("/fleet")
         assert resp.status_code == 200
-        assert "2 need you → Ledger" in resp.text
+        assert "3 need you → Ledger" in resp.text
         assert "Needs Action" not in resp.text
 
     async def test_fleet_no_pending_pointer_when_no_pending_gates(self, ui_client):
@@ -655,30 +662,34 @@ class TestNavUpdate:
         assert resp.status_code == 200
         assert 'href="/gates"' not in resp.text
 
-    async def test_nav_has_admin_review_link(self, ui_client):
-        client, _store = ui_client
-        # When count is 0, Admin Review is buried in the account menu.
-        resp = await client.get("/ledger")
-        assert resp.status_code == 200
-        assert 'href="/admin-review"' in resp.text
-
-    async def test_nav_admin_review_badge_reflects_cluster_admin_review_count_only(self, ui_client):
+    async def test_nav_has_no_admin_review_link(self, ui_client):
+        """Admin Review (the separate, elevated-approvals nav item) was
+        retired 2026-07-18 along with the `cluster-admin-review` gate type
+        it existed solely for -- every gate type is per-app now, so there's
+        no cross-app queue left to link here, even with a pending gate of
+        that (now-legacy) type in the fleet."""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="admin-badge-app"))
         await store.create_gate(aid, "cluster-admin-review", "needs elevated review")
-        await store.create_gate(aid, "auto-mode-review", "app-owner gate, must not count here")
 
-        # The nav badge counts are cached briefly at module scope (helpers.py)
-        # -- force a fresh computation so this test's own gates are what
-        # get counted, not whatever an earlier test in the same run left behind.
-        with patch("agentit.portal.helpers._nav_gate_badges_cache",
-                   {"pending_actions": 0, "admin_review": 0, "ts": 0.0}):
-            resp = await client.get("/ledger")
+        resp = await client.get("/ledger")
         assert resp.status_code == 200
-        # One cluster-admin-review gate -> nav badge shows "1" next to Admin
-        # Review, not 2 (the app-owner "auto-mode-review" gate must not
-        # count toward this badge).
-        assert re.search(r'Admin Review\s*<span class="nav-badge">1</span>', resp.text)
+        assert 'href="/admin-review"' not in resp.text
+        assert "Admin Review" not in resp.text
+
+    async def test_ledger_nav_badge_counts_every_pending_gate_including_legacy_types(self, ui_client):
+        """The single remaining nav badge (Ledger's) counts every pending
+        gate, including a stale `cluster-admin-review` one -- there's no
+        longer a second, separately-counted badge to split it out into."""
+        client, store = ui_client
+        aid = await store.save(make_report(repo_name="admin-badge-app-2"))
+        await store.create_gate(aid, "cluster-admin-review", "needs elevated review")
+        await store.create_gate(aid, "auto-mode-review", "app-owner gate")
+
+        with patch("agentit.portal.helpers._nav_gate_badges_cache", {"pending_actions": 0, "ts": 0.0}):
+            resp = await client.get("/fleet")
+        assert resp.status_code == 200
+        assert re.search(r'Ledger\s*<span class="nav-badge">2</span>', resp.text)
 
 
 # ── 7. Self-Improvement "run now" trigger ───────────────────────────────

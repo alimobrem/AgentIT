@@ -2,8 +2,11 @@
 (routes/gates.py::resolve_gate) -- confirms gate-approve now funnels through
 the unified delivery router (finding #1 in docs/unified-apply-flow.md: a
 gate approval previously called raw `apply_manifests_to_cluster()` directly,
-with no audit trail and no GitOps awareness), and the two new gate types
-(`cluster-admin-review`, `gitops-pr-pending`) resolve correctly.
+with no audit trail and no GitOps awareness), and `gitops-pr-pending`
+resolves correctly. `cluster-admin-review` (approving it used to perform a
+real elevated-RBAC direct apply) was removed 2026-07-18 -- see
+`TestClusterAdminReviewGateTypeRemoved` below for how a stale gate of that
+type now resolves instead.
 """
 from __future__ import annotations
 
@@ -215,47 +218,37 @@ class TestResolveGateFunnelsThroughRouter:
         assert deliver_records[0].outcome == "success"
 
 
-class TestClusterAdminReviewGate:
-    async def test_approve_applies_directly_into_operator_namespace(self, gate_client, _mock_kube):
-        client, store, aid = gate_client
-        await store.save_onboarding(aid, [_cicd_file()])
-        gate_id = await store.create_gate(aid, "cluster-admin-review", "Needs elevated RBAC")
+class TestClusterAdminReviewGateTypeRemoved:
+    """`cluster-admin-review` (approving it used to perform a real,
+    elevated-RBAC direct apply via ``apply_with_verification(...,
+    allow_operator_namespaces=True)``, for CI/CD manifests destined for a
+    shared operator namespace) has been removed 2026-07-18 along with every
+    other direct-cluster-apply code path in this app -- that category now
+    delivers via the exact same GitOps PR mechanism as cluster-config (see
+    delivery.py's ``CATEGORY_CICD_SHARED_NAMESPACE`` handling; verified live
+    that ArgoCD's own reconciler service account already holds the RBAC
+    AgentIT's lacks for these namespaces -- see the README). No code path
+    in this app creates this gate type anymore (mirrors the already-removed
+    ``cluster-conflict-review`` handling right below). ``resolve_gate()`` no
+    longer special-cases it at all -- if a gate of this type somehow still
+    exists (a real, still-pending one existed in production the day this
+    was retired), approving it now falls through to the exact same generic
+    ``route_and_deliver()`` path any other gate type does, re-classifying
+    its files fresh and routing any still-cicd ones through a real GitOps
+    commit, never a direct ``kube.apply_yaml`` call."""
 
-        resp = await client.post(
-            f"/gates/{gate_id}/resolve",
-            data={"status": "approved", "resolved_by": "admin"},
-            follow_redirects=False,
-        )
-        assert resp.status_code == 303
-        assert "gate_approved=true" in resp.headers["location"]
-        _mock_kube.apply_yaml.assert_called_once()
-        # The manifest's own declared operator namespace must be preserved,
-        # not rewritten to the app's namespace.
-        call_args = _mock_kube.apply_yaml.call_args
-        assert "openshift-pipelines" in call_args[0][0]
-
-        approved = await store.list_gates(status="approved")
-        assert len(approved) == 1
-
-    async def test_approve_still_applies_directly_even_when_app_is_gitops_registered(
+    async def test_stale_gate_of_this_type_funnels_through_the_generic_router(
         self, gitops_gate_client, _mock_kube,
     ):
-        """The question this guards against: now that GitOps registration is
-        mandatory for an app's own cluster/app config, is cluster-admin-
-        review's elevated-direct-apply justification stale? Answer: no --
-        it's a structurally separate lane (CI/CD manifests destined for a
-        shared operator namespace this service account was never granted
-        write RBAC to), completely independent of whether THIS app has its
-        own GitOps registration (``report.infra_repo_url`` is set here,
-        exactly like ``gate_client``'s GitOps-registered sibling). Approving
-        this gate still performs a real, direct ``kube.apply_yaml`` call --
-        never a GitOps commit, never a no-op -- regardless of the app's own
-        registration state."""
         client, store, aid = gitops_gate_client
         await store.save_onboarding(aid, [_cicd_file()])
         gate_id = await store.create_gate(aid, "cluster-admin-review", "Needs elevated RBAC")
 
-        with patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit:
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"):
+            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
             resp = await client.post(
                 f"/gates/{gate_id}/resolve",
                 data={"status": "approved", "resolved_by": "admin"},
@@ -263,15 +256,36 @@ class TestClusterAdminReviewGate:
             )
         assert resp.status_code == 303
         assert "gate_approved=true" in resp.headers["location"]
-        # A real, direct cluster apply -- not a GitOps commit -- happened,
-        # even though this app has a known infra_repo_url.
-        _mock_kube.apply_yaml.assert_called_once()
-        call_args = _mock_kube.apply_yaml.call_args
-        assert "openshift-pipelines" in call_args[0][0]
-        mock_commit.assert_not_called()
+        # A real GitOps commit -- never a direct, elevated-RBAC apply.
+        mock_commit.assert_called_once()
+        _mock_kube.apply_yaml.assert_not_called()
 
         approved = await store.list_gates(status="approved")
         assert len(approved) == 1
+        # The commit opens a fresh PR-merge gate for this delivery, same as
+        # any other GitOps-routed category -- CI/CD-shared-namespace's own
+        # distinct gate type (see delivery.py's _CICD_SHARED_NAMESPACE_
+        # GATE_TYPE), not the standard "gitops-pr-pending".
+        pending = await store.list_gates(status="pending")
+        assert any(g["gate_type"] == "gitops-pr-pending-shared-namespace" for g in pending)
+
+    async def test_missing_onboarding_files_still_approves_no_special_handling(self, gate_client, _mock_kube):
+        """Without the removed gate-type-specific branch, there is no
+        special handling left for a missing-onboarding-files case either --
+        it behaves exactly like any other unrecognized gate type reaching
+        the same generic fallback."""
+        client, store, aid = gate_client
+        gate_id = await store.create_gate(aid, "cluster-admin-review", "Stale gate, no onboarding.")
+
+        resp = await client.post(
+            f"/gates/{gate_id}/resolve",
+            data={"status": "approved", "resolved_by": "admin"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        _mock_kube.apply_yaml.assert_not_called()
+        assert len(await store.list_gates(status="approved")) == 1
+        assert len(await store.list_gates(status="pending")) == 0
 
 
 class TestClusterConflictReviewGateTypeRemoved:

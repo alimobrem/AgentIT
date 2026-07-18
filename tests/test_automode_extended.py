@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from agentit.automode import AutoMode
 from agentit.llm import LLMClient
+from agentit.portal.delivery import _CICD_SHARED_NAMESPACE_GATE_TYPE
 from conftest import make_async_store, make_report
 
 
@@ -435,9 +436,18 @@ class TestExecuteUnifiedRouterGuards:
     these two tests) that both gaps are real: the Secret test's
     `mock_apply.assert_not_called()`/`"secret.yaml" not in paths` assertions
     failed (the Secret WAS handed to `apply_manifests_to_cluster`), and the
-    CI/CD test's gate assertion failed with zero `cluster-admin-review`
-    gates created (the Pipeline was silently `skip_operator_ns`'d inside
+    CI/CD test's gate assertion failed with zero pending gates created for
+    that category (the Pipeline was silently `skip_operator_ns`'d inside
     `cluster_apply.py` instead). Both pass against the fixed code below.
+
+    The CI/CD test itself was updated 2026-07-18: that category no longer
+    escalates to a `cluster-admin-review` direct-apply gate (removed along
+    with every other direct-cluster-apply code path) -- it now delivers via
+    the same GitOps-commit-and-``gitops-pr-pending``-gate mechanism as
+    cluster-config, still completely independent of AutoMode's own
+    cluster-config handling (`_finish_gitops_pr()`/`_finish_without_
+    cluster_config_delivery()` above only ever look at
+    `CATEGORY_CLUSTER_CONFIG`'s own outcome).
     """
 
     async def test_secret_manifest_never_reaches_cluster_apply(self):
@@ -482,14 +492,20 @@ class TestExecuteUnifiedRouterGuards:
         assert result["action"] == "gated"
         assert result["details"]["delivery"]["blocked"] == ["secret.yaml"]
 
-    async def test_cicd_shared_namespace_escalates_to_admin_review_gate(self):
+    async def test_cicd_shared_namespace_delivers_via_gitops_pr_gate(self):
         """(b) A CI/CD manifest destined for a shared operator namespace
-        (e.g. `openshift-pipelines`) must escalate to a `cluster-admin-review`
-        gate -- never `cluster_apply.py`'s older, silent `skip_operator_ns`
-        behavior every other AutoMode-generated manifest kind gets."""
+        (e.g. `openshift-pipelines`) delivers via the same GitOps-commit-
+        and-``gitops-pr-pending``-gate mechanism as cluster-config now
+        (2026-07-18, replacing the removed `cluster-admin-review` direct-
+        apply escalation) -- never `cluster_apply.py`'s older, silent
+        `skip_operator_ns` behavior every other AutoMode-generated manifest
+        kind gets, and never any direct cluster apply at all. Needs a known
+        `infra_repo_url` now (same as cluster-config -- this category can no
+        longer fall back to a direct apply either)."""
         s, raw = await make_async_store()
         await raw.set_setting("auto_mode", "true")
         report = make_report(criticality="low", summary="test")
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
         aid = await raw.save(report)
 
         llm = MagicMock()
@@ -504,38 +520,35 @@ class TestExecuteUnifiedRouterGuards:
             ),
         }]
 
-        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
-            # Only relevant pre-fix: the real (unmocked) function's own
-            # skip_operator_ns classification for this exact manifest.
-            mock_apply.return_value = {
-                "applied": [], "errors": [],
-                "skipped": ["pipeline.yaml (targets operator namespace openshift-pipelines)"],
-            }
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"), \
+             patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
             engine = AutoMode(store=s, llm_client=llm)
-            result = await engine.execute(aid, files, "default", "low", True, "test-app")
+            result = await engine.execute(aid, files, "default", "low", True, "test-app", report=report)
 
         # Never routed through cluster_apply.py at all -- no chance of the
-        # old silent skip_operator_ns behavior.
+        # old silent skip_operator_ns behavior, and never a direct apply.
         mock_apply.assert_not_called()
+        mock_commit.assert_called_once()
         gates = await raw.list_gates(status="pending")
-        admin_gates = [g for g in gates if g["gate_type"] == "cluster-admin-review"]
-        assert len(admin_gates) == 1
-        assert "openshift-pipelines" in admin_gates[0]["summary"]
-        assert "never a silent skip" in admin_gates[0]["summary"]
+        pr_gates = [g for g in gates if g["gate_type"] == _CICD_SHARED_NAMESPACE_GATE_TYPE]
+        assert len(pr_gates) == 1
+        assert "openshift-pipelines" in pr_gates[0]["summary"]
+        assert "shared, cluster-wide operator namespace" in pr_gates[0]["summary"]
         delivery = result["details"]["delivery"]
-        assert delivery["mechanisms"]["cicd_shared_namespace"] == "cluster-admin-review-gate"
-        assert delivery["outcomes"]["cicd_shared_namespace"]["gate_id"] == admin_gates[0]["id"]
+        assert delivery["mechanisms"]["cicd_shared_namespace"] == "infra-repo-commit"
+        assert delivery["outcomes"]["cicd_shared_namespace"]["gate_id"] == pr_gates[0]["id"]
 
-    async def test_mixed_batch_commits_cluster_config_and_gates_cicd_separately(self):
+    async def test_mixed_batch_commits_cluster_config_and_cicd_via_separate_gitops_prs(self):
         """A single AutoMode batch mixing an ordinary ConfigMap with a
-        CI/CD-shared-namespace manifest must split correctly: the ConfigMap
-        is committed via GitOps (Direct Apply has been removed as a concept
-        entirely), the CI/CD manifest gets its own admin-review gate -- both
-        guards apply in the same call, not just in isolation. The CI/CD
-        lane's `cluster-admin-review` escalation is completely independent
-        of the cluster-config category's own mechanism -- it still applies
-        directly into the shared operator namespace once a human approves
-        it (see routes/gates.py), unrelated to Direct Apply's removal."""
+        CI/CD-shared-namespace manifest must split correctly: both deliver
+        via GitOps now, but as two separate commits/PRs/gates (never merged
+        into one, which would risk one clobbering the other -- see
+        delivery.py's `_CICD_SHARED_NAMESPACE_PATH_PREFIX`), not just in
+        isolation from each other."""
         s, raw = await make_async_store()
         await raw.set_setting("auto_mode", "true")
         report = make_report(criticality="low", summary="test")
@@ -560,19 +573,25 @@ class TestExecuteUnifiedRouterGuards:
              patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
              patch("agentit.portal.github_pr.ensure_applicationset"), \
              patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
-            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
-                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
+            mock_commit.side_effect = [
+                {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                 "commit_url": "https://github.com/org/infra-gitops/commit/aaa", "files_committed": 1},
+                {"pr_url": "https://github.com/org/infra-gitops/pull/2",
+                 "commit_url": "https://github.com/org/infra-gitops/commit/bbb", "files_committed": 1},
+            ]
             engine = AutoMode(store=s, llm_client=llm)
             result = await engine.execute(aid, files, "default", "low", True, "test-app", report=report)
 
         mock_apply.assert_not_called()
-        mock_commit.assert_called_once()
-        committed_paths = {f["path"] for f in mock_commit.call_args[0][2]}
-        assert committed_paths == {"cm.yaml"}
+        assert mock_commit.call_count == 2
+        cluster_call, cicd_call = mock_commit.call_args_list
+        assert {f["path"] for f in cluster_call.args[2]} == {"cm.yaml"}
+        assert {f["path"] for f in cicd_call.args[2]} == {"pipeline.yaml"}
+        assert cicd_call.args[3] == f"agentit/{report.repo_name}-cicd-shared-namespace"
         assert result["action"] == "gated"
         gates = await raw.list_gates(status="pending")
-        assert any(g["gate_type"] == "cluster-admin-review" for g in gates)
-        assert any(g["gate_type"] == "gitops-pr-pending" for g in gates)
+        assert len(gates) == 2
+        assert {g["gate_type"] for g in gates} == {"gitops-pr-pending", _CICD_SHARED_NAMESPACE_GATE_TYPE}
 
 
 class TestExecuteWithPublisher:

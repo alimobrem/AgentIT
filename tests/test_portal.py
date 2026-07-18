@@ -1274,52 +1274,24 @@ async def test_api_events_filter_target_app(client, _override_store):
 # Gate queue tests
 #
 # The global "/gates" page is retired (docs/ui-redesign-proposal.md §2/§5):
-# it now redirects to "/admin-review", which shows only `cluster-admin-review`
-# gates -- the one gate type that's genuinely cross-app, for a genuinely
-# different audience than an app owner. The other 7 (app-owner-scoped) gate
-# types now live on Assessment Detail's Actions tab -- see
-# test_admin_review_and_actions_tab.py for that behavior.
+# it now redirects to "/ledger" (previously "/admin-review", which used to
+# show only `cluster-admin-review` gates -- the one gate type that used to
+# be genuinely cross-app, for a genuinely different audience than an app
+# owner; both that gate type and the Admin Review page it lived on were
+# retired 2026-07-18 -- see delivery.py/routes/gates.py). Every gate type
+# now lives on Assessment Detail's Actions tab.
 # ------------------------------------------------------------------
 
 
-async def test_gates_redirects_to_admin_review(client):
+async def test_gates_redirects_to_ledger(client):
     resp = await client.get("/gates", follow_redirects=False)
     assert resp.status_code == 301
-    assert resp.headers["location"] == "/admin-review"
+    assert resp.headers["location"] == "/ledger"
 
 
-async def test_admin_review_page_empty(client):
-    resp = await client.get("/admin-review")
-    assert resp.status_code == 200
-    assert "No pending gates" in resp.text
-
-
-async def test_admin_review_page_with_pending(client, _override_store):
-    store = _override_store
-    report = _make_report()
-    aid = await store.save(report)
-    await store.create_gate(aid, "cluster-admin-review", "Approve deployment of test-repo")
-
-    resp = await client.get("/admin-review")
-    assert resp.status_code == 200
-    assert "Approve deployment of test-repo" in resp.text
-    assert "Approve" in resp.text
-    assert "Reject" in resp.text
-
-
-async def test_admin_review_page_excludes_app_owner_gate_types(client, _override_store):
-    """A "deploy"-style app-owner gate must never show up on Admin Review --
-    that's exactly the audience split docs/ui-redesign-proposal.md §2 makes.
-    It belongs on that app's own Assessment Detail Actions tab instead."""
-    store = _override_store
-    report = _make_report()
-    aid = await store.save(report)
-    await store.create_gate(aid, "deploy", "Approve deployment of test-repo")
-
-    resp = await client.get("/admin-review")
-    assert resp.status_code == 200
-    assert "Approve deployment of test-repo" not in resp.text
-    assert "No pending gates" in resp.text
+async def test_admin_review_page_is_gone(client):
+    resp = await client.get("/admin-review", follow_redirects=False)
+    assert resp.status_code == 404
 
 
 async def test_resolve_gate_approve(client, _override_store):
@@ -1349,7 +1321,11 @@ async def test_resolve_gate_approve(client, _override_store):
     assert approved[0]["resolved_by"] == "tester"
 
 
-async def test_resolve_cluster_admin_review_gate_redirects_to_admin_review(client, _override_store):
+async def test_resolve_stale_cluster_admin_review_gate_redirects_to_own_actions_tab(client, _override_store):
+    """`cluster-admin-review`'s own cross-app redirect target (the now-
+    removed Admin Review page) was retired 2026-07-18 -- a gate of this
+    type is per-app like any other now, so rejecting one redirects to its
+    own app's Actions tab, same as every other gate type."""
     store = _override_store
     report = _make_report()
     aid = await store.save(report)
@@ -1361,7 +1337,7 @@ async def test_resolve_cluster_admin_review_gate_redirects_to_admin_review(clien
         follow_redirects=False,
     )
     assert resp.status_code == 303
-    assert resp.headers["location"] == "/admin-review"
+    assert resp.headers["location"] == f"/assessments/{aid}?tab=actions"
 
 
 async def test_list_gates_includes_app_name(client, _override_store):
@@ -1601,7 +1577,7 @@ async def test_no_inline_styles_gates(client, _override_store):
     report = _make_report()
     aid = await store.save(report)
     await store.create_gate(aid, "cluster-admin-review", "Test gate")
-    resp = await client.get("/admin-review")
+    resp = await client.get(f"/assessments/{aid}?tab=actions")
     html = resp.text
     for line in html.split("\n"):
         if "style=" in line.lower() and 'style="--pct' not in line:
@@ -1733,7 +1709,7 @@ async def test_gates_uses_design_system_classes(client, _override_store):
     report = _make_report()
     aid = await store.save(report)
     await store.create_gate(aid, "cluster-admin-review", "Gate test")
-    resp = await client.get("/admin-review")
+    resp = await client.get(f"/assessments/{aid}?tab=actions")
     assert "gate-actions" in resp.text
     assert "btn-approve" in resp.text
     assert "btn-danger-outline" in resp.text
@@ -2155,14 +2131,16 @@ async def test_settings_nav_link(client):
 async def test_settings_auto_mode_banner_does_not_reference_retired_gates_page(client, _override_store):
     """Regression: the Auto-Mode banner said destructive changes get
     "queued in Gates for your review" -- Gates no longer exists as a
-    standalone page (split into per-app Actions tabs + Admin Review)."""
+    standalone page (split into per-app Actions tabs; the banner's other
+    original destination, Admin Review, was itself retired 2026-07-18 along
+    with the `cluster-admin-review` gate type it existed solely for)."""
     store = _override_store
     await store.set_setting("auto_mode", "true")
     resp = await client.get("/settings")
     assert resp.status_code == 200
     assert "queued in Gates" not in resp.text
     assert "Actions tab" in resp.text
-    assert "Admin Review" in resp.text
+    assert "Admin Review" not in resp.text
 
 
 async def test_settings_and_schedules_are_tabs_of_each_other(client, _override_store):
@@ -2644,7 +2622,6 @@ async def test_all_pages_return_200(client, _override_store):
         "/assess",
         "/events",
         "/gates",
-        "/admin-review",
         "/agents",
         "/schedules",
         "/settings",

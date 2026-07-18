@@ -32,13 +32,20 @@ CATEGORY_NARRATIVE_REPORT = "narrative_report"
 CATEGORY_MANIFEST_AT_REST = "manifest_at_rest"
 CATEGORY_SECRET_BLOCKED = "secret_blocked"
 
-# The one gate type that's genuinely cross-app, for a genuinely different
-# audience (whoever holds elevated RBAC, not the app owner) -- see
-# docs/ui-redesign-proposal.md §2. Every other gate type is per-app and
-# lives on Fleet (a "needs action" badge) + Assessment Detail (the Actions
-# tab) instead of the retired global Gates page. Defined here (not
-# routes/gates.py) so ``routes/fleet.py``/``routes/assessments.py``/
-# ``helpers.py`` can all reference it without importing a routes module.
+# Retired (2026-07-18): CI/CD manifests destined for a shared operator
+# namespace no longer create this gate type or take any elevated-RBAC direct-
+# apply path at all -- see CATEGORY_CICD_SHARED_NAMESPACE's mechanism below,
+# now MECHANISM_INFRA_REPO_COMMIT like every other category, gated on a
+# standard "gitops-pr-pending" merge-review instead. This string constant is
+# kept only so already-persisted historical `gates` rows of this type (and
+# the one real, still-pending one this migration found live) keep rendering
+# honest text instead of a `KeyError`/blank string -- no code path creates a
+# gate of this type anymore, and it no longer gets a dedicated cross-app
+# page: a stale pending row now simply surfaces on its own app's Fleet
+# "needs action" badge / Assessment Detail Actions tab like any other gate,
+# and resolves via resolve_gate()'s generic route_and_deliver() fallback
+# (which re-classifies its files and routes any still-cicd ones through the
+# same GitOps PR path as a fresh delivery would).
 ADMIN_REVIEW_GATE_TYPE = "cluster-admin-review"
 
 # The gate type a finding creates once it's failed to resolve
@@ -67,10 +74,40 @@ FINDING_ESCALATION_THRESHOLD = 3
 # landed) still render honest text instead of a blank/`KeyError` lookup.
 MECHANISM_DIRECT_APPLY = "direct-apply"
 MECHANISM_INFRA_REPO_COMMIT = "infra-repo-commit"
+# Retired (2026-07-18) alongside ADMIN_REVIEW_GATE_TYPE above -- kept only so
+# historical `deliveries`/`gates` rows already persisted with this mechanism
+# string still render honest text (see MECHANISM_DIRECT_APPLY's identical
+# precedent above). CATEGORY_CICD_SHARED_NAMESPACE now resolves to
+# MECHANISM_INFRA_REPO_COMMIT, same as CATEGORY_CLUSTER_CONFIG.
 MECHANISM_CLUSTER_ADMIN_REVIEW_GATE = "cluster-admin-review-gate"
 MECHANISM_SOURCE_REPO_PR = "source-repo-pr"
 MECHANISM_APP_REPO_PR = "app-repo-pr"
 MECHANISM_NONE = "none"
+
+# The distinct GitOps-infra-repo subfolder (apps/{app}/{this}/*, in place of
+# a file's own generation-source `category`) and Git branch (in place of the
+# app-config category's shared `agentit/{app}` branch) CI/CD-shared-namespace
+# manifests commit to -- see _deliver_via_gitops_pr_and_gate() below. Two
+# reasons this must never share cluster-config's own branch/folder: (1) a
+# human reviewer needs an unambiguous visual signal ("this PR/folder touches
+# a namespace every app on the cluster shares, not just this app's own") per
+# the 2026-07-18 cluster-admin-review-removal decision; (2) commit_to_infra_
+# repo() force-pushes whatever branch name it's given, rebased fresh off the
+# infra repo's default branch every call -- two categories sharing one
+# branch name within the same route_and_deliver() call would silently
+# clobber each other's commit instead of both landing.
+_CICD_SHARED_NAMESPACE_PATH_PREFIX = "cicd-shared-namespace"
+
+# The distinct gate type CI/CD-shared-namespace's own PR-merge gate uses --
+# see _deliver_via_gitops_pr_and_gate()'s ``gate_type`` docstring for why
+# this can't just be the standard "gitops-pr-pending": store.create_gate()
+# dedupes by (repo_url, gate_type) against already-pending gates, so a
+# mixed batch delivering both categories for the same app in the same
+# route_and_deliver() call would otherwise collide, silently losing the
+# second category's own gate. resolve_gate() (routes/gates.py) treats this
+# and the standard type identically at approval time -- both just merge a
+# PR named in the gate's own summary.
+_CICD_SHARED_NAMESPACE_GATE_TYPE = "gitops-pr-pending-shared-namespace"
 
 _NARRATIVE_REPORT_FILENAMES = frozenset({"dependency-report.md", "cost-report.md"})
 
@@ -94,7 +131,9 @@ def has_unresolved_placeholders(content: str | None) -> bool:
 MECHANISM_DESCRIPTIONS: dict[str, str] = {
     MECHANISM_DIRECT_APPLY: "Apply these manifests directly to the cluster -- no GitOps registration was found for this app.",
     MECHANISM_INFRA_REPO_COMMIT: "Commit to the GitOps infra repo and open a PR -- this app is GitOps-registered via a live Argo CD Application. A human must still merge the PR; AgentIT will never auto-merge.",
-    MECHANISM_CLUSTER_ADMIN_REVIEW_GATE: "Hold for cluster-admin review -- these manifests target a shared operator namespace this service account cannot apply to without elevated RBAC.",
+    # Retired (2026-07-18) -- see MECHANISM_CLUSTER_ADMIN_REVIEW_GATE's own
+    # comment above; kept only for historical-record rendering.
+    MECHANISM_CLUSTER_ADMIN_REVIEW_GATE: "Held for cluster-admin review -- these manifests targeted a shared operator namespace this service account could not apply to without elevated RBAC. (Retired: this category now delivers via a GitOps PR instead.)",
     MECHANISM_SOURCE_REPO_PR: "Open a PR against this app's code repo with a real patch to the named file(s).",
     MECHANISM_APP_REPO_PR: "Open an informational PR against this app's code repo with these files under `.agentit/`.",
     MECHANISM_NONE: "Nothing to deliver.",
@@ -296,6 +335,8 @@ async def deliver_with_verification(
     assessment_id: str,
     actor: str,
     dry_run: bool,
+    path_prefix: str | None = None,
+    branch_name: str | None = None,
 ) -> dict:
     """Structurally parallel to ``cluster_apply.apply_with_verification()``,
     for the commit-and-PR delivery mechanisms
@@ -304,6 +345,17 @@ async def deliver_with_verification(
     ``record_skill_outcomes()`` after a successful commit/PR (not just a
     successful apply -- a merged PR is exactly as strong a "this fix was
     accepted" signal, per the design doc).
+
+    ``path_prefix``/``branch_name`` only apply to ``MECHANISM_INFRA_REPO_
+    COMMIT`` -- see ``_CICD_SHARED_NAMESPACE_PATH_PREFIX``'s own comment for
+    why the CI/CD-shared-namespace category needs both to differ from the
+    cluster-config category's own (default) folder/branch, even within the
+    same ``route_and_deliver()`` call. ``path_prefix``, when given, overrides
+    every file's own generation-source ``category`` for
+    ``commit_to_infra_repo()``'s ``apps/{app}/{category}/{filename}`` path --
+    on a COPY of each file dict, not ``files`` itself, so
+    ``record_skill_outcomes()`` below still attributes outcomes using each
+    file's real, original ``category``.
     """
     resource = f"assessment:{assessment_id}"
 
@@ -318,7 +370,10 @@ async def deliver_with_verification(
         if mechanism == MECHANISM_INFRA_REPO_COMMIT:
             from agentit.portal.github_pr import commit_to_infra_repo, ensure_applicationset
 
-            result = await asyncio.to_thread(commit_to_infra_repo, report.infra_repo_url, app_name, files)
+            commit_files = [{**f, "category": path_prefix} for f in files] if path_prefix else files
+            result = await asyncio.to_thread(
+                commit_to_infra_repo, report.infra_repo_url, app_name, commit_files, branch_name,
+            )
             if "error" not in result:
                 await asyncio.to_thread(ensure_applicationset, report.infra_repo_url)
                 commit_url = result.get("commit_url", "")
@@ -381,11 +436,11 @@ async def gate_delivery_confirmation(store: object, gate: dict) -> str:
     """The exact "AgentIT will: ..." statement a human must see -- in the
     un-skippable confirm modal, not just page prose -- before approving a
     gate actually triggers a real delivery. Shared by every surface that
-    renders a gate card (the retired global Gates page, Admin Review,
-    Assessment Detail's Actions tab, and the Fleet-embedded ones) so the
-    gate list, the dry-run preview, and the point-of-no-return confirmation
-    can never say different things about the same decision (per the
-    2026-07-14 customer-review addendum to docs/unified-apply-flow.md).
+    renders a gate card (the retired global Gates page, Assessment Detail's
+    Actions tab, and the Fleet-embedded ones) so the gate list, the dry-run
+    preview, and the point-of-no-return confirmation can never say different
+    things about the same decision (per the 2026-07-14 customer-review
+    addendum to docs/unified-apply-flow.md).
     """
     gate_type = gate.get("gate_type", "")
     if gate_type == "rollback-review":
@@ -395,14 +450,18 @@ async def gate_delivery_confirmation(store: object, gate: dict) -> str:
             "AgentIT will: mark this escalated finding acknowledged for manual follow-up -- "
             "no automatic fix or re-delivery is triggered by approving this gate."
         )
-    if gate_type in ("gitops-pr-pending", "cluster-admin-review"):
+    if gate_type in ("gitops-pr-pending", _CICD_SHARED_NAMESPACE_GATE_TYPE, "cluster-admin-review"):
         # These gate types already carry the exact mechanism + reason in
         # their own summary text (see automode.py / delivery.py's gate
         # creation calls) -- reuse it verbatim instead of restating it.
         # (`auto-mode-scope-review` used to be a third member of this list
         # -- it can no longer be created at all now that the per-(namespace,
         # kind) auto-mode allowlist that created it has been removed along
-        # with AutoMode's direct-apply branch.)
+        # with AutoMode's direct-apply branch.) `cluster-admin-review` itself
+        # can no longer be created either (2026-07-18) -- kept here only so
+        # a stale, already-persisted pending gate of that type still renders
+        # its own historical summary verbatim instead of falling through to
+        # the generic cluster-config-mechanism branch below.
         return gate.get("summary", "")
     assessment_id = gate.get("assessment_id")
     if not assessment_id:
@@ -415,7 +474,14 @@ async def gate_delivery_confirmation(store: object, gate: dict) -> str:
     return confirmation_text(mechanism, infra_repo_url=infra_repo_url)
 
 
-def _cicd_gate_summary(files: list[dict]) -> str:
+def _cicd_shared_namespace_note(files: list[dict]) -> str:
+    """The extra callout prepended to a CI/CD-shared-namespace delivery's
+    ``gitops-pr-pending`` gate summary (see ``_deliver_via_gitops_pr_and_
+    gate()`` below) -- names the exact target namespace(s), same as the
+    retired ``cluster-admin-review`` gate's own summary used to, so a
+    reviewer immediately sees *which* shared namespace this PR affects
+    without opening the diff.
+    """
     namespaces: set[str] = set()
     for f in files:
         for doc in _parse_manifest(f.get("content", "")):
@@ -424,10 +490,71 @@ def _cicd_gate_summary(files: list[dict]) -> str:
                 namespaces.add(ns)
     ns_list = ", ".join(sorted(namespaces)) or "a shared operator namespace"
     return (
-        f"{len(files)} manifest(s) target {ns_list} -- needs cluster-admin RBAC "
-        "this service account doesn't have by default. Approving this gate will "
-        "apply directly into that namespace (never a silent skip)."
+        f"{len(files)} manifest(s) target {ns_list} -- a shared, cluster-wide operator "
+        "namespace, not this app's own. Elevated review needed before merging (every app "
+        "relying on that namespace is affected, not just this one)."
     )
+
+
+async def _deliver_via_gitops_pr_and_gate(
+    *,
+    files: list[dict],
+    report: AssessmentReport,
+    app_name: str,
+    store: object,
+    assessment_id: str,
+    actor: str,
+    dry_run: bool,
+    infra_repo_url: str | None,
+    path_prefix: str | None = None,
+    branch_name: str | None = None,
+    gate_note: str = "",
+    gate_type: str = "gitops-pr-pending",
+) -> dict:
+    """Commit ``files`` to the GitOps infra repo and, once a real (non-dry-
+    run) PR is actually opened, gate its merge behind a review -- the exact
+    sequence the cluster/app-config category has always used, and (since
+    2026-07-18, replacing the removed ``cluster-admin-review`` direct-apply
+    gate) the CI/CD-shared-namespace category now uses too. Shared here so
+    ``route_and_deliver()``'s two call sites below can never drift apart on
+    this sequence.
+
+    ``path_prefix``/``branch_name`` (see ``_CICD_SHARED_NAMESPACE_PATH_
+    PREFIX``) let a caller land this commit in a distinctly-named subfolder/
+    branch -- and therefore a distinct PR -- instead of interleaving with the
+    app's own cluster-config commit. ``gate_note``, when non-empty, is
+    prepended to the created gate's summary as an extra callout a reviewer
+    needs (e.g. naming the exact shared namespace this PR touches).
+
+    ``gate_type`` defaults to the standard ``"gitops-pr-pending"`` (cluster-
+    config's own) but MUST be overridden to a distinct value by any other
+    caller within the same ``route_and_deliver()`` invocation --
+    ``store.create_gate()`` dedupes by ``(repo_url, gate_type)`` against
+    already-pending gates (by design, so a re-assess/watcher tick doesn't
+    pile up N duplicate rows of the same type -- see its own docstring), so
+    two categories both requesting a fresh ``"gitops-pr-pending"`` gate for
+    the SAME app in the SAME call would silently collide: the second
+    ``create_gate()`` call would just hand back the FIRST category's gate
+    id, silently losing the second PR's own review gate entirely. The CI/CD-
+    shared-namespace category passes its own distinct
+    ``"gitops-pr-pending-shared-namespace"`` type for exactly this reason
+    (see ``route_and_deliver()``'s two call sites) -- ``resolve_gate()``
+    (``routes/gates.py``) treats both types identically at approval time.
+    """
+    outcome = await deliver_with_verification(
+        mechanism=MECHANISM_INFRA_REPO_COMMIT, files=files, report=report,
+        app_name=app_name, store=store, assessment_id=assessment_id,
+        actor=actor, dry_run=dry_run, path_prefix=path_prefix, branch_name=branch_name,
+    )
+    pr_url = outcome.get("pr_url") if isinstance(outcome, dict) and not dry_run else None
+    if pr_url and "error" not in outcome:
+        mechanism_text = confirmation_text(MECHANISM_INFRA_REPO_COMMIT, infra_repo_url=infra_repo_url)
+        summary = f"{mechanism_text} PR opened: {pr_url}. Approving this gate merges the PR -- AgentIT never auto-merges."
+        if gate_note:
+            summary = f"{gate_note} {summary}"
+        gate_id = await store.create_gate(assessment_id, gate_type, summary, pr_url=pr_url)
+        outcome["gate_id"] = gate_id
+    return outcome
 
 
 async def _maybe_schedule_verification(
@@ -642,9 +769,17 @@ async def route_and_deliver(
     if cluster_files:
         mechanisms[CATEGORY_CLUSTER_CONFIG] = resolve_cluster_config_mechanism(infra_repo_url)
 
+    # CI/CD manifests destined for a shared operator namespace (2026-07-18):
+    # no longer a cluster-admin-review direct-apply gate (removed entirely --
+    # AgentIT never applies directly to a cluster for any category now).
+    # ArgoCD's own reconciler service account already holds the elevated
+    # RBAC AgentIT's lacks for these namespaces (verified live against this
+    # cluster's openshift-gitops-argocd-application-controller SA -- see the
+    # README), so this resolves through the exact same GitOps-commit
+    # decision as the cluster-config category above.
     cicd_files = groups.pop(CATEGORY_CICD_SHARED_NAMESPACE, [])
     if cicd_files:
-        mechanisms[CATEGORY_CICD_SHARED_NAMESPACE] = MECHANISM_CLUSTER_ADMIN_REVIEW_GATE
+        mechanisms[CATEGORY_CICD_SHARED_NAMESPACE] = resolve_cluster_config_mechanism(infra_repo_url)
 
     source_files = groups.pop(CATEGORY_SOURCE_PATCH, [])
     if source_files:
@@ -679,31 +814,14 @@ async def route_and_deliver(
     try:
         if cluster_files:
             if mechanisms[CATEGORY_CLUSTER_CONFIG] == MECHANISM_INFRA_REPO_COMMIT and report is not None:
-                outcomes[CATEGORY_CLUSTER_CONFIG] = await deliver_with_verification(
-                    mechanism=MECHANISM_INFRA_REPO_COMMIT, files=cluster_files, report=report,
-                    app_name=app_name, store=store, assessment_id=assessment_id,
-                    actor=actor, dry_run=dry_run,
-                )
                 # Mirror AutoMode: portal Deliver opens the PR; Approve & Deliver
                 # on gitops-pr-pending merges it. Without this gate the manual
                 # Assess→Generate→Deliver path had no Gate step for GitOps apps.
-                cluster_outcome = outcomes[CATEGORY_CLUSTER_CONFIG]
-                pr_url = (
-                    cluster_outcome.get("pr_url")
-                    if isinstance(cluster_outcome, dict) and not dry_run
-                    else None
+                outcomes[CATEGORY_CLUSTER_CONFIG] = await _deliver_via_gitops_pr_and_gate(
+                    files=cluster_files, report=report, app_name=app_name, store=store,
+                    assessment_id=assessment_id, actor=actor, dry_run=dry_run,
+                    infra_repo_url=infra_repo_url,
                 )
-                if pr_url and "error" not in cluster_outcome:
-                    mechanism_text = confirmation_text(
-                        MECHANISM_INFRA_REPO_COMMIT, infra_repo_url=infra_repo_url,
-                    )
-                    gate_id = await store.create_gate(
-                        assessment_id, "gitops-pr-pending",
-                        f"{mechanism_text} PR opened: {pr_url}. "
-                        "Approving this gate merges the PR -- AgentIT never auto-merges.",
-                        pr_url=pr_url,
-                    )
-                    cluster_outcome["gate_id"] = gate_id
             else:
                 # MECHANISM_NONE: no infra_repo_url is known for this
                 # assessment at all -- Direct Apply is no longer a fallback
@@ -722,28 +840,36 @@ async def route_and_deliver(
                 }
 
         if cicd_files:
-            # A real Dry Run must stay a pure preview -- no side effects --
-            # exactly like every other category above (`deliver_with_
-            # verification()`'s own `dry_run=True` branch never mutates
-            # anything either). Discovered via the automatic Dry Run ->
-            # Deliver chain (``auto_dry_run_then_deliver()``): a Dry Run
-            # that ran unconditionally after every onboarding surfaced that
-            # this branch had no such guard, unlike every other mechanism
-            # here -- a "preview" click was silently opening a real,
-            # pending cluster-admin-review gate. Fixed here rather than
-            # only in the automatic path, since a human's manual Dry Run
-            # click had exactly the same latent bug.
-            if dry_run:
-                outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = {
-                    "dry_run": True, "mechanism": MECHANISM_CLUSTER_ADMIN_REVIEW_GATE,
-                    "files": [f["path"] for f in cicd_files],
-                }
-            else:
-                gate_id = await store.create_gate(
-                    assessment_id, "cluster-admin-review", _cicd_gate_summary(cicd_files),
+            # Retired (2026-07-18): this used to open a cluster-admin-review
+            # gate whose approval performed a real, elevated-RBAC direct
+            # apply -- AgentIT's own service account structurally lacked
+            # RBAC for these namespaces (still true), but that's no longer
+            # the point: AgentIT never applies directly to a cluster for ANY
+            # category now. ArgoCD's reconciler SA already holds the RBAC
+            # AgentIT lacks (verified live, see the README), so this commits
+            # to a distinctly-named path/branch (never the cluster-config
+            # category's own, even within this same call -- see
+            # _CICD_SHARED_NAMESPACE_PATH_PREFIX) and gates its merge behind
+            # a standard gitops-pr-pending review, same as cluster-config.
+            if mechanisms[CATEGORY_CICD_SHARED_NAMESPACE] == MECHANISM_INFRA_REPO_COMMIT and report is not None:
+                outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = await _deliver_via_gitops_pr_and_gate(
+                    files=cicd_files, report=report, app_name=app_name, store=store,
+                    assessment_id=assessment_id, actor=actor, dry_run=dry_run,
+                    infra_repo_url=infra_repo_url,
+                    path_prefix=_CICD_SHARED_NAMESPACE_PATH_PREFIX,
+                    branch_name=f"agentit/{_sanitize_app_name(app_name)}-cicd-shared-namespace",
+                    gate_note=_cicd_shared_namespace_note(cicd_files),
+                    gate_type=_CICD_SHARED_NAMESPACE_GATE_TYPE,
                 )
+            else:
                 outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = {
-                    "gate_id": gate_id, "files": [f["path"] for f in cicd_files],
+                    "error": (
+                        "no GitOps infra repo is known for this assessment -- CI/CD manifests "
+                        "destined for a shared operator namespace can only be delivered via a "
+                        "GitOps PR now (the elevated-RBAC direct-apply path has been removed); "
+                        "register this app for GitOps first (see \"Register for GitOps\" on "
+                        "Assessment Detail)"
+                    ),
                 }
 
         if source_files:

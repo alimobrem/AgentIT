@@ -173,22 +173,24 @@ async def get_store():
 
 # ── Nav gate badges ───────────────────────────────────────────────────
 #
-# base.html's nav bar shows two gate-derived badges: Fleet's link carries
-# the fleet-wide count of pending, app-owner-scoped gates (the 7 types that
-# now live on Fleet rows + Assessment Detail's Actions tab), and Admin
-# Review's link carries the count of pending `cluster-admin-review` gates
-# only (docs/ui-redesign-proposal.md §2/§5). This closes a real pre-existing
-# defect: the old nav referenced a `pending_gates` template variable no
-# context processor ever actually supplied (only Insights' own page context
-# computed it, so the badge was silently blank everywhere else). Cached
-# briefly since nav renders on every page (Ledger Needs You + Admin Review).
+# base.html's nav bar shows the fleet-wide count of pending gates on
+# Ledger's link (docs/ui-redesign-proposal.md §2/§5). This closes a real
+# pre-existing defect: the old nav referenced a `pending_gates` template
+# variable no context processor ever actually supplied (only Insights' own
+# page context computed it, so the badge was silently blank everywhere
+# else). Cached briefly since nav renders on every page.
+#
+# Used to also split out a separate `admin_review` count for a second,
+# cross-app "Admin Review" nav link -- retired 2026-07-18 along with the
+# `cluster-admin-review` gate type it existed solely for. Every gate type is
+# per-app now, so every pending gate counts toward this one total.
 
-_nav_gate_badges_cache: dict = {"pending_actions": 0, "admin_review": 0, "ts": 0.0}
+_nav_gate_badges_cache: dict = {"pending_actions": 0, "ts": 0.0}
 _NAV_GATE_BADGES_CACHE_TTL = 20  # seconds
 # Double-checked locking, mirroring get_store() above: the `await
 # store.list_gates(...)` below is a genuine yield point, so without a lock,
 # multiple concurrent requests can all see a stale cache, all refresh, and
-# interleave their 3-key writes into a torn read for a third caller. This is
+# interleave their writes into a torn read for a third caller. This is
 # async-only (never invoked via asyncio.to_thread), so an `asyncio.Lock` --
 # not a `threading.Lock` -- is the correct primitive here.
 _nav_gate_badges_lock = asyncio.Lock()
@@ -197,31 +199,22 @@ _nav_gate_badges_lock = asyncio.Lock()
 async def get_nav_gate_badge_counts(store: object) -> dict[str, int]:
     now = _time.monotonic()
     if now - _nav_gate_badges_cache["ts"] < _NAV_GATE_BADGES_CACHE_TTL:
-        return {
-            "pending_actions": _nav_gate_badges_cache["pending_actions"],
-            "admin_review": _nav_gate_badges_cache["admin_review"],
-        }
+        return {"pending_actions": _nav_gate_badges_cache["pending_actions"]}
     async with _nav_gate_badges_lock:
         now = _time.monotonic()
         if now - _nav_gate_badges_cache["ts"] < _NAV_GATE_BADGES_CACHE_TTL:
-            return {
-                "pending_actions": _nav_gate_badges_cache["pending_actions"],
-                "admin_review": _nav_gate_badges_cache["admin_review"],
-            }
+            return {"pending_actions": _nav_gate_badges_cache["pending_actions"]}
         try:
             gates = await store.list_gates(status="pending")
         except Exception:
             log.debug("Failed to refresh nav gate badge counts", exc_info=True)
             gates = []
 
-        from agentit.portal.delivery import ADMIN_REVIEW_GATE_TYPE
-        admin_review = sum(1 for g in gates if g.get("gate_type") == ADMIN_REVIEW_GATE_TYPE)
-        pending_actions = len(gates) - admin_review
+        pending_actions = len(gates)
 
         _nav_gate_badges_cache["pending_actions"] = pending_actions
-        _nav_gate_badges_cache["admin_review"] = admin_review
         _nav_gate_badges_cache["ts"] = now
-        return {"pending_actions": pending_actions, "admin_review": admin_review}
+        return {"pending_actions": pending_actions}
 
 
 # ── Event publishing ──────────────────────────────────────────────────

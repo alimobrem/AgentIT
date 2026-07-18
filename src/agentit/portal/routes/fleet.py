@@ -127,10 +127,11 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
 
 async def _attach_pending_actions(fleet: list[dict], s: object) -> None:
     """"Needs action" badge per app (docs/ui-redesign-proposal.md §2) -- a
-    cheap ``GROUP BY repo_url`` count of pending, app-owner-scoped gates
-    (``cluster-admin-review`` excluded: that's a different audience's
-    concern, counted separately for the Admin Review nav badge). Mutates
-    each fleet row in place with ``pending_actions_count``.
+    cheap ``GROUP BY repo_url`` count of pending gates. Every gate type is
+    per-app now (``cluster-admin-review``, the one cross-app type this used
+    to exclude for a separate Admin Review nav badge, was retired
+    2026-07-18 -- see delivery.py). Mutates each fleet row in place with
+    ``pending_actions_count``.
 
     Keyed by ``repo_url`` (not ``assessment_id``): ``list_gates()`` joins
     each gate back to the specific historical assessment it was created
@@ -141,7 +142,6 @@ async def _attach_pending_actions(fleet: list[dict], s: object) -> None:
     re-assessed -- the same orphaned-gate-attribution bug fixed in
     ``store.py``/``store_pg.py``'s ``list_gates_for_assessment()``.
     """
-    from agentit.portal.delivery import ADMIN_REVIEW_GATE_TYPE
     try:
         pending_gates = await s.list_gates(status="pending")
     except Exception:
@@ -150,8 +150,6 @@ async def _attach_pending_actions(fleet: list[dict], s: object) -> None:
 
     counts: dict[str, int] = {}
     for g in pending_gates:
-        if g.get("gate_type") == ADMIN_REVIEW_GATE_TYPE:
-            continue
         repo_url = g.get("repo_url")
         if repo_url:
             counts[repo_url] = counts.get(repo_url, 0) + 1

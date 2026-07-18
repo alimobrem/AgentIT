@@ -113,8 +113,9 @@
   <p class="text-sm mb-1">{{ delivery_confirmation }}</p>
   {% if request.query_params.get('cicd_gate') %}
   <p class="text-sm mb-0">
-    Shared-operator manifests need cluster-admin review —
-    see <a href="/admin-review">Admin Review</a> (never silently skipped).
+    Shared-operator manifests were committed as a separate GitOps PR (never silently
+    skipped) — it needs elevated review before merging; see the PR link above or this
+    app's Actions tab.
   </p>
   {% endif %}
 </details>

@@ -387,19 +387,18 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     all_findings = [f for sc in report.scores for f in sc.findings]
     fixable_categories = {f.category for f in all_findings if lookup(f.category) is not None}
 
-    # The 7 app-owner-scoped gate types now live here (Actions tab) instead
-    # of the retired global Gates page -- cluster-admin-review is excluded,
-    # it's the one gate type for a genuinely different audience and stays
-    # on the separate Admin Review page (docs/ui-redesign-proposal.md §2).
+    # Every gate type now lives here (Actions tab) instead of the retired
+    # global Gates page -- including a stale ``cluster-admin-review`` row, if
+    # one somehow still exists (that type, and the separate Admin Review
+    # page it used to live on, were retired 2026-07-18 -- see delivery.py).
     from agentit.portal.delivery import (
-        ADMIN_REVIEW_GATE_TYPE,
         gate_delivery_confirmation,
         get_next_action_state,
         is_gitops_registered,
     )
     assessment_gates = await s.list_gates_for_assessment(assessment_id, status="pending") \
         if hasattr(s, "list_gates_for_assessment") else []
-    pending_actions = [g for g in assessment_gates if g["gate_type"] != ADMIN_REVIEW_GATE_TYPE]
+    pending_actions = assessment_gates
     for g in pending_actions:
         g["delivery_confirmation"] = await gate_delivery_confirmation(s, g)
 
@@ -421,8 +420,7 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         recently_resolved_actions_count = sum(
             1 for g in all_app_gates
-            if g["gate_type"] != ADMIN_REVIEW_GATE_TYPE
-            and g["status"] in ("approved", "rejected", "expired", "cancelled")
+            if g["status"] in ("approved", "rejected", "expired", "cancelled")
             and (g.get("resolved_at") or g.get("created_at") or "") >= cutoff
         )
 

@@ -154,10 +154,9 @@ flowchart TD
     O & P --> Q["orchestration-summary.md"]
 
     Q --> R["delivery.py::route_and_deliver()\none router for every entry point:\nmanual Deliver, gate-approve, AutoMode, DriftDetector"]
-    R -->|"GitOps-registered app"| S["commit to infra repo + PR\n(github_pr.py, never auto-merged)"]
-    R -->|"not registered"| T["cluster_apply.py\ndry-run → LLM classify → real per-field-manager SSA"]
-    R -->|"CI/CD → shared operator namespace"| U["cluster-admin-review gate\n(never a silent skip)"]
-```
+    R -->|"known infra repo (mandatory)"| S["commit to infra repo + PR\n(github_pr.py, never auto-merged) --\nsame for CI/CD → shared operator namespace,\nvia its own distinct branch/path/gate"]
+    R -->|"no infra repo known\n(legacy pre-mandatory-GitOps only)"| T["refuse -- no direct-apply fallback\n(register for GitOps first)"]
+    ```
 
 Every path that used to independently decide "apply now" (manual apply,
 gate-approve, `AutoMode`, `DriftDetector`) now funnels through this one
