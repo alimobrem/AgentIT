@@ -214,6 +214,26 @@ doesn't newly break anything — but if that 302 issue ever gets fixed, that hoo
 matching secret configured on GitHub's side (it currently has none either) or it will start hard-
 failing HMAC checks instead of silently 302'ing.
 
+**Follow-up (2026-07-18): the 302 issue above got fixed, and did need the secret too, exactly as
+predicted.** Root cause of the 302 itself (not identified at the time this note was first written):
+the Route targets the oauth-proxy sidecar (`targetPort: proxy-https`), and `--skip-auth-regex` only
+ever exempted `^/healthz$` — every GitHub push webhook (an external caller, unlike the other
+`/api/webhook/*` routes, which never leave the cluster) hit the OAuth login redirect instead of the
+app, 100% of the time (`gh api repos/.../hooks/{id}/deliveries` confirmed every attempt failing this
+way). A second, independently-broken hook (id `652423282`, created 2026-07-13 after this incident's
+fix, correctly `https://` this time) layered a *second* failure mode on top: `github_pr.py::
+ensure_webhook()` hardcoded `insecure_ssl: "0"`, so GitHub's delivery attempts failed TLS
+verification against this cluster's self-signed ingress cert before ever reaching the 302. Fixed
+both: `chart/templates/deployment.yaml` adds `--skip-auth-regex=^/api/webhook/` (same reasoning as
+`^/healthz$` above — these routes already carry their own HMAC/internal-token auth, oauth-proxy was
+never their real boundary); `ensure_webhook()` now takes an opt-in `AGENTIT_WEBHOOK_INSECURE_SSL`
+override instead of a hardcoded value. Live-remediated the two existing broken hooks directly
+(deleted the unfixable stale `http://` one, `gh api --method PATCH` the `https://` one to
+`insecure_ssl: "1"` + the matching `secret` from the same `github-webhook-secret` this note already
+predicted it would need) — verified via `gh api .../hooks/652423282/pings` (200) right after. See the
+"Awaiting verification" entry in the README's Unified apply flow section for the full user-facing
+investigation this came from.
+
 **Found and fixed** (originally logged here as "found but explicitly not fixed"):
 `chart/templates/argo-events/sensor-onboard.yaml` and `sensor-auto-apply.yaml` both set
 `retryStrategy.factor` as `{value: 2.0}` (a nested object), which Argo Events fails to parse as a

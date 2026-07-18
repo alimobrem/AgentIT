@@ -20,7 +20,7 @@
   {% endif %}
   &nbsp;
   <span class="badge badge-{{ report.criticality }}"
-    title="How much oversight this app needs -- set at Assess time, not inferred. High/critical apps always require human deploy approval (never auto-approved) and get stricter default SLO targets.">{{ report.criticality }}</span>
+    title="How much oversight this app needs -- set at Assess time, not inferred. High/critical apps can never auto-deliver (a human must click Deliver, or approve a gate, before any PR opens) and get stricter default SLO targets.">{{ report.criticality }}</span>
   &nbsp;
   {% if gitops_registered %}
   <span class="badge badge-info" title="Changes to this app go through PR review + Argo CD sync">GitOps</span>

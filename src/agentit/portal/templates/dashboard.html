@@ -78,12 +78,13 @@
       <input type="url" name="repo_url" required placeholder="https://github.com/org/repo">
     </div>
     <div class="form-group">
-      <select name="criticality">
+      <select name="criticality" aria-label="Criticality">
         <option value="low">Low</option>
         <option value="medium" selected>Medium</option>
         <option value="high">High</option>
         <option value="critical">Critical</option>
       </select>
+      <span class="text-muted text-xs">How much oversight this app needs. Low/Medium can auto-open a GitOps PR with no clicks (if Auto-Mode is on and the safety check passes); High/Critical always needs an explicit human Deliver click (or gate approval) before any PR opens. Higher criticality also sets stricter default SLO targets.</span>
     </div>
     <div class="action-bar">
       <button type="submit" class="btn btn-lg">

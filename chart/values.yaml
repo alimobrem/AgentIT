@@ -22,6 +22,13 @@ resources:
 env:
   ANTHROPIC_VERTEX_PROJECT_ID: ""
   CLOUD_ML_REGION: ""
+  # "1"/"true" skips TLS verification when registering each managed app's
+  # push webhook with GitHub -- needed on clusters using a self-signed
+  # ingress cert (the OpenShift default), where GitHub's webhook delivery
+  # otherwise fails every attempt with "certificate signed by unknown
+  # authority" and delivery finding-verification never runs. See
+  # github_pr.py::ensure_webhook() and docs/deployment.md.
+  AGENTIT_WEBHOOK_INSECURE_SSL: ""
 
 rollout:
   enabled: true
