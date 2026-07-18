@@ -1142,7 +1142,7 @@ class TestWatcherNetworkPolicies:
         docs = list(yaml.safe_load_all(rendered))
         return {d["metadata"]["name"]: d for d in docs if d}
 
-    def test_parseable_and_covers_all_five_watchers(self):
+    def test_parseable_and_covers_all_six_watchers(self):
         by_name = self._by_name()
         assert set(by_name) == {
             "agentit-vuln-watcher",
@@ -1150,6 +1150,7 @@ class TestWatcherNetworkPolicies:
             "agentit-drift-detector",
             "agentit-skill-learner",
             "agentit-capability-scout",
+            "agentit-reassess-scheduler",
         }
         for policy in by_name.values():
             assert policy["kind"] == "NetworkPolicy"
@@ -1167,13 +1168,14 @@ class TestWatcherNetworkPolicies:
             "agentit-drift-detector": "agentit-drift-detector",
             "agentit-skill-learner": "agentit-skill-learner",
             "agentit-capability-scout": "agentit-capability-scout",
+            "agentit-reassess-scheduler": "agentit-reassess-scheduler",
         }
         by_name = self._by_name()
         for name, app_label in expected.items():
             assert by_name[name]["spec"]["podSelector"]["matchLabels"]["app"] == app_label
 
     def test_capability_scout_has_no_portal_or_kube_api_egress(self):
-        """Unlike the other 4 watchers, capability-scout never calls
+        """Unlike the other watchers, capability-scout never calls
         kube.py and has no cross-pod draft-push mechanism -- it opens a PR
         directly against the git remote instead."""
         policy = self._by_name()["agentit-capability-scout"]
@@ -1182,12 +1184,26 @@ class TestWatcherNetworkPolicies:
             assert 8080 not in ports
             assert 6443 not in ports
 
+    def test_reassess_scheduler_has_portal_egress_but_no_kube_api_egress(self):
+        """reassess-scheduler only ever calls back into the portal's own
+        /api/webhook/assess -- unlike vuln-watcher/slo-tracker/drift-detector
+        it never calls kube.py, so it has no Kubernetes API server egress
+        rule (but, unlike capability-scout, it does need the portal Service
+        rule)."""
+        policy = self._by_name()["agentit-reassess-scheduler"]
+        egress_ports = set()
+        for rule in policy["spec"]["egress"]:
+            for p in rule.get("ports", []):
+                egress_ports.add(p.get("port"))
+        assert 8080 in egress_ports
+        assert 6443 not in egress_ports
+
     def test_egress_allows_dns_and_api_server(self):
-        """capability-scout is the one exception -- see
-        test_capability_scout_has_no_portal_or_kube_api_egress above: it
-        never calls kube.py, so it has no Kubernetes API server egress rule."""
+        """capability-scout and reassess-scheduler are the two exceptions
+        -- see their own dedicated tests above: neither calls kube.py, so
+        neither has a Kubernetes API server egress rule."""
         for name, policy in self._by_name().items():
-            if name == "agentit-capability-scout":
+            if name in ("agentit-capability-scout", "agentit-reassess-scheduler"):
                 continue
             egress_ports = {
                 (rule.get("ports", [{}])[0].get("protocol"), rule.get("ports", [{}])[0].get("port"))
@@ -1261,6 +1277,7 @@ class TestAgentDeploymentsUseTheAgentitServiceAccount:
         CHART_DIR / "agents" / "drift-detector.yaml",
         CHART_DIR / "agents" / "skill-learner.yaml",
         CHART_DIR / "agents" / "capability-scout.yaml",
+        CHART_DIR / "agents" / "reassess-scheduler.yaml",
     ]
 
     def test_all_agent_deployments_set_service_account_name(self):
@@ -1427,6 +1444,59 @@ class TestCapabilityScoutDefaultsOff:
         values_path = CHART_DIR.parent / "values.yaml"
         values = yaml.safe_load(values_path.read_text())
         assert values["agents"]["capabilityScout"]["enabled"] is False
+
+
+class TestReassessSchedulerDeployment:
+    """reassess-scheduler Deployment (chart/templates/agents/reassess-scheduler.yaml)
+    -- follows the exact same long-lived-Deployment-watcher pattern as
+    drift-detector/skill-learner, not a new mechanism."""
+
+    TEMPLATE = CHART_DIR / "agents" / "reassess-scheduler.yaml"
+
+    def test_parseable(self):
+        doc = _load(self.TEMPLATE)
+        assert doc["kind"] == "Deployment"
+        assert doc["metadata"]["name"] == "agentit-reassess-scheduler"
+
+    def test_invokes_reassess_watch_with_configured_interval(self):
+        doc = _load(self.TEMPLATE)
+        container = doc["spec"]["template"]["spec"]["containers"][0]
+        assert container["command"] == ["python", "-m", "agentit", "reassess-watch"]
+        assert "--interval" in container["args"]
+
+    def test_calls_back_into_the_portal_via_internal_webhook_token(self):
+        """Every re-assessment goes through the portal's own
+        /api/webhook/assess -- not a second, parallel assess pipeline --
+        so this Deployment needs the same AGENTIT_PORTAL_URL/
+        AGENTIT_INTERNAL_WEBHOOK_TOKEN wiring RemediationLoop/SkillLearner
+        already use."""
+        doc = _load(self.TEMPLATE)
+        container = doc["spec"]["template"]["spec"]["containers"][0]
+        env_by_name = {e["name"]: e for e in container["env"] if "name" in e}
+        assert "AGENTIT_PORTAL_URL" in env_by_name
+        assert env_by_name["AGENTIT_INTERNAL_WEBHOOK_TOKEN"]["valueFrom"]["secretKeyRef"]["optional"] is True
+
+    def test_has_liveness_probe_via_heartbeat_file(self):
+        doc = _load(self.TEMPLATE)
+        container = doc["spec"]["template"]["spec"]["containers"][0]
+        assert "heartbeat" in container["livenessProbe"]["exec"]["command"][-1]
+
+    def test_has_restrictive_security_context(self):
+        doc = _load(self.TEMPLATE)
+        pod_spec = doc["spec"]["template"]["spec"]
+        assert pod_spec["securityContext"]["runAsNonRoot"] is True
+        container = pod_spec["containers"][0]
+        assert container["securityContext"]["allowPrivilegeEscalation"] is False
+        assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
+
+    def test_defaults_to_disabled_in_values(self):
+        """Off by default like every other agent flag -- an operator must
+        opt in before any app's saved cadence actually causes an automatic
+        re-assessment."""
+        values_path = CHART_DIR.parent / "values.yaml"
+        values = yaml.safe_load(values_path.read_text())
+        assert values["agents"]["reassessScheduler"]["enabled"] is False
+        assert values["agents"]["reassessScheduler"]["interval"] == 3600
 
 
 class TestWorkflowCronJobsShareTheSameRescanPattern:

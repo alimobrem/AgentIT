@@ -1,0 +1,91 @@
+{{- if .Values.agents.reassessScheduler.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-reassess-scheduler
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-reassess-scheduler
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-reassess-scheduler
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-reassess-scheduler
+        app.kubernetes.io/component: agent
+    spec:
+      # Uses the same `{{ .Release.Name }}` SA every other watcher
+      # Deployment does (see drift-detector.yaml's identical comment) for
+      # consistency, even though this watcher never calls the Kubernetes
+      # API directly -- only the portal's own /api/webhook/assess (over
+      # HTTP, internal-token-gated) and Postgres.
+      serviceAccountName: {{ .Release.Name }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: reassess-scheduler
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [python, -m, agentit, reassess-watch]
+          args:
+            - --interval
+            - "{{ .Values.agents.reassessScheduler.interval }}"
+          env:
+            # Same source of truth as the image ref above / portal Rollout.
+            - name: AGENTIT_GIT_COMMIT
+              value: {{ .Values.image.tag | quote }}
+            - name: AGENTIT_IMAGE_TAG
+              value: {{ .Values.image.tag | quote }}
+            # Every re-assessment is triggered via the portal's own
+            # /api/webhook/assess -- the same route RemediationLoop/Tekton
+            # already call -- not a second, parallel assess code path.
+            - name: AGENTIT_PORTAL_URL
+              value: http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc:8080
+            - name: AGENTIT_INTERNAL_WEBHOOK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agentit-internal-webhook-token
+                  key: token
+                  optional: true
+            {{- if .Values.kafka.enabled }}
+            - name: AGENTIT_KAFKA_BOOTSTRAP
+              value: {{ .Values.kafka.bootstrapServers }}
+            {{- end }}
+            # Postgres is the only supported store -- always-on, not a flag.
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.bundled.credentials.secretName }}
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.bundled.credentials.secretName }}
+                  key: password
+            - name: AGENTIT_DB_DSN
+              value: "postgresql://$(PGUSER):$(PGPASSWORD)@{{ .Release.Name }}-postgres-bundled.{{ .Release.Namespace }}.svc:5432/{{ .Values.postgres.bundled.credentials.database }}"
+          livenessProbe:
+            exec:
+              command: [sh, -c, "test -f /tmp/heartbeat && test $(($(date +%s) - $(stat -c %Y /tmp/heartbeat 2>/dev/null || echo 0))) -lt 900"]
+            initialDelaySeconds: 60
+            periodSeconds: 120
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+{{- end }}
