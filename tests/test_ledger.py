@@ -6,9 +6,11 @@ grouping, the watcher-failure signal) and the §4 rewind chain query."""
 from __future__ import annotations
 
 from agentit.ledger import (
+    CARD_TYPE_LABELS,
     get_chain_cards,
     get_ledger_cards,
     group_cards_by_app,
+    humanize_card_type,
     recent_watcher_failures,
 )
 from agentit.llm_decisions import build_secret_classify_events
@@ -327,6 +329,22 @@ class TestGroupCardsByApp:
         cards = [{"target_app": None, "timestamp": "2026-01-01T00:00:00"}]
 
         assert group_cards_by_app(cards) == {}
+
+
+class TestHumanizeCardType:
+    """Ledger card_type is a bare letter (A-P) internally -- ledger.html's
+    filter dropdown and every rendered card badge must never show that
+    letter on its own with no explanation (docs/ledger-design-spec.md §1
+    is where each letter's real meaning is defined)."""
+
+    def test_every_letter_a_through_p_has_a_real_label(self):
+        for letter in "ABCDEFGHIJKLMNOP":
+            label = humanize_card_type(letter)
+            assert label != letter, f"card type {letter} has no human label"
+            assert label == CARD_TYPE_LABELS[letter]
+
+    def test_unknown_card_type_falls_back_to_itself_not_a_crash(self):
+        assert humanize_card_type("Z") == "Z"
 
 
 class TestRecentWatcherFailures:

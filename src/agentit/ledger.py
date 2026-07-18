@@ -255,6 +255,50 @@ def _gate_card(gate: dict, *, known_app_name: str | None = None) -> dict:
     }
 
 
+# Human labels for the card_type letter (docs/ledger-design-spec.md §1's
+# A-P table) -- the letter itself stays the real filter value/query param
+# (ledger.html's <option value="{{ letter }}">, insights.py's card_type
+# query arg) so nothing about the underlying data model or route changes;
+# only what's ever shown to a user is affected. Deliberately a category
+# name distinct from a card's own humanized title (see
+# _EVENT_ACTION_TITLES below) rather than restating it -- "Gate opened" +
+# "GitOps PR pending" on the same card is two levels of real information,
+# not one fact said twice.
+CARD_TYPE_LABELS: dict[str, str] = {
+    "A": "Assessment",
+    "B": "Fix / onboard generated",
+    "C": "Classifier",
+    "D": "Gate opened",
+    "E": "Gate resolved",
+    "F": "Delivery",
+    "G": "Fix review",
+    "H": "Watcher tick",
+    "I": "Needs attention",
+    "J": "SLO breach",
+    "K": "Drift",
+    "L": "Self-correction",
+    "M": "Learning run",
+    "N": "Catalog change",
+    "O": "Self-improvement",
+    "P": "Setting change",
+}
+
+
+def humanize_card_type(card_type: str) -> str:
+    """Decode a card_type letter into its real category name (see
+    CARD_TYPE_LABELS above) -- never the bare letter, which means nothing
+    to a user without reading this module's own source. Falls back to the
+    letter itself for any value outside A-P (there shouldn't be one, but a
+    lookup miss should degrade to "unlabeled", not a blank/KeyError).
+
+    Public (not just this module's own Ledger badge use): also registered
+    as the ``humanize_card_type`` Jinja filter (see portal/app.py) so
+    ledger.html's "Card type" filter dropdown decodes the same table
+    instead of listing bare letters A-P with no explanation.
+    """
+    return CARD_TYPE_LABELS.get(card_type, card_type)
+
+
 _MECHANISM_SHORT_LABELS: dict[str, str] = {
     "direct-apply": "Applied directly",
     # These three all say plainly *which* repo the PR/commit targets --

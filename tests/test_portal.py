@@ -871,6 +871,26 @@ async def test_ledger_page_filters_by_card_type(client, _override_store):
     assert "assessment-complete" not in resp.text
 
 
+async def test_ledger_card_type_filter_and_badge_show_human_labels_not_bare_letters(client, _override_store):
+    """The Card type filter dropdown and every card's own badge decode the
+    bare A-P letter (docs/ledger-design-spec.md §1) into a real label via
+    ledger.py's humanize_card_type() -- a user should never have to read
+    the source to know what "H" means."""
+    store = _override_store
+    await store.save(_make_report("card-label-app"))
+    await store.log_event("vuln-watcher", "tick-complete", None, "info", "tick ok")
+
+    resp = await client.get("/ledger?view=flat")
+    assert resp.status_code == 200
+    # Filter dropdown's visible option text, not just its value=
+    assert ">Watcher tick</option>" in resp.text
+    assert ">Assessment</option>" in resp.text
+    for letter in "ABCDEFGHIJKLMNOP":
+        assert f">{letter}</option>" not in resp.text, f"card type {letter} rendered as a bare letter"
+    # The card's own badge also shows the label, keeping the raw letter only as a tooltip
+    assert 'title="Card type H">Watcher tick<' in resp.text
+
+
 async def test_ledger_page_filters_by_app(client, _override_store):
     store = _override_store
     await store.save(_make_report("app-one"))

@@ -29,7 +29,7 @@
   <div class="timeline-marker {% if card.severity == 'critical' %}marker-danger{% elif card.card_type in ('E', 'F') %}marker-success{% elif card.card_type == 'D' %}marker-info{% else %}marker-default{% endif %}"></div>
   <div class="timeline-content">
     <div class="timeline-header">
-      <span class="badge badge-muted">{{ card.card_type }}</span>
+      <span class="badge badge-muted" title="Card type {{ card.card_type }}">{{ card.card_type | humanize_card_type }}</span>
       <span class="badge badge-{{ card.severity | default('info') }}">{{ card.title }}</span>
       {% if link_to_app and card.target_app %}
         {% if card.assessment_id %}

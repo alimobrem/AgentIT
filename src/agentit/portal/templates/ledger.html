@@ -45,7 +45,7 @@
       <select id="filter-ledger-card-type" name="card_type">
         <option value="">All card types</option>
         {% for letter in ('A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P') %}
-        <option value="{{ letter }}" {{ 'selected' if card_type_filter == letter }}>{{ letter }}</option>
+        <option value="{{ letter }}" {{ 'selected' if card_type_filter == letter }}>{{ letter | humanize_card_type }}</option>
         {% endfor %}
       </select>
     </div>
