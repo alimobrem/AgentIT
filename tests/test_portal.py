@@ -1370,6 +1370,22 @@ async def test_resolve_stale_cluster_admin_review_gate_redirects_to_own_actions_
     assert resp.headers["location"] == f"/assessments/{aid}?tab=actions"
 
 
+async def test_gate_card_badge_shows_human_label_not_raw_gate_type(client, _override_store):
+    """gate_card() (Assessment Detail's Actions tab, shared with the
+    now-retired Admin Review page) rendered a gate's real gate_type as
+    `{{ gate.gate_type | upper }}` -- an all-caps hyphenated identifier
+    with no explanation. Fixed via ledger.py's humanize_gate_type()."""
+    store = _override_store
+    report = _make_report_with_findings("gate-label-app")
+    aid = await store.save(report)
+    await store.create_gate(aid, "auto-mode-review", "needs review")
+
+    resp = await client.get(f"/assessments/{aid}?tab=actions")
+    assert resp.status_code == 200
+    assert "AUTO-MODE-REVIEW" not in resp.text
+    assert 'title="Gate type: auto-mode-review">Auto-mode review<' in resp.text
+
+
 async def test_list_gates_includes_app_name(client, _override_store):
     """docs/ui-redesign-proposal.md §2's confirmed defect: gates never
     carried which app they belonged to. list_gates()/list_all_gates() now

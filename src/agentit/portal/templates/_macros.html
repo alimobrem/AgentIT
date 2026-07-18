@@ -61,7 +61,7 @@
 <div class="card mb-1" x-data="{ showReason: false }">
   <div class="card-header">
     <div>
-      <span class="badge badge-{{ gate.severity | default('info') }}">{{ gate.gate_type | upper }}</span>
+      <span class="badge badge-{{ gate.severity | default('info') }}" title="Gate type: {{ gate.gate_type }}">{{ gate.gate_type | humanize_gate_type }}</span>
       <span class="text-muted text-sm" data-timestamp="{{ gate.created_at }}">{{ gate.created_at[:16] }}</span>
     </div>
     {% if gate.assessment_id %}

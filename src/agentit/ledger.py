@@ -299,6 +299,51 @@ def humanize_card_type(card_type: str) -> str:
     return CARD_TYPE_LABELS.get(card_type, card_type)
 
 
+# Human labels for a gate's real gate_type -- gate_card() (_macros.html)
+# used to render this as `{{ gate.gate_type | upper }}`, e.g.
+# "GITOPS-PR-PENDING-SHARED-NAMESPACE" or "AUTO-MODE-REVIEW", an all-caps
+# hyphenated internal identifier with no spaces, on both Admin Review and
+# every app's Actions tab. Deliberately not a strict dict-only lookup like
+# CARD_TYPE_LABELS above: gate types have changed more than once this
+# session (cluster-conflict-review and auto-mode-scope-review retired,
+# cluster-admin-review retired but still rendered for in-flight rows,
+# gitops-pr-pending-shared-namespace added) and the "finding-{category}"
+# family covers whichever check dimensions checks/ actually has -- a
+# fallback that degrades gracefully to a readable phrase (never a raw,
+# unhumanized value) matters more here than an exhaustive table that goes
+# stale the next time a gate type is renamed.
+GATE_TYPE_LABELS: dict[str, str] = {
+    "cluster-admin-review": "Cluster-admin review",
+    "gitops-pr-pending": "GitOps PR pending",
+    "gitops-pr-pending-shared-namespace": "GitOps PR pending (shared namespace)",
+    "auto-mode-review": "Auto-mode review",
+    "rollback-review": "Rollback review",
+    "finding-unresolved-escalation": "Unresolved finding escalation",
+}
+
+
+def humanize_gate_type(gate_type: str) -> str:
+    """Decode a gate's gate_type into a real, readable phrase -- never the
+    raw hyphenated identifier. Checks the explicit table first; a
+    "finding-{category}" gate (one per check dimension -- see
+    routes/webhooks.py's per-category dispatcher) becomes "{Category}
+    finding"; anything else degrades to Title Case with hyphens/
+    underscores turned into spaces, so an unrecognized or future gate type
+    still reads as a phrase instead of a raw identifier.
+
+    Public: also registered as the ``humanize_gate_type`` Jinja filter
+    (see portal/app.py) for _macros.html's shared ``gate_card()``.
+    """
+    if not gate_type:
+        return gate_type
+    if gate_type in GATE_TYPE_LABELS:
+        return GATE_TYPE_LABELS[gate_type]
+    if gate_type.startswith("finding-"):
+        category = gate_type[len("finding-"):].replace("-", " ").replace("_", " ").strip()
+        return f"{category.capitalize()} finding" if category else "Finding"
+    return gate_type.replace("-", " ").replace("_", " ").strip().capitalize()
+
+
 _MECHANISM_SHORT_LABELS: dict[str, str] = {
     "direct-apply": "Applied directly",
     # These three all say plainly *which* repo the PR/commit targets --

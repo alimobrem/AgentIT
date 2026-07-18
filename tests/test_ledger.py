@@ -11,6 +11,7 @@ from agentit.ledger import (
     get_ledger_cards,
     group_cards_by_app,
     humanize_card_type,
+    humanize_gate_type,
     recent_watcher_failures,
 )
 from agentit.llm_decisions import build_secret_classify_events
@@ -345,6 +346,31 @@ class TestHumanizeCardType:
 
     def test_unknown_card_type_falls_back_to_itself_not_a_crash(self):
         assert humanize_card_type("Z") == "Z"
+
+
+class TestHumanizeGateType:
+    """gate_card() (_macros.html) used to render a gate's real gate_type
+    as `{{ gate.gate_type | upper }}` -- an all-caps, hyphenated internal
+    identifier ("GITOPS-PR-PENDING-SHARED-NAMESPACE") with no explanation,
+    on every app's Actions tab."""
+
+    def test_known_gate_types_get_a_real_phrase(self):
+        assert humanize_gate_type("cluster-admin-review") == "Cluster-admin review"
+        assert humanize_gate_type("gitops-pr-pending") == "GitOps PR pending"
+        assert humanize_gate_type("auto-mode-review") == "Auto-mode review"
+        assert humanize_gate_type("rollback-review") == "Rollback review"
+
+    def test_finding_category_gates_degrade_to_a_readable_phrase(self):
+        assert humanize_gate_type("finding-security") == "Security finding"
+        assert humanize_gate_type("finding-data_governance") == "Data governance finding"
+        assert humanize_gate_type("finding-unresolved-escalation") == "Unresolved finding escalation"
+
+    def test_unknown_gate_type_still_reads_as_a_phrase_not_a_raw_identifier(self):
+        assert humanize_gate_type("some-future-gate-type") == "Some future gate type"
+        assert "-" not in humanize_gate_type("some-future-gate-type")
+
+    def test_empty_gate_type_does_not_crash(self):
+        assert humanize_gate_type("") == ""
 
 
 class TestRecentWatcherFailures:
