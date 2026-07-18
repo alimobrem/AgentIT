@@ -524,6 +524,16 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
         h["overall_score"] >= 100 for h in score_history if h["id"] != assessment_id
     )
 
+    assessment_cadence = await s.get_assessment_cadence(report.repo_url)
+    # Real signal (same one schedules.py's "Long-Lived Agents" table and
+    # Capabilities' Self-Improvement tab already use), not a chart-intent
+    # default -- so the cadence dropdown's help text never claims automatic
+    # re-assessment is happening when watchers/reassess_scheduler.py isn't
+    # actually deployed/ticking anywhere in this cluster.
+    from agentit.portal.routes.capabilities import watcher_heartbeat_status
+    _reassess_hb = watcher_heartbeat_status(await s.list_agents(), "reassess-scheduler", 2 * 86400)
+    reassess_scheduler_active = bool(_reassess_hb["has_run"]) and not _reassess_hb["stale"]
+
     return get_templates().TemplateResponse(
         request,
         "assessment_detail.html",
@@ -550,6 +560,8 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "suppressions": suppressions,
             "celebrate_first_perfect_score": celebrate_first_perfect_score,
             "recently_resolved_actions_count": recently_resolved_actions_count,
+            "assessment_cadence": assessment_cadence,
+            "reassess_scheduler_active": reassess_scheduler_active,
         },
     )
 
@@ -608,6 +620,43 @@ async def register_gitops(request: Request, assessment_id: str):
             f"/assessments/{assessment_id}?success="
             f"{quote('GitOps infra repo configured via ' + infra_repo_url + '. This app will show as GitOps-registered once your next Fix/Onboard delivery is committed and merged there.')}"
         ),
+        status_code=303,
+    )
+
+
+@router.post("/assessments/{assessment_id}/set-cadence", response_model=None)
+async def set_assessment_cadence(request: Request, assessment_id: str):
+    """Sets how often this app is automatically re-Assessed
+    (``apps.assessment_cadence``: daily/weekly/monthly/manual) --
+    read by ``watchers/reassess_scheduler.py``'s tick loop, which triggers
+    the re-assessment through the same ``/api/webhook/assess`` route the
+    manual Fleet Re-assess button already uses. Saving a cadence here is
+    real (persisted on the app row) regardless of whether that watcher is
+    currently deployed/enabled -- see ``assessment_detail.html``'s own
+    honest copy for the "nothing is running to act on it yet" case.
+    """
+    from agentit.portal.store import ASSESSMENT_CADENCES
+
+    s = await get_store()
+    report = await s.get(assessment_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+
+    form = await request.form()
+    cadence = str(form.get("cadence", "")).strip()
+    if cadence not in ASSESSMENT_CADENCES:
+        return RedirectResponse(
+            url=f"/assessments/{assessment_id}?error={quote('Invalid re-assessment cadence.')}",
+            status_code=303,
+        )
+
+    await s.set_assessment_cadence(report.repo_url, cadence)
+    await s.log_event(
+        "portal", "assessment-cadence-changed", report.repo_name, "info",
+        f"Automatic re-assessment cadence set to: {cadence}",
+    )
+    return RedirectResponse(
+        url=f"/assessments/{assessment_id}?success={quote('Re-assessment cadence updated.')}",
         status_code=303,
     )
 
