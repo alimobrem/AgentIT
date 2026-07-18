@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import os
 from unittest.mock import MagicMock, patch
 
 from agentit.portal.github_pr import (
@@ -8,6 +9,7 @@ from agentit.portal.github_pr import (
     create_onboarding_pr,
     ensure_applicationset,
     ensure_infra_repo,
+    ensure_webhook,
 )
 
 
@@ -568,3 +570,83 @@ def test_ensure_infra_repo_writes_gitkeep_to_created_owner(mock_requests):
     put_url = mock_requests.put.call_args.args[0]
     assert "/repos/agentit-bot/agentit-gitops/contents/apps/.gitkeep" in put_url
     assert "/repos/octocat/" not in put_url
+
+
+# ── ensure_webhook ───────────────────────────────────────────────────────
+#
+# Regression test for the live "Awaiting verification" investigation: GitHub
+# webhook delivery to a self-signed-ingress-cert cluster (the OpenShift
+# default) fails every attempt with "certificate signed by unknown
+# authority" when `insecure_ssl` is hardcoded to "0" -- confirmed live via
+# `gh api repos/.../hooks/{id}/deliveries` showing a 100% failure rate for
+# AgentIT's own push webhook. `check_pending_delivery_verifications()` only
+# ever runs from a successfully-delivered push webhook, so this silently
+# starves it and leaves deliveries stuck "Awaiting verification" forever.
+
+
+@patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"})
+@patch("agentit.portal.github_pr.requests")
+def test_ensure_webhook_defaults_to_verifying_tls(mock_requests):
+    """No `AGENTIT_WEBHOOK_INSECURE_SSL` override -> the secure default
+    ("0", verify TLS) is sent, unchanged from today's behavior."""
+    get_resp = MagicMock()
+    get_resp.status_code = 200
+    get_resp.json.return_value = []
+    mock_requests.get.return_value = get_resp
+
+    post_resp = MagicMock()
+    post_resp.status_code = 201
+    post_resp.json.return_value = {"id": 42}
+    mock_requests.post.return_value = post_resp
+
+    os.environ.pop("AGENTIT_WEBHOOK_INSECURE_SSL", None)
+    result = ensure_webhook(
+        "https://github.com/org/my-app.git", "https://agentit.example.com/api/webhook/github-push",
+    )
+
+    assert result == {"id": 42, "created": True}
+    assert mock_requests.post.call_args.kwargs["json"]["config"]["insecure_ssl"] == "0"
+
+
+@patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123", "AGENTIT_WEBHOOK_INSECURE_SSL": "1"})
+@patch("agentit.portal.github_pr.requests")
+def test_ensure_webhook_insecure_ssl_override_for_self_signed_clusters(mock_requests):
+    """`AGENTIT_WEBHOOK_INSECURE_SSL=1` (set for clusters using a self-signed
+    ingress cert) must register the hook with `insecure_ssl: "1"`, so GitHub
+    actually delivers push events instead of failing TLS verification."""
+    get_resp = MagicMock()
+    get_resp.status_code = 200
+    get_resp.json.return_value = []
+    mock_requests.get.return_value = get_resp
+
+    post_resp = MagicMock()
+    post_resp.status_code = 201
+    post_resp.json.return_value = {"id": 43}
+    mock_requests.post.return_value = post_resp
+
+    result = ensure_webhook(
+        "https://github.com/org/my-app.git", "https://agentit.example.com/api/webhook/github-push",
+    )
+
+    assert result == {"id": 43, "created": True}
+    assert mock_requests.post.call_args.kwargs["json"]["config"]["insecure_ssl"] == "1"
+
+
+@patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"})
+@patch("agentit.portal.github_pr.requests")
+def test_ensure_webhook_idempotent_skips_create_on_existing_url(mock_requests):
+    """A hook already registered at the exact same URL must not be
+    recreated -- unaffected by the `insecure_ssl` change above."""
+    get_resp = MagicMock()
+    get_resp.status_code = 200
+    get_resp.json.return_value = [
+        {"id": 7, "config": {"url": "https://agentit.example.com/api/webhook/github-push"}},
+    ]
+    mock_requests.get.return_value = get_resp
+
+    result = ensure_webhook(
+        "https://github.com/org/my-app.git", "https://agentit.example.com/api/webhook/github-push",
+    )
+
+    assert result == {"id": 7, "created": False}
+    mock_requests.post.assert_not_called()

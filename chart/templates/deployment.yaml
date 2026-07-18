@@ -120,6 +120,8 @@ spec:
               value: {{ .Values.env.ANTHROPIC_VERTEX_PROJECT_ID | default "" | quote }}
             - name: CLOUD_ML_REGION
               value: {{ .Values.env.CLOUD_ML_REGION | default "" | quote }}
+            - name: AGENTIT_WEBHOOK_INSECURE_SSL
+              value: {{ .Values.env.AGENTIT_WEBHOOK_INSECURE_SSL | default "" | quote }}
             {{- if .Values.gcp.credentialsSecret }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: /var/secrets/gcp/credentials.json
@@ -225,6 +227,23 @@ spec:
             # public Route hit the OAuth login redirect (302) instead of the
             # app, and reported the portal as permanently down.
             - --skip-auth-regex=^/healthz$
+            # /api/webhook/github-push is called by GitHub itself (never a
+            # browser, and unreachable except through this external Route --
+            # GitHub can't reach the in-cluster Service the other
+            # /api/webhook/* routes use), and already has its own
+            # HMAC-SHA256 signature check (`_verify_github_signature` in
+            # routes/webhooks.py) as its real auth boundary, same as every
+            # other /api/webhook/* route already relies on an internal
+            # token instead of this proxy (docs/deployment.md's "Internal
+            # webhook token" section) -- oauth-proxy was never meant to
+            # guard any of these. Without this flag, GitHub's webhook
+            # delivery hit the OAuth login redirect (302) on every single
+            # attempt (`gh api repos/.../hooks/{id}/deliveries` showed a
+            # 100% failure rate), which silently starved
+            # `check_pending_delivery_verifications()` of the push events
+            # it needs -- deliveries stayed stuck "Awaiting verification"
+            # forever, since nothing else ever re-checks them.
+            - --skip-auth-regex=^/api/webhook/
           volumeMounts:
             - name: proxy-tls
               mountPath: /etc/tls/private

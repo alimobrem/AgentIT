@@ -1010,6 +1010,20 @@ def ensure_webhook(repo_url: str, webhook_url: str) -> dict:
                 logger.info("Webhook already exists on %s/%s (id=%s)", owner, repo, hook["id"])
                 return {"id": hook["id"], "created": False}
 
+        # Verify TLS by default (secure default for clusters with a real,
+        # publicly-trusted cert). Self-signed-ingress dev clusters (e.g. the
+        # default OpenShift wildcard cert) make GitHub's webhook delivery
+        # fail every single time with "certificate signed by unknown
+        # authority" -- confirmed live via `gh api repos/.../hooks/{id}/
+        # deliveries` showing 100% failures for this exact reason, which
+        # silently starves `check_pending_delivery_verifications()` of the
+        # push events it needs, leaving deliveries stuck showing "Awaiting
+        # verification" forever. `AGENTIT_WEBHOOK_INSECURE_SSL=1` opts a
+        # cluster into skipping verification, mirroring the CI webhook's
+        # already-hand-patched `insecure_ssl` (see docs/deployment.md).
+        insecure_ssl = "1" if os.environ.get("AGENTIT_WEBHOOK_INSECURE_SSL", "").strip().lower() in (
+            "1", "true", "yes",
+        ) else "0"
         resp = requests.post(
             f"{base_url}/hooks",
             headers=hdrs, timeout=10,
@@ -1020,7 +1034,7 @@ def ensure_webhook(repo_url: str, webhook_url: str) -> dict:
                 "config": {
                     "url": webhook_url,
                     "content_type": "json",
-                    "insecure_ssl": "0",
+                    "insecure_ssl": insecure_ssl,
                 },
             },
         )

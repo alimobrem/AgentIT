@@ -1322,6 +1322,25 @@ class TestOauthProxyHealthzBypass:
         raw = self.TEMPLATE.read_text()
         assert "--skip-auth-regex=^/healthz$" in raw
 
+    def test_skips_auth_for_github_push_webhook(self):
+        """Regression guard for a live bug: GitHub's own `github-push`
+        webhook delivery is external (GitHub can't reach the in-cluster
+        Service the other /api/webhook/* routes use) and must go through
+        this same oauth-proxy-fronted Route -- without this flag, every
+        single delivery attempt got redirected to the OAuth login page
+        (302) instead of reaching the app (confirmed live via `gh api
+        repos/.../hooks/{id}/deliveries`: 100% failure rate), silently
+        starving `check_pending_delivery_verifications()` of the push
+        events it needs and leaving deliveries stuck showing "Awaiting
+        verification" forever. `/api/webhook/github-push` already has its
+        own HMAC-SHA256 signature check as its real auth boundary
+        (`_verify_github_signature` in routes/webhooks.py), same as every
+        other /api/webhook/* route relies on an internal token instead of
+        this proxy -- see docs/deployment.md's "Internal webhook token"
+        section."""
+        raw = self.TEMPLATE.read_text()
+        assert "--skip-auth-regex=^/api/webhook/" in raw
+
 
 class TestSyntheticProbeCertCheck:
     """Regression guard for a live bug: ubi-minimal (this Job's probe image)
