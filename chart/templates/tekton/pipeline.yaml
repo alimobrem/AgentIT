@@ -185,9 +185,20 @@ spec:
         - name: image
           value: $(params.image-ref):$(params.revision)
 
+    # 2026-07-17 incident: this task's pod sat unschedulable (PV node-affinity
+    # + untolerated-taint conflict -- see trigger.yaml's notify-argocd
+    # podTemplate.tolerations, the real fix for that) long enough to exceed
+    # the old 2m timeout before the scheduling picture improved, and
+    # separately hit `etcdserver: request timed out` during Task resolution
+    # under control-plane pressure. 5m gives real transient scheduling/etcd
+    # delays room to clear on their own. Deliberately NOT raising `retries`
+    # above 1: earlier the same session, a *different* task's retry pileup
+    # (fresh pod per retry, same resource-starved nodes) turned one hang into
+    # a 10-minute cascading failure -- more retries compound exactly the
+    # resource pressure that caused the original delay, they don't fix it.
     - name: notify-argocd
       retries: 1
-      timeout: "2m0s"
+      timeout: "5m0s"
       runAfter: [run-tests, smoke-test-image]
       taskSpec:
         params:

@@ -29,6 +29,10 @@ HELM_VARS = {
 def _render(template_path: Path) -> str:
     """Read a template file and do basic Helm variable substitution."""
     raw = template_path.read_text()
+    # Strip {{- /* ... */ -}} Helm comment blocks (e.g. trigger.yaml's
+    # webhook-secret setup note) -- these can span multiple lines, so this
+    # must run before the single-line if/else/end/range stripping below.
+    raw = re.sub(r"[ \t]*\{\{-?\s*/\*.*?\*/\s*-?\}\}\n?", "", raw, flags=re.DOTALL)
     # Strip {{- if ... }}, {{- else }} and {{- end }} conditionals. This keeps
     # both branches' literal content, which is fine for our purposes here:
     # tests target one branch's keys and tolerate the other branch's lines
@@ -278,6 +282,75 @@ class TestTektonPipeline:
         assert "report-status" in task_names
         assert "self-assess" in task_names
 
+    def test_notify_argocd_timeout_tolerates_real_scheduling_delays(self):
+        """2026-07-17 incident: notify-argocd's pod couldn't schedule (PV
+        node-affinity + untolerated taints) and separately hit etcd
+        timeouts during Task resolution -- both took longer to clear than
+        the old 2m timeout. 5 minutes gives real transient delays room."""
+        doc = _load(self.TEMPLATE)
+        tasks = {t["name"]: t for t in doc["spec"]["tasks"]}
+        assert tasks["notify-argocd"]["timeout"] == "5m0s"
+
+    def test_notify_argocd_retries_not_bumped_above_one(self):
+        """Deliberate: a different task's retry pileup under node-resource
+        exhaustion turned one hang into a 10-minute cascading failure this
+        same session. More retries on a task that fails due to sustained
+        resource pressure compounds that pressure instead of fixing it --
+        the toleration fix (trigger.yaml) and the longer timeout above are
+        the safe levers here, not additional retries."""
+        doc = _load(self.TEMPLATE)
+        tasks = {t["name"]: t for t in doc["spec"]["tasks"]}
+        assert tasks["notify-argocd"]["retries"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Tekton PipelineRun trigger template: chart/templates/tekton/trigger.yaml
+# ---------------------------------------------------------------------------
+
+class TestTektonTrigger:
+    TEMPLATE = CHART_DIR / "tekton" / "trigger.yaml"
+
+    def _docs(self):
+        rendered = _render(self.TEMPLATE)
+        return list(yaml.safe_load_all(rendered))
+
+    def test_parseable(self):
+        docs = self._docs()
+        kinds = {d["kind"] for d in docs if d}
+        assert {"TriggerTemplate", "EventListener", "Route"} <= kinds
+
+    def _task_run_specs(self) -> list[dict]:
+        docs = self._docs()
+        tt = next(d for d in docs if d and d["kind"] == "TriggerTemplate")
+        pr_spec = tt["spec"]["resourcetemplates"][0]["spec"]
+        return pr_spec["taskRunSpecs"]
+
+    def test_notify_argocd_tolerates_the_control_plane_taint(self):
+        """2026-07-17 incident: notify-argocd's pod hit "0/6 nodes
+        available: PV node-affinity mismatches + untolerated taints" --
+        the `source` workspace's dynamically-provisioned EBS PVC ties the
+        whole PipelineRun to a single AWS zone (1 schedulable worker each
+        on this cluster), and that one same-zone worker being briefly
+        saturated leaves zero viable nodes. Tolerating the control-plane
+        taint for this one lightweight, short-lived task gives it a
+        same-zone fallback node without touching cluster taints/labels."""
+        specs = {s["pipelineTaskName"]: s for s in self._task_run_specs()}
+        assert "notify-argocd" in specs, "notify-argocd needs its own taskRunSpecs entry"
+        tolerations = specs["notify-argocd"]["podTemplate"]["tolerations"]
+        master_toleration = next(
+            (t for t in tolerations if t["key"] == "node-role.kubernetes.io/master"), None,
+        )
+        assert master_toleration is not None
+        assert master_toleration["effect"] == "NoSchedule"
+        assert master_toleration["operator"] == "Exists"
+
+    def test_build_image_task_run_spec_untouched(self):
+        """The notify-argocd podTemplate entry must be additive -- build-image's
+        existing stepSpecs compute-resource override (already tuned live,
+        see the comment above it) must survive alongside it."""
+        specs = {s["pipelineTaskName"]: s for s in self._task_run_specs()}
+        assert specs["build-image"]["stepSpecs"][0]["name"] == "build"
+
 
 # ---------------------------------------------------------------------------
 # Kafka → Sensor → HTTP trigger flow validation
@@ -350,6 +423,166 @@ class TestTektonCleanup:
         doc = _load(self.TEMPLATE)
         sa = doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]["serviceAccountName"]
         assert sa == "pipeline"
+
+    def _cleanup_script(self) -> str:
+        doc = _load(self.TEMPLATE)
+        return doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["args"][0]
+
+    def test_no_multi_field_for_loop_over_command_substitution(self):
+        """Regression guard for the real 2026-07-18 incident bug: `for x in
+        $(oc get ... -o jsonpath='...{name}{" "}{value}...')` word-splits on
+        every space/newline, so each loop iteration only ever sees one
+        token -- `awk '{print $2}'` on that single token is always empty,
+        so every `[ -z "$VALUE" ] && continue` guard fired on every
+        iteration and none of these loops ever deleted anything (confirmed
+        live: 100+ un-GC'd PipelineRuns/TaskRuns and dozens of stale Failed
+        pods). Every jsonpath template below emits two space-separated
+        fields per item, so none of them may be looped over with a bare
+        `for x in $(...)` -- must redirect to a file and `while read`."""
+        script = self._cleanup_script()
+        two_field_jsonpaths = [
+            line for line in script.splitlines()
+            if "jsonpath=" in line and '{" "}' in line and not line.lstrip().startswith("#")
+        ]
+        assert len(two_field_jsonpaths) >= 4, (
+            "expected to find the failed-pods/orphaned-affinity-pods/"
+            "orphaned-affinity-statefulsets/orphaned-jobs jsonpath queries"
+        )
+        for line in two_field_jsonpaths:
+            assert "for " not in line, (
+                f"multi-field jsonpath query must not be consumed by a bare "
+                f"`for x in $(...)` (word-splits apart from the pairing): {line!r}"
+            )
+
+    def _run_cleanup_script(self, tmp_path, namespace: str = "test-ns"):
+        """Actually execute the rendered cleanup script (real shell logic,
+        not just a string/YAML assertion) against a fake `oc` on PATH that
+        serves canned `get` responses and records every `delete` call --
+        the strongest regression check that the fixed multi-field loops
+        really do delete old-and-only-old resources end to end."""
+        import os
+        import subprocess
+        import textwrap
+
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        log_file = tmp_path / "oc-deletes.log"
+        fake_oc = bin_dir / "oc"
+        fake_oc.write_text(textwrap.dedent(f"""\
+            #!/usr/bin/env python3
+            import sys
+
+            args = sys.argv[1:]
+            verb = args[0] if args else ""
+            resource = args[1] if len(args) > 1 else ""
+            log_path = {str(log_file)!r}
+
+            def log(line):
+                with open(log_path, "a") as f:
+                    f.write(line + "\\n")
+
+            OLD, NEW = "2020-01-01T00:00:00Z", "2099-01-01T00:00:00Z"
+
+            if verb == "get":
+                if resource == "pods":
+                    joined = " ".join(args)
+                    if "phase=Succeeded" in joined:
+                        pass  # no succeeded pods in this fixture
+                    elif "phase=Failed" in joined:
+                        print("old-failed-pod " + OLD)
+                        print("new-failed-pod " + NEW)
+                    elif "managed-by=tekton-pipelines" in joined:
+                        print("orphan-aa-pod orphaned-pr")
+                        print("live-aa-pod live-pr")
+                elif resource == "pipelinerun":
+                    if len(args) > 2 and not args[2].startswith("-"):
+                        # existence check: `oc get pipelinerun NAME -n NS -o name`
+                        name = args[2]
+                        if name == "live-pr":
+                            print("pipelinerun.tekton.dev/" + name)
+                            sys.exit(0)
+                        sys.exit(1)
+                    else:
+                        print("old-pr " + OLD)
+                        print("new-pr " + NEW)
+                elif resource == "statefulset":
+                    print("orphan-aa-ss orphaned-pr")
+                    print("live-aa-ss live-pr")
+                elif resource == "pvc":
+                    pass  # no orphaned PVCs in this fixture
+                elif resource == "jobs":
+                    print("old-job " + OLD)
+                    print("new-job " + NEW)
+                sys.exit(0)
+            elif verb == "delete":
+                if resource.startswith(("pod/", "pipelinerun/")):
+                    log("delete " + resource)
+                else:
+                    name = args[2] if len(args) > 2 else ""
+                    log("delete " + resource + " " + name)
+                sys.exit(0)
+            sys.exit(0)
+        """))
+        fake_oc.chmod(0o755)
+
+        script = self._cleanup_script().replace("{{ .Release.Namespace }}", namespace)
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, (
+            f"cleanup script exited {result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        deleted = log_file.read_text().splitlines() if log_file.exists() else []
+        return result, deleted
+
+    def test_deletes_failed_pods_older_than_one_hour_only(self, tmp_path):
+        _result, deleted = self._run_cleanup_script(tmp_path)
+        assert any("old-failed-pod" in line for line in deleted), (
+            f"expected the >1h-old Failed pod to be deleted; deletes: {deleted}"
+        )
+        assert not any("new-failed-pod" in line for line in deleted), (
+            f"a Failed pod from the far future must never be deleted; deletes: {deleted}"
+        )
+
+    def test_deletes_orphaned_affinity_assistant_pods_only(self, tmp_path):
+        _result, deleted = self._run_cleanup_script(tmp_path)
+        assert any("orphan-aa-pod" in line for line in deleted), (
+            f"affinity-assistant pod whose PipelineRun no longer exists must be deleted; deletes: {deleted}"
+        )
+        assert not any("live-aa-pod" in line for line in deleted), (
+            f"affinity-assistant pod for a still-existing PipelineRun must not be deleted; deletes: {deleted}"
+        )
+
+    def test_deletes_orphaned_affinity_assistant_statefulsets_only(self, tmp_path):
+        _result, deleted = self._run_cleanup_script(tmp_path)
+        assert any("orphan-aa-ss" in line for line in deleted)
+        assert not any("live-aa-ss" in line for line in deleted)
+
+    def test_deletes_old_pipelineruns_only(self, tmp_path):
+        _result, deleted = self._run_cleanup_script(tmp_path)
+        assert any("old-pr" in line for line in deleted), (
+            f"PipelineRun completed >24h ago must be deleted; deletes: {deleted}"
+        )
+        assert not any("new-pr" in line for line in deleted)
+
+    def test_deletes_old_orphaned_jobs_only(self, tmp_path):
+        _result, deleted = self._run_cleanup_script(tmp_path)
+        assert any("old-job" in line for line in deleted), (
+            f"agent Job older than 1h must be deleted; deletes: {deleted}"
+        )
+        assert not any("new-job" in line for line in deleted)
+
+    def test_reports_nonzero_deleted_counts_in_output(self, tmp_path):
+        """Regression: before the fix, every 'Deleted N ...' summary line
+        printed 0 (or, for failed pods, only counted the unrelated
+        succeeded-pods loop) even when stale resources existed."""
+        result, _deleted = self._run_cleanup_script(tmp_path)
+        assert "Deleted 1 orphaned agent Jobs" in result.stdout
+        assert "Deleted 1 orphaned affinity-assistant pods" in result.stdout
+        assert "Deleted 1 orphaned affinity-assistant StatefulSets" in result.stdout
+        assert "Deleted 1 old PipelineRuns" in result.stdout
 
 
 # ---------------------------------------------------------------------------

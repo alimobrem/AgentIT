@@ -35,53 +35,59 @@ spec:
 
                   echo "Cleaning failed pods older than 1 hour (keeps recent failures inspectable)..."
                   FAILED_CUTOFF=$(date -u -d '1 hour ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-1H '+%Y-%m-%dT%H:%M:%SZ')
-                  for pod in $(oc get pods -n {{ .Release.Namespace }} --field-selector=status.phase=Failed -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.startTime}{"\n"}{end}' 2>/dev/null); do
-                    NAME=$(echo "$pod" | awk '{print $1}')
-                    STARTED=$(echo "$pod" | awk '{print $2}')
+                  # `for pod in $(oc get ... -o jsonpath='...{name}{" "}{startTime}{"\n"}...')`
+                  # (the form every loop below used to use) word-splits its command
+                  # substitution on ALL whitespace, including the space between name
+                  # and timestamp -- each loop iteration only ever sees ONE token, so
+                  # `awk '{print $2}'` on a single-token line is always empty and the
+                  # `[ -z "$STARTED" ] && continue` guard skipped every pod, forever.
+                  # Confirmed live (2026-07-18 incident): this is why dozens of stale
+                  # Failed pods and 100+ PipelineRuns/TaskRuns piled up despite this
+                  # CronJob "running" every 10 minutes. Redirect into a file and `while
+                  # read` line-by-line instead -- preserves the multi-field pairing.
+                  oc get pods -n {{ .Release.Namespace }} --field-selector=status.phase=Failed -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.startTime}{"\n"}{end}' > /tmp/failed-pods.txt 2>/dev/null || true
+                  while read -r NAME STARTED; do
                     if [ -z "$NAME" ] || [ -z "$STARTED" ]; then continue; fi
                     if [ "$STARTED" \< "$FAILED_CUTOFF" ]; then
                       oc delete pod "$NAME" -n {{ .Release.Namespace }} --wait=false 2>/dev/null && POD_DELETED=$((POD_DELETED+1))
                     fi
-                  done
+                  done < /tmp/failed-pods.txt
                   echo "Deleted $POD_DELETED completed/failed pods"
 
                   echo "Cleaning PipelineRuns older than 24 hours..."
                   CUTOFF=$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-24H '+%Y-%m-%dT%H:%M:%SZ')
                   PR_DELETED=0
-                  for pr in $(oc get pipelinerun -n {{ .Release.Namespace }} -o jsonpath='{range .items[?(@.status.completionTime)]}{.metadata.name}{" "}{.status.completionTime}{"\n"}{end}'); do
-                    NAME=$(echo "$pr" | awk '{print $1}')
-                    COMPLETED=$(echo "$pr" | awk '{print $2}')
+                  oc get pipelinerun -n {{ .Release.Namespace }} -o jsonpath='{range .items[?(@.status.completionTime)]}{.metadata.name}{" "}{.status.completionTime}{"\n"}{end}' > /tmp/old-pipelineruns.txt 2>/dev/null || true
+                  while read -r NAME COMPLETED; do
                     if [ -z "$NAME" ] || [ -z "$COMPLETED" ]; then continue; fi
                     if [ "$COMPLETED" \< "$CUTOFF" ]; then
                       oc delete pipelinerun "$NAME" -n {{ .Release.Namespace }} --wait=false 2>/dev/null && PR_DELETED=$((PR_DELETED+1))
                     fi
-                  done
+                  done < /tmp/old-pipelineruns.txt
                   echo "Deleted $PR_DELETED old PipelineRuns"
 
                   echo "Cleaning orphaned affinity-assistant pods..."
                   AA_DELETED=0
-                  for pod in $(oc get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/managed-by=tekton-pipelines -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.labels.tekton\.dev/pipelineRun}{"\n"}{end}' 2>/dev/null); do
-                    POD_NAME=$(echo "$pod" | awk '{print $1}')
-                    PR_NAME=$(echo "$pod" | awk '{print $2}')
+                  oc get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/managed-by=tekton-pipelines -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.labels.tekton\.dev/pipelineRun}{"\n"}{end}' > /tmp/aa-pods.txt 2>/dev/null || true
+                  while read -r POD_NAME PR_NAME; do
                     if [ -z "$POD_NAME" ] || [ -z "$PR_NAME" ]; then continue; fi
                     EXISTS=$(oc get pipelinerun "$PR_NAME" -n {{ .Release.Namespace }} -o name 2>/dev/null || echo "")
                     if [ -z "$EXISTS" ]; then
                       oc delete pod "$POD_NAME" -n {{ .Release.Namespace }} --wait=false 2>/dev/null && AA_DELETED=$((AA_DELETED+1))
                     fi
-                  done
+                  done < /tmp/aa-pods.txt
                   echo "Deleted $AA_DELETED orphaned affinity-assistant pods"
 
                   echo "Cleaning orphaned affinity-assistant StatefulSets..."
                   SS_DELETED=0
-                  for ss in $(oc get statefulset -n {{ .Release.Namespace }} -l app.kubernetes.io/managed-by=tekton-pipelines -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.labels.tekton\.dev/pipelineRun}{"\n"}{end}' 2>/dev/null); do
-                    SS_NAME=$(echo "$ss" | awk '{print $1}')
-                    PR_NAME=$(echo "$ss" | awk '{print $2}')
+                  oc get statefulset -n {{ .Release.Namespace }} -l app.kubernetes.io/managed-by=tekton-pipelines -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.labels.tekton\.dev/pipelineRun}{"\n"}{end}' > /tmp/aa-statefulsets.txt 2>/dev/null || true
+                  while read -r SS_NAME PR_NAME; do
                     if [ -z "$SS_NAME" ] || [ -z "$PR_NAME" ]; then continue; fi
                     EXISTS=$(oc get pipelinerun "$PR_NAME" -n {{ .Release.Namespace }} -o name 2>/dev/null || echo "")
                     if [ -z "$EXISTS" ]; then
                       oc delete statefulset "$SS_NAME" -n {{ .Release.Namespace }} --wait=false 2>/dev/null && SS_DELETED=$((SS_DELETED+1))
                     fi
-                  done
+                  done < /tmp/aa-statefulsets.txt
                   echo "Deleted $SS_DELETED orphaned affinity-assistant StatefulSets"
 
                   echo "Cleaning orphaned PVCs..."
@@ -99,15 +105,14 @@ spec:
 
                   echo "Cleaning orphaned agent Jobs (older than 1 hour)..."
                   JOB_DELETED=0
-                  for job in $(oc get jobs -n {{ .Release.Namespace }} -l agentit/managed-by=orchestrator -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.creationTimestamp}{"\n"}{end}'); do
-                    NAME=$(echo "$job" | awk '{print $1}')
-                    CREATED=$(echo "$job" | awk '{print $2}')
+                  AGE_CUTOFF=$(date -u -d '1 hour ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-1H '+%Y-%m-%dT%H:%M:%SZ')
+                  oc get jobs -n {{ .Release.Namespace }} -l agentit/managed-by=orchestrator -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.creationTimestamp}{"\n"}{end}' > /tmp/orphan-jobs.txt 2>/dev/null || true
+                  while read -r NAME CREATED; do
                     if [ -z "$NAME" ] || [ -z "$CREATED" ]; then continue; fi
-                    AGE_CUTOFF=$(date -u -d '1 hour ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-1H '+%Y-%m-%dT%H:%M:%SZ')
                     if [ "$CREATED" \< "$AGE_CUTOFF" ]; then
                       oc delete job "$NAME" -n {{ .Release.Namespace }} --wait=false 2>/dev/null && JOB_DELETED=$((JOB_DELETED+1))
                     fi
-                  done
+                  done < /tmp/orphan-jobs.txt
                   echo "Deleted $JOB_DELETED orphaned agent Jobs"
               resources:
                 requests:

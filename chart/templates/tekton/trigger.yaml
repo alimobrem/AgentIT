@@ -45,6 +45,30 @@ spec:
                   limits:
                     cpu: "1"
                     memory: 1Gi
+          # notify-argocd's pod inherits the `source` workspace PVC's node
+          # affinity (dynamically-provisioned gp3-csi/EBS volumes bind to a
+          # single AWS zone on first mount -- confirmed live: this cluster
+          # has exactly 1 schedulable worker per zone, paired with 1
+          # control-plane node in that same zone). With only 3 real workers,
+          # that one same-zone worker being briefly saturated by concurrent
+          # CI pods is enough to leave literally zero schedulable nodes for
+          # this task -- the exact "0/6 nodes available: PV node-affinity
+          # mismatches + untolerated taints" failure from the 2026-07-17
+          # incident. Tolerating the control-plane taint gives this one
+          # task a same-zone fallback node. Safe to do narrowly here only:
+          # notify-argocd is a single `sed`+`oc apply` (no build/test load,
+          # 64Mi/50m request, <2m runtime) -- unlike run-tests/build-image,
+          # it adds negligible extra pressure to the already etcd-sensitive
+          # control-plane nodes it might land on.
+          - pipelineTaskName: notify-argocd
+            podTemplate:
+              tolerations:
+                - key: node-role.kubernetes.io/master
+                  operator: Exists
+                  effect: NoSchedule
+                - key: node-role.kubernetes.io/control-plane
+                  operator: Exists
+                  effect: NoSchedule
         workspaces:
           - name: source
             volumeClaimTemplate:
