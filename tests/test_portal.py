@@ -3453,6 +3453,14 @@ async def test_activate_skill_survives_simulated_redeploy(tmp_path, monkeypatch)
 
     repo_dir = tmp_path / "repo"
     subprocess.run(["git", "clone", str(origin), str(repo_dir)], check=True, capture_output=True)
+    # A clean CI container has no ~/.gitconfig -- without a local identity,
+    # `git commit` below fails fast with "Please tell me who you are"
+    # (confirmed live: 15 straight Tekton `run-tests` failures on exactly
+    # this). Same per-repo `git config` pattern already used by
+    # test_cli.py/test_watch.py/test_onboard.py/test_cloner.py/
+    # test_comprehensive.py for their own throwaway repos.
+    subprocess.run(["git", "-C", str(repo_dir), "config", "user.email", "t@t.com"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "config", "user.name", "T"], check=True, capture_output=True)
 
     skill_file = _make_draft_skill(repo_dir, name="cve-2018-1002105")
     subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True)

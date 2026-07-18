@@ -12,10 +12,25 @@ a third time -- see docs/self-improvement-for-agentit.md.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# `git commit` needs an identity and falls back to guessing one from
+# getpwuid()/hostname when user.name/user.email aren't configured -- not
+# guaranteed to succeed (or to be fast) in every runtime, e.g. an arbitrary
+# OpenShift UID with no /etc/passwd entry. Setting these env vars for the
+# commit step only (checkout/add/push don't need an identity) makes this
+# automated commit path never depend on ambient git config, consistent with
+# the bot identity already baked into Containerfile's `git config --global`.
+_BOT_GIT_ENV = {
+    "GIT_AUTHOR_NAME": "AgentIT",
+    "GIT_AUTHOR_EMAIL": "agentit@agentit.local",
+    "GIT_COMMITTER_NAME": "AgentIT",
+    "GIT_COMMITTER_EMAIL": "agentit@agentit.local",
+}
 
 
 def create_branch_commit_push(
@@ -34,15 +49,25 @@ def create_branch_commit_push(
     path), not something that should take down a watcher's tick.
     """
     try:
-        subprocess.run(["git", "checkout", "-b", branch], check=True, capture_output=True, cwd=cwd, text=True)
-        subprocess.run(["git", "add", *paths], check=True, capture_output=True, cwd=cwd, text=True)
-        subprocess.run(["git", "commit", "-m", commit_message], check=True, capture_output=True, cwd=cwd, text=True)
-        subprocess.run(["git", "push", "-u", "origin", branch], check=True, capture_output=True, cwd=cwd, text=True)
+        subprocess.run(
+            ["git", "checkout", "-b", branch], check=True, capture_output=True, cwd=cwd, text=True, timeout=30,
+        )
+        subprocess.run(["git", "add", *paths], check=True, capture_output=True, cwd=cwd, text=True, timeout=30)
+        subprocess.run(
+            ["git", "commit", "-m", commit_message], check=True, capture_output=True, cwd=cwd, text=True,
+            timeout=30, env={**os.environ, **_BOT_GIT_ENV},
+        )
+        subprocess.run(
+            ["git", "push", "-u", "origin", branch], check=True, capture_output=True, cwd=cwd, text=True, timeout=60,
+        )
         return {"success": True, "branch": branch}
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr if isinstance(exc.stderr, str) else str(exc.stderr or "")
         logger.warning("git branch/commit/push failed for branch %s: %s", branch, stderr)
         return {"success": False, "error": stderr[:500] or str(exc)}
+    except subprocess.TimeoutExpired as exc:
+        logger.warning("git command timed out for branch %s: %s", branch, exc)
+        return {"success": False, "error": str(exc)}
     except OSError as exc:
         logger.warning("git command unavailable: %s", exc)
         return {"success": False, "error": str(exc)}
