@@ -56,6 +56,28 @@ def _cached_checks():
         return _checks_cache["data"]
 
 
+def bust_skills_cache() -> None:
+    """Invalidate the 60s skills cache so a newly-saved/activated skill
+    shows up on the very next page load.
+
+    Every caller (this module's own manual "Research CVEs & Generate
+    Skills"/activate-skill routes, plus ``webhooks.py``'s
+    ``skill-learner``-sourced draft webhook) used to write
+    ``_skills_cache["data"] = None`` directly, bypassing
+    ``_skills_cache_lock`` entirely -- the exact read-check-write critical
+    section that lock exists to protect (see ``_cached_skills()`` above).
+    A bust racing a concurrent ``_cached_skills()`` refresh that was already
+    past its own `is None`/TTL check can have its `None` silently
+    overwritten by that refresh's stale-relative-to-the-bust result,
+    delaying visibility of the new skill by up to another `_CACHE_TTL`
+    (60s) -- exactly what busting the cache was meant to prevent. Routing
+    every caller through this one locked helper closes that gap the same
+    way the TTL-cache locking fix already did for the read path.
+    """
+    with _skills_cache_lock:
+        _skills_cache["data"] = None
+
+
 # ── Agents ────────────────────────────────────────────────────────────
 
 # Same 2-day staleness threshold Schedules' watcher table and Capabilities'
@@ -688,7 +710,7 @@ async def capabilities_learn_route(request: Request):
     await s.log_event("learning-agent", LEARNING_RUN_ACTION, None, severity, summary, details=details)
 
     if saved:
-        _skills_cache["data"] = None  # bust the 60s cache so new skills show immediately
+        bust_skills_cache()  # bust the 60s cache so new skills show immediately
         # Kept alongside the LEARNING_RUN_ACTION event above for backward
         # compatibility -- existing consumers (tests, the toast) key off
         # "skills-generated" specifically to know a skill was actually written.
@@ -864,7 +886,7 @@ async def activate_skill_route(request: Request):
 
     verb = "Reactivated" if from_status == "deprecated" else "Activated"
     target.write_text(content.replace(f"status: {from_status}", "status: active", 1), encoding="utf-8")
-    _skills_cache["data"] = None
+    bust_skills_cache()
 
     # In-pod activation is done and already usable regardless of what
     # happens next -- see `_persist_skill_status_change`'s docstring for why
@@ -965,7 +987,7 @@ async def deprecate_skill_route(request: Request):
             "status: deprecated", f'status: deprecated\ndeprecated_reason: "{reason}"', 1,
         )
     target.write_text(updated, encoding="utf-8")
-    _skills_cache["data"] = None
+    bust_skills_cache()
 
     # Same durability requirement as activation -- see
     # `_persist_skill_status_change`'s docstring (skills/ is baked into the

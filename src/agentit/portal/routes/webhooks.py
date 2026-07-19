@@ -558,9 +558,12 @@ async def webhook_skill_draft(request: Request):
 
     # Bust the Capabilities page's 60s skills cache so this draft shows up
     # on the very next page load -- same cache `capabilities_learn_route`
-    # busts after a manual "Research CVEs & Generate Skills" run.
-    from agentit.portal.routes import capabilities as _capabilities
-    _capabilities._skills_cache["data"] = None
+    # busts after a manual "Research CVEs & Generate Skills" run. Goes
+    # through the locked helper (not a direct dict write) so this can't
+    # race `_cached_skills()`'s own read-check-write critical section --
+    # see `bust_skills_cache()`'s docstring.
+    from agentit.portal.routes.capabilities import bust_skills_cache
+    bust_skills_cache()
 
     return JSONResponse({"status": "saved", "name": path.stem, "path": str(path)})
 

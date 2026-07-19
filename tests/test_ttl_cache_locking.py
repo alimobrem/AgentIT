@@ -153,6 +153,56 @@ class TestCapabilitiesSkillsChecksCacheLock:
         capabilities_routes._checks_cache["data"] = None
         capabilities_routes._checks_cache["ts"] = 0
 
+    def test_bust_skills_cache_actually_blocks_on_the_read_paths_lock(self):
+        """Regression guard: `webhook_skill_draft`/the manual "Research
+        CVEs" route/`activate_skill_route` used to write
+        `_skills_cache["data"] = None` directly, bypassing
+        `_skills_cache_lock` entirely -- a bust racing a concurrent
+        `_cached_skills()` refresh already past its own `is None`/TTL check
+        could have its `None` silently overwritten by that refresh's
+        stale-relative-to-the-bust result.
+
+        A concurrency-counting lock (like `_TrackingLock` above) can't
+        actually catch this: `bust_skills_cache()`'s own critical section is
+        a single dict write, fast enough that even an unlocked version
+        would rarely overlap another lock-holder in a `_holders` counter.
+        Instead, this proves causation directly: hold
+        `_skills_cache_lock` open on a background thread, then call
+        `bust_skills_cache()` on the main thread and time it -- if it goes
+        through the (currently-held) lock, it must block for roughly the
+        hold duration; if it bypasses the lock (the pre-fix bug), it
+        returns almost immediately regardless of who else holds the lock.
+        """
+        capabilities_routes._skills_cache["data"] = "stale"
+        hold_seconds = 0.5
+        released = threading.Event()
+
+        def holder():
+            with capabilities_routes._skills_cache_lock:
+                _time.sleep(hold_seconds)
+            released.set()
+
+        t = threading.Thread(target=holder)
+        t.start()
+        _time.sleep(0.1)  # let the holder thread actually acquire first
+
+        start = _time.monotonic()
+        capabilities_routes.bust_skills_cache()
+        elapsed = _time.monotonic() - start
+        t.join()
+
+        # Generous margin (70% of the hold duration): the point is
+        # distinguishing "blocked for roughly the hold time" from the
+        # pre-fix bug's "returned in microseconds regardless of the lock",
+        # not asserting an exact wait time.
+        assert elapsed >= hold_seconds * 0.7, (
+            f"bust_skills_cache() returned in {elapsed:.3f}s while the lock was held for "
+            f"{hold_seconds}s -- it did not actually block on _skills_cache_lock"
+        )
+        assert released.is_set()
+        capabilities_routes._skills_cache["data"] = None
+        capabilities_routes._skills_cache["ts"] = 0
+
 
 class TestNavGateBadgesCacheLock:
     async def test_nav_gate_badges_lock_provides_mutual_exclusion(self, monkeypatch):
