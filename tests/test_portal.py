@@ -111,7 +111,6 @@ async def _override_store():
          patch("agentit.portal.routes.capabilities.get_store", return_value=test_store), \
          patch("agentit.portal.routes.settings.get_store", return_value=test_store), \
          patch("agentit.portal.routes.insights.get_store", return_value=test_store), \
-         patch("agentit.portal.routes.remediations.get_store", return_value=test_store), \
          patch("agentit.portal.routes.slos.get_store", return_value=test_store), \
          patch("agentit.image_builder.build_app_image",
                return_value={"image_ref": "test/image:test", "run_name": "test-run", "status": "skipped-in-tests"}):
@@ -335,7 +334,6 @@ async def test_back_to_assessment_links_are_live(client, _override_store):
 
     pages = [
         f"/assessments/{aid}/onboard-results",
-        f"/assessments/{aid}/remediations",
         f"/assessments/{aid}/slos",
         f"/assessments/{aid}/onboarding-history",
     ]
@@ -866,76 +864,34 @@ async def test_events_target_app_links_to_assessment_when_resolvable(client, _ov
 
 
 # ------------------------------------------------------------------
-# Ledger tests (docs/ledger-design-spec.md Phase 1)
+# Ledger tests -- Ledger's redesigned purpose is a fleet-wide PR list/
+# lifecycle view (see routes/insights.py::ledger_page()'s docstring),
+# superseding the earlier generic A-P event-union design docs/ledger-
+# design-spec.md described. Full coverage (needs-approval/history/filter-
+# by-category-app-lifecycle/empty states) lives in test_ledger_pr_view.py;
+# these are just route-level smoke tests alongside the rest of this file's
+# other page tests.
 # ------------------------------------------------------------------
 
 
-async def test_ledger_page_renders_fleet_wide_cards(client, _override_store):
-    """Default view is grouped by app (docs/ledger-design-spec.md §2 rule 2)
-    -- the app's row shows its own most-recent card summarized inline and
-    links back to that app's Assessment Detail Ledger tab. A freshly
-    assessed app with no open gates isn't "Needs You" (rule 3), so this
-    disables that filter to check the underlying grouped rendering itself."""
+async def test_ledger_page_renders_pr_list(client, _override_store):
     store = _override_store
     aid = await store.save(_make_report("ledger-fleet-app"))
+    await store.create_gate(
+        aid, "gitops-pr-pending", "PR opened", pr_url="https://github.com/org/ledger-fleet-app/pull/1",
+    )
 
-    resp = await client.get("/ledger?needs_you=0")
+    resp = await client.get("/ledger")
     assert resp.status_code == 200
     assert "Ledger" in resp.text
-    assert "assessment-complete" in resp.text
-    assert f'<a href="/assessments/{aid}?tab=ledger">ledger-fleet-app</a>' in resp.text
-
-
-async def test_ledger_page_filters_by_card_type(client, _override_store):
-    """Card-type filtering is exercised in the flat stream (?view=flat) --
-    a watcher tick has no target_app, so it can never appear in a
-    grouped-by-app row (docs/ledger-design-spec.md §2 rule 2 is strictly
-    per-app; untargeted fleet-level events live in the flat view only)."""
-    store = _override_store
-    await store.save(_make_report("card-a-app"))
-    await store.log_event("vuln-watcher", "tick-complete", None, "info", "tick ok")
-
-    resp = await client.get("/ledger?view=flat&card_type=H")
-    assert resp.status_code == 200
-    assert "tick-complete" in resp.text
-    assert "assessment-complete" not in resp.text
-
-
-async def test_ledger_card_type_filter_and_badge_show_human_labels_not_bare_letters(client, _override_store):
-    """The Card type filter dropdown and every card's own badge decode the
-    bare A-P letter (docs/ledger-design-spec.md §1) into a real label via
-    ledger.py's humanize_card_type() -- a user should never have to read
-    the source to know what "H" means."""
-    store = _override_store
-    await store.save(_make_report("card-label-app"))
-    await store.log_event("vuln-watcher", "tick-complete", None, "info", "tick ok")
-
-    resp = await client.get("/ledger?view=flat")
-    assert resp.status_code == 200
-    # Filter dropdown's visible option text, not just its value=
-    assert ">Watcher tick</option>" in resp.text
-    assert ">Assessment</option>" in resp.text
-    for letter in "ABCDEFGHIJKLMNOP":
-        assert f">{letter}</option>" not in resp.text, f"card type {letter} rendered as a bare letter"
-    # The card's own badge also shows the label, keeping the raw letter only as a tooltip
-    assert 'title="Card type H">Watcher tick<' in resp.text
-
-
-async def test_ledger_page_filters_by_app(client, _override_store):
-    store = _override_store
-    await store.save(_make_report("app-one"))
-    await store.save(_make_report("app-two"))
-
-    resp = await client.get("/ledger?app=app-one")
-    assert resp.status_code == 200
-    assert "app-one" in resp.text
-    assert "app-two" not in resp.text
+    assert "https://github.com/org/ledger-fleet-app/pull/1" in resp.text
 
 
 async def test_ledger_page_empty_state(client, _override_store):
     resp = await client.get("/ledger")
     assert resp.status_code == 200
-    assert "No Ledger activity yet" in resp.text
+    assert "No PR history yet" in resp.text
+    assert "Nothing waiting on you" in resp.text
 
 
 async def test_ledger_nav_link_present(client, _override_store):
@@ -1051,10 +1007,12 @@ async def test_finding_source_badge_strips_absolute_path(client, _override_store
     assert 'name="check_source" value="check:/opt/app-root/src/checks/cicd/ci-pipeline.yaml"' in resp.text
 
 
-async def test_ledger_needs_you_filter_hides_healthy_apps_by_default(client, _override_store):
-    """docs/ledger-design-spec.md §2 rule 3: "Needs You" (on by default)
-    shows only apps with a pending gate, a stale gate, or an unresolved SLO
-    breach -- a healthy app with no open work is hidden until toggled off."""
+async def test_ledger_no_longer_shows_non_pr_gates_or_healthy_app_needs_you(client, _override_store):
+    """Ledger's old fleet-wide "Needs You" (any pending gate, any app) is
+    gone -- Ledger is strictly PR-focused now (see
+    routes/insights.py::ledger_page()'s docstring). A `finding-security`
+    gate is a real pending action, but never a PR, so it must never appear
+    in Ledger's "Waiting for your approval" list."""
     store = _override_store
     await store.save(_make_report("healthy-app"))
     needs_aid = await store.save(_make_report("needs-app"))
@@ -1062,26 +1020,20 @@ async def test_ledger_needs_you_filter_hides_healthy_apps_by_default(client, _ov
 
     resp = await client.get("/ledger")
     assert resp.status_code == 200
-    assert "needs-app" in resp.text
-    assert "healthy-app" not in resp.text
-
-    resp_all = await client.get("/ledger?needs_you=0")
-    assert resp_all.status_code == 200
-    assert "needs-app" in resp_all.text
-    assert "healthy-app" in resp_all.text
+    assert "Waiting for your approval (0)" in resp.text
 
 
-async def test_ledger_watcher_failure_banner_shown_within_window(client, _override_store):
-    """The 4th "Needs You" signal (a watcher's last tick failed recently) is
-    fleet-wide, not attributable to one app row, so it renders as its own
-    banner instead of a per-app filter criterion."""
+async def test_watcher_tick_failures_are_events_page_job_not_ledgers(client, _override_store):
+    """A watcher's tick failure is real, behind-the-scenes system activity
+    -- Events' job (product direction), regardless of whether a PR is
+    involved -- not something Ledger's PR list should surface at all."""
     store = _override_store
     await store.log_event("vuln-watcher", "tick-failed", None, "error", "vuln-watcher tick failed: boom")
 
-    resp = await client.get("/ledger")
-    assert resp.status_code == 200
-    assert "watcher tick failure" in resp.text.lower()
-    assert "vuln-watcher" in resp.text
+    events_resp = await client.get("/events")
+    assert events_resp.status_code == 200
+    assert "tick-failed" in events_resp.text
+    assert "vuln-watcher" in events_resp.text
 
 
 async def test_ledger_chain_route_replays_a_real_chain_read_only(client, _override_store):
@@ -1180,12 +1132,20 @@ async def test_insights_stat_cards_and_rows_deep_link(client, _override_store):
     assert resp.status_code == 200
     html = resp.text
     assert 'href="/fleet"' in html
-    assert 'href="/fleet/remediations"' in html
-    assert 'href="/ledger?needs_you=1"' in html
     assert 'href="/events"' in html
     assert 'href="/agents/hardening"' in html
     assert 'href="/capabilities/skills/netpol-skill/history"' in html
     assert "Skills Needing Review" in html
+    # The old "Remediations" stat card (a hand-maintained completion flag
+    # with no link to a real PR/gate) is gone -- "Total PRs" is the
+    # PR-based replacement, and "Pending Gates" now rolls up to Fleet
+    # (per-app badges) instead of the now strictly-PR-focused Ledger.
+    assert "Total PRs" in html
+    # The old "Remediations" stat card (a hand-maintained completion flag
+    # with no link to a real PR/gate) is gone -- "Total PRs" is the
+    # PR-based replacement, and it links to Fleet (which already carries
+    # per-app Open PRs/Total PRs columns), not a retired fleet-wide page.
+    assert "Total PRs" in html
 
 
 async def test_insights_page_shows_check_compliance(client, _override_store):
@@ -1852,20 +1812,34 @@ async def test_agent_detail_page(client, _override_store):
     store = _override_store
     await store.register_agent("security", "hardening", "network,rbac")
     await store.log_event("security", "completed", "test-app", "info", "Generated 5 files")
-    report = _make_report()
-    aid = await store.save(report)
-    await store.save_remediation(aid, "security", "Add NetworkPolicy")
     resp = await client.get("/agents/security")
     assert resp.status_code == 200
     assert "security" in resp.text
     assert "hardening" in resp.text
     assert "Generated 5 files" in resp.text
-    assert "Add NetworkPolicy" in resp.text
 
 
 async def test_agent_detail_not_found(client, _override_store):
     resp = await client.get("/agents/nonexistent")
     assert resp.status_code == 404
+
+
+async def test_agent_detail_runs_stat_card_reflects_real_agent_runs(client, _override_store):
+    """The Runs stat card (replacing the removed, hand-maintained
+    "Remediations" completion flag) must be derived from real `agent_runs`
+    rows, not any fabricated/persisted completion state."""
+    import re
+
+    store = _override_store
+    await store.register_agent("security", "hardening", "network,rbac")
+    await store.save_agent_run("security", "local", "success")
+    await store.save_agent_run("security", "local", "success")
+    await store.save_agent_run("security", "local", "error", error="boom")
+    resp = await client.get("/agents/security")
+    assert resp.status_code == 200
+    assert "Runs" in resp.text
+    assert re.search(r">2</span>\s*<span[^>]*> succeeded", resp.text)
+    assert re.search(r">1</span>\s*<span[^>]*> failed", resp.text)
 
 
 async def test_agent_detail_shows_run_history(client, _override_store):
@@ -1942,48 +1916,6 @@ async def test_agent_detail_page_shows_real_status_from_heartbeat_age(client, _o
     assert '<span class="text-success">Active</span>' not in stale_resp.text
 
 
-# ── Remediations page ─────────────────────────────────────────────────
-
-
-async def test_remediations_page(client, _override_store):
-    store = _override_store
-    aid = await store.save(_make_report())
-    await store.save_remediation(aid, "security", "Fix RBAC")
-    await store.save_remediation(aid, "observability", "Add metrics")
-    resp = await client.get(f"/assessments/{aid}/remediations")
-    assert resp.status_code == 200
-    assert "Remediations" in resp.text
-    assert "Fix RBAC" in resp.text
-    assert "Add metrics" in resp.text
-
-
-async def test_remediations_page_empty(client, _override_store):
-    store = _override_store
-    aid = await store.save(_make_report())
-    resp = await client.get(f"/assessments/{aid}/remediations")
-    assert resp.status_code == 200
-    assert "No remediations" in resp.text
-
-
-async def test_complete_remediation(client, _override_store):
-    store = _override_store
-    aid = await store.save(_make_report())
-    rid = await store.save_remediation(aid, "security", "Fix RBAC")
-    resp = await client.post(f"/assessments/{aid}/remediations/{rid}/complete", follow_redirects=False)
-    assert resp.status_code == 303
-    rems = await store.list_remediations(aid)
-    assert rems[0]["status"] == "completed"
-
-
-async def test_api_remediations(client, _override_store):
-    store = _override_store
-    aid = await store.save(_make_report())
-    await store.save_remediation(aid, "compliance", "Add SBOM")
-    resp = await client.get(f"/api/assessments/{aid}/remediations")
-    assert resp.status_code == 200
-    assert len(resp.json()) == 1
-
-
 # ── SLOs page ──────────────────────────────────────────────────────────
 
 
@@ -2030,17 +1962,20 @@ async def test_nav_includes_agents_link(client):
     assert 'href="/capabilities"' in agents_resp.text
 
 
-# ── Assessment detail shows remediation/SLO buttons ────────────────────
+# ── Assessment detail shows PR-tracking/SLO buttons ─────────────────────
 
 
-async def test_assessment_detail_shows_remediation_button(client, _override_store):
+async def test_assessment_detail_shows_pr_history_tab_not_remediations_button(client, _override_store):
+    """The old "Remediations (N)" action-bar link (a hand-maintained
+    completion flag with no link to a real PR/gate) is gone -- the "PR
+    History" tab, backed by pr_tracking.py's real gate/delivery/onboarding
+    PR aggregation, is the actual source of truth for fix/PR status now."""
     store = _override_store
     aid = await store.save(_make_report())
-    await store.save_remediation(aid, "security", "Fix it")
     resp = await client.get(f"/assessments/{aid}")
     assert resp.status_code == 200
-    assert f"/assessments/{aid}/remediations" in resp.text
-    assert "Remediations (1)" in resp.text
+    assert f"/assessments/{aid}/remediations" not in resp.text
+    assert "PR History" in resp.text
 
 
 async def test_assessment_detail_renders_score_history(client, _override_store):
@@ -2068,7 +2003,6 @@ async def test_assessment_detail_shows_links_with_zero_counts(client, _override_
     aid = await store.save(_make_report())
     resp = await client.get(f"/assessments/{aid}")
     assert resp.status_code == 200
-    assert "Remediations (0)" in resp.text
     assert "SLOs (0)" in resp.text
     assert "History (0)" in resp.text
 
@@ -2927,10 +2861,9 @@ async def test_delete_assessment_route(client, _override_store):
 
 
 async def test_delete_cascades(client, _override_store):
-    """Delete removes all related data — remediations, SLOs, gates, onboarding."""
+    """Delete removes all related data — SLOs, gates, onboarding."""
     store = _override_store
     aid = await store.save(_make_report())
-    await store.save_remediation(aid, "security", "Fix RBAC")
     await store.save_slo(aid, "availability", 99.9)
     await store.create_gate(aid, "deploy", "Approve deploy")
     await store.save_onboarding(aid, [{"category": "sec", "path": "x.yaml", "content": "y", "description": "d"}])
@@ -2938,7 +2871,6 @@ async def test_delete_cascades(client, _override_store):
     resp = await client.post(f"/assessments/{aid}/delete", follow_redirects=False)
     assert resp.status_code == 303
     assert await store.get(aid) is None
-    assert await store.list_remediations(aid) == []
     assert await store.list_slos(aid) == []
     assert await store.get_onboarding(aid) is None
 
@@ -2955,15 +2887,6 @@ async def test_delete_slo_route(client, _override_store):
     resp = await client.post(f"/assessments/{aid}/slos/{sid}/delete", follow_redirects=False)
     assert resp.status_code == 303
     assert len(await store.list_slos(aid)) == 0
-
-
-async def test_delete_remediation_route(client, _override_store):
-    store = _override_store
-    aid = await store.save(_make_report())
-    rid = await store.save_remediation(aid, "cicd", "Add pipeline")
-    resp = await client.post(f"/assessments/{aid}/remediations/{rid}/delete", follow_redirects=False)
-    assert resp.status_code == 303
-    assert len(await store.list_remediations(aid)) == 0
 
 
 async def test_cancel_gate_route(client, _override_store):
@@ -4125,16 +4048,18 @@ async def test_capability_run_detail_shows_live_pr_status(client, _override_stor
     assert 'href="{{ pr_url }}"' not in resp.text
 
 
-async def test_ledger_pending_count_uses_badge_accent(client, _override_store):
-    """Pending-action counts on Ledger rows are attention signals — same
-    badge-accent as Ledger Needs You, not badge-warning."""
+async def test_fleet_pending_action_badge_uses_badge_accent(client, _override_store):
+    """Pending-action counts are attention signals — badge-accent, not
+    badge-warning. This gate type isn't a PR, so it renders on Fleet's own
+    per-row badge now (Ledger's job narrowed to strictly PRs -- see
+    routes/insights.py::ledger_page())."""
     store = _override_store
     aid = await store.save(_make_report("ledger-pending-badge"))
     await store.create_gate(aid, "auto-mode-review", "needs review")
-    resp = await client.get("/ledger?needs_you=0")
+    resp = await client.get("/fleet")
     assert resp.status_code == 200
-    assert 'class="badge badge-accent">1 pending</span>' in resp.text
-    assert 'class="badge badge-warning">1 pending</span>' not in resp.text
+    assert 'class="badge badge-accent"' in resp.text
+    assert "1 pending action" in resp.text
 
 
 # ── Agent registry cleanup (agent_registry_cleanup) ───────────────────

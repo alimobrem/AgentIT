@@ -136,7 +136,6 @@ async def critical_portal():
             "agentit.portal.routes.capabilities.get_store",
             "agentit.portal.routes.settings.get_store",
             "agentit.portal.routes.insights.get_store",
-            "agentit.portal.routes.remediations.get_store",
             "agentit.portal.routes.slos.get_store",
         ):
             stack.enter_context(patch(target, return_value=store))

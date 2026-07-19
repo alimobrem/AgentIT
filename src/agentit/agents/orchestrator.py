@@ -439,7 +439,6 @@ class FleetOrchestrator:
                     findings_count=len(result.files),
                 ))
                 await self._log_event(agent_name, "completed", f"Generated {len(result.files)} files")
-                await self._record_remediations(agent_name, result.files)
             except Exception as exc:
                 elapsed = time.monotonic() - t0
                 agent_run_duration_seconds.labels(agent=agent_name, mode="local").observe(elapsed)
@@ -585,7 +584,6 @@ class FleetOrchestrator:
                             success=True, findings_count=len(files),
                         ))
                         await self._log_event(agent_name, "completed", f"Generated {len(files)} files (K8s Job)")
-                        await self._record_remediations(agent_name, files)
                         # Write files to output_dir for downstream consumption
                         sub_dir = self.output_dir / category
                         sub_dir.mkdir(parents=True, exist_ok=True)
@@ -905,21 +903,6 @@ class FleetOrchestrator:
         if created:
             await self._log_event("release", "slos-created",
                             f"Created {created} default SLO(s) for {self.report.criticality} criticality")
-
-    async def _record_remediations(self, agent_name: str, files: list) -> None:
-        """Record each generated file as a remediation in the store."""
-        if self._store is None or self._assessment_id is None:
-            return
-        for f in files:
-            try:
-                await self._store.save_remediation(
-                    self._assessment_id,
-                    agent_name,
-                    f.description,
-                )
-            except Exception as exc:
-                logger.warning("Failed to record remediation for %s/%s: %s",
-                               agent_name, f.path, exc)
 
     async def _log_event(self, agent_name: str, action: str, summary: str) -> None:
         self._events.append({

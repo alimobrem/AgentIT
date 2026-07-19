@@ -6,6 +6,8 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from agentit.api_drift_detector import DriftResult
 from agentit.kube import KubeError
 from agentit.platform_context import PlatformContext
@@ -15,6 +17,25 @@ from conftest import make_async_store
 
 def _detector() -> DriftDetector:
     return DriftDetector(publisher=MagicMock(), interval=1)
+
+
+@pytest.fixture(autouse=True)
+def _default_no_managed_apps_applicationset():
+    """Defaults `kube.get_custom_resource` to "ApplicationSet not found" for
+    every test in this module.
+
+    `detect_once()` now unconditionally runs `_check_applicationset_drift()`
+    every tick (see `TestApplicationSetDriftHeal` below for the dedicated
+    tests) -- without this default, every *other*, unrelated test in this
+    file that calls `detect_once()`/`run()` would suddenly make a real,
+    unmocked `kube.get_custom_resource` call, which (per `kube.py`'s own
+    `get_client()` docstring) falls back to whatever cluster the ambient
+    `~/.kube/config` happens to point at when `AGENTIT_OFFLINE` isn't set --
+    never acceptable from a unit test. Tests that actually exercise
+    ApplicationSet drift-healing override this themselves.
+    """
+    with patch("agentit.watchers.drift_detector.kube.get_custom_resource", return_value=None):
+        yield
 
 
 _SYNCED_ARGO_APP = {
@@ -328,3 +349,167 @@ class TestConstructionAcceptsAsyncStoreDirectly:
         detector = DriftDetector(publisher=MagicMock(), interval=1, store=store)
         result = await detector.detect_once()  # must not raise AttributeError/TypeError
         assert result == []
+
+
+_EXPECTED_MANAGED_APPS_REPO_URL = "https://github.com/alimobrem/agentit-gitops"
+
+# Shaped exactly like the real 2026-07-18 live incident this feature fixes:
+# something outside AgentIT ran `oc create`/`oc patch` and overwrote both
+# repoURL fields with this same bogus placeholder host (confirmed live
+# against the real cluster while building this fix).
+_DRIFTED_APPLICATIONSET = {
+    "metadata": {"name": "agentit-managed-apps", "namespace": "openshift-gitops"},
+    "spec": {
+        "generators": [{"git": {"repoURL": "https://github.com/org/infra-gitops", "revision": "HEAD"}}],
+        "template": {
+            "spec": {"source": {"repoURL": "https://github.com/org/infra-gitops", "targetRevision": "HEAD"}},
+        },
+    },
+}
+
+_HEALTHY_APPLICATIONSET = {
+    "metadata": {"name": "agentit-managed-apps", "namespace": "openshift-gitops"},
+    "spec": {
+        "generators": [{"git": {"repoURL": _EXPECTED_MANAGED_APPS_REPO_URL, "revision": "HEAD"}}],
+        "template": {
+            "spec": {"source": {"repoURL": _EXPECTED_MANAGED_APPS_REPO_URL, "targetRevision": "HEAD"}},
+        },
+    },
+}
+
+
+class TestApplicationSetDriftHeal:
+    """2026-07-18 incident: something entirely outside this repo's code ran
+    `oc create`/`oc patch` directly against the live cluster and overwrote
+    `agentit-managed-apps`'s git source repoURL with a bogus placeholder --
+    twice in one day -- breaking GitOps rollout for the entire fleet both
+    times until a human noticed and manually restored it. These tests cover
+    the self-heal that closes that gap."""
+
+    @patch("agentit.watchers.drift_detector.kube.list_custom_resources", return_value=None)
+    @patch("agentit.portal.github_pr.ensure_applicationset", return_value=True)
+    @patch("agentit.watchers.drift_detector.kube.get_custom_resource")
+    async def test_detects_and_heals_drifted_repo_url(self, mock_get, mock_ensure, mock_list):
+        mock_get.return_value = _DRIFTED_APPLICATIONSET
+        detector = _detector()
+
+        await detector.detect_once()
+
+        mock_get.assert_called_once_with(
+            "argoproj.io", "v1alpha1", "applicationsets", "agentit-managed-apps",
+            namespace="openshift-gitops",
+        )
+        mock_ensure.assert_called_once_with(_EXPECTED_MANAGED_APPS_REPO_URL)
+
+        heal_calls = [
+            c for c in detector._publisher.publish.call_args_list
+            if c.kwargs.get("action") == "applicationset-repo-drift-healed"
+        ]
+        assert len(heal_calls) == 1
+        call = heal_calls[0]
+        assert call.kwargs["severity"] == "critical"
+        assert call.kwargs["target_app"] == "agentit-managed-apps"
+        assert call.kwargs["details"]["expected_repo_url"] == _EXPECTED_MANAGED_APPS_REPO_URL
+        assert call.kwargs["details"]["generator_repo_url"] == "https://github.com/org/infra-gitops"
+        assert call.kwargs["details"]["healed"] is True
+
+    @patch("agentit.watchers.drift_detector.kube.list_custom_resources", return_value=None)
+    @patch("agentit.portal.github_pr.ensure_applicationset")
+    @patch("agentit.watchers.drift_detector.kube.get_custom_resource")
+    async def test_no_heal_when_repo_url_already_matches_expected(self, mock_get, mock_ensure, mock_list):
+        mock_get.return_value = _HEALTHY_APPLICATIONSET
+        detector = _detector()
+
+        await detector.detect_once()
+
+        mock_ensure.assert_not_called()
+        publish_calls = [
+            c for c in detector._publisher.publish.call_args_list
+            if str(c.kwargs.get("action", "")).startswith("applicationset-repo-drift")
+        ]
+        assert publish_calls == []
+
+    @patch("agentit.watchers.drift_detector.kube.list_custom_resources", return_value=None)
+    @patch("agentit.portal.github_pr.ensure_applicationset")
+    @patch("agentit.watchers.drift_detector.kube.get_custom_resource", return_value=None)
+    async def test_never_creates_applicationset_when_missing(self, mock_get, mock_ensure, mock_list):
+        """Object creation stays owned by onboarding's own
+        ensure_applicationset() call -- routine drift healing must never
+        create (or delete) the ApplicationSet, only correct an existing
+        one's drifted repoURL."""
+        detector = _detector()
+
+        await detector.detect_once()  # ApplicationSet not found (get_custom_resource -> None)
+
+        mock_ensure.assert_not_called()
+        publish_calls = [
+            c for c in detector._publisher.publish.call_args_list
+            if str(c.kwargs.get("action", "")).startswith("applicationset-repo-drift")
+        ]
+        assert publish_calls == []
+
+    @patch("agentit.watchers.drift_detector.kube.list_custom_resources", return_value=None)
+    @patch("agentit.portal.github_pr.ensure_applicationset", return_value=False)
+    @patch("agentit.watchers.drift_detector.kube.get_custom_resource")
+    async def test_heal_failure_still_publishes_critical_event(self, mock_get, mock_ensure, mock_list):
+        """A failed heal attempt (e.g. RBAC/API error inside
+        ensure_applicationset()) must still be visible/auditable on Events
+        -- never fail silently."""
+        mock_get.return_value = _DRIFTED_APPLICATIONSET
+        detector = _detector()
+
+        await detector.detect_once()
+
+        mock_ensure.assert_called_once_with(_EXPECTED_MANAGED_APPS_REPO_URL)
+        fail_calls = [
+            c for c in detector._publisher.publish.call_args_list
+            if c.kwargs.get("action") == "applicationset-repo-drift-heal-failed"
+        ]
+        assert len(fail_calls) == 1
+        assert fail_calls[0].kwargs["severity"] == "critical"
+        assert fail_calls[0].kwargs["details"]["healed"] is False
+
+    @patch("agentit.watchers.drift_detector.kube.list_custom_resources", return_value=None)
+    @patch("agentit.portal.github_pr.ensure_applicationset")
+    @patch("agentit.watchers.drift_detector.kube.get_custom_resource", side_effect=KubeError("apiserver unreachable"))
+    async def test_kube_error_fetching_applicationset_does_not_crash_tick(self, mock_get, mock_ensure, mock_list):
+        detector = _detector()
+
+        result = await detector.detect_once()  # must not raise
+
+        assert result == []
+        mock_ensure.assert_not_called()
+
+    @patch("agentit.watchers.drift_detector.kube.list_custom_resources", return_value=None)
+    @patch("agentit.portal.github_pr.ensure_applicationset", return_value=True)
+    @patch("agentit.watchers.drift_detector.kube.get_custom_resource")
+    async def test_heals_when_only_template_source_url_drifted(self, mock_get, mock_ensure, mock_list):
+        """The real incident overwrote both `spec.generators[0].git.repoURL`
+        and `spec.template.spec.source.repoURL` -- but either field
+        drifting alone must still trigger a heal."""
+        partially_drifted = {
+            "metadata": {"name": "agentit-managed-apps"},
+            "spec": {
+                "generators": [{"git": {"repoURL": _EXPECTED_MANAGED_APPS_REPO_URL}}],
+                "template": {"spec": {"source": {"repoURL": "https://github.com/org/infra-gitops"}}},
+            },
+        }
+        mock_get.return_value = partially_drifted
+        detector = _detector()
+
+        await detector.detect_once()
+
+        mock_ensure.assert_called_once_with(_EXPECTED_MANAGED_APPS_REPO_URL)
+
+    @patch("agentit.watchers.drift_detector.kube.get_custom_resource", return_value=_DRIFTED_APPLICATIONSET)
+    async def test_runs_independently_of_argo_applications_access(self, mock_get):
+        """Must still check/heal the ApplicationSet even when the Argo CD
+        Applications list itself is unreachable (a different resource, not
+        gated on the same RBAC/availability)."""
+        with patch("agentit.watchers.drift_detector.kube.list_custom_resources", side_effect=KubeError("403")), \
+             patch("agentit.portal.github_pr.ensure_applicationset", return_value=True) as mock_ensure:
+            detector = _detector()
+            result = await detector.detect_once()
+
+        assert result == []
+        mock_ensure.assert_called_once_with(_EXPECTED_MANAGED_APPS_REPO_URL)

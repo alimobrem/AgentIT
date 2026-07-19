@@ -1457,11 +1457,12 @@
     <span class="logo">AgentIT</span>
     <div id="nav-primary" class="links" :class="{ 'links-open': navOpen }">
       {# Exclusive jobs (docs/portal-experience-design-language.md §1):
-         Ledger = ops inbox (Needs You badge); Fleet = scoreboard only. Admin
-         Review (a third, elevated-queue nav item) was retired 2026-07-18
-         along with the `cluster-admin-review` gate type it existed solely
-         for -- every gate type is per-app now, so there's no longer a
-         cross-app queue to link here. #}
+         Ledger = fleet-wide PR list/lifecycle (badge = PRs waiting for
+         your approval); Fleet = scoreboard only. Admin Review (a third,
+         elevated-queue nav item) was retired 2026-07-18 along with the
+         `cluster-admin-review` gate type it existed solely for -- every
+         gate type is per-app now, so there's no longer a cross-app queue
+         to link here. #}
       <a href="/ledger" class="{{ 'nav-active' if request.url.path == '/' or request.url.path.startswith('/ledger') }}">Ledger
         {% if nav_pending_actions %}<span class="nav-badge">{{ nav_pending_actions }}</span>{% endif %}
       </a>
@@ -1943,13 +1944,13 @@ function eventsDrawer() {
     },
     _eventHref(e) {
       // Prefer app-scoped action surfaces when we have an assessment id
-      // (enriched by /api/events); else Ledger Needs You by app; else
+      // (enriched by /api/events); else that app's PRs on Ledger; else
       // correlation filter on Events.
       if (e && e.assessment_id) {
         return '/assessments/' + e.assessment_id + '?tab=actions';
       }
       if (e && e.target_app) {
-        return '/ledger?needs_you=1&app=' + encodeURIComponent(e.target_app);
+        return '/ledger?app=' + encodeURIComponent(e.target_app);
       }
       if (e && e.correlation_id) {
         return '/events?correlation_id=' + encodeURIComponent(e.correlation_id);
@@ -2079,7 +2080,6 @@ function commandPalette() {
       { label: 'Settings', href: '/settings', hint: 'Auto-mode & data retention' },
       { label: 'Schedules', href: '/schedules', hint: 'Scheduled operations' },
       { label: 'Fleet SLOs', href: '/fleet/slos', hint: 'SLOs across every app' },
-      { label: 'Fleet Remediations', href: '/fleet/remediations', hint: 'Remediations across every app' },
     ],
     handleGlobalKeydown(e) {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {

@@ -465,26 +465,6 @@ async def deliver_with_verification(
     return {"mechanism": mechanism, "dry_run": False, **result}
 
 
-async def complete_remediations(store: object, assessment_id: str) -> None:
-    """Mark every not-yet-completed ``remediations`` row for this
-    assessment as completed.
-
-    Shared by ``AutoMode._finish_without_cluster_config_delivery()`` (a
-    delivery with no cluster-config category is "done" the instant it's
-    delivered) and ``routes/gates.py``'s ``gitops-pr-pending`` approval
-    (a cluster-config fix isn't actually done until the human merge that
-    lands it is confirmed -- see ``merge_pr()`` -- never merely once the
-    PR was opened). Remediations are only ever scoped by ``assessment_id``
-    (``store.save_remediation()``/``list_remediations()``), so, like the
-    pre-existing call site above, this completes every live remediation
-    for the assessment rather than one keyed to this specific PR.
-    """
-    remediations = await store.list_remediations(assessment_id)
-    for rem in remediations:
-        if rem["status"] != "completed":
-            await store.complete_remediation(rem["id"])
-
-
 async def gate_delivery_confirmation(store: object, gate: dict) -> str:
     """The exact "AgentIT will: ..." statement a human must see -- in the
     un-skippable confirm modal, not just page prose -- before approving a
@@ -1225,12 +1205,6 @@ async def redispatch_finding_fix(
             f"Re-dispatch for '{category}' produced no fix: {reason}",
         )
         return {"action": "no-fix-available", "reason": reason}
-
-    for f in dispatch_result["files"]:
-        await store.save_remediation(
-            assessment_id, dispatch_result["agent"], f["description"],
-            status="generated", manifest_path=f["path"],
-        )
 
     namespace = app_name.lower().replace("_", "-").replace(".", "-")
     auto = AutoMode(store=store, publisher=None, llm_client=llm_client)

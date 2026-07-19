@@ -2,9 +2,13 @@
 three places a ``pr_url`` can land today (see ``store.py``'s schema comments
 on the ``gates``/``deliveries``/``onboarding_results`` tables):
 
-- ``gates.pr_url`` on a ``gitops-pr-pending`` gate -- the
-  ``infra-repo-commit`` category's PR (the GitOps infra repo). This is the
-  one PR record with a genuinely reliable, already-known outcome with no
+- ``gates.pr_url`` on a ``gitops-pr-pending`` (``cluster_config``) or
+  ``gitops-pr-pending-shared-namespace`` (``cicd_shared_namespace``) gate --
+  both commit to the GitOps infra repo and open a PR (see
+  ``delivery.py``'s ``_deliver_via_gitops_pr_and_gate()``; the two gate
+  types exist only so ``store.create_gate()``'s ``(repo_url, gate_type)``
+  dedup never collides a same-app, same-call pair of them). Gate-tracked
+  PRs are the ones with a genuinely reliable, already-known outcome with no
   live GitHub call needed: the gate's own ``status`` (``pending`` -> still
   open; ``approved`` -> merged, since approving *is* the merge action per
   ``routes/gates.py::resolve_gate``; ``rejected``/``dismissed``/``expired``
@@ -27,11 +31,36 @@ here would double-count the same PR under two different confidence levels.
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from typing import Any
 
-from agentit.portal.delivery import CATEGORY_CLUSTER_CONFIG, repo_kind_for_mechanism
+from agentit.portal.delivery import (
+    CATEGORY_CICD_SHARED_NAMESPACE,
+    CATEGORY_CLUSTER_CONFIG,
+    _CICD_SHARED_NAMESPACE_GATE_TYPE,
+    repo_kind_for_mechanism,
+)
 
 _GITOPS_PR_GATE_TYPE = "gitops-pr-pending"
+
+# Every gate type that carries a real, gate-tracked PR (a reliably-known
+# outcome, no live GitHub call needed -- see this module's docstring), and
+# the one real category each always belongs to (route_and_deliver() only
+# ever creates each for its own fixed category -- see delivery.py). Two
+# gate types exist so a same-app, same-call cluster-config PR and CI/CD-
+# shared-namespace PR can never collide under store.create_gate()'s
+# (repo_url, gate_type) dedup -- gate_pr_records() below stamps every
+# record with its real category so a fleet-wide caller (the Ledger) can
+# filter "by category" the same way for gate-sourced and delivery-sourced
+# records, without needing to know gates don't carry their own category
+# column.
+_GATE_TYPE_CATEGORY: dict[str, str] = {
+    _GITOPS_PR_GATE_TYPE: CATEGORY_CLUSTER_CONFIG,
+    _CICD_SHARED_NAMESPACE_GATE_TYPE: CATEGORY_CICD_SHARED_NAMESPACE,
+}
+
+CATEGORY_ONBOARDING = "onboarding"
 
 
 def _dedup_by_pr_url(records: list[dict]) -> list[dict]:
@@ -50,12 +79,14 @@ def _dedup_by_pr_url(records: list[dict]) -> list[dict]:
 
 
 def gate_pr_records(gates: list[dict]) -> list[dict]:
-    """Normalize every ``gitops-pr-pending`` gate carrying a ``pr_url`` into
-    a PR record whose state is already known -- no live GitHub call needed."""
+    """Normalize every gate-tracked PR (``gitops-pr-pending`` and
+    ``gitops-pr-pending-shared-namespace``) carrying a ``pr_url`` into a PR
+    record whose state is already known -- no live GitHub call needed."""
     records = []
     for g in gates:
         pr_url = g.get("pr_url")
-        if g.get("gate_type") != _GITOPS_PR_GATE_TYPE or not pr_url:
+        category = _GATE_TYPE_CATEGORY.get(g.get("gate_type"))
+        if category is None or not pr_url:
             continue
         status = g.get("status")
         if status == "pending":
@@ -68,6 +99,7 @@ def gate_pr_records(gates: list[dict]) -> list[dict]:
             "pr_url": pr_url,
             "repo_kind": "gitops",
             "source": "gate",
+            "category": category,
             "gate_id": g.get("id"),
             "gate_status": status,
             "assessment_id": g.get("assessment_id"),
@@ -75,6 +107,11 @@ def gate_pr_records(gates: list[dict]) -> list[dict]:
             "resolved_at": g.get("resolved_at"),
             "resolved_by": g.get("resolved_by"),
             "known_state": state,
+            # The full gate row, e.g. so a fleet-wide caller (the Ledger)
+            # can render the exact same Approve & Deliver / Reject card
+            # (``_macros.html``'s ``gate_card``) every other pending-gate
+            # surface already uses, instead of a second, drifting copy.
+            "raw": g,
         })
     return records
 
@@ -91,7 +128,11 @@ def delivery_pr_records(deliveries: list[dict]) -> list[dict]:
                 cat, mech = pair.split(":", 1)
                 cat_to_mechanism[cat] = mech
         for category, outcome in outcomes.items():
-            if category == CATEGORY_CLUSTER_CONFIG or not isinstance(outcome, dict):
+            # Both categories already covered by gate_pr_records(), with a
+            # reliably-known outcome -- including them again here would
+            # double-count the same PR under two different confidence
+            # levels (see this module's docstring).
+            if category in _GATE_TYPE_CATEGORY.values() or not isinstance(outcome, dict):
                 continue
             pr_url = outcome.get("pr_url")
             if not pr_url:
@@ -123,6 +164,7 @@ def onboarding_pr_records(onboardings: list[dict]) -> list[dict]:
                 "pr_url": pr_url,
                 "repo_kind": "code",
                 "source": "onboarding",
+                "category": CATEGORY_ONBOARDING,
                 "assessment_id": ob.get("assessment_id") or ob.get("id"),
                 "created_at": ob.get("created_at"),
                 "known_state": None,
@@ -175,8 +217,8 @@ async def resolve_pr_states(records: list[dict], status_cache: dict[str, dict] |
 
 
 async def attach_reject_reasons(store: object, app_name: str, records: list[dict]) -> list[dict]:
-    """Best-effort correlation of each rejected ``gitops-pr-pending`` gate's
-    real rejection reason from ``agent_feedback.human_reason`` --
+    """Best-effort correlation of each rejected gate-tracked PR's real
+    rejection reason from ``agent_feedback.human_reason`` --
     ``resolve_gate()`` (``routes/gates.py``) records it there via
     ``record_feedback(finding_category=gate_type, action="rejected")`` in
     the same request that resolves the gate, but ``gates`` has no
@@ -184,27 +226,37 @@ async def attach_reject_reasons(store: object, app_name: str, records: list[dict
     directly (see ``store.py``'s schema -- a real, currently-unfilled
     wiring gap this correlates around rather than papering over).
 
-    Matched positionally by chronological order (oldest-first), not by
-    nearest timestamp: ``resolve_gate()`` writes exactly one feedback row
-    per rejected ``gitops-pr-pending`` gate for this app, in the same order
-    the gates themselves were rejected, so the Nth rejected gate lines up
-    with the Nth ``gitops-pr-pending`` feedback row. Only applies the match
-    when the two lists are the same length -- if they ever disagree (e.g. a
-    gate rejected before this correlation existed, or a feedback row from
-    some other path), this leaves ``reject_reason`` unset rather than
-    risking a wrong pairing.
+    Matched positionally by chronological order (oldest-first) within each
+    real ``gate_type`` separately (``gitops-pr-pending`` and
+    ``gitops-pr-pending-shared-namespace`` each dedup and get rejected
+    independently -- see ``_GATE_TYPE_CATEGORY`` above -- so their feedback
+    rows must never be cross-matched), not by nearest timestamp:
+    ``resolve_gate()`` writes exactly one feedback row per rejected gate of
+    a given type for this app, in the same order the gates themselves were
+    rejected, so the Nth rejected gate of that type lines up with the Nth
+    feedback row of that same type. Only applies the match within a
+    gate_type when its two lists are the same length -- if they ever
+    disagree (e.g. a gate rejected before this correlation existed, or a
+    feedback row from some other path), this leaves that gate_type's
+    ``reject_reason`` unset rather than risking a wrong pairing.
     """
     rejected = [r for r in records if r.get("source") == "gate" and r.get("gate_status") == "rejected"]
     if not rejected or not hasattr(store, "get_feedback_for_app"):
         return records
-    feedback = await store.get_feedback_for_app(app_name, finding_category=_GITOPS_PR_GATE_TYPE)
-    feedback = [f for f in feedback if f.get("action") == "rejected"]
-    if len(feedback) != len(rejected):
-        return records
-    rejected_oldest_first = sorted(rejected, key=lambda r: r.get("resolved_at") or "")
-    feedback_oldest_first = sorted(feedback, key=lambda f: f.get("created_at") or "")
-    for gate_record, fb in zip(rejected_oldest_first, feedback_oldest_first):
-        gate_record["reject_reason"] = fb.get("human_reason") or ""
+    rejected_by_gate_type: dict[str, list[dict]] = {}
+    for r in rejected:
+        gate_type = (r.get("raw") or {}).get("gate_type") or _GITOPS_PR_GATE_TYPE
+        rejected_by_gate_type.setdefault(gate_type, []).append(r)
+
+    for gate_type, gate_type_rejected in rejected_by_gate_type.items():
+        feedback = await store.get_feedback_for_app(app_name, finding_category=gate_type)
+        feedback = [f for f in feedback if f.get("action") == "rejected"]
+        if len(feedback) != len(gate_type_rejected):
+            continue
+        rejected_oldest_first = sorted(gate_type_rejected, key=lambda r: r.get("resolved_at") or "")
+        feedback_oldest_first = sorted(feedback, key=lambda f: f.get("created_at") or "")
+        for gate_record, fb in zip(rejected_oldest_first, feedback_oldest_first):
+            gate_record["reject_reason"] = fb.get("human_reason") or ""
     return records
 
 
@@ -222,3 +274,155 @@ async def get_app_pr_history(store: object, assessment_id: str, repo_url: str, a
     records = collect_pr_records(gates, deliveries, onboardings)
     records = await attach_reject_reasons(store, app_name, records)
     return await resolve_pr_states(records)
+
+
+# ── Fleet-wide PR lifecycle (the Ledger) ───────────────────────────────────
+#
+# The Ledger's whole purpose (per product direction) is a cross-app list of
+# PRs that need attention, plus each PR's real lifecycle -- waiting for
+# approval, merged, rejected (with the real reason), or just open -- not a
+# generic event log. Everything below builds on the exact same per-app
+# primitives above; only the fleet-wide fan-out + one shared, batched live-
+# GitHub-check cache (mirroring ``routes/fleet.py``'s own
+# ``_pr_status_cache`` for its "Open PRs" column, kept separate rather than
+# shared so this module's cache lifetime is independent of Fleet's) are new.
+
+LIFECYCLE_NEEDS_APPROVAL = "needs_approval"
+LIFECYCLE_OPEN = "open"
+LIFECYCLE_MERGED = "merged"
+LIFECYCLE_REJECTED = "rejected"
+LIFECYCLE_CLOSED = "closed"
+LIFECYCLE_UNKNOWN = "unknown"
+
+_LIFECYCLE_LABELS: dict[str, str] = {
+    LIFECYCLE_NEEDS_APPROVAL: "Waiting for your approval",
+    LIFECYCLE_OPEN: "Open",
+    LIFECYCLE_MERGED: "Merged",
+    LIFECYCLE_REJECTED: "Rejected",
+    LIFECYCLE_CLOSED: "Closed",
+    LIFECYCLE_UNKNOWN: "Unknown",
+}
+
+
+def annotate_lifecycle(record: dict) -> dict:
+    """Add ``lifecycle``/``lifecycle_label``/``needs_attention`` to a PR
+    record already run through ``resolve_pr_states()`` (i.e. it has
+    ``state``). "Needs approval" is deliberately narrower than "open": it's
+    only true for a gate-tracked (``source == "gate"``) record whose gate
+    is still ``pending`` -- the one case where a human must act *inside
+    AgentIT* (Approve & Deliver / Reject) before this PR can merge.
+    ``source-repo-pr``/``app-repo-pr``/onboarding PRs are never gated --
+    review/merge for those happens directly on GitHub, outside AgentIT's
+    own approval step -- so an "open" one of those is real, but never
+    "needs approval" in this sense.
+    """
+    is_gate = record.get("source") == "gate"
+    gate_status = record.get("gate_status")
+    if is_gate and gate_status == "pending":
+        lifecycle = LIFECYCLE_NEEDS_APPROVAL
+    elif record.get("state") == "merged":
+        lifecycle = LIFECYCLE_MERGED
+    elif is_gate and gate_status == "rejected":
+        lifecycle = LIFECYCLE_REJECTED
+    elif record.get("state") == "open":
+        lifecycle = LIFECYCLE_OPEN
+    elif record.get("state") == "closed":
+        lifecycle = LIFECYCLE_CLOSED
+    else:
+        lifecycle = LIFECYCLE_UNKNOWN
+    record["lifecycle"] = lifecycle
+    record["lifecycle_label"] = _LIFECYCLE_LABELS[lifecycle]
+    record["needs_attention"] = lifecycle == LIFECYCLE_NEEDS_APPROVAL
+    return record
+
+
+_FLEET_PR_CACHE_TTL = 120  # seconds -- mirrors fleet.py's own PR-status cache TTL.
+_fleet_pr_status_cache: dict[str, Any] = {"data": {}, "ts": 0.0}
+_fleet_pr_status_cache_lock = threading.Lock()
+
+
+async def collect_fleet_pr_records(store: object, fleet: list[dict] | None = None) -> list[dict]:
+    """Every known PR record across the WHOLE fleet, newest first, each
+    tagged with its owning app (``app_name``/``repo_url``) and a resolved
+    ``lifecycle`` -- the fleet-wide sibling of ``get_app_pr_history()``,
+    backing the Ledger's PR list. Reuses the exact three fleet-wide,
+    one-query-each accessors ``routes/fleet.py``'s "Open PRs"/"Total PRs"
+    columns already established (``list_all_gates``/``list_all_deliveries``/
+    ``list_all_onboarding_pr_urls``), so no new store query shape is
+    introduced -- only a second, independent consumer of data that already
+    flows through this module.
+
+    Live GitHub calls (for the ``source-repo-pr``/``app-repo-pr``/onboarding
+    records with no stored outcome) are batched into one round across the
+    entire fleet and cached for ``_FLEET_PR_CACHE_TTL`` seconds, the same
+    "one round per TTL window, not one call per PR per request" shape
+    ``routes/fleet.py::_attach_pr_counts`` uses -- kept as this module's own
+    cache (not shared with Fleet's) so the two pages' cache lifetimes never
+    interfere with each other.
+    """
+    if fleet is None:
+        fleet = await store.get_fleet_data()
+
+    try:
+        all_gates = await store.list_all_gates()
+    except Exception:
+        all_gates = []
+    try:
+        all_deliveries = await store.list_all_deliveries(limit=5000)
+    except Exception:
+        all_deliveries = []
+    try:
+        all_onboarding_prs = (
+            await store.list_all_onboarding_pr_urls() if hasattr(store, "list_all_onboarding_pr_urls") else []
+        )
+    except Exception:
+        all_onboarding_prs = []
+
+    gates_by_repo: dict[str, list[dict]] = {}
+    for g in all_gates:
+        if g.get("repo_url"):
+            gates_by_repo.setdefault(g["repo_url"], []).append(g)
+    deliveries_by_app: dict[str, list[dict]] = {}
+    for d in all_deliveries:
+        if d.get("app_name"):
+            deliveries_by_app.setdefault(d["app_name"], []).append(d)
+    onboardings_by_repo: dict[str, list[dict]] = {}
+    for ob in all_onboarding_prs:
+        if ob.get("repo_url"):
+            onboardings_by_repo.setdefault(ob["repo_url"], []).append(ob)
+
+    all_records: list[dict] = []
+    for app_item in fleet:
+        records = collect_pr_records(
+            gates_by_repo.get(app_item["repo_url"], []),
+            deliveries_by_app.get(app_item["repo_name"], []),
+            onboardings_by_repo.get(app_item["repo_url"], []),
+        )
+        records = await attach_reject_reasons(store, app_item["repo_name"], records)
+        for r in records:
+            r["app_name"] = app_item["repo_name"]
+            r["repo_url"] = app_item["repo_url"]
+        all_records.extend(records)
+
+    now = time.monotonic()
+    with _fleet_pr_status_cache_lock:
+        cache_fresh = (now - _fleet_pr_status_cache["ts"]) < _FLEET_PR_CACHE_TTL
+        status_cache = _fleet_pr_status_cache["data"] if cache_fresh else {}
+        if not cache_fresh:
+            _fleet_pr_status_cache["data"] = status_cache
+            _fleet_pr_status_cache["ts"] = now
+
+    unresolved_urls = list({
+        r["pr_url"] for r in all_records
+        if r["known_state"] is None and r["pr_url"] not in status_cache
+    })
+    if unresolved_urls:
+        from agentit.portal.github_pr import get_pr_status
+        results = await asyncio.gather(*(asyncio.to_thread(get_pr_status, u) for u in unresolved_urls))
+        status_cache.update(dict(zip(unresolved_urls, results)))
+
+    await resolve_pr_states(all_records, status_cache=status_cache)
+    for r in all_records:
+        annotate_lifecycle(r)
+    all_records.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    return all_records

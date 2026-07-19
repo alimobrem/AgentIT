@@ -1,4 +1,4 @@
-"""Fleet-wide pages: dashboard, fleet SLOs, fleet remediations."""
+"""Fleet-wide pages: dashboard, fleet SLOs."""
 from __future__ import annotations
 
 import asyncio
@@ -316,7 +316,18 @@ async def fleet_page(request: Request) -> HTMLResponse:
         })
     avg_score = sum(r["latest_score"] for r in fleet) / total_apps
     critical_total = sum(r["critical_count"] for r in fleet)
-    pending_need_you = sum(r.get("pending_actions_count", 0) for r in fleet)
+    # PR-approval-specific (not every pending gate -- see
+    # _attach_pending_actions()'s own per-row badge for the rest), and
+    # deliberately its own fresh, uncached query rather than reusing the
+    # nav bar's cached badge count (helpers.get_nav_gate_badge_counts()) --
+    # this banner should always reflect this exact request's real state,
+    # matching every other Fleet stat on this page.
+    try:
+        all_pending_gates = await s.list_gates(status="pending")
+    except Exception:
+        log.debug("Failed to fetch pending gates for Fleet's PR-approval pointer", exc_info=True)
+        all_pending_gates = []
+    pending_need_you = sum(1 for g in all_pending_gates if g.get("gate_type") == "gitops-pr-pending")
 
     from agentit.portal.metrics import fleet_size as _fs, fleet_avg_score as _fas
     _fs.set(total_apps)
@@ -351,25 +362,6 @@ async def fleet_slos(request: Request) -> HTMLResponse:
     return get_templates().TemplateResponse(request, "fleet_slos.html", {
         "slos": all_slos, "breached_count": len(breached),
         "total_count": len(all_slos),
-    })
-
-
-@router.get("/fleet/remediations", response_class=HTMLResponse)
-async def fleet_remediations(request: Request) -> HTMLResponse:
-    """Fleet-wide remediation view — all remediations across all apps."""
-    s = await get_store()
-    fleet = await s.get_fleet_data()
-    all_remediations = []
-    for app_data in fleet:
-        remeds = await s.list_remediations(app_data["id"])
-        for r in remeds:
-            r["app_name"] = app_data["repo_name"]
-            r["app_id"] = app_data["id"]
-            all_remediations.append(r)
-    pending = [r for r in all_remediations if r.get("status") != "completed"]
-    return get_templates().TemplateResponse(request, "fleet_remediations.html", {
-        "remediations": all_remediations, "pending_count": len(pending),
-        "total_count": len(all_remediations),
     })
 
 

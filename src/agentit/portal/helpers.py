@@ -173,17 +173,23 @@ async def get_store():
 
 # ── Nav gate badges ───────────────────────────────────────────────────
 #
-# base.html's nav bar shows the fleet-wide count of pending gates on
-# Ledger's link (docs/ui-redesign-proposal.md §2/§5). This closes a real
-# pre-existing defect: the old nav referenced a `pending_gates` template
-# variable no context processor ever actually supplied (only Insights' own
-# page context computed it, so the badge was silently blank everywhere
-# else). Cached briefly since nav renders on every page.
+# base.html's nav bar shows the fleet-wide count of PRs waiting for your
+# approval on Ledger's link -- a pending `gitops-pr-pending`/
+# `gitops-pr-pending-shared-namespace` gate, the only gate types Ledger's
+# PR-lifecycle view renders/acts on, now that Ledger is strictly PR-focused
+# rather than every app-owner-scoped gate type (docs/ui-redesign-proposal.md
+# §2/§5). Every other app-owner gate type (`rollback-review`,
+# `finding-unresolved-escalation`, ...) stays visible via Fleet's per-app
+# "needs action"/escalation badges and Assessment Detail's Actions tab, not
+# this nav badge. This also closes a real pre-existing defect: the old nav
+# referenced a `pending_gates` template variable no context processor ever
+# actually supplied (only Insights' own page context computed it, so the
+# badge was silently blank everywhere else). Cached briefly since nav
+# renders on every page.
 #
 # Used to also split out a separate `admin_review` count for a second,
 # cross-app "Admin Review" nav link -- retired 2026-07-18 along with the
-# `cluster-admin-review` gate type it existed solely for. Every gate type is
-# per-app now, so every pending gate counts toward this one total.
+# `cluster-admin-review` gate type it existed solely for.
 
 _nav_gate_badges_cache: dict = {"pending_actions": 0, "ts": 0.0}
 _NAV_GATE_BADGES_CACHE_TTL = 20  # seconds
@@ -210,7 +216,11 @@ async def get_nav_gate_badge_counts(store: object) -> dict[str, int]:
             log.debug("Failed to refresh nav gate badge counts", exc_info=True)
             gates = []
 
-        pending_actions = len(gates)
+        from agentit.portal.delivery import _CICD_SHARED_NAMESPACE_GATE_TYPE
+        pending_actions = sum(
+            1 for g in gates
+            if g.get("gate_type") in ("gitops-pr-pending", _CICD_SHARED_NAMESPACE_GATE_TYPE)
+        )
 
         _nav_gate_badges_cache["pending_actions"] = pending_actions
         _nav_gate_badges_cache["ts"] = now
@@ -309,6 +319,15 @@ DIMENSION_LABELS: dict[str, str] = {
     "ha_dr": "HA/DR",
     "cicd": "CI/CD",
     "data_governance": "Data Governance",
+    # Delivery/PR categories (delivery.py's CATEGORY_* constants) reuse this
+    # same filter for Ledger's category filter/badges (routes/insights.py::
+    # ledger_page(), templates/ledger.html) -- not just assessment
+    # dimensions -- so acronym-bearing category names need the same
+    # explicit mapping a bare Title Case fallback would get wrong.
+    "cicd_shared_namespace": "CI/CD (shared namespace)",
+    "cluster_config": "Cluster config",
+    "source_patch": "Source patch",
+    "manifest_at_rest": "Manifest at rest",
 }
 
 

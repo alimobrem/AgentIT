@@ -224,14 +224,20 @@ class TestAssessmentDetailPrHistory:
 
 
 class TestCriticalityTooltip:
+    """Tooltip copy was re-verified and reworded (2026-07-18, "re-verify
+    Criticality against current code") to describe only Criticality's two
+    real effects (auto-deliver eligibility, default SLO strictness) -- the
+    dead "extra deploy-approval gate" effect these tests used to assert on
+    is gone from the copy along with the dead gate-list entry itself."""
+
     async def test_fleet_criticality_badge_has_explanatory_tooltip(self, portal_client):
         client, _store, _aid = portal_client
         resp = await client.get("/fleet")
         assert resp.status_code == 200
-        assert "never auto-approved" in resp.text
+        assert "can never auto-deliver" in resp.text
 
     async def test_assessment_detail_criticality_badge_has_explanatory_tooltip(self, portal_client):
         client, _store, aid = portal_client
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
-        assert "never auto-approved" in resp.text
+        assert "can never auto-deliver" in resp.text

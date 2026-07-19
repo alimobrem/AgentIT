@@ -36,7 +36,7 @@ class TestAssessOnboardFlow:
         result = await orch.run()
 
         assert any(r.success for r in result.agent_results)
-        assert len(await raw.list_remediations(aid)) > 0
+        assert any(r.files_generated for r in result.agent_results)
         assert len(await raw.list_slos(aid)) > 0
 
     async def test_orchestrator_registers_agents(self, tmp_path):
@@ -167,12 +167,11 @@ class TestGateLifecycleFlow:
         store = await make_store()
         aid = await store.save(make_report())
         await store.create_gate(aid, "deploy", "Gate")
-        await store.save_remediation(aid, "security", "Fix")
         await store.save_slo(aid, "avail", 99.9)
 
         await store.delete(aid)
         assert await store.get(aid) is None
-        assert await store.list_remediations(aid) == []
+        assert await store.list_gates_for_assessment(aid) == []
         assert await store.list_slos(aid) == []
 
 

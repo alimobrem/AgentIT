@@ -554,10 +554,6 @@ class TestTemplateRendering:
         client, _, aid = portal_client
         assert (await client.get(f"/assessments/{aid}/onboard-results")).status_code == 200
 
-    async def test_remediations_renders(self, portal_client):
-        client, _, aid = portal_client
-        assert (await client.get(f"/assessments/{aid}/remediations")).status_code == 200
-
     async def test_slos_renders(self, portal_client):
         client, _, aid = portal_client
         assert (await client.get(f"/assessments/{aid}/slos")).status_code == 200

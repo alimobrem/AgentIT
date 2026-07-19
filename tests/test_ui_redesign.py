@@ -107,9 +107,13 @@ class TestFixFindingIsPureGeneration:
 
         assert await store.get_apply_results(aid) is None
 
-    async def test_fix_still_saves_remediation_and_generates_files(self, ui_client):
+    async def test_fix_generates_files(self, ui_client):
         """The generation half of fix_finding() is unchanged -- only the
-        direct-apply side effect was removed."""
+        direct-apply side effect was removed. (A prior version of this test
+        also asserted a `remediations` row was saved -- that table has
+        since been removed as a standalone concept entirely; the
+        `fix_generated=` redirect param below is itself the real,
+        already-asserted-elsewhere signal that generation succeeded.)"""
         client, store = ui_client
         aid = await store.save(_report_with_network_finding())
 
@@ -121,8 +125,6 @@ class TestFixFindingIsPureGeneration:
 
         assert resp.status_code == 303
         assert "fix_generated=" in resp.headers["location"]
-        remediations = await store.list_remediations(aid)
-        assert len(remediations) > 0
 
     async def test_onboard_results_flash_message_says_deliver_not_apply_or_pr(self, ui_client):
         """Regression test for the stale copy docs/ui-redesign-proposal.md
@@ -369,6 +371,21 @@ class TestGateAppAttributionAndActionsTab:
         assert "assessment-complete" in ledger_tab
         assert "No Ledger activity yet for this app." not in ledger_tab
 
+    async def test_assessment_detail_ledger_tab_shows_human_card_type_label(self, ui_client):
+        """This per-app Ledger tab (unlike the fleet-wide /ledger page,
+        redesigned as a strictly PR-focused list -- see
+        routes/insights.py::ledger_page()) still renders the full A-P
+        card-type system via the shared ledger_card macro -- its badge must
+        decode the bare letter into ledger.py's humanize_card_type() label,
+        never a bare "A" a user would have to read the source to decode."""
+        client, store = ui_client
+        aid = await store.save(make_report(repo_name="card-label-app"))
+
+        resp = await client.get(f"/assessments/{aid}?tab=ledger")
+        assert resp.status_code == 200
+        ledger_tab = resp.text.split('x-show="tab === \'ledger\'"', 1)[1]
+        assert 'title="Card type A">Assessment<' in ledger_tab
+
     async def test_assessment_detail_tab_query_param_opens_ledger_tab(self, ui_client):
         client, store = ui_client
         aid = await store.save(make_report(repo_name="ledger-tab-param-app"))
@@ -377,11 +394,16 @@ class TestGateAppAttributionAndActionsTab:
         assert resp.status_code == 200
         assert "x-data=\"{ tab: 'ledger', findingsCount: 0 }\"" in resp.text
 
-    async def test_fleet_quiet_ledger_pointer_counts_every_pending_gate(self, ui_client):
-        """Fleet is scoreboard-only: pending ops → quiet Ledger link, not a
-        Needs Action column. Every gate type counts now -- the separate
-        cross-app `cluster-admin-review` exclusion was retired 2026-07-18
-        along with that gate type and the Admin Review page it lived on."""
+    async def test_fleet_quiet_ledger_pointer_counts_pr_gates_only(self, ui_client):
+        """Fleet's quiet Ledger pointer is PR-approval-specific now (Ledger's
+        own job narrowed to strictly PRs -- see
+        routes/insights.py::ledger_page()): auto-mode-review/dry-run-failed/
+        cluster-admin-review must never inflate it, even though they're real
+        pending gates -- only a pending gitops-pr-pending gate does. (Before
+        Ledger's PR redesign, every pending gate counted toward this banner
+        -- including, briefly, a legacy `cluster-admin-review` gate after
+        the standalone Admin Review page/gate type were retired 2026-07-18
+        -- this test's assertions supersede that intermediate behavior.)"""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="needs-action-app"))
         await store.create_gate(aid, "auto-mode-review", "gate 1")
@@ -390,8 +412,14 @@ class TestGateAppAttributionAndActionsTab:
 
         resp = await client.get("/fleet")
         assert resp.status_code == 200
-        assert "3 need you → Ledger" in resp.text
+        assert "need your approval → Ledger" not in resp.text
         assert "Needs Action" not in resp.text
+        # All three non-PR gates (including the now-legacy
+        # cluster-admin-review, which counts here like any other gate type
+        # since the standalone Admin Review page/exclusion were retired)
+        # still show as this app's own real "pending action" row badge --
+        # not silently dropped.
+        assert "3 pending action" in resp.text
 
     async def test_fleet_no_pending_pointer_when_no_pending_gates(self, ui_client):
         client, store = ui_client
@@ -399,19 +427,23 @@ class TestGateAppAttributionAndActionsTab:
 
         resp = await client.get("/fleet")
         assert resp.status_code == 200
-        assert "need you → Ledger" not in resp.text
+        assert "need your approval → Ledger" not in resp.text
+        assert "pending action" not in resp.text
 
-    async def test_fleet_pending_pointer_links_to_ledger(self, ui_client):
-        """Pending ops are Ledger's job — Fleet only offers a quiet pointer."""
+    async def test_fleet_pending_pointer_links_to_ledger_for_pr_gates_only(self, ui_client):
+        """A non-PR pending gate (auto-mode-review) never moves the
+        fleet-wide "→ Ledger" pointer -- it shows via this app's own
+        per-row "pending action" badge (linking straight to its Actions
+        tab) instead, since it's not a PR Ledger would ever list."""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="linked-badge-app"))
         await store.create_gate(aid, "auto-mode-review", "needs review")
 
         resp = await client.get("/fleet")
         assert resp.status_code == 200
-        assert 'href="/ledger"' in resp.text
-        assert "1 need you → Ledger" in resp.text
-        assert f'?tab=actions' not in resp.text or f'/assessments/{aid}?tab=actions' not in resp.text
+        assert "need your approval → Ledger" not in resp.text
+        assert "1 pending action" in resp.text
+        assert f'/assessments/{aid}?tab=actions' in resp.text
 
     async def test_assessment_detail_tab_query_param_opens_actions_tab(self, ui_client):
         """The badge above links with ?tab=actions -- the Alpine tab state
@@ -734,10 +766,15 @@ class TestNavUpdate:
         assert 'href="/admin-review"' not in resp.text
         assert "Admin Review" not in resp.text
 
-    async def test_ledger_nav_badge_counts_every_pending_gate_including_legacy_types(self, ui_client):
-        """The single remaining nav badge (Ledger's) counts every pending
-        gate, including a stale `cluster-admin-review` one -- there's no
-        longer a second, separately-counted badge to split it out into."""
+    async def test_ledger_nav_badge_ignores_legacy_and_app_owner_gate_types(self, ui_client):
+        """The single remaining nav badge (Ledger's) is PR-approval-specific
+        now (Ledger's own job narrowed to strictly PRs -- see
+        routes/insights.py::ledger_page()) -- neither a stale
+        `cluster-admin-review` gate nor an ordinary app-owner
+        `auto-mode-review` gate is a PR, so neither moves it. (Before
+        Ledger's PR redesign, every pending gate counted toward this badge
+        once the separate Admin Review badge was retired -- this test's
+        assertion supersedes that intermediate behavior.)"""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="admin-badge-app-2"))
         await store.create_gate(aid, "cluster-admin-review", "needs elevated review")
@@ -746,7 +783,10 @@ class TestNavUpdate:
         with patch("agentit.portal.helpers._nav_gate_badges_cache", {"pending_actions": 0, "ts": 0.0}):
             resp = await client.get("/fleet")
         assert resp.status_code == 200
-        assert re.search(r'Ledger\s*<span class="nav-badge">2</span>', resp.text)
+        assert not re.search(r'Ledger\s*<span class="nav-badge">', resp.text)
+        # Both gates are still real pending actions -- visible via this
+        # app's own row badge instead.
+        assert "2 pending action" in resp.text
 
 
 # ── 7. Self-Improvement "run now" trigger ───────────────────────────────

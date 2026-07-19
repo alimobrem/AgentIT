@@ -449,6 +449,39 @@ def test_ensure_applicationset_returns_false_on_api_error(mock_kube):
     assert result is False
 
 
+# ── expected_managed_apps_repo_url ───────────────────────────────────────
+#
+# DriftDetector's ApplicationSet self-heal (2026-07-18) needs a real,
+# non-hardcoded "what's correct" value -- these prove it's genuinely derived
+# through this module's own owner-resolution routine, not a second literal
+# URL that could silently drift out of sync with `ensure_infra_repo()`'s
+# actual convention.
+
+
+def test_expected_managed_apps_repo_url_follows_infra_repo_naming_convention():
+    from agentit.portal.github_pr import expected_managed_apps_repo_url
+
+    url = expected_managed_apps_repo_url()
+
+    assert url == "https://github.com/alimobrem/agentit-gitops"
+
+
+@patch("agentit.portal.github_pr._parse_owner_repo")
+def test_expected_managed_apps_repo_url_is_derived_via_parse_owner_repo(mock_parse):
+    """Regression guard against silently hardcoding the final URL:
+    swapping the owner-resolution routine's return value must change the
+    computed expected URL -- proving the function actually calls through
+    it instead of just returning a literal string."""
+    from agentit.portal.github_pr import expected_managed_apps_repo_url
+
+    mock_parse.return_value = ("someone-else", "AgentIT")
+
+    url = expected_managed_apps_repo_url()
+
+    assert url == "https://github.com/someone-else/agentit-gitops"
+    mock_parse.assert_called_once_with("https://github.com/alimobrem/AgentIT")
+
+
 # ── ensure_infra_repo ────────────────────────────────────────────────────
 #
 # Regression test for docs/code-review-2026-07-12.md item #8: the

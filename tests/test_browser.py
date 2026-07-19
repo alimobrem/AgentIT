@@ -178,7 +178,6 @@ def app_url():
          patch("agentit.portal.routes.capabilities.get_store", return_value=async_store), \
          patch("agentit.portal.routes.settings.get_store", return_value=async_store), \
          patch("agentit.portal.routes.insights.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.remediations.get_store", return_value=async_store), \
          patch("agentit.portal.routes.slos.get_store", return_value=async_store), \
          patch.object(AssessmentStore, "close", _noop_close):
 
@@ -269,11 +268,6 @@ class TestEveryPageLoads:
         expect(page.locator(".delivery-secondary a", has_text="Download")).to_be_visible()
         expect(page.locator(".delivery-secondary button", has_text="Per-Agent PRs")).to_have_count(0)
 
-    def test_remediations_page(self, page: Page, app_url):
-        url, aid, _ = app_url
-        page.goto(f"{url}/assessments/{aid}/remediations")
-        expect(page.locator("h1")).to_be_visible()
-
     def test_slos_page(self, page: Page, app_url):
         url, aid, _ = app_url
         page.goto(f"{url}/assessments/{aid}/slos")
@@ -338,11 +332,6 @@ class TestEveryPageLoads:
         url, _, _ = app_url
         page.goto(f"{url}/fleet/slos")
         expect(page.locator("h1")).to_contain_text("Fleet SLOs")
-
-    def test_fleet_remediations_page(self, page: Page, app_url):
-        url, _, _ = app_url
-        page.goto(f"{url}/fleet/remediations")
-        expect(page.locator("h1")).to_contain_text("Fleet Remediations")
 
     def test_404_page(self, page: Page, app_url):
         url, _, _ = app_url

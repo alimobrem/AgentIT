@@ -19,13 +19,13 @@
     </div>
   </div>
   <div class="stat-card">
-    <div class="stat-label">Remediations</div>
+    <div class="stat-label">Runs</div>
     <div class="stat-value">
-      <span class="text-success">{{ completed }}</span>
-      <span class="text-muted text-sm"> done</span>
-      {% if pending > 0 %}
-        / <span class="text-warning">{{ pending }}</span>
-        <span class="text-muted text-sm"> pending</span>
+      <span class="text-success">{{ runs_success }}</span>
+      <span class="text-muted text-sm"> succeeded</span>
+      {% if agent_runs and agent_runs|length > runs_success %}
+        / <span class="text-warning">{{ agent_runs|length - runs_success }}</span>
+        <span class="text-muted text-sm"> failed</span>
       {% endif %}
     </div>
   </div>
@@ -69,53 +69,6 @@
       <td class="text-sm">{% if run.duration_ms is not none %}{{ (run.duration_ms / 1000) | round(2) }}s{% else %}—{% endif %}</td>
       <td class="text-sm text-muted">{{ run.resource_tier or "—" }}</td>
       <td class="text-sm text-muted">{{ run.error or "—" }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% endif %}
-
-{% if remediations %}
-<h2 class="section-title">Remediations</h2>
-<table>
-  <thead>
-    <tr>
-      <th>Description</th>
-      <th>Status</th>
-      <th>Created</th>
-      <th>Completed</th>
-      <th>Action</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for r in remediations %}
-    <tr class="{% if r.status == 'completed' %}row-border-green{% else %}row-border-yellow{% endif %}">
-      <td>{{ r.description }}</td>
-      <td>
-        {% if r.status == "completed" %}
-          <span class="badge badge-low">completed</span>
-        {% elif r.status == "applied" %}
-          <span class="badge badge-info">applied</span>
-        {% else %}
-          <span class="badge badge-medium">pending</span>
-        {% endif %}
-      </td>
-      <td class="text-sm"><span data-timestamp="{{ r.created_at }}">{{ r.created_at[:19] }}</span></td>
-      <td class="text-sm">{% if r.completed_at %}<span data-timestamp="{{ r.completed_at }}">{{ r.completed_at[:19] }}</span>{% else %}—{% endif %}</td>
-      <td>
-        {% if r.status not in ("completed", "applied") %}
-        <form method="post" action="/assessments/{{ r.assessment_id }}/remediations/{{ r.id }}/status" class="inline-form">
-          <input type="hidden" name="status" value="completed">
-          <input type="hidden" name="redirect" value="/agents/{{ agent.agent_name }}">
-          <button type="submit" class="btn btn-green btn-sm">
-            <span class="btn-label">Mark Done</span>
-            <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
-          </button>
-        </form>
-        {% else %}
-        <span class="text-sm text-muted">—</span>
-        {% endif %}
-      </td>
     </tr>
     {% endfor %}
   </tbody>

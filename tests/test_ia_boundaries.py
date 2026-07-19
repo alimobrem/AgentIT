@@ -1,10 +1,16 @@
-"""Exclusive IA ownership: Ledger inbox vs Fleet scoreboard. (Admin Review, a
-third, elevated-approvals nav item, was retired 2026-07-18 along with the
-`cluster-admin-review` gate type it existed solely for -- see
+"""Exclusive IA ownership: Ledger's PR list vs Fleet scoreboard. (Admin
+Review, a third, elevated-approvals nav item, was retired 2026-07-18 along
+with the `cluster-admin-review` gate type it existed solely for -- see
 delivery.py/routes/gates.py.)
 
-See docs/portal-experience-design-language.md §1 and docs/ledger-design-spec.md
-§3 exclusive-ownership tables.
+See docs/portal-experience-design-language.md §1. Ledger's own job was
+redefined by product direction (docs/ledger-design-spec.md's original A-P
+generic event union is superseded): it's now strictly a fleet-wide PR list/
+lifecycle view (waiting for approval / open / merged / rejected / closed),
+not a generic "everything that needs a human" inbox -- non-PR gate types
+(``auto-mode-review``, ``rollback-review``, ``finding-unresolved-
+escalation``) never show up there; they stay on Fleet's per-app badges and
+Assessment Detail's Actions tab.
 """
 from __future__ import annotations
 
@@ -54,19 +60,39 @@ async def test_fleet_is_scoreboard_at_fleet_path(ui_client):
     assert "scoreboard-app" in resp.text
 
 
-async def test_ledger_is_ops_home_with_needs_you_default(ui_client):
+async def test_ledger_is_the_pr_list_not_a_generic_inbox(ui_client):
     client, _store = ui_client
     resp = await client.get("/ledger")
     assert resp.status_code == 200
     assert "<h1>Ledger</h1>" in resp.text
-    assert "Morning inbox" in resp.text
-    assert "Needs You" in resp.text
+    assert "Waiting for your approval" in resp.text
+    assert "PR history" in resp.text
 
 
-async def test_nav_needs_you_badge_on_ledger_not_fleet(ui_client):
+async def test_ledger_never_shows_non_pr_gates(ui_client):
+    """auto-mode-review is a real, pending, app-owner gate -- but not a PR
+    gate -- so it must never appear in Ledger's "Waiting for your approval"
+    list (it belongs on Fleet's needs-action badge / Assessment Detail's
+    Actions tab instead)."""
+    client, store = ui_client
+    aid = await store.save(make_report(repo_name="non-pr-gate-app"))
+    await store.create_gate(aid, "auto-mode-review", "needs review")
+    resp = await client.get("/ledger")
+    assert resp.status_code == 200
+    assert "Waiting for your approval (0)" in resp.text
+
+
+async def test_nav_needs_you_badge_on_ledger_reflects_pr_gates_only(ui_client):
     client, store = ui_client
     aid = await store.save(make_report(repo_name="nav-badge-app"))
+    # A non-PR pending gate must NOT move this badge -- only a pending
+    # gitops-pr-pending gate (a PR waiting for approval) does.
     await store.create_gate(aid, "auto-mode-review", "needs review")
+    await store.create_gate(
+        aid, "gitops-pr-pending",
+        "PR opened: https://github.com/org/nav-badge-app-gitops/pull/1. Approving this gate merges the PR.",
+        pr_url="https://github.com/org/nav-badge-app-gitops/pull/1",
+    )
     with patch(
         "agentit.portal.helpers._nav_gate_badges_cache",
         {"pending_actions": 0, "ts": 0.0},
@@ -80,16 +106,31 @@ async def test_nav_needs_you_badge_on_ledger_not_fleet(ui_client):
     assert not re.search(r'Fleet\s*<span class="nav-badge">', primary)
 
 
-async def test_fleet_quiet_pointer_to_ledger_needs_you(ui_client):
+async def test_fleet_quiet_pointer_to_ledger_counts_pr_gates_only(ui_client):
     client, store = ui_client
     aid = await store.save(make_report(repo_name="quiet-pointer-app"))
+    # Two non-PR gates must not inflate the "N PR(s) need your approval"
+    # banner -- only the one real gitops-pr-pending gate below does.
     await store.create_gate(aid, "auto-mode-review", "gate 1")
     await store.create_gate(aid, "dry-run-failed", "gate 2")
-    resp = await client.get("/fleet")
-    assert resp.status_code == 200
+    await store.create_gate(
+        aid, "gitops-pr-pending",
+        "PR opened: https://github.com/org/quiet-pointer-app-gitops/pull/1. Approving this gate merges the PR.",
+        pr_url="https://github.com/org/quiet-pointer-app-gitops/pull/1",
+    )
+    with patch(
+        "agentit.portal.helpers._nav_gate_badges_cache",
+        {"pending_actions": 0, "ts": 0.0},
+    ):
+        resp = await client.get("/fleet")
+    assert resp.status_code == 200, resp.text[:500]
     assert 'href="/ledger"' in resp.text
-    assert "2 need you → Ledger" in resp.text
-    assert f'/assessments/{aid}?tab=actions' not in resp.text
+    assert "1 PR(s) need your approval → Ledger" in resp.text
+    # The two non-PR gates are real pending actions too -- they show via
+    # this app's own row badge (linking straight to its Actions tab)
+    # instead of inflating the PR-specific fleet-wide pointer above.
+    assert f'/assessments/{aid}?tab=actions' in resp.text
+    assert "3 pending action" in resp.text
 
 
 async def test_admin_review_nav_and_page_are_gone(ui_client):

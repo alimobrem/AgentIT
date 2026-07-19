@@ -307,5 +307,7 @@ class TestWebhookWiring:
         assert resp.status_code == 200
         gates = await store.list_gates(status="pending")
         assert not any(g["gate_type"] == "finding-unresolved-escalation" for g in gates)
-        remediations = await store.list_remediations(resp.json()["assessment_id"])
-        assert remediations == []
+        # Redispatch never fired -- no "finding-redispatched" event, the
+        # real signal redispatch_finding_fix() logs on success.
+        events = await store.list_events(target_app=old_report.repo_name, limit=50)
+        assert not any(e["action"] == "finding-redispatched" for e in events)

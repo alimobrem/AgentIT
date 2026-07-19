@@ -174,15 +174,19 @@ CREATE TABLE IF NOT EXISTS gates (
 -- covers a brand-new one).
 ALTER TABLE gates ADD COLUMN IF NOT EXISTS pr_url TEXT;
 
-CREATE TABLE IF NOT EXISTS remediations (
-    id TEXT PRIMARY KEY,
-    assessment_id TEXT NOT NULL REFERENCES assessments(id),
-    agent_name TEXT NOT NULL,
-    description TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    created_at TIMESTAMPTZ NOT NULL,
-    completed_at TIMESTAMPTZ
-);
+-- Remediations has been removed as a standalone concept: rows were keyed
+-- only by (assessment_id, agent_name, description) with zero link to the
+-- delivery/gate/PR that actually resolved them, so "completion" was always
+-- a hand-maintained flag (a manual "Mark Done" button as the only fallback)
+-- -- see gates.pr_url / deliveries.details_json.outcomes.*.pr_url /
+-- onboarding_results.pr_url (aggregated by pr_tracking.py) for the real,
+-- honestly-derived fix/PR status this table never actually tracked. This
+-- DROP is a one-time, idempotent cleanup for any database that already
+-- created the table before this line landed; confirmed nothing of value is
+-- lost -- every generated-fix/delivery outcome that ever mattered is
+-- already durably recorded via `events`/`deliveries`/`gates` independent of
+-- this table.
+DROP TABLE IF EXISTS remediations;
 
 CREATE TABLE IF NOT EXISTS agent_registry (
     id TEXT PRIMARY KEY,
@@ -385,7 +389,7 @@ ON CONFLICT (repo_url) DO NOTHING;
 
 _ALL_TABLES = [
     "assessments", "apps", "onboarding_results", "events", "gates",
-    "remediations", "agent_registry", "slos", "apply_results",
+    "agent_registry", "slos", "apply_results",
     "settings", "remediation_jobs", "scheduled_operations",
     "processed_webhooks", "agent_feedback", "skill_effectiveness",
     "suppressed_checks", "skill_inventory_snapshots",
@@ -764,11 +768,11 @@ class AssessmentStore:
     async def delete(self, assessment_id: str) -> bool:
         """Delete the whole app, not just the one ``assessment_id`` passed
         in -- Fleet's confirm dialog (fleet.html) promises removing "ALL
-        related data (assessments, onboarding, gates, remediations, SLOs)"
+        related data (assessments, onboarding, gates, SLOs)"
         and that this "cannot be undone". An app re-assessed more than once
         has older ``assessments`` rows the caller never names, and a delete
         scoped to only one exact id left every one of THOSE rows' gates/
-        remediations/slos/onboarding/apply_results/deliveries/events fully
+        slos/onboarding/apply_results/deliveries/events fully
         intact -- ``get_fleet_data()``'s ``MAX(assessed_at)`` join then
         picked the next-latest surviving assessment on the next Fleet load,
         silently resurrecting the "deleted" app.
@@ -791,7 +795,7 @@ class AssessmentStore:
                 repo_name = repo_row["repo_name"]
 
                 for table in (
-                    "remediation_jobs", "onboarding_results", "remediations",
+                    "remediation_jobs", "onboarding_results",
                     "slos", "gates", "apply_results", "deliveries",
                 ):
                     await conn.execute(
@@ -1258,13 +1262,6 @@ class AssessmentStore:
         )
         return row is not None
 
-    async def list_remediations_by_agent(self, agent_name: str) -> list[dict]:
-        rows = await self._pool.fetch(
-            "SELECT * FROM remediations WHERE agent_name = $1 ORDER BY created_at DESC",
-            agent_name,
-        )
-        return _rows_to_dicts(rows)
-
     # ── Assessment history / trends ─────────────────────────────────────
 
     async def list_history(self, repo_url: str) -> list[dict]:
@@ -1702,92 +1699,6 @@ class AssessmentStore:
             app_name, finding_category,
         )
         return row["cnt"] if row else 0
-
-    # ── Remediations ───────────────────────────────────────────────────
-
-    async def save_remediation(
-        self,
-        assessment_id: str,
-        agent_name: str,
-        description: str,
-        status: str = "generated",
-        manifest_path: str | None = None,
-    ) -> str:
-        """Create a remediation, or return/update the existing live one for
-        this exact (assessment_id, agent_name, description).
-
-        The dedup key is entirely within this table, so the existence
-        check and the INSERT run inside one transaction serialized by a
-        Postgres advisory lock keyed on that triple -- two genuinely
-        concurrent callers no longer both see "no live remediation" and
-        both insert a duplicate."""
-        async with self._pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.fetchval(
-                    "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
-                    f"{assessment_id}:{agent_name}:{description}",
-                )
-                existing = await conn.fetchrow(
-                    """
-                    SELECT id, status FROM remediations
-                    WHERE assessment_id = $1 AND agent_name = $2 AND description = $3
-                      AND status NOT IN ('completed', 'applied')
-                    LIMIT 1
-                    """,
-                    assessment_id, agent_name, description,
-                )
-                if existing:
-                    if status != "generated" and status != existing["status"]:
-                        await conn.execute(
-                            "UPDATE remediations SET status = $1 WHERE id = $2",
-                            status, existing["id"],
-                        )
-                    return existing["id"]
-                rem_id = uuid.uuid4().hex
-                await conn.execute(
-                    """
-                    INSERT INTO remediations (id, assessment_id, agent_name, description, status, created_at)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    """,
-                    rem_id, assessment_id, agent_name, description, status, _now(),
-                )
-                return rem_id
-
-    async def update_remediation_status(self, remediation_id: str, status: str) -> bool:
-        result = await self._pool.execute(
-            "UPDATE remediations SET status = $1 WHERE id = $2 AND status != 'completed'",
-            status, remediation_id,
-        )
-        if status == "completed":
-            await self._pool.execute(
-                "UPDATE remediations SET completed_at = $1 WHERE id = $2 AND status = 'completed'",
-                _now(), remediation_id,
-            )
-        return _affected(result) > 0
-
-    async def list_remediations(self, assessment_id: str) -> list[dict]:
-        rows = await self._pool.fetch(
-            "SELECT * FROM remediations WHERE assessment_id = $1 ORDER BY created_at DESC",
-            assessment_id,
-        )
-        return _rows_to_dicts(rows)
-
-    async def delete_remediation(self, remediation_id: str, assessment_id: str) -> bool:
-        result = await self._pool.execute(
-            "DELETE FROM remediations WHERE id = $1 AND assessment_id = $2",
-            remediation_id, assessment_id,
-        )
-        return _affected(result) > 0
-
-    async def complete_remediation(self, remediation_id: str) -> bool:
-        result = await self._pool.execute(
-            """
-            UPDATE remediations SET status = 'completed', completed_at = $1
-            WHERE id = $2 AND status != 'completed'
-            """,
-            _now(), remediation_id,
-        )
-        return _affected(result) > 0
 
     # ── Agent Registry ─────────────────────────────────────────────────
 
@@ -2427,12 +2338,7 @@ class AssessmentStore:
             assessment_id,
         )
 
-        remeds = await self._pool.fetch(
-            "SELECT created_at as timestamp, agent_name as agent_id, 'remediation' as action, status as severity, description as summary FROM remediations WHERE assessment_id = $1 ORDER BY created_at ASC",
-            assessment_id,
-        )
-
-        timeline = _rows_to_dicts(events) + _rows_to_dicts(gates) + _rows_to_dicts(remeds)
+        timeline = _rows_to_dicts(events) + _rows_to_dicts(gates)
         timeline.sort(key=lambda x: x.get("timestamp", ""))
         return timeline
 
@@ -2441,7 +2347,34 @@ class AssessmentStore:
         total_assessments = await self._pool.fetchval("SELECT COUNT(*) FROM assessments") or 0
         unique_apps = await self._pool.fetchval("SELECT COUNT(DISTINCT repo_url) FROM assessments") or 0
         total_onboardings = await self._pool.fetchval("SELECT COUNT(*) FROM onboarding_results") or 0
-        total_remediations = await self._pool.fetchval("SELECT COUNT(*) FROM remediations") or 0
+        # Real PR activity, not a hand-maintained "remediations" completion
+        # flag with no link to any actual PR/gate/delivery (see the removed
+        # `remediations` table's schema comment) -- a pure DB count across
+        # the exact three places pr_tracking.py documents a `pr_url` can
+        # land, with no live GitHub call (mirrors every other stat here).
+        # `gitops_pr_count`: gates.pr_url on a gitops-pr-pending gate (the
+        # GitOps infra-repo PR). `delivery_pr_count`: a delivery outcome's
+        # own pr_url (source-repo-pr/app-repo-pr categories). `onboarding_pr_
+        # count`: onboarding_results.pr_url, which may itself be several
+        # `|`-joined URLs (Per-Agent PRs) -- split and counted individually.
+        gitops_pr_count = await self._pool.fetchval(
+            "SELECT COUNT(*) FROM gates WHERE gate_type = 'gitops-pr-pending' AND pr_url IS NOT NULL"
+        ) or 0
+        delivery_pr_count = await self._pool.fetchval(
+            """
+            SELECT COUNT(*) FROM deliveries d,
+                jsonb_each(COALESCE(d.details_json->'outcomes', '{}'::jsonb)) AS outcome(category, value)
+            WHERE value->>'pr_url' IS NOT NULL
+            """
+        ) or 0
+        onboarding_pr_rows = await self._pool.fetch(
+            "SELECT pr_url FROM onboarding_results WHERE pr_url IS NOT NULL AND pr_url != ''"
+        )
+        onboarding_pr_count = sum(
+            len([u for u in (row["pr_url"] or "").split("|") if u.strip()])
+            for row in onboarding_pr_rows
+        )
+        total_prs = gitops_pr_count + delivery_pr_count + onboarding_pr_count
         pending_gates = await self._pool.fetchval("SELECT COUNT(*) FROM gates WHERE status = 'pending'") or 0
         total_events = await self._pool.fetchval("SELECT COUNT(*) FROM events") or 0
 
@@ -2455,7 +2388,7 @@ class AssessmentStore:
             "total_assessments": total_assessments,
             "unique_apps": unique_apps,
             "total_onboardings": total_onboardings,
-            "total_remediations": total_remediations,
+            "total_prs": total_prs,
             "pending_gates": pending_gates,
             "total_events": total_events,
             "total_feedback": total_feedback,
@@ -2665,12 +2598,6 @@ class AssessmentStore:
                 counts["onboarding_results"] = _affected(status)
 
                 status = await conn.execute(
-                    "DELETE FROM remediations WHERE status = 'completed' AND completed_at < $1",
-                    cutoff,
-                )
-                counts["remediations"] = _affected(status)
-
-                status = await conn.execute(
                     "DELETE FROM gates WHERE status IN ('approved', 'rejected', 'expired', 'cancelled') "
                     "AND resolved_at < $1",
                     cutoff,
@@ -2723,7 +2650,7 @@ class AssessmentStore:
     # ── DB size / row-count metrics ──────────────────────────────────────
 
     _METRIC_TABLES = (
-        "assessments", "apps", "onboarding_results", "events", "gates", "remediations",
+        "assessments", "apps", "onboarding_results", "events", "gates",
         "agent_registry", "slos", "apply_results", "remediation_jobs",
         "scheduled_operations", "agent_feedback", "skill_effectiveness",
         "agent_runs", "check_results", "deliveries",

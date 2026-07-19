@@ -384,52 +384,6 @@ async def test_fleet_data_counts_critical_findings_correctly():
     assert fleet[0]["critical_count"] == 2  # 1 critical + 1 high
 
 
-# ── Remediations ───────────────────────────────────────────────────────
-
-
-class TestRemediationsTable:
-    async def test_save_and_list(self):
-        store = await make_store()
-        aid = await store.save(make_report())
-        rid = await store.save_remediation(aid, "security", "Fix RBAC")
-        rems = await store.list_remediations(aid)
-        assert len(rems) == 1
-        assert rems[0]["agent_name"] == "security"
-        assert rems[0]["status"] == "generated"
-        assert rems[0]["id"] == rid
-
-    async def test_complete(self):
-        store = await make_store()
-        aid = await store.save(make_report())
-        rid = await store.save_remediation(aid, "security", "Fix RBAC")
-        assert await store.complete_remediation(rid) is True
-        rems = await store.list_remediations(aid)
-        assert rems[0]["status"] == "completed"
-        assert rems[0]["completed_at"] is not None
-
-    async def test_complete_idempotent(self):
-        store = await make_store()
-        aid = await store.save(make_report())
-        rid = await store.save_remediation(aid, "cicd", "Add pipeline")
-        await store.complete_remediation(rid)
-        assert await store.complete_remediation(rid) is False
-
-    async def test_delete(self):
-        store = await make_store()
-        aid = await store.save(make_report())
-        rid = await store.save_remediation(aid, "security", "Fix RBAC")
-        assert await store.delete_remediation(rid, aid) is True
-        assert await store.list_remediations(aid) == []
-
-    async def test_delete_wrong_assessment_returns_false(self):
-        store = await make_store()
-        aid = await store.save(make_report())
-        other_aid = await store.save(make_report(repo_name="other-app"))
-        rid = await store.save_remediation(aid, "security", "Fix RBAC")
-        assert await store.delete_remediation(rid, other_aid) is False
-        assert len(await store.list_remediations(aid)) == 1
-
-
 # ── Agent Registry ─────────────────────────────────────────────────────
 
 
@@ -692,14 +646,19 @@ class TestSlosTable:
 
 
 class TestOrchestratorStoreWiring:
-    async def test_remediations_recorded_on_onboard(self):
-        """Orchestrator records remediations in the store when assessment_id is provided.
+    async def test_files_generated_recorded_on_onboard(self):
+        """Orchestrator records each agent's real generated-file output on
+        its own `AgentResult` (`files_generated`) when assessment_id is
+        provided -- the removed `remediations` table used to additionally
+        persist a parallel, hand-maintained copy of this same fact with no
+        link to the fix's real delivery/PR outcome (see
+        `FleetOrchestrator._record_remediations()`'s removal); the
+        agent_results/agent_runs the orchestrator already produces are the
+        real, non-fabricated record now.
 
         criticality="high" so dependency/cost/codechange are actually
         planned -- security/observability/cicd/compliance are now
-        skill-only domains (see docs/agent-removal-readiness.md) and skill-
-        generated files aren't recorded as remediations (only Python-agent
-        output is, via FleetOrchestrator._record_remediations()).
+        skill-only domains (see docs/agent-removal-readiness.md).
         """
         from agentit.agents.orchestrator import FleetOrchestrator
         import tempfile
@@ -717,10 +676,8 @@ class TestOrchestratorStoreWiring:
             )
             result = await orch.run()
 
-        rems = await store.list_remediations(aid)
-        assert len(rems) > 0
-        agent_names_in_rems = {r["agent_name"] for r in rems}
-        assert agent_names_in_rems & {"cost", "dependency", "codechange"}
+        agent_names_with_files = {r.agent_name for r in result.agent_results if r.files_generated}
+        assert agent_names_with_files & {"cost", "dependency", "codechange"}
 
     async def test_agents_registered_on_run(self):
         """Orchestrator registers available Python agents in the store.
@@ -750,15 +707,18 @@ class TestOrchestratorStoreWiring:
         for core in ("cost", "dependency", "codechange"):
             assert core in agent_names, f"{core} not registered"
 
-    async def test_no_remediations_without_assessment_id(self):
-        """Orchestrator skips remediation recording when assessment_id is None."""
+    async def test_run_succeeds_without_assessment_id(self):
+        """Orchestrator still runs (and generates files) when assessment_id
+        is None -- e.g. a dry-run/preview invocation with nothing persisted
+        yet. criticality="high" so dependency/cost/codechange are actually
+        planned -- see the sibling test above for why."""
         from agentit.agents.orchestrator import FleetOrchestrator
         import tempfile
         from pathlib import Path
 
         store = await make_store()
         async_store = store
-        report = make_report()
+        report = make_report(criticality="high")
         await store.save(report)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -766,11 +726,9 @@ class TestOrchestratorStoreWiring:
                 report=report, output_dir=Path(tmpdir),
                 store=async_store,
             )
-            await orch.run()
+            result = await orch.run()
 
-        # No assessment_id means no remediations saved — but we can't
-        # query without an assessment_id. Just verify no crash.
-        assert True
+        assert any(r.success for r in result.agent_results)
 
     async def test_slos_created_on_onboard(self):
         """Orchestrator creates default SLOs after release agent runs."""

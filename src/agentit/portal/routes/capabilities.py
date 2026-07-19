@@ -170,18 +170,19 @@ async def agent_detail(request: Request, agent_name: str) -> HTMLResponse:
     agent["status"] = _agent_display_status(agents, agent_name)
 
     events = await s.list_events_by_agent(agent_name, limit=50)
-    remediations = await s.list_remediations_by_agent(agent_name)
-    pending = sum(1 for r in remediations if r["status"] not in ("completed", "applied"))
-    completed = sum(1 for r in remediations if r["status"] in ("completed", "applied"))
     agent_runs = await s.list_agent_runs(agent_name, limit=50) if hasattr(s, 'list_agent_runs') else []
+    # Real run outcomes (agent_runs, already fetched above), not the
+    # removed `remediations` table's hand-maintained completion flag --
+    # see docs/architecture.md's removal note. `agent_runs` is capped at
+    # 50 (list_agent_runs' own limit), so these are "recent", not
+    # lifetime, counts.
+    runs_success = sum(1 for r in agent_runs if r["status"] == "success")
 
     return get_templates().TemplateResponse(request, "agent_detail.html", {
         "agent": agent,
         "events": events,
-        "remediations": remediations,
-        "pending": pending,
-        "completed": completed,
         "agent_runs": agent_runs,
+        "runs_success": runs_success,
     })
 
 

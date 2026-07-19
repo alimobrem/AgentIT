@@ -11,7 +11,6 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from agentit.audit import audit_log
 from agentit.portal.delivery import (
     _CICD_SHARED_NAMESPACE_GATE_TYPE,
-    complete_remediations,
     route_and_deliver,
 )
 from agentit.portal.helpers import get_current_user, get_store
@@ -157,11 +156,12 @@ async def resolve_gate(request: Request, gate_id: str):
             # The cluster-config fix this PR carries isn't actually
             # delivered until this merge -- unlike every other delivery
             # mechanism, opening the PR (automode.py::_finish_gitops_pr,
-            # route_and_deliver()'s own gate creation) never completes the
-            # remediation on its own. This is the one point that confirms
-            # the merge actually happened, so it's the one point that can
-            # honestly mark the remediation done.
-            await complete_remediations(s, assessment_id)
+            # route_and_deliver()'s own gate creation) never delivers on its
+            # own. This gate's own status (now "approved", i.e. merged) IS
+            # the one honest, PR-linked "done" fact -- see pr_tracking.py's
+            # gate_pr_records(), which reads exactly this status to render
+            # the merge on Assessment Detail's Open PRs / PR History. No
+            # separate "mark done" bookkeeping needed.
             return RedirectResponse(
                 # gitops-pr-pending gates only ever exist for a merged commit
                 # against the GitOps infra repo (see the comment above) --

@@ -44,6 +44,11 @@ class DriftDetector:
 
         Returns a list of dicts with keys: app, sync_status, health_status.
         """
+        # Independent of the Argo Applications list below (a different
+        # resource, ApplicationSet) -- runs every tick regardless of
+        # whether that list succeeds.
+        await self._check_applicationset_drift()
+
         app_list = await asyncio.to_thread(self._fetch_argo_apps)
         if app_list is None:
             click.echo("[drift-detect] No Argo CD access -- skipping", err=True)
@@ -205,6 +210,87 @@ class DriftDetector:
             summary=summary,
         )
         click.echo(f"[drift-detect] GITOPS LAG: {summary}", err=True)
+
+    async def _check_applicationset_drift(self) -> None:
+        """Self-heal the fleet-wide `agentit-managed-apps` ApplicationSet's
+        git source repoURL if it's ever manually overwritten outside AgentIT.
+
+        2026-07-18 incident (twice in one day): something entirely outside
+        this repo's code ran `oc create`/`oc patch` directly against the
+        live cluster and overwrote `spec.generators[0].git.repoURL` /
+        `spec.template.spec.source.repoURL` with a bogus placeholder --
+        confirmed via `metadata.managedFields` field-manager fingerprinting
+        (`kubectl-create`/`kubectl-patch`, neither of which is this app).
+        That broke GitOps rollout for the entire fleet both times until a
+        human noticed and manually restored it.
+
+        Only ever CORRECTS a drifted value back to the known-good one
+        (`github_pr.expected_managed_apps_repo_url()`), applied via
+        `github_pr.ensure_applicationset()` -- the exact same function
+        onboarding already uses to write this spec, so there is one source
+        of truth for "what correct looks like", not a second copy of the
+        spec here. Never creates or deletes the object: that stays owned by
+        onboarding's own `ensure_applicationset()` call
+        (`routes/assessments.py`, `portal/delivery.py`) -- if the
+        ApplicationSet doesn't exist yet, this is a no-op.
+        """
+        from agentit.portal import github_pr
+
+        name = github_pr.MANAGED_APPS_APPLICATIONSET_NAME
+        namespace = github_pr.MANAGED_APPS_APPLICATIONSET_NAMESPACE
+
+        try:
+            appset = await asyncio.to_thread(
+                kube.get_custom_resource,
+                "argoproj.io", "v1alpha1", "applicationsets", name, namespace=namespace,
+            )
+        except kube.KubeError as exc:
+            logger.warning("Failed to fetch %s ApplicationSet: %s", name, exc)
+            return
+
+        if appset is None:
+            # Not onboarded yet -- creation belongs to
+            # ensure_applicationset() at onboarding time, never to routine
+            # drift healing.
+            return
+
+        spec = appset.get("spec", {}) or {}
+        generators = spec.get("generators") or [{}]
+        generator_url = (generators[0] or {}).get("git", {}).get("repoURL", "")
+        source_url = spec.get("template", {}).get("spec", {}).get("source", {}).get("repoURL", "")
+
+        expected_url = github_pr.expected_managed_apps_repo_url()
+        if generator_url == expected_url and source_url == expected_url:
+            return
+
+        drifted_url = generator_url or source_url
+        click.echo(
+            f"[drift-detect] DRIFT: {name} ApplicationSet repoURL is '{drifted_url}', "
+            f"expected '{expected_url}' -- healing",
+            err=True,
+        )
+        healed = await asyncio.to_thread(github_pr.ensure_applicationset, expected_url)
+        action = "applicationset-repo-drift-healed" if healed else "applicationset-repo-drift-heal-failed"
+        summary = (
+            f"{name} ApplicationSet's git source repoURL had drifted to '{drifted_url}' "
+            f"(expected '{expected_url}') -- "
+            f"{'automatically restored' if healed else 'heal attempt FAILED, needs manual fix'}."
+        )
+        self._publisher.publish(
+            "agentit-events",
+            agent_id="drift-detector",
+            action=action,
+            target_app=name,
+            severity="critical",
+            summary=summary,
+            details={
+                "generator_repo_url": generator_url,
+                "source_repo_url": source_url,
+                "expected_repo_url": expected_url,
+                "healed": healed,
+            },
+        )
+        click.echo(f"[drift-detect] {summary}", err=True)
 
     async def _maybe_close_gitops_delivery(self, argo_app_name: str, synced_revision: str) -> None:
         """If ``synced_revision`` matches a pending GitOps delivery's

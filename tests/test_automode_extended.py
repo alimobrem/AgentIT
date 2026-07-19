@@ -80,27 +80,23 @@ class TestExecuteAutoApply:
         assert "routing error" in result["reason"]
         mock_apply.assert_not_called()
 
-    async def test_remediations_stay_pending_until_gitops_pr_is_merged(self):
-        """Documents a real, discovered behavior change from Direct Apply's
-        removal (flagged in the task report, not silently papered over):
-        `_finish_direct_apply()`'s success branch marked remediations
-        "completed" the instant a direct apply succeeded -- appropriate,
-        since a direct apply mutates the cluster immediately.
-        `_finish_gitops_pr()` never calls `_complete_remediations()` at all
-        -- opening a PR is not delivery; the cluster is not mutated until a
-        human merges it. Since GitOps commit+PR is now cluster_config's ONLY
-        reachable outcome (Direct Apply removed entirely), remediations tied
-        to a cluster_config fix now stay "generated", not "completed", after
-        AutoMode's terminal action -- arguably the more honest state (it
-        genuinely isn't done until merged), but a real, visible behavior
-        change worth a human decision on whether completion should instead
-        be wired to the eventual PR-merge event."""
+    async def test_gitops_pr_gate_stays_pending_until_a_human_merges_it(self):
+        """A cluster-config fix's real "done" fact is derived purely from
+        PR/gate state now (the removed `remediations` table's completion
+        flag never had a real link to this outcome anyway -- see the
+        README changelog entry for the removal). `_finish_gitops_pr()`
+        opens the PR and creates a `gitops-pr-pending` gate, but never
+        resolves it -- opening a PR is not delivery; the cluster/GitOps
+        repo state a human relies on isn't final until a human actually
+        merges it via `/gates/{id}/resolve` (see
+        test_gates_delivery.py::TestGitopsPrPendingGateReflectsRealPrOutcome
+        for that side). This asserts AutoMode's own terminal action leaves
+        that gate genuinely pending, not silently auto-resolved."""
         s, raw = await make_async_store()
         await raw.set_setting("auto_mode", "true")
         report = make_report(criticality="low", summary="test")
         report.infra_repo_url = "https://github.com/org/infra-gitops"
         aid = await raw.save(report)
-        await raw.save_remediation(aid, "security", "Add NetworkPolicy")
 
         llm = MagicMock()
         llm.classify_action.return_value = {
@@ -123,8 +119,10 @@ class TestExecuteAutoApply:
             }], "default", "low", True, "test-app", report=report)
 
         assert result["action"] == "gated"
-        rems = await raw.list_remediations(aid)
-        assert rems[0]["status"] != "completed"
+        gates = await raw.list_gates_for_assessment(aid, status="pending")
+        gitops_gates = [g for g in gates if g["gate_type"] == "gitops-pr-pending"]
+        assert len(gitops_gates) == 1
+        assert gitops_gates[0]["pr_url"] == "https://github.com/org/infra-gitops/pull/1"
 
 
 class TestExecuteNoLongerDryRunsAgainstTheClusterForClusterConfig:
@@ -154,7 +152,7 @@ class TestExecuteNoLongerDryRunsAgainstTheClusterForClusterConfig:
             "is_destructive": False, "confidence": 0.95, "reason": "Safe",
         }
         # Real, parseable NetworkPolicy content -- see the comment on
-        # test_remediations_stay_pending_until_gitops_pr_is_merged above for why.
+        # test_gitops_pr_gate_stays_pending_until_a_human_merges_it above for why.
         files = [{
             "category": "sec", "path": "np.yaml", "description": "np",
             "content": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: test\n",
@@ -191,7 +189,7 @@ class TestExecuteAuditLogGapClosed:
             "is_destructive": False, "confidence": 0.95, "reason": "Adds ConfigMap",
         }
         # Real, parseable ConfigMap content -- see the comment on
-        # test_remediations_stay_pending_until_gitops_pr_is_merged above for why.
+        # test_gitops_pr_gate_stays_pending_until_a_human_merges_it above for why.
         files = [{
             "category": "cost", "path": "labels.yaml", "description": "labels",
             "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\n",
@@ -240,7 +238,7 @@ class TestExecuteAuditLogGapClosed:
             "is_destructive": False, "confidence": 0.95, "reason": "Safe",
         }
         # Real, parseable NetworkPolicy content -- see the comment on
-        # test_remediations_stay_pending_until_gitops_pr_is_merged above for why.
+        # test_gitops_pr_gate_stays_pending_until_a_human_merges_it above for why.
         files = [{
             "category": "sec", "path": "np.yaml", "description": "np",
             "content": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: test\n",
@@ -374,7 +372,7 @@ class TestExecuteConflictHandlingIsNowUnreachableForClusterConfig:
         llm = MagicMock()
         llm.classify_action.return_value = {"is_destructive": False, "confidence": 0.95, "reason": "Safe"}
         # Real, parseable NetworkPolicy content -- see the comment on
-        # test_remediations_stay_pending_until_gitops_pr_is_merged above for why.
+        # test_gitops_pr_gate_stays_pending_until_a_human_merges_it above for why.
         files = [{
             "category": "sec", "path": "np.yaml", "description": "np",
             "content": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: test\n",

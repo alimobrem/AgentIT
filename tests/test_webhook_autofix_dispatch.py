@@ -2,11 +2,14 @@
 (routes/webhooks.py) -- docs/onboarding-loop-vision-gap-analysis.md Phase 0
 item 1. `RemediationDispatcher.dispatch()`'s return value used to be
 discarded entirely inside the `diff.auto_fixable` loop: the generated fix
-files were produced and immediately thrown away, with no persisted
-remediation and no delivery attempt. This now mirrors `fix_finding()`'s
-persistence pattern (`save_remediation()`) and additionally delivers via
-`AutoMode.execute()`, since this branch only ever runs once the repo owner
-has already turned the global `auto_mode` setting on.
+files were produced and immediately thrown away, with no logged event and
+no delivery attempt. This now logs a durable "fix-generated" event and
+delivers via `AutoMode.execute()`, since this branch only ever runs once
+the repo owner has already turned the global `auto_mode` setting on. (A
+prior version of this fix also persisted a `remediations` row -- that
+table has since been removed as a standalone concept entirely; the real
+outcome is the `deliveries`/`gates` rows `AutoMode.execute()` produces,
+asserted below.)
 """
 from __future__ import annotations
 
@@ -47,12 +50,11 @@ class TestWebhookAutoFixDispatchIsNotDiscarded:
     async def test_dispatched_finding_is_saved_and_delivered_not_discarded(self, portal_client):
         """End-to-end: a git push triggers a re-assessment that surfaces a
         new, auto-fixable "network" finding with `auto_mode` on. Before this
-        fix, `dispatcher.dispatch()`'s result was discarded -- no
-        remediation row, no delivery, no trace at all. It must now show up
-        both as a saved `remediations` row (fix_finding()'s own persistence
-        pattern) and as a real delivery through the unified router
-        (`AutoMode.execute()` -> `route_and_deliver()`), not just a
-        generated-and-forgotten file."""
+        fix, `dispatcher.dispatch()`'s result was discarded -- no logged
+        event, no delivery, no trace at all. It must now show up both as a
+        durable "fix-generated" event and as a real delivery through the
+        unified router (`AutoMode.execute()` -> `route_and_deliver()`), not
+        just a generated-and-forgotten file."""
         client, store, old_aid = portal_client
         old_report = await store.get(old_aid)
         repo_url = old_report.repo_url
@@ -91,13 +93,12 @@ class TestWebhookAutoFixDispatchIsNotDiscarded:
         assert body["status"] == "assessed"
         new_assessment_id = body["assessment_id"]
 
-        # 1. Persisted, not just generated in memory -- mirrors
-        # fix_finding()'s own save_remediation() call for its human-
-        # initiated equivalent.
-        remediations = await store.list_remediations(new_assessment_id)
-        assert len(remediations) == 1
-        assert remediations[0]["agent_name"] == "security"
-        assert remediations[0]["status"] in ("generated", "applied", "approved", "completed")
+        # 1. Persisted as a durable, queryable fact -- not just generated
+        # in memory and discarded.
+        events = await store.list_events(target_app=old_report.repo_name, limit=50)
+        fix_generated = [e for e in events if e["action"] == "fix-generated"]
+        assert len(fix_generated) == 1
+        assert "security" in fix_generated[0]["summary"]
 
         # 2. Actually delivered through the shared router, not left sitting
         # ungenerated-from-the-router's-perspective: route_and_deliver()
@@ -135,9 +136,6 @@ class TestWebhookAutoFixDispatchIsNotDiscarded:
 
         assert resp.status_code == 200
         new_assessment_id = resp.json()["assessment_id"]
-
-        remediations = await store.list_remediations(new_assessment_id)
-        assert len(remediations) == 1
 
         events = await store.list_events(target_app=old_report.repo_name, limit=50)
         actions = [e["action"] for e in events]

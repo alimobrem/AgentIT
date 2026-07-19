@@ -841,6 +841,42 @@ def is_trusted_git_host(repo_url: str) -> bool:
     return any(host == d or host.endswith("." + d) for d in _TRUSTED_GIT_DOMAINS)
 
 
+MANAGED_APPS_APPLICATIONSET_NAME = "agentit-managed-apps"
+MANAGED_APPS_APPLICATIONSET_NAMESPACE = "openshift-gitops"
+
+# AgentIT's own repo -- the same default `cli.py`'s `self-assess`/`self-fix`
+# commands and `routes/assessments.py`'s `/self-assess` route already use.
+# Reused here purely as the owner-resolution seed for
+# `expected_managed_apps_repo_url()` below: this fleet is single-tenant (one
+# GitHub owner backs every onboarded app's shared `agentit-gitops` infra
+# repo), so AgentIT's own owner is that owner -- not a new convention.
+_AGENTIT_SELF_REPO_URL = "https://github.com/alimobrem/AgentIT"
+
+
+def expected_managed_apps_repo_url() -> str:
+    """The git source repoURL the fleet-wide ``agentit-managed-apps``
+    ApplicationSet (built by ``ensure_applicationset()`` below) should
+    always have.
+
+    Derived the exact same way ``_auto_create_infra_repo()``
+    (``routes/assessments.py``) computes it when it calls
+    ``ensure_infra_repo()``: resolve the owner via ``_parse_owner_repo()``
+    (this module's one owner-resolution routine, used by every other call
+    site here) and apply ``ensure_infra_repo()``'s own "one shared
+    ``agentit-gitops`` repo per GitHub owner" naming convention -- never a
+    second, independently hardcoded guess of the final URL.
+
+    Used by ``DriftDetector`` (``watchers/drift_detector.py``) to detect and
+    self-heal the 2026-07-18 incident: something entirely outside this
+    repo's code ran ``oc create``/``oc patch`` directly against the live
+    cluster and overwrote this ApplicationSet's repoURL with a bogus
+    placeholder -- twice in one day -- breaking GitOps rollout for the
+    entire fleet until a human noticed and manually restored it each time.
+    """
+    owner, _ = _parse_owner_repo(_AGENTIT_SELF_REPO_URL)
+    return f"https://github.com/{owner}/agentit-gitops"
+
+
 def ensure_applicationset(infra_repo_url: str) -> bool:
     """Ensure an Argo CD ApplicationSet exists for the infra repo."""
     if not is_trusted_git_host(infra_repo_url):
@@ -850,8 +886,8 @@ def ensure_applicationset(infra_repo_url: str) -> bool:
         )
         return False
 
-    name = "agentit-managed-apps"
-    namespace = "openshift-gitops"
+    name = MANAGED_APPS_APPLICATIONSET_NAME
+    namespace = MANAGED_APPS_APPLICATIONSET_NAMESPACE
     appset = {
         "apiVersion": "argoproj.io/v1alpha1",
         "kind": "ApplicationSet",

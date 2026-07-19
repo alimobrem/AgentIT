@@ -124,7 +124,6 @@ async def _override_store():
          patch("agentit.portal.routes.capabilities.get_store", return_value=async_store), \
          patch("agentit.portal.routes.settings.get_store", return_value=async_store), \
          patch("agentit.portal.routes.insights.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.remediations.get_store", return_value=async_store), \
          patch("agentit.portal.routes.slos.get_store", return_value=async_store), \
          patch("agentit.image_builder.build_app_image",
                return_value={"image_ref": "test/image:test", "run_name": "test-run", "status": "skipped-in-tests"}):

@@ -54,7 +54,6 @@ async def next_action_client():
          patch("agentit.portal.routes.capabilities.get_store", return_value=store), \
          patch("agentit.portal.routes.settings.get_store", return_value=store), \
          patch("agentit.portal.routes.insights.get_store", return_value=store), \
-         patch("agentit.portal.routes.remediations.get_store", return_value=store), \
          patch("agentit.portal.routes.slos.get_store", return_value=store):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True) as client:
             await prime_csrf(client)

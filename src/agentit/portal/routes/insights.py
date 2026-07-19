@@ -120,8 +120,8 @@ async def events_page(request: Request, page: int = 1, per_page: int = 25,
 
     # target_app -> latest assessment id, so the "Target App" column can
     # link to that app's Assessment Detail page wherever a real
-    # assessment_id resolves (Fleet, Remediations, and Decisions already
-    # link app names the same way; Events showed plain text).
+    # assessment_id resolves (Fleet and Decisions already link app names
+    # the same way; Events showed plain text).
     fleet = await s.get_fleet_data()
     app_ids_by_name = {app_data["repo_name"]: app_data["id"] for app_data in fleet}
     for e in all_events:
@@ -152,120 +152,93 @@ async def events_page(request: Request, page: int = 1, per_page: int = 25,
 @router.get("/ledger", response_class=HTMLResponse)
 async def ledger_page(
     request: Request, page: int = 1, per_page: int = 25,
-    q: str = "", severity: str = "", card_type: str = "", app: str = "",
-    view: str = "", needs_you: str = "1",
+    q: str = "", category: str = "", app: str = "", lifecycle: str = "",
 ) -> HTMLResponse:
-    """Fleet-wide Ledger view (docs/ledger-design-spec.md §5 Phase 1, plus
-    the §2 noise-at-scale controls): a read-only union of events/gates/
-    deliveries/fix-reviews across every app, additive alongside
-    Events/Decisions -- neither of those pages changes.
+    """Ledger's whole job (product direction, superseding the earlier
+    generic A-P event-union design in docs/ledger-design-spec.md): a
+    fleet-wide list of every PR AgentIT has ever opened, across every app,
+    with each PR's real lifecycle -- waiting for your approval, open,
+    merged, rejected (with the real reason), or closed -- filterable by
+    category and app. "Which PRs need my attention, and what happened to
+    every PR", not a generic system-activity feed.
 
-    Default rendering is §2 rule 2's grouped-by-app view (one row per app,
-    collapsed to its most-recent/most-severe card) with rule 3's "Needs
-    You" filter on by default. ``?app=`` (a grouped row's own expand link)
-    or ``?view=flat`` opts into the flat, chronological stream -- the exact
-    same shape Assessment Detail's own Ledger tab renders, just reachable
-    fleet-wide too.
+    Deliberately NOT a replacement for:
+
+    - **Events** (``/events``) -- the real-time, behind-the-scenes system-
+      activity feed (watcher ticks, webhook-triggered re-assessments, drift
+      detection, catalog changes, ...) regardless of whether a PR is
+      involved at all. Every one of the old card types that was genuinely
+      "the system did a thing" rather than "a PR needs attention or
+      changed status" is already a raw ``events`` row today and already
+      fully visible there -- nothing moved out of this page had nowhere
+      else to go.
+    - **Decisions** (``/decisions``) -- the LLM/AutoMode decision audit,
+      including fix-review (``skill_effectiveness``) outcomes.
+    - Non-PR gate types (``cluster-admin-review``, ``rollback-review``,
+      ``finding-unresolved-escalation``) -- these were never PRs; they stay
+      visible via Admin Review, Fleet's per-app "needs action"/escalation
+      badges, and Assessment Detail's own Actions tab.
+    - Per-app history -- Assessment Detail's Timeline/Ledger tabs and PR
+      History tab still own "everything that happened to this one app".
+
+    ``pr_tracking.collect_fleet_pr_records()`` does the real aggregation
+    (from ``gates``/``deliveries``/``onboarding_results``, the same three
+    places Fleet's "Open PRs"/"Total PRs" columns and Assessment Detail's
+    PR History tab already read) -- this route only filters/paginates/
+    renders what that function returns.
     """
-    from agentit.ledger import get_ledger_cards, group_cards_by_app, recent_watcher_failures
-    from agentit.portal.routes.fleet import _attach_pending_actions
+    from agentit.portal.pr_tracking import collect_fleet_pr_records
 
     s = await get_store()
-    all_cards = await get_ledger_cards(s, target_app=app or None, limit=2000)
+    records = await collect_fleet_pr_records(s)
 
-    # Same target_app -> assessment_id resolution events_page already does,
-    # so a fleet-wide card can link back to that app's own Assessment
-    # Detail / Ledger tab.
-    fleet = await s.get_fleet_data()
-    app_ids_by_name = {app_data["repo_name"]: app_data["id"] for app_data in fleet}
-    for c in all_cards:
-        c["assessment_id"] = c.get("assessment_id") or app_ids_by_name.get(c.get("target_app"))
-
-    # §2 rule 3's 4th signal is fleet-wide (a tick isn't scoped to one app),
-    # so it's computed once here, before any app/card-level filter narrows
-    # `all_cards` down to a single app's stream.
-    watcher_alerts = recent_watcher_failures(all_cards, hours=4)
+    # Filter option lists reflect the full, unfiltered fleet -- so picking
+    # one filter never hides the others still available to pick next.
+    categories = sorted({r["category"] for r in records if r.get("category")})
+    apps = sorted({r["app_name"] for r in records if r.get("app_name")})
 
     if q:
         ql = q.lower()
-        all_cards = [
-            c for c in all_cards
-            if ql in (c.get("target_app") or "").lower()
-            or ql in c.get("title", "").lower()
-            or ql in c.get("summary", "").lower()
+        records = [
+            r for r in records
+            if ql in (r.get("app_name") or "").lower()
+            or ql in (r.get("category") or "").lower()
+            or ql in (r.get("title") or "").lower()
+            or ql in (r.get("pr_url") or "").lower()
         ]
-    if severity:
-        all_cards = [c for c in all_cards if c.get("severity") == severity]
-    if card_type:
-        all_cards = [c for c in all_cards if c["card_type"] == card_type]
+    if category:
+        records = [r for r in records if r.get("category") == category]
+    if app:
+        records = [r for r in records if r.get("app_name") == app]
+    if lifecycle:
+        records = [r for r in records if r.get("lifecycle") == lifecycle]
 
-    if app or view == "flat":
-        total = len(all_cards)
-        total_pages = max(1, (total + per_page - 1) // per_page)
-        page = max(1, min(page, total_pages))
-        start = (page - 1) * per_page
-        cards = all_cards[start:start + per_page]
-        return get_templates().TemplateResponse(request, "ledger.html", {
-            "mode": "flat", "cards": cards, "page": page, "total_pages": total_pages,
-            "per_page": per_page, "total": total,
-            "q": q, "severity_filter": severity, "card_type_filter": card_type,
-            "app_filter": app, "watcher_alerts": watcher_alerts,
-        })
+    # Needs-attention PRs (gate-tracked and still pending your Approve/
+    # Reject inside AgentIT) always render in full, ungated by pagination
+    # -- this is the one bucket the whole page exists to make impossible to
+    # miss. `gate_card` (the exact same Approve & Deliver/Reject/Dismiss
+    # macro Admin Review and Assessment Detail's Actions tab already use)
+    # renders directly off each record's own `raw` gate row -- one real
+    # action surface, not a second copy of the resolve-gate wiring.
+    needs_approval = [r for r in records if r["needs_attention"]]
+    for r in needs_approval:
+        r["raw"]["severity"] = "warning"
 
-    # §2 rule 2: fleet-wide default is grouped by app, collapsed to one row
-    # each -- score and pending-action count, plus that app's own most-
-    # recent Ledger card. Deliberately skips fleet.html's live cluster/Argo
-    # CD enrichment (`_enrich_fleet_with_cluster_status`) -- that call
-    # bridges a worker thread back onto this request's event loop via
-    # `run_coroutine_threadsafe` (see its own docstring), and this grouped
-    # view already runs `list_slos()` per app just below; stacking a second
-    # thread-bridged cluster call on top added real, measured extra load on
-    # that bridge under the full test suite for a GitOps badge the "Needs
-    # You" triage view doesn't need (a user who clicks through to Fleet or
-    # Assessment Detail already sees it there). If a live deploy-status
-    # badge is wanted here later, do it as its own follow-up, not bundled
-    # into this view by default.
-    await _attach_pending_actions(fleet, s)
-    stale_gate_ids = {g["id"] for g in await s.get_stale_gates(hours=4)}
-    all_gates = await s.list_all_gates()
-    stale_repo_urls = {g["repo_url"] for g in all_gates if g["id"] in stale_gate_ids and g.get("repo_url")}
-
-    cards_by_app = group_cards_by_app(all_cards)
-    card_filter_active = bool(q or severity or card_type)
-    rows = []
-    for a in fleet:
-        slos = await s.list_slos(a["id"])
-        breached_count = sum(1 for sl in slos if sl.get("status") == "breached")
-        app_cards = cards_by_app.get(a["repo_name"], [])
-        if card_filter_active and not app_cards:
-            continue
-        row_needs_you = (
-            a.get("pending_actions_count", 0) > 0
-            or a["repo_url"] in stale_repo_urls
-            or breached_count > 0
-        )
-        rows.append({
-            "repo_name": a["repo_name"],
-            "assessment_id": a["id"],
-            "score": a["latest_score"],
-            "pending_actions_count": a.get("pending_actions_count", 0),
-            "breached_slo_count": breached_count,
-            "needs_you": row_needs_you,
-            "latest_card": app_cards[0] if app_cards else None,
-            "card_count": len(app_cards),
-            "cards": app_cards[:10],
-        })
-
-    total_apps = len(rows)
-    if needs_you != "0":
-        rows = [r for r in rows if r["needs_you"]]
-    rows.sort(key=lambda r: (r["latest_card"]["timestamp"] if r["latest_card"] else ""), reverse=True)
+    history = [r for r in records if not r["needs_attention"]]
+    total_history = len(history)
+    total_pages = max(1, (total_history + per_page - 1) // per_page)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * per_page
+    history_page = history[start:start + per_page]
 
     return get_templates().TemplateResponse(request, "ledger.html", {
-        "mode": "grouped", "rows": rows, "total_apps": total_apps,
-        "needs_you_count": len(rows), "needs_you_filter": needs_you,
-        "q": q, "severity_filter": severity, "card_type_filter": card_type,
-        "app_filter": app, "watcher_alerts": watcher_alerts,
+        "needs_approval": needs_approval,
+        "history": history_page,
+        "total_records": len(records),
+        "total_history": total_history,
+        "page": page, "total_pages": total_pages, "per_page": per_page,
+        "categories": categories, "apps": apps,
+        "q": q, "category_filter": category, "app_filter": app, "lifecycle_filter": lifecycle,
     })
 
 

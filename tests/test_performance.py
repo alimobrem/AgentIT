@@ -81,12 +81,6 @@ class TestPagePerformance:
         assert resp.status_code == 200
         assert t < MEDIUM
 
-    async def test_remediations_page(self, portal_client):
-        client, _, aid = portal_client
-        resp, t = await _timed_get(client, f"/assessments/{aid}/remediations")
-        assert resp.status_code == 200
-        assert t < MEDIUM
-
     async def test_slos_page(self, portal_client):
         client, _, aid = portal_client
         resp, t = await _timed_get(client, f"/assessments/{aid}/slos")
