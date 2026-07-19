@@ -1251,6 +1251,38 @@ class AssessmentStore:
         )
         return _rows_to_dicts(rows)
 
+    async def list_unresolved_events(
+        self, action: str, resolved_actions: list[str], target_app: str | None = None,
+    ) -> list[dict]:
+        """Every ``action``-typed event with no later event correlated to it
+        (``correlation_id`` = the original event's own ``id``) whose own
+        ``action`` is one of ``resolved_actions`` -- the lightweight, plain-
+        events "still needs a human decision" mechanism that replaced the
+        ``gates`` table for recommendations that aren't PR-trackable
+        (``rollback-review``, ``finding-unresolved-escalation`` -- see
+        ``routes/recommendations.py``). Mirrors the same correlation-id
+        chain convention ``list_events_by_correlation_id()`` already uses,
+        just inverted: "does this event have a resolving reply" rather than
+        "give me every event in one chain". Pass ``target_app`` to scope to
+        one app (mirrors ``list_gates_for_assessment()``'s old per-app
+        scoping); omit for the fleet-wide view (mirrors ``list_all_gates()``).
+        """
+        query = """
+            SELECT e1.* FROM events e1
+            WHERE e1.action = $1
+              AND NOT EXISTS (
+                SELECT 1 FROM events e2
+                WHERE e2.correlation_id = e1.id AND e2.action = ANY($2::text[])
+              )
+        """
+        params: list[Any] = [action, list(resolved_actions)]
+        if target_app is not None:
+            params.append(target_app)
+            query += f" AND e1.target_app = ${len(params)}"
+        query += " ORDER BY e1.timestamp DESC"
+        rows = await self._pool.fetch(query, *params)
+        return _rows_to_dicts(rows)
+
     async def list_dlq_messages(self, limit: int = 200) -> list[dict]:
         rows = await self._pool.fetch(
             "SELECT * FROM events WHERE action = 'dead-letter' ORDER BY timestamp DESC LIMIT $1",
