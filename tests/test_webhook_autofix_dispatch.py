@@ -4,16 +4,18 @@ item 1. `RemediationDispatcher.dispatch()`'s return value used to be
 discarded entirely inside the `diff.auto_fixable` loop: the generated fix
 files were produced and immediately thrown away, with no logged event and
 no delivery attempt. This now logs a durable "fix-generated" event and
-delivers via `AutoMode.execute()`, since this branch only ever runs once
-the repo owner has already turned the global `auto_mode` setting on. (A
-prior version of this fix also persisted a `remediations` row -- that
-table has since been removed as a standalone concept entirely; the real
-outcome is the `deliveries`/`gates` rows `AutoMode.execute()` produces,
+always gates the fix for human review (AutoMode, which used to
+conditionally auto-deliver this via `AutoMode.execute()` when the global
+`auto_mode` setting was on, has been removed -- nothing auto-delivers
+without an explicit human action anymore, so every dispatched fix stops at
+a real, visible gate now, unconditionally). (A prior version of this fix
+also persisted a `remediations` row -- that table has since been removed
+as a standalone concept entirely; the real outcome is the `gates` row
 asserted below.)
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from agentit.models import DimensionScore, Finding, Severity
 from conftest import make_report
@@ -47,41 +49,22 @@ def _push_body(repo_url: str) -> dict:
 
 
 class TestWebhookAutoFixDispatchIsNotDiscarded:
-    async def test_dispatched_finding_is_saved_and_delivered_not_discarded(self, portal_client):
+    async def test_dispatched_finding_is_saved_and_gated_not_discarded(self, portal_client):
         """End-to-end: a git push triggers a re-assessment that surfaces a
-        new, auto-fixable "network" finding with `auto_mode` on. Before this
-        fix, `dispatcher.dispatch()`'s result was discarded -- no logged
-        event, no delivery, no trace at all. It must now show up both as a
-        durable "fix-generated" event and as a real delivery through the
-        unified router (`AutoMode.execute()` -> `route_and_deliver()`), not
-        just a generated-and-forgotten file."""
+        new, auto-fixable "network" finding. Before this fix,
+        `dispatcher.dispatch()`'s result was discarded -- no logged event,
+        no gate, no trace at all. It must now show up both as a durable
+        "fix-generated" event and as a real, visible gate for human review
+        -- never an autonomous delivery (AutoMode has been removed)."""
         client, store, old_aid = portal_client
         old_report = await store.get(old_aid)
         repo_url = old_report.repo_url
 
-        await store.set_setting("auto_mode", "true")
-
         new_report = _report_with_network_finding(repo_name=old_report.repo_name, repo_url=repo_url)
-        # Direct Apply has been removed as a concept entirely -- a known
-        # infra_repo_url is required for AutoMode's delivery to actually go
-        # anywhere (see resolve_cluster_config_mechanism()); this now
-        # exercises the GitOps commit+PR path rather than a direct apply.
-        new_report.infra_repo_url = "https://github.com/org/infra-gitops"
-
-        safe_llm = MagicMock()
-        safe_llm.classify_action.return_value = {
-            "is_destructive": False, "confidence": 0.95,
-            "reason": "Adds a NetworkPolicy -- not destructive",
-        }
 
         with patch("agentit.portal.routes.webhooks.clone_assess_cleanup", return_value=new_report), \
-             patch("agentit.portal.routes.webhooks.get_llm_client", return_value=safe_llm), \
-             patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
              patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
-             patch("agentit.portal.github_pr.ensure_applicationset"), \
              patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
-            mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
-                                          "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
             resp = await client.post(
                 "/api/webhook/github-push",
                 json=_push_body(repo_url),
@@ -91,7 +74,6 @@ class TestWebhookAutoFixDispatchIsNotDiscarded:
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "assessed"
-        new_assessment_id = body["assessment_id"]
 
         # 1. Persisted as a durable, queryable fact -- not just generated
         # in memory and discarded.
@@ -100,34 +82,29 @@ class TestWebhookAutoFixDispatchIsNotDiscarded:
         assert len(fix_generated) == 1
         assert "security" in fix_generated[0]["summary"]
 
-        # 2. Actually delivered through the shared router, not left sitting
-        # ungenerated-from-the-router's-perspective: route_and_deliver()
-        # always creates a `deliveries` row, which only happens if
-        # AutoMode.execute() was really invoked with the dispatched files.
-        deliveries = await store.list_deliveries(new_assessment_id)
-        assert len(deliveries) == 1
-        assert deliveries[0]["app_name"] == old_report.repo_name
-
-        # GitOps-registered -- AutoMode commits to the infra repo and opens
-        # a PR (never a direct apply) and never touches the cluster at all.
-        mock_commit.assert_called_once()
+        # 2. Gated for human review, not delivered autonomously -- AutoMode
+        # has been removed, so nothing here ever calls route_and_deliver()
+        # or touches Git/the cluster on its own.
+        gated = [e for e in events if e["action"] == "gated"]
+        assert len(gated) == 1
+        gates = await store.list_gates(status="pending")
+        matching = [g for g in gates if g["gate_type"] == "finding-network"]
+        assert len(matching) == 1
+        mock_commit.assert_not_called()
         mock_apply.assert_not_called()
 
-    async def test_dispatch_still_logs_a_visible_event_even_when_llm_unavailable(self, portal_client):
-        """Fail-closed case: with no LLM client available (this suite's
-        hermetic default), AutoMode gates for human review instead of
-        applying -- but the fix must still be persisted and the outcome
-        still logged, never silently dropped the way the pre-fix code
-        dropped it unconditionally."""
+    async def test_dispatch_gates_regardless_of_llm_availability(self, portal_client):
+        """AutoMode's LLM safety classification (and its fail-closed-when-
+        unavailable behavior) has been removed along with AutoMode itself
+        -- gating a dispatched fix for human review no longer depends on an
+        LLM client at all, so this must behave identically whether or not
+        one is configured."""
         client, store, old_aid = portal_client
         old_report = await store.get(old_aid)
         repo_url = old_report.repo_url
-
-        await store.set_setting("auto_mode", "true")
         new_report = _report_with_network_finding(repo_name=old_report.repo_name, repo_url=repo_url)
 
-        with patch("agentit.portal.routes.webhooks.clone_assess_cleanup", return_value=new_report), \
-             patch("agentit.portal.routes.webhooks.get_llm_client", return_value=None):
+        with patch("agentit.portal.routes.webhooks.clone_assess_cleanup", return_value=new_report):
             resp = await client.post(
                 "/api/webhook/github-push",
                 json=_push_body(repo_url),
@@ -135,7 +112,6 @@ class TestWebhookAutoFixDispatchIsNotDiscarded:
             )
 
         assert resp.status_code == 200
-        new_assessment_id = resp.json()["assessment_id"]
 
         events = await store.list_events(target_app=old_report.repo_name, limit=50)
         actions = [e["action"] for e in events]

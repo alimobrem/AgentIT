@@ -26,7 +26,7 @@ _GITOPS_LAG_HOURS_THRESHOLD = 1.0
 
 class DriftDetector:
     """Long-lived agent that polls Argo CD applications and publishes drift
-    events when apps are OutOfSync. Optionally auto-syncs when auto-mode is on.
+    events when apps are OutOfSync, then unconditionally re-syncs them.
     """
 
     def __init__(
@@ -332,23 +332,22 @@ class DriftDetector:
                 logger.warning("Failed to verify/close GitOps delivery %s: %s", delivery["id"], exc)
 
     async def _maybe_auto_sync(self, app_name: str) -> None:
-        """If auto-mode is enabled, patch the Application to trigger a sync.
+        """Patch the Application to trigger a sync, unconditionally.
 
-        ``self._store`` is the ``AssessmentStore`` handed in by ``cli.py``'s
-        ``drift_detect`` command. Without one (e.g. a detector constructed
-        without a store, as some tests do), there's no settings table to
-        check ``auto_mode`` against, so auto-sync is skipped entirely rather
-        than guessing/constructing a throwaway store.
+        AutoMode (which used to gate this behind a settings toggle) has
+        been removed: re-syncing a drifted Argo CD Application only ever
+        re-applies what's already declared in Git and already merged by a
+        human -- the exact same self-heal ``_check_applicationset_drift()``
+        above already performs unconditionally for the fleet-wide
+        ApplicationSet. There's no unreviewed mutation here to gate on a
+        toggle; a human already approved this state the moment they merged
+        the GitOps commit, so catching the cluster up to it is always safe.
+
+        Logging still goes through ``self._store`` when one was handed in
+        (``cli.py``'s ``drift_detect`` command); without one (e.g. a
+        detector constructed without a store, as some tests do), the sync
+        itself still runs, it just has nowhere to log the outcome.
         """
-        if self._store is None:
-            return
-
-        from agentit.automode import AutoMode
-
-        auto = AutoMode(store=self._store, publisher=self._publisher)
-        if not await auto.is_enabled():
-            return
-
         click.echo(f"[drift-detect] Auto-syncing {app_name}...", err=True)
         try:
             await asyncio.to_thread(

@@ -212,6 +212,99 @@ class TestYamlKindMissing:
         assert len(findings) == 1
 
 
+class TestListPatternMatching:
+    """Gap 1 (docs/extension-model-unification-plan-2026-07-18.md): pattern
+    becomes str | list[str] with OR semantics, and an optional
+    case_insensitive flag -- both additive, zero behavior change for any
+    check file that doesn't use them. This is also the primitive
+    `skill_engine.detect_check_definitions()` relies on to run a `mode:
+    detect` Markdown skill's rule through this exact same engine."""
+
+    def test_parse_check_file_accepts_list_pattern(self, tmp_path: Path) -> None:
+        content = VALID_CHECK.replace('pattern: "Dockerfile*"', "pattern: [foo, bar]")
+        p = _write_check(tmp_path, "listpat", content)
+        defn = _parse_check_file(p)
+        assert defn is not None
+        assert defn.pattern == ["foo", "bar"]
+
+    def test_parse_check_file_still_accepts_scalar_pattern(self, tmp_path: Path) -> None:
+        """Regression guard: every existing check file (scalar pattern,
+        no case_insensitive key) must parse identically to before."""
+        p = _write_check(tmp_path, "scalarpat", VALID_CHECK)
+        defn = _parse_check_file(p)
+        assert defn is not None
+        assert defn.pattern == "Dockerfile*"
+        assert defn.case_insensitive is False
+
+    def test_file_contains_matches_any_pattern_in_list(self, create_mock_repo) -> None:
+        repo = create_mock_repo({"main.go": 'import "go.opentelemetry.io/otel"\n'})
+        content = VALID_CHECK.replace("type: file_exists", "type: file_contains").replace(
+            'pattern: "Dockerfile*"', "pattern: [opentelemetry, otel, jaeger]"
+        )
+        checks = load_checks(_dir_with_check(repo.parent, content))
+        findings = run_checks(checks, repo)
+        assert len(findings) == 0
+
+    def test_file_contains_fails_when_no_pattern_in_list_matches(self, create_mock_repo) -> None:
+        repo = create_mock_repo({"main.go": "package main\n"})
+        content = VALID_CHECK.replace("type: file_exists", "type: file_contains").replace(
+            'pattern: "Dockerfile*"', "pattern: [opentelemetry, otel, jaeger]"
+        )
+        checks = load_checks(_dir_with_check(repo.parent, content))
+        findings = run_checks(checks, repo)
+        assert len(findings) == 1
+
+    def test_yaml_kind_exists_matches_any_kind_in_list(self, create_mock_repo) -> None:
+        repo = create_mock_repo({"svc.yaml": "apiVersion: v1\nkind: PodMonitor\n"})
+        content = VALID_CHECK.replace("type: file_exists", "type: yaml_kind_exists").replace(
+            'pattern: "Dockerfile*"', "pattern: [ServiceMonitor, PodMonitor]"
+        )
+        checks = load_checks(_dir_with_check(repo.parent, content))
+        findings = run_checks(checks, repo)
+        assert len(findings) == 0
+
+    def test_file_exists_matches_any_glob_in_list(self, create_mock_repo) -> None:
+        repo = create_mock_repo({"Containerfile": "FROM ubi9"})
+        content = VALID_CHECK.replace('pattern: "Dockerfile*"', "pattern: [Dockerfile*, Containerfile*]")
+        checks = load_checks(_dir_with_check(repo.parent, content))
+        findings = run_checks(checks, repo)
+        assert len(findings) == 0
+
+    def test_case_insensitive_file_contains(self, create_mock_repo) -> None:
+        repo = create_mock_repo({"README.md": "# Structlog Setup Guide\n"})
+        content = (
+            VALID_CHECK.replace("type: file_exists", "type: file_contains")
+            .replace('pattern: "Dockerfile*"', "pattern: structlog")
+            + "case_insensitive: true\n"
+        )
+        checks = load_checks(_dir_with_check(repo.parent, content))
+        findings = run_checks(checks, repo)
+        assert len(findings) == 0
+
+    def test_case_sensitive_by_default(self, create_mock_repo) -> None:
+        """No case_insensitive key -> exact-case matching, unchanged from
+        today. This is the zero-behavior-change guarantee for every
+        pre-existing check file."""
+        repo = create_mock_repo({"README.md": "# Structlog Setup Guide\n"})
+        content = VALID_CHECK.replace("type: file_exists", "type: file_contains").replace(
+            'pattern: "Dockerfile*"', "pattern: structlog"
+        )
+        checks = load_checks(_dir_with_check(repo.parent, content))
+        findings = run_checks(checks, repo)
+        assert len(findings) == 1  # "Structlog" (capital S) != "structlog"
+
+    def test_case_insensitive_yaml_kind_exists(self, create_mock_repo) -> None:
+        repo = create_mock_repo({"svc.yaml": "apiVersion: v1\nkind: servicemonitor\n"})
+        content = (
+            VALID_CHECK.replace("type: file_exists", "type: yaml_kind_exists")
+            .replace('pattern: "Dockerfile*"', "pattern: ServiceMonitor")
+            + "case_insensitive: true\n"
+        )
+        checks = load_checks(_dir_with_check(repo.parent, content))
+        findings = run_checks(checks, repo)
+        assert len(findings) == 0
+
+
 # ---------------------------------------------------------------------------
 # Dimension grouping
 # ---------------------------------------------------------------------------

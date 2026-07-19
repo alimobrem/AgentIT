@@ -106,3 +106,73 @@ class TestAllSkills:
             assert "apiVersion" in doc, f"doc {i}: missing apiVersion"
             assert "kind" in doc, f"doc {i}: missing kind"
             assert "metadata" in doc, f"doc {i}: missing metadata"
+
+
+# check_engine.VALID_TYPES, duplicated here deliberately (like
+# tests/test_all_checks.py's own independent copy) so this schema test
+# catches drift against the real engine instead of silently trusting it.
+_DETECT_VALID_TYPES = {
+    "file_exists", "file_contains", "file_missing", "yaml_kind_exists", "yaml_kind_missing",
+}
+_DETECT_VALID_SEVERITIES = {"critical", "high", "medium", "low", "info"}
+
+
+class TestDetectModeSkills:
+    """Schema validation for `mode: detect` skills -- the detection-shaped
+    half of the unified extension model
+    (docs/extension-model-unification-plan-2026-07-18.md). Mirrors
+    tests/test_all_checks.py's role for legacy checks/*.yaml files: every
+    detect-mode skill on disk must have a rule that will actually compile
+    into a runnable check_engine.CheckDefinition, not just well-formed
+    frontmatter."""
+
+    def test_detect_mode_has_required_detection_fields(self, skill_file: Path) -> None:
+        meta, _ = _parse_frontmatter(skill_file)
+        if meta.get("mode") != "detect":
+            pytest.skip("not detect mode")
+        for field in ("severity", "category", "description", "recommendation", "rule"):
+            assert field in meta, f"{skill_file.name}: mode=detect missing required field '{field}'"
+
+    def test_detect_mode_rule_type_is_valid(self, skill_file: Path) -> None:
+        meta, _ = _parse_frontmatter(skill_file)
+        if meta.get("mode") != "detect":
+            pytest.skip("not detect mode")
+        rule = meta.get("rule", {})
+        assert isinstance(rule, dict), f"{skill_file.name}: rule must be a mapping"
+        assert rule.get("type") in _DETECT_VALID_TYPES, (
+            f"{skill_file.name}: rule.type {rule.get('type')!r} is not one of {_DETECT_VALID_TYPES}"
+        )
+
+    def test_detect_mode_severity_is_valid(self, skill_file: Path) -> None:
+        meta, _ = _parse_frontmatter(skill_file)
+        if meta.get("mode") != "detect":
+            pytest.skip("not detect mode")
+        assert str(meta.get("severity", "")).lower() in _DETECT_VALID_SEVERITIES, (
+            f"{skill_file.name}: severity {meta.get('severity')!r} is not one of {_DETECT_VALID_SEVERITIES}"
+        )
+
+    def test_detect_mode_triggers_and_outputs_are_empty(self, skill_file: Path) -> None:
+        """Not a hard engine requirement (Skill.matches()/generate() both
+        already no-op for mode=detect regardless of these values -- see
+        skill_engine.py) but a real footgun if left non-empty: a
+        detect-mode skill with real triggers looks, on the Capabilities
+        page, like it also does something on match, which it never does."""
+        meta, _ = _parse_frontmatter(skill_file)
+        if meta.get("mode") != "detect":
+            pytest.skip("not detect mode")
+        assert meta.get("triggers") == [], f"{skill_file.name}: mode=detect should have empty triggers"
+        assert meta.get("outputs") == [], f"{skill_file.name}: mode=detect should have empty outputs"
+
+    def test_detect_mode_rule_compiles_via_skill_engine(self, skill_file: Path) -> None:
+        """End-to-end schema check: load_skill() + _skill_to_check_definition()
+        must actually produce a runnable CheckDefinition, not just pass the
+        field-presence checks above in isolation."""
+        from agentit.skill_engine import _skill_to_check_definition, load_skill
+
+        meta, _ = _parse_frontmatter(skill_file)
+        if meta.get("mode") != "detect":
+            pytest.skip("not detect mode")
+        skill = load_skill(skill_file)
+        assert skill is not None, f"{skill_file.name}: failed to load as a Skill"
+        defn = _skill_to_check_definition(skill)
+        assert defn is not None, f"{skill_file.name}: rule did not compile to a CheckDefinition"

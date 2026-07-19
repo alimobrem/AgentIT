@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading
 import time as _time
 from datetime import datetime, timezone
@@ -144,6 +145,20 @@ async def agent_detail(request: Request, agent_name: str) -> HTMLResponse:
                 "category": watcher["mode"],
                 "status": "deployed",
                 "capabilities": f"interval: {watcher['interval']}",
+                "registered_at": "—",
+                "last_heartbeat": "—",
+            }
+        elif agent_name in AGENT_CAPABILITIES:
+            # An onboarding agent (cost/dependency/codechange) that's never
+            # actually run in this deployment yet -- Catalog's "Onboarding
+            # Agents" reference table links here unconditionally (see
+            # capabilities.html), so this must render an honest "never run"
+            # page rather than 404 on a link the page itself put there.
+            agent = {
+                "agent_name": agent_name,
+                "category": agent_name,
+                "status": "never run",
+                "capabilities": AGENT_CAPABILITIES[agent_name],
                 "registered_at": "—",
                 "last_heartbeat": "—",
             }
@@ -530,6 +545,14 @@ async def capabilities_page(request: Request) -> HTMLResponse:
     deprecated_skills = sum(1 for sk in skills if sk.status == "deprecated")
     total_checks = len(checks)
 
+    # Surfaced above the fold (not buried inside the collapsed "Skills by
+    # Domain" section below) -- a draft skill needs a real human decision
+    # (activate or leave it), unlike every other row on this page, which is
+    # reference material. Sorted for a stable render order across requests.
+    draft_skills = sorted(
+        (sk for sk in skills if sk.status == "draft"), key=lambda sk: (sk.domain, sk.name),
+    )
+
     from agentit.agents.capabilities import get_onboarding_agents, WATCHER_AGENTS
     agents = get_onboarding_agents()
     watchers = WATCHER_AGENTS
@@ -548,6 +571,7 @@ async def capabilities_page(request: Request) -> HTMLResponse:
         "total_skills": total_skills,
         "active_skills": active_skills,
         "deprecated_skills": deprecated_skills,
+        "draft_skills": draft_skills,
         "total_checks": total_checks,
         "agents": agents,
         "watchers": watchers,
@@ -701,12 +725,18 @@ async def skill_history(request: Request, skill_name: str) -> HTMLResponse:
     })
 
 
-def _persist_skill_activation(target: Path, repo_dir: Path) -> dict:
-    """Commit `target`'s already-written draft->active flip to git and open
-    a draft PR for it -- reusing the exact branch/commit/push
+def _persist_skill_status_change(
+    target: Path, repo_dir: Path, *, action: str, description: str,
+) -> dict:
+    """Commit `target`'s already-written status flip to git and open a
+    draft PR for it -- reusing the exact branch/commit/push
     (`git_pr.create_branch_commit_push`) and PR-open (`git_pr.open_draft_pr`)
     mechanics `capability_scout.py`'s `_open_pr()` already uses for changes
     to AgentIT's own repo, rather than inventing a new persistence path.
+    Shared by activate/reactivate (-> active) and deprecate (-> deprecated)
+    below -- the git mechanics are identical, only the branch slug
+    (`action`, e.g. "activate-skill"/"deprecate-skill") and the human-facing
+    commit/PR copy (`description`) differ per caller.
 
     Never a direct commit to `main`: every existing automated flow that
     touches this repo (`self-fix --create-pr`, capability-scout) pushes a
@@ -718,16 +748,15 @@ def _persist_skill_activation(target: Path, repo_dir: Path) -> dict:
     enforcing this technically, but the codebase's own precedent already
     settles it.)
 
-    Without this, `activate_skill_route`'s `target.write_text(...)` only
-    ever lands in the live pod's writable container layer -- `skills/` is
-    baked into the image at build time (no PVC/volume mount), so a
-    redeploy silently reverts every activation. Once the resulting PR
-    merges, the next redeploy bakes in the already-active state instead of
-    reverting it.
+    Without this, the caller's own `target.write_text(...)` only ever lands
+    in the live pod's writable container layer -- `skills/` is baked into
+    the image at build time (no PVC/volume mount), so a redeploy silently
+    reverts every status change. Once the resulting PR merges, the next
+    redeploy bakes in the already-changed state instead of reverting it.
 
     Returns ``{"pr_url": ...}`` on success or ``{"error": ...}`` on
     failure -- never raises, matching `_open_pr`'s contract, since a
-    git/network/auth failure here must not undo (or crash) an activation
+    git/network/auth failure here must not undo (or crash) a status change
     that's already live in the pod.
     """
     from agentit.git_pr import create_branch_commit_push, open_draft_pr
@@ -737,38 +766,54 @@ def _persist_skill_activation(target: Path, repo_dir: Path) -> dict:
     except ValueError:
         rel_path = str(target)
 
-    branch = f"agentit/activate-skill/{target.stem}-{int(_time.time())}"
+    branch = f"agentit/{action}/{target.stem}-{int(_time.time())}"
     commit_message = (
-        f"chore(skills): activate {target.stem}\n\n"
-        f"Promotes {rel_path} from status: draft to status: active via the "
-        f"Capabilities UI. Without this commit the flip only lives in the "
-        f"running pod's writable layer and is silently reverted by the next "
-        f"redeploy, since skills/ is baked into the container image."
+        f"chore(skills): {description}\n\n"
+        f"Applies via the Capabilities UI. Without this commit the change "
+        f"only lives in the running pod's writable layer and is silently "
+        f"reverted by the next redeploy, since skills/ is baked into the "
+        f"container image."
     )
     branch_result = create_branch_commit_push(branch, [rel_path], commit_message, cwd=repo_dir)
     if not branch_result.get("success"):
         return {"error": branch_result.get("error", "git branch/commit/push failed")}
 
     body = (
-        f"## Activate skill: {target.stem}\n\n"
-        f"Promotes `{rel_path}` from `status: draft` to `status: active`.\n\n"
+        f"## {description}\n\n"
+        f"Changes `{rel_path}`.\n\n"
         "The running pod's copy was already flipped (immediately usable); "
         "this PR makes that survive the next redeploy, since `skills/` is "
         "baked into the container image and isn't backed by a volume.\n\n"
-        "> Opened by AgentIT's Capabilities UI activation flow."
+        "> Opened by AgentIT's Capabilities UI."
     )
     return open_draft_pr(
-        branch=branch, title=f"[AgentIT] Activate skill: {target.stem}", body=body, cwd=repo_dir,
+        branch=branch, title=f"[AgentIT] {description}", body=body, cwd=repo_dir,
     )
+
+
+# A skill can be promoted to active from either of these statuses:
+# "draft" (the normal, most common path -- learning agent/CLI writes a new
+# draft, a human reviews and activates it) or "deprecated" (reactivation --
+# a human deprecated a skill, via `deprecate_skill_route` below or the
+# drift-detector watcher's automatic API-removal deprecation, and later
+# decides it should be active again, e.g. the removed API came back, or a
+# manual deprecation turns out to be a mistake). Both go through the exact
+# same `verify_skill()` functional gate below -- reactivation is not a
+# lower-scrutiny path than first-time activation.
+_REACTIVATABLE_STATUSES = ("draft", "deprecated")
 
 
 @router.post("/capabilities/skills/activate", response_model=None)
 async def activate_skill_route(request: Request):
-    """Promote a draft skill to active. Portal equivalent of `agentit activate-skill`.
+    """Promote a draft (or previously-deprecated) skill to active. Portal
+    equivalent of `agentit activate-skill` for the draft case.
 
     Draft skills are only ever written by the learning agent (research
     button, skill-learner watcher, or CLI) — this is the human-review step
-    that lets the skill engine actually start matching them.
+    that lets the skill engine actually start matching them. Deprecated
+    skills reach here via the "Reactivate" action (`deprecate_skill_route`'s
+    inverse) — see `_REACTIVATABLE_STATUSES` above for why both share this
+    one route/verification gate instead of two near-identical routes.
     """
     form = await request.form()
     skill_path_raw = str(form.get("skill_path", ""))
@@ -786,9 +831,12 @@ async def activate_skill_route(request: Request):
         return RedirectResponse(url=f"/capabilities?error={quote('Skill file not found')}", status_code=303)
 
     content = target.read_text(encoding="utf-8")
-    if "status: draft" not in content:
+    from_status = next(
+        (s for s in _REACTIVATABLE_STATUSES if f"status: {s}" in content), None,
+    )
+    if from_status is None:
         return RedirectResponse(
-            url=f"/capabilities?error={quote('Skill is not in draft status')}", status_code=303,
+            url=f"/capabilities?error={quote('Skill is not in draft or deprecated status')}", status_code=303,
         )
 
     from agentit.skill_engine import load_skill, verify_skill
@@ -814,23 +862,27 @@ async def activate_skill_route(request: Request):
             status_code=303,
         )
 
-    target.write_text(content.replace("status: draft", "status: active", 1), encoding="utf-8")
+    verb = "Reactivated" if from_status == "deprecated" else "Activated"
+    target.write_text(content.replace(f"status: {from_status}", "status: active", 1), encoding="utf-8")
     _skills_cache["data"] = None
 
     # In-pod activation is done and already usable regardless of what
-    # happens next -- see `_persist_skill_activation`'s docstring for why
+    # happens next -- see `_persist_skill_status_change`'s docstring for why
     # this git step still has to run (skills/ is baked into the image, no
     # volume mount) and why its failure must not be swallowed silently.
-    git_result = await asyncio.to_thread(_persist_skill_activation, target, Path.cwd())
+    git_result = await asyncio.to_thread(
+        _persist_skill_status_change, target, Path.cwd(),
+        action="activate-skill", description=f"{verb} skill: {target.stem}",
+    )
     pr_url = git_result.get("pr_url")
 
-    success_msg = f"Activated: {target.stem}"
+    success_msg = f"{verb}: {target.stem}"
     if verify_warnings:
         success_msg += f" (note: {'; '.join(verify_warnings)})"
     if pr_url:
         success_msg += f" — persisted via PR: {pr_url}"
 
-    event_summary = f"Activated skill: {target.stem}" + (f" ({'; '.join(verify_warnings)})" if verify_warnings else "")
+    event_summary = f"{verb} skill: {target.stem}" + (f" ({'; '.join(verify_warnings)})" if verify_warnings else "")
     event_details: dict = {"skill": target.stem}
     if pr_url:
         event_details["pr_url"] = pr_url
@@ -850,6 +902,100 @@ async def activate_skill_route(request: Request):
         # CVE-mitigation-skill incidents this fix addresses.
         warning_msg = (
             f"{target.stem} is active in this pod now, but the git commit needed to survive the "
+            f"next redeploy failed ({str(git_result.get('error', 'unknown error'))[:150]}) — it will be "
+            f"silently reverted on redeploy unless this is retried or committed manually."
+        )
+        url += f"&warning={quote(warning_msg)}"
+    return RedirectResponse(url=url, status_code=303)
+
+
+@router.post("/capabilities/skills/deprecate", response_model=None)
+async def deprecate_skill_route(request: Request):
+    """Manually deprecate an active skill. Human-triggered counterpart to
+    `watchers/drift_detector.py`'s *automatic* deprecation (which only
+    fires when a skill's own output K8s kind is removed from the cluster).
+
+    Deliberately the built alternative to a "delete skill" action (see
+    docs/capabilities-ux-redesign-notes.md §3): the skill file and its full
+    history stay on disk and in the catalog, just excluded from matching
+    (`Skill.matches()` already returns ``False`` for status ``deprecated``
+    findings-wise, though it still logs a warning if somehow matched) —
+    reversible via `activate_skill_route`'s reactivation path, unlike a
+    hard delete. No `verify_skill()` gate here: unlike promoting *into*
+    active use, taking a skill out of rotation carries no functional risk
+    to verify against.
+    """
+    form = await request.form()
+    skill_path_raw = str(form.get("skill_path", ""))
+    reason = str(form.get("reason", "")).strip()
+
+    if not reason:
+        return RedirectResponse(
+            url=f"/capabilities?error={quote('A reason is required to deprecate a skill')}", status_code=303,
+        )
+
+    skills_root = Path("skills").resolve()
+    try:
+        target = Path(skill_path_raw).resolve()
+        target.relative_to(skills_root)
+    except (ValueError, OSError):
+        return RedirectResponse(
+            url=f"/capabilities?error={quote('Invalid skill path')}", status_code=303,
+        )
+
+    if not target.is_file():
+        return RedirectResponse(url=f"/capabilities?error={quote('Skill file not found')}", status_code=303)
+
+    content = target.read_text(encoding="utf-8")
+    if "status: active" not in content:
+        return RedirectResponse(
+            url=f"/capabilities?error={quote('Only an active skill can be deprecated')}", status_code=303,
+        )
+
+    updated = content.replace("status: active", "status: deprecated", 1)
+    # Mirror drift_detector.py's own frontmatter shape (`deprecated_reason:
+    # "..."`) so any skill deprecated this way is indistinguishable, on
+    # disk, from one the watcher deprecated automatically -- both are read
+    # by the same `Skill.deprecated_reason` field and shown the same way on
+    # skill_detail.html.
+    if "deprecated_reason:" in updated:
+        updated = re.sub(r'deprecated_reason:\s*".*?"', f'deprecated_reason: "{reason}"', updated, count=1)
+    else:
+        updated = updated.replace(
+            "status: deprecated", f'status: deprecated\ndeprecated_reason: "{reason}"', 1,
+        )
+    target.write_text(updated, encoding="utf-8")
+    _skills_cache["data"] = None
+
+    # Same durability requirement as activation -- see
+    # `_persist_skill_status_change`'s docstring (skills/ is baked into the
+    # image, no volume mount, so an unpersisted flip is silently reverted
+    # by the next redeploy).
+    git_result = await asyncio.to_thread(
+        _persist_skill_status_change, target, Path.cwd(),
+        action="deprecate-skill", description=f"Deprecate skill: {target.stem}",
+    )
+    pr_url = git_result.get("pr_url")
+
+    s = await get_store()
+    success_msg = f"Deprecated: {target.stem} ({reason})"
+    if pr_url:
+        success_msg += f" — persisted via PR: {pr_url}"
+
+    event_details: dict = {"skill": target.stem, "reason": reason}
+    if pr_url:
+        event_details["pr_url"] = pr_url
+    else:
+        event_details["git_persist_error"] = git_result.get("error", "unknown error")
+    await s.log_event(
+        "portal", "skill-deprecated", None, "info" if pr_url else "warning",
+        f"Deprecated skill: {target.stem} ({reason})", details=event_details,
+    )
+
+    url = f"/capabilities?success={quote(success_msg)}"
+    if not pr_url:
+        warning_msg = (
+            f"{target.stem} is deprecated in this pod now, but the git commit needed to survive the "
             f"next redeploy failed ({str(git_result.get('error', 'unknown error'))[:150]}) — it will be "
             f"silently reverted on redeploy unless this is retried or committed manually."
         )
