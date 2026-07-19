@@ -282,6 +282,24 @@
 </div>
 {% endif %}
 
+{% if webhook_deliveries %}
+<h2 class="section-title">Webhook Deliveries</h2>
+<div id="webhook-deliveries-panel" hx-get="/health" hx-trigger="every 30s" hx-select="#webhook-deliveries-panel" hx-target="this" hx-swap="outerHTML">
+<table>
+  <thead><tr><th>App</th><th>Status</th><th>Detail</th></tr></thead>
+  <tbody>
+    {% for wh in webhook_deliveries %}
+    <tr class="{% if wh.ok %}row-border-green{% elif wh.ok is none %}row-border-yellow{% else %}row-border-red{% endif %}">
+      <td class="text-bold">{{ wh.repo_name }}</td>
+      <td><span class="badge {% if wh.ok %}badge-low{% elif wh.ok is none %}badge-medium{% else %}badge-critical{% endif %}">{{ wh.status | replace("_", " ") | capitalize }}</span></td>
+      <td class="text-sm text-muted">{{ wh.detail }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
 {% if kafka_stats and kafka_stats.available %}
 <h3 class="text-sm mt-1 mb-1">Topics</h3>
 <table>

@@ -1088,3 +1088,93 @@ def ensure_webhook(repo_url: str, webhook_url: str) -> dict:
     except Exception as exc:
         logger.warning("Failed to ensure webhook on %s: %s", repo_url, exc)
         return {"error": str(exc)}
+
+
+def check_webhook_delivery_health(repo_url: str, url_suffix: str = "/api/webhook/github-push") -> dict:
+    """Real liveness check for a managed repo's registered push webhook --
+    "is GitHub actually delivering push events to us", not just "is a hook
+    registered". Used by the Health page's Webhook Deliveries section.
+
+    Registration alone (``ensure_webhook()`` above) proved nothing about
+    whether GitHub could actually reach the app -- the 2026-07-18 "Awaiting
+    verification" incident had a webhook registered, active, and 100%
+    failing (oauth-proxy's ``--skip-auth-regex`` 302'ing every delivery to
+    the OAuth login page, plus a second hook independently failing TLS
+    verification), and nothing surfaced that short of a human manually
+    running `gh api repos/.../hooks/{id}/deliveries`. This does exactly
+    that check, automatically: ``GET .../hooks`` to find the registered
+    hook (matched by URL suffix, not the full URL, so this doesn't need to
+    reconstruct this app's own external base URL), then ``GET .../hooks/
+    {id}/deliveries`` for its most recent delivery outcome.
+
+    Returns ``{"ok": bool | None, "status": str, "detail": str}``.
+    ``ok=None`` ("no_deliveries") is a deliberately distinct, non-failing
+    "inconclusive" state (a brand new hook GitHub hasn't called yet) --
+    different from ``ok=False``'s "registered but actually failing".
+    Never raises: every GitHub API call is wrapped, matching
+    ``check_github_token()``'s convention above.
+    """
+    try:
+        token = _get_token()
+    except RuntimeError:
+        return {
+            "ok": False, "status": "no_token",
+            "detail": "GITHUB_TOKEN is not set -- cannot check webhook delivery health",
+        }
+    hdrs = _headers(token)
+
+    try:
+        owner, repo = _parse_owner_repo(repo_url)
+        hooks_resp = requests.get(f"{_API}/repos/{owner}/{repo}/hooks", headers=hdrs, timeout=10)
+        hooks_resp.raise_for_status()
+        hook = next(
+            (h for h in hooks_resp.json() if h.get("config", {}).get("url", "").endswith(url_suffix)),
+            None,
+        )
+    except Exception as exc:
+        logger.warning("Failed to list webhooks on %s: %s", repo_url, exc)
+        return {"ok": False, "status": "error", "detail": f"Could not list webhooks: {exc}"}
+
+    if hook is None:
+        return {
+            "ok": False, "status": "not_registered",
+            "detail": f"No webhook ending in {url_suffix} is registered on this repo",
+        }
+    if not hook.get("active", True):
+        return {
+            "ok": False, "status": "inactive",
+            "detail": f"Webhook {hook['id']} is registered but disabled on GitHub",
+        }
+
+    try:
+        deliveries_resp = requests.get(
+            f"{_API}/repos/{owner}/{repo}/hooks/{hook['id']}/deliveries",
+            headers=hdrs, params={"per_page": 5}, timeout=10,
+        )
+        deliveries_resp.raise_for_status()
+        deliveries = deliveries_resp.json()
+    except Exception as exc:
+        logger.warning("Failed to fetch deliveries for webhook %s on %s: %s", hook["id"], repo_url, exc)
+        return {"ok": False, "status": "error", "detail": f"Could not fetch delivery history: {exc}"}
+
+    if not deliveries:
+        return {
+            "ok": None, "status": "no_deliveries",
+            "detail": f"Webhook {hook['id']} registered but has no recorded deliveries yet",
+        }
+
+    latest = deliveries[0]
+    status_code = latest.get("status_code")
+    delivered_at = latest.get("delivered_at", "?")
+    if status_code is not None and 200 <= status_code < 300:
+        return {
+            "ok": True, "status": "delivering",
+            "detail": f"Last delivery at {delivered_at}: HTTP {status_code} ({latest.get('status', 'OK')})",
+        }
+    return {
+        "ok": False, "status": "failing",
+        "detail": (
+            f"Last delivery at {delivered_at}: HTTP {status_code} ({latest.get('status', 'unknown')}) -- "
+            "GitHub is not reaching this app; check oauth-proxy's --skip-auth-regex and the hook's insecure_ssl setting"
+        ),
+    }
