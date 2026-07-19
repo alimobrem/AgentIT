@@ -2075,52 +2075,13 @@ async def test_settings_page_default(client, _override_store):
     resp = await client.get("/settings")
     assert resp.status_code == 200
     assert "Settings" in resp.text
-    assert "Auto-Mode" in resp.text
-    assert "OFF" in resp.text
-
-
-async def test_toggle_auto_mode_on(client, _override_store):
-    store = _override_store
-    resp = await client.post("/settings/auto-mode", data={"value": "true"}, follow_redirects=False)
-    assert resp.status_code == 303
-    assert await store.get_setting("auto_mode") == "true"
-
-
-async def test_toggle_auto_mode_off(client, _override_store):
-    store = _override_store
-    await store.set_setting("auto_mode", "true")
-    resp = await client.post("/settings/auto-mode", data={"value": "false"}, follow_redirects=False)
-    assert resp.status_code == 303
-    assert await store.get_setting("auto_mode") == "false"
-
-
-async def test_settings_page_shows_on_when_enabled(client, _override_store):
-    store = _override_store
-    await store.set_setting("auto_mode", "true")
-    resp = await client.get("/settings")
-    assert resp.status_code == 200
-    assert "ON" in resp.text
-    assert "Disable Auto-Mode" in resp.text
+    assert "LLM Safety Gate" in resp.text
+    assert "Data Retention" in resp.text
 
 
 async def test_settings_nav_link(client):
     resp = await client.get("/")
     assert 'href="/settings"' in resp.text
-
-
-async def test_settings_auto_mode_banner_does_not_reference_retired_gates_page(client, _override_store):
-    """Regression: the Auto-Mode banner said destructive changes get
-    "queued in Gates for your review" -- Gates no longer exists as a
-    standalone page (split into per-app Actions tabs; the banner's other
-    original destination, Admin Review, was itself retired 2026-07-18 along
-    with the `cluster-admin-review` gate type it existed solely for)."""
-    store = _override_store
-    await store.set_setting("auto_mode", "true")
-    resp = await client.get("/settings")
-    assert resp.status_code == 200
-    assert "queued in Gates" not in resp.text
-    assert "Actions tab" in resp.text
-    assert "Admin Review" not in resp.text
 
 
 async def test_settings_and_schedules_are_tabs_of_each_other(client, _override_store):
@@ -2134,27 +2095,28 @@ async def test_settings_and_schedules_are_tabs_of_each_other(client, _override_s
     assert 'href="/settings"' in schedules_resp.text
 
 
-# ── Auto-mode allowlist removed (Settings page) ─────────────────────────
-# The per-(namespace, kind) auto-mode allowlist -- and its Settings UI
-# (add/remove entries) -- has been removed along with Direct Apply and
-# AutoMode's direct-apply branch as a concept entirely: its entire purpose
-# was bounding what AutoMode could mutate *without a human already in the
-# loop*, which no longer describes any outcome AutoMode can reach (its one
-# live terminal action for cluster-config is now a GitOps commit+PR gated
-# on a human merge). See test_automode_extended.py for AutoMode's own
-# simplified behavior coverage.
+# ── AutoMode removed (Settings page) ────────────────────────────────────
+# AutoMode -- and its whole-batch ON/OFF toggle, Decision Matrix table, and
+# "Recent Auto-Mode Actions" table on this page -- has been removed
+# entirely: nothing auto-delivers without an explicit human action anymore,
+# so there's no more setting to toggle. The per-(namespace, kind) auto-mode
+# allowlist (and its own Settings UI) was retired earlier still, for the
+# same underlying reason (see test_settings_page_no_longer_shows_
+# allowlist_ui below, predating this removal).
 
 
-async def test_settings_recent_actions_table_shows_human_labels(client, _override_store):
-    """"Recent Auto-Mode Actions" rendered a raw events.action value
-    verbatim ("gitops-pr-opened", "auto-applied", ...)."""
-    store = _override_store
-    await store.log_event("auto-mode", "gitops-pr-opened", "auto-action-app", "info", "PR opened")
-
+async def test_settings_page_no_longer_shows_auto_mode_ui(client, _override_store):
     resp = await client.get("/settings")
     assert resp.status_code == 200
-    assert ">GitOps PR opened<" in resp.text
-    assert ">gitops-pr-opened<" not in resp.text
+    assert "Auto-Mode" not in resp.text
+    assert "Decision Matrix" not in resp.text
+
+
+async def test_auto_mode_toggle_route_no_longer_exists(client, _override_store):
+    resp = await client.post(
+        "/settings/auto-mode", data={"value": "true"}, follow_redirects=False,
+    )
+    assert resp.status_code == 404
 
 
 async def test_settings_page_no_longer_shows_allowlist_ui(client, _override_store):
@@ -4166,7 +4128,20 @@ async def test_decisions_page_renders_empty_state(client):
     assert "No LLM decisions logged yet" in resp.text
 
 
-async def test_decisions_page_shows_fix_review_and_auto_mode_decisions(client, _override_store):
+async def test_decisions_page_shows_fix_review_decisions(client, _override_store):
+    store = _override_store
+    await store.record_skill_outcome("network-policy", "my-app", "approved", "Fix is correct and safe")
+
+    resp = await client.get("/decisions")
+    assert resp.status_code == 200
+    assert "network-policy" in resp.text
+    assert "Fix is correct and safe" in resp.text
+
+
+async def test_decisions_page_no_longer_shows_automode_decision_events(client, _override_store):
+    """AutoMode has been removed -- a stray historical action='decision'
+    event (from before the removal) must no longer render on the Decisions
+    page at all; only fix-review/secret-classify/capability-proposal remain."""
     store = _override_store
     await store.record_skill_outcome("network-policy", "my-app", "approved", "Fix is correct and safe")
     await store.log_event("HardeningAgent", "decision", "other-app", "info",
@@ -4175,10 +4150,8 @@ async def test_decisions_page_shows_fix_review_and_auto_mode_decisions(client, _
     resp = await client.get("/decisions")
     assert resp.status_code == 200
     assert "network-policy" in resp.text
-    assert "Fix is correct and safe" in resp.text
-    assert "HardeningAgent" in resp.text
-    assert "Adds a ConfigMap" in resp.text
-    assert "auto-applied" in resp.text
+    assert "Adds a ConfigMap" not in resp.text
+    assert "auto-applied" not in resp.text
 
 
 async def test_decisions_page_filters_by_attribution(client, _override_store):
@@ -4196,14 +4169,21 @@ async def test_decisions_page_filters_by_attribution(client, _override_store):
 
 
 async def test_decisions_page_filters_by_decision_type(client, _override_store):
+    from agentit.llm_decisions import build_secret_classify_events
+
     store = _override_store
     await store.record_skill_outcome("network-policy", "app-a", "approved", "fine skill decision")
-    await store.log_event("auto-mode", "decision", "app-b", "info", "AUTO-APPLY: safe: fine auto decision")
+    for ev in build_secret_classify_events(
+        [{"file_path": "app.py", "secret_type": "password", "is_secret": False,
+          "confidence": 0.8, "reason": "fine secret decision", "kept": False}],
+        target_app="app-b",
+    ):
+        await store.log_event(**ev)
 
     resp = await client.get("/decisions?decision_type=fix-review")
     assert resp.status_code == 200
     assert "fine skill decision" in resp.text
-    assert "fine auto decision" not in resp.text
+    assert "fine secret decision" not in resp.text
 
 
 async def test_decisions_page_shows_secret_classify_decisions(client, _override_store):

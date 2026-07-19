@@ -2,22 +2,13 @@
 generation) into one queryable, attributed view.
 
 "Decision" here means the LLM's output directly gates an outcome (approve/reject/
-auto-apply/gate) — not just "the LLM generated some text". Four decision points
-currently produce durable records that this module can query:
+gate) — not just "the LLM generated some text". Three decision points currently
+produce durable records that this module can query:
 
   - fix-review (`LLMClient.review_fix`, invoked from `cli.py`'s `self-fix` command's
     Step 3 first-approver gate): approves or rejects a generated fix. Persisted to the
     `skill_effectiveness` table via `record_skill_outcome()`, attributed by skill name
     (real per-skill attribution — this is the best-attributed decision point today).
-
-  - auto-mode classify (`LLMClient.classify_action`, invoked from
-    `AutoMode.should_auto_apply`/`execute`): classifies a bundle of manifests as safe
-    or destructive to decide auto-apply vs. gate. Persisted to the `events` table
-    (action='decision'). Attribution is the caller-supplied `agent_name` when known
-    (e.g. the dispatcher's `result["agent"]`), otherwise the generic "auto-mode"
-    component name — most auto-mode decisions today fall into the latter bucket
-    because most callers (onboarding, self-fix) apply a whole bundle of manifests
-    spanning many agents at once, not a single agent/skill's output.
 
   - secret-classify (`LLMClient.classify_secret`, invoked from
     `analyzers.security.SecurityAnalyzer._check_secrets`): decides per regex match
@@ -36,6 +27,11 @@ currently produce durable records that this module can query:
     proposal was actually made — `_capability_proposal_decisions()` maps each cycle to
     a decision, attributed generically to the `capability-scout` component (there's no
     per-app or per-skill target — every proposal targets AgentIT's own repo).
+
+AutoMode used to add a fourth decision point here ("auto-mode classify",
+`LLMClient.classify_action`, invoked from `AutoMode.should_auto_apply`/
+`execute`) -- removed along with AutoMode itself; no code path logs an
+action='decision' event anymore, so there's nothing left to query for it.
 """
 from __future__ import annotations
 
@@ -43,11 +39,9 @@ import asyncio
 import json
 
 DECISION_TYPE_FIX_REVIEW = "fix-review"
-DECISION_TYPE_AUTO_MODE = "auto-mode-classify"
 DECISION_TYPE_SECRET_CLASSIFY = "secret-classify"  # == analyzers.security.SECRET_CLASSIFY_ACTION
 DECISION_TYPE_CAPABILITY_PROPOSAL = "capability-proposal"
 
-_AUTO_MODE_FALLBACK_AGENT = "auto-mode"
 _SECRET_CLASSIFY_ATTRIBUTION = "security-analyzer"
 _CAPABILITY_SCOUT_ATTRIBUTION = "capability-scout"
 
@@ -87,52 +81,14 @@ def _fix_review_decisions(store, limit: int, loop=None) -> list[dict]:
     ]
 
 
-def _parse_auto_mode_summary(summary: str) -> tuple[str, str]:
-    """Split an auto-mode decision event's summary into (outcome, reason).
-
-    Summaries are logged as `f"{'AUTO-APPLY' if can_apply else 'GATE'}: {reason}"`
-    by `AutoMode.execute()` — see automode.py.
-    """
-    if ": " in summary:
-        prefix, reason = summary.split(": ", 1)
-    else:
-        prefix, reason = summary, ""
-    outcome = "auto-applied" if prefix.strip() == "AUTO-APPLY" else "gated"
-    return outcome, reason
-
-
-def _auto_mode_decisions(store, limit: int, loop=None) -> list[dict]:
-    """`events` rows (action='decision') → decisions attributed by `agent_id`.
-
-    `agent_id` is the real originating agent/skill when the caller passed one
-    through to `AutoMode.execute(agent_name=...)`; otherwise it's the generic
-    "auto-mode" component name (see module docstring).
-    """
-    rows = _bridge(store.list_events_by_action("decision", limit=limit), loop)
-    decisions = []
-    for r in rows:
-        outcome, reason = _parse_auto_mode_summary(r["summary"])
-        agent_id = r["agent_id"]
-        decisions.append({
-            "timestamp": r["timestamp"],
-            "decision_type": DECISION_TYPE_AUTO_MODE,
-            "attribution": agent_id,
-            "attribution_kind": "component" if agent_id == _AUTO_MODE_FALLBACK_AGENT else "agent",
-            "target_app": r.get("target_app") or "",
-            "outcome": outcome,
-            "reason": reason,
-        })
-    return decisions
-
-
 def build_secret_classify_events(decisions: list[dict], target_app: str) -> list[dict]:
     """Turn `SecurityAnalyzer`'s raw per-match `classify_secret` verdicts into
     `store.log_event()` call kwargs, ready to persist once a caller has run an
     assessment (see `runner.run_assessment`'s `secret_decisions_out` param).
 
-    Mirrors `AutoMode.execute()`'s "{OUTCOME}: {reason}" summary convention
-    exactly so `_secret_classify_decisions()` below can parse it the same way
-    `_parse_auto_mode_summary()` does.
+    Summaries follow a plain "{OUTCOME}: {reason}" convention so
+    `_secret_classify_decisions()` below can parse them back apart with
+    `_parse_secret_classify_summary()`.
     """
     from agentit.analyzers.security import SECRET_CLASSIFY_ACTION
 
@@ -202,7 +158,7 @@ def _humanize_capability_evidence(text: str) -> str:
     like the real signal rows `gather_evidence()` feeds the LLM (e.g. one
     of `store.get_agent_stats()`'s own per-agent dicts: `{"agent":
     "remediation-loop", "total_events": 36, ...}`), confirmed live on the
-    Decisions page -- every other decision type here (auto-mode-classify,
+    Decisions page -- every other decision type here (fix-review,
     secret-classify) always renders a plain sentence. If `text` parses as
     a JSON object/array, reformat it as "key: value" pairs (recursing into
     list items) instead of ever showing raw braces/quotes; otherwise it's
@@ -228,10 +184,10 @@ def _humanize_capability_evidence(text: str) -> str:
 def _capability_proposal_decisions(store, limit: int, loop=None) -> list[dict]:
     """`events` rows (action='capability-run') → decisions attributed to the
     `capability-scout` component -- every cycle becomes a decision, whether
-    or not it actually produced a proposal, mirroring `_auto_mode_decisions()`'s
-    "generic component attribution" bucket (there's no per-app/per-skill
-    target here; every proposal targets AgentIT's own repo, a constant, not
-    derived per-row)."""
+    or not it actually produced a proposal, using the same "generic
+    component attribution" as `_secret_classify_decisions()` above (there's
+    no per-app/per-skill target here; every proposal targets AgentIT's own
+    repo, a constant, not derived per-row)."""
     from agentit.capability_scout import CAPABILITY_RUN_ACTION
 
     rows = _bridge(store.list_events_by_action(CAPABILITY_RUN_ACTION, limit=limit), loop)
@@ -279,7 +235,6 @@ def list_llm_decisions(
     """
     decisions = (
         _fix_review_decisions(store, limit, loop)
-        + _auto_mode_decisions(store, limit, loop)
         + _secret_classify_decisions(store, limit, loop)
         + _capability_proposal_decisions(store, limit, loop)
     )

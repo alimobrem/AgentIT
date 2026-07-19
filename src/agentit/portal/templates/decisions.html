@@ -4,12 +4,10 @@
 <h1>LLM Decisions</h1>
 <p class="text-muted text-sm mb-1">Audit log of LLM decide-points — Events owns the chronological stream.</p>
 <p class="text-muted mb-2">
-  Every place the LLM actually decides an outcome (approve/reject/auto-apply/gate) —
+  Every place the LLM actually decides an outcome (approve/reject/gate) —
   not just generates text — attributed by the agent or skill that triggered it.
   Covers <strong>fix-review</strong> (self-fix's first-approver gate, attributed
-  by skill), <strong>auto-mode classify</strong> (safety classification for auto-apply,
-  attributed by agent when the caller supplies one, otherwise the generic
-  <code>auto-mode</code> component name), <strong>secret-classify</strong> (the security
+  by skill), <strong>secret-classify</strong> (the security
   analyzer's per-match hardcoded-secret false-positive filter, attributed to the
   generic <code>security-analyzer</code> component), and <strong>capability-proposal</strong>
   (capability-scout's self-improvement cycle, attributed to the generic
@@ -81,7 +79,7 @@
 </table>
 {% else %}
 <div class="empty-state">
-  <p>No LLM decisions logged yet. Run self-fix or trigger an auto-mode decision to see data here.</p>
+  <p>No LLM decisions logged yet. Run self-fix or Assess a repo (which runs the secret classifier) to see data here.</p>
 </div>
 {% endif %}
 

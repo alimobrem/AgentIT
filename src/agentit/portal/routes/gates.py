@@ -116,9 +116,11 @@ async def resolve_gate(request: Request, gate_id: str):
             )
 
         if gate.get("gate_type") in ("gitops-pr-pending", _CICD_SHARED_NAMESPACE_GATE_TYPE):
-            # AutoMode already opened the PR autonomously when it created
-            # this gate (automode.py::execute) -- approving it is a merge,
-            # never a re-delivery, since these manifests were never meant
+            # route_and_deliver() already opened the PR when it created this
+            # gate (whether triggered by a human's Deliver click or by one
+            # of the few remaining autonomous callers, e.g. delivery.py's
+            # Phase 4 redispatch) -- approving it is a merge, never a
+            # re-delivery, since these manifests were never meant
             # to be applied directly for this GitOps-registered app at all
             # (see docs/unified-apply-flow.md section (B)). The CI/CD-
             # shared-namespace variant (2026-07-18) is treated identically

@@ -360,7 +360,10 @@ _ACTION_LABELS: dict[str, str] = {
     "check-removed": "Check removed",
     "skill-activated": "Skill activated",
     "skill-deprecated": "Skill deprecated",
-    # Settings' "Recent Auto-Mode Actions" table (agent_id="auto-mode").
+    # AutoMode used to log these (agent_id="auto-mode") for Settings'
+    # now-removed "Recent Auto-Mode Actions" table -- kept so any
+    # already-persisted historical event with one of these actions still
+    # renders as a readable phrase on Events/Ledger, not a raw identifier.
     "gitops-pr-opened": "GitOps PR opened",
     "gitops-commit-failed": "GitOps commit failed",
     "auto-applied": "Applied automatically",

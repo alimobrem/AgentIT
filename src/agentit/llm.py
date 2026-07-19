@@ -47,7 +47,7 @@ def _strip_code_fence(raw: str) -> str:
 
 # _chat()'s default output budget — enough for the small, fixed-shape JSON
 # responses most callers expect (a couple of scalar fields plus a one-sentence
-# "reason"): classify_secret, classify_action, review_fix, summarize_architecture.
+# "reason"): classify_secret, review_fix, summarize_architecture.
 # Callers whose response shape is genuinely open-ended or has several
 # free-text/paragraph fields must pass their own higher max_tokens explicitly
 # (see detect_eol_risks/propose_capability_improvement below) rather than
@@ -115,19 +115,6 @@ _SUMMARIZE_SYSTEM = (
     "You are a software architect. Given stack info and a file listing, "
     "produce a 2-3 sentence architecture summary. Be concise."
 )
-
-_ACTION_CLASSIFY_SYSTEM = (
-    "You are a Kubernetes security reviewer. Classify whether the following "
-    "action is DESTRUCTIVE (could cause downtime, data loss, security regression, "
-    "or break a running workload). Be conservative — if uncertain, classify as destructive.\n\n"
-    "Destructive examples: deleting resources, scaling to zero, removing NetworkPolicies, "
-    "changing RBAC to grant cluster-admin, modifying secrets, removing health probes.\n\n"
-    "Safe examples: adding new resources (NetworkPolicy, ServiceMonitor, ConfigMap), "
-    "adding labels, creating RBAC with minimal permissions, adding probes.\n\n"
-    'Respond ONLY with valid JSON: {"is_destructive": bool, "confidence": float, "reason": str}. '
-    "confidence is 0.0-1.0."
-)
-
 
 _EOL_SYSTEM = (
     "You are a software supply-chain analyst reviewing a repository's detected stack "
@@ -275,37 +262,6 @@ class LLMClient:
         )
         return self._chat(_SUMMARIZE_SYSTEM, user_msg)
 
-    def classify_action(
-        self,
-        action_type: str,
-        manifests: list[str],
-        context: str,
-    ) -> dict | None:
-        """Classify a K8s action as destructive or safe.
-
-        Returns {"is_destructive": bool, "confidence": float, "reason": str}
-        or None on failure (caller must treat None as destructive — fail-closed).
-        """
-        manifest_text = "\n---\n".join(manifests[:5])
-        user_msg = (
-            f"Action: {action_type}\n"
-            f"Context: {context}\n\n"
-            f"Manifests ({len(manifests)} total, first 5 shown):\n{manifest_text}"
-        )
-        raw = self._chat(_ACTION_CLASSIFY_SYSTEM, user_msg)
-        if raw is None:
-            return None
-        try:
-            parsed = json.loads(raw)
-            return {
-                "is_destructive": bool(parsed["is_destructive"]),
-                "confidence": float(parsed["confidence"]),
-                "reason": str(parsed["reason"]),
-            }
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-            logger.warning("LLM returned unparseable action classification: %s", raw)
-            return None
-
     def review_fix(
         self,
         finding_description: str,
@@ -355,7 +311,7 @@ class LLMClient:
     ) -> list[dict] | None:
         """Open-ended EOL/near-EOL detection across the repo's whole stack.
 
-        Unlike ``classify_secret``/``classify_action`` this isn't a
+        Unlike ``classify_secret`` this isn't a
         yes/no filter over a heuristic hit -- it's genuinely open-ended
         reasoning, so the caller (``agentit.analyzers.eol.llm_findings``)
         treats this as purely additive to a deterministic baseline.

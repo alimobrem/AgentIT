@@ -45,7 +45,7 @@ async def test_get_sets_csrf_cookie(client):
 async def test_post_without_any_csrf_token_rejected(client):
     """No cookie, no header/field at all -- the base case a real cross-site
     forged request would also produce."""
-    resp = await client.post("/settings/auto-mode", data={"value": "true"})
+    resp = await client.post("/settings/purge", data={})
     assert resp.status_code == 403
 
 
@@ -54,14 +54,14 @@ async def test_post_with_cookie_but_no_matching_header_rejected(client):
     attacker page can't read its value (same-origin policy) to also set a
     matching header -- this is exactly the attack double-submit defeats."""
     await client.get("/ledger")  # sets the cookie
-    resp = await client.post("/settings/auto-mode", data={"value": "true"})
+    resp = await client.post("/settings/purge", data={})
     assert resp.status_code == 403
 
 
 async def test_post_with_mismatched_header_rejected(client):
     await client.get("/ledger")
     resp = await client.post(
-        "/settings/auto-mode", data={"value": "true"},
+        "/settings/purge", data={},
         headers={"X-CSRF-Token": "not-the-real-token"},
     )
     assert resp.status_code == 403
@@ -71,7 +71,7 @@ async def test_post_with_valid_double_submit_header_succeeds(client):
     get_resp = await client.get("/ledger")
     token = get_resp.cookies["csrf_token"]
     resp = await client.post(
-        "/settings/auto-mode", data={"value": "true"},
+        "/settings/purge", data={},
         headers={"X-CSRF-Token": token}, follow_redirects=False,
     )
     assert resp.status_code == 303
@@ -84,8 +84,8 @@ async def test_post_with_valid_form_field_fallback_succeeds():
     get_resp = await client.get("/ledger")
     token = get_resp.cookies["csrf_token"]
     resp = await client.post(
-        "/settings/auto-mode",
-        data={"value": "true", "csrf_token": token},
+        "/settings/purge",
+        data={"csrf_token": token},
         follow_redirects=False,
     )
     assert resp.status_code == 303

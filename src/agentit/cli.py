@@ -644,11 +644,10 @@ def run_agent(agent_name: str, report_path: str) -> None:
 @main.command("self-assess")
 @click.option("--repo-url", default="https://github.com/alimobrem/AgentIT", help="AgentIT repo URL.")
 @click.option("--criticality", type=click.Choice(["low", "medium", "high", "critical"]), default="high")
-@click.option("--auto-apply", is_flag=True, default=False, help="Run auto-mode pipeline after onboarding.")
 @click.option("--llm", "use_llm", is_flag=True, default=None)
 @click.option("--llm-model", default=None)
 @_run_async
-async def self_assess(repo_url: str, criticality: str, auto_apply: bool, use_llm: bool, llm_model: str | None) -> None:
+async def self_assess(repo_url: str, criticality: str, use_llm: bool, llm_model: str | None) -> None:
     """Assess AgentIT itself — dogfooding the platform on its own repo."""
     from agentit.agents.orchestrator import FleetOrchestrator
 
@@ -677,39 +676,6 @@ async def self_assess(repo_url: str, criticality: str, auto_apply: bool, use_llm
                 click.echo(f"  [{status}] {ar.agent_name}: {len(ar.files_generated)} files", err=True)
 
             click.echo(f"\n{result.recommendation}", err=True)
-
-            if auto_apply and result.plan.auto_approve:
-                from agentit.automode import AutoMode
-                llm_client = None
-                if use_llm:
-                    try:
-                        from agentit.llm import LLMClient
-                        llm_client = LLMClient(model=llm_model)
-                    except Exception:
-                        click.echo("LLM unavailable — continuing without safety classification.", err=True)
-
-                files = []
-                for ar in result.agent_results:
-                    if not ar.success:
-                        continue
-                    for fpath in ar.files_generated:
-                        full = out / ar.category / fpath
-                        if full.is_file():
-                            files.append({
-                                "category": ar.category,
-                                "path": fpath,
-                                "content": full.read_text(),
-                                "description": fpath,
-                            })
-
-                engine = AutoMode(store=store, llm_client=llm_client)
-                apply_result = await engine.execute(
-                    assessment_id, files, "agentit",
-                    criticality, result.plan.auto_approve, "agentit",
-                )
-                click.echo(f"\nAuto-apply: {apply_result['action']} — {apply_result['reason']}", err=True)
-            elif auto_apply:
-                click.echo("\nAuto-apply skipped: orchestrator did not auto-approve.", err=True)
 
     except CloneError as exc:
         click.echo(f"Error: {exc}", err=True)

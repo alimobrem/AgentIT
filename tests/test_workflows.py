@@ -58,45 +58,6 @@ class TestAssessOnboardFlow:
         assert len(agents) >= 3
 
 
-class TestAutoModeFlow:
-    """Auto-mode: should_auto_apply decision matrix."""
-
-    async def test_disabled_always_gates(self):
-        from agentit.automode import AutoMode
-        store, _raw = await make_async_store()
-        auto = AutoMode(store=store)
-        ok, _ = await auto.should_auto_apply(True, ["x"], "low", "app")
-        assert ok is False
-
-    async def test_enabled_no_llm_gates(self):
-        from agentit.automode import AutoMode
-        store, raw = await make_async_store()
-        await raw.set_setting("auto_mode", "true")
-        auto = AutoMode(store=store, llm_client=None)
-        ok, _ = await auto.should_auto_apply(True, ["x"], "low", "app")
-        assert ok is False
-
-    async def test_enabled_llm_safe_approves(self):
-        from agentit.automode import AutoMode
-        store, raw = await make_async_store()
-        await raw.set_setting("auto_mode", "true")
-        llm = MagicMock()
-        llm.classify_action.return_value = {"is_destructive": False, "confidence": 0.95, "reason": "safe"}
-        auto = AutoMode(store=store, llm_client=llm)
-        ok, _ = await auto.should_auto_apply(True, ["x"], "low", "app")
-        assert ok is True
-
-    async def test_enabled_llm_destructive_gates(self):
-        from agentit.automode import AutoMode
-        store, raw = await make_async_store()
-        await raw.set_setting("auto_mode", "true")
-        llm = MagicMock()
-        llm.classify_action.return_value = {"is_destructive": True, "confidence": 0.9, "reason": "deletes"}
-        auto = AutoMode(store=store, llm_client=llm)
-        ok, _ = await auto.should_auto_apply(True, ["x"], "low", "app")
-        assert ok is False
-
-
 class TestRemediationLoopFlow:
     """Remediation loop: assess failure doesn't crash."""
 

@@ -209,25 +209,11 @@ def test_propose_capability_improvement_realistic_payload_no_longer_truncates():
 # ── max_tokens budget wiring: shorter-response callers stay on the default ──
 
 
-def test_classify_action_uses_default_token_budget():
-    """classify_action's simple safe/unsafe+confidence+reason response doesn't
+def test_classify_secret_uses_default_token_budget():
+    """classify_secret's simple safe/unsafe+confidence+reason response doesn't
     need a bigger budget -- it must still request agentit.llm._DEFAULT_MAX_TOKENS
     (512), proving the higher budgets given to detect_eol_risks/
     propose_capability_improvement didn't get blanket-applied to every caller."""
-    from agentit.llm import _DEFAULT_MAX_TOKENS
-
-    response = _mock_response(json.dumps({"is_destructive": False, "confidence": 0.9, "reason": "Adding a ConfigMap"}))
-    mock_create = MagicMock(return_value=response)
-    client = _make_client(mock_create)
-    result = client.classify_action("apply", ["kind: ConfigMap"], "App: demo")
-
-    assert result is not None
-    _, kwargs = mock_create.call_args
-    assert kwargs["max_tokens"] == _DEFAULT_MAX_TOKENS == 512
-
-
-def test_classify_secret_uses_default_token_budget():
-    """Same contract as classify_action above, pinned for classify_secret."""
     from agentit.llm import _DEFAULT_MAX_TOKENS
 
     response = _mock_response(json.dumps({"is_secret": False, "confidence": 0.9, "reason": "Env var lookup"}))
@@ -241,7 +227,7 @@ def test_classify_secret_uses_default_token_budget():
 
 
 def test_review_fix_uses_default_token_budget():
-    """Same contract as classify_action above, pinned for review_fix."""
+    """Same contract as classify_secret above, pinned for review_fix."""
     from agentit.llm import _DEFAULT_MAX_TOKENS
 
     response = _mock_response(json.dumps({"approved": True, "confidence": 0.9, "reason": "Correct and safe"}))
@@ -254,69 +240,18 @@ def test_review_fix_uses_default_token_budget():
     assert kwargs["max_tokens"] == _DEFAULT_MAX_TOKENS == 512
 
 
-# ── classify_action / review_fix safety-gate fail-closed regression ──────
+# ── classify_secret / review_fix safety-gate fail-closed regression ──────
 #
 # README.md previously mislabeled llm.py as "fail-open" in its repository-layout
-# comment. It's actually fail-closed: both classify_action() and review_fix()
+# comment. It's actually fail-closed: both classify_secret() and review_fix()
 # return None on any _chat() failure or unparseable response, and every caller
-# (AutoMode.should_auto_apply in automode.py, cli.py's self-fix Step 3) treats
-# None as the destructive/rejected outcome, never a silent "safe" default.
+# treats None as the conservative outcome -- analyzers.security.SecurityAnalyzer
+# keeps the regex-matched secret finding as-is (never drops it) when
+# classify_secret() returns None, and cli.py's self-fix Step 3 treats a None
+# review_fix() result as rejected -- never a silent "safe" default either way.
 # These tests pin that contract directly against LLMClient so a future change
-# to _chat()/classify_action()/review_fix() that silently started defaulting
+# to _chat()/classify_secret()/review_fix() that silently started defaulting
 # to "safe" would fail loudly here.
-
-
-def test_classify_action_timeout_returns_none():
-    import anthropic
-    import httpx
-
-    timeout_exc = anthropic.APITimeoutError(request=httpx.Request("POST", "https://example.invalid"))
-    client = _make_client(MagicMock(side_effect=timeout_exc))
-    result = client.classify_action("apply", ["kind: Deployment"], "App: demo, Criticality: high")
-
-    assert result is None
-
-
-def test_classify_action_connection_error_returns_none():
-    import anthropic
-    client = _make_client(MagicMock(side_effect=anthropic.APIConnectionError(request=MagicMock())))
-    result = client.classify_action("apply", ["kind: Deployment"], "App: demo, Criticality: high")
-
-    assert result is None
-
-
-def test_classify_action_malformed_json_returns_none():
-    client = _make_client(MagicMock(return_value=_mock_response("this is not JSON at all")))
-    result = client.classify_action("apply", ["kind: Deployment"], "App: demo, Criticality: high")
-
-    assert result is None
-
-
-def test_classify_action_missing_field_returns_none():
-    # Valid JSON, but missing the required "confidence" key -- must not be
-    # coerced into a default "safe" classification.
-    response = _mock_response(json.dumps({"is_destructive": False, "reason": "looks fine"}))
-    client = _make_client(MagicMock(return_value=response))
-    result = client.classify_action("apply", ["kind: Deployment"], "App: demo, Criticality: high")
-
-    assert result is None
-
-
-def test_classify_action_low_confidence_is_not_silently_upgraded_to_safe():
-    # classify_action() itself doesn't threshold on confidence -- it faithfully
-    # returns whatever the model reported. The fail-closed decision for a
-    # low-confidence result is made by the caller (AutoMode.should_auto_apply,
-    # see tests/test_automode.py::test_llm_low_confidence_returns_false), which
-    # rejects auto-apply below _CONFIDENCE_THRESHOLD regardless of is_destructive.
-    # This test pins that classify_action() never masks a low confidence value
-    # or substitutes a higher one.
-    response = _mock_response(json.dumps({"is_destructive": False, "confidence": 0.2, "reason": "Unclear"}))
-    client = _make_client(MagicMock(return_value=response))
-    result = client.classify_action("apply", ["kind: Deployment"], "App: demo, Criticality: high")
-
-    assert result is not None
-    assert result["confidence"] == pytest.approx(0.2)
-    assert result["is_destructive"] is False
 
 
 def test_review_fix_timeout_returns_none():
@@ -506,7 +441,7 @@ def test_classify_secret_bad_json_still_returns_none_after_fence_strip():
 
 
 def test_review_fix_low_confidence_is_not_silently_upgraded_to_approved():
-    # Same contract as classify_action above: review_fix() faithfully returns
+    # Same contract as classify_secret above: review_fix() faithfully returns
     # the model's own confidence. cli.py's self-fix Step 3 gate
     # (`review["approved"] and review["confidence"] >= 0.7`) is what actually
     # rejects a low-confidence approval -- review_fix() itself must never

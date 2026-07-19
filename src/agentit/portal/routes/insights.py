@@ -15,21 +15,21 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 # Gate types a real code path can still create today: "gitops-pr-pending"/
-# the CI/CD-shared-namespace variant of it/"auto-mode-review" (delivery.py/
-# automode.py), "rollback-review" (watchers/slo_tracker.py), and the
-# "finding-" prefix, which covers both delivery.py's ESCALATION_GATE_TYPE
-# ("finding-unresolved-escalation", Phase 4) and routes/webhooks.py's
-# per-category dispatcher gates ("finding-{category}"). Direct Apply and its
-# "cluster-conflict-review" gate are already gone (routes/gates.py);
-# ADMIN_REVIEW_GATE_TYPE ("cluster-admin-review") joined them 2026-07-18 --
-# no code path creates it anymore either, but it's kept in this set
-# deliberately (unlike the other two retired types, which were simply
-# dropped from here): a real, still-pending row of this type existed in
-# production the day it was retired, and it still resolves to a genuine
-# GitOps PR when approved (see routes/gates.py's generic fallback) -- a
-# real, actionable pending item should keep counting here until it's
-# actually resolved, not silently stop counting just because its type can
-# no longer be freshly created.
+# the CI/CD-shared-namespace variant of it (delivery.py), "rollback-review"
+# (watchers/slo_tracker.py), and the "finding-" prefix, which covers both
+# delivery.py's ESCALATION_GATE_TYPE ("finding-unresolved-escalation",
+# Phase 4) and routes/webhooks.py's per-category dispatcher gates
+# ("finding-{category}"). Direct Apply and its "cluster-conflict-review"
+# gate are already gone (routes/gates.py); ADMIN_REVIEW_GATE_TYPE
+# ("cluster-admin-review") joined them 2026-07-18, and "auto-mode-review"
+# joined them alongside AutoMode's removal -- no code path creates either
+# anymore, but both are kept in this set deliberately (unlike the other
+# retired types, which were simply dropped from here): a real,
+# still-pending row of either type may still exist in production, and it
+# still resolves to a genuine GitOps PR when approved (see routes/gates.py's
+# generic fallback) -- a real, actionable pending item should keep counting
+# here until it's actually resolved, not silently stop counting just
+# because its type can no longer be freshly created.
 _LIVE_GATE_TYPES = {
     ADMIN_REVIEW_GATE_TYPE, "gitops-pr-pending", _CICD_SHARED_NAMESPACE_GATE_TYPE,
     "auto-mode-review", "rollback-review",
@@ -75,10 +75,10 @@ async def decisions_page(request: Request, decision_type: str = "", attribution:
 
     Answers "how is agent/skill X actually performing" — how often the LLM
     approves, rejects, or gates its output, and why — by merging the
-    fix-review (skill_effectiveness), auto-mode classify, secret-classify,
-    and capability-proposal (all three via events) decision records into one
-    view. See agentit/llm_decisions.py's module docstring for what each
-    decision type covers and how it's attributed.
+    fix-review (skill_effectiveness), secret-classify, and capability-proposal
+    (both via events) decision records into one view. See agentit/
+    llm_decisions.py's module docstring for what each decision type covers
+    and how it's attributed.
     """
     from agentit.llm_decisions import list_llm_decisions, summarize_by_attribution
 
@@ -172,8 +172,8 @@ async def ledger_page(
       changed status" is already a raw ``events`` row today and already
       fully visible there -- nothing moved out of this page had nowhere
       else to go.
-    - **Decisions** (``/decisions``) -- the LLM/AutoMode decision audit,
-      including fix-review (``skill_effectiveness``) outcomes.
+    - **Decisions** (``/decisions``) -- the LLM decision audit, including
+      fix-review (``skill_effectiveness``) outcomes.
     - Non-PR gate types (``cluster-admin-review``, ``rollback-review``,
       ``finding-unresolved-escalation``) -- these were never PRs; they stay
       visible via Admin Review, Fleet's per-app "needs action"/escalation

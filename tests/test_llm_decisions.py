@@ -1,12 +1,12 @@
-"""Tests for llm_decisions.py: merging fix-review and auto-mode decisions
-into one attributed view (by agent/skill, not by human user)."""
+"""Tests for llm_decisions.py: merging fix-review, secret-classify, and
+capability-proposal decisions into one attributed view (by agent/skill, not
+by human user)."""
 
 from __future__ import annotations
 
 import asyncio
 
 from agentit.llm_decisions import (
-    DECISION_TYPE_AUTO_MODE,
     DECISION_TYPE_CAPABILITY_PROPOSAL,
     DECISION_TYPE_FIX_REVIEW,
     DECISION_TYPE_SECRET_CLASSIFY,
@@ -55,7 +55,8 @@ class TestFixReviewDecisions:
 
 
 class TestListEventsByAction:
-    """store.list_events_by_action() — the primitive _auto_mode_decisions() relies on."""
+    """store.list_events_by_action() — the generic primitive
+    _secret_classify_decisions()/_capability_proposal_decisions() rely on."""
 
     async def test_returns_only_events_with_matching_action(self) -> None:
         store = await make_store()
@@ -77,43 +78,19 @@ class TestListEventsByAction:
         assert len(await store.list_events_by_action("decision", limit=2)) == 2
 
 
-class TestAutoModeDecisions:
-    async def test_auto_apply_event_becomes_a_decision(self) -> None:
+class TestDecisionActionEventsNoLongerSurfaced:
+    """AutoMode (the only caller that ever logged an action='decision'
+    event) has been removed -- such events, including any stray
+    historical ones from before the removal, must never surface as a
+    decision anymore."""
+
+    async def test_decision_action_event_produces_no_decision(self) -> None:
         store = await make_store()
         await store.log_event("auto-mode", "decision", "my-app", "info",
                          "AUTO-APPLY: LLM classified as safe (0.95): Adds a ConfigMap")
 
         decisions = await list_llm_decisions(store)
-        assert len(decisions) == 1
-        d = decisions[0]
-        assert d["decision_type"] == DECISION_TYPE_AUTO_MODE
-        assert d["attribution"] == "auto-mode"
-        assert d["attribution_kind"] == "component"
-        assert d["target_app"] == "my-app"
-        assert d["outcome"] == "auto-applied"
-        assert d["reason"] == "LLM classified as safe (0.95): Adds a ConfigMap"
-
-    async def test_gate_event_becomes_a_decision(self) -> None:
-        store = await make_store()
-        await store.log_event("auto-mode", "decision", "my-app", "warning",
-                         "GATE: LLM flagged as destructive: Deletes a Deployment")
-
-        decisions = await list_llm_decisions(store)
-        d = decisions[0]
-        assert d["outcome"] == "gated"
-        assert d["reason"] == "LLM flagged as destructive: Deletes a Deployment"
-
-    async def test_real_agent_attribution_when_caller_supplied_one(self) -> None:
-        """When AutoMode.execute() is called with agent_name=..., the decision
-        event's agent_id is the real originating agent, not 'auto-mode'."""
-        store = await make_store()
-        await store.log_event("HardeningAgent", "decision", "my-app", "info",
-                         "AUTO-APPLY: LLM classified as safe (0.9): Adds NetworkPolicy")
-
-        decisions = await list_llm_decisions(store)
-        d = decisions[0]
-        assert d["attribution"] == "HardeningAgent"
-        assert d["attribution_kind"] == "agent"
+        assert decisions == []
 
     async def test_other_events_with_different_action_are_not_included(self) -> None:
         store = await make_store()
@@ -183,25 +160,24 @@ class TestCapabilityProposalDecisions:
         decisions = await list_llm_decisions(store)
         assert decisions[0]["outcome"] == "error"
 
-    async def test_included_alongside_fix_review_and_auto_mode_decisions(self) -> None:
+    async def test_included_alongside_fix_review_decisions(self) -> None:
         store = await make_store()
         await store.record_skill_outcome("network-policy", "app-a", "approved", "fine")
-        await store.log_event("auto-mode", "decision", "app-b", "info", "AUTO-APPLY: safe: fine")
         await store.log_event(
             "capability-scout", "capability-run", None, "info", "Opened proposal PR",
             details={"evidence": "e", "pr_url": "https://github.com/org/agentit/pull/1"},
         )
 
         decisions = await list_llm_decisions(store)
-        assert len(decisions) == 3
+        assert len(decisions) == 2
         types = {d["decision_type"] for d in decisions}
-        assert types == {DECISION_TYPE_FIX_REVIEW, DECISION_TYPE_AUTO_MODE, DECISION_TYPE_CAPABILITY_PROPOSAL}
+        assert types == {DECISION_TYPE_FIX_REVIEW, DECISION_TYPE_CAPABILITY_PROPOSAL}
 
     async def test_json_shaped_evidence_is_humanized_not_dumped_raw(self) -> None:
         """Regression, confirmed live: the Decisions page's capability-
         proposal "Reasoning" column showed a raw JSON dump (e.g. one of
         `await store.get_agent_stats()`'s own per-agent dicts) while every other
-        decision type (auto-mode-classify, secret-classify) always shows
+        decision type (fix-review, secret-classify) always shows
         a plain-English sentence. A JSON-object-shaped `evidence` string
         must be reformatted as readable "key: value" text instead."""
         import json as _json
@@ -345,7 +321,6 @@ class TestSecretClassifyDecisions:
     async def test_included_alongside_other_decision_types(self) -> None:
         store = await make_store()
         await store.record_skill_outcome("network-policy", "app-a", "approved", "fine")
-        await store.log_event("auto-mode", "decision", "app-b", "info", "AUTO-APPLY: safe: fine")
         for ev in build_secret_classify_events(
             [{"file_path": "f.py", "secret_type": "token", "is_secret": True,
               "confidence": 0.8, "reason": "real token", "kept": True}],
@@ -355,7 +330,7 @@ class TestSecretClassifyDecisions:
 
         decisions = await list_llm_decisions(store)
         types = {d["decision_type"] for d in decisions}
-        assert types == {DECISION_TYPE_FIX_REVIEW, DECISION_TYPE_AUTO_MODE, DECISION_TYPE_SECRET_CLASSIFY}
+        assert types == {DECISION_TYPE_FIX_REVIEW, DECISION_TYPE_SECRET_CLASSIFY}
 
     async def test_filter_by_secret_classify_attribution(self) -> None:
         store = await make_store()
@@ -376,17 +351,23 @@ class TestListLlmDecisionsMerging:
     async def test_merges_both_decision_types_sorted_newest_first(self) -> None:
         store = await make_store()
         await store.record_skill_outcome("network-policy", "app-a", "approved", "looks fine")
-        await store.log_event("auto-mode", "decision", "app-b", "info", "AUTO-APPLY: safe: fine")
+        await store.log_event(
+            "capability-scout", "capability-run", None, "info", "Opened proposal PR",
+            details={"evidence": "e", "pr_url": "https://github.com/org/agentit/pull/1"},
+        )
 
         decisions = await list_llm_decisions(store)
         assert len(decisions) == 2
         types = {d["decision_type"] for d in decisions}
-        assert types == {DECISION_TYPE_FIX_REVIEW, DECISION_TYPE_AUTO_MODE}
+        assert types == {DECISION_TYPE_FIX_REVIEW, DECISION_TYPE_CAPABILITY_PROPOSAL}
 
     async def test_filter_by_decision_type(self) -> None:
         store = await make_store()
         await store.record_skill_outcome("network-policy", "app-a", "approved", "looks fine")
-        await store.log_event("auto-mode", "decision", "app-b", "info", "AUTO-APPLY: safe: fine")
+        await store.log_event(
+            "capability-scout", "capability-run", None, "info", "Opened proposal PR",
+            details={"evidence": "e", "pr_url": "https://github.com/org/agentit/pull/1"},
+        )
 
         decisions = await list_llm_decisions(store, decision_type=DECISION_TYPE_FIX_REVIEW)
         assert len(decisions) == 1

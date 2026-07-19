@@ -4,9 +4,10 @@ Covers, per item number in that doc's Part 3 checklist:
   #1  type-to-confirm for the highest-blast-radius actions only
   #2  Cancel default-focus on the shared confirm modal
   #3  Auto-Mode Allowlist was the primary control, global toggle a fallback --
-      the allowlist (and this checklist item) is now moot: it's been removed
-      along with Direct Apply/AutoMode's direct-apply branch entirely, see
-      test_settings_shows_a_single_auto_mode_section_not_a_fallback below
+      this checklist item is now doubly moot: the allowlist was removed along
+      with Direct Apply/AutoMode's direct-apply branch, and AutoMode itself
+      has since been removed entirely too (see test_portal.py's "AutoMode
+      removed (Settings page)" section)
   #4/#5 Cmd+K command palette + its own discoverable shortcut hint
   #6/#8 real, step-by-step onboarding progress + SSE streaming
   #7  optimistic UI for the Suppress action
@@ -186,20 +187,9 @@ async def test_ordinary_gate_approval_does_not_use_type_to_confirm(client, _over
 
 
 # ── #3: Allowlist removed along with Direct Apply/AutoMode's direct-apply
-# branch (its entire purpose -- bounding what AutoMode could mutate without
-# a human already in the loop -- no longer describes any outcome AutoMode
-# can reach) -- see test_portal.py's "Auto-mode allowlist removed" section.
-
-
-async def test_settings_shows_a_single_auto_mode_section_not_a_fallback(client, _override_store):
-    """With the allowlist gone, Auto-Mode is the one, non-"fallback"
-    control again -- there's no second, more-scoped mechanism left for it
-    to be a coarse fallback beneath."""
-    resp = await client.get("/settings")
-    assert resp.status_code == 200
-    assert '<h2 class="section-title">Auto-Mode</h2>' in resp.text
-    assert "Auto-Mode Allowlist" not in resp.text
-    assert "Global Fallback Toggle" not in resp.text
+# branch, and AutoMode itself has since been removed entirely too -- see
+# test_portal.py's "AutoMode removed (Settings page)" section for the
+# full coverage of what the Settings page looks like now.
 
 
 # ── #4/#5: Cmd+K command palette + discoverable shortcut hint ───────────

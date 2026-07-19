@@ -1,4 +1,4 @@
-"""Settings page: auto-mode toggle, retention/purge, raw settings API."""
+"""Settings page: retention/purge, raw settings API."""
 from __future__ import annotations
 
 import logging
@@ -16,16 +16,11 @@ router = APIRouter()
 
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request) -> HTMLResponse:
-    s = await get_store()
-    auto_mode = (await s.get_setting("auto_mode")) in ("true", "1", "on")
     llm_available = get_llm_client() is not None
-    recent_actions = await s.list_events_by_agent("auto-mode", limit=20)
     retention_days = get_retention_days()
     purge_result = request.query_params.get("purged")
     return get_templates().TemplateResponse(request, "settings.html", {
-        "auto_mode": auto_mode,
         "llm_available": llm_available,
-        "recent_actions": recent_actions,
         "retention_days": retention_days,
         "purge_result": purge_result,
     })
@@ -40,21 +35,6 @@ async def purge_old_data(request: Request):
     audit_log(actor=get_current_user(request), action="purge", resource="store",
               details={"retention_days": retention, "rows_deleted": total, "by_table": counts})
     return RedirectResponse(url=f"/settings?purged={total}", status_code=303)
-
-
-@router.post("/settings/auto-mode", response_model=None)
-async def toggle_auto_mode(request: Request):
-    form = await request.form()
-    value = str(form.get("value", "false")).lower()
-    s = await get_store()
-    await s.set_setting("auto_mode", value)
-    await s.log_event(
-        "portal", "auto-mode-toggled", None,
-        "info", f"Auto-mode {'enabled' if value == 'true' else 'disabled'}",
-    )
-    audit_log(actor=get_current_user(request), action="auto-mode-toggle", resource="settings:auto_mode",
-              details={"value": value})
-    return RedirectResponse(url="/settings", status_code=303)
 
 
 @router.get("/api/settings")
