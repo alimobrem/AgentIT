@@ -321,16 +321,15 @@ async def assess_progress(
         # Atomically claim continue_onboard so the htmx 2s poll cannot
         # start two onboarding jobs for the same completed assess.
         if hasattr(s, "claim_continue_onboard") and await s.claim_continue_onboard(job_id):
-            # auto_deliver=True: the assess->onboard chain always continues
-            # into the automatic Dry Run -> Deliver chain too (matches
-            # onboard_submit()'s own default -- see its docstring), so the
-            # full chain this session's product owner asked for --
-            # Assess -> Onboard -> Dry Run -> Deliver (PR opened) -- has no
-            # human click anywhere in the middle.
-            onboard_job_id = await s.create_remediation_job(assessment_id, auto_deliver=True)
+            # The assess->onboard chain continues straight into onboarding,
+            # same as before -- but AutoMode (and the automatic Dry Run ->
+            # Deliver chain it gated) has been removed, so onboarding
+            # always stops once manifests are generated now, requiring an
+            # explicit human "Deliver" click on Onboard Results.
+            onboard_job_id = await s.create_remediation_job(assessment_id)
             base_url = _get_trusted_base_url(request)
             background_tasks.add_task(
-                _run_onboarding_job, onboard_job_id, assessment_id, base_url, True,
+                _run_onboarding_job, onboard_job_id, assessment_id, base_url,
             )
             return RedirectResponse(
                 url=f"/assessments/{assessment_id}/onboard/progress/{onboard_job_id}",
@@ -750,7 +749,7 @@ async def onboarding_history(request: Request, assessment_id: str) -> HTMLRespon
 
 
 async def _run_onboarding_job(
-    job_id: str, assessment_id: str, base_url: str, auto_deliver: bool = False,
+    job_id: str, assessment_id: str, base_url: str,
 ) -> None:
     """Background body of onboarding -- runs after ``onboard_submit`` has
     already redirected the human to the real-time progress page below.
@@ -766,24 +765,13 @@ async def _run_onboarding_job(
     already writes live, per agent, via ``list_events_by_correlation_id()``
     -- not fabricated here.
 
-    ``auto_deliver`` (default False -- ``onboard_submit()``/the assess-chain
-    call site both pass the real, form-resolved flag; only a caller that
-    never resolves it stays off) chains the once-manifests-are-saved
-    onboarding job straight into the same automatic Dry Run -> Deliver
-    sequence a human otherwise clicks by hand on Onboard Results (see
-    ``delivery.auto_dry_run_then_deliver()``) -- but only once
-    ``AutoMode.should_auto_apply_and_log()`` (the same LLM confidence/
-    destructive-action safety check the vuln-watcher/webhook auto-apply
-    paths already require) classifies the generated manifests as safe; a
-    low-confidence or destructive classification halts at
-    ``gated_for_review`` instead of chaining, falling back to requiring an
-    explicit human Deliver click. Job status moves through ``dry_run`` ->
-    ``delivering`` -> ``completed`` on a clean run; a real Dry Run failure
-    (no infra repo known, etc.) halts at ``dry_run_failed`` and a Deliver-
-    stage failure at ``deliver_failed`` -- both terminal, both routed to
-    Onboard Results (never back to Assessment Detail, since manifests
-    already exist by this point) with the failure surfaced, per the "Dry
-    Run is a real, respected gate" requirement.
+    Always stops at ``completed`` once manifests are generated and saved --
+    AutoMode (and the automatic Dry Run -> Deliver chain it used to gate
+    behind an LLM safety classification) has been removed, so there is no
+    more mechanism deciding "should this go automatically" for onboarding.
+    A human always clicks Deliver on Onboard Results to proceed, the same
+    as every other GitOps delivery in this app, which always needs a human
+    to merge the resulting PR anyway.
 
     Uses its own store handle (not the request-scoped one) since this
     coroutine keeps running after the request/response cycle that started
@@ -846,87 +834,7 @@ async def _run_onboarding_job(
         # job's `error` column, which is reserved for a genuine failure.
         _ = warnings
 
-        if not auto_deliver:
-            await s.update_remediation_job(job_id, "completed", "Onboarding complete")
-            return
-
-        from agentit.portal.delivery import auto_dry_run_then_deliver
-
-        namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
-        # Re-fetch from the store (mirrors deliver()'s own pattern) rather
-        # than reusing the local `files` var -- `save_onboarding()` is what
-        # actually persisted them, and this operates on the exact persisted
-        # shape (`edited` defaults False) `route_and_deliver()` expects.
-        chain_files = await s.get_onboarding(assessment_id) or []
-
-        # AutoMode's LLM safety classification -- the same confidence-
-        # threshold/destructive-action gate the vuln-watcher/webhook auto-
-        # apply paths (routes/webhooks.py's webhook_auto_apply/dispatcher
-        # loop) already require before opening a real PR. Onboarding's
-        # auto_dry_run_then_deliver() below is deliberately narrow (see its
-        # own docstring) and never re-decides this on its own, so without
-        # this check onboarding's main auto-deliver flow opened a GitOps PR
-        # with no LLM review at all. A low-confidence/destructive
-        # classification here doesn't fail onboarding -- the manifests
-        # already exist -- it just falls back to requiring an explicit
-        # human "Deliver" click on Onboard Results instead of auto-opening
-        # the PR.
-        from agentit.automode import AutoMode
-
-        auto = AutoMode(store=s, publisher=None, llm_client=get_llm_client())
-        chain_manifests = [f["content"] for f in chain_files if f["path"].endswith((".yaml", ".yml"))]
-        can_auto_deliver, safety_reason = await auto.should_auto_apply_and_log(
-            orch_summary.get("auto_approve", False), chain_manifests, report.criticality, report.repo_name,
-        )
-        if not can_auto_deliver:
-            message = (
-                f"Automatic delivery skipped after onboarding -- AutoMode's safety check gated "
-                f"this batch for human review: {safety_reason}. Review and click Deliver on "
-                "Onboard Results to proceed manually."
-            )
-            await s.log_event(
-                "portal", "onboard-auto-deliver-gated", report.repo_name, "warning",
-                message, correlation_id=assessment_id,
-            )
-            await s.update_remediation_job(job_id, "gated_for_review", message[:280])
-            return
-
-        async def _on_stage(stage: str) -> None:
-            label = {
-                "dry_run": "Running automatic Dry Run...",
-                "delivering": "Dry Run passed -- committing and opening PR...",
-            }[stage]
-            await s.update_remediation_job(job_id, stage, label)
-
-        from agentit.assessment_diff import current_finding_keys
-
-        chain_result = await auto_dry_run_then_deliver(
-            chain_files, app_name=report.repo_name, namespace=namespace, report=report,
-            store=s, assessment_id=assessment_id, actor="onboarding-auto-deliver",
-            on_stage=_on_stage, target_findings=sorted(current_finding_keys(report)),
-        )
-
-        if chain_result["ok"]:
-            pr_note = f" PR opened: {chain_result['pr_url']}" if chain_result.get("pr_url") else " Nothing needed a PR."
-            await s.log_event(
-                "portal", "onboard-auto-delivered", report.repo_name, "info",
-                f"Automatic Dry Run and Deliver succeeded after onboarding.{pr_note}",
-                correlation_id=assessment_id,
-            )
-            await s.update_remediation_job(
-                job_id, "completed", f"Onboarding, Dry Run, and Delivery complete.{pr_note}",
-            )
-        else:
-            stage = chain_result["stage"]
-            friendly_stage = "Dry Run" if stage == "dry_run" else "Deliver"
-            status = "dry_run_failed" if stage == "dry_run" else "deliver_failed"
-            err = chain_result.get("error") or "Unknown error"
-            message = f"Automatic {friendly_stage} failed after onboarding -- the chain stopped here: {err[:200]}"
-            await s.log_event(
-                "portal", "onboard-auto-deliver-blocked", report.repo_name, "warning",
-                message, correlation_id=assessment_id,
-            )
-            await s.update_remediation_job(job_id, status, message[:280], error=message[:280])
+        await s.update_remediation_job(job_id, "completed", "Onboarding complete")
     except Exception as exc:
         log.exception("Onboarding failed for %s", assessment_id)
         from agentit.portal.metrics import onboardings_total as _ot
@@ -945,104 +853,56 @@ async def onboard_submit(
     request: Request,
     assessment_id: str,
     background_tasks: BackgroundTasks,
-    auto_deliver: str = Form("1"),
 ):
     """Kicks off onboarding as a background job and immediately redirects to
     a real-time progress page (docs/ux-design-requirements.md checklist #6)
     instead of blocking the request for however long agent orchestration
     takes -- mirrors ``assess_submit()``'s existing job-tracking pattern.
 
-    Chaining the completed onboarding job straight into an automatic Dry
-    Run -> Deliver is now the default for every Onboard, not just the
-    assess->onboard chain -- mirrors ``assess_submit()``'s own
-    ``continue_onboard`` convention (f215d13): a caller can still opt out
-    by explicitly posting ``auto_deliver=0``/``false``/``""`` -- nothing
-    today does, but the mechanism (this Form field) stays available rather
-    than being removed outright. Direct callers that bypass FastAPI's Form
-    injection get the same non-str-default guard ``assess_submit()`` uses,
-    treating that the same as an explicit opt-out rather than silently
-    defaulting to True for a caller that never resolved the field at all.
+    Onboarding always stops at "completed" once manifests are generated
+    and saved -- AutoMode (and the automatic Dry Run -> Deliver chain it
+    used to gate) has been removed, so a human always clicks Deliver on
+    Onboard Results to proceed.
     """
     s = await get_store()
     report = await s.get(assessment_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
 
-    auto_deliver_flag = auto_deliver if isinstance(auto_deliver, str) else ""
-    chain = auto_deliver_flag.strip().lower() in ("1", "true", "yes", "on")
-    job_id = await s.create_remediation_job(assessment_id, auto_deliver=chain)
+    job_id = await s.create_remediation_job(assessment_id)
     base_url = _get_trusted_base_url(request)
-    background_tasks.add_task(_run_onboarding_job, job_id, assessment_id, base_url, chain)
+    background_tasks.add_task(_run_onboarding_job, job_id, assessment_id, base_url)
     return RedirectResponse(
         url=f"/assessments/{assessment_id}/onboard/progress/{job_id}", status_code=303,
     )
 
 
 # Job statuses that end a human's wait on the progress page -- no further
-# polling/SSE ticks matter once one of these is reached. "completed"/
-# "failed" predate the automatic Dry Run -> Deliver chain; "dry_run_failed"/
-# "deliver_failed" are new (see ``_run_onboarding_job``'s docstring).
-# "gated_for_review" is AutoMode's LLM safety check declining to auto-
-# deliver (low confidence or a destructive classification) -- distinct from
-# the two failure states above: onboarding itself succeeded and nothing
-# was attempted or failed, a human just needs to click Deliver by hand.
-_ONBOARD_JOB_TERMINAL_STATUSES = ("completed", "failed", "dry_run_failed", "deliver_failed", "gated_for_review")
+# polling/SSE ticks matter once one of these is reached. AutoMode has been
+# removed, along with the automatic Dry Run -> Deliver chain it used to
+# gate -- onboarding now only ever ends at "completed" (manifests
+# generated and saved) or "failed" (generation itself failed).
+_ONBOARD_JOB_TERMINAL_STATUSES = ("completed", "failed")
 
 
-async def _onboard_terminal_redirect_url(store: object, assessment_id: str, job: dict) -> str:
+async def _onboard_terminal_redirect_url(assessment_id: str, job: dict) -> str:
     """Where a human (or an SSE-driven client-side redirect) lands once an
-    onboarding job -- and, when auto-chained, its automatic Dry Run +
-    Deliver -- reaches a terminal state. Shared by the direct GET redirect
-    (``onboard_progress()``) and the SSE stream's server-rendered fragment
-    (``onboard_progress_stream()`` -> ``_onboard_progress_fragment.html``'s
-    inline ``<script>``) so the two can never disagree about the URL for
-    the same job.
+    onboarding job reaches a terminal state. Shared by the direct GET
+    redirect (``onboard_progress()``) and the SSE stream's server-rendered
+    fragment (``onboard_progress_stream()`` -> ``_onboard_progress_fragment.
+    html``'s inline ``<script>``) so the two can never disagree about the
+    URL for the same job.
 
     - ``"failed"`` (onboarding generation itself failed, no manifests
       exist) -> Assessment Detail, with the error flash CLAUDE.md's
-      "errors must always be visible" convention requires -- unchanged
-      from before the automatic chain existed.
-    - ``"dry_run_failed"``/``"deliver_failed"`` (manifests exist; the
-      automatic chain halted at a real gate) -> Onboard Results, with the
-      same error flash -- a human reviews/retries from there, never
-      bounced back to Assessment Detail once there's something real to
-      look at (requirement: Dry Run stays a real, respected gate).
-    - ``"gated_for_review"`` (manifests exist; AutoMode's LLM safety check
-      declined to auto-deliver) -> Onboard Results, with a warning flash
-      (not the error flash -- nothing failed) explaining the fix still
-      needs a manual Deliver click.
-    - ``"completed"`` -> Onboard Results, decorated with ``pr_url``/
-      ``pr_url_repo`` (reusing ``repo_kind_for_mechanism()``) when this was
-      an auto-chained run that actually opened a PR, so the same green
-      flash banner a manual "Commit & Open PR" click produces also appears
-      here -- an auto-chained success looks identical to a human-driven
-      one, not silently reliant on Delivery History alone.
+      "errors must always be visible" convention requires.
+    - ``"completed"`` -> Onboard Results, where a human clicks Deliver by
+      hand -- onboarding never auto-delivers now, so there's no PR to
+      decorate this redirect with yet.
     """
     if job["status"] == "failed":
         return f"/assessments/{assessment_id}?error={quote(job.get('error') or 'Onboarding failed')}"
-
-    base_url = f"/assessments/{assessment_id}/onboard-results"
-    if job["status"] in ("dry_run_failed", "deliver_failed"):
-        return f"{base_url}?error={quote(job.get('error') or 'Automatic delivery failed')}"
-    if job["status"] == "gated_for_review":
-        return f"{base_url}?warning={quote(job.get('current_step') or 'Automatic delivery needs human review')}"
-
-    # "completed" -- only decorated further when this run was auto-chained.
-    if "auto_deliver" not in (job.get("steps_completed") or []):
-        return base_url
-    deliveries = await store.list_deliveries(assessment_id) if hasattr(store, "list_deliveries") else []
-    if not deliveries:
-        return base_url
-    from agentit.portal.delivery import repo_kind_for_mechanism
-    outcomes = (deliveries[0].get("details") or {}).get("outcomes", {})
-    for o in outcomes.values():
-        if isinstance(o, dict) and o.get("pr_url"):
-            repo_kind = repo_kind_for_mechanism(o.get("mechanism", ""))
-            params = f"pr_url={quote(o['pr_url'])}"
-            if repo_kind:
-                params += f"&pr_url_repo={repo_kind}"
-            return f"{base_url}?{params}"
-    return base_url
+    return f"/assessments/{assessment_id}/onboard-results"
 
 
 @router.get("/assessments/{assessment_id}/onboard/progress/{job_id}", response_class=HTMLResponse)
@@ -1057,7 +917,7 @@ async def onboard_progress(request: Request, assessment_id: str, job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
     if job["status"] in _ONBOARD_JOB_TERMINAL_STATUSES:
         return RedirectResponse(
-            url=await _onboard_terminal_redirect_url(s, assessment_id, job), status_code=303,
+            url=await _onboard_terminal_redirect_url(assessment_id, job), status_code=303,
         )
     agent_steps = await _onboard_agent_steps(s, assessment_id)
     return get_templates().TemplateResponse(request, "onboard_progress.html", {
@@ -1106,7 +966,7 @@ async def onboard_progress_stream(assessment_id: str, job_id: str):
                 break
             agent_steps = await _onboard_agent_steps(s, assessment_id)
             is_terminal = job["status"] in _ONBOARD_JOB_TERMINAL_STATUSES
-            redirect_url = await _onboard_terminal_redirect_url(s, assessment_id, job) if is_terminal else None
+            redirect_url = await _onboard_terminal_redirect_url(assessment_id, job) if is_terminal else None
             html = templates.get_template("_onboard_progress_fragment.html").render(
                 job=job, agent_steps=agent_steps, assessment_id=assessment_id, redirect_url=redirect_url,
             )
