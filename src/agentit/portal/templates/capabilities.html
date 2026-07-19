@@ -4,15 +4,15 @@
 {% from "_macros.html" import tab_nav %}
 {{ tab_nav([
   {"href": "/capabilities", "label": "Catalog"},
-  {"href": "/agents", "label": "Registry", "prefix": "/agents"},
+  {"href": "/agents", "label": "Agent Activity", "prefix": "/agents"},
   {"href": "/capabilities/self-improvement", "label": "Self-Improvement", "prefix": "/capabilities/self-improvement"},
 ], request) }}
 <h1>Capabilities &amp; Workflows</h1>
-<p class="text-muted">Skills, checks, agents, and automation — everything AgentIT can do.</p>
+<p class="text-muted">Skills, checks, agents, and automation — everything AgentIT can do. For what's actually run, see the <a href="/agents">Agent Activity</a> tab.</p>
 
 <div class="action-bar mb-1">
   <form method="post" action="/capabilities/learn" class="inline-form" x-data>
-    <button type="submit" class="btn btn-outline btn-sm"
+    <button type="submit" class="btn btn-sm btn-action"
       @click="showToast('Researching &amp; drafting skills\u2026 this can take up to 3 minutes \u2014 please don\u2019t close this tab.', 'info', 8000)">
       <span class="btn-label">Research Skills</span>
       <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Researching&hellip;</span>
@@ -59,6 +59,39 @@
     <div class="stat-value">{{ total_checks }}</div>
   </div>
 </div>
+
+{% if draft_skills %}
+<h2 class="section-title">Needs Review <span class="badge badge-accent">{{ draft_skills|length }}</span></h2>
+<p class="text-muted mb-1">LLM-drafted skills, awaiting a human decision before the skill engine can match them. Not reference material — kept above the fold on purpose.</p>
+<table class="mb-2">
+  <thead>
+    <tr>
+      <th>Skill</th>
+      <th>Domain</th>
+      <th>Property</th>
+      <th>Action</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for skill in draft_skills %}
+    <tr>
+      <td class="text-bold"><a href="/capabilities/skills/{{ skill.name }}/history">{{ skill.name }}</a></td>
+      <td class="text-sm">{{ skill.domain }}</td>
+      <td class="text-sm text-muted">{{ skill.property_description or '—' }}</td>
+      <td>
+        <form method="post" action="/capabilities/skills/activate" class="inline-form">
+          <input type="hidden" name="skill_path" value="{{ skill.file_path }}">
+          <button type="submit" class="btn btn-sm btn-green">
+            <span class="btn-label">Activate</span>
+            <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+          </button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
 
 <h2 class="section-title">Recent Catalog Changes</h2>
 <p class="text-muted mb-1">Skills and checks added to or removed from the catalog, detected automatically every hour. Full history on the <a href="/events">Events</a> page.</p>
@@ -166,13 +199,32 @@
       <td>
         {% if skill.status == "active" %}
           <span class="badge badge-success">active</span>
+          <form method="post" action="/capabilities/skills/deprecate" class="inline-form" x-data="{ deprecating: false }">
+            <input type="hidden" name="skill_path" value="{{ skill.file_path }}">
+            <button type="button" class="btn btn-sm btn-danger-outline" x-show="!deprecating"
+              @click="deprecating = true">Deprecate</button>
+            <div x-show="deprecating" class="gate-reject-row">
+              <input type="text" name="reason" placeholder="Why deprecate? (required)" class="gate-reject-input">
+              <button type="submit" class="btn btn-sm btn-danger-outline">
+                <span class="btn-label">Confirm</span>
+                <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+              </button>
+            </div>
+          </form>
         {% elif skill.status == "deprecated" %}
-          <span class="badge badge-warning">deprecated</span>
+          <span class="badge badge-warning" title="{{ skill.deprecated_reason }}">deprecated</span>
+          <form method="post" action="/capabilities/skills/activate" class="inline-form">
+            <input type="hidden" name="skill_path" value="{{ skill.file_path }}">
+            <button type="submit" class="btn btn-sm btn-green">
+              <span class="btn-label">Reactivate</span>
+              <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+            </button>
+          </form>
         {% elif skill.status == "draft" %}
           <span class="badge badge-info">draft</span>
           <form method="post" action="/capabilities/skills/activate" class="inline-form">
             <input type="hidden" name="skill_path" value="{{ skill.file_path }}">
-            <button type="submit" class="btn btn-sm btn-outline">
+            <button type="submit" class="btn btn-sm btn-green">
               <span class="btn-label">Activate</span>
               <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
             </button>
@@ -335,13 +387,14 @@
   <tbody>
     {% for a in agents %}
     <tr>
-      <td class="text-bold">{{ a.name }}</td>
+      <td class="text-bold"><a href="/agents/{{ a.category }}">{{ a.name }}</a></td>
       <td class="text-sm">{{ a.generates }}</td>
       <td><span class="badge badge-info">{{ a.category }}</span></td>
     </tr>
     {% endfor %}
   </tbody>
 </table>
+<p class="text-muted text-sm mb-1">Agent names link to their real run history on the <a href="/agents">Agent Activity</a> tab.</p>
 {% endif %}
 
 {% if watchers %}
@@ -354,13 +407,14 @@
   <tbody>
     {% for w in watchers %}
     <tr>
-      <td class="text-bold">{{ w.name }}</td>
+      <td class="text-bold"><a href="/agents/{{ w.name }}">{{ w.name }}</a></td>
       <td class="text-sm">{{ w.description }}</td>
       <td>{{ w.interval }}</td>
     </tr>
     {% endfor %}
   </tbody>
 </table>
+<p class="text-muted text-sm mb-1">Watcher names link to their real heartbeat/run history on the <a href="/agents">Agent Activity</a> tab.</p>
 {% endif %}
 
 {% if fix_categories %}

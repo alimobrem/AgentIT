@@ -3546,6 +3546,282 @@ async def test_activate_skill_survives_simulated_redeploy(tmp_path, monkeypatch)
     assert "status: draft" not in redeployed_content
 
 
+# ── Capabilities: reactivate a deprecated skill (activate route, ─────────
+#    generalized from draft-only) ─────────────────────────────────────────
+
+
+def _make_deprecated_skill(tmp_path, name="cve-2020-example", domain="security") -> Path:
+    skills_dir = tmp_path / "skills" / domain
+    skills_dir.mkdir(parents=True)
+    skill_file = skills_dir / f"{name}.md"
+    skill_file.write_text(
+        f"---\n"
+        f"name: {name}\n"
+        f"domain: {domain}\n"
+        f"version: 1\n"
+        f"triggers: [test]\n"
+        f"outputs: [NetworkPolicy]\n"
+        f"status: deprecated\n"
+        f'deprecated_reason: "superseded by a newer skill"\n'
+        f"---\n"
+        "## Property\nEnsures network isolation.\n\n"
+        "## Constraints\nMust apply to all pods.\n\n"
+        "## Verification\nCheck that a NetworkPolicy restricting Ingress exists.\n\n"
+        "```yaml\n"
+        "apiVersion: networking.k8s.io/v1\n"
+        "kind: NetworkPolicy\n"
+        "metadata:\n"
+        "  name: {{app_name}}-netpol\n"
+        "spec:\n"
+        "  podSelector: {}\n"
+        "  policyTypes:\n"
+        "    - Ingress\n"
+        "```\n",
+        encoding="utf-8",
+    )
+    return skill_file
+
+
+async def test_activate_route_reactivates_deprecated_skill(client, tmp_path, monkeypatch):
+    """The activate route now also promotes deprecated -> active (not just
+    draft -> active) -- deprecation must not be a dead end."""
+    skill_file = _make_deprecated_skill(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    resp = await client.post(
+        "/capabilities/skills/activate",
+        data={"skill_path": str(skill_file)},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    from urllib.parse import unquote
+    assert "Reactivated" in unquote(resp.headers["location"])
+    content = skill_file.read_text()
+    assert "status: active" in content
+    assert "status: deprecated" not in content
+
+
+async def test_activate_route_still_rejects_active_skill(client, tmp_path, monkeypatch):
+    skills_dir = tmp_path / "skills" / "security"
+    skills_dir.mkdir(parents=True)
+    skill_file = skills_dir / "already-active2.md"
+    skill_file.write_text(
+        "---\nname: already-active2\ndomain: security\nversion: 1\n"
+        "triggers: [test]\noutputs: [NetworkPolicy]\nstatus: active\n---\nbody\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    resp = await client.post(
+        "/capabilities/skills/activate",
+        data={"skill_path": str(skill_file)},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "error=" in resp.headers["location"]
+
+
+# ── Capabilities: deprecate an active skill ─────────────────────────────
+
+
+def _make_active_skill(tmp_path, name="cve-2021-example", domain="security") -> Path:
+    skills_dir = tmp_path / "skills" / domain
+    skills_dir.mkdir(parents=True)
+    skill_file = skills_dir / f"{name}.md"
+    skill_file.write_text(
+        f"---\nname: {name}\ndomain: {domain}\nversion: 1\n"
+        f"triggers: [test]\noutputs: [NetworkPolicy]\nstatus: active\n---\nbody\n",
+        encoding="utf-8",
+    )
+    return skill_file
+
+
+async def test_deprecate_skill_flips_active_to_deprecated(client, tmp_path, monkeypatch):
+    skill_file = _make_active_skill(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    resp = await client.post(
+        "/capabilities/skills/deprecate",
+        data={"skill_path": str(skill_file), "reason": "false positives in production"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "success=" in resp.headers["location"]
+    content = skill_file.read_text()
+    assert "status: deprecated" in content
+    assert 'deprecated_reason: "false positives in production"' in content
+
+
+async def test_deprecate_skill_requires_a_reason(client, tmp_path, monkeypatch):
+    skill_file = _make_active_skill(tmp_path, name="cve-2021-noreason")
+    monkeypatch.chdir(tmp_path)
+
+    resp = await client.post(
+        "/capabilities/skills/deprecate",
+        data={"skill_path": str(skill_file), "reason": "   "},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "error=" in resp.headers["location"]
+    assert "status: active" in skill_file.read_text()
+
+
+async def test_deprecate_skill_rejects_non_active_skill(client, tmp_path, monkeypatch):
+    skill_file = _make_deprecated_skill(tmp_path, name="cve-2021-alreadydep")
+    monkeypatch.chdir(tmp_path)
+
+    resp = await client.post(
+        "/capabilities/skills/deprecate",
+        data={"skill_path": str(skill_file), "reason": "trying again"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "error=" in resp.headers["location"]
+
+
+async def test_deprecate_skill_rejects_path_outside_skills_dir(client, tmp_path, monkeypatch):
+    outside_file = tmp_path / "not-a-skill.md"
+    outside_file.write_text("status: active", encoding="utf-8")
+    (tmp_path / "skills").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    resp = await client.post(
+        "/capabilities/skills/deprecate",
+        data={"skill_path": str(outside_file), "reason": "test"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "error=" in resp.headers["location"]
+    assert outside_file.read_text() == "status: active"
+
+
+async def test_deprecate_skill_commits_to_git_and_opens_pr(client, tmp_path, monkeypatch):
+    skill_file = _make_active_skill(tmp_path, name="cve-2021-gitpr")
+    monkeypatch.chdir(tmp_path)
+
+    captured = {}
+
+    def _fake_commit_push(branch, paths, message, cwd=None):
+        captured["branch"] = branch
+        captured["paths"] = paths
+        captured["content"] = skill_file.read_text()
+        captured["cwd"] = cwd
+        return {"success": True, "branch": branch}
+
+    with patch("agentit.git_pr.create_branch_commit_push", side_effect=_fake_commit_push) as mock_commit, \
+         patch("agentit.git_pr.open_draft_pr", return_value={"pr_url": "https://github.com/alimobrem/AgentIT/pull/1001"}) as mock_pr:
+        resp = await client.post(
+            "/capabilities/skills/deprecate",
+            data={"skill_path": str(skill_file), "reason": "no longer relevant"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    location = resp.headers["location"]
+    assert "success=" in location
+    assert "pull/1001" in location
+
+    mock_commit.assert_called_once()
+    assert "agentit/deprecate-skill/" in captured["branch"]
+    assert captured["paths"] == ["skills/security/cve-2021-gitpr.md"]
+    assert "status: deprecated" in captured["content"]
+    assert captured["cwd"] == tmp_path
+    mock_pr.assert_called_once()
+    assert mock_pr.call_args.kwargs["cwd"] == tmp_path
+
+
+async def test_deprecate_skill_git_failure_keeps_deprecation_but_warns(client, tmp_path, monkeypatch, _override_store):
+    skill_file = _make_active_skill(tmp_path, name="cve-2021-gitfail")
+    monkeypatch.chdir(tmp_path)
+    store = _override_store
+
+    with patch(
+        "agentit.git_pr.create_branch_commit_push",
+        return_value={"success": False, "error": "remote: permission denied"},
+    ):
+        resp = await client.post(
+            "/capabilities/skills/deprecate",
+            data={"skill_path": str(skill_file), "reason": "no longer relevant"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 303
+    location = resp.headers["location"]
+    assert "success=" in location
+    assert "warning=" in location
+    assert "status: deprecated" in skill_file.read_text()
+
+    import json
+    events = await store.list_events_by_action("skill-deprecated")
+    assert len(events) == 1
+    assert events[0]["severity"] == "warning"
+    details = json.loads(events[0]["details_json"] or "{}")
+    assert "git_persist_error" in details
+    assert "pr_url" not in details
+    assert details["reason"] == "no longer relevant"
+
+
+# ── Capabilities: "Needs Review" (draft skills surfaced above the fold) ──
+
+
+async def test_capabilities_page_shows_needs_review_for_draft_skills(client, tmp_path, monkeypatch):
+    from agentit.portal.routes import capabilities as capabilities_routes
+    skill_file = _make_draft_skill(tmp_path, name="cve-2099-needsreview")
+    monkeypatch.chdir(tmp_path)
+    capabilities_routes._skills_cache["data"] = None
+
+    resp = await client.get("/capabilities")
+    assert resp.status_code == 200
+    assert "Needs Review" in resp.text
+    assert "cve-2099-needsreview" in resp.text
+    # Appears once above the fold (Needs Review) and once in the collapsed
+    # Skills by Domain table -- both real, both real activation forms.
+    assert resp.text.count('action="/capabilities/skills/activate"') >= 2
+
+
+async def test_capabilities_page_hides_needs_review_when_no_drafts(client, tmp_path, monkeypatch):
+    from agentit.portal.routes import capabilities as capabilities_routes
+    skill_file = _make_active_skill(tmp_path, name="cve-2099-onlyactive")
+    monkeypatch.chdir(tmp_path)
+    capabilities_routes._skills_cache["data"] = None
+
+    resp = await client.get("/capabilities")
+    assert resp.status_code == 200
+    assert "Needs Review" not in resp.text
+
+
+# ── Capabilities: reference tables link to real Agent Activity pages ────
+
+
+async def test_capabilities_page_links_onboarding_agents_to_registry_detail(client):
+    resp = await client.get("/capabilities")
+    assert resp.status_code == 200
+    # get_onboarding_agents() returns {"cost", "dependency", "codechange"} as
+    # the real agent-registry key (category) -- the reference table must
+    # link to it, not to the display name.
+    assert 'href="/agents/cost"' in resp.text
+    assert 'href="/agents/dependency"' in resp.text
+    assert 'href="/agents/codechange"' in resp.text
+
+
+async def test_capabilities_page_links_watchers_to_registry_detail(client):
+    resp = await client.get("/capabilities")
+    assert resp.status_code == 200
+    assert 'href="/agents/skill-learner"' in resp.text
+    assert 'href="/agents/capability-scout"' in resp.text
+
+
+async def test_agent_detail_renders_for_never_run_onboarding_agent(client, _override_store):
+    """Catalog's reference table now links every onboarding agent to its
+    Agent Activity detail page unconditionally -- an agent that's never
+    actually run in this deployment must render an honest page, not 404 on
+    a link the app itself put there."""
+    resp = await client.get("/agents/cost")
+    assert resp.status_code == 200
+    assert "cost" in resp.text
+    assert "never ticked" in resp.text.lower()
+
+
 # ── Capabilities: per-skill lifecycle view ──────────────────────────────
 
 
@@ -3570,6 +3846,62 @@ async def test_skill_history_page_shows_outcomes_and_events(client, _override_st
     assert "app-b" in resp.text
     assert "looks fine" in resp.text
     assert "New skill added: security/network-policy" in resp.text
+
+
+async def test_skill_detail_page_shows_what_the_skill_does(client, tmp_path, monkeypatch):
+    """The detail view must show real skill content (triggers/outputs/mode/
+    body), not just effectiveness/lifecycle history -- previously the only
+    way to see what a skill actually does was to open the raw .md file."""
+    from agentit.portal.routes import capabilities as capabilities_routes
+    skills_dir = tmp_path / "skills" / "security"
+    skills_dir.mkdir(parents=True)
+    skill_file = skills_dir / "detail-view-skill.md"
+    skill_file.write_text(
+        "---\nname: detail-view-skill\ndomain: security\nversion: 3\n"
+        "triggers: [foo-trigger, bar-trigger]\noutputs: [NetworkPolicy, ConfigMap]\n"
+        "status: active\nsource: manual\nmode: template\n"
+        'property: "Blocks foo traffic between pods."\n---\n'
+        "## Property\nBlocks foo traffic.\n\n```yaml\nkind: NetworkPolicy\n```\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    capabilities_routes._skills_cache["data"] = None
+
+    resp = await client.get("/capabilities/skills/detail-view-skill/history")
+    assert resp.status_code == 200
+    assert "foo-trigger" in resp.text
+    assert "bar-trigger" in resp.text
+    assert "NetworkPolicy" in resp.text
+    assert "ConfigMap" in resp.text
+    assert "Blocks foo traffic between pods." in resp.text
+    assert "template" in resp.text
+    # Active skill: real Deprecate action visible on the detail page itself.
+    assert 'action="/capabilities/skills/deprecate"' in resp.text
+
+
+async def test_skill_detail_page_shows_activate_for_draft(client, tmp_path, monkeypatch):
+    from agentit.portal.routes import capabilities as capabilities_routes
+    skill_file = _make_draft_skill(tmp_path, name="cve-2099-detaildraft")
+    monkeypatch.chdir(tmp_path)
+    capabilities_routes._skills_cache["data"] = None
+
+    resp = await client.get("/capabilities/skills/cve-2099-detaildraft/history")
+    assert resp.status_code == 200
+    assert 'action="/capabilities/skills/activate"' in resp.text
+    assert ">Activate<" in resp.text
+
+
+async def test_skill_detail_page_shows_reactivate_and_reason_for_deprecated(client, tmp_path, monkeypatch):
+    from agentit.portal.routes import capabilities as capabilities_routes
+    skill_file = _make_deprecated_skill(tmp_path, name="cve-2020-detaildep")
+    monkeypatch.chdir(tmp_path)
+    capabilities_routes._skills_cache["data"] = None
+
+    resp = await client.get("/capabilities/skills/cve-2020-detaildep/history")
+    assert resp.status_code == 200
+    assert 'action="/capabilities/skills/activate"' in resp.text
+    assert ">Reactivate<" in resp.text
+    assert "superseded by a newer skill" in resp.text
 
 
 async def test_get_skill_history_store_method():

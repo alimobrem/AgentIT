@@ -34,11 +34,65 @@
     <div class="stat-label">Domain</div>
     <div class="stat-value text-sm">{{ skill.domain if skill else "—" }}</div>
   </div>
+  <div class="stat-card">
+    <div class="stat-label">Mode</div>
+    <div class="stat-value text-sm">{{ skill.mode if skill else "—" }}</div>
+  </div>
 </div>
 
 <div class="action-bar mb-2">
   <a href="/capabilities" class="btn btn-outline btn-sm">&larr; All Capabilities</a>
+  {% if skill and skill.status in ("draft", "deprecated") %}
+  <form method="post" action="/capabilities/skills/activate" class="inline-form">
+    <input type="hidden" name="skill_path" value="{{ skill.file_path }}">
+    <button type="submit" class="btn btn-sm btn-green">
+      <span class="btn-label">{{ "Reactivate" if skill.status == "deprecated" else "Activate" }}</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+    </button>
+  </form>
+  {% elif skill and skill.status == "active" %}
+  <form method="post" action="/capabilities/skills/deprecate" class="inline-form" x-data="{ deprecating: false }">
+    <input type="hidden" name="skill_path" value="{{ skill.file_path }}">
+    <button type="button" class="btn btn-sm btn-danger-outline" x-show="!deprecating"
+      @click="deprecating = true">Deprecate</button>
+    <div x-show="deprecating" class="gate-reject-row">
+      <input type="text" name="reason" placeholder="Why deprecate? (required)" class="gate-reject-input">
+      <button type="submit" class="btn btn-sm btn-danger-outline">
+        <span class="btn-label">Confirm</span>
+        <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+      </button>
+    </div>
+  </form>
+  {% endif %}
 </div>
+
+{% if skill %}
+<h2 class="section-title">What This Skill Does</h2>
+<p class="mb-1">{{ skill.property_description or "No property description in this skill's frontmatter." }}</p>
+{% if skill.status == "deprecated" and skill.deprecated_reason %}
+<p class="text-warning text-sm mb-1">Deprecated: {{ skill.deprecated_reason }}{% if skill.superseded_by %} — superseded by <a href="/capabilities/skills/{{ skill.superseded_by }}/history">{{ skill.superseded_by }}</a>{% endif %}</p>
+{% endif %}
+<table class="mb-1">
+  <tbody>
+    <tr><th>Triggers</th><td>{% for t in skill.triggers %}<span class="badge badge-muted">{{ t }}</span> {% endfor %}</td></tr>
+    <tr><th>Outputs</th><td>{% for o in skill.outputs %}<span class="badge badge-info">{{ o }}</span> {% endfor %}</td></tr>
+    <tr><th>Version</th><td>{{ skill.version }}</td></tr>
+    <tr><th>Source</th><td>{{ skill.source }}</td></tr>
+    {% if skill.created_at %}<tr><th>Created</th><td class="text-sm"><span data-timestamp="{{ skill.created_at }}">{{ skill.created_at[:10] }}</span></td></tr>{% endif %}
+    {% if skill.requires_crd %}<tr><th>Requires CRD</th><td>{% for c in skill.requires_crd %}<span class="badge badge-warning">{{ c }}</span> {% endfor %}</td></tr>{% endif %}
+    {% if skill.conflicts_with %}<tr><th>Conflicts With</th><td>{% for c in skill.conflicts_with %}<a href="/capabilities/skills/{{ c }}/history">{{ c }}</a> {% endfor %}</td></tr>{% endif %}
+  </tbody>
+</table>
+
+<div x-data="{ open: false }">
+<button type="button" class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
+  Skill Body (Property / Constraints / Verification / Template)
+</button>
+<div class="collapse-body" x-show="open" x-transition>
+<pre class="code-block"><code>{{ skill.body }}</code></pre>
+</div>
+</div>
+{% endif %}
 
 {% if outcomes %}
 <h2 class="section-title">Effectiveness Trend</h2>
