@@ -685,7 +685,7 @@ class TestUpdateRemediationJobConcurrentSteps:
         import asyncio
 
         assessment_id = await store.save(_make_report("repo-concurrent-steps"))
-        job_id = await store.create_remediation_job(assessment_id, auto_deliver=False)
+        job_id = await store.create_remediation_job(assessment_id)
 
         steps = [f"step-{i}" for i in range(10)]
         await asyncio.gather(
@@ -703,7 +703,7 @@ class TestUpdateRemediationJobConcurrentSteps:
         in the array one at a time, and a duplicate step is not
         double-added."""
         assessment_id = await store.save(_make_report("repo-sequential-steps"))
-        job_id = await store.create_remediation_job(assessment_id, auto_deliver=False)
+        job_id = await store.create_remediation_job(assessment_id)
 
         await store.update_remediation_job(job_id, "assessing", current_step="clone")
         await store.update_remediation_job(job_id, "assessing", current_step="scan")
