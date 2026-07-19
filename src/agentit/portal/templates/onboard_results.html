@@ -120,6 +120,100 @@
   {% endif %}
 </details>
 
+{# ── Pull Requests: the page's main framing ──────────────────────────
+   What this onboarding will open (pre-delivery preview, from
+   preview_delivery_groups()) or has already opened (real PRs, from
+   pr_tracking.py -- the same primitives Ledger/Assessment Detail's PR
+   displays already use) -- one card per real delivery mechanism/target
+   repo, with which findings/agent-generated files it covers, in place of
+   raw manifest/category counts. #}
+<h2 class="section-title mt-0">Pull Requests</h2>
+{% if pr_cards %}
+<p class="text-sm text-muted mb-1">
+  {% if pr_opened_count and pr_pending_count %}
+  {{ pr_opened_count }} pull request{{ 's' if pr_opened_count != 1 }} opened so far — {{ pr_pending_count }} more will open once you deliver the rest below.
+  {% elif pr_opened_count %}
+  {{ pr_opened_count }} pull request{{ 's' if pr_opened_count != 1 }} opened for this onboarding.
+  {% else %}
+  AgentIT will open {{ pr_cards|length }} pull request{{ 's' if pr_cards|length != 1 }} once you deliver — previewed below, nothing opened yet.
+  {% endif %}
+</p>
+{% for card in pr_cards %}
+<div class="manifest-card">
+  <div class="action-bar mb-1">
+    <span class="badge badge-muted" title="{{ 'The GitOps infra repo for this app' if card.repo_kind == 'gitops' else 'The code repo for this app' }}">{{ 'GitOps repo' if card.repo_kind == 'gitops' else 'Code repo' }}</span>
+    {% if card.record and card.record.pr_url %}
+      {% if card.record.lifecycle == 'needs_approval' %}
+      <span class="badge badge-warning">Waiting for your approval</span>
+      {% elif card.record.lifecycle == 'open' %}
+      <span class="badge badge-info">Open</span>
+      {% elif card.record.lifecycle == 'merged' %}
+      <span class="badge badge-success">Merged</span>
+      {% elif card.record.lifecycle == 'rejected' %}
+      <span class="badge badge-critical">Rejected</span>
+      {% elif card.record.lifecycle == 'closed' %}
+      <span class="badge badge-muted">Closed</span>
+      {% else %}
+      <span class="badge badge-muted" title="No live GitHub status could be determined for this PR (e.g. GITHUB_TOKEN not configured, or the API call failed)">Unknown</span>
+      {% endif %}
+    {% else %}
+    <span class="badge badge-info" title="Nothing has been committed yet -- this previews what Commit & Open PR (below) will do.">Not opened yet</span>
+    {% endif %}
+  </div>
+  <p class="manifest-title mb-0">{{ card.category | dimension_label }}</p>
+  {% if card.mechanism_text %}<p class="text-sm text-muted mb-1">{{ card.mechanism_text }}</p>{% endif %}
+  {% if card.record and card.record.pr_url %}
+  <p class="mb-1">
+    <a href="{{ card.record.html_url | safe_url }}" target="_blank" hx-boost="false">{{ card.record.title or card.record.pr_url }}</a>
+    {% if card.record.lifecycle == 'needs_approval' %}
+    <span class="text-muted text-sm"> &middot; approve on the <a href="/assessments/{{ assessment_id }}?tab=actions">Actions tab</a> to merge it</span>
+    {% elif card.record.lifecycle == 'rejected' and card.record.reject_reason %}
+    <span class="text-muted text-sm"> &mdash; rejected: {{ card.record.reject_reason }}</span>
+    {% elif card.record.lifecycle == 'merged' and card.record.merged_at %}
+    <span class="text-muted text-sm"> &middot; merged <span data-timestamp="{{ card.record.merged_at }}">{{ card.record.merged_at[:10] }}</span></span>
+    {% endif %}
+  </p>
+  {% endif %}
+  {% if card.older_records %}
+  <p class="text-sm text-muted mb-1">Plus {{ card.older_records|length }} earlier PR{{ 's' if card.older_records|length != 1 }} for this category (see Delivery History below).</p>
+  {% endif %}
+  {% if card.files %}
+  <details class="delivery-meta mb-0">
+    <summary class="text-sm text-muted">{{ card.files|length }} file{{ 's' if card.files|length != 1 }} in this PR</summary>
+    <ul class="finding-list mb-0">
+      {% for f in card.files %}
+      <li class="finding-item">
+        <span class="badge badge-muted">{{ f.category | dimension_label }}</span>
+        <strong>{{ f.path }}</strong>
+        <span class="text-muted text-sm"> &mdash; {{ f.description }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+</div>
+{% endfor %}
+{% elif not per_agent_pr_records %}
+<div class="empty-state">
+  <p>Nothing here can become a pull request. Every generated file was either a narrative report (informational only, e.g. a cost/dependency summary) or blocked from delivery entirely (e.g. it contains a Secret).</p>
+</div>
+{% endif %}
+{% if per_agent_pr_records %}
+<h3 class="text-sm mb-1">Per-agent PRs ({{ per_agent_pr_records|length }})</h3>
+<p class="text-sm text-muted mb-1">Opened via "Per-Agent PRs" — one PR per agent against the code repo, an alternative to the combined PR(s) above.</p>
+<ul class="finding-list mb-1">
+  {% for r in per_agent_pr_records %}
+  <li class="finding-item">
+    <a href="{{ r.html_url | safe_url }}" target="_blank" hx-boost="false">{{ r.title or r.pr_url }}</a>
+    {% if r.state == 'merged' %}<span class="badge badge-success">Merged</span>
+    {% elif r.state == 'open' %}<span class="badge badge-info">Open</span>
+    {% elif r.state == 'closed' %}<span class="badge badge-muted">Closed</span>
+    {% else %}<span class="badge badge-muted" title="No live GitHub status could be determined for this PR">Unknown</span>{% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+
 {# ── Primary Actions ─────────────────────────────────────────────── #}
 {% set total = namespace(count=0) %}
 {% for cat, files in grouped.items() %}{% set total.count = total.count + files|length %}{% endfor %}
@@ -373,11 +467,14 @@
 {% endif %}
 {% endif %}
 
-{# ── Orchestration (collapsed by default) ────────────────────────── #}
+{# ── Agent run details (collapsed by default) -- generation-step
+   diagnostics (which agent/skill ran, success/failure, file counts), kept
+   for troubleshooting a failed/partial generation but never the page's
+   primary framing -- see the Pull Requests section above for that. #}
 {% if orchestration and orchestration.agents %}
 <div x-data="{ open: false }">
   <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
-    Orchestration ({{ orchestration.agents|length }} agents)
+    Agent Run Details ({{ orchestration.agents|length }} agents)
   </h2>
   <div class="collapse-body" x-show="open" x-transition>
     <div class="alert {% if orchestration.recommendation and 'BLOCKED' in orchestration.recommendation %}alert-error{% elif orchestration.recommendation and 'AUTO-APPROVED' in orchestration.recommendation %}alert-success{% else %}alert-warn{% endif %} mb-1">
@@ -399,8 +496,13 @@
 </div>
 {% endif %}
 
-{# ── Generated Manifests (code collapsed by default) ─────────────── #}
-<p class="text-muted mb-1 mt-2">{{ total.count }} manifests across {{ grouped|length }} categories</p>
+{# ── Generated Files (collapsed by default) -- the raw manifests behind
+   the Pull Requests above, organized by which agent/skill generated them
+   (not by PR/repo target -- see the Pull Requests section for that view).
+   Kept here, still fully editable before delivery, but no longer the
+   page's default, always-visible framing. #}
+<details class="delivery-meta mb-1">
+  <summary class="text-sm text-muted">Generated Files — {{ total.count }} manifest{{ 's' if total.count != 1 }} across {{ grouped|length }} categor{{ 'y' if grouped|length == 1 else 'ies' }} (view/edit)</summary>
 
 {% for category, files in grouped.items() %}
 <div x-data="{ open: false }">
@@ -414,6 +516,7 @@
         {{ f.path }}
         {% if f.edited %}<span class="badge badge-warning">edited</span>{% endif %}
       </div>
+      {% if f.description and f.description != f.path %}<p class="manifest-desc">{{ f.description }}</p>{% endif %}
       <div class="action-bar mb-1" x-show="!editing">
         <button type="button" class="btn btn-sm btn-outline" @click="editing = true">Edit</button>
         {% if f.edited %}
@@ -445,4 +548,5 @@
   </div>
 </div>
 {% endfor %}
+</details>
 {% endblock %}

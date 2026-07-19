@@ -1249,14 +1249,78 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
     # un-skippable confirm dialog at the actual point of delivery, so the
     # two can never say different things about the same decision.
     from agentit.portal.delivery import (
+        CATEGORY_CICD_SHARED_NAMESPACE,
+        CATEGORY_CLUSTER_CONFIG,
+        CATEGORY_MANIFEST_AT_REST,
+        CATEGORY_SOURCE_PATCH,
         confirmation_text,
         is_gitops_registered,
+        preview_delivery_groups,
         resolve_cluster_config_mechanism,
     )
     gitops_registered, infra_repo_url = await is_gitops_registered(report.repo_name, report)
     delivery_mechanism = resolve_cluster_config_mechanism(infra_repo_url)
     delivery_confirmation = confirmation_text(delivery_mechanism, infra_repo_url=infra_repo_url)
     deliveries = await s.list_deliveries(assessment_id) if hasattr(s, "list_deliveries") else []
+
+    # ── PR-centric framing (replaces raw manifest/category plumbing) ──────
+    # What this onboarding will open (or has already opened) as real pull
+    # requests, grouped by the exact taxonomy/mechanism route_and_deliver()
+    # itself uses -- never a second, drifting approximation of it (see
+    # preview_delivery_groups()'s own docstring) -- merged with every real,
+    # already-known PR for this assessment (pr_tracking.py; single source
+    # of truth, same primitives Ledger/Assessment Detail's PR displays use).
+    preview_groups = preview_delivery_groups(files, infra_repo_url=infra_repo_url)
+
+    from agentit.portal.pr_tracking import (
+        annotate_lifecycle,
+        attach_reject_reasons,
+        collect_pr_records,
+        resolve_pr_states,
+    )
+    gates_for_prs = await s.list_gates_for_assessment(assessment_id) if hasattr(s, "list_gates_for_assessment") else []
+    pr_records = collect_pr_records(gates_for_prs, deliveries, onboardings)
+    pr_records = await attach_reject_reasons(s, report.repo_name, pr_records)
+    pr_records = await resolve_pr_states(pr_records)
+    for r in pr_records:
+        annotate_lifecycle(r)
+    records_by_category: dict[str, list[dict]] = {}
+    for r in pr_records:
+        records_by_category.setdefault(r["category"], []).append(r)
+
+    _TAXONOMY_ORDER = (
+        CATEGORY_CLUSTER_CONFIG, CATEGORY_CICD_SHARED_NAMESPACE,
+        CATEGORY_SOURCE_PATCH, CATEGORY_MANIFEST_AT_REST,
+    )
+    pr_cards = []
+    for category in _TAXONOMY_ORDER:
+        preview = preview_groups.get(category)
+        # Records are already sorted newest-first (collect_pr_records()) --
+        # the most recent real PR for this category is what's "current";
+        # any older ones (a category re-delivered across separate Deliver
+        # clicks) still surface, just not as the headline record.
+        category_records = records_by_category.get(category, [])
+        if not preview and not category_records:
+            continue
+        current, older = (category_records[0], category_records[1:]) if category_records else (None, [])
+        pr_cards.append({
+            "category": category,
+            "repo_kind": (current or {}).get("repo_kind") or (preview or {}).get("repo_kind", ""),
+            "mechanism_text": (preview or {}).get("confirmation", ""),
+            "files": (preview or {}).get("files", []),
+            "record": current,
+            "older_records": older,
+        })
+
+    # Per-Agent PRs (the alternative "one PR per agent" delivery path) --
+    # opened directly against the code repo, not through route_and_deliver()
+    # at all, so it has no taxonomy category/mechanism of its own to preview
+    # -- only ever shown here once real (see onboarding_pr_records() in
+    # pr_tracking.py; onboarding_results.pr_url is the one place these
+    # land).
+    per_agent_pr_records = records_by_category.get("onboarding", [])
+    pr_opened_count = sum(1 for c in pr_cards if c["record"])
+    pr_pending_count = len(pr_cards) - pr_opened_count
 
     # Unlock Commit / Per-Agent when a successful dry-run is persisted, the
     # flash query still carries dry_run_summary (redirect / hx-boost), or a
@@ -1290,6 +1354,10 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
             "delivery_confirmation": delivery_confirmation,
             "deliveries": deliveries,
             "dry_run_done": dry_run_done,
+            "pr_cards": pr_cards,
+            "per_agent_pr_records": per_agent_pr_records,
+            "pr_opened_count": pr_opened_count,
+            "pr_pending_count": pr_pending_count,
         },
     )
 

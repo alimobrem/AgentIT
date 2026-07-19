@@ -40,6 +40,41 @@ def _write_target_path_manifest(sub_dir: Path, files: list) -> None:
     sub_dir.mkdir(parents=True, exist_ok=True)
     (sub_dir / _TARGET_PATHS_MANIFEST).write_text(json.dumps(mapping), encoding="utf-8")
 
+
+_FILE_METADATA_MANIFEST = "_file_metadata.json"
+
+
+def _write_file_metadata_manifest(sub_dir: Path, files: list) -> None:
+    """Persist ``{path: {"description", "finding_addressed", "skill_name"}}``
+    for every generated file -- the real, human-authored "why this file
+    exists" ``GeneratedFile`` already carries (see ``agents/base.py``:
+    every agent/skill sets a real ``description``, e.g. "VPA for {name}
+    (updateMode: ...)" or a codechange's own ``finding.description``; skill
+    output additionally sets ``finding_addressed``/``skill_name``).
+
+    Sibling to ``_write_target_path_manifest()`` above: same problem
+    (``AgentResult.files_generated`` only threads plain relative paths
+    through to ``portal/helpers.py::run_onboarding``, so a ``GeneratedFile``'s
+    own fields don't otherwise survive the local-agent/K8s-Job -> portal
+    boundary), same fix (a JSON sidecar file next to each agent's/skills'
+    generated output). Without this, Onboard Results' PR-intent framing
+    would have no real per-file "why" to show and would have to either
+    fabricate one or fall back to a bare filename -- this sidecar is what
+    lets it show the real thing instead.
+    """
+    mapping = {
+        f.path: {
+            "description": f.description,
+            "finding_addressed": getattr(f, "finding_addressed", "") or "",
+            "skill_name": getattr(f, "skill_name", "") or "",
+        }
+        for f in files
+    }
+    if not mapping:
+        return
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    (sub_dir / _FILE_METADATA_MANIFEST).write_text(json.dumps(mapping), encoding="utf-8")
+
 def _read_agent_mode() -> str:
     """AGENTIT_AGENT_MODE is the documented/canonical name; AGENT_MODE is
     kept as a fallback for anyone already relying on the
@@ -291,6 +326,7 @@ class FleetOrchestrator:
                 for f in skill_files:
                     safe = _safe_path(skill_dir, f.path)
                     safe.write_text(f.content, encoding="utf-8")
+                _write_file_metadata_manifest(skill_dir, skill_files)
         except Exception as exc:
             logger.debug("Skill engine failed (non-fatal): %s", exc)
 
@@ -431,6 +467,7 @@ class FleetOrchestrator:
                 agent_runs_total.labels(agent=agent_name, mode="local", status="success").inc()
                 await self._save_agent_run(agent_name, "local", "success", elapsed, resource_tier)
                 _write_target_path_manifest(sub_dir, result.files)
+                _write_file_metadata_manifest(sub_dir, result.files)
                 results.append(AgentResult(
                     agent_name=agent_name,
                     category=category,
@@ -591,6 +628,7 @@ class FleetOrchestrator:
                             safe = _safe_path(sub_dir, f.path)
                             safe.write_text(f.content, encoding="utf-8")
                         _write_target_path_manifest(sub_dir, files)
+                        _write_file_metadata_manifest(sub_dir, files)
                     except Exception as exc:
                         logger.warning("Failed to parse Job output for %s: %s", agent_name, exc)
                         agent_runs_total.labels(agent=agent_name, mode="kubernetes", status="error").inc()

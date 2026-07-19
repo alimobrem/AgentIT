@@ -468,15 +468,32 @@ async def run_onboarding(report, assessment_id: str | None = None, store: object
                     target_paths = _json.loads(manifest_path.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     log.warning("Failed to read target-path manifest for %s", ar.category, exc_info=True)
+            # Real per-file intent (why this file exists) -- see
+            # agents/orchestrator.py::_write_file_metadata_manifest(). Falls
+            # back to the bare relative path (the old behavior) only when
+            # the sidecar is missing/unreadable, never a fabricated "why".
+            file_metadata: dict[str, dict] = {}
+            metadata_path = category_dir / "_file_metadata.json"
+            if metadata_path.is_file():
+                import json as _json
+                try:
+                    file_metadata = _json.loads(metadata_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    log.warning("Failed to read file-metadata manifest for %s", ar.category, exc_info=True)
             for rel_path in ar.files_generated:
                 file_path = category_dir / rel_path
                 if file_path.is_file():
+                    meta = file_metadata.get(rel_path, {})
                     entry = {
                         "category": ar.category,
                         "path": rel_path,
-                        "description": rel_path,
+                        "description": meta.get("description") or rel_path,
                         "content": file_path.read_text(encoding="utf-8"),
                     }
+                    if meta.get("finding_addressed"):
+                        entry["finding_addressed"] = meta["finding_addressed"]
+                    if meta.get("skill_name"):
+                        entry["skill_name"] = meta["skill_name"]
                     target_path = target_paths.get(rel_path, "")
                     if target_path:
                         entry["target_path"] = target_path

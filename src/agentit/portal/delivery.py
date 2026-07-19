@@ -280,6 +280,55 @@ def classify_file(entry: dict) -> str:
     return CATEGORY_CLUSTER_CONFIG
 
 
+def preview_delivery_groups(
+    files: list[dict], *, infra_repo_url: str | None,
+) -> dict[str, dict]:
+    """Read-only preview of how ``route_and_deliver()`` would group and
+    route ``files`` right now -- no commits, no PRs, no store writes. Runs
+    the exact same classify -> exclude-blocked/narrative -> strip-
+    placeholders -> mechanism-resolution sequence ``route_and_deliver()``
+    itself performs first, extracted here so a caller (Onboard Results'
+    pre-delivery "AgentIT will open N PR(s)" preview) shows the same real
+    taxonomy/mechanism decision a real Deliver click will make, instead of
+    a second, drifting approximation of it.
+
+    Returns ``{category: {"files": [...], "mechanism": ..., "repo_kind":
+    ..., "confirmation": ...}}`` for every deliverable category
+    (``CATEGORY_CLUSTER_CONFIG``/``CATEGORY_CICD_SHARED_NAMESPACE``/
+    ``CATEGORY_SOURCE_PATCH``/``CATEGORY_MANIFEST_AT_REST``) that still has
+    at least one file after that sequence.
+    ``CATEGORY_SECRET_BLOCKED``/``CATEGORY_NARRATIVE_REPORT`` are never
+    included -- neither is ever routed to any delivery mechanism (see
+    ``route_and_deliver()``'s own handling of both).
+    """
+    groups: dict[str, list[dict]] = {}
+    for f in files:
+        groups.setdefault(classify_file(f), []).append(f)
+    groups.pop(CATEGORY_SECRET_BLOCKED, None)
+    groups.pop(CATEGORY_NARRATIVE_REPORT, None)
+
+    result: dict[str, dict] = {}
+    for category, group_files in groups.items():
+        keep = [f for f in group_files if not has_unresolved_placeholders(f.get("content"))]
+        if not keep:
+            continue
+        if category in (CATEGORY_CLUSTER_CONFIG, CATEGORY_CICD_SHARED_NAMESPACE):
+            mechanism = resolve_cluster_config_mechanism(infra_repo_url)
+        elif category == CATEGORY_SOURCE_PATCH:
+            mechanism = MECHANISM_SOURCE_REPO_PR
+        elif category == CATEGORY_MANIFEST_AT_REST:
+            mechanism = MECHANISM_APP_REPO_PR
+        else:
+            continue
+        result[category] = {
+            "files": keep,
+            "mechanism": mechanism,
+            "repo_kind": repo_kind_for_mechanism(mechanism),
+            "confirmation": confirmation_text(mechanism, infra_repo_url=infra_repo_url),
+        }
+    return result
+
+
 def _sanitize_app_name(app_name: str) -> str:
     return app_name.lower().replace("_", "-").replace(".", "-")
 
