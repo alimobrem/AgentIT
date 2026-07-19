@@ -71,9 +71,9 @@ The real system has more moving parts — an event-driven path via Kafka + Argo 
 
 AgentIT uses two complementary systems for assessment and remediation:
 
-### Property-based skills (45 skills across 12 domains)
+### Property-based skills (46 skills across 12 domains)
 
-Skills are Markdown files with YAML frontmatter that define **what must be true** (properties), not how to generate manifests. The skill engine matches skills to assessment findings; the LLM generates tailored fixes using the skill's constraints and the app's platform context. `FleetOrchestrator` builds and passes an LLM client into the skill engine on every run (CLI, portal, and webhook onboarding alike) whenever `ANTHROPIC_API_KEY`/`ANTHROPIC_VERTEX_PROJECT_ID` is configured, so LLM-only skills (no template block — e.g. `network-policy`, `containerfile`, `tekton-pipeline`) actually produce tailored output in production, not just template substitution.
+Skills are Markdown files with YAML frontmatter that define **what must be true** (properties), not how to generate manifests. The skill engine matches skills to assessment findings; the LLM generates tailored fixes using the skill's constraints and the app's platform context. `FleetOrchestrator` builds and passes an LLM client into the skill engine on every run (CLI, portal, and webhook onboarding alike) whenever `ANTHROPIC_API_KEY`/`ANTHROPIC_VERTEX_PROJECT_ID` is configured, so LLM-only skills (no template block — e.g. `network-policy`, `containerfile`, `tekton-pipeline`) actually produce tailored output in production, not just template substitution. One of the 46 (`observability/health-probes-check.md`) is `mode: detect` — a declarative detection rule, not a remediation template — see "Data-driven checks" below.
 
 ```
 skills/
@@ -99,20 +99,22 @@ Skills have lifecycle management: `draft` → `active` → `deprecated` → `ret
 
 **`audit-policy` no longer fabricates a never-applyable resource.** `apiVersion: audit.k8s.io/v1, kind: Policy` is not a real Kubernetes REST API resource on any cluster — it's a static file schema consumed only by kube-apiserver's own `--audit-policy-file` startup flag, never something `kubectl apply` accepts. Applying it always failed, and `cluster_apply.py`'s missing-operator heuristic misattributed that failure to a missing Kyverno install (Kyverno's own CRD happens to also be named `Policy`, in a completely unrelated API group) — a wrong, misleading fix suggestion. The skill now delivers the same real audit policy rules as advisory reference documentation in a ConfigMap (the same pattern `incident/runbook.md`/`retirement/decommission-plan.md`/`compliance/compliance-evidence.md` already use), with instructions for how a cluster-admin actually wires it in on vanilla Kubernetes vs. OpenShift — never silently treated as "already enforced," and never reaching `cluster_apply.py`'s CRD-missing/missing-operator path at all.
 
-### Data-driven checks (20 checks across 7 dimensions)
+### Data-driven checks (19 checks across 7 dimensions) + `mode: detect` skills
 
-YAML check files in `checks/` define declarative rules that supplement the Python analyzers. Check types: `file_exists`, `file_contains`, `file_missing`, `yaml_kind_exists`, `yaml_kind_missing`. The learning agent can create new checks without touching Python code.
+YAML check files in `checks/` define declarative rules that supplement the Python analyzers. Check types: `file_exists`, `file_contains`, `file_missing`, `yaml_kind_exists`, `yaml_kind_missing`, each now also accepting a `pattern:` list (OR semantics) and an optional `case_insensitive: true`, not just a single scalar string. The learning agent can create new checks without touching Python code.
 
 ```
 checks/
 ├── security/         # containerfile, network-policy, secrets-scanning
-├── observability/    # health-check, metrics-endpoint, structured-logging
+├── observability/    # metrics-endpoint, structured-logging
 ├── cicd/             # ci-pipeline, dockerfile, gitops
 ├── compliance/       # admission-policies, license, sbom
 ├── infrastructure/   # helm-chart, k8s-manifests, resource-quota
 ├── ha_dr/            # hpa, pdb, replicas
 └── data_governance/  # backup-config, retention-policy
 ```
+
+**Unification, Phase 1 (2026-07-18): checks are becoming a peer of skills, sharing skills' exact Markdown format and lifecycle.** A skill's `mode:` frontmatter field now accepts `detect` in addition to `template`/`llm` — a `mode: detect` skill defines a declarative `rule:` (the same 5 types above) instead of a remediation template, and `skill_engine.detect_check_definitions()` runs it through `check_engine`'s own runners, merging its findings into `runner.run_assessment()` exactly like a legacy `checks/*.yaml` file would. This means a detection rule gets the same lifecycle (`draft`/`active`/`deprecated`/`retired`), the same Activate/Deprecate/Reactivate UI, and the same git-PR-backed persistence the Capabilities page already built for remediation skills — with zero changes to that UI's own code. `skills/observability/health-probes-check.md` is the first one, ported from (and replacing) the former `checks/observability/health-check.yaml`, proven equivalent by a parity test before the YAML file was deleted. See [`docs/extension-model-unification-plan-2026-07-18.md`](docs/extension-model-unification-plan-2026-07-18.md) for the full design, the reconciliation with the original design spec's "keep skills and checks separate" recommendation (narrower than it sounds — see that doc), and the backlog for unifying the remaining `checks/*.yaml` files and the 3 Python agents + 6 watchers the same way.
 
 ### Catalog change tracking
 

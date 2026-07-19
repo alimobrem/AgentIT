@@ -1,7 +1,27 @@
 # Unifying checks/analyzers/skills into one extension model — design spec
 
-**Status: design spec, not yet implemented.** No code changes are made by
-this doc. Written in the same style as `docs/ledger-design-spec.md`:
+**Status update (2026-07-18): superseded in part, see
+`docs/extension-model-unification-plan-2026-07-18.md`.** This doc's own
+scope (per its "Scope note" below) never re-examined the agents-vs-skills
+question, and its §2 "Option B" recommendation is specifically about *not*
+merging checks' detection-matching machinery into skills' remediation-
+matching machinery (`SkillEngine.match()`/`generate()`/platform-gating) —
+that reasoning still holds and is unchanged by the new plan. What's
+superseded is the assumption that checks and skills must therefore stay
+two different *file formats*: explicit user direction on 2026-07-18 ("agent,
+skills, and checks... each are md files that define them") led to building
+a `mode: detect` extension to the skill Markdown format that reuses this
+doc's own §3 Gap 1 idea (list-pattern OR matching in `check_engine.py`) to
+let a Markdown file's `rule` run through `check_engine`'s exact runners —
+sharing the file format and lifecycle with skills, without touching the
+remediation-matching machinery §2 point 1 above correctly argues against
+merging. See the new plan's "Reconciling with the spec's recommendation"
+section for the precise distinction. This doc's own analysis (§0-§6) is
+otherwise still accurate and is left as-is below, unmodified, per this
+repo's docs convention of appending status rather than rewriting history.
+
+**Original status: design spec, not yet implemented.** No code changes are
+made by this doc. Written in the same style as `docs/ledger-design-spec.md`:
 grounded in the *actual current* code (read directly, not designed against
 an imagined system), with a phased, incremental rollout that never breaks
 the working product mid-flight.
