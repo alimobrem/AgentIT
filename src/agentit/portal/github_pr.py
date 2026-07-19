@@ -105,6 +105,14 @@ def get_pr_status(pr_url: str) -> dict:
                 "body": data.get("body") or "",
                 "labels": [lbl.get("name", "") for lbl in (data.get("labels") or [])],
                 "created_at": data.get("created_at", ""),
+                # Number of commits on the PR -- every AgentIT PR-opening
+                # function (create_onboarding_pr/create_agent_prs/
+                # create_source_patch_pr/commit_to_infra_repo) makes exactly
+                # one commit before opening the PR, so >1 here means a human
+                # pushed additional commits before it was merged/closed --
+                # see get_pr_extra_commits(), the real pre-merge-edit signal
+                # this backs (pr_outcomes.py).
+                "commits": data.get("commits", 0),
             }
 
         if "/compare/" in pr_url:
@@ -144,6 +152,114 @@ def get_pr_status(pr_url: str) -> dict:
             "state": "unknown", "merged_at": "", "html_url": pr_url,
             "title": "", "body": "", "labels": [], "created_at": "",
         }
+
+
+def get_pr_extra_commits(pr_url: str, max_commits: int = 5) -> list[dict]:
+    """Real commits pushed to ``pr_url`` AFTER AgentIT's own original commit
+    -- the durable, factual signal that a human edited AgentIT's proposed
+    content before merging/closing it (see docs on the removed ``gates``
+    system's replacement: a merged PR's outcome must capture whether it
+    landed exactly as proposed).
+
+    Every AgentIT PR-opening function (``create_onboarding_pr``/
+    ``create_agent_prs``/``create_source_patch_pr``/``commit_to_infra_repo``)
+    makes exactly one commit before opening the PR -- so the first commit
+    returned by ``GET /pulls/{n}/commits`` is always AgentIT's own, and
+    anything after it was pushed by someone else. Returns each such commit
+    as ``{"sha", "message", "author", "files": [{"filename", "additions",
+    "deletions", "patch"}]}`` -- the real diff of that commit alone, fetched
+    via ``GET /repos/{owner}/{repo}/commits/{sha}`` -- capped at
+    ``max_commits`` to bound API usage. Returns ``[]`` on any failure, when
+    there's only one commit (nothing to report), or when the PR URL can't
+    be parsed -- callers must treat that as "no edit signal available,"
+    never fabricate one.
+    """
+    try:
+        token = _get_token()
+        hdrs = _headers(token)
+        parts = pr_url.rstrip("/").split("/")
+        if "/pull/" not in pr_url or len(parts) < 2 or parts[-2] != "pull":
+            return []
+        owner, repo, pr_number = parts[-4], parts[-3], parts[-1]
+        resp = requests.get(
+            f"{_API}/repos/{owner}/{repo}/pulls/{pr_number}/commits",
+            headers=hdrs, timeout=10, params={"per_page": 100},
+        )
+        resp.raise_for_status()
+        commits = resp.json()
+    except Exception:
+        logger.warning("Failed to list commits for %s", pr_url, exc_info=True)
+        return []
+
+    if len(commits) <= 1:
+        return []
+
+    extra: list[dict] = []
+    for commit in commits[1 : max_commits + 1]:
+        sha = commit.get("sha", "")
+        if not sha:
+            continue
+        commit_info = commit.get("commit", {})
+        entry = {
+            "sha": sha,
+            "message": (commit_info.get("message") or "").split("\n", 1)[0],
+            "author": commit_info.get("author", {}).get("name", ""),
+            "files": [],
+        }
+        try:
+            detail_resp = requests.get(
+                f"{_API}/repos/{owner}/{repo}/commits/{sha}", headers=hdrs, timeout=10,
+            )
+            detail_resp.raise_for_status()
+            detail = detail_resp.json()
+            entry["files"] = [
+                {
+                    "filename": f.get("filename", ""),
+                    "additions": f.get("additions", 0),
+                    "deletions": f.get("deletions", 0),
+                    "patch": f.get("patch", ""),
+                }
+                for f in (detail.get("files") or [])
+            ]
+        except Exception:
+            logger.warning("Failed to fetch commit detail for %s@%s", pr_url, sha, exc_info=True)
+        extra.append(entry)
+    return extra
+
+
+def close_pr(pr_url: str, reason: str = "") -> dict:
+    """Close ``pr_url`` without merging -- the real, honest counterpart to
+    ``merge_pr()`` above for the "this shouldn't ship" outcome. Posts
+    ``reason`` (when given) as a real PR comment before closing, both for
+    human visibility on GitHub itself and so a later
+    ``fetch_pr_close_comments()``/``parse_reject_reason()`` pass (see
+    ``capability_scout.py``, the pattern this reuses) can read the same
+    reason back. Returns ``{"closed": True}`` or ``{"error": str}``.
+    """
+    try:
+        token = _get_token()
+        hdrs = _headers(token)
+        parts = pr_url.rstrip("/").split("/")
+        if "/pull/" not in pr_url or len(parts) < 2 or parts[-2] != "pull":
+            return {"error": f"not a PR URL: {pr_url}"}
+        owner, repo, pr_number = parts[-4], parts[-3], parts[-1]
+
+        if reason:
+            requests.post(
+                f"{_API}/repos/{owner}/{repo}/issues/{pr_number}/comments",
+                headers=hdrs, timeout=10, json={"body": reason},
+            )
+
+        resp = requests.patch(
+            f"{_API}/repos/{owner}/{repo}/pulls/{pr_number}",
+            headers=hdrs, timeout=15, json={"state": "closed"},
+        )
+        if resp.status_code >= 400:
+            return {"error": f"GitHub API error: {resp.text[:200]}"}
+        return {"closed": True}
+    except Exception as exc:
+        logger.exception("Failed to close PR %s", pr_url)
+        return {"error": str(exc)}
 
 
 def get_commit_info(repo_url: str, sha: str) -> dict:

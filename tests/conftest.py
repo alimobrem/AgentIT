@@ -290,7 +290,7 @@ _ALL_STORE_TABLES = (
     "settings", "remediation_jobs", "scheduled_operations",
     "processed_webhooks", "agent_feedback", "skill_effectiveness",
     "suppressed_checks", "skill_inventory_snapshots",
-    "agent_runs", "check_results", "deliveries",
+    "agent_runs", "check_results", "deliveries", "pr_outcomes",
 )
 
 _shared_store: AssessmentStore | None = None
