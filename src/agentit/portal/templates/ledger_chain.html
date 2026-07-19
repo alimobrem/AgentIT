@@ -4,7 +4,7 @@
 <p class="mb-1"><a href="/ledger">&larr; Back to Ledger</a></p>
 <h1>Replay this chain</h1>
 <p class="text-muted text-sm mb-2">
-  Read-only playback of every event, gate, and delivery sharing this correlation id, in the
+  Read-only playback of every event and delivery sharing this correlation id, in the
   order it actually happened. This is history, not a decision point — nothing here can be
   re-approved or re-rejected from this view.
 </p>
@@ -29,7 +29,6 @@
         <span class="text-muted text-sm" data-timestamp="{{ card.timestamp }}">{{ card.timestamp[:16] }}</span>
       </div>
       <p class="text-sm text-muted">{{ card.summary }}</p>
-      {% if card.gate_status %}<p class="text-sm">Gate status: <strong>{{ card.gate_status }}</strong></p>{% endif %}
       {% if card.mechanism %}<p class="text-sm">Delivery mechanism: <strong>{{ card.mechanism | humanize_mechanism }}</strong></p>{% endif %}
       {% if card.attribution %}<p class="text-sm">Skill: <strong>{{ card.attribution }}</strong></p>{% endif %}
       <p class="text-muted text-sm">Step {{ loop.index }} of {{ cards|length }} — read-only history, no actions available here.</p>

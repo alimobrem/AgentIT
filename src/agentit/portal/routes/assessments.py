@@ -385,24 +385,20 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     all_findings = [f for sc in report.scores for f in sc.findings]
     fixable_categories = {f.category for f in all_findings if lookup(f.category) is not None}
 
-    # Every remaining gate type lives here (Actions tab) instead of the
-    # retired global Gates page -- including a stale ``cluster-admin-review``
-    # row, if one somehow still exists (that type, and the separate Admin
-    # Review page it used to live on, were retired 2026-07-18 -- see
-    # delivery.py). rollback-review/finding-unresolved-escalation are no
-    # longer gates at all -- they're plain, unresolved events (see
-    # routes/recommendations.py) rendered here via recommendation_card
-    # instead of gate_card.
-    from agentit.portal.delivery import (
-        gate_delivery_confirmation,
-        get_next_action_state,
-        is_gitops_registered,
-    )
-    assessment_gates = await s.list_gates_for_assessment(assessment_id, status="pending") \
-        if hasattr(s, "list_gates_for_assessment") else []
-    for g in assessment_gates:
-        g["delivery_confirmation"] = await gate_delivery_confirmation(s, g)
-        g["kind"] = "gate"
+    # Actions tab: every real thing still waiting on a human for this app --
+    # an open, unmerged PR (Merge/Close, routes/pr_actions.py -- the real
+    # GitHub PR review IS the approval step now, no gate involved), an
+    # unresolved rollback recommendation, or an unresolved escalated
+    # finding (both plain events, see routes/recommendations.py). The
+    # `gates` table/generic gate-resolution machinery has been removed
+    # entirely (2026-07-19) -- nothing here reads from it anymore.
+    from agentit.portal.delivery import get_next_action_state, is_gitops_registered
+    from agentit.portal.pr_tracking import get_app_pr_history
+
+    pr_history = await get_app_pr_history(s, assessment_id, report.repo_url, report.repo_name)
+    open_prs = [pr for pr in pr_history if pr["state"] == "open"]
+    for pr in open_prs:
+        pr["kind"] = "pr"
 
     unresolved_rollbacks = await s.list_unresolved_events(
         "rollback-recommended", ["rollback-executed", "rollback-dismissed"], target_app=report.repo_name,
@@ -415,7 +411,7 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     for e in unresolved_escalations:
         e["kind"] = "escalation"
 
-    pending_actions = assessment_gates + unresolved_rollbacks + unresolved_escalations
+    pending_actions = open_prs + unresolved_rollbacks + unresolved_escalations
 
     # Real "what happens next" fact (docs/onboarding-loop-vision-gap-
     # analysis.md's Step 8 discussion / Phase 5) -- reuses
@@ -427,21 +423,18 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     )
 
     # Real, specific empty-state copy for the Actions tab (docs/ux-design-
-    # requirements.md checklist #10) -- how many of THIS app's actions were
-    # actually resolved recently (gates, plus rollback/escalation events
-    # resolved the same way -- a real resolving event correlated to the
-    # original one), instead of a bare "nothing here".
+    # requirements.md checklist #10) -- how many of THIS app's actions
+    # (merged/closed PRs, rollback/escalation events resolved the same way
+    # -- a real resolving event correlated to the original one) were
+    # actually resolved recently, instead of a bare "nothing here".
     recently_resolved_actions_count = 0
     if not pending_actions:
         from datetime import datetime, timedelta, timezone
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-        if hasattr(s, "list_gates_for_assessment"):
-            all_app_gates = await s.list_gates_for_assessment(assessment_id)
-            recently_resolved_actions_count += sum(
-                1 for g in all_app_gates
-                if g["status"] in ("approved", "rejected", "expired", "cancelled")
-                and (g.get("resolved_at") or g.get("created_at") or "") >= cutoff
-            )
+        recently_resolved_actions_count += sum(
+            1 for pr in pr_history
+            if pr["state"] in ("merged", "closed") and (pr.get("merged_at") or pr.get("created_at") or "") >= cutoff
+        )
         recent_events = await s.list_events(target_app=report.repo_name, limit=200)
         recently_resolved_actions_count += sum(
             1 for e in recent_events
@@ -467,8 +460,7 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
 
     timeline = await s.get_assessment_timeline(assessment_id) if hasattr(s, 'get_assessment_timeline') else []
     # docs/ledger-design-spec.md Phase 1: additive 5th tab, alongside (not
-    # replacing) Actions/Timeline above -- same gate_card macro, same
-    # route_and_deliver()/resolve_gate() paths, nothing existing changes.
+    # replacing) Actions/Timeline above.
     from agentit.ledger import get_ledger_cards
     ledger_cards = await get_ledger_cards(s, target_app=report.repo_name, assessment_id=assessment_id)
     trend = await s.get_trend(report.repo_url) if hasattr(s, 'get_trend') else {}
@@ -504,12 +496,8 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
         h["overall_score"] >= 100 for h in score_history if h["id"] != assessment_id
     )
 
-    # Open PRs section + PR History tab (real GitHub/DB-backed data only --
-    # see pr_tracking.py's module docstring for exactly what's tracked vs.
-    # what still needs a live GitHub call).
-    from agentit.portal.pr_tracking import get_app_pr_history
-    pr_history = await get_app_pr_history(s, assessment_id, report.repo_url, report.repo_name)
-    open_prs = [pr for pr in pr_history if pr["state"] == "open"]
+    # pr_history/open_prs (Open PRs section + PR History tab) are already
+    # computed above, alongside pending_actions.
 
     assessment_cadence = await s.get_assessment_cadence(report.repo_url)
     # Real signal (same one schedules.py's "Long-Lived Agents" table and
@@ -1161,14 +1149,13 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
 
     from agentit.portal.pr_tracking import (
         annotate_lifecycle,
-        attach_reject_reasons,
         collect_pr_records,
         resolve_pr_states,
+        sync_and_attach_pr_outcomes,
     )
-    gates_for_prs = await s.list_gates_for_assessment(assessment_id) if hasattr(s, "list_gates_for_assessment") else []
-    pr_records = collect_pr_records(gates_for_prs, deliveries, onboardings)
-    pr_records = await attach_reject_reasons(s, report.repo_name, pr_records)
-    pr_records = await resolve_pr_states(pr_records)
+    pr_records = collect_pr_records(deliveries, onboardings)
+    await resolve_pr_states(pr_records)
+    pr_records = await sync_and_attach_pr_outcomes(s, pr_records)
     for r in pr_records:
         annotate_lifecycle(r)
     records_by_category: dict[str, list[dict]] = {}

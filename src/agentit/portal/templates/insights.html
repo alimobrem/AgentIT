@@ -23,15 +23,16 @@
     <div class="stat-label">Total PRs</div>
     <div class="stat-value">{{ insights.total_prs }}</div>
   </a>
-  {# Spans every live gate type (PR approvals, cluster-admin-review,
-     rollback-review, finding-escalation) -- Ledger now only ever shows the
-     PR-approval subset (see routes/insights.py::ledger_page()), so this
-     rolls up to Fleet, where every app's own "needs action"/escalation
-     badge lives, rather than a page that would only show part of this
-     number. #}
+  {# Every real thing still waiting on a human, fleet-wide: open/unmerged
+     PRs (the same count_fleet_prs_waiting_for_approval() the Ledger/nav
+     badge use) plus unresolved rollback/escalation recommendations
+     (routes/recommendations.py). Ledger only ever shows the PR-approval
+     subset (see routes/insights.py::ledger_page()), so this rolls up to
+     Fleet, where every app's own "needs action" badge lives, rather than a
+     page that would only show part of this number. #}
   <a class="stat-card" href="/fleet" title="Open Fleet -- per-app needs-action badges">
-    <div class="stat-label">Pending Gates</div>
-    <div class="stat-value {% if insights.pending_gates > 0 %}text-warning{% else %}text-success{% endif %}">{{ insights.pending_gates }}</div>
+    <div class="stat-label">Needs Attention</div>
+    <div class="stat-value {% if insights.needs_attention > 0 %}text-warning{% else %}text-success{% endif %}">{{ insights.needs_attention }}</div>
   </a>
   <a class="stat-card" href="/events" title="Open Events feed">
     <div class="stat-label">Events Logged</div>

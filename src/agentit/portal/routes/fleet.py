@@ -27,12 +27,12 @@ _ARGO_CACHE_TTL = 60  # seconds
 # coroutines on the same event loop thread, not other OS threads.
 _argo_cache_lock = threading.Lock()
 
-# Live GitHub PR state (open/merged/closed) for every PR that isn't already
-# tracked by a gate's own status (see pr_tracking.py) -- cached fleet-wide,
-# not per-app, so N apps x M PRs on one Fleet page load means one batched
-# round of concurrent GitHub calls per TTL window, not N*M live calls per
-# request. A longer TTL than Argo's cache above: PR merge/close state
-# changes far less often than a live sync/health status.
+# Live GitHub PR state (open/merged/closed) for every PR (see
+# pr_tracking.py) -- cached fleet-wide, not per-app, so N apps x M PRs on
+# one Fleet page load means one batched round of concurrent GitHub calls
+# per TTL window, not N*M live calls per request. A longer TTL than Argo's
+# cache above: PR merge/close state changes far less often than a live
+# sync/health status.
 _pr_status_cache: dict = {"data": {}, "ts": 0}
 _PR_STATUS_CACHE_TTL = 120  # seconds
 _pr_status_cache_lock = threading.Lock()
@@ -140,28 +140,17 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
 
 async def _attach_pending_actions(fleet: list[dict], s: object) -> None:
     """"Needs action" badge per app (docs/ui-redesign-proposal.md §2) --
-    unresolved rollback/escalation recommendations plus any still-pending
-    gate (the ``gates`` table itself is being phased out in favor of real
-    PR state / plain unresolved events -- see ``routes/recommendations.py``;
-    this still counts any legacy pending gate row until that migration is
-    complete). Mutates each fleet row in place with ``pending_actions_count``.
-
-    Keyed by ``repo_url``: a fleet row's ``id`` is always the app's LATEST
-    assessment_id (``get_fleet_data()``), but recommendations/gates are
-    keyed by app name/repo_url directly, not by which historical assessment
-    happened to be current when they were created.
+    every open, unmerged PR (Merge/Close on the Actions tab -- see
+    routes/pr_actions.py) plus any unresolved rollback/escalation
+    recommendation (routes/recommendations.py). The ``gates`` table/generic
+    gate-resolution machinery has been removed entirely (2026-07-19) --
+    nothing here reads from it anymore. Mutates each fleet row in place
+    with ``pending_actions_count``. Requires ``_attach_pr_counts()`` to
+    have already run (reads each row's own ``open_prs``) so this doesn't
+    duplicate that function's fleet-wide GitHub-status batch.
     """
-    counts: dict[str, int] = {}
-
-    try:
-        pending_gates = await s.list_gates(status="pending")
-    except Exception:
-        log.debug("Failed to fetch pending gates for fleet 'needs action' badges", exc_info=True)
-        pending_gates = []
-    for g in pending_gates:
-        repo_url = g.get("repo_url")
-        if repo_url:
-            counts[repo_url] = counts.get(repo_url, 0) + 1
+    for app_item in fleet:
+        app_item["pending_actions_count"] = app_item.get("open_prs", 0)
 
     repo_url_by_app_name = {app_item["repo_name"]: app_item["repo_url"] for app_item in fleet}
     try:
@@ -174,13 +163,15 @@ async def _attach_pending_actions(fleet: list[dict], s: object) -> None:
     except Exception:
         log.debug("Failed to fetch unresolved recommendations for fleet 'needs action' badges", exc_info=True)
         unresolved_rollbacks, unresolved_escalations = [], []
+
+    counts_by_repo: dict[str, int] = {}
     for event in unresolved_rollbacks + unresolved_escalations:
         repo_url = repo_url_by_app_name.get(event.get("target_app"))
         if repo_url:
-            counts[repo_url] = counts.get(repo_url, 0) + 1
+            counts_by_repo[repo_url] = counts_by_repo.get(repo_url, 0) + 1
 
     for app_item in fleet:
-        app_item["pending_actions_count"] = counts.get(app_item["repo_url"], 0)
+        app_item["pending_actions_count"] += counts_by_repo.get(app_item["repo_url"], 0)
 
 
 async def _attach_next_action_state(fleet: list[dict], s: object) -> None:
@@ -222,11 +213,11 @@ async def _attach_next_action_state(fleet: list[dict], s: object) -> None:
 async def _attach_pr_counts(fleet: list[dict], s: object) -> None:
     """"Total PRs"/"Open PRs" per app -- real DB/GitHub-backed data (see
     pr_tracking.py's module docstring for exactly what's tracked). "Total"
-    is a pure DB count, no GitHub call. "Open" additionally needs to know
-    the live state of every PR that isn't already tracked by a gate's own
-    status; those are batched into ONE round of concurrent GitHub calls
-    across the whole fleet (never one call per app) and cached fleet-wide
-    for ``_PR_STATUS_CACHE_TTL`` seconds -- a per-app-per-request live check
+    is a pure DB count, no GitHub call. "Open" additionally needs a live
+    GitHub check for every PR (none carry a stored outcome of their own);
+    those are batched into ONE round of concurrent GitHub calls across the
+    whole fleet (never one call per app) and cached fleet-wide for
+    ``_PR_STATUS_CACHE_TTL`` seconds -- a per-app-per-request live check
     would be too slow/rate-limit-prone for a list view at any real fleet
     size. Mutates each fleet row in place with ``total_prs``/``open_prs``.
     """
@@ -234,11 +225,6 @@ async def _attach_pr_counts(fleet: list[dict], s: object) -> None:
 
     from agentit.portal.pr_tracking import collect_pr_records, resolve_pr_states
 
-    try:
-        all_gates = await s.list_all_gates()
-    except Exception:
-        log.debug("Failed to fetch gates for fleet PR counts", exc_info=True)
-        all_gates = []
     try:
         all_deliveries = await s.list_all_deliveries(limit=5000)
     except Exception:
@@ -250,10 +236,6 @@ async def _attach_pr_counts(fleet: list[dict], s: object) -> None:
         log.debug("Failed to fetch onboarding PR URLs for fleet PR counts", exc_info=True)
         all_onboarding_prs = []
 
-    gates_by_repo: dict[str, list[dict]] = {}
-    for g in all_gates:
-        if g.get("repo_url"):
-            gates_by_repo.setdefault(g["repo_url"], []).append(g)
     deliveries_by_app: dict[str, list[dict]] = {}
     for d in all_deliveries:
         if d.get("app_name"):
@@ -266,7 +248,6 @@ async def _attach_pr_counts(fleet: list[dict], s: object) -> None:
     records_by_repo: dict[str, list[dict]] = {}
     for app_item in fleet:
         records_by_repo[app_item["repo_url"]] = collect_pr_records(
-            gates_by_repo.get(app_item["repo_url"], []),
             deliveries_by_app.get(app_item["repo_name"], []),
             onboardings_by_repo.get(app_item["repo_url"], []),
         )
@@ -313,16 +294,16 @@ async def home() -> RedirectResponse:
 async def fleet_page(request: Request) -> HTMLResponse:
     """Portfolio scoreboard: apps, scores, Assess / Scan (Re-scan) / Delete.
 
-    Pending human gates are owned by Ledger Needs You — this page only
-    offers a quiet pointer, never an ops-inbox badge column.
+    PRs waiting for approval are owned by Ledger's "Needs You" section —
+    this page only offers a quiet pointer, never an ops-inbox badge column.
     """
     s = await get_store()
     fleet = await s.get_fleet_data()
     loop = asyncio.get_running_loop()
     fleet = await asyncio.to_thread(_enrich_fleet_with_cluster_status, fleet, s, loop)
+    await _attach_pr_counts(fleet, s)
     await _attach_pending_actions(fleet, s)
     await _attach_next_action_state(fleet, s)
-    await _attach_pr_counts(fleet, s)
     total_apps = len(fleet)
     if total_apps == 0:
         return get_templates().TemplateResponse(request, "dashboard.html", {

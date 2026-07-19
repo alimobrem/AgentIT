@@ -12,10 +12,10 @@
      open and unmerged on GitHub, the same PR-status-derived definition
      Ledger's own stat uses (see routes/insights.py::ledger_page()'s
      docstring), so this banner always agrees with what clicking through
-     actually shows. Every other pending, app-owner-scoped gate type still
-     shows via each app's own "pending action" row badge below and
-     Assessment Detail's Actions tab -- never silently dropped, just not a
-     PR. #}
+     actually shows. Every other pending, app-owner-scoped recommendation
+     (rollback/escalation) still shows via each app's own "pending action"
+     row badge below and Assessment Detail's Actions tab -- never silently
+     dropped, just not a PR. #}
   {% if pending_need_you %}
   <a href="/ledger" class="text-muted text-sm">{{ pending_need_you }} PR(s) need your approval → Ledger</a>
   {% endif %}
@@ -54,7 +54,7 @@
       <th>Trend</th>
       <th>Deployed</th>
       <th>Namespace</th>
-      <th title="How much oversight this app needs -- set at Assess time, not inferred. High/critical apps can never auto-deliver (a human must click Deliver, or approve a gate, before any PR opens) and get stricter default SLO targets.">Criticality</th>
+      <th title="How much oversight this app needs -- set at Assess time, not inferred. High/critical apps can never auto-deliver (a human must click Deliver, then merge the resulting PR) and get stricter default SLO targets.">Criticality</th>
       <th>Critical + High</th>
       <th title="PRs AgentIT has opened for this app against its code repo and/or GitOps infra repo">Open PRs / Total</th>
       <th></th>
@@ -99,18 +99,16 @@
           {% endif %}
         </div>
         {% elif r.pending_actions_count %}
-        {# Real, already-computed pending-gate count (fleet.py's own
-           _attach_pending_actions(), unchanged) that had no per-app render
-           anywhere until now -- the fleet-wide "N need you -> Ledger"
-           pointer above this table used to be its only surface, and that
-           pointer is now PR-approval-specific (Ledger's own job narrowed to
-           strictly PRs -- see routes/insights.py::ledger_page()). A
-           rollback-review/finding/auto-mode-review gate is still a real
-           pending action on this app even though it's never a PR; this
-           closes that gap rather than leaving it only reachable by opening
-           this app's Actions tab unprompted. #}
+        {# Real, already-computed pending-action count (fleet.py's own
+           _attach_pending_actions()): open PRs needing merge/close, plus
+           any unresolved rollback/escalation recommendation. The
+           fleet-wide "N need you -> Ledger" pointer above this table is
+           PR-approval-specific (Ledger's own job narrowed to strictly PRs
+           -- see routes/insights.py::ledger_page()); a rollback/escalation
+           recommendation is still a real pending action on this app even
+           though it's never a PR, so it needs this per-app surface too. #}
         <div class="mt-1">
-          <a href="/assessments/{{ r.id }}?tab=actions" class="badge badge-accent" title="{{ r.pending_actions_count }} pending gate(s) awaiting your review on this app's Actions tab">{{ r.pending_actions_count }} pending action{{ 's' if r.pending_actions_count != 1 }}</a>
+          <a href="/assessments/{{ r.id }}?tab=actions" class="badge badge-accent" title="{{ r.pending_actions_count }} action(s) awaiting your review on this app's Actions tab">{{ r.pending_actions_count }} pending action{{ 's' if r.pending_actions_count != 1 }}</a>
         </div>
         {% endif %}
       </td>
@@ -160,8 +158,7 @@
         {# Open PRs AgentIT has tracked for this app, out of every PR ever opened
            (code repo + GitOps infra repo) -- see pr_tracking.py. Total is a pure
            DB count; Open additionally reflects a live, fleet-wide-cached GitHub
-           check for any PR not already tracked by a gate's own status
-           (routes/fleet.py::_attach_pr_counts). #}
+           check (routes/fleet.py::_attach_pr_counts). #}
         {% if r.total_prs %}
         <a href="/assessments/{{ r.id }}?tab=prs" class="{% if r.open_prs > 0 %}text-warning text-bold{% else %}text-muted{% endif %}">{{ r.open_prs }} / {{ r.total_prs }}</a>
         {% else %}
@@ -211,13 +208,13 @@
                app reserved for this heaviest friction pattern (the other
                case that used to warrant it, the cluster-admin-review gate
                approval, was retired 2026-07-18) -- it irreversibly removes
-               the app's entire history (assessments, onboarding, gates,
+               the app's entire history (assessments, onboarding, deliveries,
                SLOs), the widest blast radius any single-click action in
                the fleet table has. #}
             <button type="button" class="btn btn-sm btn-danger-outline" aria-label="Delete {{ r.repo_name }}" title="Delete App"
               @click="$dispatch('show-confirm', {
                 title: 'Delete App',
-                message: 'Delete ' + {{ r.repo_name | tojson | forceescape }} + ' and ALL related data (assessments, onboarding, gates, SLOs)? This cannot be undone.',
+                message: 'Delete ' + {{ r.repo_name | tojson | forceescape }} + ' and ALL related data (assessments, onboarding, deliveries, SLOs)? This cannot be undone.',
                 form: $refs.deleteForm{{ r.id }},
                 opts: { confirmText: 'I understand, delete this app', danger: true, typeToConfirm: {{ r.repo_name | tojson | forceescape }} }
               })">×</button>
@@ -261,7 +258,7 @@
           <option value="high">High</option>
           <option value="critical">Critical</option>
         </select>
-        <span class="text-muted text-xs">How much oversight this app needs. Low/Medium can auto-open a GitOps PR with no clicks (if Auto-Mode is on and the safety check passes); High/Critical always needs an explicit human Deliver click (or gate approval) before any PR opens. Higher criticality also sets stricter default SLO targets. Sticky across Re-scan -- change it here, or via a fresh Assess of the same repo.</span>
+        <span class="text-muted text-xs">How much oversight this app needs. High/Critical always needs an explicit human Deliver click, then a PR merge, before any change reaches the cluster/repo. Higher criticality also sets stricter default SLO targets. Sticky across Re-scan -- change it here, or via a fresh Assess of the same repo.</span>
       </div>
       <button type="submit" class="btn">
         <span class="btn-label">Run Assessment</span>

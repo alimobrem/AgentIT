@@ -1,16 +1,23 @@
-"""The Ledger ? one queryable stream over events, gates, deliveries, and
+"""The Ledger ? one queryable stream over events, deliveries, and
 fix-review decisions. See docs/ledger-design-spec.md for the full design;
 this module implements that spec's Phase 1 backing query (plus the ?2
 noise-at-scale shaping and the ?4 rewind chain query) -- read-only, no
 changes to any existing write path.
 
-``get_ledger_cards()`` unions the four real tables into the card shapes
+``get_ledger_cards()`` unions the three real tables into the card shapes
 listed in the spec's ?1 table (card types A-P) and returns them newest
 first. Every mapping below is keyed off a real, already-produced
-``action``/``gate_type``/``mechanism`` value -- nothing here invents new
-telemetry; Phase 0 (this module's sibling changes in ``slo_tracker.py``/
+``action``/``mechanism`` value -- nothing here invents new telemetry;
+Phase 0 (this module's sibling changes in ``slo_tracker.py``/
 ``drift_detector.py``) fills the two real gaps the spec identified so
 that cards J and K have something to render.
+
+Card types D/E ("Gate opened"/"Gate resolved") used to be sourced from the
+``gates`` table -- that table/its generic resolve/create machinery has been
+removed entirely (2026-07-19; every delivery ends in a real GitHub PR
+merge/close now, not an in-app gate). D/E are repurposed to the real
+``gitops-pr-opened``/``gitops-pr-merged``/``gitops-pr-closed`` events
+delivery.py/routes/pr_actions.py already log for that same PR lifecycle.
 
 ``group_cards_by_app()``, ``recent_watcher_failures()``, and
 ``get_chain_cards()`` back the fleet-wide grouped view, the "Needs You"
@@ -77,11 +84,12 @@ _EVENT_ACTION_TO_CARD_TYPE: dict[str, str] = {
     # below the failure threshold reads like any other freshly-generated
     # fix; a finding escalated to a human at/above the threshold is a
     # "needs attention" signal in its own right, in addition to (not
-    # instead of) the real pending gate (`ESCALATION_GATE_TYPE`) it also
-    # creates -- card D for that gate.
+    # instead of) the real unresolved `finding-escalated` event/
+    # Acknowledge action (routes/recommendations.py) it also creates.
     "finding-redispatched": "B",
     "finding-redispatch-no-fix": "I",
     "finding-escalated": "I",
+    "finding-escalation-acknowledged": "I",
     "critical-findings-detected": "I",
     "remediation-failed": "I",
     # Not a "finding" in the literal sense, but the same "something in the
@@ -92,15 +100,27 @@ _EVENT_ACTION_TO_CARD_TYPE: dict[str, str] = {
     # Phase 0 item 4).
     "infra-repo-creation-failed": "I",
     # The automatic Dry Run -> Deliver chain (docs/onboarding-loop-vision-
-    # gap-analysis.md Phase 3) halting at a real gate -- no infra repo
-    # known, a routing error, etc. -- is exactly the same "something in the
-    # pipeline needs attention" shape as the other two entries in this
-    # bucket. A successful auto-chain deliberately has no event mapped
-    # here: `route_and_deliver()`'s own `deliveries` row already produces
-    # card F for it, and adding a second card for the same delivery would
-    # be a duplicate, not new signal.
+    # gap-analysis.md Phase 3) halting on a routing error, no infra repo
+    # known, etc. -- is exactly the same "something in the pipeline needs
+    # attention" shape as the other two entries in this bucket. A
+    # successful auto-chain deliberately has no event mapped here:
+    # `route_and_deliver()`'s own `deliveries` row already produces card F
+    # for it, and adding a second card for the same delivery would be a
+    # duplicate, not new signal.
     "onboard-auto-deliver-blocked": "I",
     "rollback-recommended": "J",
+    "rollback-executed": "J",
+    "rollback-dismissed": "J",
+    # The real GitHub PR merge review IS the approval step now for every
+    # delivery category (the `gates` table/generic gate machinery has been
+    # removed entirely, 2026-07-19) -- opening a PR is card D ("needs your
+    # approval"), merging or closing it without merging is card E ("Gate
+    # resolved" -- kept as the letter's existing human label since it's the
+    # same "this PR-approval-shaped item is done" fact, just never backed by
+    # a `gates` row).
+    "gitops-pr-opened": "D",
+    "gitops-pr-merged": "E",
+    "gitops-pr-closed": "E",
     "drift-detected": "K",
     "drift-auto-synced": "K",
     "drift-auto-sync-failed": "K",
@@ -117,15 +137,6 @@ _EVENT_ACTION_TO_CARD_TYPE: dict[str, str] = {
     "auto-mode-allowlist-added": "P",
     "auto-mode-allowlist-removed": "P",
 }
-
-_GATE_STATUS_TO_CARD_TYPE = {
-    "pending": "D",
-    "approved": "E",
-    "rejected": "E",
-    "expired": "E",
-    "cancelled": "E",
-}
-
 
 def _tick_run_summary(agent_id: str, run: list[dict]) -> dict:
     """One or more consecutive ``tick-complete`` events -> a single event
@@ -174,10 +185,10 @@ def _annotate_chain_counts(event_cards: list[dict]) -> None:
     """Mutates each event-sourced card in place with ``chain_count`` --
     how many cards in *this same fetch* share its ``correlation_id`` --
     so the "Part of a chain (N events)" affordance never issues an extra
-    query just to know N. Gates/deliveries/fix-reviews have no
-    ``correlation_id`` of their own (per spec ?1, they're joined to a
-    chain via ``assessment_id`` instead), so this only ever touches cards
-    sourced from ``events``."""
+    query just to know N. Deliveries/fix-reviews have no ``correlation_id``
+    of their own (per spec ?1, they're joined to a chain via
+    ``assessment_id`` instead), so this only ever touches cards sourced
+    from ``events``."""
     counts: dict[str, int] = {}
     for c in event_cards:
         cid = c.get("correlation_id")
@@ -234,42 +245,21 @@ def _event_card(event: dict) -> dict | None:
     }
 
 
-def _gate_card(gate: dict, *, known_app_name: str | None = None) -> dict:
-    """``gates`` has no ``app_name``/``target_app`` column of its own --
-    ``list_all_gates()`` supplies it via a join (``gate.get("app_name")``),
-    but ``list_gates_for_assessment()`` doesn't, so the per-app call site
-    passes ``known_app_name`` (the caller already knows which app it asked
-    for) instead."""
-    card_type = _GATE_STATUS_TO_CARD_TYPE.get(gate["status"], "E")
-    return {
-        "card_type": card_type,
-        "timestamp": gate.get("resolved_at") or gate["created_at"],
-        "target_app": known_app_name or gate.get("app_name"),
-        "severity": "warning" if gate["status"] == "pending" else "info",
-        "title": gate["gate_type"],
-        "summary": gate.get("summary", ""),
-        "assessment_id": gate.get("assessment_id"),
-        "gate_status": gate["status"],
-        "source": "gates",
-        "raw": gate,
-    }
-
-
 # Human labels for the card_type letter (docs/ledger-design-spec.md §1's
 # A-P table) -- the letter itself stays the real filter value/query param
 # (ledger.html's <option value="{{ letter }}">, insights.py's card_type
 # query arg) so nothing about the underlying data model or route changes;
 # only what's ever shown to a user is affected. Deliberately a category
 # name distinct from a card's own humanized title (see
-# _EVENT_ACTION_TITLES below) rather than restating it -- "Gate opened" +
-# "GitOps PR pending" on the same card is two levels of real information,
+# _EVENT_ACTION_TITLES below) rather than restating it -- "PR opened" +
+# "GitOps PR opened" on the same card is two levels of real information,
 # not one fact said twice.
 CARD_TYPE_LABELS: dict[str, str] = {
     "A": "Assessment",
     "B": "Fix / onboard generated",
     "C": "Classifier",
-    "D": "Gate opened",
-    "E": "Gate resolved",
+    "D": "PR opened",
+    "E": "PR resolved",
     "F": "Delivery",
     "G": "Fix review",
     "H": "Watcher tick",
@@ -299,60 +289,15 @@ def humanize_card_type(card_type: str) -> str:
     return CARD_TYPE_LABELS.get(card_type, card_type)
 
 
-# Human labels for a gate's real gate_type -- gate_card() (_macros.html)
-# used to render this as `{{ gate.gate_type | upper }}`, e.g.
-# "GITOPS-PR-PENDING-SHARED-NAMESPACE" or "AUTO-MODE-REVIEW", an all-caps
-# hyphenated internal identifier with no spaces, on both Admin Review and
-# every app's Actions tab. Deliberately not a strict dict-only lookup like
-# CARD_TYPE_LABELS above: gate types have changed more than once this
-# session (cluster-conflict-review and auto-mode-scope-review retired,
-# cluster-admin-review retired but still rendered for in-flight rows,
-# gitops-pr-pending-shared-namespace added) and the "finding-{category}"
-# family covers whichever check dimensions checks/ actually has -- a
-# fallback that degrades gracefully to a readable phrase (never a raw,
-# unhumanized value) matters more here than an exhaustive table that goes
-# stale the next time a gate type is renamed.
-GATE_TYPE_LABELS: dict[str, str] = {
-    "cluster-admin-review": "Cluster-admin review",
-    "gitops-pr-pending": "GitOps PR pending",
-    "gitops-pr-pending-shared-namespace": "GitOps PR pending (shared namespace)",
-    "auto-mode-review": "Auto-mode review",
-    "rollback-review": "Rollback review",
-    "finding-unresolved-escalation": "Unresolved finding escalation",
-}
-
-
-def humanize_gate_type(gate_type: str) -> str:
-    """Decode a gate's gate_type into a real, readable phrase -- never the
-    raw hyphenated identifier. Checks the explicit table first; a
-    "finding-{category}" gate (one per check dimension -- see
-    routes/webhooks.py's per-category dispatcher) becomes "{Category}
-    finding"; anything else degrades to Title Case with hyphens/
-    underscores turned into spaces, so an unrecognized or future gate type
-    still reads as a phrase instead of a raw identifier.
-
-    Public: also registered as the ``humanize_gate_type`` Jinja filter
-    (see portal/app.py) for _macros.html's shared ``gate_card()``.
-    """
-    if not gate_type:
-        return gate_type
-    if gate_type in GATE_TYPE_LABELS:
-        return GATE_TYPE_LABELS[gate_type]
-    if gate_type.startswith("finding-"):
-        category = gate_type[len("finding-"):].replace("-", " ").replace("_", " ").strip()
-        return f"{category.capitalize()} finding" if category else "Finding"
-    return gate_type.replace("-", " ").replace("_", " ").strip().capitalize()
-
-
 # Human phrases for a raw events.action value -- Capabilities' "Recent
 # Catalog Changes" table (and any other page rendering a raw action
 # string straight from the events table) showed e.g. "skill-added",
-# "check-removed" verbatim. Not exhaustive by design (see
-# humanize_gate_type()'s docstring for why a graceful fallback beats a
-# table that must be kept in lockstep with every log_event() call site):
-# only the handful of actions a real template renders directly today are
-# listed; everything else degrades to a readable phrase instead of the
-# raw hyphenated identifier.
+# "check-removed" verbatim. Not exhaustive by design -- a graceful fallback
+# (Title Case, hyphens/underscores to spaces) beats a table that must be
+# kept in lockstep with every log_event() call site: only the handful of
+# actions a real template renders directly today are listed; everything
+# else degrades to a readable phrase instead of the raw hyphenated
+# identifier.
 _ACTION_LABELS: dict[str, str] = {
     "skill-added": "Skill added",
     "skill-removed": "Skill removed",
@@ -360,11 +305,9 @@ _ACTION_LABELS: dict[str, str] = {
     "check-removed": "Check removed",
     "skill-activated": "Skill activated",
     "skill-deprecated": "Skill deprecated",
-    # AutoMode used to log these (agent_id="auto-mode") for Settings'
-    # now-removed "Recent Auto-Mode Actions" table -- kept so any
-    # already-persisted historical event with one of these actions still
-    # renders as a readable phrase on Events/Ledger, not a raw identifier.
     "gitops-pr-opened": "GitOps PR opened",
+    "gitops-pr-merged": "GitOps PR merged",
+    "gitops-pr-closed": "GitOps PR closed",
     "gitops-commit-failed": "GitOps commit failed",
     "auto-applied": "Applied automatically",
     "delivery-routing-error": "Delivery routing error",
@@ -469,15 +412,12 @@ async def get_ledger_cards(
     assessment_id: str | None = None,
     limit: int = 200,
 ) -> list[dict]:
-    """Union events + gates + deliveries + fix-review decisions into Ledger
-    cards, newest first.
+    """Union events + deliveries + fix-review decisions into Ledger cards,
+    newest first.
 
     Scoping: pass ``target_app`` for a per-app stream (events/deliveries/
-    fix-reviews are keyed by app name; gates are keyed by ``assessment_id``,
-    so they're fetched via ``list_gates_for_assessment`` when
-    ``assessment_id`` is also given -- see docs/architecture.md's
-    "Data model: assessments vs. apps" for why gates need the extra hop).
-    Pass neither for the fleet-wide view.
+    fix-reviews are all keyed by app name). Pass neither for the fleet-wide
+    view.
     """
     cards: list[dict] = []
 
@@ -491,13 +431,6 @@ async def get_ledger_cards(
     event_cards = [c for e in events if (c := _event_card(e)) is not None]
     _annotate_chain_counts(event_cards)
     cards.extend(event_cards)
-
-    if assessment_id:
-        gates = await store.list_gates_for_assessment(assessment_id)
-        cards.extend(_gate_card(g, known_app_name=target_app) for g in gates[:limit])
-    else:
-        gates = await store.list_all_gates()
-        cards.extend(_gate_card(g) for g in gates[:limit])
 
     if assessment_id:
         deliveries = await store.list_deliveries(assessment_id)
@@ -524,15 +457,14 @@ async def get_chain_cards(store: object, correlation_id: str) -> list[dict]:
       Events page's existing "Chain" link already runs
       (``list_events_by_correlation_id``, oldest first here so the
       scrubber plays back in the order it actually happened).
-    - ``gates`` rows and the ``deliveries`` row(s) for the assessment_id
-      that correlation_id resolves to, for every app touched by the chain.
+    - the ``deliveries`` row(s) for the assessment_id that correlation_id
+      resolves to, for every app touched by the chain.
     - ``skill_effectiveness`` (fix-review) rows for those same apps,
       restricted to the chain's own time span.
 
-    Returns cards oldest-first, each still carrying its own ``gate_status``/
-    ``mechanism``/etc. Callers render these read-only -- no action buttons --
-    since a resolved gate has nothing left to approve and a delivery that
-    already happened can't be re-decided.
+    Returns cards oldest-first, each still carrying its own ``mechanism``/
+    etc. Callers render these read-only -- no action buttons -- since a
+    delivery that already happened can't be re-decided.
     """
     events = await store.list_events_by_correlation_id(correlation_id, limit=500)
     cards = [c for e in events if (c := _event_card(e)) is not None]
@@ -545,8 +477,6 @@ async def get_chain_cards(store: object, correlation_id: str) -> list[dict]:
 
     start, end = cards[0]["timestamp"], cards[-1]["timestamp"]
     for app_name, aid in assessment_id_by_app.items():
-        gates = await store.list_gates_for_assessment(aid)
-        cards.extend(_gate_card(g, known_app_name=app_name) for g in gates)
         deliveries = await store.list_deliveries(aid)
         cards.extend(_delivery_card(d) for d in deliveries)
 

@@ -19,7 +19,6 @@ from fastapi.templating import Jinja2Templates
 from agentit.ledger import humanize_action as _humanize_action
 from agentit.ledger import humanize_card_type as _humanize_card_type
 from agentit.ledger import humanize_delivery_mechanism as _humanize_mechanism
-from agentit.ledger import humanize_gate_type as _humanize_gate_type
 from agentit.portal.helpers import (
     get_store,
     get_retention_days,
@@ -64,9 +63,10 @@ def _auth_context_processor(request: Request) -> dict:
     """Exposes `{{ current_user }}` / `{{ is_authenticated }}` / `{{
     oauth_sign_out_path }}` to every template -- base.html's nav bar uses
     these to show a "Logged in as" identity and a Logout link, using the
-    exact same `get_current_user()` already attributed to `resolved_by` on
-    gate actions (see routes/gates.py), so the nav display and the audit
-    trail never disagree about who's making a request."""
+    exact same `get_current_user()` already attributed to actor/actor
+    fields on real actions (e.g. routes/pr_actions.py, routes/
+    recommendations.py), so the nav display and the audit trail never
+    disagree about who's making a request."""
     return {
         "current_user": get_current_user(request),
         "is_authenticated": is_authenticated(request),
@@ -225,9 +225,9 @@ async def _dedupe_repo_urls() -> None:
 
 async def _background_maintenance() -> None:
     """Every 5 min: refresh DB/event-buffer size metrics, reap orphaned
-    assess/onboard jobs, self-heal duplicate repo_urls. Hourly: expire
-    stale gates, diff the skill/check inventory, prune stale
-    agent_registry rows. Daily: purge old data."""
+    assess/onboard jobs, self-heal duplicate repo_urls. Hourly: purge old
+    data (daily), diff the skill/check inventory, prune stale
+    agent_registry rows."""
     tick = 0
     while True:
         await asyncio.sleep(300)
@@ -248,9 +248,6 @@ async def _background_maintenance() -> None:
 
         try:
             s = await get_store()
-            expired = await s.expire_stale_gates(hours=24)
-            if expired:
-                log.info("Background: expired %d stale gates", expired)
             if (tick // 12) % 24 == 0:
                 retention = get_retention_days()
                 counts = await s.purge_old_data(retention_days=retention)
@@ -374,7 +371,6 @@ templates.env.filters["tojson"] = _tojson_filter
 templates.env.filters["clean_source"] = _clean_source
 templates.env.filters["humanize_mechanism"] = _humanize_mechanism
 templates.env.filters["humanize_card_type"] = _humanize_card_type
-templates.env.filters["humanize_gate_type"] = _humanize_gate_type
 templates.env.filters["humanize_action"] = _humanize_action
 
 
@@ -404,8 +400,8 @@ from agentit.portal.routes.health import router as health_router  # noqa: E402
 from agentit.portal.routes.schedules import router as schedules_router  # noqa: E402
 from agentit.portal.routes.fleet import router as fleet_router  # noqa: E402
 from agentit.portal.routes.assessments import router as assessments_router  # noqa: E402
-from agentit.portal.routes.gates import router as gates_router  # noqa: E402
 from agentit.portal.routes.recommendations import router as recommendations_router  # noqa: E402
+from agentit.portal.routes.pr_actions import router as pr_actions_router  # noqa: E402
 from agentit.portal.routes.capabilities import router as capabilities_router  # noqa: E402
 from agentit.portal.routes.settings import router as settings_router  # noqa: E402
 from agentit.portal.routes.insights import router as insights_router  # noqa: E402
@@ -416,8 +412,8 @@ app.include_router(health_router)
 app.include_router(schedules_router)
 app.include_router(fleet_router)
 app.include_router(assessments_router)
-app.include_router(gates_router)
 app.include_router(recommendations_router)
+app.include_router(pr_actions_router)
 app.include_router(capabilities_router)
 app.include_router(settings_router)
 app.include_router(insights_router)

@@ -283,26 +283,25 @@ async def webhook_github_push(request: Request):
                         # in-memory dict this handler used to discard once
                         # dispatch() returned -- the real fix/PR outcome is
                         # tracked by the delivery this branch triggers next
-                        # (`deliveries`/`gates`, see pr_tracking.py), not a
+                        # (`deliveries`, see pr_tracking.py), not a
                         # separate hand-maintained `remediations` row.
                         await s.log_event(
                             "dispatcher", "fix-generated", managed["repo_name"], "info",
                             f"Generated {len(dispatch_result['files'])} fix(es) for '{finding.category}' via {dispatch_result['agent']}",
                         )
-                        # AutoMode has been removed: this fix is always
-                        # gated for human review now, exactly like
-                        # webhook_finding()'s dispatcher branch below --
-                        # nothing auto-delivers without an explicit human
-                        # action anymore, so a generated fix always stops
-                        # here rather than autonomously opening a PR.
-                        gate_id = await s.create_gate(
-                            assessment_id, f"finding-{finding.category}",
-                            f"Dispatcher generated {len(dispatch_result['files'])} fix(es) for "
-                            f"'{finding.category}' -- review and approve",
-                        )
+                        # AutoMode has been removed: nothing auto-delivers
+                        # without an explicit human action anymore -- this
+                        # dispatched fix is never itself persisted (see
+                        # RemediationDispatcher.dispatch()'s docstring), so
+                        # the real next step is re-running Onboard for this
+                        # app (which regenerates and saves the same fix,
+                        # deliverable from Onboard Results) rather than a
+                        # gate implying a specific "approve" action this
+                        # in-memory result can't actually back.
                         await s.log_event(
-                            "dispatcher", "gated", managed["repo_name"], "info",
-                            f"Fix for {finding.category} gated for review (gate {gate_id})",
+                            "dispatcher", "fix-not-delivered", managed["repo_name"], "info",
+                            f"Fix for '{finding.category}' generated but not delivered -- "
+                            "re-run Onboard for this app to review and deliver it from Onboard Results.",
                         )
 
         await s.log_event("change-analysis", "impact-analyzed", managed["repo_name"],
@@ -393,16 +392,20 @@ async def webhook_onboard(request: Request):
 
 @router.post("/api/webhook/auto-apply", dependencies=[Depends(verify_internal_token)])
 async def webhook_auto_apply(request: Request):
-    """Gate onboarding's generated manifests for human review.
+    """Point onboarding's generated manifests at Onboard Results for human review.
 
     AutoMode (which used to decide here whether to auto-deliver via an LLM
     safety classification) has been removed: delivery now always requires
-    an explicit human action -- the Deliver button on Onboard Results, or
-    approving the gate this creates -- consistent with every other former
-    AutoMode call site. (This route is only reached via RemediationLoop's
-    own pipeline, itself only reachable today via a direct call to
-    /api/webhook/remediate; it's kept, unreachable from any autonomous
-    trigger, for that explicit-invocation case.)
+    an explicit human action -- the Deliver button on Onboard Results --
+    consistent with every other former AutoMode call site. No gate is
+    created (the ``gates`` table has been removed entirely): the generated
+    manifests are already real, durably-saved onboarding files
+    (``s.get_onboarding()``), so "review and deliver from Onboard Results"
+    is directly actionable with no separate approval row needed. (This
+    route is only reached via RemediationLoop's own pipeline, itself only
+    reachable today via a direct call to /api/webhook/remediate; it's kept,
+    unreachable from any autonomous trigger, for that explicit-invocation
+    case.)
     """
     body = await request.json()
     assessment_id = body.get("assessment_id")
@@ -418,14 +421,14 @@ async def webhook_auto_apply(request: Request):
     if files is None:
         raise HTTPException(404, "Onboarding not found -- run onboarding first")
 
-    gate_id = await s.create_gate(
-        assessment_id, "auto-mode-review",
+    await s.log_event(
+        "dispatcher", "ready-for-delivery", report.repo_name, "info",
         f"Generated {len(files)} manifest(s) for {report.repo_name} -- review and deliver from Onboard Results.",
     )
     result = {
-        "action": "gated",
+        "action": "ready_for_delivery",
         "reason": "Delivery now always requires human review -- open Onboard Results to Deliver.",
-        "details": {"gate_id": gate_id},
+        "details": {"assessment_id": assessment_id},
     }
     log.info("auto-apply result for %s: %s -- %s", assessment_id, result["action"], result["reason"])
     return JSONResponse(result)
@@ -470,20 +473,21 @@ async def webhook_finding(request: Request):
         await s.log_event("dispatcher", "no-fix-available", app_name, "warning", result["error"])
         return JSONResponse({"status": "accepted", "action": "alert-only", "reason": result["error"]})
 
-    # AutoMode has been removed: a generated fix always gates for human
-    # review now -- nothing auto-delivers without an explicit human action
-    # anymore.
+    # AutoMode has been removed: nothing auto-delivers without an explicit
+    # human action anymore. This dispatched fix is never itself persisted
+    # (see RemediationDispatcher.dispatch()'s docstring) -- no gate is
+    # created (the `gates` table has been removed entirely); the real next
+    # step is re-running Onboard for this app, which regenerates and saves
+    # the same fix, deliverable from Onboard Results.
     if result["files"]:
-        gate_id = await s.create_gate(
-            app["id"], f"finding-{category}",
-            f"Dispatcher generated {len(result['files'])} fix(es) for '{category}' -- review and approve",
+        await s.log_event(
+            "dispatcher", "fix-not-delivered", app_name, "info",
+            f"Fix for '{category}' generated but not delivered -- "
+            "re-run Onboard for this app to review and deliver it from Onboard Results.",
         )
-        await s.log_event("dispatcher", "gated", app_name, "info",
-                           f"Fix for {category} gated for review (gate {gate_id})")
         return JSONResponse({
             "status": "accepted",
-            "action": "gated",
-            "gate_id": gate_id,
+            "action": "fix-not-delivered",
             "files_generated": len(result["files"]),
             "agent": result["agent"],
         })

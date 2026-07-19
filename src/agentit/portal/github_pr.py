@@ -665,11 +665,11 @@ def create_agent_prs(
 def merge_pr(pr_url: str) -> dict:
     """Merge a GitHub PR via the REST API.
 
-    Used only by the ``gitops-pr-pending`` gate's approval path
-    (``routes/gates.py::resolve_gate``): a human approving that gate *is*
-    the merge action -- AgentIT itself never calls this to auto-merge on its
-    own initiative, matching the design doc's explicit "a human always
-    merges into a self-healing/pruning GitOps repo" posture (see
+    Used only by the real, direct Merge action on a still-open PR
+    (``routes/pr_actions.py::merge_pr_route``): a human clicking Merge PR
+    *is* the merge action -- AgentIT itself never calls this to auto-merge
+    on its own initiative, matching the design doc's explicit "a human
+    always merges into a self-healing/pruning GitOps repo" posture (see
     docs/unified-apply-flow.md section (B)).
     """
     try:

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import gate_card %}
+{% from "_macros.html" import pr_action_card %}
 {% block title %}Ledger - AgentIT{% endblock %}
 {% block content %}
 <h1>Ledger</h1>
@@ -54,7 +54,7 @@
 
 <div class="stat-grid">
   <div class="stat-card">
-    <div class="stat-label" title="Every PR AgentIT has opened that's still open and unmerged on GitHub, whether or not it has an in-app approval gate">Waiting for your approval</div>
+    <div class="stat-label" title="Every PR AgentIT has opened that's still open and unmerged on GitHub">Waiting for your approval</div>
     <div class="stat-value {% if needs_approval|length > 0 %}text-warning{% else %}text-success{% endif %}">{{ needs_approval|length }}</div>
   </div>
   <div class="stat-card">
@@ -67,29 +67,7 @@
 <h2 class="section-title mt-2">Waiting for your approval ({{ needs_approval|length }})</h2>
 {% if needs_approval %}
 {% for r in needs_approval %}
-{% if r.source == 'gate' %}
-{{ gate_card(r.raw) }}
-{% else %}
-{# Genuinely open, unmerged PR with no in-app approval gate (source-repo-
-   pr/app-repo-pr/onboarding never gets one -- see pr_tracking.py) --
-   still counts as "waiting for your approval" since it's still real work
-   waiting on a human, just reviewed/merged directly on GitHub instead of
-   through an AgentIT action. #}
-<div class="card mb-1">
-  <div class="card-header">
-    <div>
-      <span class="badge badge-warning">Open on GitHub</span>
-      <span class="badge badge-muted">{{ r.category | dimension_label }}</span>
-      <span class="text-muted text-sm" data-timestamp="{{ r.created_at }}">{{ (r.created_at or '')[:10] }}</span>
-    </div>
-    {% if r.assessment_id %}<a href="/assessments/{{ r.assessment_id }}?tab=prs" class="btn btn-sm btn-outline">View App</a>{% endif %}
-  </div>
-  <p class="my-4">
-    {{ r.app_name }} &mdash; <a href="{{ r.html_url | safe_url }}" target="_blank" rel="noopener" hx-boost="false">{{ r.title or r.pr_url }}</a>
-  </p>
-  <p class="text-sm text-muted mb-0">No in-app approval step for this PR type &mdash; review and merge it directly on GitHub.</p>
-</div>
-{% endif %}
+{{ pr_action_card(r, r.assessment_id) }}
 {% endfor %}
 {% else %}
 <div class="empty-state">
@@ -113,9 +91,7 @@
       <td><a href="{{ r.html_url | safe_url }}" target="_blank" hx-boost="false">{{ r.title or r.pr_url }}</a></td>
       <td class="text-sm"><span data-timestamp="{{ r.created_at }}">{{ (r.created_at or '')[:10] }}</span></td>
       <td>
-        {% if r.lifecycle == 'open' %}
-        <span class="badge badge-info">Open</span>
-        {% elif r.lifecycle == 'merged' %}
+        {% if r.lifecycle == 'merged' %}
         <span class="badge badge-success">Merged</span>
         {% elif r.lifecycle == 'rejected' %}
         <span class="badge badge-critical">Rejected</span>
@@ -131,7 +107,7 @@
         {% elif r.lifecycle == 'rejected' %}
         Rejected{% if r.reject_reason %} &mdash; {{ r.reject_reason }}{% endif %}
         {% elif r.lifecycle == 'closed' %}
-        Closed without merging{% if r.source == 'gate' %} ({{ r.gate_status }}){% else %} &mdash; no rejection reason is captured for this PR type today{% endif %}
+        Closed without merging
         {% elif r.lifecycle == 'unknown' %}
         Not tracked &mdash; see the badge tooltip
         {% else %}

@@ -97,82 +97,55 @@
 </div>
 {% endmacro %}
 
-{% macro gate_card(gate) %}
-{# Approve & Deliver / Reject / Dismiss card for one pending gate. Every
-   gate type is per-app now and renders here, on Assessment Detail's Actions
-   tab (and Fleet's embedded copies) -- the separate Admin Review page this
-   macro used to also serve (cluster-admin-review gates only) was retired
-   2026-07-18 along with that gate type. See docs/ui-redesign-proposal.md §2
-   ("reuse the same partial/macro, don't reinvent it"). #}
+{% macro pr_action_card(record, assessment_id='') %}
+{# Merge / Close card for one still-open, unmerged PR -- replaces the
+   retired generic gate_card (the gates table/generic gate-resolution
+   machinery has been removed entirely, 2026-07-19). Every delivery
+   category gets this exact same real GitHub-API action now: the PR merge
+   review IS the approval step, not an in-app gate row that only a subset
+   of categories used to have. Renders on Assessment Detail's Actions tab
+   and the Ledger's "Waiting for your approval" section. #}
 <div class="card mb-1" x-data="{ showReason: false }">
   <div class="card-header">
     <div>
-      <span class="badge badge-{{ gate.severity | default('info') }}" title="Gate type: {{ gate.gate_type }}">{{ gate.gate_type | humanize_gate_type }}</span>
-      <span class="text-muted text-sm" data-timestamp="{{ gate.created_at }}">{{ gate.created_at[:16] }}</span>
+      <span class="badge badge-warning">Waiting for your approval</span>
+      <span class="badge badge-muted">{{ record.category | dimension_label }}</span>
+      <span class="text-muted text-sm" data-timestamp="{{ record.created_at }}">{{ (record.created_at or '')[:16] }}</span>
     </div>
-    {% if gate.assessment_id %}
-    <a href="/assessments/{{ gate.assessment_id }}/onboard-results" class="btn btn-sm btn-outline">Preview Files</a>
-    {% endif %}
   </div>
 
-  <p class="my-4">{{ gate.summary }}</p>
-  {# gitops-pr-pending gates (and the CI/CD-shared-namespace variant of it)
-     carry the real PR URL as a structured field (delivery.py's
-     _deliver_via_gitops_pr_and_gate() passes pr_url= to create_gate()),
-     not just embedded as plain text inside gate.summary above -- render a
-     real, clickable <a href> instead of leaving the URL inert. #}
-  {% if gate.pr_url %}
-  <p class="text-sm mb-1"><a href="{{ gate.pr_url | safe_url }}" target="_blank" rel="noopener" hx-boost="false">View pull request &rarr;</a></p>
-  {% endif %}
-  {# Several gate types (rollback-review, gitops-pr-pending, and formerly
-     cluster-admin-review) reuse gate.summary verbatim as delivery_
-     confirmation (see delivery.py's gate_delivery_confirmation()) -- for
-     those, this second line added no new information, just the same
-     sentence restated in muted text right below itself. Only show it when
-     it actually says something summary doesn't. #}
-  {% if gate.delivery_confirmation and gate.delivery_confirmation != gate.summary %}
-  <p class="text-sm text-muted mb-1"><strong>{{ gate.delivery_confirmation }}</strong></p>
-  {% endif %}
+  <p class="my-4">
+    {% if record.app_name %}{{ record.app_name }} &mdash; {% endif %}
+    <a href="{{ record.html_url | default(record.pr_url) | safe_url }}" target="_blank" rel="noopener" hx-boost="false">{{ record.title or record.pr_url }}</a>
+  </p>
 
   <div class="action-bar">
-    <form method="POST" action="/gates/{{ gate.id }}/resolve" x-ref="approveForm">
-      <input type="hidden" name="status" value="approved">
+    <form method="POST" action="/prs/merge" x-ref="mergeForm">
+      <input type="hidden" name="pr_url" value="{{ record.pr_url }}">
+      <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
       <button type="button" class="btn btn-green"
         @click="$dispatch('show-confirm', {
-          title: 'Approve & Deliver',
-          message: {{ gate.delivery_confirmation | default('This will apply the generated manifests to your cluster.', true) | tojson | forceescape }} + ' This action modifies production resources.',
-          form: $refs.approveForm,
-          opts: {
-            confirmText: 'Approve & Deliver',
-            danger: false
-          }
-        })">
-        Approve &amp; Deliver
-      </button>
+          title: 'Merge PR',
+          message: 'Merge this pull request now? This action modifies production resources.',
+          form: $refs.mergeForm,
+          opts: { confirmText: 'Merge PR', danger: false }
+        })">Merge PR</button>
     </form>
 
-    <form method="POST" action="/gates/{{ gate.id }}/resolve">
-      <input type="hidden" name="status" value="rejected">
-      <button type="button" class="btn btn-outline" @click="showReason = true" x-show="!showReason">Reject</button>
+    <form method="POST" action="/prs/close">
+      <input type="hidden" name="pr_url" value="{{ record.pr_url }}">
+      <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
+      <input type="hidden" name="app_name" value="{{ record.app_name }}">
+      <input type="hidden" name="category" value="{{ record.category }}">
+      <button type="button" class="btn btn-outline" @click="showReason = true" x-show="!showReason">Close</button>
       <div x-show="showReason" class="gate-reject-row">
         <input type="text" name="reason" placeholder="Why? (helps agents learn)" class="gate-reject-input">
         <button type="submit" class="btn btn-danger-outline">
-          <span class="btn-label">Confirm Reject</span>
+          <span class="btn-label">Confirm Close</span>
           <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
         </button>
         <button type="button" class="btn btn-outline btn-sm" @click="showReason = false">Cancel</button>
       </div>
-    </form>
-
-    <form method="POST" action="/gates/{{ gate.id }}/cancel" class="inline-form"
-          x-data x-ref="dismissGate{{ gate.id }}">
-      <button type="button" class="btn btn-outline btn-sm"
-        @click="$dispatch('show-confirm', {
-          title: 'Dismiss Gate',
-          message: 'Dismiss this gate? The pending action will be cancelled.',
-          form: $refs.dismissGate{{ gate.id }},
-          opts: { confirmText: 'Dismiss', danger: true }
-        })">Dismiss</button>
     </form>
   </div>
 </div>

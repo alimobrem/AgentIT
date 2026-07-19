@@ -275,28 +275,21 @@ async def get_store():
 # approval on Ledger's link -- the same PR-status-derived count Ledger's
 # own "Waiting for your approval" stat shows (pr_tracking.py's
 # count_fleet_prs_waiting_for_approval()/fleet_prs_waiting_for_approval()):
-# any PR that's still open and unmerged on GitHub, whether or not an in-app
-# gitops-pr-pending/-shared-namespace gate row exists for it (2026-07-19:
-# this used to count only pending gates of those two types, silently
-# missing every source-repo-pr/app-repo-pr/onboarding PR, which never gets
-# one -- see pr_tracking.py's module docstring). Every other app-owner gate
-# type (`rollback-review`, `finding-unresolved-escalation`, ...) stays
-# visible via Fleet's per-app "needs action"/escalation badges and
+# any PR that's still open and unmerged on GitHub. Every other app-owner
+# recommendation (`rollback-review`, `finding-unresolved-escalation`, ...)
+# stays visible via Fleet's per-app "needs action"/escalation badges and
 # Assessment Detail's Actions tab, not this nav badge. Cached briefly since
 # nav renders on every page.
-#
-# Used to also split out a separate `admin_review` count for a second,
-# cross-app "Admin Review" nav link -- retired 2026-07-18 along with the
-# `cluster-admin-review` gate type it existed solely for.
 
 _nav_gate_badges_cache: dict = {"pending_actions": 0, "ts": 0.0}
 _NAV_GATE_BADGES_CACHE_TTL = 20  # seconds
 # Double-checked locking, mirroring get_store() above: the `await
-# store.list_gates(...)` below is a genuine yield point, so without a lock,
-# multiple concurrent requests can all see a stale cache, all refresh, and
-# interleave their writes into a torn read for a third caller. This is
-# async-only (never invoked via asyncio.to_thread), so an `asyncio.Lock` --
-# not a `threading.Lock` -- is the correct primitive here.
+# count_fleet_prs_waiting_for_approval(...)` below is a genuine yield
+# point, so without a lock, multiple concurrent requests can all see a
+# stale cache, all refresh, and interleave their writes into a torn read
+# for a third caller. This is async-only (never invoked via
+# asyncio.to_thread), so an `asyncio.Lock` -- not a `threading.Lock` -- is
+# the correct primitive here.
 _nav_gate_badges_lock = asyncio.Lock()
 
 

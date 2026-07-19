@@ -353,9 +353,7 @@
     <li class="finding-item">
       <span class="badge badge-info" title="{{ 'The GitOps infra repo for this app' if pr.repo_kind == 'gitops' else 'The code repo for this app' }}">{{ 'GitOps' if pr.repo_kind == 'gitops' else 'Code' }}</span>
       <a href="{{ pr.html_url | safe_url }}" target="_blank" hx-boost="false">{{ pr.title or pr.pr_url }}</a>
-      {% if pr.source == 'gate' %}
-      <span class="text-muted text-sm">&middot; awaiting your approval on the <a href="/assessments/{{ assessment_id }}?tab=actions">Actions tab</a></span>
-      {% endif %}
+      <span class="text-muted text-sm">&middot; merge or close it on the <a href="/assessments/{{ assessment_id }}?tab=actions">Actions tab</a></span>
     </li>
     {% endfor %}
   </ul>
@@ -552,12 +550,12 @@
   </p>
   {% endif %}
   {% if pending_actions %}
-  {% from "_macros.html" import gate_card, recommendation_card %}
+  {% from "_macros.html" import pr_action_card, recommendation_card %}
   {% for item in pending_actions %}
-  {% if item.kind in ("rollback", "escalation") %}
-  {{ recommendation_card(item, assessment_id) }}
+  {% if item.kind == "pr" %}
+  {{ pr_action_card(item, assessment_id) }}
   {% else %}
-  {{ gate_card(item) }}
+  {{ recommendation_card(item, assessment_id) }}
   {% endif %}
   {% endfor %}
   {% else %}
@@ -688,14 +686,10 @@
         <td class="text-sm text-muted">
           {% if pr.state == 'merged' and pr.merged_at %}
           Merged <span data-timestamp="{{ pr.merged_at }}">{{ pr.merged_at[:10] }}</span>
-          {% elif pr.gate_status == 'rejected' %}
-          Rejected{% if pr.reject_reason %} &mdash; {{ pr.reject_reason }}{% endif %}
-          {% elif pr.gate_status == 'dismissed' %}
-          Dismissed
-          {% elif pr.gate_status == 'expired' %}
-          Expired (stale, never approved or rejected)
+          {% elif pr.state == 'closed' and pr.reject_reason %}
+          Rejected &mdash; {{ pr.reject_reason }}
           {% elif pr.state == 'closed' %}
-          Closed without merging &mdash; no rejection reason is captured for this PR type today
+          Closed without merging
           {% elif pr.state == 'unknown' %}
           Not tracked &mdash; see the badge tooltip
           {% else %}

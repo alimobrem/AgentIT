@@ -85,8 +85,8 @@ CREATE TABLE IF NOT EXISTS apps (
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL
 );
--- Additive, idempotent column (same no-migration-framework convention as
--- `gates.pr_url` above): how often this app should be automatically
+-- Additive, idempotent column (same no-migration-framework convention used
+-- throughout this file): how often this app should be automatically
 -- re-assessed by watchers/reassess_scheduler.py, independent of the
 -- push-triggered/manual re-Assess paths that already existed. 'daily' is
 -- the default for every app (including ones onboarded before this column
@@ -156,37 +156,34 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_action ON events(action);
 CREATE INDEX IF NOT EXISTS idx_events_correlation_id ON events(correlation_id);
 
-CREATE TABLE IF NOT EXISTS gates (
-    id TEXT PRIMARY KEY,
-    assessment_id TEXT NOT NULL REFERENCES assessments(id),
-    gate_type TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    summary TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL,
-    resolved_at TIMESTAMPTZ,
-    resolved_by TEXT,
-    pr_url TEXT
-);
--- Additive, idempotent column for a table that may already exist from
--- before `pr_url` was added (this codebase has no migration framework --
--- see migrate_sqlite.py's module comment -- so this ALTER covers an
--- already-created table the same way the CREATE ... IF NOT EXISTS above
--- covers a brand-new one).
-ALTER TABLE gates ADD COLUMN IF NOT EXISTS pr_url TEXT;
-
 -- Remediations has been removed as a standalone concept: rows were keyed
 -- only by (assessment_id, agent_name, description) with zero link to the
--- delivery/gate/PR that actually resolved them, so "completion" was always
+-- delivery/PR that actually resolved them, so "completion" was always
 -- a hand-maintained flag (a manual "Mark Done" button as the only fallback)
--- -- see gates.pr_url / deliveries.details_json.outcomes.*.pr_url /
--- onboarding_results.pr_url (aggregated by pr_tracking.py) for the real,
--- honestly-derived fix/PR status this table never actually tracked. This
--- DROP is a one-time, idempotent cleanup for any database that already
--- created the table before this line landed; confirmed nothing of value is
--- lost -- every generated-fix/delivery outcome that ever mattered is
--- already durably recorded via `events`/`deliveries`/`gates` independent of
--- this table.
+-- -- see deliveries.details_json.outcomes.*.pr_url / onboarding_results.
+-- pr_url (aggregated by pr_tracking.py) for the real, honestly-derived
+-- fix/PR status this table never actually tracked. This DROP is a one-time,
+-- idempotent cleanup for any database that already created the table
+-- before this line landed; confirmed nothing of value is lost -- every
+-- generated-fix/delivery outcome that ever mattered is already durably
+-- recorded via `events`/`deliveries` independent of this table.
 DROP TABLE IF EXISTS remediations;
+
+-- The generic `gates` table (and its `resolve_gate()`/`create_gate()`
+-- machinery, routes/gates.py) has been removed entirely, 2026-07-19: every
+-- delivery now ends in a real GitHub PR that requires a human merge --
+-- that IS the approval step now, for every category (see pr_tracking.py's
+-- module docstring and routes/pr_actions.py's Merge/Close actions).
+-- rollback-review/finding-unresolved-escalation (which never had a PR to
+-- track) became plain, unresolved `events` rows instead (see
+-- store.list_unresolved_events()/routes/recommendations.py). Confirmed
+-- nothing of value is lost: every real PR/delivery outcome that ever
+-- mattered is already durably recorded via `deliveries`/`onboarding_
+-- results`/`pr_outcomes`, independent of this table; a rejection reason
+-- that used to live only in a gate-resolution's `agent_feedback` write is
+-- now captured directly from the real GitHub PR close comment
+-- (pr_outcomes.py), not lost.
+DROP TABLE IF EXISTS gates;
 
 -- Durable, queryable record of what happened to a real GitHub PR AgentIT
 -- opened, once it's known to be closed without merging (a real rejection)
@@ -380,7 +377,8 @@ CREATE INDEX IF NOT EXISTS idx_deliveries_app ON deliveries(app_name);
 -- finding the delivery targeted stopped showing up on re-assessment -- two
 -- different questions about the same delivery, so conflating them into one
 -- column would lose one or the other. Additive columns on an already-
--- created table, same convention as the `gates.pr_url` ALTER below.
+-- created table, same no-migration-framework convention used throughout
+-- this file.
 ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS target_findings_json JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS finding_resolution TEXT;
 
@@ -416,7 +414,7 @@ ON CONFLICT (repo_url) DO NOTHING;
 """
 
 _ALL_TABLES = [
-    "assessments", "apps", "onboarding_results", "events", "gates",
+    "assessments", "apps", "onboarding_results", "events",
     "agent_registry", "slos", "apply_results",
     "settings", "remediation_jobs", "scheduled_operations",
     "processed_webhooks", "agent_feedback", "skill_effectiveness",
@@ -589,20 +587,6 @@ class AssessmentStore:
 
     async def close(self) -> None:
         await self._pool.close()
-
-    async def _refresh_active_gates_metric(self) -> None:
-        """Keep the `agentit_active_gates` gauge in sync with pending gate count.
-
-        Called from every method that creates/resolves/expires a gate so the
-        gauge is correct regardless of which caller (portal route, automode,
-        slo-tracker, ...) triggered the change.
-        """
-        try:
-            from agentit.portal.metrics import active_gates
-            count = await self._pool.fetchval("SELECT COUNT(*) FROM gates WHERE status = 'pending'")
-            active_gates.set(count or 0)
-        except Exception:
-            logger.debug("Failed to refresh active_gates gauge", exc_info=True)
 
     # ── Settings ───────────────────────────────────────────────────────
 
@@ -838,21 +822,25 @@ class AssessmentStore:
     async def delete(self, assessment_id: str) -> bool:
         """Delete the whole app, not just the one ``assessment_id`` passed
         in -- Fleet's confirm dialog (fleet.html) promises removing "ALL
-        related data (assessments, onboarding, gates, SLOs)"
+        related data (assessments, onboarding, deliveries, SLOs)"
         and that this "cannot be undone". An app re-assessed more than once
         has older ``assessments`` rows the caller never names, and a delete
-        scoped to only one exact id left every one of THOSE rows' gates/
+        scoped to only one exact id left every one of THOSE rows'
         slos/onboarding/apply_results/deliveries/events fully
         intact -- ``get_fleet_data()``'s ``MAX(assessed_at)`` join then
         picked the next-latest surviving assessment on the next Fleet load,
         silently resurrecting the "deleted" app.
 
         Scoped by the app's ``repo_url`` -- the same identity
-        ``get_fleet_data()``/``list_history()``/``list_gates_for_assessment()``
+        ``get_fleet_data()``/``list_history()``/``list_deliveries_for_app()``
         already key every other fleet-wide/app-wide query on (see
         docs/architecture.md's "Data model: assessments vs. apps") -- so
         every historical assessment for this app, and everything hanging
-        off any of them, is removed together.
+        off any of them, is removed together. ``pr_outcomes``/
+        ``agent_feedback``/``skill_effectiveness`` are deliberately NOT
+        included -- durable learning history that must outlive an app being
+        removed from the fleet (see ``pr_outcomes`` table's own schema
+        comment).
         """
         async with self._pool.acquire() as conn:
             async with conn.transaction():
@@ -866,7 +854,7 @@ class AssessmentStore:
 
                 for table in (
                     "remediation_jobs", "onboarding_results",
-                    "slos", "gates", "apply_results", "deliveries",
+                    "slos", "apply_results", "deliveries",
                 ):
                     await conn.execute(
                         f"DELETE FROM {table} WHERE assessment_id IN "
@@ -1124,7 +1112,7 @@ class AssessmentStore:
         historical assessment of ``repo_url`` -- not just one assessment_id.
         Joined by ``repo_url`` (not an exact ``assessment_id`` match), the
         same "apps outlive a single assessment run" convention
-        ``list_gates_for_assessment()`` already uses (docs/architecture.md).
+        ``list_deliveries_for_app()`` already uses (docs/architecture.md).
         Used by ``pr_tracking.py`` to build one app's full PR History --
         ``onboarding_results.pr_url`` may itself be several ``|``-joined
         URLs (Per-Agent PRs writes multiple back into this one column, see
@@ -1151,8 +1139,8 @@ class AssessmentStore:
     async def list_all_onboarding_pr_urls(self) -> list[dict]:
         """Fleet-wide equivalent of ``list_onboardings_for_repo()`` -- every
         onboarding_results row with a real ``pr_url``, across every app, in
-        one query (mirrors ``list_all_gates()``/``list_all_deliveries()``'s
-        existing fleet-wide-in-one-query convention). Used by Fleet's
+        one query (mirrors ``list_all_deliveries()``'s existing fleet-wide-
+        in-one-query convention). Used by Fleet's
         "Total PRs"/"Open PRs" columns so that enrichment never issues one
         onboarding query per app.
         """
@@ -1475,181 +1463,6 @@ class AssessmentStore:
             })
         return fleet
 
-    # ── Gates ────────────────────────────────────────────────────────────
-
-    async def create_gate(
-        self, assessment_id: str, gate_type: str, summary: str, pr_url: str | None = None,
-    ) -> str:
-        """Create a pending gate, or return the existing one for this app.
-
-        ``pr_url``, when given (only ``gitops-pr-pending`` gates set this
-        today), is the structured, single-source-of-truth PR link for this
-        gate -- rendered as a real ``<a href>`` by ``_macros.html``'s
-        ``gate_card()`` instead of the gate having to be regex-scanned out
-        of ``summary``'s free text.
-
-        Dedupes by ``repo_url`` + ``gate_type`` (not exact ``assessment_id``):
-        gates are app-scoped facts that outlive a single assessment
-        (docs/architecture.md). Without the join, re-assess + SLO tracker
-        (which iterates every historical assessment) left N pending
-        ``rollback-review`` rows of the same type on Actions.
-
-        The dedup key spans a join (``gates.gate_type`` + the owning
-        assessment's ``repo_url``), so it can't be enforced with a plain
-        unique index on ``gates`` alone. Instead, the existence check and
-        the INSERT run inside one transaction serialized by a Postgres
-        advisory lock keyed on ``(repo_url, gate_type)`` -- two genuinely
-        concurrent callers for the same app+type (e.g. slo-tracker's tick
-        racing a webhook-triggered dispatch) now block on the lock rather
-        than both seeing "no pending gate" and both inserting a duplicate.
-        """
-        async with self._pool.acquire() as conn:
-            async with conn.transaction():
-                repo_row = await conn.fetchrow(
-                    "SELECT repo_url FROM assessments WHERE id = $1", assessment_id,
-                )
-                repo_url = repo_row["repo_url"] if repo_row else assessment_id
-                await conn.fetchval(
-                    "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
-                    f"{repo_url}:{gate_type}",
-                )
-
-                existing = await conn.fetchrow(
-                    """
-                    SELECT gates.id FROM gates
-                    INNER JOIN assessments ON gates.assessment_id = assessments.id
-                    WHERE assessments.repo_url = $1
-                      AND gates.gate_type = $2
-                      AND gates.status = 'pending'
-                    ORDER BY gates.created_at DESC
-                    LIMIT 1
-                    """,
-                    repo_url, gate_type,
-                )
-                if existing:
-                    return existing["id"]
-
-                gate_id = uuid.uuid4().hex
-                await conn.execute(
-                    """
-                    INSERT INTO gates (id, assessment_id, gate_type, status, summary, created_at, pr_url)
-                    VALUES ($1, $2, $3, 'pending', $4, $5, $6)
-                    """,
-                    gate_id, assessment_id, gate_type, summary, _now(), pr_url,
-                )
-        await self._refresh_active_gates_metric()
-        return gate_id
-
-    async def expire_stale_gates(self, hours: int = 24) -> int:
-        """Auto-reject pending gates older than the given hours."""
-        cutoff = _now() - timedelta(hours=hours)
-        status = await self._pool.execute(
-            """
-            UPDATE gates SET status = 'expired', resolved_at = $1, resolved_by = 'auto-expire'
-            WHERE status = 'pending' AND created_at < $2
-            """,
-            _now(), cutoff,
-        )
-        count = _affected(status)
-        if count:
-            await self._refresh_active_gates_metric()
-        return count
-
-    async def list_gates(self, status: str = "pending") -> list[dict]:
-        rows = await self._pool.fetch(
-            """
-            SELECT gates.*, assessments.repo_name AS app_name, assessments.repo_url AS repo_url
-            FROM gates LEFT JOIN assessments ON gates.assessment_id = assessments.id
-            WHERE gates.status = $1 ORDER BY gates.created_at DESC
-            """,
-            status,
-        )
-        return _rows_to_dicts(rows)
-
-    async def list_all_gates(self) -> list[dict]:
-        rows = await self._pool.fetch(
-            """
-            SELECT gates.*, assessments.repo_name AS app_name, assessments.repo_url AS repo_url
-            FROM gates LEFT JOIN assessments ON gates.assessment_id = assessments.id
-            ORDER BY gates.created_at DESC
-            """
-        )
-        return _rows_to_dicts(rows)
-
-    async def list_gates_for_assessment(self, assessment_id: str, status: str | None = None) -> list[dict]:
-        """Keyed off ``repo_url``, joined back through every historical
-        assessment of the same app, not an exact ``assessment_id`` match --
-        see docs/architecture.md's "Data model: assessments vs. apps"."""
-        if status is not None:
-            rows = await self._pool.fetch(
-                """
-                SELECT gates.* FROM gates
-                INNER JOIN assessments ON gates.assessment_id = assessments.id
-                WHERE assessments.repo_url = (SELECT repo_url FROM assessments WHERE id = $1)
-                  AND gates.status = $2
-                ORDER BY gates.created_at DESC
-                """,
-                assessment_id, status,
-            )
-        else:
-            rows = await self._pool.fetch(
-                """
-                SELECT gates.* FROM gates
-                INNER JOIN assessments ON gates.assessment_id = assessments.id
-                WHERE assessments.repo_url = (SELECT repo_url FROM assessments WHERE id = $1)
-                ORDER BY gates.created_at DESC
-                """,
-                assessment_id,
-            )
-        return _rows_to_dicts(rows)
-
-    async def get_stale_gates(self, hours: int = 24) -> list[dict]:
-        """Find pending gates older than the given hours."""
-        cutoff = _now() - timedelta(hours=hours)
-        rows = await self._pool.fetch(
-            "SELECT * FROM gates WHERE status = 'pending' AND created_at < $1 ORDER BY created_at ASC",
-            cutoff,
-        )
-        return _rows_to_dicts(rows)
-
-    async def resolve_gate(self, gate_id: str, status: str, resolved_by: str) -> bool:
-        """Atomically flip a gate away from `pending`. The `WHERE status =
-        'pending'` makes this the actual claim: only one of any
-        near-simultaneous callers for the same gate_id can ever see
-        `True` back. Callers must check the return value and only
-        proceed to a side effect (cluster apply / PR merge / GitOps
-        commit) after a `True` claim -- see `reopen_gate()` below for
-        undoing a claim whose side effect then failed."""
-        result = await self._pool.execute(
-            """
-            UPDATE gates SET status = $1, resolved_at = $2, resolved_by = $3
-            WHERE id = $4 AND status = 'pending'
-            """,
-            status, _now(), resolved_by, gate_id,
-        )
-        changed = _affected(result) > 0
-        if changed:
-            await self._refresh_active_gates_metric()
-        return changed
-
-    async def reopen_gate(self, gate_id: str, from_status: str) -> bool:
-        """Revert a gate claimed by `resolve_gate()` back to `pending`
-        after its side effect failed, so a human can retry (or reject)
-        instead of it being left falsely marked resolved. Scoped to
-        `WHERE status = from_status` so this only ever undoes the exact
-        claim the calling request itself just made."""
-        result = await self._pool.execute(
-            """
-            UPDATE gates SET status = 'pending', resolved_at = NULL, resolved_by = NULL
-            WHERE id = $1 AND status = $2
-            """,
-            gate_id, from_status,
-        )
-        changed = _affected(result) > 0
-        if changed:
-            await self._refresh_active_gates_metric()
-        return changed
-
     # ── Deliveries ───────────────────────────────────────────────────────
 
     async def create_delivery(
@@ -1880,7 +1693,7 @@ class AssessmentStore:
     async def list_slos(self, assessment_id: str) -> list[dict]:
         """Keyed off ``repo_url``, joined back through every historical
         assessment of the same app, the same fix shape
-        ``list_gates_for_assessment()`` already has.
+        ``list_deliveries_for_app()`` already has.
 
         Identical ``(metric_name, target_value)`` rows from repeated
         onboarding (before default-SLO seeding skipped existing metrics)
@@ -2030,8 +1843,8 @@ class AssessmentStore:
         update, or a duplicate `BackgroundTasks` dispatch) could both read
         the same ``steps_completed`` array before either writes, each append
         their own step, and whichever commits last silently overwrites the
-        other's step -- a lost update, same shape as the `create_gate`/
-        `save_remediation` dedup races fixed elsewhere in this file. Postgres
+        other's step -- a lost update, the same class of race the advisory-
+        lock/row-lock patterns elsewhere in this file guard against. Postgres
         default `READ COMMITTED` isolation does not prevent this on its own;
         `FOR UPDATE` makes the second transaction's `SELECT` block until the
         first commits, so it reads the already-appended array instead of a
@@ -2351,6 +2164,18 @@ class AssessmentStore:
         )
         return {r["pr_url"] for r in rows}
 
+    async def get_pr_outcomes_for_urls(self, pr_urls: list[str]) -> dict[str, dict]:
+        """Batched ``{pr_url: outcome_dict}`` for every one of ``pr_urls``
+        that has a recorded outcome -- one query so a caller attaching
+        outcomes onto many PR records at once (pr_tracking.py's
+        ``attach_pr_outcomes()``) never issues one query per record."""
+        if not pr_urls:
+            return {}
+        rows = await self._pool.fetch(
+            "SELECT * FROM pr_outcomes WHERE pr_url = ANY($1::text[])", pr_urls,
+        )
+        return {d["pr_url"]: d for r in rows if (d := _pr_outcome_row_to_dict(r)) is not None}
+
     async def list_pr_outcomes(
         self, app_name: str = "", finding_category: str = "", skill_name: str = "",
     ) -> list[dict]:
@@ -2527,13 +2352,7 @@ class AssessmentStore:
                ORDER BY timestamp ASC""",
             f'%{assessment_id}%', f'%{assessment_id[:12]}%',
         )
-
-        gates = await self._pool.fetch(
-            "SELECT created_at as timestamp, 'gate' as agent_id, gate_type as action, status as severity, summary FROM gates WHERE assessment_id = $1 ORDER BY created_at ASC",
-            assessment_id,
-        )
-
-        timeline = _rows_to_dicts(events) + _rows_to_dicts(gates)
+        timeline = _rows_to_dicts(events)
         timeline.sort(key=lambda x: x.get("timestamp", ""))
         return timeline
 
@@ -2543,18 +2362,16 @@ class AssessmentStore:
         unique_apps = await self._pool.fetchval("SELECT COUNT(DISTINCT repo_url) FROM assessments") or 0
         total_onboardings = await self._pool.fetchval("SELECT COUNT(*) FROM onboarding_results") or 0
         # Real PR activity, not a hand-maintained "remediations" completion
-        # flag with no link to any actual PR/gate/delivery (see the removed
+        # flag with no link to any actual PR/delivery (see the removed
         # `remediations` table's schema comment) -- a pure DB count across
-        # the exact three places pr_tracking.py documents a `pr_url` can
-        # land, with no live GitHub call (mirrors every other stat here).
-        # `gitops_pr_count`: gates.pr_url on a gitops-pr-pending gate (the
-        # GitOps infra-repo PR). `delivery_pr_count`: a delivery outcome's
-        # own pr_url (source-repo-pr/app-repo-pr categories). `onboarding_pr_
-        # count`: onboarding_results.pr_url, which may itself be several
-        # `|`-joined URLs (Per-Agent PRs) -- split and counted individually.
-        gitops_pr_count = await self._pool.fetchval(
-            "SELECT COUNT(*) FROM gates WHERE gate_type = 'gitops-pr-pending' AND pr_url IS NOT NULL"
-        ) or 0
+        # the two places pr_tracking.py documents a `pr_url` can land, with
+        # no live GitHub call (mirrors every other stat here).
+        # `delivery_pr_count`: a delivery outcome's own pr_url (every
+        # category now, including the former gate-tracked cluster_config/
+        # cicd_shared_namespace -- the `gates` table has been removed
+        # entirely, 2026-07-19). `onboarding_pr_count`: onboarding_results.
+        # pr_url, which may itself be several `|`-joined URLs (Per-Agent
+        # PRs) -- split and counted individually.
         delivery_pr_count = await self._pool.fetchval(
             """
             SELECT COUNT(*) FROM deliveries d,
@@ -2569,8 +2386,7 @@ class AssessmentStore:
             len([u for u in (row["pr_url"] or "").split("|") if u.strip()])
             for row in onboarding_pr_rows
         )
-        total_prs = gitops_pr_count + delivery_pr_count + onboarding_pr_count
-        pending_gates = await self._pool.fetchval("SELECT COUNT(*) FROM gates WHERE status = 'pending'") or 0
+        total_prs = delivery_pr_count + onboarding_pr_count
         total_events = await self._pool.fetchval("SELECT COUNT(*) FROM events") or 0
 
         row = await self._pool.fetchrow(
@@ -2584,7 +2400,6 @@ class AssessmentStore:
             "unique_apps": unique_apps,
             "total_onboardings": total_onboardings,
             "total_prs": total_prs,
-            "pending_gates": pending_gates,
             "total_events": total_events,
             "total_feedback": total_feedback,
             "total_rejections": total_rejections,
@@ -2792,13 +2607,6 @@ class AssessmentStore:
                 )
                 counts["onboarding_results"] = _affected(status)
 
-                status = await conn.execute(
-                    "DELETE FROM gates WHERE status IN ('approved', 'rejected', 'expired', 'cancelled') "
-                    "AND resolved_at < $1",
-                    cutoff,
-                )
-                counts["gates"] = _affected(status)
-
                 webhook_cutoff = _now() - timedelta(days=7)
                 status = await conn.execute(
                     "DELETE FROM processed_webhooks WHERE processed_at < $1",
@@ -2845,7 +2653,7 @@ class AssessmentStore:
     # ── DB size / row-count metrics ──────────────────────────────────────
 
     _METRIC_TABLES = (
-        "assessments", "apps", "onboarding_results", "events", "gates",
+        "assessments", "apps", "onboarding_results", "events",
         "agent_registry", "slos", "apply_results", "remediation_jobs",
         "scheduled_operations", "agent_feedback", "skill_effectiveness",
         "agent_runs", "check_results", "deliveries", "pr_outcomes",

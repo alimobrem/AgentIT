@@ -31,30 +31,6 @@ CATEGORY_NARRATIVE_REPORT = "narrative_report"
 CATEGORY_MANIFEST_AT_REST = "manifest_at_rest"
 CATEGORY_SECRET_BLOCKED = "secret_blocked"
 
-# Retired (2026-07-18): CI/CD manifests destined for a shared operator
-# namespace no longer create this gate type or take any elevated-RBAC direct-
-# apply path at all -- see CATEGORY_CICD_SHARED_NAMESPACE's mechanism below,
-# now MECHANISM_INFRA_REPO_COMMIT like every other category, gated on a
-# standard "gitops-pr-pending" merge-review instead. This string constant is
-# kept only so already-persisted historical `gates` rows of this type (and
-# the one real, still-pending one this migration found live) keep rendering
-# honest text instead of a `KeyError`/blank string -- no code path creates a
-# gate of this type anymore, and it no longer gets a dedicated cross-app
-# page: a stale pending row now simply surfaces on its own app's Fleet
-# "needs action" badge / Assessment Detail Actions tab like any other gate,
-# and resolves via resolve_gate()'s generic route_and_deliver() fallback
-# (which re-classifies its files and routes any still-cicd ones through the
-# same GitOps PR path as a fresh delivery would).
-ADMIN_REVIEW_GATE_TYPE = "cluster-admin-review"
-
-# The gate type a finding creates once it's failed to resolve
-# FINDING_ESCALATION_THRESHOLD times in a row (docs/onboarding-loop-vision-
-# gap-analysis.md Phase 4) -- a real, visible "needs you" signal (see
-# resolve_gate()'s special case for it, routes/gates.py), not a silent
-# give-up and not another identical auto-retry forever. Per-app, like
-# every other gate type above ADMIN_REVIEW_GATE_TYPE.
-ESCALATION_GATE_TYPE = "finding-unresolved-escalation"
-
 # How many confirmed "still present after the fix" delivery attempts, for
 # the same (app, finding-category), before this stops auto-retrying and
 # escalates to a human instead. 3 matches this codebase's existing
@@ -68,16 +44,16 @@ FINDING_ESCALATION_THRESHOLD = 3
 # Mechanisms a category can be routed to. MECHANISM_DIRECT_APPLY is no
 # longer a selectable live outcome (Direct Apply has been removed as a
 # concept entirely -- see resolve_cluster_config_mechanism()) -- the
-# constant/string survives only so historical `deliveries`/`gates` rows
-# already persisted with this mechanism (from before this directive
-# landed) still render honest text instead of a blank/`KeyError` lookup.
+# constant/string survives only so historical `deliveries` rows already
+# persisted with this mechanism (from before this directive landed) still
+# render honest text instead of a blank/`KeyError` lookup.
 MECHANISM_DIRECT_APPLY = "direct-apply"
 MECHANISM_INFRA_REPO_COMMIT = "infra-repo-commit"
-# Retired (2026-07-18) alongside ADMIN_REVIEW_GATE_TYPE above -- kept only so
-# historical `deliveries`/`gates` rows already persisted with this mechanism
-# string still render honest text (see MECHANISM_DIRECT_APPLY's identical
-# precedent above). CATEGORY_CICD_SHARED_NAMESPACE now resolves to
-# MECHANISM_INFRA_REPO_COMMIT, same as CATEGORY_CLUSTER_CONFIG.
+# Retired (2026-07-18, alongside the direct-apply cluster-admin-review gate
+# type) -- kept only so historical `deliveries` rows already persisted with
+# this mechanism string still render honest text (see MECHANISM_DIRECT_
+# APPLY's identical precedent above). CATEGORY_CICD_SHARED_NAMESPACE now
+# resolves to MECHANISM_INFRA_REPO_COMMIT, same as CATEGORY_CLUSTER_CONFIG.
 MECHANISM_CLUSTER_ADMIN_REVIEW_GATE = "cluster-admin-review-gate"
 MECHANISM_SOURCE_REPO_PR = "source-repo-pr"
 MECHANISM_APP_REPO_PR = "app-repo-pr"
@@ -86,27 +62,16 @@ MECHANISM_NONE = "none"
 # The distinct GitOps-infra-repo subfolder (apps/{app}/{this}/*, in place of
 # a file's own generation-source `category`) and Git branch (in place of the
 # app-config category's shared `agentit/{app}` branch) CI/CD-shared-namespace
-# manifests commit to -- see _deliver_via_gitops_pr_and_gate() below. Two
-# reasons this must never share cluster-config's own branch/folder: (1) a
-# human reviewer needs an unambiguous visual signal ("this PR/folder touches
-# a namespace every app on the cluster shares, not just this app's own") per
-# the 2026-07-18 cluster-admin-review-removal decision; (2) commit_to_infra_
+# manifests commit to -- see _deliver_via_gitops_pr() below. Two reasons this
+# must never share cluster-config's own branch/folder: (1) a human reviewer
+# needs an unambiguous visual signal ("this PR/folder touches a namespace
+# every app on the cluster shares, not just this app's own") per the
+# 2026-07-18 cluster-admin-review-removal decision; (2) commit_to_infra_
 # repo() force-pushes whatever branch name it's given, rebased fresh off the
 # infra repo's default branch every call -- two categories sharing one
 # branch name within the same route_and_deliver() call would silently
 # clobber each other's commit instead of both landing.
 _CICD_SHARED_NAMESPACE_PATH_PREFIX = "cicd-shared-namespace"
-
-# The distinct gate type CI/CD-shared-namespace's own PR-merge gate uses --
-# see _deliver_via_gitops_pr_and_gate()'s ``gate_type`` docstring for why
-# this can't just be the standard "gitops-pr-pending": store.create_gate()
-# dedupes by (repo_url, gate_type) against already-pending gates, so a
-# mixed batch delivering both categories for the same app in the same
-# route_and_deliver() call would otherwise collide, silently losing the
-# second category's own gate. resolve_gate() (routes/gates.py) treats this
-# and the standard type identically at approval time -- both just merge a
-# PR named in the gate's own summary.
-_CICD_SHARED_NAMESPACE_GATE_TYPE = "gitops-pr-pending-shared-namespace"
 
 _NARRATIVE_REPORT_FILENAMES = frozenset({"dependency-report.md", "cost-report.md"})
 
@@ -166,10 +131,9 @@ def repo_kind_for_mechanism(mechanism: str) -> str:
 
 def resolve_cluster_config_mechanism(infra_repo_url: str | None) -> str:
     """The cluster/app-config category's delivery mechanism, shared by every
-    caller that predicts or acts on it (``route_and_deliver()``,
-    ``gate_delivery_confirmation()``, and the dry-run preview on Onboard
-    Results) so they can never disagree about what a given
-    ``infra_repo_url`` resolves to.
+    caller that predicts or acts on it (``route_and_deliver()`` and the
+    dry-run preview on Onboard Results) so they can never disagree about
+    what a given ``infra_repo_url`` resolves to.
 
     Direct Apply has been removed as a concept entirely (product directive:
     all apps must use GitOps; GitHub-PR-merge is the only sanctioned gate) --
@@ -201,10 +165,10 @@ def resolve_cluster_config_mechanism(infra_repo_url: str | None) -> str:
 def confirmation_text(mechanism: str, *, infra_repo_url: str | None = None) -> str:
     """The exact statement a human must see -- and actively acknowledge --
     immediately before ``route_and_deliver()`` actually fires for the
-    cluster/app-config category, e.g. via a gate-approve confirmation or the
-    portal's unified "Deliver" action. Reused verbatim by both the dry-run
-    preview *and* the point-of-no-return confirmation dialog, so the two
-    can never say different things about the same decision.
+    cluster/app-config category, via the portal's unified "Deliver" action.
+    Reused verbatim by both the dry-run preview *and* the point-of-no-return
+    confirmation dialog, so the two can never say different things about
+    the same decision.
 
     For the direct-apply path, this names the *target cluster* (API server
     host, or in-cluster) alongside the *action* -- ``kube.get_client()``
@@ -218,10 +182,10 @@ def confirmation_text(mechanism: str, *, infra_repo_url: str | None = None) -> s
 
     ``MECHANISM_DIRECT_APPLY`` handling below is kept for two reasons even
     though ``resolve_cluster_config_mechanism()`` can never select it as a
-    live outcome anymore: historical ``deliveries``/``gates`` rows already
-    persisted with this mechanism string still need honest, renderable text
-    if ever re-derived rather than a `KeyError`/blank string, and this
-    function has no way to distinguish "asked to describe a mechanism that
+    live outcome anymore: historical ``deliveries`` rows already persisted
+    with this mechanism string still need honest, renderable text if ever
+    re-derived rather than a `KeyError`/blank string, and this function has
+    no way to distinguish "asked to describe a mechanism that
     can no longer be chosen" from "asked to describe a legacy record."
     """
     base = MECHANISM_DESCRIPTIONS.get(mechanism, mechanism)
@@ -513,55 +477,13 @@ async def deliver_with_verification(
     return {"mechanism": mechanism, "dry_run": False, **result}
 
 
-async def gate_delivery_confirmation(store: object, gate: dict) -> str:
-    """The exact "AgentIT will: ..." statement a human must see -- in the
-    un-skippable confirm modal, not just page prose -- before approving a
-    gate actually triggers a real delivery. Shared by every surface that
-    renders a gate card (the retired global Gates page, Assessment Detail's
-    Actions tab, and the Fleet-embedded ones) so the gate list, the dry-run
-    preview, and the point-of-no-return confirmation can never say different
-    things about the same decision (per the 2026-07-14 customer-review
-    addendum to docs/unified-apply-flow.md).
-    """
-    gate_type = gate.get("gate_type", "")
-    if gate_type == "rollback-review":
-        return "AgentIT will: mark this rollback approved for manual intervention -- no automatic apply is triggered."
-    if gate_type == ESCALATION_GATE_TYPE:
-        return (
-            "AgentIT will: mark this escalated finding acknowledged for manual follow-up -- "
-            "no automatic fix or re-delivery is triggered by approving this gate."
-        )
-    if gate_type in ("gitops-pr-pending", _CICD_SHARED_NAMESPACE_GATE_TYPE, "cluster-admin-review"):
-        # These gate types already carry the exact mechanism + reason in
-        # their own summary text (see automode.py / delivery.py's gate
-        # creation calls) -- reuse it verbatim instead of restating it.
-        # (`auto-mode-scope-review` used to be a third member of this list
-        # -- it can no longer be created at all now that the per-(namespace,
-        # kind) auto-mode allowlist that created it has been removed along
-        # with AutoMode's direct-apply branch.) `cluster-admin-review` itself
-        # can no longer be created either (2026-07-18) -- kept here only so
-        # a stale, already-persisted pending gate of that type still renders
-        # its own historical summary verbatim instead of falling through to
-        # the generic cluster-config-mechanism branch below.
-        return gate.get("summary", "")
-    assessment_id = gate.get("assessment_id")
-    if not assessment_id:
-        return ""
-    report = await store.get(assessment_id)
-    if report is None:
-        return ""
-    _registered, infra_repo_url = await is_gitops_registered(report.repo_name, report)
-    mechanism = resolve_cluster_config_mechanism(infra_repo_url)
-    return confirmation_text(mechanism, infra_repo_url=infra_repo_url)
-
-
 def _cicd_shared_namespace_note(files: list[dict]) -> str:
-    """The extra callout prepended to a CI/CD-shared-namespace delivery's
-    ``gitops-pr-pending`` gate summary (see ``_deliver_via_gitops_pr_and_
-    gate()`` below) -- names the exact target namespace(s), same as the
-    retired ``cluster-admin-review`` gate's own summary used to, so a
-    reviewer immediately sees *which* shared namespace this PR affects
-    without opening the diff.
+    """The extra callout logged alongside a CI/CD-shared-namespace
+    delivery's PR-opened event (see ``_deliver_via_gitops_pr()`` below) --
+    names the exact target namespace(s), same as the retired
+    ``cluster-admin-review`` gate's own summary used to, so a reviewer
+    immediately sees *which* shared namespace this PR affects without
+    opening the diff.
     """
     namespaces: set[str] = set()
     for f in files:
@@ -577,7 +499,7 @@ def _cicd_shared_namespace_note(files: list[dict]) -> str:
     )
 
 
-async def _deliver_via_gitops_pr_and_gate(
+async def _deliver_via_gitops_pr(
     *,
     files: list[dict],
     report: AssessmentReport,
@@ -589,38 +511,32 @@ async def _deliver_via_gitops_pr_and_gate(
     infra_repo_url: str | None,
     path_prefix: str | None = None,
     branch_name: str | None = None,
-    gate_note: str = "",
-    gate_type: str = "gitops-pr-pending",
+    note: str = "",
 ) -> dict:
-    """Commit ``files`` to the GitOps infra repo and, once a real (non-dry-
-    run) PR is actually opened, gate its merge behind a review -- the exact
-    sequence the cluster/app-config category has always used, and (since
-    2026-07-18, replacing the removed ``cluster-admin-review`` direct-apply
-    gate) the CI/CD-shared-namespace category now uses too. Shared here so
-    ``route_and_deliver()``'s two call sites below can never drift apart on
-    this sequence.
+    """Commit ``files`` to the GitOps infra repo and open a real PR -- the
+    exact sequence the cluster/app-config category has always used, and
+    (since 2026-07-18, replacing the removed ``cluster-admin-review``
+    direct-apply gate) the CI/CD-shared-namespace category now uses too.
+    Shared here so ``route_and_deliver()``'s two call sites below can never
+    drift apart on this sequence.
+
+    No gate is created for the opened PR (the ``gates`` table/generic
+    gate-resolution machinery has been removed entirely, 2026-07-19): the
+    real GitHub PR merge review IS the approval step now, for every
+    delivery category equally -- ``pr_tracking.py`` derives "waiting for
+    your approval"/merged/rejected purely from the PR's own live GitHub
+    state (plus ``pr_outcomes.py``'s durable reject-reason/pre-merge-edit
+    capture), and ``routes/pr_actions.py`` provides the real Merge/Close
+    actions. This function's only remaining job is committing the files and
+    opening the PR; the event logged below (``gitops-pr-opened``) is purely
+    an observability record, not anything a human resolves.
 
     ``path_prefix``/``branch_name`` (see ``_CICD_SHARED_NAMESPACE_PATH_
     PREFIX``) let a caller land this commit in a distinctly-named subfolder/
     branch -- and therefore a distinct PR -- instead of interleaving with the
-    app's own cluster-config commit. ``gate_note``, when non-empty, is
-    prepended to the created gate's summary as an extra callout a reviewer
-    needs (e.g. naming the exact shared namespace this PR touches).
-
-    ``gate_type`` defaults to the standard ``"gitops-pr-pending"`` (cluster-
-    config's own) but MUST be overridden to a distinct value by any other
-    caller within the same ``route_and_deliver()`` invocation --
-    ``store.create_gate()`` dedupes by ``(repo_url, gate_type)`` against
-    already-pending gates (by design, so a re-assess/watcher tick doesn't
-    pile up N duplicate rows of the same type -- see its own docstring), so
-    two categories both requesting a fresh ``"gitops-pr-pending"`` gate for
-    the SAME app in the SAME call would silently collide: the second
-    ``create_gate()`` call would just hand back the FIRST category's gate
-    id, silently losing the second PR's own review gate entirely. The CI/CD-
-    shared-namespace category passes its own distinct
-    ``"gitops-pr-pending-shared-namespace"`` type for exactly this reason
-    (see ``route_and_deliver()``'s two call sites) -- ``resolve_gate()``
-    (``routes/gates.py``) treats both types identically at approval time.
+    app's own cluster-config commit. ``note``, when non-empty, is prepended
+    to the logged event's summary as an extra callout (e.g. naming the exact
+    shared namespace this PR touches).
     """
     outcome = await deliver_with_verification(
         mechanism=MECHANISM_INFRA_REPO_COMMIT, files=files, report=report,
@@ -630,11 +546,13 @@ async def _deliver_via_gitops_pr_and_gate(
     pr_url = outcome.get("pr_url") if isinstance(outcome, dict) and not dry_run else None
     if pr_url and "error" not in outcome:
         mechanism_text = confirmation_text(MECHANISM_INFRA_REPO_COMMIT, infra_repo_url=infra_repo_url)
-        summary = f"{mechanism_text} PR opened: {pr_url}. Approving this gate merges the PR -- AgentIT never auto-merges."
-        if gate_note:
-            summary = f"{gate_note} {summary}"
-        gate_id = await store.create_gate(assessment_id, gate_type, summary, pr_url=pr_url)
-        outcome["gate_id"] = gate_id
+        summary = f"{mechanism_text} PR opened: {pr_url}. Merge it (or Close it) from the Actions tab -- AgentIT never auto-merges."
+        if note:
+            summary = f"{note} {summary}"
+        try:
+            await store.log_event("delivery", "gitops-pr-opened", app_name, "info", summary)
+        except Exception:
+            logger.warning("Failed to log gitops-pr-opened event for %s", app_name, exc_info=True)
     return outcome
 
 
@@ -756,8 +674,8 @@ async def route_and_deliver(
     ``create_onboarding_pr``/``commit_to_infra_repo`` on their own.
 
     ``assessment_id`` is required (not in the design doc's illustrative
-    signature) because every side effect here -- gates, SLOs, audit
-    resources, the ``deliveries`` row itself -- is keyed by it.
+    signature) because every side effect here -- SLOs, audit resources, the
+    ``deliveries`` row itself -- is keyed by it.
 
     No longer takes a ``force_dry_run_first`` parameter -- that was
     AutoMode's own safety knob for the cluster-config direct-apply branch's
@@ -895,10 +813,10 @@ async def route_and_deliver(
     try:
         if cluster_files:
             if mechanisms[CATEGORY_CLUSTER_CONFIG] == MECHANISM_INFRA_REPO_COMMIT and report is not None:
-                # Mirror AutoMode: portal Deliver opens the PR; Approve & Deliver
-                # on gitops-pr-pending merges it. Without this gate the manual
-                # Assess→Generate→Deliver path had no Gate step for GitOps apps.
-                outcomes[CATEGORY_CLUSTER_CONFIG] = await _deliver_via_gitops_pr_and_gate(
+                # Opens the PR; a human merges (or closes) it directly from
+                # the Actions tab (routes/pr_actions.py) -- the real GitHub
+                # PR review IS the approval step now, no gate involved.
+                outcomes[CATEGORY_CLUSTER_CONFIG] = await _deliver_via_gitops_pr(
                     files=cluster_files, report=report, app_name=app_name, store=store,
                     assessment_id=assessment_id, actor=actor, dry_run=dry_run,
                     infra_repo_url=infra_repo_url,
@@ -930,17 +848,16 @@ async def route_and_deliver(
             # AgentIT lacks (verified live, see the README), so this commits
             # to a distinctly-named path/branch (never the cluster-config
             # category's own, even within this same call -- see
-            # _CICD_SHARED_NAMESPACE_PATH_PREFIX) and gates its merge behind
-            # a standard gitops-pr-pending review, same as cluster-config.
+            # _CICD_SHARED_NAMESPACE_PATH_PREFIX) and opens its own PR,
+            # merged/closed the same way as cluster-config's.
             if mechanisms[CATEGORY_CICD_SHARED_NAMESPACE] == MECHANISM_INFRA_REPO_COMMIT and report is not None:
-                outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = await _deliver_via_gitops_pr_and_gate(
+                outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = await _deliver_via_gitops_pr(
                     files=cicd_files, report=report, app_name=app_name, store=store,
                     assessment_id=assessment_id, actor=actor, dry_run=dry_run,
                     infra_repo_url=infra_repo_url,
                     path_prefix=_CICD_SHARED_NAMESPACE_PATH_PREFIX,
                     branch_name=f"agentit/{_sanitize_app_name(app_name)}-cicd-shared-namespace",
-                    gate_note=_cicd_shared_namespace_note(cicd_files),
-                    gate_type=_CICD_SHARED_NAMESPACE_GATE_TYPE,
+                    note=_cicd_shared_namespace_note(cicd_files),
                 )
             else:
                 outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = {
@@ -1006,8 +923,7 @@ async def route_and_deliver(
 # ── Finding-scoped re-verification & bounded auto-escalation ──────────────
 # (docs/onboarding-loop-vision-gap-analysis.md §7/Phase 3-4). Nothing above
 # this line changes shape for a caller that never passes `target_findings`.
-# ESCALATION_GATE_TYPE/FINDING_ESCALATION_THRESHOLD are defined near the top
-# of this module, alongside ADMIN_REVIEW_GATE_TYPE.
+# FINDING_ESCALATION_THRESHOLD is defined near the top of this module.
 
 
 async def correlate_delivery_finding(
@@ -1174,7 +1090,7 @@ async def redispatch_finding_fix(
         dry_run=False, target_findings=[finding],
     )
     cluster_outcome = delivery["outcomes"].get(CATEGORY_CLUSTER_CONFIG)
-    if isinstance(cluster_outcome, dict) and cluster_outcome.get("gate_id"):
+    if isinstance(cluster_outcome, dict) and cluster_outcome.get("pr_url"):
         action = "delivered"
         reason = f"Opened PR {cluster_outcome.get('pr_url', '')} -- awaiting human merge".strip()
     elif isinstance(cluster_outcome, dict) and cluster_outcome.get("error"):
@@ -1207,8 +1123,8 @@ async def handle_confirmed_finding_failure(
     category = finding[0]
     failure_count = await store.get_finding_failure_count(app_name, category)
     if failure_count >= FINDING_ESCALATION_THRESHOLD:
-        gate_id = await escalate_unresolved_finding(store, assessment_id, app_name, finding, failure_count)
-        return {"action": "escalated", "gate_id": gate_id, "failure_count": failure_count}
+        event_id = await escalate_unresolved_finding(store, assessment_id, app_name, finding, failure_count)
+        return {"action": "escalated", "event_id": event_id, "failure_count": failure_count}
     # Nested (not flattened via `**result`) deliberately: redispatch_finding_
     # fix() returns its own "action" key (the underlying delivery outcome,
     # e.g. "delivered"/"routing-error") -- flattening it would silently

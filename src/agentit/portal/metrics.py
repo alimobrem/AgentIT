@@ -30,11 +30,6 @@ remediations_total = Counter(
     ["agent", "status"],
 )
 
-active_gates = Gauge(
-    "agentit_active_gates",
-    "Number of pending approval gates",
-)
-
 fleet_size = Gauge(
     "agentit_fleet_size",
     "Number of managed applications",

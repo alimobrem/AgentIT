@@ -144,6 +144,28 @@ async def _record_rejection_side_effects(store: object, record: dict, reject_rea
             await record_skill_outcomes(store, app_name, files, None, "rejected", reject_reason)
 
 
+async def attach_pr_outcomes(store: object, records: list[dict]) -> list[dict]:
+    """Attach ``reject_reason``/``edited_before_merge``/``edit_diff`` onto
+    every record in ``records`` that has a durably-recorded ``pr_outcomes``
+    row -- one batched query, so a caller enriching many PR records at once
+    (Fleet-wide or one app's history) never issues one query per record.
+    Call ``sync_pr_outcomes()`` first so a newly-detected outcome (this same
+    page load) is already in the table by the time this runs.
+    """
+    if not hasattr(store, "get_pr_outcomes_for_urls"):
+        return records
+    urls = [r["pr_url"] for r in records if r.get("pr_url")]
+    outcomes = await store.get_pr_outcomes_for_urls(urls)
+    for record in records:
+        outcome = outcomes.get(record.get("pr_url"))
+        if outcome is None:
+            continue
+        record["reject_reason"] = outcome.get("reject_reason") or ""
+        record["edited_before_merge"] = outcome["outcome"] == OUTCOME_EDITED_BEFORE_MERGE
+        record["edit_diff"] = outcome.get("edit_diff") or []
+    return records
+
+
 async def sync_pr_outcomes(
     store: object,
     records: list[dict],

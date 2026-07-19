@@ -192,6 +192,34 @@ class TestSyncPrOutcomesEditedBeforeMerge:
         assert await store.get_pr_outcome(record["pr_url"]) is None
 
 
+class TestAttachPrOutcomes:
+    async def test_attaches_reject_reason_onto_matching_records(self):
+        store = await make_store()
+        await store.record_pr_outcome(
+            "https://github.com/o/r/pull/1", "app-a", "rejected", reject_reason="duplicate",
+        )
+        records = [{"pr_url": "https://github.com/o/r/pull/1"}, {"pr_url": "https://github.com/o/r/pull/2"}]
+
+        await pr_outcomes.attach_pr_outcomes(store, records)
+
+        assert records[0]["reject_reason"] == "duplicate"
+        assert records[0]["edited_before_merge"] is False
+        assert "reject_reason" not in records[1]
+
+    async def test_attaches_edited_before_merge_flag(self):
+        store = await make_store()
+        await store.record_pr_outcome(
+            "https://github.com/o/r/pull/3", "app-a", "edited_before_merge",
+            edit_diff=[{"sha": "abcd"}],
+        )
+        records = [{"pr_url": "https://github.com/o/r/pull/3"}]
+
+        await pr_outcomes.attach_pr_outcomes(store, records)
+
+        assert records[0]["edited_before_merge"] is True
+        assert records[0]["edit_diff"][0]["sha"] == "abcd"
+
+
 class TestSyncPrOutcomesSkipsOpen:
     async def test_open_pr_is_never_synced(self):
         store = await make_store()
@@ -220,6 +248,17 @@ class TestListPrOutcomes:
         assert len(await store.list_pr_outcomes(finding_category="cost")) == 1
         assert len(await store.list_pr_outcomes(skill_name="add-hpa")) == 1
         assert len(await store.list_pr_outcomes()) == 2
+
+    async def test_get_pr_outcomes_for_urls_batches_lookup(self):
+        store = await make_store()
+        await store.record_pr_outcome("https://github.com/o/r/pull/1", "app-a", "rejected", reject_reason="wontfix")
+        await store.record_pr_outcome("https://github.com/o/r/pull/2", "app-b", "edited_before_merge")
+
+        outcomes = await store.get_pr_outcomes_for_urls([
+            "https://github.com/o/r/pull/1", "https://github.com/o/r/pull/2", "https://github.com/o/r/pull/999",
+        ])
+        assert set(outcomes) == {"https://github.com/o/r/pull/1", "https://github.com/o/r/pull/2"}
+        assert outcomes["https://github.com/o/r/pull/1"]["reject_reason"] == "wontfix"
 
     async def test_record_pr_outcome_is_idempotent_per_pr_url(self):
         store = await make_store()

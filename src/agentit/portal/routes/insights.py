@@ -7,37 +7,11 @@ import logging
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from agentit.portal.delivery import _CICD_SHARED_NAMESPACE_GATE_TYPE, ADMIN_REVIEW_GATE_TYPE
 from agentit.portal.helpers import get_store, get_templates
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# Gate types a real code path can still create today: "gitops-pr-pending"/
-# the CI/CD-shared-namespace variant of it (delivery.py), "rollback-review"
-# (watchers/slo_tracker.py), and the "finding-" prefix, which covers both
-# delivery.py's ESCALATION_GATE_TYPE ("finding-unresolved-escalation",
-# Phase 4) and routes/webhooks.py's per-category dispatcher gates
-# ("finding-{category}"). Direct Apply and its "cluster-conflict-review"
-# gate are already gone (routes/gates.py); ADMIN_REVIEW_GATE_TYPE
-# ("cluster-admin-review") joined them 2026-07-18, and "auto-mode-review"
-# joined them alongside AutoMode's removal -- no code path creates either
-# anymore, but both are kept in this set deliberately (unlike the other
-# retired types, which were simply dropped from here): a real,
-# still-pending row of either type may still exist in production, and it
-# still resolves to a genuine GitOps PR when approved (see routes/gates.py's
-# generic fallback) -- a real, actionable pending item should keep counting
-# here until it's actually resolved, not silently stop counting just
-# because its type can no longer be freshly created.
-_LIVE_GATE_TYPES = {
-    ADMIN_REVIEW_GATE_TYPE, "gitops-pr-pending", _CICD_SHARED_NAMESPACE_GATE_TYPE,
-    "auto-mode-review", "rollback-review",
-}
-
-
-def _is_live_gate_type(gate_type: str) -> bool:
-    return gate_type in _LIVE_GATE_TYPES or gate_type.startswith("finding-")
 
 
 @router.get("/insights", response_class=HTMLResponse)
@@ -50,14 +24,23 @@ async def insights_page(request: Request) -> HTMLResponse:
     check_compliance = await s.get_check_compliance()
     loop_health = await s.get_loop_health()
 
-    # get_fleet_insights()'s own `pending_gates` is a blind
-    # `COUNT(*) FROM gates WHERE status = 'pending'` -- recompute it here
-    # from the real gate list, filtered to gate types that can still
-    # actually be created, so a leftover pending row of a since-removed
-    # gate type (e.g. a stale `cluster-conflict-review`, per routes/
-    # gates.py's own comment on it) can't inflate this fleet-wide stat.
-    pending_gates = await s.list_gates(status="pending")
-    fleet_insights["pending_gates"] = sum(1 for g in pending_gates if _is_live_gate_type(g.get("gate_type", "")))
+    # get_fleet_insights()'s own `pending_gates` count is gone along with
+    # the `gates` table it used to `COUNT(*)` from (2026-07-19). "Needs
+    # your attention" fleet-wide is now real PR/event state: every open,
+    # unmerged PR (count_fleet_prs_waiting_for_approval -- the same
+    # definition the Ledger/nav badge use) plus every unresolved rollback/
+    # escalation recommendation (routes/recommendations.py).
+    from agentit.portal.pr_tracking import count_fleet_prs_waiting_for_approval
+    waiting_for_approval = await count_fleet_prs_waiting_for_approval(s)
+    unresolved_rollbacks = await s.list_unresolved_events(
+        "rollback-recommended", ["rollback-executed", "rollback-dismissed"],
+    )
+    unresolved_escalations = await s.list_unresolved_events(
+        "finding-escalated", ["finding-escalation-acknowledged"],
+    )
+    fleet_insights["needs_attention"] = (
+        waiting_for_approval + len(unresolved_rollbacks) + len(unresolved_escalations)
+    )
 
     return get_templates().TemplateResponse(request, "insights.html", {
         "insights": fleet_insights,

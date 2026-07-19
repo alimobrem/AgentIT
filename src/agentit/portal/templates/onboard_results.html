@@ -37,8 +37,6 @@
 <div class="alert alert-success" role="status">
   PR opened against the {{ _pr_repo_label }}: <a href="{{ request.query_params.get('pr_url') | safe_url }}" target="_blank" hx-boost="false">{{ request.query_params.get('pr_url') }}</a>
 </div>
-{% elif request.query_params.get('gate_approved') %}
-<div class="alert alert-success" role="status">Gate approved — delivered.</div>
 {% elif request.query_params.get('fix_generated') %}
 <div class="alert alert-success" role="status">
   Generated {{ request.query_params.get('fix_generated') }} fix(es) via {{ request.query_params.get('agent', 'dispatcher') }} agent. Review below, then {{ _deliver_label }}.
@@ -145,8 +143,6 @@
     {% if card.record and card.record.pr_url %}
       {% if card.record.lifecycle == 'needs_approval' %}
       <span class="badge badge-warning">Waiting for your approval</span>
-      {% elif card.record.lifecycle == 'open' %}
-      <span class="badge badge-info">Open</span>
       {% elif card.record.lifecycle == 'merged' %}
       <span class="badge badge-success">Merged</span>
       {% elif card.record.lifecycle == 'rejected' %}
@@ -166,7 +162,7 @@
   <p class="mb-1">
     <a href="{{ card.record.html_url | safe_url }}" target="_blank" hx-boost="false">{{ card.record.title or card.record.pr_url }}</a>
     {% if card.record.lifecycle == 'needs_approval' %}
-    <span class="text-muted text-sm"> &middot; approve on the <a href="/assessments/{{ assessment_id }}?tab=actions">Actions tab</a> to merge it</span>
+    <span class="text-muted text-sm"> &middot; merge or close it from the <a href="/assessments/{{ assessment_id }}?tab=actions">Actions tab</a></span>
     {% elif card.record.lifecycle == 'rejected' and card.record.reject_reason %}
     <span class="text-muted text-sm"> &mdash; rejected: {{ card.record.reject_reason }}</span>
     {% elif card.record.lifecycle == 'merged' and card.record.merged_at %}
