@@ -47,8 +47,10 @@ on (with concrete next-step guidance in `details.guidance`) — none of them
 are safe to blindly auto-fix without oversight (e.g. this watcher will never
 attempt to re-register a webhook against an unknown external state, restart
 a pipeline, or delete cluster objects). This mirrors this repo's existing
-split: `DriftDetector` *does* auto-sync Argo CD drift when auto-mode is on
-because a sync is safe/idempotent; nothing here is that safe.
+split: `DriftDetector` *does* auto-sync Argo CD drift unconditionally,
+because a sync only ever re-applies what's already declared in Git and
+already merged by a human (safe/idempotent, no unreviewed mutation to gate);
+nothing here is that safe.
 """
 from __future__ import annotations
 
