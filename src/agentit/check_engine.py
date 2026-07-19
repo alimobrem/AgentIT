@@ -32,10 +32,15 @@ SEVERITY_MAP: dict[str, Severity] = {
 
 
 class CheckDefinition:
-    """A single parsed check loaded from a YAML file."""
+    """A single parsed check loaded from a YAML file (or, via
+    `skill_engine.detect_check_definitions()`, adapted from a `mode: detect`
+    Markdown skill -- see docs/extension-model-unification-plan-2026-07-18.md.
+    Either source produces one of these, run through the exact same runners
+    below, so assessment behaves identically regardless of which format
+    defined the rule."""
 
     __slots__ = ("name", "dimension", "severity", "category", "check_type", "pattern",
-                 "description", "recommendation", "source_path")
+                 "description", "recommendation", "source_path", "case_insensitive")
 
     def __init__(
         self,
@@ -44,10 +49,11 @@ class CheckDefinition:
         severity: Severity,
         category: str,
         check_type: str,
-        pattern: str,
+        pattern: str | list[str],
         description: str,
         recommendation: str,
         source_path: str,
+        case_insensitive: bool = False,
     ) -> None:
         self.name = name
         self.dimension = dimension
@@ -58,6 +64,7 @@ class CheckDefinition:
         self.description = description
         self.recommendation = recommendation
         self.source_path = source_path
+        self.case_insensitive = case_insensitive
 
 
 def _parse_check_file(path: Path) -> CheckDefinition | None:
@@ -88,16 +95,22 @@ def _parse_check_file(path: Path) -> CheckDefinition | None:
         logger.warning("Check file %s has unknown severity '%s'", path, data["severity"])
         return None
 
+    raw_pattern = data["pattern"]
+    pattern: str | list[str] = (
+        [str(p) for p in raw_pattern] if isinstance(raw_pattern, list) else str(raw_pattern)
+    )
+
     return CheckDefinition(
         name=data["name"],
         dimension=data["dimension"],
         severity=sev,
         category=data["category"],
         check_type=check_type,
-        pattern=str(data["pattern"]),
+        pattern=pattern,
         description=data["description"],
         recommendation=data["recommendation"],
         source_path=str(path),
+        case_insensitive=bool(data.get("case_insensitive", False)),
     )
 
 
@@ -117,18 +130,31 @@ def load_checks(checks_dir: Path) -> list[CheckDefinition]:
 # Check runners
 # ---------------------------------------------------------------------------
 
+def _pattern_list(pattern: str | list[str]) -> list[str]:
+    """Normalize a ``CheckDefinition.pattern`` (scalar or list) into a list
+    so every runner below applies OR semantics ("matches if any element
+    matches") the same way, regardless of whether the rule came from a
+    single-string legacy check or a list-pattern one."""
+    return pattern if isinstance(pattern, list) else [pattern]
+
+
 def _run_file_exists(check: CheckDefinition, repo_path: Path) -> Finding | None:
-    """Return ``None`` (pass) if at least one file matches the glob *pattern*."""
+    """Return ``None`` (pass) if at least one file matches any glob in *pattern*."""
+    patterns = _pattern_list(check.pattern)
     for fp in repo_path.rglob("*"):
         if fp.is_file() and not is_ignored(fp, repo_path):
-            if fnmatch.fnmatch(fp.name, check.pattern):
+            if any(fnmatch.fnmatch(fp.name, p) for p in patterns):
                 return None
     # No match -> finding
     return _make_finding(check)
 
 
 def _run_file_contains(check: CheckDefinition, repo_path: Path) -> Finding | None:
-    """Return ``None`` (pass) if any non-ignored text file contains *pattern*."""
+    """Return ``None`` (pass) if any non-ignored text file contains any
+    pattern in *pattern* (case-insensitively if ``check.case_insensitive``)."""
+    patterns = _pattern_list(check.pattern)
+    if check.case_insensitive:
+        patterns = [p.lower() for p in patterns]
     for fp in repo_path.rglob("*"):
         if not fp.is_file() or is_ignored(fp, repo_path):
             continue
@@ -136,34 +162,46 @@ def _run_file_contains(check: CheckDefinition, repo_path: Path) -> Finding | Non
             content = fp.read_text(errors="ignore")
         except OSError:
             continue
-        if check.pattern in content:
+        haystack = content.lower() if check.case_insensitive else content
+        if any(p in haystack for p in patterns):
             return None
     return _make_finding(check)
 
 
 def _run_file_missing(check: CheckDefinition, repo_path: Path) -> Finding | None:
-    """Return a finding if a file matching the glob *pattern* IS found."""
+    """Return a finding if a file matching any glob in *pattern* IS found."""
+    patterns = _pattern_list(check.pattern)
     for fp in repo_path.rglob("*"):
         if fp.is_file() and not is_ignored(fp, repo_path):
-            if fnmatch.fnmatch(fp.name, check.pattern):
+            if any(fnmatch.fnmatch(fp.name, p) for p in patterns):
                 return _make_finding(check, file_path=str(fp.relative_to(repo_path)))
     return None
 
 
 def _run_yaml_kind_exists(check: CheckDefinition, repo_path: Path) -> Finding | None:
-    """Return ``None`` (pass) if any YAML file contains ``kind: <pattern>``."""
-    needle = f"kind: {check.pattern}"
+    """Return ``None`` (pass) if any YAML file contains ``kind: <p>`` for
+    any p in *pattern* (case-insensitively if ``check.case_insensitive``)."""
+    patterns = _pattern_list(check.pattern)
+    needles = [f"kind: {p}" for p in patterns]
+    if check.case_insensitive:
+        needles = [n.lower() for n in needles]
     for _, content in iter_yaml_files(repo_path):
-        if needle in content:
+        haystack = content.lower() if check.case_insensitive else content
+        if any(n in haystack for n in needles):
             return None
     return _make_finding(check)
 
 
 def _run_yaml_kind_missing(check: CheckDefinition, repo_path: Path) -> Finding | None:
-    """Return a finding if any YAML file contains ``kind: <pattern>``."""
-    needle = f"kind: {check.pattern}"
+    """Return a finding if any YAML file contains ``kind: <p>`` for any p
+    in *pattern* (case-insensitively if ``check.case_insensitive``)."""
+    patterns = _pattern_list(check.pattern)
+    needles = [f"kind: {p}" for p in patterns]
+    if check.case_insensitive:
+        needles = [n.lower() for n in needles]
     for path, content in iter_yaml_files(repo_path):
-        if needle in content:
+        haystack = content.lower() if check.case_insensitive else content
+        if any(n in haystack for n in needles):
             return _make_finding(check, file_path=str(path.relative_to(repo_path)))
     return None
 
