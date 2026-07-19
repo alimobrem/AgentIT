@@ -6,23 +6,64 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+from agentit.models import DimensionScore, Finding, Severity
 from agentit.watchers.vuln_watcher import VulnWatcher
-from conftest import make_async_store
+from conftest import make_async_store, make_report
 
 
-async def _watcher(store=None, consumer=None) -> VulnWatcher:
+async def _watcher(store=None, consumer=None, publisher=None) -> VulnWatcher:
     async_store, _raw = store or await make_async_store()
     return VulnWatcher(
-        publisher=MagicMock(),
+        publisher=publisher or MagicMock(),
         store=async_store,
         consumer=consumer or MagicMock(),
         interval=1,
     )
 
 
+def _report_with_critical_finding(**kwargs):
+    report = make_report(**kwargs)
+    report.scores = [
+        DimensionScore(
+            dimension="security", score=20, max_score=100,
+            findings=[Finding(category="container", severity=Severity.critical,
+                               description="Root user in Containerfile", recommendation="Add USER directive")],
+        ),
+    ]
+    report.overall_score = 20
+    return report
+
+
 async def test_check_fleet_with_empty_fleet_is_a_noop():
     watcher = await _watcher()
     await watcher.check_fleet()  # must not raise, even with no tracked apps
+
+
+class TestCriticalFindingsSurfaceAsAlertsOnly:
+    """AutoMode (and the remediation loop it used to trigger here for
+    critical/high findings) has been removed: check_fleet() now only ever
+    publishes an alert -- fixing a finding always requires a human to
+    explicitly Assess/Onboard/Deliver for that app, never an autonomous
+    background trigger."""
+
+    async def test_critical_findings_publish_alert_and_never_trigger_remediation(self):
+        async_store, raw_store = await make_async_store()
+        await raw_store.save(_report_with_critical_finding(repo_name="critical-app"))
+
+        publisher = MagicMock()
+        watcher = await _watcher(store=(async_store, raw_store), publisher=publisher)
+
+        with patch("agentit.remediation_loop.RemediationLoop") as mock_loop_cls:
+            await watcher.check_fleet()
+
+        mock_loop_cls.assert_not_called()
+        alert_calls = [
+            c for c in publisher.publish.call_args_list
+            if c.kwargs.get("action") == "critical-findings-detected"
+        ]
+        assert len(alert_calls) == 1
+        assert alert_calls[0].kwargs["target_app"] == "critical-app"
+        assert alert_calls[0].kwargs["severity"] == "warning"
 
 
 class TestAsyncRunLoop:
@@ -43,14 +84,11 @@ class TestAsyncRunLoop:
 
 
 class TestTickRunsOnEventLoop:
-    """``check_fleet`` is now a genuine coroutine (this pass's
-    FleetOrchestrator/AutoMode/RemediationDispatcher/RemediationLoop async
-    rewrite made VulnWatcher's own AutoMode/RemediationLoop call sites
-    async too) -- ``run()`` `await`s it directly rather than dispatching
-    the whole tick to a worker thread via ``asyncio.to_thread``, and
-    record_tick telemetry must still fire afterwards. ``self._store`` is
-    now the async store directly (no more `.raw`/`AsyncSQLiteStore.wrap`
-    bridge inside `check_fleet` itself)."""
+    """``check_fleet`` is a genuine coroutine -- ``run()`` `await`s it
+    directly rather than dispatching the whole tick to a worker thread via
+    ``asyncio.to_thread``, and record_tick telemetry must still fire
+    afterwards. ``self._store`` is the async store directly (no more
+    `.raw`/`AsyncSQLiteStore.wrap` bridge inside `check_fleet` itself)."""
 
     @patch("agentit.watchers.vuln_watcher.sleep_with_heartbeat", side_effect=KeyboardInterrupt)
     async def test_check_fleet_awaited_directly_and_telemetry_records(self, mock_sleep):

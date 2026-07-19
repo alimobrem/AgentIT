@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 
 
 class VulnWatcher:
-    """Long-lived agent that listens for assessment events, checks the fleet
-    for critical/high findings, and triggers remediation when auto-mode is on.
+    """Long-lived agent that listens for assessment events and checks the
+    fleet for critical/high findings, surfacing each one as a real alert.
     """
 
     def __init__(
@@ -46,21 +46,22 @@ class VulnWatcher:
             )
 
     async def check_fleet(self) -> None:
-        """Scan the fleet for apps with critical/high findings and alert or remediate.
+        """Scan the fleet for apps with critical/high findings and alert.
 
         ``self._store`` is the ``AssessmentStore`` handed in by ``cli.py``'s
         ``vuln_watch`` command, so every store call here is `await`ed
-        directly. ``AutoMode``/``RemediationLoop`` are also genuinely
-        async, so they're constructed with that same store object.
+        directly.
+
+        AutoMode (and the remediation loop it used to trigger here for
+        critical/high findings) has been removed: this watcher's job is
+        now purely detection and visibility -- every critical/high finding
+        always surfaces as a real, actionable alert, and fixing it always
+        requires a human to explicitly Assess/Onboard/Deliver for that app
+        (Fleet's "Scan"/"Re-scan" -- there's no more autonomous fix
+        pipeline behind the scenes to gate on a toggle).
         """
         fleet = await self._store.get_fleet_data()
         click.echo(f"[vuln-watch] Monitoring {len(fleet)} apps", err=True)
-
-        from agentit.automode import AutoMode
-        from agentit.remediation_loop import RemediationLoop
-
-        auto = AutoMode(store=self._store, publisher=self._publisher, llm_client=None)
-        loop = RemediationLoop(store=self._store, publisher=self._publisher)
 
         for app_data in fleet:
             if app_data.get("critical_count", 0) > 0:
@@ -72,38 +73,11 @@ class VulnWatcher:
                     severity="warning",
                     summary=f"{app_data['critical_count']} critical/high findings in {app_data['repo_name']}",
                 )
-                if await auto.is_enabled():
-                    click.echo(
-                        f"[vuln-watch] Auto-mode: running remediation loop for {app_data['repo_name']}...",
-                        err=True,
-                    )
-                    try:
-                        result = await loop.trigger(
-                            repo_url=app_data["repo_url"],
-                            app_name=app_data["repo_name"],
-                            criticality=app_data.get("criticality", "medium"),
-                            reason=f"critical findings detected ({app_data['critical_count']})",
-                        )
-                        click.echo(
-                            f"[vuln-watch] Loop result: {result['outcome']} at step {result.get('step', '?')}",
-                            err=True,
-                        )
-                    except Exception as exc:
-                        logger.exception("Remediation loop failed for %s", app_data["repo_name"])
-                        click.echo(f"[vuln-watch] Remediation loop failed: {exc}", err=True)
-                        if self._publisher:
-                            self._publisher.publish(
-                                "agentit-alerts", agent_id="vuln-watcher",
-                                action="remediation-failed", target_app=app_data.get("repo_name", ""),
-                                severity="critical",
-                                summary=f"Remediation loop failed: {exc}",
-                            )
 
     async def run(self) -> None:
         """Main loop: poll events, check fleet, sleep.
 
-        ``check_fleet`` is now a genuine coroutine (``AutoMode``/
-        ``RemediationLoop`` are natively async) -- it's `await`ed directly
+        ``check_fleet`` is a genuine coroutine -- it's `await`ed directly
         here instead of being dispatched via ``asyncio.to_thread``, since
         wrapping an async function in `to_thread` would just add a
         redundant thread hop for no benefit.

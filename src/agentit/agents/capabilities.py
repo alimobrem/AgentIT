@@ -24,9 +24,9 @@ AGENT_CAPABILITIES: dict[str, str] = {
     "dependency": "Dependency report, Renovate/Dependabot config",
     "codechange": ".gitignore, OTel instrumentation, structured logging",
     # Long-lived watcher agents
-    "vuln-watcher": "Monitors fleet for CVEs, triggers remediation when auto-mode on",
+    "vuln-watcher": "Monitors fleet for CVEs, raises an alert for every critical/high finding",
     "slo-tracker": "Checks SLO status, publishes breach alerts, recommends rollbacks",
-    "drift-detector": "Queries Argo CD for OutOfSync apps, optionally auto-syncs",
+    "drift-detector": "Queries Argo CD for OutOfSync apps, auto-syncs them back to Git",
     "skill-learner": "Researches CVEs via LLM, drafts new skills for human review",
     "capability-scout": "Proposes small, evidence-grounded changes to AgentIT itself as a draft PR",
     "reassess-scheduler": "Automatically re-Assesses apps on their configured cadence (daily/weekly/monthly)",
@@ -52,9 +52,9 @@ AGENT_DISPLAY_NAMES: dict[str, str] = {
 }
 
 WATCHER_AGENTS: list[dict[str, str]] = [
-    {"name": "vuln-watcher", "mode": "Kafka consumer + polling", "interval": "6 hours", "description": "Monitors fleet for critical/high findings, triggers remediation loop when auto-mode is on"},
+    {"name": "vuln-watcher", "mode": "Kafka consumer + polling", "interval": "6 hours", "description": "Monitors fleet for critical/high findings and raises an alert for each one"},
     {"name": "slo-tracker", "mode": "Polling", "interval": "5 minutes", "description": "Checks SLO status across all assessments, publishes breach alerts, recommends rollbacks"},
-    {"name": "drift-detector", "mode": "Argo CD polling", "interval": "10 minutes", "description": "Queries Argo CD apps for OutOfSync state, optionally auto-syncs when auto-mode is on"},
+    {"name": "drift-detector", "mode": "Argo CD polling", "interval": "10 minutes", "description": "Queries Argo CD apps for OutOfSync state and auto-syncs them back to the Git-declared state"},
     {"name": "skill-learner", "mode": "LLM polling", "interval": "24 hours", "description": "Researches recent CVEs via LLM and drafts new skills (status: draft) for human review — requires an LLM connection"},
     {"name": "capability-scout", "mode": "LLM polling", "interval": "24 hours", "description": "Reads fleet usage/effectiveness data and doc-gap signals, proposes one small change to AgentIT itself as a draft PR for human review — requires an LLM connection and GITHUB_TOKEN"},
     {"name": "reassess-scheduler", "mode": "Polling", "interval": "1 hour", "description": "Checks every app's configured re-assessment cadence (daily/weekly/monthly, set on its Assessment Detail page) and automatically re-Assesses any app that's due, via the same route the manual Scan/Re-scan button uses"},

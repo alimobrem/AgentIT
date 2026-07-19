@@ -124,16 +124,19 @@ class TestDriftDetectorTickTelemetry:
         detector = _detector()
         assert detector._store is None
 
-    @patch("agentit.watchers.drift_detector.kube.list_custom_resources")
-    async def test_maybe_auto_sync_reuses_injected_store(self, mock_list):
+    @patch("agentit.watchers.drift_detector.kube.custom_objects")
+    async def test_maybe_auto_sync_reuses_injected_store(self, mock_custom_objects):
         """_maybe_auto_sync previously always created a brand-new AssessmentStore()
         even when the detector already had one -- it should reuse the injected
         store when present. ``self._store`` is now the async store directly,
         no more `.raw`/`AsyncSQLiteStore.wrap` bridge inside `_maybe_auto_sync`."""
         async_store, raw_store = await make_async_store()
-        await raw_store.set_setting("auto_mode", "false")
         detector = DriftDetector(publisher=MagicMock(), interval=1, store=async_store)
-        await detector._maybe_auto_sync("some-app")  # auto-mode off -> returns early, no crash
+        await detector._maybe_auto_sync("some-app")  # must not raise
+
+        mock_custom_objects.return_value.patch_namespaced_custom_object.assert_called_once()
+        events = await raw_store.list_events()
+        assert any(e["action"] == "drift-auto-synced" for e in events)
 
 
 _AGENTIT_APP = {
@@ -255,12 +258,17 @@ class TestGitopsLagDetection:
 class TestAutoSyncLogged:
     """docs/ledger-design-spec.md Phase 0: an auto-sync attempt (success or
     failure) must be persisted via log_event(), not only a click.echo() --
-    otherwise it's invisible everywhere in the Ledger/Events/Timeline."""
+    otherwise it's invisible everywhere in the Ledger/Events/Timeline.
+
+    AutoMode has been removed: ``_maybe_auto_sync`` now runs unconditionally
+    (no more `auto_mode` setting to gate on) -- re-syncing a drifted
+    Application only ever re-applies what's already declared in Git and
+    already merged by a human, the same reasoning behind
+    ``_check_applicationset_drift()``'s own unconditional self-heal."""
 
     @patch("agentit.watchers.drift_detector.kube.custom_objects")
     async def test_successful_auto_sync_logs_drift_auto_synced_event(self, mock_custom_objects):
         async_store, store = await make_async_store()
-        await store.set_setting("auto_mode", "true")
         detector = DriftDetector(publisher=MagicMock(), interval=1, store=async_store)
 
         await detector._maybe_auto_sync("some-app")
@@ -278,7 +286,6 @@ class TestAutoSyncLogged:
             "connection refused"
         )
         async_store, store = await make_async_store()
-        await store.set_setting("auto_mode", "true")
         detector = DriftDetector(publisher=MagicMock(), interval=1, store=async_store)
 
         await detector._maybe_auto_sync("some-app")  # must not raise
@@ -289,6 +296,17 @@ class TestAutoSyncLogged:
         assert failed[0]["target_app"] == "some-app"
         assert failed[0]["severity"] == "warning"
         assert "connection refused" in failed[0]["summary"]
+
+    @patch("agentit.watchers.drift_detector.kube.custom_objects")
+    async def test_auto_sync_runs_even_without_a_store(self, mock_custom_objects):
+        """No settings table to gate on anymore -- a detector constructed
+        without a store (some watcher tests do this) still triggers the
+        real sync, it just has nowhere to log the outcome."""
+        detector = DriftDetector(publisher=MagicMock(), interval=1)
+
+        await detector._maybe_auto_sync("some-app")  # must not raise
+
+        mock_custom_objects.return_value.patch_namespaced_custom_object.assert_called_once()
 
 
 class TestAsyncRunLoop:
@@ -308,11 +326,9 @@ class TestAsyncRunLoop:
 
 
 class TestTickRunsOffEventLoop:
-    """``detect_once`` is now a genuine coroutine (part of this pass's
-    FleetOrchestrator/AutoMode/RemediationDispatcher/RemediationLoop async
-    rewrite, which forced DriftDetector's own AutoMode call site to become
-    async too) -- ``run()`` awaits it directly rather than dispatching the
-    whole tick to a worker thread. The specific blocking kube call inside
+    """``detect_once`` is a genuine coroutine -- ``run()`` awaits it
+    directly rather than dispatching the whole tick to a worker thread.
+    The specific blocking kube call inside
     ``detect_once`` (``_fetch_argo_apps``, which wraps
     ``kube.list_custom_resources``) is still narrowly wrapped in
     ``asyncio.to_thread`` so it doesn't block the event loop, and
@@ -345,7 +361,6 @@ class TestConstructionAcceptsAsyncStoreDirectly:
         from agentit.portal.store import create_store
 
         store = await create_store(postgres_dsn, min_size=1, max_size=2)
-        await store.set_setting("auto_mode", "false")
         detector = DriftDetector(publisher=MagicMock(), interval=1, store=store)
         result = await detector.detect_once()  # must not raise AttributeError/TypeError
         assert result == []
