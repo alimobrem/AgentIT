@@ -36,6 +36,7 @@ Point AgentIT at a Git repository and it will:
 - [Configuration](#configuration)
 - [Deploying to OpenShift](#deploying-to-openshift)
 - [Testing](#testing)
+- [Resilience](#resilience)
 - [Security notes](#security-notes)
 - [Repository layout](#repository-layout)
 - [License](#license)
@@ -586,11 +587,57 @@ uv run pytest tests/test_browser_critical.py --browser-tests -q
 | Containerization | 22 | K8s Job agent dispatch |
 | Futureproof | 16 | Platform context, skill lifecycle, API drift |
 | Durability | 12 | Circuit breaker, TTL cache, error recovery |
+| Fault injection / resilience | ~30 | `kube_breaker`/`llm_breaker` real-failure-shape injection (`test_kube_breaker.py`, `test_llm_breaker.py`), a genuinely wedged Postgres via `pg_sleep()` (`test_store_resilience.py`), lock-usage proofs (`test_ttl_cache_locking.py`), concurrent-write races (`test_store.py`'s gate/remediation-job concurrency tests) — see [`docs/resilience-audit-2026-07-18.md`](docs/resilience-audit-2026-07-18.md) for the pattern and findings |
 | Check engine | ~15 | Data-driven check loading, each check type, integration |
 | Skill validation | ~15 | All 40 skills load, valid frontmatter, generate valid YAML |
 | Self-observability | ~50 | `agent_runs`/`check_results` persistence, DLQ republish, correlation-id tracing, circuit-breaker/DB-size/event-buffer/watcher-staleness metrics, watcher tick telemetry (`tests/test_watchers_telemetry.py`, `tests/test_durability.py`, extensions to `tests/test_store_extended.py`) |
 
 Additional test markers: `--run-real-repos` (clone live GitHub repos), `--live-cluster` (e2e against OpenShift), `--browser-tests` (Playwright critical journeys), `--run-llm-evals` (requires API key).
+
+## Resilience
+
+**Proactive resilience audit — 4 fragility fixes shipped, testing pattern established (2026-07-18).** Distinct from the same day's reactive incident fixes (webhook dedup races, `create_gate`/`save_remediation` races, unlocked TTL caches, `kube_breaker` wiring — each found from one observed symptom), this pass systematically re-checked the same six fragility categories (concurrency, external-dependency resilience, single points of failure, resource exhaustion, cascading failure, data-integrity-under-partial-failure) for further, not-yet-found instances of those same bug classes. Found and fixed: (1) `CircuitBreaker` itself (`llm_breaker`/`kube_breaker`'s shared class) had zero locking around its own failure-count bookkeeping, despite existing specifically to protect against concurrent-failure surges; (2) `AssessmentStore.create()`'s Postgres pool had no `command_timeout`, so a wedged (not fully down) DB could hang every request indefinitely and exhaust the connection pool; (3) `update_remediation_job()`'s `steps_completed` append was a lost-update race, the same shape as the already-fixed `create_gate`/`save_remediation` races; (4) three skills-cache-bust call sites bypassed the existing `_skills_cache_lock` entirely. Full findings — including a prioritized, evidence-based backlog of what was found but deliberately not fixed and why, the fault-injection testing pattern extended from the existing `test_kube_breaker.py`, and a periodic-verification proposal coordinated with the concurrent self-health-check watcher effort — are in [`docs/resilience-audit-2026-07-18.md`](docs/resilience-audit-2026-07-18.md).
+
+**How we know we're getting more resilient over time, concretely:** a
+named, growing fault-injection test suite (the "Fault injection /
+resilience" row above), re-run on every commit, that fails against
+pre-fix code and passes against the fix — not a vague claim — plus the
+audit doc's own categorized backlog naming exactly what's still open and
+why, so the next pass has a concrete starting point instead of
+re-discovering the same gaps.
+
+**Fault-injection pattern, for reuse on the next external dependency:**
+mock the client at its lowest-level accessor (`test_kube_breaker.py`/
+`test_llm_breaker.py`), inject a real-shaped exception, and assert the
+three invariants every breaker-wrapped function should have — N failures
+open the breaker at its documented threshold, an open breaker skips the
+real call (`assert_not_called()`) and returns each function's own
+documented "unavailable" contract, and a success resets the count. For
+locking correctness, prefer a deterministic proof over a probabilistic
+race: swap in a tracking lock and count concurrent holders
+(`test_ttl_cache_locking.py`) if the critical section has real work in
+it, or hold the real lock open on a background thread and time how long
+the call under test blocks if it doesn't. For Postgres/network
+timeouts, prefer a real dependency with an injected fault
+(`pg_sleep()`, `test_store_resilience.py`) over a mock, when the fault
+is expressible at that level.
+
+**Circuit breakers are thread-safe (`llm_breaker`/`kube_breaker`,
+`portal/helpers.py::CircuitBreaker`).** `record_failure()`/
+`record_success()`/`is_open` are guarded by a `threading.Lock` — both
+breakers are one shared instance called from many concurrent OS threads
+(every `LLMClient._chat()` call and most of `kube.py`'s real
+API-calling functions run inside `asyncio.to_thread`), so an unlocked
+critical section could lose a failure-count update exactly when a
+dependency is genuinely struggling.
+
+**Postgres queries/connections are time-bounded (`portal/store.py::
+AssessmentStore.create()`).** `command_timeout` (default 30s) and
+`connect_timeout` (default 15s) are passed to `asyncpg.create_pool()` —
+without this, a wedged (not fully down) Postgres could hang any query
+indefinitely and, since every route holds its connection for that whole
+wait, exhaust the connection pool and cascade into total portal
+unavailability with zero user-facing signal.
 
 ## Security notes
 
@@ -602,7 +649,7 @@ Additional test markers: `--run-real-repos` (clone live GitHub repos), `--live-c
 - **Delivery always requires an explicit human action.** AutoMode (which used to auto-apply an orchestrator-approved, LLM-classified-non-destructive change without a human click) has been removed entirely (2026-07-18) — every real delivery path (Deliver from Onboard Results, approving a `gitops-pr-pending` gate, `route_and_deliver()`) now stops at a GitOps commit + PR and waits for a human to merge it. AgentIT never auto-merges.
 - **Manifests are validated before being trusted.** `agents/base.py::validate_manifest()` checks every generated YAML, and `cluster_apply.py` runs a `--dry-run=client` pass before any real apply.
 - **SSRF prevention.** `cloner.py` rejects private IPs, localhost, and internal DNS suffixes. `portal/helpers.py::safe_url()` rejects protocol-relative URLs.
-- **Circuit breakers.** LLM and Kubernetes API clients use circuit breakers (`CircuitBreaker` in `portal/helpers.py`, `llm_breaker`/`kube_breaker`) to prevent cascading failures. `llm.py`'s `LLMClient._chat()` checks/records against `llm_breaker` around every real Anthropic call; `kube.py`'s real API-calling functions (`list_pods`, `list_custom_resources`, `apply_yaml`, `namespace_exists`, ...) do the same against `kube_breaker` via a shared `_kube_breaker_scope()` choke point — each checks `is_open` before attempting a call (skipping with a safe fallback matching its own existing failure contract if open) and records success/failure around the real call itself. `AGENTIT_OFFLINE`'s hard-stop (a dedicated `KubeOfflineError`) is explicitly exempted from ever counting as a `kube_breaker` failure, and expected non-failure statuses (404 "not found", 409 "already exists"/conflict) don't count either — both are the Health page's "kube" row now being a real, tripsable signal instead of permanently green.
+- **Circuit breakers.** LLM and Kubernetes API clients use circuit breakers (`CircuitBreaker` in `portal/helpers.py`, `llm_breaker`/`kube_breaker`) to prevent cascading failures. `llm.py`'s `LLMClient._chat()` checks/records against `llm_breaker` around every real Anthropic call; `kube.py`'s real API-calling functions (`list_pods`, `list_custom_resources`, `apply_yaml`, `namespace_exists`, ...) do the same against `kube_breaker` via a shared `_kube_breaker_scope()` choke point — each checks `is_open` before attempting a call (skipping with a safe fallback matching its own existing failure contract if open) and records success/failure around the real call itself. `AGENTIT_OFFLINE`'s hard-stop (a dedicated `KubeOfflineError`) is explicitly exempted from ever counting as a `kube_breaker` failure, and expected non-failure statuses (404 "not found", 409 "already exists"/conflict) don't count either — both are the Health page's "kube" row now being a real, tripsable signal instead of permanently green. `CircuitBreaker`'s own failure-count bookkeeping is `threading.Lock`-guarded (2026-07-18 resilience audit) — both breakers are one shared instance called from many concurrent OS threads (every `_chat()` call and most of `kube.py`'s real calls run inside `asyncio.to_thread`), so this was a real, if ironic, gap in the mechanism meant to protect against concurrent-failure surges.
 - **Cross-namespace apply needs `rbac.clusterWideApply` (default `true`).** "Apply to Cluster" onboards an app into its *own* namespace (e.g. a repo named `pinky` gets namespace `pinky`), which usually doesn't exist yet when onboarding starts. `kube.namespace_exists()` does a cluster-scoped `GET` on that namespace, and the SA's own namespace-scoped RoleBinding (`{{ .Release.Name }}-edit`, to ClusterRole `edit`) can't grant that — only a `ClusterRoleBinding` can. `chart/templates/rbac.yaml` has one gated behind `rbac.clusterWideApply`; if it's disabled, every apply into a not-yet-existing namespace 403s before it reaches manifest application, surfacing on `/onboard-results` as "Cluster apply failed — check server logs" (applying into an already-existing namespace, like this app's own self-assessment, doesn't hit this). Note `edit` still doesn't grant `patch` on `ResourceQuota`/`LimitRange`/`Namespace` even cluster-wide — those three continue to show up as apply errors by design, not a bug.
 - **Operator installs use a narrowly scoped grant, not `edit`.** The onboard-results "Install Operator" button (`cluster_apply.install_operator`) needs to create a Namespace+OperatorGroup for OwnNamespace-only operators (VPA, ODF, RHBK/Keycloak) or a Subscription in the shared `openshift-operators` namespace for everything else. Even with `clusterWideApply` on, the "edit" ClusterRole only grants get/list/watch on namespaces (not create), so this is gated behind its own `rbac.operatorInstall` flag (default `true`) with a dedicated 4-rule `ClusterRole`. If installs fail with a permissions error, check that this flag is enabled on the release.
 
