@@ -147,6 +147,81 @@ def get_credential_states() -> dict[str, dict[str, object]]:
     }
 
 
+# ── Self-health-check states ────────────────────────────────────────────
+#
+# Backs the Health page's "AgentIT Self-Health" panel -- pass/fail per
+# check with a plain-language summary and (when failing) actionable
+# guidance, mirroring get_credential_states()'s {ok, status, detail} shape
+# above. Unlike the credential checks (which run live, synchronously, on
+# every Health page load), these checks run periodically in a separate
+# watcher pod (watchers/self_health_check.py) and persist one event per
+# check per tick -- this just reads back the most recent persisted result
+# for each known check, it never re-runs the check itself.
+
+
+def _event_details(event: dict) -> dict:
+    """Parse a store event row's details -- rows expose ``details_json``
+    (a JSON string; asyncpg does not auto-decode JSONB columns here), not
+    ``details``. Mirrors the same inline pattern already used by
+    ``routes/capabilities.py``/``llm_decisions.py``/``capability_scout.py``."""
+    raw = event.get("details_json")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            import json
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except ValueError:
+            return {}
+    return {}
+
+
+async def get_self_health_check_states(store) -> dict[str, dict[str, object]]:
+    """Most recent result for each of ``SelfHealthCheck``'s known checks,
+    keyed by its event ``action`` -- e.g. ``self-check-webhook``. A check
+    with no event yet (watcher not enabled, or hasn't ticked since
+    startup) is reported as ``status: "unknown"`` rather than omitted, so
+    the panel always shows every known check.
+    """
+    from agentit.watchers.self_health_check import CHECK_ACTIONS, CHECK_LABELS
+
+    states: dict[str, dict[str, object]] = {
+        action: {
+            "label": CHECK_LABELS.get(action, action),
+            "ok": None, "status": "unknown", "severity": "info",
+            "summary": "No self-health-check result yet -- the watcher may not be enabled, or hasn't ticked since startup.",
+            "guidance": None, "checked_at": None,
+        }
+        for action in CHECK_ACTIONS
+    }
+
+    try:
+        events = await store.list_events_by_agent("self-health-check", limit=50)
+    except Exception:
+        log.warning("Failed to load self-health-check events", exc_info=True)
+        return states
+
+    seen: set[str] = set()
+    for event in events:  # newest first (list_events_by_agent orders DESC)
+        action = event.get("action")
+        if action not in states or action in seen:
+            continue
+        seen.add(action)
+        details = _event_details(event)
+        severity = event.get("severity", "info")
+        states[action] = {
+            "label": CHECK_LABELS.get(action, action),
+            "ok": severity == "info",
+            "status": "healthy" if severity == "info" else severity,
+            "severity": severity,
+            "summary": event.get("summary", ""),
+            "guidance": details.get("guidance"),
+            "checked_at": event.get("timestamp"),
+        }
+    return states
+
+
 # ── Store singleton ───────────────────────────────────────────────────
 #
 # ``get_store()`` is async -- it's the only way any caller (portal, CLI,

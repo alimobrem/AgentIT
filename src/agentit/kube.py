@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time as _time
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 
 from agentit.portal.helpers import kube_breaker
 
@@ -255,6 +256,38 @@ def get_pod_count(namespace: str) -> tuple[int, int]:
     running = sum(1 for p in pods if p["status"] == "Running")
     failed = sum(1 for p in pods if p["status"] == "Failed" or p.get("crash_looping", False))
     return running, failed
+
+
+def count_stale_terminal_pods(namespace: str, max_age_hours: float = 2.0) -> int:
+    """Count Failed/Succeeded pods older than ``max_age_hours`` in a
+    namespace -- a generic proxy for "is this namespace's terminal-pod
+    cleanup actually keeping up", independent of *why* cleanup might not
+    be working (a CronJob's Job can exit 0 while its own pruning logic
+    silently does nothing -- see docs/cicd-stall-hardening-2026-07-17.md).
+    Used by the self-health-check watcher's cleanup-effectiveness check.
+
+    Reads raw pod timestamps directly (rather than going through
+    ``list_pods()``'s simplified ``age`` string, which is truncated to
+    minute precision with no timezone for display purposes) so the age
+    comparison here is exact.
+    """
+    if kube_breaker.is_open:
+        logger.warning("Kube circuit breaker open — skipping count_stale_terminal_pods(%s)", namespace)
+        raise KubeError("Kubernetes circuit breaker open — too many recent API failures")
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+    try:
+        with _kube_breaker_scope():
+            pods = core_v1().list_namespaced_pod(namespace, _request_timeout=10)
+        count = 0
+        for p in pods.items:
+            if p.status.phase not in ("Failed", "Succeeded"):
+                continue
+            created = p.metadata.creation_timestamp
+            if created is not None and created < cutoff:
+                count += 1
+        return count
+    except Exception as exc:
+        raise KubeError(f"Failed to count stale terminal pods in {namespace}: {exc}") from exc
 
 
 def list_custom_resources(
@@ -801,6 +834,40 @@ def delete_job(name: str, namespace: str) -> None:
             )
     except Exception:
         logger.debug("delete_job %s/%s failed", namespace, name, exc_info=True)
+
+
+def list_cronjobs(namespace: str) -> list[dict]:
+    """List CronJobs in a namespace, returns simplified dicts.
+
+    Backs the self-health-check watcher's "are my own maintenance
+    CronJobs actually running and succeeding" check
+    (``watchers/self_health_check.py``) -- it needs to reason about *any*
+    CronJob this chart currently ships (``tekton-cleanup``,
+    ``secret-rotation``, the fleet-rescan CronJobs, ...) without a
+    hardcoded name list that silently goes stale as new ones are added,
+    so this lists everything in the namespace rather than one name at a
+    time. Uses the namespace-scoped ``edit`` ClusterRole already bound to
+    every watcher's ServiceAccount (``rbac.yaml``) -- no new RBAC grant.
+    """
+    if kube_breaker.is_open:
+        logger.warning("Kube circuit breaker open — skipping list_cronjobs(%s)", namespace)
+        raise KubeError("Kubernetes circuit breaker open — too many recent API failures")
+    try:
+        with _kube_breaker_scope():
+            cronjobs = batch_v1().list_namespaced_cron_job(namespace, _request_timeout=10)
+        return [
+            {
+                "name": cj.metadata.name,
+                "schedule": cj.spec.schedule,
+                "suspended": bool(cj.spec.suspend),
+                "last_schedule_time": cj.status.last_schedule_time.isoformat() if cj.status.last_schedule_time else None,
+                "last_successful_time": cj.status.last_successful_time.isoformat() if cj.status.last_successful_time else None,
+                "active_count": len(cj.status.active or []),
+            }
+            for cj in cronjobs.items
+        ]
+    except Exception as exc:
+        raise KubeError(f"Failed to list CronJobs in {namespace}: {exc}") from exc
 
 
 def namespace_exists(namespace: str) -> bool:

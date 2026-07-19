@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -281,3 +282,122 @@ class TestRolloutUndo:
 
         assert result["success"] is False
         assert "forbidden" in result["message"]
+
+
+def _cronjob(name: str, schedule: str = "*/10 * * * *", suspend: bool = False,
+             last_schedule_time=None, last_successful_time=None, active=None) -> MagicMock:
+    cj = MagicMock()
+    cj.metadata.name = name
+    cj.spec.schedule = schedule
+    cj.spec.suspend = suspend
+    cj.status.last_schedule_time = last_schedule_time
+    cj.status.last_successful_time = last_successful_time
+    cj.status.active = active
+    return cj
+
+
+class TestListCronjobs:
+    """Backs the self-health-check watcher's maintenance-CronJob check
+    (watchers/self_health_check.py) -- generic over whatever CronJobs
+    currently exist, not a hardcoded name list."""
+
+    def test_returns_simplified_dicts_for_every_cronjob(self):
+        now = datetime.now(timezone.utc)
+        earlier = now - timedelta(minutes=5)
+        mock_batch = MagicMock()
+        mock_batch.list_namespaced_cron_job.return_value = MagicMock(items=[
+            _cronjob("tekton-cleanup", last_schedule_time=now, last_successful_time=earlier, active=[object()]),
+        ])
+
+        with patch("agentit.kube.batch_v1", return_value=mock_batch):
+            result = kube.list_cronjobs("agentit")
+
+        assert result == [{
+            "name": "tekton-cleanup",
+            "schedule": "*/10 * * * *",
+            "suspended": False,
+            "last_schedule_time": now.isoformat(),
+            "last_successful_time": earlier.isoformat(),
+            "active_count": 1,
+        }]
+
+    def test_handles_never_scheduled_cronjob(self):
+        """A freshly-installed CronJob with no status timestamps yet must
+        report None, not raise or fabricate a timestamp."""
+        mock_batch = MagicMock()
+        mock_batch.list_namespaced_cron_job.return_value = MagicMock(items=[
+            _cronjob("secret-rotation"),
+        ])
+
+        with patch("agentit.kube.batch_v1", return_value=mock_batch):
+            result = kube.list_cronjobs("agentit")
+
+        assert result[0]["last_schedule_time"] is None
+        assert result[0]["last_successful_time"] is None
+        assert result[0]["active_count"] == 0
+
+    def test_reports_suspended_flag(self):
+        mock_batch = MagicMock()
+        mock_batch.list_namespaced_cron_job.return_value = MagicMock(items=[
+            _cronjob("cost-report", suspend=True),
+        ])
+
+        with patch("agentit.kube.batch_v1", return_value=mock_batch):
+            result = kube.list_cronjobs("agentit")
+
+        assert result[0]["suspended"] is True
+
+    def test_api_failure_raises_kube_error(self):
+        mock_batch = MagicMock()
+        mock_batch.list_namespaced_cron_job.side_effect = RuntimeError("connection refused")
+
+        with patch("agentit.kube.batch_v1", return_value=mock_batch):
+            with pytest.raises(kube.KubeError):
+                kube.list_cronjobs("agentit")
+
+
+def _pod(phase: str, created: datetime) -> MagicMock:
+    pod = MagicMock()
+    pod.status.phase = phase
+    pod.metadata.creation_timestamp = created
+    return pod
+
+
+class TestCountStaleTerminalPods:
+    """Backs the self-health-check watcher's cleanup-effectiveness check --
+    a generic "is the terminal-pod backlog actually bounded" signal,
+    independent of any one specific cleanup-CronJob bug."""
+
+    def test_counts_only_old_failed_and_succeeded_pods(self):
+        now = datetime.now(timezone.utc)
+        old = now - timedelta(hours=3)
+        recent = now - timedelta(minutes=5)
+        mock_core = MagicMock()
+        mock_core.list_namespaced_pod.return_value = MagicMock(items=[
+            _pod("Failed", old),
+            _pod("Succeeded", old),
+            _pod("Failed", recent),      # too young to count
+            _pod("Running", old),        # not terminal -- must not count
+        ])
+
+        with patch("agentit.kube.core_v1", return_value=mock_core):
+            count = kube.count_stale_terminal_pods("agentit", max_age_hours=2.0)
+
+        assert count == 2
+
+    def test_no_stale_pods_returns_zero(self):
+        mock_core = MagicMock()
+        mock_core.list_namespaced_pod.return_value = MagicMock(items=[])
+
+        with patch("agentit.kube.core_v1", return_value=mock_core):
+            count = kube.count_stale_terminal_pods("agentit")
+
+        assert count == 0
+
+    def test_api_failure_raises_kube_error(self):
+        mock_core = MagicMock()
+        mock_core.list_namespaced_pod.side_effect = RuntimeError("timeout")
+
+        with patch("agentit.kube.core_v1", return_value=mock_core):
+            with pytest.raises(kube.KubeError):
+                kube.count_stale_terminal_pods("agentit")

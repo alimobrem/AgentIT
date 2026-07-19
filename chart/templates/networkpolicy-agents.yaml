@@ -371,3 +371,62 @@ spec:
           port: 5432
     {{- end }}
 {{- end }}
+---
+{{- if .Values.agents.selfHealthCheck.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-self-health-check
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-self-health-check
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ .Release.Name }}-self-health-check
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    # NOTE: this rule intentionally has NO `ports` restriction -- see the
+    # identical rule on the other watchers above for the DNS-resolution
+    # rationale (empirically confirmed on this cluster's OVN-Kubernetes).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
+    # Like vuln-watcher/slo-tracker/drift-detector, every check here reads
+    # kube.py (Tekton PipelineRuns/CronJobs/Pods, Argo Applications) --
+    # needs the Kubernetes API server. Like capability-scout, the
+    # webhook-reachability check calls the GitHub API directly (public
+    # internet, not selectable via podSelector/namespaceSelector) -- needs
+    # port 443. Unlike reassess-scheduler/skill-learner, this watcher
+    # never calls back into the portal Service -- no port-8080 rule.
+    - ports:
+        - protocol: TCP
+          port: 6443
+    - ports:
+        - protocol: TCP
+          port: 443
+    {{- if .Values.kafka.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              strimzi.io/cluster: agentit-kafka
+      ports:
+        - protocol: TCP
+          port: 9092
+    {{- end }}
+    {{- if .Values.postgres.bundled.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: postgres-bundled
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- end }}
+{{- end }}

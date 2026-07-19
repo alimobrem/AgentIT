@@ -1670,7 +1670,7 @@ class TestWatcherNetworkPolicies:
         docs = list(yaml.safe_load_all(rendered))
         return {d["metadata"]["name"]: d for d in docs if d}
 
-    def test_parseable_and_covers_all_six_watchers(self):
+    def test_parseable_and_covers_all_seven_watchers(self):
         by_name = self._by_name()
         assert set(by_name) == {
             "agentit-vuln-watcher",
@@ -1679,6 +1679,7 @@ class TestWatcherNetworkPolicies:
             "agentit-skill-learner",
             "agentit-capability-scout",
             "agentit-reassess-scheduler",
+            "agentit-self-health-check",
         }
         for policy in by_name.values():
             assert policy["kind"] == "NetworkPolicy"
@@ -2025,6 +2026,67 @@ class TestReassessSchedulerDeployment:
         values = yaml.safe_load(values_path.read_text())
         assert values["agents"]["reassessScheduler"]["enabled"] is False
         assert values["agents"]["reassessScheduler"]["interval"] == 3600
+
+
+class TestSelfHealthCheckDeployment:
+    """self-health-check Deployment (chart/templates/agents/self-health-check.yaml)
+    -- follows the exact same long-lived-Deployment-watcher pattern as
+    drift-detector/reassess-scheduler, not a new mechanism. See
+    docs/self-health-check-backlog.md for the design rationale."""
+
+    TEMPLATE = CHART_DIR / "agents" / "self-health-check.yaml"
+
+    def test_parseable(self):
+        doc = _load(self.TEMPLATE)
+        assert doc["kind"] == "Deployment"
+        assert doc["metadata"]["name"] == "agentit-self-health-check"
+
+    def test_invokes_self_health_watch_with_configured_interval(self):
+        doc = _load(self.TEMPLATE)
+        container = doc["spec"]["template"]["spec"]["containers"][0]
+        assert container["command"] == ["python", "-m", "agentit", "self-health-watch"]
+        assert "--interval" in container["args"]
+
+    def test_reuses_the_shared_service_account_no_new_rbac(self):
+        """This watcher only needs the RBAC every other watcher's SA
+        already has (-argocd-read + the namespace-scoped edit ClusterRole)
+        -- must not introduce a dedicated ServiceAccount/Role."""
+        doc = _load(self.TEMPLATE)
+        pod_spec = doc["spec"]["template"]["spec"]
+        # HELM_VARS substitutes `{{ .Release.Name }}` -> "agentit" for
+        # rendering purposes -- same value every other agent template test
+        # in this file resolves to.
+        assert pod_spec["serviceAccountName"] == "agentit"
+
+    def test_github_token_is_optional(self):
+        """Needed for the webhook-reachability check, but must degrade
+        gracefully (that one check reports inconclusive) rather than
+        block the whole watcher when unset."""
+        doc = _load(self.TEMPLATE)
+        container = doc["spec"]["template"]["spec"]["containers"][0]
+        env_by_name = {e["name"]: e for e in container["env"] if "name" in e}
+        assert env_by_name["GITHUB_TOKEN"]["valueFrom"]["secretKeyRef"]["optional"] is True
+
+    def test_has_liveness_probe_via_heartbeat_file(self):
+        doc = _load(self.TEMPLATE)
+        container = doc["spec"]["template"]["spec"]["containers"][0]
+        assert "heartbeat" in container["livenessProbe"]["exec"]["command"][-1]
+
+    def test_has_restrictive_security_context(self):
+        doc = _load(self.TEMPLATE)
+        pod_spec = doc["spec"]["template"]["spec"]
+        assert pod_spec["securityContext"]["runAsNonRoot"] is True
+        container = pod_spec["containers"][0]
+        assert container["securityContext"]["allowPrivilegeEscalation"] is False
+        assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
+
+    def test_defaults_to_disabled_in_values(self):
+        """Off by default like every other agent flag -- enabled on the
+        live deployment via argocd/application.yaml instead."""
+        values_path = CHART_DIR.parent / "values.yaml"
+        values = yaml.safe_load(values_path.read_text())
+        assert values["agents"]["selfHealthCheck"]["enabled"] is False
+        assert values["agents"]["selfHealthCheck"]["interval"] == 900
 
 
 class TestWorkflowCronJobsShareTheSameRescanPattern:

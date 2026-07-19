@@ -157,6 +157,32 @@
 </div>
 </div>
 
+<h2 class="section-title">AgentIT Self-Health</h2>
+<p class="text-muted text-sm mb-1">Periodic functional checks of AgentIT's own critical infrastructure -- not just "is the pod running" (self-health-check watcher, every 15 minutes by default). The webhook row below reuses the same live per-app delivery check rendered further down this page, run here in the background so a failure reaches the sitewide alert badge even if nobody opens this page. See <a href="https://github.com/alimobrem/AgentIT/blob/main/docs/self-health-check-backlog.md" target="_blank" rel="noopener" hx-boost="false">docs/self-health-check-backlog.md</a> for what else is on the roadmap.</p>
+<table>
+  <thead><tr><th>Check</th><th>Status</th><th>Details</th></tr></thead>
+  <tbody>
+    {% for action, check in self_health_checks.items() %}
+    <tr class="{% if check.status == 'healthy' %}row-border-green{% elif check.status == 'unknown' %}{% else %}row-border-red{% endif %}">
+      <td class="text-bold">{{ check.label }}</td>
+      <td>
+        <span class="badge {% if check.status == 'healthy' %}badge-low{% elif check.severity == 'critical' %}badge-critical{% elif check.severity == 'warning' %}badge-warning{% else %}badge-info{% endif %}">
+          {{ check.status | capitalize }}
+        </span>
+      </td>
+      <td class="text-sm">
+        {{ check.summary }}
+        {% if check.guidance %}<br><span class="text-muted">Next step: {{ check.guidance }}</span>{% endif %}
+        {% if check.checked_at %}<br><span class="text-muted text-xs">Checked {{ check.checked_at[:19] }}</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    {% if not self_health_checks %}
+    <tr><td colspan="3" class="text-muted">Self-health-check watcher not enabled</td></tr>
+    {% endif %}
+  </tbody>
+</table>
+
 <h2 class="section-title">Argo CD</h2>
 <table>
   <thead><tr><th>App</th><th>Sync</th><th>Health</th></tr></thead>

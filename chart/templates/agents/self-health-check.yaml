@@ -1,0 +1,93 @@
+{{- if .Values.agents.selfHealthCheck.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-self-health-check
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-self-health-check
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-self-health-check
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-self-health-check
+        app.kubernetes.io/component: agent
+    spec:
+      # Same `{{ .Release.Name }}` SA every other watcher Deployment uses
+      # (see drift-detector.yaml's identical comment) -- this watcher needs
+      # exactly the RBAC that SA already has: the -argocd-read Role
+      # (openshift-gitops) to resolve AgentIT's own repo URL, and the
+      # namespace-scoped `edit` ClusterRole (Tekton PipelineRuns, CronJobs,
+      # Jobs, Pods) it's already bound to. No new grant needed.
+      serviceAccountName: {{ .Release.Name }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: self-health-check
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [python, -m, agentit, self-health-watch]
+          args:
+            - --interval
+            - "{{ .Values.agents.selfHealthCheck.interval }}"
+          env:
+            # Same source of truth as the image ref above / portal Rollout.
+            - name: AGENTIT_GIT_COMMIT
+              value: {{ .Values.image.tag | quote }}
+            - name: AGENTIT_IMAGE_TAG
+              value: {{ .Values.image.tag | quote }}
+            {{- if .Values.kafka.enabled }}
+            - name: AGENTIT_KAFKA_BOOTSTRAP
+              value: {{ .Values.kafka.bootstrapServers }}
+            {{- end }}
+            # Postgres is the only supported store -- always-on, not a flag.
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.bundled.credentials.secretName }}
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.bundled.credentials.secretName }}
+                  key: password
+            - name: AGENTIT_DB_DSN
+              value: "postgresql://$(PGUSER):$(PGPASSWORD)@{{ .Release.Name }}-postgres-bundled.{{ .Release.Namespace }}.svc:5432/{{ .Values.postgres.bundled.credentials.database }}"
+            # Needed for the webhook-reachability check (github_pr.py's
+            # get_webhook_delivery_health lists hooks + delivery history) --
+            # same Secret the main portal Deployment and capability-scout
+            # already read. Optional: without it, that one check reports
+            # "inconclusive this tick" via its own error field instead of
+            # failing the whole watcher tick.
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+                  optional: true
+          livenessProbe:
+            exec:
+              command: [sh, -c, "test -f /tmp/heartbeat && test $(($(date +%s) - $(stat -c %Y /tmp/heartbeat 2>/dev/null || echo 0))) -lt 900"]
+            initialDelaySeconds: 60
+            periodSeconds: 120
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+{{- end }}

@@ -65,6 +65,14 @@ spec:
         # "The agent fleet" section and this file's own header comment.
         - name: agents.reassessScheduler.enabled
           value: "true"
+        # Self-health-check: verifies AgentIT's own webhook/CI-pipeline/
+        # maintenance-CronJob health end to end -- see
+        # docs/self-health-check-backlog.md and README's Self-observability
+        # section. Enabled here as part of the same 2026-07-18 "every
+        # watcher/CronJob the chart ships is on for this live deployment"
+        # decision as every other agents.*.enabled flag on this page.
+        - name: agents.selfHealthCheck.enabled
+          value: "true"
         - name: agents.skillLearner.enabled
           value: "true"
         - name: agents.skillLearner.interval

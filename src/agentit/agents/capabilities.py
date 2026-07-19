@@ -58,6 +58,7 @@ WATCHER_AGENTS: list[dict[str, str]] = [
     {"name": "skill-learner", "mode": "LLM polling", "interval": "24 hours", "description": "Researches recent CVEs via LLM and drafts new skills (status: draft) for human review — requires an LLM connection"},
     {"name": "capability-scout", "mode": "LLM polling", "interval": "24 hours", "description": "Reads fleet usage/effectiveness data and doc-gap signals, proposes one small change to AgentIT itself as a draft PR for human review — requires an LLM connection and GITHUB_TOKEN"},
     {"name": "reassess-scheduler", "mode": "Polling", "interval": "1 hour", "description": "Checks every app's configured re-assessment cadence (daily/weekly/monthly, set on its Assessment Detail page) and automatically re-Assesses any app that's due, via the same route the manual Scan/Re-scan button uses"},
+    {"name": "self-health-check", "mode": "Kube + GitHub API polling", "interval": "15 minutes", "description": "Verifies AgentIT's own critical infrastructure end to end -- GitHub webhook delivery health, CI pipeline stall detection, maintenance CronJob success, and cleanup-CronJob effectiveness -- publishing pass/fail events surfaced on the Health page's Self-Health panel and the sitewide Events badge"},
 ]
 
 

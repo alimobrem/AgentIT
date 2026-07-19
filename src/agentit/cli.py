@@ -484,6 +484,25 @@ async def drift_detect(interval: int) -> None:
     await detector.run()
 
 
+@main.command("self-health-watch")
+@click.option("--interval", default=900, type=int, help="Check interval in seconds (default: 15 minutes).")
+@_run_async
+async def self_health_watch(interval: int) -> None:
+    """Long-lived self-health-check — periodically verifies AgentIT's own
+    critical infrastructure (webhook reachability, CI pipeline progress,
+    maintenance CronJob success, cleanup effectiveness) is actually
+    working end to end, not just "is the pod running". See
+    docs/self-health-check-backlog.md for the design rationale and what's
+    deliberately out of scope.
+    """
+    from agentit.events import get_publisher
+    from agentit.watchers.self_health_check import SelfHealthCheck
+
+    store = await create_store()
+    checker = SelfHealthCheck(publisher=get_publisher(), store=store, interval=interval)
+    await checker.run()
+
+
 @main.command("reassess-watch")
 @click.option(
     "--interval", default=3600, type=int,

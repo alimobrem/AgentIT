@@ -189,6 +189,15 @@ agents:
   reassessScheduler:
     enabled: false
     interval: 3600    # 1 hour
+  # self-health-check: verifies AgentIT's own critical infrastructure end to
+  # end (GitHub webhook delivery health, CI pipeline stall detection,
+  # maintenance CronJob success, cleanup-CronJob effectiveness) instead of
+  # only "is the pod running" -- see docs/self-health-check-backlog.md.
+  # Off by default like every other agent flag; enabled on the live
+  # deployment via argocd/application.yaml.
+  selfHealthCheck:
+    enabled: false
+    interval: 900     # 15 minutes
   skillLearner:
     enabled: false
     interval: 86400   # 24 hours

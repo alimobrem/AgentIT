@@ -23,6 +23,7 @@ from agentit.portal.health_links import (
 from agentit.portal.helpers import (
     get_circuit_breaker_states,
     get_credential_states,
+    get_self_health_check_states,
     get_store,
     get_templates,
 )
@@ -716,6 +717,7 @@ async def health_page(request: Request) -> HTMLResponse:
     loop = asyncio.get_running_loop()
     data = await asyncio.to_thread(_get_cluster_health, store, loop)
     data["deploy_status"] = await asyncio.to_thread(_get_deploy_status, True)
+    data["self_health_checks"] = await get_self_health_check_states(store)
     return get_templates().TemplateResponse(request, "health.html", data)
 
 
