@@ -39,8 +39,7 @@
       <label for="filter-ledger-lifecycle">Status</label>
       <select id="filter-ledger-lifecycle" name="lifecycle">
         <option value="">Any status</option>
-        <option value="needs_approval" {{ 'selected' if lifecycle_filter == 'needs_approval' }}>Waiting for approval</option>
-        <option value="open" {{ 'selected' if lifecycle_filter == 'open' }}>Open</option>
+        <option value="needs_approval" {{ 'selected' if lifecycle_filter == 'needs_approval' }}>Waiting for approval (open, unmerged)</option>
         <option value="merged" {{ 'selected' if lifecycle_filter == 'merged' }}>Merged</option>
         <option value="rejected" {{ 'selected' if lifecycle_filter == 'rejected' }}>Rejected</option>
         <option value="closed" {{ 'selected' if lifecycle_filter == 'closed' }}>Closed</option>
@@ -55,7 +54,7 @@
 
 <div class="stat-grid">
   <div class="stat-card">
-    <div class="stat-label">Waiting for your approval</div>
+    <div class="stat-label" title="Every PR AgentIT has opened that's still open and unmerged on GitHub, whether or not it has an in-app approval gate">Waiting for your approval</div>
     <div class="stat-value {% if needs_approval|length > 0 %}text-warning{% else %}text-success{% endif %}">{{ needs_approval|length }}</div>
   </div>
   <div class="stat-card">
@@ -68,12 +67,34 @@
 <h2 class="section-title mt-2">Waiting for your approval ({{ needs_approval|length }})</h2>
 {% if needs_approval %}
 {% for r in needs_approval %}
+{% if r.source == 'gate' %}
 {{ gate_card(r.raw) }}
+{% else %}
+{# Genuinely open, unmerged PR with no in-app approval gate (source-repo-
+   pr/app-repo-pr/onboarding never gets one -- see pr_tracking.py) --
+   still counts as "waiting for your approval" since it's still real work
+   waiting on a human, just reviewed/merged directly on GitHub instead of
+   through an AgentIT action. #}
+<div class="card mb-1">
+  <div class="card-header">
+    <div>
+      <span class="badge badge-warning">Open on GitHub</span>
+      <span class="badge badge-muted">{{ r.category | dimension_label }}</span>
+      <span class="text-muted text-sm" data-timestamp="{{ r.created_at }}">{{ (r.created_at or '')[:10] }}</span>
+    </div>
+    {% if r.assessment_id %}<a href="/assessments/{{ r.assessment_id }}?tab=prs" class="btn btn-sm btn-outline">View App</a>{% endif %}
+  </div>
+  <p class="my-4">
+    {{ r.app_name }} &mdash; <a href="{{ r.html_url | safe_url }}" target="_blank" rel="noopener" hx-boost="false">{{ r.title or r.pr_url }}</a>
+  </p>
+  <p class="text-sm text-muted mb-0">No in-app approval step for this PR type &mdash; review and merge it directly on GitHub.</p>
+</div>
+{% endif %}
 {% endfor %}
 {% else %}
 <div class="empty-state">
   <h3>Nothing waiting on you</h3>
-  <p class="text-muted">Every GitOps PR AgentIT has opened is either already merged/rejected, or still open on GitHub with no AgentIT approval step of its own.</p>
+  <p class="text-muted">Every PR AgentIT has ever opened is already merged, rejected, or closed.</p>
 </div>
 {% endif %}
 {% endif %}
