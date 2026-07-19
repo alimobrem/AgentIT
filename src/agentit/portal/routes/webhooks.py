@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from agentit.portal.helpers import (
-    clone_assess_cleanup, get_llm_client, get_store, publish_event, run_onboarding, with_timeout,
+    clone_assess_cleanup, get_store, publish_event, run_onboarding, with_timeout,
 )
 
 log = logging.getLogger(__name__)
@@ -245,27 +245,25 @@ async def webhook_github_push(request: Request):
                                    "warning" if diff.degraded else "info",
                                    diff.summary())
 
-                auto_mode_on = (await s.get_setting("auto_mode")) == "true"
-
                 # Finding-scoped re-verification (docs/onboarding-loop-
                 # vision-gap-analysis.md Phase 3): every push-triggered
                 # re-assessment automatically checks whether any prior
                 # delivery on this app that recorded a target finding
-                # actually cleared it, regardless of auto_mode -- this is
-                # pure correlation + a visible signal, not itself an
-                # automated delivery. Phase 4's bounded auto-retry/
-                # escalation on a confirmed failure IS gated on auto_mode,
-                # same as the diff.auto_fixable dispatch loop below.
+                # actually cleared it -- pure correlation + a visible
+                # signal, not itself an automated delivery. AutoMode has
+                # been removed, so Phase 4's reaction to a confirmed
+                # still-present finding is no longer a bounded auto-retry
+                # (that retry's own terminal action was an unreviewed
+                # auto-delivery) -- it now always escalates straight to a
+                # human-review gate, same as the diff.auto_fixable
+                # dispatch loop below.
                 from agentit.portal.delivery import check_pending_delivery_verifications
-                await check_pending_delivery_verifications(
-                    s, managed["repo_name"], report, assessment_id,
-                    auto_mode=auto_mode_on, llm_client=get_llm_client(),
-                )
+                await check_pending_delivery_verifications(s, managed["repo_name"], report, assessment_id)
 
                 # Auto-fix new findings that are auto-fixable. RemediationDispatcher
                 # is now genuinely async -- await it directly, no more
                 # .raw/to_thread bridge needed for this call path.
-                if diff.auto_fixable and auto_mode_on:
+                if diff.auto_fixable:
                     from agentit.remediation.dispatcher import RemediationDispatcher
                     dispatcher = RemediationDispatcher(s)
                     for finding in diff.auto_fixable:
@@ -291,29 +289,20 @@ async def webhook_github_push(request: Request):
                             "dispatcher", "fix-generated", managed["repo_name"], "info",
                             f"Generated {len(dispatch_result['files'])} fix(es) for '{finding.category}' via {dispatch_result['agent']}",
                         )
-                        # Unlike fix_finding()'s human-initiated path (which
-                        # stops at generation -- a human still clicks Deliver
-                        # on Onboard Results), this branch only runs when the
-                        # repo owner already turned on the `auto_mode`
-                        # setting above, so -- matching the fully-autonomous
-                        # treatment `RemediationLoop.trigger()` already gives
-                        # webhook-driven fixes elsewhere -- actually deliver
-                        # via the same router every other delivery goes
-                        # through, instead of leaving the generated fix
-                        # sitting ungenerated-from-the-router's-perspective
-                        # until a human happens to notice it.
-                        from agentit.automode import AutoMode
-                        from agentit.assessment_diff import finding_key
-                        auto = AutoMode(store=s, publisher=None, llm_client=get_llm_client())
-                        auto_result = await auto.execute(
-                            assessment_id, dispatch_result["files"], managed["repo_name"],
-                            report.criticality, True, managed["repo_name"],
-                            dispatch_result["agent"], report=report,
-                            target_findings=[finding_key(finding.category, finding.description)],
+                        # AutoMode has been removed: this fix is always
+                        # gated for human review now, exactly like
+                        # webhook_finding()'s dispatcher branch below --
+                        # nothing auto-delivers without an explicit human
+                        # action anymore, so a generated fix always stops
+                        # here rather than autonomously opening a PR.
+                        gate_id = await s.create_gate(
+                            assessment_id, f"finding-{finding.category}",
+                            f"Dispatcher generated {len(dispatch_result['files'])} fix(es) for "
+                            f"'{finding.category}' -- review and approve",
                         )
                         await s.log_event(
-                            "dispatcher", auto_result["action"], managed["repo_name"], "info",
-                            f"Auto-fix {auto_result['action']} for {finding.category}: {auto_result['reason']}",
+                            "dispatcher", "gated", managed["repo_name"], "info",
+                            f"Fix for {finding.category} gated for review (gate {gate_id})",
                         )
 
         await s.log_event("change-analysis", "impact-analyzed", managed["repo_name"],
@@ -404,10 +393,19 @@ async def webhook_onboard(request: Request):
 
 @router.post("/api/webhook/auto-apply", dependencies=[Depends(verify_internal_token)])
 async def webhook_auto_apply(request: Request):
-    """Auto-apply manifests if auto-mode is on and LLM classifies as safe."""
+    """Gate onboarding's generated manifests for human review.
+
+    AutoMode (which used to decide here whether to auto-deliver via an LLM
+    safety classification) has been removed: delivery now always requires
+    an explicit human action -- the Deliver button on Onboard Results, or
+    approving the gate this creates -- consistent with every other former
+    AutoMode call site. (This route is only reached via RemediationLoop's
+    own pipeline, itself only reachable today via a direct call to
+    /api/webhook/remediate; it's kept, unreachable from any autonomous
+    trigger, for that explicit-invocation case.)
+    """
     body = await request.json()
     assessment_id = body.get("assessment_id")
-    namespace = body.get("namespace", "default")
     if not assessment_id:
         raise HTTPException(400, "assessment_id required")
 
@@ -420,28 +418,17 @@ async def webhook_auto_apply(request: Request):
     if files is None:
         raise HTTPException(404, "Onboarding not found -- run onboarding first")
 
-    orch = await s.get_orchestration(assessment_id) or {}
-    auto_approve = orch.get("auto_approve", False)
-
-    # AutoMode is now genuinely async -- await it directly, no more
-    # .raw/to_thread bridge needed for this call path.
-    from agentit.automode import AutoMode
-    from agentit.assessment_diff import current_finding_keys
-    engine = AutoMode(store=s, publisher=None, llm_client=get_llm_client())
-
-    # This batch spans the whole onboarding run (every finding the
-    # assessment surfaced, not one specific finding) -- target every
-    # finding known at this assessment so a later re-assessment's diff can
-    # still tell whether this delivery's underlying findings cleared.
-    result = await engine.execute(
-        assessment_id, files, namespace,
-        report.criticality, auto_approve, report.repo_name,
-        report=report, target_findings=sorted(current_finding_keys(report)),
+    gate_id = await s.create_gate(
+        assessment_id, "auto-mode-review",
+        f"Generated {len(files)} manifest(s) for {report.repo_name} -- review and deliver from Onboard Results.",
     )
-
+    result = {
+        "action": "gated",
+        "reason": "Delivery now always requires human review -- open Onboard Results to Deliver.",
+        "details": {"gate_id": gate_id},
+    }
     log.info("auto-apply result for %s: %s -- %s", assessment_id, result["action"], result["reason"])
-    status_code = 207 if result["action"] in ("partial_failure", "failed", "split") else 200
-    return JSONResponse(result, status_code=status_code)
+    return JSONResponse(result)
 
 
 @router.post("/api/webhook/finding", dependencies=[Depends(verify_internal_token)])
@@ -473,8 +460,8 @@ async def webhook_finding(request: Request):
     if not app:
         return JSONResponse({"status": "accepted", "action": "alert-only", "reason": f"app '{app_name}' not in fleet"})
 
-    # RemediationDispatcher/AutoMode are now genuinely async -- await them
-    # directly, no more .raw/to_thread bridge needed for this call path.
+    # RemediationDispatcher is now genuinely async -- await it directly,
+    # no more .raw/to_thread bridge needed for this call path.
     from agentit.remediation.dispatcher import RemediationDispatcher
     dispatcher = RemediationDispatcher(s)
     result = await dispatcher.dispatch(app["id"], category, app_name)
@@ -483,35 +470,9 @@ async def webhook_finding(request: Request):
         await s.log_event("dispatcher", "no-fix-available", app_name, "warning", result["error"])
         return JSONResponse({"status": "accepted", "action": "alert-only", "reason": result["error"]})
 
-    from agentit.automode import AutoMode
-    from agentit.events import get_publisher as _gp
-    auto = AutoMode(store=s, publisher=_gp(), llm_client=get_llm_client())
-
-    if await auto.is_enabled() and result["files"]:
-        namespace = app.get("deploy_namespace", app_name)
-        # `app` is `get_fleet_data()`'s summary dict, not the full report --
-        # fetch the real report so AutoMode can see `infra_repo_url` for its
-        # GitOps-aware terminal action (docs/unified-apply-flow.md's
-        # plumbing-gap fix: a fleet-wide dict alone can't answer "is this
-        # app GitOps-registered").
-        finding_report = await s.get(app["id"])
-        from agentit.assessment_diff import finding_key
-        auto_result = await auto.execute(
-            app["id"], result["files"], namespace,
-            app.get("criticality", "medium"), False, app_name,
-            result["agent"], report=finding_report,
-            target_findings=[finding_key(category, description)],
-        )
-        await s.log_event("dispatcher", auto_result["action"], app_name, "info",
-                           f"Auto-mode {auto_result['action']} for {category}: {auto_result['reason']}")
-        return JSONResponse({
-            "status": "accepted",
-            "action": auto_result["action"],
-            "reason": auto_result["reason"],
-            "files_generated": len(result["files"]),
-            "agent": result["agent"],
-        })
-
+    # AutoMode has been removed: a generated fix always gates for human
+    # review now -- nothing auto-delivers without an explicit human action
+    # anymore.
     if result["files"]:
         gate_id = await s.create_gate(
             app["id"], f"finding-{category}",

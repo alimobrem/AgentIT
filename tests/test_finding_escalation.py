@@ -19,7 +19,7 @@ Covers:
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from agentit.assessment_diff import finding_key
 from agentit.ledger import get_ledger_cards
@@ -60,17 +60,9 @@ def _push_body(repo_url: str) -> dict:
     }
 
 
-def _safe_llm():
-    llm = MagicMock()
-    llm.classify_action.return_value = {
-        "is_destructive": False, "confidence": 0.95, "reason": "Adds a NetworkPolicy -- not destructive",
-    }
-    return llm
-
-
 def _gitops_patches():
     """The same boundary mocks test_webhook_autofix_dispatch.py uses so a
-    GitOps-registered AutoMode delivery never makes a real cluster/GitHub
+    GitOps-registered redispatch delivery never makes a real cluster/GitHub
     call: the delivery mechanism resolves to infra-repo-commit and the
     commit itself is mocked out."""
     return (
@@ -117,7 +109,6 @@ class TestGetFindingFailureCount:
 class TestHandleConfirmedFindingFailure:
     async def test_below_threshold_redispatches_not_escalates(self):
         store, _ = await make_async_store()
-        await store.set_setting("auto_mode", "true")
         report = _report_with_network_finding(repo_name="esc-app2")
         report.infra_repo_url = "https://github.com/org/infra-gitops"
         aid = await store.save(report)
@@ -125,7 +116,7 @@ class TestHandleConfirmedFindingFailure:
         patches = _gitops_patches()
         with patches[0], patches[1] as mock_commit, patches[2]:
             result = await handle_confirmed_finding_failure(
-                store, _safe_llm(), report, aid, "esc-app2", _NETWORK_TARGET,
+                store, report, aid, "esc-app2", _NETWORK_TARGET,
             )
 
         assert result["action"] == "redispatched"
@@ -156,7 +147,7 @@ class TestHandleConfirmedFindingFailure:
 
         with patch("agentit.remediation.dispatcher.RemediationDispatcher.dispatch") as mock_dispatch:
             result = await handle_confirmed_finding_failure(
-                store, _safe_llm(), report, aid, "esc-app3", _NETWORK_TARGET,
+                store, report, aid, "esc-app3", _NETWORK_TARGET,
             )
 
         assert result["action"] == "escalated"
@@ -198,7 +189,6 @@ class TestRepeatedFailureLoopStopsAtThreshold:
         is created for this finding, so the loop provably stops instead of
         regenerating an identical fix forever."""
         store, _ = await make_async_store()
-        await store.set_setting("auto_mode", "true")
         app_name = "esc-app5"
         report = _report_with_network_finding(repo_name=app_name)
         report.infra_repo_url = "https://github.com/org/infra-gitops"
@@ -219,9 +209,7 @@ class TestRepeatedFailureLoopStopsAtThreshold:
                 new_report = _report_with_network_finding(repo_name=app_name)
                 new_aid = await store.save(new_report)
 
-                results = await check_pending_delivery_verifications(
-                    store, app_name, new_report, new_aid, auto_mode=True, llm_client=_safe_llm(),
-                )
+                results = await check_pending_delivery_verifications(store, app_name, new_report, new_aid)
                 assert len(results) == 1
                 assert results[0]["status"] == "still_present"
                 escalation_actions = [e["action"] for e in results[0]["escalations"]]
@@ -260,9 +248,7 @@ class TestRepeatedFailureLoopStopsAtThreshold:
         final_report = _report_with_network_finding(repo_name=app_name)
         final_aid = await store.save(final_report)
         with patches[0], patches[2]:
-            further_results = await check_pending_delivery_verifications(
-                store, app_name, final_report, final_aid, auto_mode=True, llm_client=_safe_llm(),
-            )
+            further_results = await check_pending_delivery_verifications(store, app_name, final_report, final_aid)
         assert further_results == []
         mock_commit.assert_not_called()
 

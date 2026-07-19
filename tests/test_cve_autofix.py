@@ -174,41 +174,39 @@ class TestCVEWebhook:
         data = resp.json()
         assert data["action"] == "alert-only"
 
-    async def test_finding_webhook_auto_mode_decision_attributed_to_real_agent(
+    async def test_finding_webhook_always_gates_for_human_review(
         self, client, _override_store,
     ) -> None:
-        """webhook_finding already knows which agent (dispatcher's result["agent"])
-        generated the fix — the auto-mode decision it triggers should be logged
-        under that real agent name, not the generic 'auto-mode' component name."""
+        """AutoMode (which used to conditionally auto-apply here via an LLM
+        safety classification, logged as a per-agent-attributed 'decision'
+        event) has been removed -- a dispatched fix always gates for human
+        review now, with no LLM classification step and no 'decision' event
+        at all for this path."""
         store = _override_store
         report = make_report(
             repo_name="netpol-app",
             scores=[_score_with_finding("security", "network", "Missing NetworkPolicy")],
         )
         await store.save(report)
-        await store.set_setting("auto_mode", "true")
 
-        fake_llm = type("FakeLLM", (), {
-            "classify_action": staticmethod(lambda **kw: {
-                "is_destructive": False, "confidence": 0.95, "reason": "Adds NetworkPolicy",
-            }),
-        })()
-
-        with patch("agentit.portal.routes.webhooks.get_llm_client", return_value=fake_llm):
-            resp = await client.post(
-                "/api/webhook/finding",
-                json={
-                    "app_name": "netpol-app",
-                    "category": "network",
-                    "description": "Missing NetworkPolicy",
-                    "severity": "high",
-                },
-            )
+        resp = await client.post(
+            "/api/webhook/finding",
+            json={
+                "app_name": "netpol-app",
+                "category": "network",
+                "description": "Missing NetworkPolicy",
+                "severity": "high",
+            },
+        )
         assert resp.status_code == 200
+        data = resp.json()
+        assert data["action"] == "gated"
+        assert data["gate_id"]
 
+        # No more LLM safety classification -- no "decision" event for this
+        # path anymore.
         decision_events = await store.list_events_by_action("decision")
-        assert len(decision_events) == 1
-        # HardeningAgent was removed once skills covered its domain (see
-        # docs/agent-removal-readiness.md) -- the dispatcher now attributes
-        # by skill domain ("security") instead of the old agent class name.
-        assert decision_events[0]["agent_id"] == "security"
+        assert decision_events == []
+
+        gates = await store.list_gates(status="pending")
+        assert any(g["gate_type"] == "finding-network" for g in gates)

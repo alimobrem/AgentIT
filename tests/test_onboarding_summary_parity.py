@@ -1,7 +1,9 @@
 """Regression tests: helpers.run_onboarding (webhook path) and
 routes/assessments.py's _run_onboarding (inline portal path) must produce
 orchestration summaries with the same fields -- especially auto_approve/gates,
-which webhook_auto_apply relies on to decide whether to auto-apply manifests.
+persisted alongside every onboarding run as real orchestrator risk-tier data
+(unrelated to AutoMode, which used to also read this field but has since been
+removed).
 """
 from __future__ import annotations
 
@@ -81,10 +83,11 @@ async def test_run_onboarding_uses_explicitly_passed_store_not_the_singleton():
     assert len(events) > 0  # orchestrator agents logged events into OUR store
 
 
-async def test_webhook_auto_apply_sees_real_auto_approve_value():
-    """End-to-end regression for the original bug: webhook_auto_apply must
-    read the SAME auto_approve value the orchestrator computed, not a
-    hardcoded False because the summary omitted the field."""
+async def test_orchestration_summary_persists_real_auto_approve_value():
+    """End-to-end regression for the original bug: the persisted
+    orchestration summary must carry the SAME auto_approve value the
+    orchestrator computed, not a hardcoded False because the summary
+    omitted the field."""
     async_store, store = await make_async_store()
     report = make_report(criticality="low")
     aid = await store.save(report)

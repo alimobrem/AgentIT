@@ -164,7 +164,7 @@ class TestFindingWebhook:
         assert resp.status_code == 200
         assert resp.json()["action"] == "alert-only"
 
-    async def test_gates_fix_when_automode_off(self, client, _override_store):
+    async def test_gates_fix_for_human_review(self, client, _override_store):
         from agentit.models import DimensionScore, Finding, Severity
         store = _override_store
         report = make_report(

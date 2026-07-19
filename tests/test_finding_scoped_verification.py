@@ -224,10 +224,16 @@ class TestCheckPendingDeliveryVerifications:
 
         first = await check_pending_delivery_verifications(store, "verify-app3", new_report, new_aid)
         assert len(first) == 1
+        assert first[0]["delivery_id"] == delivery_id
 
+        # AutoMode has been removed -- Phase 4 is now unconditional, so the
+        # still-present outcome above also re-dispatched a fresh delivery
+        # attempt for the same finding (below FINDING_ESCALATION_THRESHOLD).
+        # That new delivery is the one still awaiting its own finding-check
+        # now -- the ORIGINAL delivery specifically must never be
+        # reprocessed.
         second = await check_pending_delivery_verifications(store, "verify-app3", new_report, new_aid)
-        assert second == []
-        _ = delivery_id
+        assert delivery_id not in {r["delivery_id"] for r in second}
 
     async def test_still_present_ledger_card_is_visible(self):
         store, _ = await make_async_store()
@@ -266,8 +272,7 @@ class TestWebhookWiring:
 
         new_report = _report_with_network_finding(repo_name=old_report.repo_name, repo_url=repo_url)
 
-        with patch("agentit.portal.routes.webhooks.clone_assess_cleanup", return_value=new_report), \
-             patch("agentit.portal.routes.webhooks.get_llm_client", return_value=None):
+        with patch("agentit.portal.routes.webhooks.clone_assess_cleanup", return_value=new_report):
             resp = await client.post(
                 "/api/webhook/github-push",
                 json=_push_body(repo_url),
@@ -278,10 +283,13 @@ class TestWebhookWiring:
         delivery = await store.get_delivery(delivery_id)
         assert delivery["finding_resolution"] == "still_present"
 
-    async def test_auto_mode_off_never_escalates_or_redispatches(self, portal_client):
-        """Phase 3's correlation always runs; Phase 4's reaction (re-dispatch
-        or escalate) must NOT fire while auto_mode is off -- it's gated the
-        same way the existing diff.auto_fixable dispatch loop already is."""
+    async def test_below_threshold_failure_redispatches_not_escalates(self, portal_client):
+        """AutoMode has been removed, so there is no more `auto_mode`
+        toggle gating Phase 4's reaction at all -- a still-present target
+        finding below FINDING_ESCALATION_THRESHOLD always re-dispatches a
+        fresh fix attempt now (never immediately escalates), exactly like
+        `check_pending_delivery_verifications()` always did once auto_mode
+        was on."""
         client, store, old_aid = portal_client
         old_report = await store.get(old_aid)
         repo_url = old_report.repo_url
@@ -291,13 +299,10 @@ class TestWebhookWiring:
             old_aid, old_report.repo_name, {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT,
             status="delivered", target_findings=[target],
         )
-        # 2 confirmed prior failures already on record -- below threshold,
-        # but if Phase 4 fired despite auto_mode being off, it would still
-        # try to redispatch/escalate; assert neither happens.
+        # No prior confirmed failures on record yet -- below threshold.
         new_report = _report_with_network_finding(repo_name=old_report.repo_name, repo_url=repo_url)
 
-        with patch("agentit.portal.routes.webhooks.clone_assess_cleanup", return_value=new_report), \
-             patch("agentit.portal.routes.webhooks.get_llm_client", return_value=None):
+        with patch("agentit.portal.routes.webhooks.clone_assess_cleanup", return_value=new_report):
             resp = await client.post(
                 "/api/webhook/github-push",
                 json=_push_body(repo_url),
@@ -307,7 +312,6 @@ class TestWebhookWiring:
         assert resp.status_code == 200
         gates = await store.list_gates(status="pending")
         assert not any(g["gate_type"] == "finding-unresolved-escalation" for g in gates)
-        # Redispatch never fired -- no "finding-redispatched" event, the
-        # real signal redispatch_finding_fix() logs on success.
+
         events = await store.list_events(target_app=old_report.repo_name, limit=50)
-        assert not any(e["action"] == "finding-redispatched" for e in events)
+        assert any(e["action"] == "finding-redispatched" for e in events)

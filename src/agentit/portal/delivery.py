@@ -14,7 +14,6 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import Awaitable, Callable
 
 from agentit import kube
 from agentit.audit import audit_log
@@ -955,113 +954,6 @@ async def route_and_deliver(
     }
 
 
-def _outcome_errors(delivery: dict) -> list[str]:
-    """Every ``{"error": ...}`` a ``route_and_deliver()`` result's per-
-    category outcomes carry -- the same signal the manual Deliver route
-    (``routes/assessments.py::deliver()``) already uses to build its
-    ``error=`` flash, reused here so a real routing/delivery failure means
-    the same thing regardless of who triggered it."""
-    return [
-        o["error"] for o in delivery["outcomes"].values()
-        if isinstance(o, dict) and o.get("error")
-    ]
-
-
-async def auto_dry_run_then_deliver(
-    files: list[dict],
-    *,
-    app_name: str,
-    namespace: str,
-    report: AssessmentReport | None,
-    store: object,
-    assessment_id: str,
-    actor: str,
-    on_stage: Callable[[str], Awaitable[None]] | None = None,
-    target_findings: list[tuple[str, str]] | None = None,
-) -> dict:
-    """Onboarding's own automatic "Dry Run, then Deliver" chain -- the same
-    two steps a human already clicks by hand on Onboard Results, run back-
-    to-back once onboarding finishes (docs/onboarding-loop-vision-gap-
-    analysis.md Phase 3, scoped narrowly to this, not ``AutoMode``'s LLM-
-    classification path).
-
-    Calls the exact same ``route_and_deliver()`` the manual Dry Run and
-    Deliver clicks call, in the same order, through the same classify/
-    secret-block/placeholder-strip/GitOps-mandatory logic -- so the secret-
-    block and placeholder-guard apply identically regardless of who
-    triggered delivery, and the mechanism can only ever be the GitOps
-    commit+PR (or the legacy ``MECHANISM_NONE`` refusal for a pre-mandatory-
-    GitOps assessment), never a direct apply.
-
-    Dry Run is a real, respected gate here, not a rubber stamp: if it
-    raises, or if any category's dry-run outcome carries an ``"error"``
-    (e.g. ``MECHANISM_NONE`` -- no infra repo known), this returns
-    immediately with ``ok=False`` and ``stage="dry_run"`` -- the real
-    Deliver call is never attempted. ``on_stage(stage)`` (when given) is
-    awaited right before each of the two ``route_and_deliver()`` calls,
-    purely so a caller (``_run_onboarding_job``) can reflect the chain's
-    real progress onto its own job-tracking row -- this function makes no
-    store writes of its own beyond what ``route_and_deliver()`` already
-    does.
-
-    ``target_findings`` is threaded straight through to the real (non-dry-
-    run) ``route_and_deliver()`` call only -- the dry-run call's own
-    ``deliveries`` row is a throwaway preview record, never a candidate for
-    Phase 3's later finding-resolution correlation.
-    """
-    if on_stage:
-        await on_stage("dry_run")
-    try:
-        dry_run_result = await route_and_deliver(
-            files, app_name=app_name, namespace=namespace, report=report,
-            store=store, assessment_id=assessment_id, actor=actor, dry_run=True,
-        )
-    except Exception as exc:
-        return {"ok": False, "stage": "dry_run", "error": str(exc)[:300]}
-
-    dry_run_errors = _outcome_errors(dry_run_result)
-    if dry_run_errors:
-        return {
-            "ok": False, "stage": "dry_run",
-            "error": " | ".join(dry_run_errors)[:300],
-            "delivery": dry_run_result,
-        }
-
-    if on_stage:
-        await on_stage("delivering")
-    try:
-        deliver_result = await route_and_deliver(
-            files, app_name=app_name, namespace=namespace, report=report,
-            store=store, assessment_id=assessment_id, actor=actor, dry_run=False,
-            target_findings=target_findings,
-        )
-    except Exception as exc:
-        return {"ok": False, "stage": "deliver", "error": str(exc)[:300]}
-
-    deliver_errors = _outcome_errors(deliver_result)
-    if deliver_errors:
-        return {
-            "ok": False, "stage": "deliver",
-            "error": " | ".join(deliver_errors)[:300],
-            "delivery": deliver_result,
-        }
-
-    pr_url = ""
-    pr_url_repo = ""
-    for cat, o in deliver_result["outcomes"].items():
-        if isinstance(o, dict) and o.get("pr_url"):
-            pr_url = o["pr_url"]
-            pr_url_repo = repo_kind_for_mechanism(deliver_result["mechanisms"].get(cat, ""))
-            break
-
-    return {
-        "ok": True, "stage": "delivered",
-        "delivery": deliver_result,
-        "pr_url": pr_url,
-        "pr_url_repo": pr_url_repo,
-    }
-
-
 # ── Finding-scoped re-verification & bounded auto-escalation ──────────────
 # (docs/onboarding-loop-vision-gap-analysis.md §7/Phase 3-4). Nothing above
 # this line changes shape for a caller that never passes `target_findings`.
@@ -1172,16 +1064,19 @@ async def escalate_unresolved_finding(
 
 
 async def redispatch_finding_fix(
-    store: object, llm_client: object, report: AssessmentReport, assessment_id: str,
+    store: object, report: AssessmentReport, assessment_id: str,
     app_name: str, finding: tuple[str, str],
 ) -> dict:
     """Phase 4's below-threshold branch: re-dispatch a fresh fix attempt for
     this exact finding through the same mechanism the original fix went
     through -- ``RemediationDispatcher.dispatch()`` to generate, then
-    ``AutoMode.execute()`` (-> ``route_and_deliver()``) to deliver -- reusing
-    the auto-chain machinery this same effort already wired end-to-end
-    (``webhook_github_push``'s auto-fixable loop, Phase 0's 9ccfa21) rather
-    than re-implementing delivery logic here.
+    ``route_and_deliver()`` directly to deliver (AutoMode has been removed;
+    it never did anything beyond an extra LLM safety classification on top
+    of this exact call for the cluster-config category -- see its own
+    former module docstring) -- reusing the auto-chain machinery this same
+    effort already wired end-to-end (``webhook_github_push``'s
+    auto-fixable loop, Phase 0's 9ccfa21) rather than re-implementing
+    delivery logic here.
 
     A category's skill/template renders deterministically (no LLM in the
     generation step itself, see ``RemediationDispatcher``'s module comment)
@@ -1190,10 +1085,11 @@ async def redispatch_finding_fix(
     still enough (a transient delivery failure, a race, a since-changed
     repo state), not as a mechanism for trying a materially different fix;
     a structurally wrong fix is exactly what ``FINDING_ESCALATION_THRESHOLD``
-    -- not this function -- is meant to catch.
+    -- not this function -- is meant to catch. Delivering a cluster-config
+    fix here still only ever opens a GitOps PR gated on a human merge,
+    never a direct cluster mutation.
     """
     category = finding[0]
-    from agentit.automode import AutoMode
     from agentit.remediation.dispatcher import RemediationDispatcher
 
     dispatcher = RemediationDispatcher(store)
@@ -1207,21 +1103,30 @@ async def redispatch_finding_fix(
         return {"action": "no-fix-available", "reason": reason}
 
     namespace = app_name.lower().replace("_", "-").replace(".", "-")
-    auto = AutoMode(store=store, publisher=None, llm_client=llm_client)
-    auto_result = await auto.execute(
-        assessment_id, dispatch_result["files"], namespace, report.criticality, True,
-        app_name, dispatch_result["agent"], report=report, target_findings=[finding],
+    delivery = await route_and_deliver(
+        dispatch_result["files"], app_name=app_name, namespace=namespace, report=report,
+        store=store, assessment_id=assessment_id, actor="delivery-verifier",
+        dry_run=False, target_findings=[finding],
     )
+    cluster_outcome = delivery["outcomes"].get(CATEGORY_CLUSTER_CONFIG)
+    if isinstance(cluster_outcome, dict) and cluster_outcome.get("gate_id"):
+        action = "delivered"
+        reason = f"Opened PR {cluster_outcome.get('pr_url', '')} -- awaiting human merge".strip()
+    elif isinstance(cluster_outcome, dict) and cluster_outcome.get("error"):
+        action, reason = "routing-error", cluster_outcome["error"]
+    else:
+        action, reason = "delivered", "Delivered via the unified router"
+
     await _log_finding_resolution_outcome(
         store, app_name, "finding-redispatched", "info",
         f"Re-dispatched a fresh fix for '{category}' after a confirmed still-present finding: "
-        f"{auto_result['action']} -- {auto_result['reason']}",
+        f"{action} -- {reason}",
     )
-    return {"action": auto_result["action"], "reason": auto_result["reason"], "agent": dispatch_result["agent"]}
+    return {"action": action, "reason": reason, "agent": dispatch_result["agent"]}
 
 
 async def handle_confirmed_finding_failure(
-    store: object, llm_client: object, report: AssessmentReport, assessment_id: str,
+    store: object, report: AssessmentReport, assessment_id: str,
     app_name: str, finding: tuple[str, str],
 ) -> dict:
     """Phase 4's single decision point, called once per still-present
@@ -1240,32 +1145,32 @@ async def handle_confirmed_finding_failure(
         gate_id = await escalate_unresolved_finding(store, assessment_id, app_name, finding, failure_count)
         return {"action": "escalated", "gate_id": gate_id, "failure_count": failure_count}
     # Nested (not flattened via `**result`) deliberately: redispatch_finding_
-    # fix() returns its own "action" key (the underlying AutoMode outcome,
-    # e.g. "gated"/"applied") -- flattening it would silently overwrite this
-    # function's own "redispatched" vs. "escalated" decision, the one thing
-    # a caller most needs to tell apart.
-    result = await redispatch_finding_fix(store, llm_client, report, assessment_id, app_name, finding)
+    # fix() returns its own "action" key (the underlying delivery outcome,
+    # e.g. "delivered"/"routing-error") -- flattening it would silently
+    # overwrite this function's own "redispatched" vs. "escalated"
+    # decision, the one thing a caller most needs to tell apart.
+    result = await redispatch_finding_fix(store, report, assessment_id, app_name, finding)
     return {"action": "redispatched", "failure_count": failure_count, "redispatch_result": result}
 
 
 async def check_pending_delivery_verifications(
     store: object, app_name: str, new_report: AssessmentReport, new_assessment_id: str,
-    *, auto_mode: bool = False, llm_client: object | None = None,
 ) -> list[dict]:
     """Phase 3 + Phase 4's single entry point, called from
     ``webhook_github_push``'s existing diff-triggered re-assessment flow
-    (routes/webhooks.py) for every push-triggered re-assessment, regardless
-    of ``auto_mode``: for every delivery on this app awaiting a finding
-    check (``store.list_deliveries_pending_finding_check()``), correlate
-    against ``new_report`` and persist+log the real outcome (Phase 3).
+    (routes/webhooks.py) for every push-triggered re-assessment: for every
+    delivery on this app awaiting a finding check
+    (``store.list_deliveries_pending_finding_check()``), correlate against
+    ``new_report`` and persist+log the real outcome (Phase 3), then react
+    to a confirmed ``"still_present"`` outcome (Phase 4: bounded auto-
+    retry, then escalate).
 
-    ``auto_mode`` additionally gates Phase 4's reaction to a confirmed
-    ``"still_present"`` outcome (bounded auto-retry, then escalate) -- the
-    same toggle this webhook's own existing ``diff.auto_fixable`` loop
-    already respects for its own auto-dispatch decision, so re-dispatching
-    (an automated delivery) never fires when the repo owner hasn't opted
-    into automated delivery at all; ``False`` still fully completes Phase
-    3's correlation+logging, it just never re-dispatches or escalates.
+    Both phases are unconditional -- there is no more ``auto_mode`` toggle
+    to gate Phase 4 behind (AutoMode has been removed): a still-present
+    target finding always either re-dispatches a fresh fix attempt (below
+    ``FINDING_ESCALATION_THRESHOLD`` confirmed failures) or escalates to a
+    real, visible human-review gate (at or above it) -- see
+    ``handle_confirmed_finding_failure()``.
     """
     pending = await store.list_deliveries_pending_finding_check(app_name)
     results: list[dict] = []
@@ -1295,11 +1200,10 @@ async def check_pending_delivery_verifications(
         )
 
         escalations = []
-        if auto_mode:
-            for key in outcome["still_present_findings"]:
-                escalations.append(await handle_confirmed_finding_failure(
-                    store, llm_client, new_report, new_assessment_id, app_name, tuple(key),
-                ))
+        for key in outcome["still_present_findings"]:
+            escalations.append(await handle_confirmed_finding_failure(
+                store, new_report, new_assessment_id, app_name, tuple(key),
+            ))
         results.append({"delivery_id": d["id"], **outcome, "escalations": escalations})
     return results
 
