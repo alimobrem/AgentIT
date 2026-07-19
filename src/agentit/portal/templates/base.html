@@ -1947,7 +1947,7 @@ function eventsDrawer() {
       // (enriched by /api/events); else that app's PRs on Ledger; else
       // correlation filter on Events.
       if (e && e.assessment_id) {
-        return '/assessments/' + e.assessment_id + '?tab=actions';
+        return '/assessments/' + e.assessment_id + '?tab=ledger';
       }
       if (e && e.target_app) {
         return '/ledger?app=' + encodeURIComponent(e.target_app);

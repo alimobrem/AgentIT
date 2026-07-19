@@ -199,7 +199,7 @@ class TestTojsonForceescape:
     quotes (`&quot;`) so the attribute value survives intact. Confirmed
     live: exactly this bug broke both onboard_results.html's own "Deliver"
     button and the shared `_macros.html::gate_card` "Approve & Deliver"
-    button (used by both Admin Review and the per-app Actions tab) --
+    button (used by both Admin Review and the per-app Ledger tab) --
     every other `tojson`-in-an-attribute usage in the template tree
     already had `| forceescape` (e.g. fleet.html's Delete button,
     onboard_results.html's Install Operator button).
@@ -298,12 +298,12 @@ class TestDeliverButtonClickAttributeIntact:
     async def test_gate_card_click_attr_is_unbroken(self, portal_client):
         """Was previously exercised via the (now-removed, 2026-07-18) Admin
         Review page's `cluster-admin-review` gate card -- `gate_card()` is
-        shared, so any pending gate on Assessment Detail's Actions tab
+        shared, so any pending gate on Assessment Detail's Ledger tab
         exercises the exact same macro/click-attribute rendering."""
         client, store, aid = portal_client
         await store.create_gate(aid, "auto-mode-review", "Approve deployment of test-app")
 
-        resp = await client.get(f"/assessments/{aid}?tab=actions")
+        resp = await client.get(f"/assessments/{aid}?tab=ledger")
         assert resp.status_code == 200
 
         parser = _ClickAttrCapture()

@@ -241,8 +241,10 @@ class TestLedgerPage:
         assert "Waiting for your approval (1)" in resp.text
         assert pr_url in resp.text
         # The exact same Approve & Deliver / Reject / Dismiss actions
-        # Admin Review and Assessment Detail's Actions tab already use --
-        # not a second, read-only copy.
+        # Admin Review already uses -- not a second, read-only copy.
+        # (Assessment Detail's own Ledger tab deliberately does NOT
+        # duplicate this gate_card for a PR-backed gate type like this one
+        # anymore -- see assessment_detail.html's Ledger-tab comment.)
         gates = await store.list_gates_for_assessment(aid, status="pending")
         gate_id = next(g["id"] for g in gates if g["gate_type"] == "gitops-pr-pending")
         assert f'/gates/{gate_id}/resolve' in resp.text

@@ -481,7 +481,7 @@ class TestNavigation:
         assert page.locator(".user-menu-dropdown >> text=Admin Review").count() == 0
         # Gates was retired as a standalone nav concept -- every gate type
         # now surfaces via Fleet's "Needs Action" badge + each app's own
-        # Actions tab.
+        # Ledger tab.
         assert page.locator('nav a[href="/gates"]').count() == 0
         assert page.locator('a[href="/admin-review"]').count() == 0
         # Events is a bell icon (not a primary-nav text link); Decisions
@@ -618,7 +618,7 @@ class TestNavigation:
         bell.click()
         expect(page.locator("#events-drawer-panel")).to_be_visible()
         item = page.locator(".events-drawer-item").first
-        expect(item).to_have_attribute("href", "/assessments/aid-1?tab=actions")
+        expect(item).to_have_attribute("href", "/assessments/aid-1?tab=ledger")
         page.click(".events-drawer-close")
         expect(badge).to_be_hidden()
         expect(bell).to_have_attribute("aria-label", "Open events feed")
@@ -770,7 +770,7 @@ class TestAccessibility:
 # Gates page replacement, narrowed to `cluster-admin-review` gates only) was
 # itself retired 2026-07-18 along with that gate type -- every gate type
 # lives on Fleet's "Needs Action" badge + each app's own Assessment Detail
-# Actions tab now (see TestAssessmentDetailActionsTab below), including a
+# Ledger tab now (see TestAssessmentDetailLedgerTab below), including a
 # stale, already-persisted `cluster-admin-review` row.
 
 
@@ -780,17 +780,17 @@ class TestAdminReviewPage:
         response = page.goto(f"{url}/admin-review")
         assert response.status == 404
 
-    def test_stale_cluster_admin_review_gate_shows_on_own_actions_tab(self, page: Page, app_url):
+    def test_stale_cluster_admin_review_gate_shows_on_own_ledger_tab(self, page: Page, app_url):
         """A stale, already-persisted `cluster-admin-review` gate now
-        surfaces on its own app's Actions tab like any other gate type --
-        there's no separate cross-app page left for it to live on."""
+        surfaces on its own app's Ledger tab like any other non-PR gate
+        type -- there's no separate cross-app page left for it to live on."""
         url, _, store = app_url
         aid = store.save(make_report(repo_name="browser-admin-review-app"))
         store.create_gate(aid, "cluster-admin-review",
                            "Browser test: CI/CD manifests need elevated review")
 
         page.goto(f"{url}/assessments/{aid}")
-        page.click(".tab-nav >> text=Actions")
+        page.click(".tab-nav >> text=Ledger")
         gate_card = page.locator(".card", has_text="Browser test: CI/CD manifests need elevated review")
         expect(gate_card).to_be_visible()
         # cluster-admin-review's delivery_confirmation echoes its own
@@ -856,31 +856,29 @@ class TestFleetBadges:
         expect(row.locator(".badge", has_text="Direct apply")).to_be_visible()
 
 
-# ── Assessment Detail Actions Tab Tests ──────────────────────────────
+# ── Assessment Detail Ledger Tab Tests ───────────────────────────────
 #
-# The Actions tab reuses the exact same gate_card() macro/UI the (now-
-# retired) Admin Review page used to (docs/ui-redesign-proposal.md §2's
-# "reuse the same partial, don't reinvent it") -- for every gate type,
-# including a stale `cluster-admin-review` row (see
-# test_stale_cluster_admin_review_gate_shows_on_own_actions_tab above).
+# The Ledger tab (formerly Actions/Timeline/PR History, merged 2026-07-19)
+# reuses the exact same gate_card() macro/UI the (now-retired) Admin Review
+# page used to (docs/ui-redesign-proposal.md §2's "reuse the same partial,
+# don't reinvent it") -- for every non-PR gate type, including a stale
+# `cluster-admin-review` row (see
+# test_stale_cluster_admin_review_gate_shows_on_own_ledger_tab above). A
+# PR-backed gate type (gitops-pr-pending) no longer gets its own gate_card
+# here -- it's covered by the Ledger tab's real PR list instead.
 
 
-class TestAssessmentDetailActionsTab:
-    def test_actions_tab_renders_gate_approval_ui(self, page: Page, app_url):
+class TestAssessmentDetailLedgerTab:
+    def test_ledger_tab_renders_gate_approval_ui_for_non_pr_gates(self, page: Page, app_url):
         url, _, store = app_url
-        # Deliberately avoids the substring "actions" in the repo name --
-        # that would make Playwright's unquoted `text=Actions` selector
+        # Deliberately avoids the substring "ledger" in the repo name --
+        # that would make Playwright's unquoted `text=Ledger` selector
         # below also match this app's own <h1>/repo-url link.
         aid = store.save(make_report(repo_name="browser-gate-approval-app"))
         store.create_gate(aid, "auto-mode-review", "Browser test: auto-mode gated pending review")
 
         page.goto(f"{url}/assessments/{aid}")
-        page.click(".tab-nav >> text=Actions")
-        # The gate's summary also legitimately appears in the (hidden,
-        # x-show) Timeline tab's pseudo-event list (get_assessment_timeline()
-        # surfaces gates too) -- scope to the gate_card's own `.card`
-        # wrapper, the one element unique to the Actions tab's rendering,
-        # so this assertion can't accidentally pass against Timeline's copy.
+        page.click(".tab-nav >> text=Ledger")
         gate_card = page.locator(".card", has_text="Browser test: auto-mode gated pending review")
         expect(gate_card).to_be_visible()
         expect(gate_card.locator("button:has-text('Approve')")).to_be_visible()
@@ -1111,13 +1109,13 @@ class TestConfirmModalFocusAndTypeToConfirm:
         assert store.get(aid) is None
 
     def test_ordinary_confirm_has_no_type_to_confirm_input(self, page: Page, app_url):
-        """A routine confirm (Reject via the Actions tab's Dismiss button)
+        """A routine confirm (Reject via the Ledger tab's Dismiss button)
         must never show the type-to-confirm input -- overusing it cheapens
         the pattern (checklist #1's own warning)."""
         url, _, store = app_url
         aid = store.save(make_report(repo_name="browser-ordinary-gate-app"))
         store.create_gate(aid, "auto-mode-review", "Browser test: ordinary gate")
-        page.goto(f"{url}/assessments/{aid}?tab=actions")
+        page.goto(f"{url}/assessments/{aid}?tab=ledger")
         gate_card = page.locator(".card", has_text="Browser test: ordinary gate")
         gate_card.locator("button:has-text('Dismiss')").click()
         expect(page.locator("#confirm-modal")).to_have_class(re.compile("open"))

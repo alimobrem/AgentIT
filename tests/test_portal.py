@@ -931,9 +931,9 @@ async def test_next_step_hint_prompts_onboarding_when_freshly_assessed(client, _
 
 
 async def test_next_step_hint_onboard_wins_over_leftover_gates_when_assessed(client, _override_store):
-    """Leftover Actions gates (e.g. rollback-review from a prior apply of
+    """Leftover Ledger gates (e.g. rollback-review from a prior apply of
     the same app) must not steal the primary CTA while lifecycle is still
-    assessed — founder confusion: "do these 3 Actions or Onboard?"."""
+    assessed — founder confusion: "do these 3 Ledger items or Onboard?"."""
     store = _override_store
     aid = await store.save(_make_report("gated-assessed-app"))
     await store.create_gate(aid, "auto-mode-review", "needs review")
@@ -944,9 +944,9 @@ async def test_next_step_hint_onboard_wins_over_leftover_gates_when_assessed(cli
     assert "Onboard This App" in hint
     assert "do not fix them one-by-one" in hint
     assert "1</strong> pending action" not in hint
-    assert f'href="/assessments/{aid}?tab=actions"' in hint
-    # Actions tab count badge is demoted while assessed (no "Actions (1)").
-    assert "Actions (1)" not in resp.text
+    assert f'href="/assessments/{aid}?tab=ledger"' in hint
+    # Ledger tab count badge is demoted while assessed (no "Ledger (1)").
+    assert "Ledger (1)" not in resp.text
     assert "leftover gates from earlier deliveries" in resp.text
 
 
@@ -966,12 +966,12 @@ async def test_next_step_hint_prioritizes_pending_actions_after_onboard(client, 
     assert "1</strong> pending action" in resp.text
     assert "Next step: click" not in resp.text
     # Regression: the hint sits outside the tab strip's x-data, so an
-    # Alpine @click="tab = 'actions'" is a dead handler. Must be a real
-    # ?tab=actions href (same convention as Fleet's pending badge).
+    # Alpine @click="tab = 'ledger'" is a dead handler. Must be a real
+    # ?tab=ledger href (same convention as Fleet's pending badge).
     hint = _next_step_hint_html(resp.text)
-    assert f'href="/assessments/{aid}?tab=actions"' in hint
-    assert "@click.prevent=\"tab = 'actions'\"" not in hint
-    assert "@click=\"tab = 'actions'\"" not in hint
+    assert f'href="/assessments/{aid}?tab=ledger"' in hint
+    assert "@click.prevent=\"tab = 'ledger'\"" not in hint
+    assert "@click=\"tab = 'ledger'\"" not in hint
 
 
 # ------------------------------------------------------------------
@@ -1269,7 +1269,7 @@ async def test_api_events_filter_target_app(client, _override_store):
 # be genuinely cross-app, for a genuinely different audience than an app
 # owner; both that gate type and the Admin Review page it lived on were
 # retired 2026-07-18 -- see delivery.py/routes/gates.py). Every gate type
-# now lives on Assessment Detail's Actions tab.
+# now lives on Assessment Detail's Ledger tab.
 # ------------------------------------------------------------------
 
 
@@ -1298,11 +1298,11 @@ async def test_resolve_gate_approve(client, _override_store):
     assert resp.status_code == 303
     # A per-app ("deploy") gate with no onboarding files to deliver falls
     # through to the generic resolve path, which lands back on that app's
-    # own Assessment Detail Actions tab (not the Overview tab, and not the
+    # own Assessment Detail Ledger tab (not the Overview tab, and not the
     # retired global Gates page) -- the next pending gate in the same
     # queue is immediately visible there (docs/ux-design-requirements.md
     # checklist #12).
-    assert resp.headers["location"] == f"/assessments/{aid}?tab=actions"
+    assert resp.headers["location"] == f"/assessments/{aid}?tab=ledger"
 
     pending = await store.list_gates(status="pending")
     assert len(pending) == 0
@@ -1311,11 +1311,11 @@ async def test_resolve_gate_approve(client, _override_store):
     assert approved[0]["resolved_by"] == "tester"
 
 
-async def test_resolve_stale_cluster_admin_review_gate_redirects_to_own_actions_tab(client, _override_store):
+async def test_resolve_stale_cluster_admin_review_gate_redirects_to_own_ledger_tab(client, _override_store):
     """`cluster-admin-review`'s own cross-app redirect target (the now-
     removed Admin Review page) was retired 2026-07-18 -- a gate of this
     type is per-app like any other now, so rejecting one redirects to its
-    own app's Actions tab, same as every other gate type."""
+    own app's Ledger tab, same as every other gate type."""
     store = _override_store
     report = _make_report()
     aid = await store.save(report)
@@ -1327,11 +1327,11 @@ async def test_resolve_stale_cluster_admin_review_gate_redirects_to_own_actions_
         follow_redirects=False,
     )
     assert resp.status_code == 303
-    assert resp.headers["location"] == f"/assessments/{aid}?tab=actions"
+    assert resp.headers["location"] == f"/assessments/{aid}?tab=ledger"
 
 
 async def test_gate_card_badge_shows_human_label_not_raw_gate_type(client, _override_store):
-    """gate_card() (Assessment Detail's Actions tab, shared with the
+    """gate_card() (Assessment Detail's Ledger tab, shared with the
     now-retired Admin Review page) rendered a gate's real gate_type as
     `{{ gate.gate_type | upper }}` -- an all-caps hyphenated identifier
     with no explanation. Fixed via ledger.py's humanize_gate_type()."""
@@ -1340,7 +1340,7 @@ async def test_gate_card_badge_shows_human_label_not_raw_gate_type(client, _over
     aid = await store.save(report)
     await store.create_gate(aid, "auto-mode-review", "needs review")
 
-    resp = await client.get(f"/assessments/{aid}?tab=actions")
+    resp = await client.get(f"/assessments/{aid}?tab=ledger")
     assert resp.status_code == 200
     assert "AUTO-MODE-REVIEW" not in resp.text
     assert 'title="Gate type: auto-mode-review">Auto-mode review<' in resp.text
@@ -1583,7 +1583,7 @@ async def test_no_inline_styles_gates(client, _override_store):
     report = _make_report()
     aid = await store.save(report)
     await store.create_gate(aid, "cluster-admin-review", "Test gate")
-    resp = await client.get(f"/assessments/{aid}?tab=actions")
+    resp = await client.get(f"/assessments/{aid}?tab=ledger")
     html = resp.text
     for line in html.split("\n"):
         if "style=" in line.lower() and 'style="--pct' not in line:
@@ -1715,7 +1715,7 @@ async def test_gates_uses_design_system_classes(client, _override_store):
     report = _make_report()
     aid = await store.save(report)
     await store.create_gate(aid, "cluster-admin-review", "Gate test")
-    resp = await client.get(f"/assessments/{aid}?tab=actions")
+    resp = await client.get(f"/assessments/{aid}?tab=ledger")
     assert "gate-actions" in resp.text
     assert "btn-approve" in resp.text
     assert "btn-danger-outline" in resp.text
@@ -1965,17 +1965,18 @@ async def test_nav_includes_agents_link(client):
 # ── Assessment detail shows PR-tracking/SLO buttons ─────────────────────
 
 
-async def test_assessment_detail_shows_pr_history_tab_not_remediations_button(client, _override_store):
+async def test_assessment_detail_shows_ledger_tab_not_remediations_button(client, _override_store):
     """The old "Remediations (N)" action-bar link (a hand-maintained
-    completion flag with no link to a real PR/gate) is gone -- the "PR
-    History" tab, backed by pr_tracking.py's real gate/delivery/onboarding
-    PR aggregation, is the actual source of truth for fix/PR status now."""
+    completion flag with no link to a real PR/gate) is gone -- the Ledger
+    tab's PR history (backed by pr_tracking.py's real gate/delivery/
+    onboarding PR aggregation; formerly its own separate "PR History" tab,
+    merged 2026-07-19) is the actual source of truth for fix/PR status now."""
     store = _override_store
     aid = await store.save(_make_report())
     resp = await client.get(f"/assessments/{aid}")
     assert resp.status_code == 200
     assert f"/assessments/{aid}/remediations" not in resp.text
-    assert "PR History" in resp.text
+    assert "Ledger" in resp.text
 
 
 async def test_assessment_detail_renders_score_history(client, _override_store):

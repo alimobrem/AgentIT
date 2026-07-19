@@ -82,7 +82,7 @@
       <span class="badge badge-muted">{{ r.category | dimension_label }}</span>
       <span class="text-muted text-sm" data-timestamp="{{ r.created_at }}">{{ (r.created_at or '')[:10] }}</span>
     </div>
-    {% if r.assessment_id %}<a href="/assessments/{{ r.assessment_id }}?tab=prs" class="btn btn-sm btn-outline">View App</a>{% endif %}
+    {% if r.assessment_id %}<a href="/assessments/{{ r.assessment_id }}?tab=ledger" class="btn btn-sm btn-outline">View App</a>{% endif %}
   </div>
   <p class="my-4">
     {{ r.app_name }} &mdash; <a href="{{ r.html_url | safe_url }}" target="_blank" rel="noopener" hx-boost="false">{{ r.title or r.pr_url }}</a>
@@ -107,7 +107,7 @@
     {% for r in history %}
     <tr>
       <td>
-        {% if r.assessment_id %}<a href="/assessments/{{ r.assessment_id }}?tab=prs">{{ r.app_name }}</a>{% else %}{{ r.app_name }}{% endif %}
+        {% if r.assessment_id %}<a href="/assessments/{{ r.assessment_id }}?tab=ledger">{{ r.app_name }}</a>{% else %}{{ r.app_name }}{% endif %}
       </td>
       <td><span class="badge badge-muted">{{ r.category | dimension_label }}</span></td>
       <td><a href="{{ r.html_url | safe_url }}" target="_blank" hx-boost="false">{{ r.title or r.pr_url }}</a></td>

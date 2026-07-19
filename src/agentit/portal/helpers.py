@@ -271,7 +271,6 @@ async def get_store():
 
 # ── Nav gate badges ───────────────────────────────────────────────────
 #
-# base.html's nav bar shows the fleet-wide count of PRs waiting for your
 # approval on Ledger's link -- the same PR-status-derived count Ledger's
 # own "Waiting for your approval" stat shows (pr_tracking.py's
 # count_fleet_prs_waiting_for_approval()/fleet_prs_waiting_for_approval()):
@@ -282,8 +281,8 @@ async def get_store():
 # one -- see pr_tracking.py's module docstring). Every other app-owner gate
 # type (`rollback-review`, `finding-unresolved-escalation`, ...) stays
 # visible via Fleet's per-app "needs action"/escalation badges and
-# Assessment Detail's Actions tab, not this nav badge. Cached briefly since
-# nav renders on every page.
+# Assessment Detail's own Ledger tab, not this nav badge. Cached briefly
+# since nav renders on every page.
 #
 # Used to also split out a separate `admin_review` count for a second,
 # cross-app "Admin Review" nav link -- retired 2026-07-18 along with the

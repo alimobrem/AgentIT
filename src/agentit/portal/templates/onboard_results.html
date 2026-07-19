@@ -120,7 +120,7 @@
   <p class="text-sm mb-0">
     Shared-operator manifests were committed as a separate GitOps PR (never silently
     skipped) — it needs elevated review before merging; see the PR link above or this
-    app's Actions tab.
+    app's Ledger tab.
   </p>
   {% endif %}
 </details>
@@ -171,7 +171,7 @@
   <p class="mb-1">
     <a href="{{ card.record.html_url | safe_url }}" target="_blank" hx-boost="false">{{ card.record.title or card.record.pr_url }}</a>
     {% if card.record.lifecycle == 'needs_approval' %}
-    <span class="text-muted text-sm"> &middot; approve on the <a href="/assessments/{{ assessment_id }}?tab=actions">Actions tab</a> to merge it</span>
+    <span class="text-muted text-sm"> &middot; review and merge it directly on GitHub, or see the <a href="/assessments/{{ assessment_id }}?tab=ledger">Ledger tab</a></span>
     {% elif card.record.lifecycle == 'rejected' and card.record.reject_reason %}
     <span class="text-muted text-sm"> &mdash; rejected: {{ card.record.reject_reason }}</span>
     {% elif card.record.lifecycle == 'merged' and card.record.merged_at %}

@@ -155,10 +155,10 @@ class TestSeverityGatedEventsBadge:
         assert match
         assert match[0].get("assessment_id") == aid
 
-    async def test_drawer_prefers_assessment_actions_href(self, trust_client):
+    async def test_drawer_prefers_assessment_ledger_href(self, trust_client):
         client, _store = trust_client
         resp = await client.get("/ledger")
         assert resp.status_code == 200
         assert "_eventHref" in resp.text
-        assert "?tab=actions" in resp.text
+        assert "?tab=ledger" in resp.text
         assert "/ledger?app=" in resp.text

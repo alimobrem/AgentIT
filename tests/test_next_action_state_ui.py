@@ -92,7 +92,7 @@ class TestFleetNextActionIndicator:
         assert f"Retry 1 of {FINDING_ESCALATION_THRESHOLD}" in text
         assert "badge-warning" in text
 
-    async def test_escalated_badge_links_to_actions_tab(self, next_action_client):
+    async def test_escalated_badge_links_to_ledger_tab(self, next_action_client):
         client, store = next_action_client
         aid = await store.save(make_report(repo_name="fleet-esc-app"))
         await escalate_unresolved_finding(store, aid, "fleet-esc-app", _NETWORK_TARGET, FINDING_ESCALATION_THRESHOLD)
@@ -101,7 +101,7 @@ class TestFleetNextActionIndicator:
 
         assert "Needs review" in text
         assert "badge-accent" in text
-        assert f'/assessments/{aid}?tab=actions' in text
+        assert f'/assessments/{aid}?tab=ledger' in text
 
     async def test_clean_app_omits_the_indicator_entirely(self, next_action_client):
         client, store = next_action_client
@@ -154,7 +154,7 @@ class TestAssessmentDetailNextActionIndicator:
         assert f"Retry 1 of {FINDING_ESCALATION_THRESHOLD}" in text
         assert "alert-warn" in text
 
-    async def test_escalated_message_links_to_actions_and_ledger(self, next_action_client):
+    async def test_escalated_message_links_to_ledger(self, next_action_client):
         client, store = next_action_client
         aid = await store.save(make_report(repo_name="ad-esc-app"))
         await store.save_onboarding(aid, [{"category": "security", "path": "x.yaml", "content": "a: b", "description": "d"}])
@@ -166,7 +166,8 @@ class TestAssessmentDetailNextActionIndicator:
         assert "Needs your review" in text
         assert "automated fixes exhausted for" in text and "network" in text
         assert "alert-error" in text
-        assert f"/assessments/{aid}?tab=actions" in text
+        # Former Actions + Ledger tabs merged into one -- a single link now,
+        # not two separate ones pointing at the same underlying gate.
         assert f"/assessments/{aid}?tab=ledger" in text
         # Confirm the escalation gate this message points to is the real one.
         gates = await store.list_gates(status="pending")

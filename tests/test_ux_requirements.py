@@ -172,7 +172,7 @@ async def test_stale_cluster_admin_review_approval_no_longer_uses_type_to_confir
     store = _override_store
     aid = await store.save(_make_report("admin-review-app"))
     await store.create_gate(aid, "cluster-admin-review", "Needs elevated RBAC")
-    resp = await client.get(f"/assessments/{aid}?tab=actions")
+    resp = await client.get(f"/assessments/{aid}?tab=ledger")
     assert resp.status_code == 200
     assert "typeToConfirm:" not in resp.text
 
@@ -181,7 +181,7 @@ async def test_ordinary_gate_approval_does_not_use_type_to_confirm(client, _over
     store = _override_store
     aid = await store.save(_make_report("ordinary-gate-app"))
     await store.create_gate(aid, "auto-mode-review", "Needs review")
-    resp = await client.get(f"/assessments/{aid}?tab=actions")
+    resp = await client.get(f"/assessments/{aid}?tab=ledger")
     assert resp.status_code == 200
     assert "typeToConfirm:" not in resp.text
 
@@ -453,7 +453,7 @@ async def test_single_manifest_delivery_does_not_celebrate(client, _override_sto
 # ── #12: gate resolution redirects to the next actionable item ──────────
 
 
-async def test_resolve_per_app_gate_redirects_to_actions_tab(client, _override_store):
+async def test_resolve_per_app_gate_redirects_to_ledger_tab(client, _override_store):
     store = _override_store
     aid = await store.save(_make_report("gate-redirect-app"))
     gate_id = await store.create_gate(aid, "deploy", "Approve deployment")
@@ -463,7 +463,7 @@ async def test_resolve_per_app_gate_redirects_to_actions_tab(client, _override_s
         follow_redirects=False,
     )
     assert resp.status_code == 303
-    assert resp.headers["location"] == f"/assessments/{aid}?tab=actions"
+    assert resp.headers["location"] == f"/assessments/{aid}?tab=ledger"
 
 
 async def test_resolve_stale_cluster_admin_review_gate_lands_on_own_onboard_results(
@@ -572,13 +572,13 @@ async def test_stale_cluster_admin_review_delivery_failure_states_cause_and_next
 # ── #10: specific, real empty-state copy ─────────────────────────────────
 
 
-async def test_actions_tab_empty_state_shows_real_recent_resolution_count(client, _override_store):
+async def test_ledger_tab_empty_state_shows_real_recent_resolution_count(client, _override_store):
     store = _override_store
     aid = await store.save(_make_report("empty-state-actions-app"))
     gate_id = await store.create_gate(aid, "deploy", "Approve deployment")
     await client.post(f"/gates/{gate_id}/resolve", data={"status": "approved", "resolved_by": "tester"})
 
-    resp = await client.get(f"/assessments/{aid}?tab=actions")
+    resp = await client.get(f"/assessments/{aid}?tab=ledger")
     assert resp.status_code == 200
     assert "No pending actions" in resp.text
     assert "resolved in the last 24 hours" in resp.text

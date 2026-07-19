@@ -41,7 +41,7 @@ CATEGORY_SECRET_BLOCKED = "secret_blocked"
 # honest text instead of a `KeyError`/blank string -- no code path creates a
 # gate of this type anymore, and it no longer gets a dedicated cross-app
 # page: a stale pending row now simply surfaces on its own app's Fleet
-# "needs action" badge / Assessment Detail Actions tab like any other gate,
+# "needs action" badge / Assessment Detail Ledger tab like any other gate,
 # and resolves via resolve_gate()'s generic route_and_deliver() fallback
 # (which re-classifies its files and routes any still-cicd ones through the
 # same GitOps PR path as a fresh delivery would).
@@ -518,10 +518,11 @@ async def gate_delivery_confirmation(store: object, gate: dict) -> str:
     un-skippable confirm modal, not just page prose -- before approving a
     gate actually triggers a real delivery. Shared by every surface that
     renders a gate card (the retired global Gates page, Assessment Detail's
-    Actions tab, and the Fleet-embedded ones) so the gate list, the dry-run
-    preview, and the point-of-no-return confirmation can never say different
-    things about the same decision (per the 2026-07-14 customer-review
-    addendum to docs/unified-apply-flow.md).
+    Ledger tab, and the fleet-wide Ledger's own "Waiting for your approval"
+    section) so the gate list, the dry-run preview, and the point-of-no-
+    return confirmation can never say different things about the same
+    decision (per the 2026-07-14 customer-review addendum to
+    docs/unified-apply-flow.md).
     """
     gate_type = gate.get("gate_type", "")
     if gate_type == "rollback-review":

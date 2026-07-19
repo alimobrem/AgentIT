@@ -26,14 +26,14 @@ def _gate_redirect_target(gate: dict) -> str:
     mostly redirect straight to that app's onboard-results -- see below).
     Every gate type is per-app now (the cross-app ``cluster-admin-review``
     gate type / Admin Review page were removed 2026-07-18 -- see delivery.py)
-    and resolved from that app's own Assessment Detail Actions tab -- lands
-    with ``?tab=actions`` so the NEXT pending gate in that same queue is
+    and resolved from that app's own Assessment Detail Ledger tab -- lands
+    with ``?tab=ledger`` so the NEXT pending gate in that same queue is
     immediately visible instead of dropping the reviewer back on the
     Overview tab (docs/ux-design-requirements.md checklist #12: "redirect to
     the next actionable item, not back to the same page")."""
     assessment_id = gate.get("assessment_id")
     if assessment_id:
-        return f"/assessments/{assessment_id}?tab=actions"
+        return f"/assessments/{assessment_id}?tab=ledger"
     return "/ledger"
 
 
@@ -91,7 +91,7 @@ async def resolve_gate(request: Request, gate_id: str):
                 f"Rollback approved for assessment {assessment_id} — manual intervention required",
             )
             return RedirectResponse(
-                url=f"/assessments/{assessment_id}?tab=actions&success=Rollback+approved.+Review+the+deployment+and+roll+back+manually+or+via+Argo+Rollouts.",
+                url=f"/assessments/{assessment_id}?tab=ledger&success=Rollback+approved.+Review+the+deployment+and+roll+back+manually+or+via+Argo+Rollouts.",
                 status_code=303,
             )
 
@@ -111,7 +111,7 @@ async def resolve_gate(request: Request, gate_id: str):
                 "no automatic re-delivery was triggered by this approval.",
             )
             return RedirectResponse(
-                url=f"/assessments/{assessment_id}?tab=actions&success=Escalation+acknowledged.",
+                url=f"/assessments/{assessment_id}?tab=ledger&success=Escalation+acknowledged.",
                 status_code=303,
             )
 

@@ -62,6 +62,17 @@ _GATE_TYPE_CATEGORY: dict[str, str] = {
 
 CATEGORY_ONBOARDING = "onboarding"
 
+# Public view of _GATE_TYPE_CATEGORY's keys -- "does this gate type already
+# have a real PR a human can just go review/merge on GitHub instead of
+# clicking an in-app Approve button" (the direction gate-approval UI is
+# moving system-wide as the `gates` table itself is phased out). Assessment
+# Detail's Ledger tab uses this to decide which pending gates still need
+# their own gate_card (rollback-review, finding-unresolved-escalation, and
+# any other non-PR type -- there's no PR to point at for those, so they stay
+# an in-app acknowledgment for now) versus which are already fully covered
+# by this module's own PR list (gate_pr_records() above).
+PR_BACKED_GATE_TYPES = frozenset(_GATE_TYPE_CATEGORY)
+
 
 def _dedup_by_pr_url(records: list[dict]) -> list[dict]:
     """First occurrence wins -- callers pass gate records first, so a
@@ -267,13 +278,23 @@ async def get_app_pr_history(store: object, assessment_id: str, repo_url: str, a
     request, mirroring the existing per-assessment ``get_pr_status()``
     precedent (``routes/assessments.py``'s onboarding-history / capability-
     run-detail pages) rather than the fleet-wide batched+cached path
-    ``routes/fleet.py`` uses for the whole Fleet list."""
+    ``routes/fleet.py`` uses for the whole Fleet list.
+
+    Each record also gets ``annotate_lifecycle()``'s
+    ``lifecycle``/``lifecycle_label``/``needs_attention`` fields -- the same
+    ones ``collect_fleet_pr_records()`` attaches for the fleet-wide Ledger --
+    so Assessment Detail's own PR list (its former Actions/Timeline/PR
+    History tabs, merged into one Ledger tab) renders identical lifecycle
+    badges/labels instead of re-deriving "Open"/"Merged"/"Closed" from
+    ``state``/``gate_status`` a second, drifting way.
+    """
     gates = await store.list_gates_for_assessment(assessment_id) if hasattr(store, "list_gates_for_assessment") else []
     deliveries = await store.list_deliveries_for_app(app_name) if hasattr(store, "list_deliveries_for_app") else []
     onboardings = await store.list_onboardings_for_repo(repo_url) if hasattr(store, "list_onboardings_for_repo") else []
     records = collect_pr_records(gates, deliveries, onboardings)
     records = await attach_reject_reasons(store, app_name, records)
-    return await resolve_pr_states(records)
+    records = await resolve_pr_states(records)
+    return [annotate_lifecycle(r) for r in records]
 
 
 # ── Fleet-wide PR lifecycle (the Ledger) ───────────────────────────────────

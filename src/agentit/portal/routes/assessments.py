@@ -385,10 +385,10 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     all_findings = [f for sc in report.scores for f in sc.findings]
     fixable_categories = {f.category for f in all_findings if lookup(f.category) is not None}
 
-    # Every gate type now lives here (Actions tab) instead of the retired
-    # global Gates page -- including a stale ``cluster-admin-review`` row, if
-    # one somehow still exists (that type, and the separate Admin Review
-    # page it used to live on, were retired 2026-07-18 -- see delivery.py).
+    # Every gate type now lives here instead of the retired global Gates page
+    # -- including a stale ``cluster-admin-review`` row, if one somehow still
+    # exists (that type, and the separate Admin Review page it used to live
+    # on, were retired 2026-07-18 -- see delivery.py).
     from agentit.portal.delivery import (
         gate_delivery_confirmation,
         get_next_action_state,
@@ -400,6 +400,20 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     for g in pending_actions:
         g["delivery_confirmation"] = await gate_delivery_confirmation(s, g)
 
+    # The `gates` table/concept is being eliminated system-wide (a separate,
+    # dedicated effort) -- a gate type that already resolves to a real PR
+    # (``gitops-pr-pending``/the CI/CD-shared-namespace variant) is fully
+    # covered by the PR list below (``pr_history``, lifecycle="needs_approval")
+    # now, so it no longer gets its own gate_card here; that would just be
+    # the same "Approve & Deliver" duplicated a second time on this same
+    # page. The remaining gate types (``rollback-review``,
+    # ``finding-unresolved-escalation``, and any stale/unrecognized one) have
+    # no PR of their own to point at -- a human acknowledgment with nothing
+    # to review on GitHub -- so they keep their gate_card here until the
+    # gate-removal effort gives them a non-gate home.
+    from agentit.portal.pr_tracking import PR_BACKED_GATE_TYPES
+    non_pr_pending_actions = [g for g in pending_actions if g.get("gate_type") not in PR_BACKED_GATE_TYPES]
+
     # Real "what happens next" fact (docs/onboarding-loop-vision-gap-
     # analysis.md's Step 8 discussion / Phase 5) -- reuses `assessment_gates`
     # (already fetched above, already scoped to this app) instead of a
@@ -408,9 +422,10 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
         s, report.repo_name, repo_url=report.repo_url, pending_gates=assessment_gates,
     )
 
-    # Real, specific empty-state copy for the Actions tab (docs/ux-design-
-    # requirements.md checklist #10) -- how many of THIS app's gates were
-    # actually resolved recently, instead of a bare "nothing here".
+    # Real, specific empty-state copy for the Ledger tab's approval section
+    # (docs/ux-design-requirements.md checklist #10) -- how many of THIS
+    # app's gates were actually resolved recently, instead of a bare
+    # "nothing here".
     recently_resolved_actions_count = 0
     if not pending_actions and hasattr(s, "list_gates_for_assessment"):
         all_app_gates = await s.list_gates_for_assessment(assessment_id)
@@ -438,12 +453,6 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
                 infra_repo_creation_failed = ev["action"] == "infra-repo-creation-failed"
                 break
 
-    timeline = await s.get_assessment_timeline(assessment_id) if hasattr(s, 'get_assessment_timeline') else []
-    # docs/ledger-design-spec.md Phase 1: additive 5th tab, alongside (not
-    # replacing) Actions/Timeline above -- same gate_card macro, same
-    # route_and_deliver()/resolve_gate() paths, nothing existing changes.
-    from agentit.ledger import get_ledger_cards
-    ledger_cards = await get_ledger_cards(s, target_app=report.repo_name, assessment_id=assessment_id)
     trend = await s.get_trend(report.repo_url) if hasattr(s, 'get_trend') else {}
     score_history = await s.get_score_history(report.repo_url) if hasattr(s, 'get_score_history') else []
     for i, h in enumerate(score_history):
@@ -477,9 +486,9 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
         h["overall_score"] >= 100 for h in score_history if h["id"] != assessment_id
     )
 
-    # Open PRs section + PR History tab (real GitHub/DB-backed data only --
-    # see pr_tracking.py's module docstring for exactly what's tracked vs.
-    # what still needs a live GitHub call).
+    # Open PRs section (Overview tab) + PR history (Ledger tab) -- real
+    # GitHub/DB-backed data only -- see pr_tracking.py's module docstring for
+    # exactly what's tracked vs. what still needs a live GitHub call.
     from agentit.portal.pr_tracking import get_app_pr_history
     pr_history = await get_app_pr_history(s, assessment_id, report.repo_url, report.repo_name)
     open_prs = [pr for pr in pr_history if pr["state"] == "open"]
@@ -506,12 +515,11 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "onboarding_count": len(onboardings),
             "fixable_categories": fixable_categories,
             "pending_actions": pending_actions,
+            "non_pr_pending_actions": non_pr_pending_actions,
             "next_action": next_action,
             "gitops_registered": gitops_registered,
             "infra_repo_url": infra_repo_url,
             "infra_repo_creation_failed": infra_repo_creation_failed,
-            "timeline": timeline,
-            "ledger_cards": ledger_cards,
             "trend": trend,
             "score_history": score_history,
             "lifecycle_stage": lifecycle_stage,

@@ -102,4 +102,4 @@ class TestFleetOperations:
 
         text = (await client.get("/fleet")).text
         assert "1 pending action" in text
-        assert f'href="/assessments/{new_frontend_id}?tab=actions"' in text
+        assert f'href="/assessments/{new_frontend_id}?tab=ledger"' in text

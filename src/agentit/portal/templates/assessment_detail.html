@@ -139,8 +139,8 @@
 
 {# Next-step hint: ties the stepper above directly to the one action that
    actually moves this app forward. While lifecycle is still "assessed",
-   Onboard This App is always the primary path — leftover Actions gates
-   (often from an earlier apply / SLO tick on a prior assessment of the
+   Onboard This App is always the primary path — leftover Ledger gates
+   (often from an earlier delivery / SLO tick on a prior assessment of the
    same app) must not compete with it. After onboard, pending gates win
    because they are the human delivery / rollback decisions. #}
 <div class="next-step-hint {% if lifecycle_stage == 'assessed' %}next-step-hint-primary{% elif pending_actions %}next-step-hint-attention{% endif %}">
@@ -152,23 +152,23 @@
     (next time use Fleet <strong>Re-scan</strong> to re-assess and onboard in one step).
     {% else %}
     Next step: click <strong>Onboard This App</strong> below.
-    Onboard generates remediations for all findings — do not fix them one-by-one on the Actions tab first.
+    Onboard generates remediations for all findings — do not fix them one-by-one on the Findings tab first.
     {% endif %}
     {% if pending_actions %}
     <span class="text-muted">
       ({{ pending_actions|length }} leftover gate{{ 's' if pending_actions|length != 1 }} from earlier deliveries can wait —
-      <a href="/assessments/{{ assessment_id }}?tab=actions">Actions</a>.)
+      <a href="/assessments/{{ assessment_id }}?tab=ledger">Ledger</a>.)
     </span>
     {% endif %}
   </span>
   {% elif pending_actions %}
   <span class="next-step-icon" aria-hidden="true">&#9679;</span>
   <strong>{{ pending_actions|length }}</strong> pending action{{ 's' if pending_actions|length != 1 }} need{{ '' if pending_actions|length != 1 else 's' }} your review —
-  {# Real ?tab=actions href — this hint sits outside the tab strip's
-     x-data, so an Alpine @click="tab = 'actions'" would be a dead handler
+  {# Real ?tab=ledger href — this hint sits outside the tab strip's
+     x-data, so an Alpine @click="tab = 'ledger'" would be a dead handler
      (see base.html's dead-button detector). Fleet's pending badge already
      uses the same query-param convention. #}
-  <a href="/assessments/{{ assessment_id }}?tab=actions">see the Actions tab below</a>.
+  <a href="/assessments/{{ assessment_id }}?tab=ledger">see the Ledger tab below</a>.
   {% elif lifecycle_stage == "onboarded" %}
   <span class="next-step-icon" aria-hidden="true">&#9679;</span>
   Onboarding complete — automatic validation is running (or has finished); see
@@ -199,8 +199,7 @@
   {% if next_action.state == "escalated" %}
   <div class="alert alert-error mb-2" role="status">
     <strong>Next action:</strong> {{ next_action.message }}
-    &nbsp;<a href="/assessments/{{ assessment_id }}?tab=actions">Review on the Actions tab</a>
-    &middot; <a href="/assessments/{{ assessment_id }}?tab=ledger">Ledger</a>
+    &nbsp;<a href="/assessments/{{ assessment_id }}?tab=ledger">Review on the Ledger tab</a>
   </div>
   {% elif next_action.state == "retrying" %}
   <div class="alert alert-warn mb-2" role="status">
@@ -226,16 +225,16 @@
     </button>
   </form>
   {% elif lifecycle_stage == "onboarded" %}
-  <a href="/assessments/{{ assessment_id }}/onboard-results" class="btn btn-action btn-lg">Review &amp; Deliver</a>
+  <a href="/assessments/{{ assessment_id }}/onboard-results" class="btn btn-action btn-lg" title="Review the generated manifests/PRs, then deliver them">Review &amp; Deliver</a>
   <form method="post" action="/assessments/{{ assessment_id }}/onboard" class="inline-form">
-    <button type="submit" class="btn btn-outline btn-sm">
+    <button type="submit" class="btn btn-outline btn-sm" title="Regenerate manifests for this app's CURRENT score, without re-scanning the repo. Use Re-scan instead if the code itself changed.">
       <span class="btn-label">Re-onboard</span>
       <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Running agents&hellip;</span>
     </button>
   </form>
   {% else %}
   <form method="post" action="/assessments/{{ assessment_id }}/onboard" class="inline-form">
-    <button type="submit" class="btn btn-outline">
+    <button type="submit" class="btn btn-outline" title="Regenerate manifests for this app's CURRENT score, without re-scanning the repo. Use Re-scan instead if the code itself changed.">
       <span class="btn-label">Re-onboard</span>
       <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Running agents&hellip;</span>
     </button>
@@ -245,12 +244,15 @@
      /assess Fleet's own row action already uses (repo_url + criticality,
      re-scored from scratch), just reachable from the app's own detail page
      too instead of only from the Fleet table. Re-onboard above regenerates
-     manifests for the CURRENT score; this re-scores the app first (then
-     auto-chains into onboard, same default every Assess/Scan entry point in
-     the app already has -- see assess_submit()'s continue_onboard default).
-     Mirrors Fleet's own ever_onboarded split exactly: a never-onboarded
-     app's plain "Scan" skips a confirm dialog; the more consequential
-     re-assess+auto-onboard case ("Re-scan") gets one. #}
+     manifests for the CURRENT score without touching the repo; this
+     re-clones and re-scores the app first (then auto-chains into onboard,
+     same default every Assess/Scan entry point in the app already has --
+     see assess_submit()'s continue_onboard default) -- the right one when
+     the app's CODE has changed since the last scan, not just when you want
+     fresh manifests for the score you already have. Mirrors Fleet's own
+     ever_onboarded split exactly: a never-onboarded app's plain "Scan"
+     skips a confirm dialog; the more consequential re-assess+auto-onboard
+     case ("Re-scan") gets one. #}
   {% set ever_onboarded = lifecycle_stage != "assessed" or prior_onboarded %}
   <form method="post" action="/assess" class="inline-form"
         x-data x-ref="reassessForm">
@@ -258,6 +260,7 @@
     <input type="hidden" name="criticality" value="{{ report.criticality }}">
     {% if ever_onboarded %}
     <button type="button" class="btn btn-outline btn-sm"
+      title="Re-clone and re-score the repo from scratch, then regenerate manifests for the new score. Use Re-onboard instead if you just want fresh manifests for the score you already have."
       @click="$dispatch('show-confirm', {
         title: 'Re-scan',
         message: 'Re-scan ' + {{ report.repo_name | tojson | forceescape }} + ' and regenerate onboard manifests in one step. You will land on Onboard Results while automatic validation and delivery run.',
@@ -322,29 +325,35 @@
   </form>
 </div>
 
-{% from "_macros.html" import client_tab_nav, ledger_card %}
-{# Initial tab honors ?tab=<key> (e.g. Fleet's "Needs Action" badge links
-   here with ?tab=actions) -- same query-param-driven Alpine init
+{% from "_macros.html" import client_tab_nav %}
+{# Initial tab honors ?tab=<key> (e.g. Fleet's per-app pending-action badge
+   links here with ?tab=ledger) -- same query-param-driven Alpine init
    convention fleet.html's Assess modal (`assessOpen`) already uses,
    since client_tab_nav's tabs are pure client-side Alpine state with no
    URL/anchor awareness of their own. Whitelisted against the real tab
    keys below rather than interpolating the raw query param into the
-   Alpine expression. #}
+   Alpine expression.
+
+   Former Actions/Timeline/PR History tabs are merged into this one Ledger
+   tab (docs/ledger-design-spec.md Phase 2's own plan for Actions+Timeline,
+   extended here to also fold in PR History -- all three had converged on
+   the same job: "what's pending or already happened for this app's
+   deliveries," just three separately-templated copies of it). A stray old
+   ?tab=actions/timeline/prs link (e.g. a stale notification) falls back to
+   Overview like any other unrecognized value, rather than silently landing
+   on a tab that no longer exists. #}
 {% set _requested_tab = request.query_params.get('tab', 'overview') %}
-{% set _initial_tab = _requested_tab if _requested_tab in ('overview', 'findings', 'actions', 'timeline', 'ledger', 'prs') else 'overview' %}
+{% set _initial_tab = _requested_tab if _requested_tab in ('overview', 'findings', 'ledger') else 'overview' %}
 <div x-data="{ tab: '{{ _initial_tab }}', findingsCount: {{ urgent_findings|length }} }">
 {{ client_tab_nav([
   {"key": "overview", "label": "Overview"},
   {"key": "findings", "label": "Findings (<span x-text=\"findingsCount\"></span>)" if urgent_findings else "Findings"},
-  {"key": "actions", "label": "Actions" ~ (" (" ~ pending_actions|length ~ ")" if pending_actions and lifecycle_stage != "assessed" else "")},
-  {"key": "timeline", "label": "Timeline"},
-  {"key": "ledger", "label": "Ledger"},
-  {"key": "prs", "label": "PR History" ~ (" (" ~ pr_history|length ~ ")" if pr_history else "")},
+  {"key": "ledger", "label": "Ledger" ~ (" (" ~ non_pr_pending_actions|length ~ ")" if non_pr_pending_actions and lifecycle_stage != "assessed" else "")},
 ]) }}
 
 <div x-show="tab === 'overview'">
   {# Open PRs -- currently-open PRs only (code repo + GitOps infra repo);
-     see the PR History tab below for every PR ever opened and its final
+     see the Ledger tab below for every PR ever opened and its final
      outcome. Omitted entirely when there are none, same "don't show an
      empty fact" convention as next_action above. #}
   {% if open_prs %}
@@ -354,8 +363,8 @@
     <li class="finding-item">
       <span class="badge badge-info" title="{{ 'The GitOps infra repo for this app' if pr.repo_kind == 'gitops' else 'The code repo for this app' }}">{{ 'GitOps' if pr.repo_kind == 'gitops' else 'Code' }}</span>
       <a href="{{ pr.html_url | safe_url }}" target="_blank" hx-boost="false">{{ pr.title or pr.pr_url }}</a>
-      {% if pr.source == 'gate' %}
-      <span class="text-muted text-sm">&middot; awaiting your approval on the <a href="/assessments/{{ assessment_id }}?tab=actions">Actions tab</a></span>
+      {% if pr.lifecycle == 'needs_approval' %}
+      <span class="text-muted text-sm">&middot; waiting for your approval &mdash; review and merge it on GitHub, or see the <a href="/assessments/{{ assessment_id }}?tab=ledger">Ledger tab</a></span>
       {% endif %}
     </li>
     {% endfor %}
@@ -427,9 +436,9 @@
       <ul class="finding-list">
         {% for f in urgent_findings %}
         {# Optimistic UI (docs/ux-design-requirements.md checklist #7):
-           Suppress is genuinely reversible (Unsuppress on the Timeline tab
-           undoes it) and low-stakes (it only affects which checks future
-           assessments re-run -- nothing cluster-side). The finding hides
+           Suppress is genuinely reversible (Unsuppress below undoes it) and
+           low-stakes (it only affects which checks future assessments
+           re-run -- nothing cluster-side). The finding hides
            the instant Suppress is confirmed, reconciling back to visible
            only if the real request actually fails -- never a bare spinner
            + full-page reload for an action this safe. #}
@@ -451,7 +460,7 @@
             <button type="button" class="btn btn-sm btn-green"
               @click="$dispatch('show-confirm', {
                 title: 'Generate Fix',
-                message: 'Generate a fix for this finding? You will review it on Onboard Results before Apply.',
+                message: 'Generate a fix for this finding? You will review it on Onboard Results before delivering.',
                 form: $refs.fixFinding{{ loop.index }},
                 opts: { confirmText: 'Generate Fix', danger: false }
               })">
@@ -510,7 +519,7 @@
                 <button type="button" class="btn btn-sm btn-green"
                   @click="$dispatch('show-confirm', {
                     title: 'Generate Fix',
-                    message: 'Generate a fix for this remediation item? You will review it on Onboard Results before Apply.',
+                    message: 'Generate a fix for this remediation item? You will review it on Onboard Results before delivering.',
                     form: $refs.fixPlan{{ loop.index }},
                     opts: { confirmText: 'Generate Fix', danger: false }
                   })">
@@ -540,61 +549,13 @@
     </div>
   </div>
   {% endif %}
-</div>
-
-<div x-show="tab === 'actions'" x-cloak>
-  {% if lifecycle_stage == "assessed" %}
-  <p class="text-muted text-sm mb-1" role="status">
-    Your next step is <strong>Onboard This App</strong> above — it generates remediations for all findings at once.
-    This tab is for post-onboard approval gates (Approve &amp; Deliver / Reject), not a parallel fix list.
-    {% if pending_actions %}
-    The item{{ 's' if pending_actions|length != 1 }} below are leftover gates from earlier deliveries for this app; optional cleanup only.
-    {% endif %}
-  </p>
-  {% endif %}
-  {% if pending_actions %}
-  {% from "_macros.html" import gate_card %}
-  {% for gate in pending_actions %}
-  {{ gate_card(gate) }}
-  {% endfor %}
-  {% else %}
-  <div class="empty-state">
-    {% if recently_resolved_actions_count %}
-    <p>No pending actions. {{ recently_resolved_actions_count }} resolved in the last 24 hours for this app.</p>
-    {% else %}
-    <p>No pending actions for this app. After Onboard, automatic validation runs and opens pull request(s) -- anything needing your review will show up here.</p>
-    {% endif %}
-  </div>
-  {% endif %}
-</div>
-
-<div x-show="tab === 'timeline'" x-cloak>
-  {% if timeline %}
-  <details open>
-    <summary class="section-toggle">Timeline</summary>
-    <div class="timeline">
-      {% for event in timeline %}
-      <div class="timeline-item">
-        <div class="timeline-marker {% if event.severity == 'critical' %}marker-danger{% elif event.action == 'completed' or event.action == 'approved' %}marker-success{% else %}marker-default{% endif %}"></div>
-        <div class="timeline-content">
-          <div class="timeline-header">
-            <span class="badge badge-{{ event.severity | default('info') }}">{{ event.agent_id }}</span>
-            <strong>{{ event.action }}</strong>
-            <span class="text-muted text-sm" data-timestamp="{{ event.timestamp }}">{{ event.timestamp[:16] }}</span>
-          </div>
-          <p class="text-sm text-muted">{{ event.summary[:200] }}</p>
-        </div>
-      </div>
-      {% endfor %}
-    </div>
-  </details>
-  {% else %}
-  <div class="empty-state">
-    <p>No timeline events for this app yet. Assessment, onboarding, delivery, and gate activity will appear here as it happens.</p>
-  </div>
-  {% endif %}
 
   {% if suppressions %}
+  {# Moved here from the former Timeline tab -- a management list of what's
+     currently suppressed ("what's true right now"), not a chronological
+     event, so it belongs alongside Findings rather than the PR-history-
+     shaped Ledger tab (see docs/ledger-design-spec.md §3's Findings-vs-feed
+     distinction). #}
   <div x-data="{ open: false }">
     <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
       Suppressed Checks ({{ suppressions|length }})
@@ -630,70 +591,83 @@
 </div>
 
 <div x-show="tab === 'ledger'" x-cloak>
-{# docs/ledger-design-spec.md Phase 1: a read-only, chronological union of
-   this app's events/gates/deliveries/fix-reviews (agentit.ledger.
-   get_ledger_cards()) -- additive alongside Actions/Timeline above, not a
-   replacement. Deliberately read-only here (no gate-resolution buttons):
-   a pending gate already renders its live Approve/Reject/Dismiss buttons
-   on the Actions tab via the shared gate_card macro; duplicating that
-   interactive form here would create two DOM elements resolving the same
-   gate_id, which gate_card's own x-ref/$dispatch wiring assumes is unique
-   per page. #}
-  {% if ledger_cards %}
-  <div class="timeline">
-    {% for card in ledger_cards %}
-    {{ ledger_card(card, link_to_app=False) }}
-    {% endfor %}
-  </div>
-  {% else %}
-  <div class="empty-state">
-    <p>No Ledger activity yet for this app.</p>
-  </div>
-  {% endif %}
-</div>
+{# Former Actions + Timeline + PR History tabs, merged (see the tab-nav
+   comment above). Two sections: gates that still need an in-app
+   acknowledgment (no PR to point at), then this app's real PR history --
+   the same lifecycle-labeled shape the fleet-wide /ledger page and Onboard
+   Results' Pull Requests section already use (pr_tracking.py), reused here
+   instead of a third, drifting copy.
 
-<div x-show="tab === 'prs'" x-cloak>
-{# Every PR AgentIT has ever opened for this app (code repo + GitOps infra
-   repo), newest first, with its final outcome (see pr_tracking.py's module
-   docstring for exactly what's DB-tracked vs. live-GitHub-checked). A
-   `gitops-pr-pending` gate's own status is a reliable, already-known
-   outcome (no live check); a source-repo-pr/app-repo-pr/onboarding PR has
-   no stored outcome at all today, so its Outcome column reflects a live
-   GitHub check made for this page load -- "Unknown" (rather than a
-   fabricated status) when that check itself couldn't determine one (e.g.
-   no GITHUB_TOKEN configured). #}
+   Gate approval itself is being eliminated system-wide (the `gates` table
+   is going away, not just its AutoMode-era gate types) -- a PR-backed gate
+   (`gitops-pr-pending`/the CI/CD-shared-namespace variant) is intentionally
+   NOT rendered as its own gate_card here anymore; it already shows up below
+   in the PR list as "Waiting for your approval" with a real link to go
+   review/merge it on GitHub. The remaining gate types below
+   (`rollback-review`, `finding-unresolved-escalation`, and any
+   stale/unrecognized one) have no PR of their own -- they're a pure human
+   acknowledgment with nothing to review on GitHub, so they keep their
+   interactive gate_card until the gate-removal effort gives them a
+   non-gate home. #}
+  {% if lifecycle_stage == "assessed" and non_pr_pending_actions %}
+  <p class="text-muted text-sm mb-1" role="status">
+    Your next step is <strong>Onboard This App</strong> above — it generates remediations for all findings at once.
+    The item{{ 's' if non_pr_pending_actions|length != 1 }} below are leftover gates from earlier deliveries for this app; optional cleanup only.
+  </p>
+  {% endif %}
+  {% if non_pr_pending_actions %}
+  {% from "_macros.html" import gate_card %}
+  <h2 class="section-title mt-0">Needs your review ({{ non_pr_pending_actions|length }})</h2>
+  {% for gate in non_pr_pending_actions %}
+  {{ gate_card(gate) }}
+  {% endfor %}
+  {% elif recently_resolved_actions_count %}
+  <p class="text-muted text-sm mb-1">No pending actions. {{ recently_resolved_actions_count }} resolved in the last 24 hours for this app.</p>
+  {% else %}
+  <p class="text-muted text-sm mb-1">No pending actions for this app. After Onboard, automatic validation runs and opens pull request(s) -- anything needing your review will show up below.</p>
+  {% endif %}
+
+  <h2 class="section-title mt-2">PR history ({{ pr_history|length }})</h2>
+  {# Every PR AgentIT has ever opened for this app (code repo + GitOps infra
+     repo), newest first, with its real lifecycle (see pr_tracking.py's
+     annotate_lifecycle()). A `gitops-pr-pending` gate's own status is a
+     reliable, already-known outcome (no live check); a source-repo-pr/
+     app-repo-pr/onboarding PR has no stored outcome at all today, so its
+     Outcome column reflects a live GitHub check made for this page load --
+     "Unknown" (rather than a fabricated status) when that check itself
+     couldn't determine one (e.g. no GITHUB_TOKEN configured). #}
   {% if pr_history %}
   <table>
-    <thead><tr><th>PR</th><th>Repo</th><th>Opened</th><th>Status</th><th>Outcome</th></tr></thead>
+    <thead><tr><th>Category</th><th>PR</th><th>Opened</th><th>Status</th><th>Outcome</th></tr></thead>
     <tbody>
       {% for pr in pr_history %}
       <tr>
+        <td><span class="badge badge-muted" title="{{ 'The GitOps infra repo for this app' if pr.repo_kind == 'gitops' else 'The code repo for this app' }}">{{ pr.category | dimension_label }}</span></td>
         <td><a href="{{ pr.html_url | safe_url }}" target="_blank" hx-boost="false">{{ pr.title or pr.pr_url }}</a></td>
-        <td><span class="badge badge-muted" title="{{ 'The GitOps infra repo for this app' if pr.repo_kind == 'gitops' else 'The code repo for this app' }}">{{ 'GitOps' if pr.repo_kind == 'gitops' else 'Code' }}</span></td>
         <td class="text-sm"><span data-timestamp="{{ pr.created_at }}">{{ (pr.created_at or '')[:10] }}</span></td>
         <td>
-          {% if pr.state == 'open' %}
+          {% if pr.lifecycle == 'needs_approval' %}
+          <span class="badge badge-warning" title="Review the diff, then merge it directly on GitHub">Waiting for your approval</span>
+          {% elif pr.lifecycle == 'open' %}
           <span class="badge badge-info">Open</span>
-          {% elif pr.state == 'merged' %}
+          {% elif pr.lifecycle == 'merged' %}
           <span class="badge badge-success">Merged</span>
-          {% elif pr.state == 'closed' %}
+          {% elif pr.lifecycle == 'rejected' %}
+          <span class="badge badge-critical">Rejected</span>
+          {% elif pr.lifecycle == 'closed' %}
           <span class="badge badge-muted">Closed</span>
           {% else %}
           <span class="badge badge-muted" title="No live GitHub status could be determined for this PR (e.g. GITHUB_TOKEN not configured, or the API call failed)">Unknown</span>
           {% endif %}
         </td>
         <td class="text-sm text-muted">
-          {% if pr.state == 'merged' and pr.merged_at %}
+          {% if pr.lifecycle == 'merged' and pr.merged_at %}
           Merged <span data-timestamp="{{ pr.merged_at }}">{{ pr.merged_at[:10] }}</span>
-          {% elif pr.gate_status == 'rejected' %}
+          {% elif pr.lifecycle == 'rejected' %}
           Rejected{% if pr.reject_reason %} &mdash; {{ pr.reject_reason }}{% endif %}
-          {% elif pr.gate_status == 'dismissed' %}
-          Dismissed
-          {% elif pr.gate_status == 'expired' %}
-          Expired (stale, never approved or rejected)
-          {% elif pr.state == 'closed' %}
-          Closed without merging &mdash; no rejection reason is captured for this PR type today
-          {% elif pr.state == 'unknown' %}
+          {% elif pr.lifecycle == 'closed' %}
+          Closed without merging{% if pr.source != 'gate' %} &mdash; no rejection reason is captured for this PR type today{% endif %}
+          {% elif pr.lifecycle == 'unknown' %}
           Not tracked &mdash; see the badge tooltip
           {% else %}
           &mdash;

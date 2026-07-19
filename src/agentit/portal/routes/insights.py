@@ -186,15 +186,16 @@ async def ledger_page(
       fix-review (``skill_effectiveness``) outcomes.
     - Non-PR gate types (``cluster-admin-review``, ``rollback-review``,
       ``finding-unresolved-escalation``) -- these were never PRs; they stay
-      visible via Admin Review, Fleet's per-app "needs action"/escalation
-      badges, and Assessment Detail's own Actions tab.
-    - Per-app history -- Assessment Detail's Timeline/Ledger tabs and PR
-      History tab still own "everything that happened to this one app".
+      visible via Fleet's per-app "needs action"/escalation badges and
+      Assessment Detail's own Ledger tab.
+    - Per-app history -- Assessment Detail's own Ledger tab still owns
+      "everything that happened to this one app" (its former Actions/
+      Timeline/PR History tabs merged into it).
 
     ``pr_tracking.collect_fleet_pr_records()`` does the real aggregation
     (from ``gates``/``deliveries``/``onboarding_results``, the same three
     places Fleet's "Open PRs"/"Total PRs" columns and Assessment Detail's
-    PR History tab already read) -- this route only filters/paginates/
+    own Ledger tab already read) -- this route only filters/paginates/
     renders what that function returns.
     """
     from agentit.portal.pr_tracking import collect_fleet_pr_records, fleet_prs_waiting_for_approval
@@ -241,6 +242,11 @@ async def ledger_page(
     # Gate-tracked records still render the real Approve & Deliver/Reject
     # actions via `gate_card` (off each record's own `raw` gate row); every
     # other open PR renders as a plain "review it on GitHub" pointer.
+    # (Assessment Detail's own Ledger tab deliberately does NOT duplicate
+    # this PR-backed gate_card anymore -- see assessment_detail.html's
+    # Ledger-tab comment -- so this fleet-wide page is now the one place a
+    # gitops-pr-pending gate still gets an in-app Approve button, until the
+    # gates-removal effort replaces this too.)
     needs_approval = fleet_prs_waiting_for_approval(records)
     for r in needs_approval:
         if r.get("source") == "gate":
