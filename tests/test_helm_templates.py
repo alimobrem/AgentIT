@@ -593,6 +593,63 @@ class TestTektonTrigger:
         pr_meta = tt["spec"]["resourcetemplates"][0]["metadata"]
         assert pr_meta["labels"]["tekton.dev/pipeline"] == "agentit-ci"
 
+    def _github_push_trigger(self) -> dict:
+        docs = self._docs()
+        el = next(d for d in docs if d and d["kind"] == "EventListener")
+        return next(t for t in el["spec"]["triggers"] if t["name"] == "github-push")
+
+    def test_github_push_trigger_requires_hmac_secret(self):
+        """Regression guard: this is AgentIT's *other* GitHub push webhook --
+        entirely separate infrastructure from the portal-native
+        `/api/webhook/github-push` FastAPI route (see
+        TestOauthProxyHealthzBypass above). This one is fronted by its own
+        Route (`agentit-ci-webhook`) straight to `el-agentit-ci-listener`,
+        never through the app's oauth-proxy sidecar at all -- so its *only*
+        auth boundary is this EventListener's `github` ClusterInterceptor
+        secretRef, verifying GitHub's HMAC signature against
+        `github-webhook-secret`. Without it, anyone who discovers the Route
+        URL could POST a fake push event and trigger an arbitrary
+        `agentit-ci` PipelineRun (build + image push + notify-argocd) with
+        no authentication at all -- confirmed as a real, previously-required
+        config (commit `fe69a89`, "Harden CI/CD pipeline: authenticate
+        webhook...") that a future refactor of this template could silently
+        drop with nothing else to catch it (docs/deployment.md's 2026-07-13
+        incident already shows this Secret going missing once, unnoticed
+        for hours, from an operational gap -- this guards the template side
+        of the same risk)."""
+        trigger = self._github_push_trigger()
+        github_interceptor = next(
+            i for i in trigger["interceptors"] if i["ref"]["name"] == "github"
+        )
+        secret_ref_param = next(
+            p for p in github_interceptor["params"] if p["name"] == "secretRef"
+        )
+        assert secret_ref_param["value"] == {
+            "secretName": "github-webhook-secret",
+            "secretKey": "secret",
+        }
+
+    def test_github_push_trigger_filters_to_default_branch(self):
+        """The `cel` interceptor's `body.ref == 'refs/heads/main'` filter is
+        this trigger's only defense against firing a full CI PipelineRun for
+        every branch push -- must survive alongside the secretRef guard
+        above, not just one or the other."""
+        trigger = self._github_push_trigger()
+        cel_interceptor = next(i for i in trigger["interceptors"] if i["ref"]["name"] == "cel")
+        filter_param = next(p for p in cel_interceptor["params"] if p["name"] == "filter")
+        assert filter_param["value"] == "body.ref == 'refs/heads/main'"
+
+    def test_ci_webhook_route_targets_the_listener_service_directly(self):
+        """The `agentit-ci-webhook` Route must keep targeting
+        `el-agentit-ci-listener` (Tekton Triggers' own EventListener
+        Service) -- never the app's own Service/Route, which would put this
+        webhook behind the oauth-proxy sidecar and reproduce the exact
+        github-push 302 bug `TestOauthProxyHealthzBypass` guards against,
+        just for a different webhook."""
+        docs = self._docs()
+        route = next(d for d in docs if d and d["kind"] == "Route" and d["metadata"]["name"] == "agentit-ci-webhook")
+        assert route["spec"]["to"] == {"kind": "Service", "name": "el-agentit-ci-listener"}
+
 
 # ---------------------------------------------------------------------------
 # Kafka → Sensor → HTTP trigger flow validation
@@ -1340,6 +1397,19 @@ class TestOauthProxyHealthzBypass:
         section."""
         raw = self.TEMPLATE.read_text()
         assert "--skip-auth-regex=^/api/webhook/" in raw
+
+    def test_templates_webhook_insecure_ssl_env_var_from_values(self):
+        """Regression guard for the other half of the same live bug:
+        `github_pr.py::ensure_webhook()`'s `AGENTIT_WEBHOOK_INSECURE_SSL`
+        opt-in override (for clusters, like this one, whose Route serves a
+        self-signed ingress cert) only ever reaches the running pod's
+        `os.environ` if this Deployment actually templates it from
+        `values.yaml` -- `test_portal_pr.py`'s `ensure_webhook` tests set
+        the env var directly and so can't catch this template wiring being
+        dropped or pointed at the wrong values.yaml key on its own."""
+        raw = self.TEMPLATE.read_text()
+        assert "- name: AGENTIT_WEBHOOK_INSECURE_SSL" in raw
+        assert "value: {{ .Values.env.AGENTIT_WEBHOOK_INSECURE_SSL | default \"\" | quote }}" in raw
 
 
 class TestSyntheticProbeCertCheck:

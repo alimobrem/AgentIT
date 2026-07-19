@@ -63,6 +63,32 @@ _deploy_status_executor = concurrent.futures.ThreadPoolExecutor(
 # loop thread, not other OS threads.
 _deploy_status_cache_lock = threading.Lock()
 
+# Webhook delivery health (github_pr.py::check_webhook_delivery_health) makes
+# 2 real GitHub API calls per managed app -- cheap individually, but the
+# Credentials/Webhook-Deliveries panel already re-runs this whole function
+# every 30s per open Health page tab (htmx `hx-trigger="every 30s"` on
+# credentials-panel below), so an uncached check would scale with both fleet
+# size and open-tab count with no bound. A short TTL cache, keyed per repo
+# URL, keeps this bounded the same way `_deploy_status_cache` already bounds
+# the kube-apiserver calls above -- same threading.Lock reasoning (this runs
+# in a real OS thread via `asyncio.to_thread`, so an `asyncio.Lock` wouldn't
+# exclude concurrent pollers).
+_WEBHOOK_HEALTH_CACHE_TTL = 60.0
+_webhook_health_cache: dict[str, tuple[float, dict]] = {}
+_webhook_health_cache_lock = threading.Lock()
+
+
+def _check_webhook_delivery_health_cached(repo_url: str) -> dict:
+    now = time.monotonic()
+    with _webhook_health_cache_lock:
+        cached = _webhook_health_cache.get(repo_url)
+        if cached is not None and (now - cached[0]) < _WEBHOOK_HEALTH_CACHE_TTL:
+            return cached[1]
+    result = github_pr.check_webhook_delivery_health(repo_url)
+    with _webhook_health_cache_lock:
+        _webhook_health_cache[repo_url] = (now, result)
+    return result
+
 
 # ── Internal helpers ──────────────────────────────────────────────────
 #
@@ -472,6 +498,7 @@ def _get_cluster_health(store=None, loop=None) -> dict:
     }
 
     managed_names = {"agentit"}
+    fleet_data: list[dict] = []
     try:
         if store is not None:
             fleet_data = store.get_fleet_data()
@@ -641,6 +668,24 @@ def _get_cluster_health(store=None, loop=None) -> dict:
     except Exception:
         log.debug("Failed to collect credential states", exc_info=True)
         result["credentials"] = {}
+
+    # Webhook delivery health -- only for apps that actually have a
+    # registered push webhook (`ensure_webhook()` only ever runs once an
+    # app completes onboarding; see assessments.py's remediation-job flow).
+    # Checking every fleet app regardless would waste GitHub API calls on
+    # apps that were never onboarded and so never got a hook at all.
+    try:
+        result["webhook_deliveries"] = [
+            {
+                "repo_name": app_data["repo_name"],
+                **_check_webhook_delivery_health_cached(app_data["repo_url"]),
+            }
+            for app_data in fleet_data
+            if app_data.get("ever_onboarded") and app_data.get("repo_url")
+        ]
+    except Exception:
+        log.debug("Failed to collect webhook delivery health", exc_info=True)
+        result["webhook_deliveries"] = []
 
     # Deep-links for Health cards / tables — real console/GitHub URLs only.
     console_url = resolve_console_url()
