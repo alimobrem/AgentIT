@@ -118,7 +118,22 @@ def _render_template(template_text: str, variables: dict[str, str]) -> str:
 
 @dataclass
 class Skill:
-    """A single skill definition loaded from a Markdown file with YAML frontmatter."""
+    """A single skill definition loaded from a Markdown file with YAML frontmatter.
+
+    ``mode`` distinguishes two fundamentally different jobs this same file
+    format now covers (see docs/extension-model-unification-plan-2026-07-18.md):
+    ``"template"``/``"llm"`` (the original, remediation-shaped skills --
+    matched by keyword ``triggers`` against a report's *finding text*,
+    producing a ``GeneratedFile``) and ``"detect"`` (the new,
+    detection-shaped kind -- runs a declarative ``rule`` against the
+    *repo's file content* directly, producing a ``Finding``, exactly like a
+    legacy ``checks/*.yaml`` file but expressed in this same Markdown+
+    frontmatter format so it gets the same lifecycle/activation machinery
+    below for free). A ``detect``-mode skill's ``triggers``/``outputs`` are
+    always empty (meaningless for detection) -- see
+    ``detect_check_definitions()``/``_skill_to_check_definition()`` for how
+    its ``rule`` is actually run.
+    """
 
     name: str
     domain: str
@@ -137,12 +152,25 @@ class Skill:
     requires_crd: list[str] = field(default_factory=list)
     source: str = "manual"
     created_at: str = ""
+    # `mode: detect` fields -- unused (left at their defaults) by every
+    # template/llm-mode skill.
+    rule: dict = field(default_factory=dict)
+    severity: str = ""
+    category: str = ""
+    description: str = ""
+    recommendation: str = ""
 
     def matches(self, report: AssessmentReport) -> bool:
         """Return True if any trigger keyword appears in the report findings.
 
-        Retired and draft skills never match. Deprecated skills match but log a warning.
+        Retired and draft skills never match. Deprecated skills match but
+        log a warning. A ``detect``-mode skill never matches here -- it has
+        no remediation output to generate; its findings come from
+        ``detect_check_definitions()`` running its ``rule`` against a repo
+        directly, not from keyword-matching a report's finding text.
         """
+        if self.mode == "detect":
+            return False
         if self.status in ("retired", "draft"):
             return False
         if self.status == "deprecated":
@@ -203,6 +231,8 @@ def load_skill(path: Path) -> Skill | None:
     conflicts_raw = meta.get("conflicts_with", [])
     requires_crd_raw = meta.get("requires_crd", [])
 
+    rule_raw = meta.get("rule", {})
+
     return Skill(
         name=meta["name"],
         domain=meta["domain"],
@@ -220,6 +250,11 @@ def load_skill(path: Path) -> Skill | None:
         requires_crd=list(requires_crd_raw) if isinstance(requires_crd_raw, list) else [requires_crd_raw],
         source=meta.get("source", "manual"),
         created_at=meta.get("created_at", ""),
+        rule=rule_raw if isinstance(rule_raw, dict) else {},
+        severity=str(meta.get("severity", "")),
+        category=str(meta.get("category", "")),
+        description=str(meta.get("description", "")),
+        recommendation=str(meta.get("recommendation", "")),
     )
 
 
@@ -233,6 +268,83 @@ def load_all_skills(skills_dir: Path) -> list[Skill]:
         if skill is not None:
             results.append(skill)
     return results
+
+
+def _skill_to_check_definition(skill: Skill):
+    """Build a ``check_engine.CheckDefinition`` from a ``mode: detect``
+    skill's ``rule`` frontmatter, reusing check_engine's own rule runners
+    (``_RUNNERS``, via ``run_checks*``) rather than duplicating
+    pattern-matching logic in a second place. Returns ``None`` (logging a
+    warning) if the skill's rule/severity don't resolve to something
+    check_engine can actually run -- the caller treats that exactly like a
+    malformed legacy YAML check file (``check_engine._parse_check_file``
+    returning ``None``): skipped, not fatal to the rest of the load.
+    """
+    from agentit.check_engine import CheckDefinition, SEVERITY_MAP, VALID_TYPES
+
+    check_type = skill.rule.get("type")
+    if check_type not in VALID_TYPES:
+        logger.warning(
+            "Skill %s (mode=detect) has missing/invalid rule.type %r", skill.name, check_type,
+        )
+        return None
+
+    sev = SEVERITY_MAP.get(skill.severity.lower())
+    if sev is None:
+        logger.warning(
+            "Skill %s (mode=detect) has missing/invalid severity %r", skill.name, skill.severity,
+        )
+        return None
+
+    raw_pattern = skill.rule.get("pattern")
+    pattern: str | list[str] = (
+        [str(p) for p in raw_pattern] if isinstance(raw_pattern, list) else str(raw_pattern)
+    )
+
+    return CheckDefinition(
+        name=skill.name,
+        dimension=skill.domain,
+        severity=sev,
+        category=skill.category or skill.domain,
+        check_type=check_type,
+        pattern=pattern,
+        description=skill.description,
+        recommendation=skill.recommendation,
+        source_path=skill.file_path,
+        case_insensitive=bool(skill.rule.get("case_insensitive", False)),
+    )
+
+
+def detect_check_definitions(skills: list[Skill]) -> list:
+    """Return ``check_engine.CheckDefinition``s for every non-retired,
+    non-draft ``mode: detect`` skill -- the bridge that lets a
+    Markdown-defined detection rule run through the exact same engine
+    (``check_engine.run_checks_by_dimension_with_status``) as a legacy
+    ``checks/*.yaml`` file, so ``runner.run_assessment()`` can merge findings
+    from both formats identically during the transition
+    (docs/extension-model-unification-plan-2026-07-18.md, Phase 1). A draft
+    skill isn't reviewed/verified yet (mirrors ``Skill.matches()``'s own
+    draft exclusion for template-mode skills); a retired one is
+    intentionally decommissioned. A *deprecated* detect skill still runs
+    (mirrors ``Skill.matches()``'s "deprecated matches but warns" behavior)
+    since deprecating a detection rule as a signal to fix it later is a
+    different lifecycle decision than never running it again.
+    """
+    result = []
+    for skill in skills:
+        if skill.mode != "detect":
+            continue
+        if skill.status in ("draft", "retired"):
+            continue
+        if skill.status == "deprecated":
+            logger.warning(
+                "Detect-mode skill '%s' is deprecated but still contributing findings"
+                " (deprecated_reason=%r)", skill.name, skill.deprecated_reason,
+            )
+        defn = _skill_to_check_definition(skill)
+        if defn is not None:
+            result.append(defn)
+    return result
 
 
 class SkillEngine:
@@ -283,6 +395,14 @@ class SkillEngine:
                  llm_client: object | None = None,
                  human_override: str | None = None) -> list[GeneratedFile]:
         """Render a skill against the report. Uses LLM if available, falls back to template."""
+        if skill.mode == "detect":
+            # Defense in depth alongside Skill.matches()'s own `mode ==
+            # "detect"` guard above -- a detect-mode skill has no
+            # remediation output to generate at all (see its own
+            # docstring); it only ever contributes Findings, via
+            # detect_check_definitions(), not GeneratedFiles.
+            return []
+
         app_name = _sanitize_name(report.repo_name)
 
         # Check if the output kind is available on the platform
@@ -583,6 +703,45 @@ def _verification_fixture_report(skill: Skill) -> AssessmentReport:
     )
 
 
+def _verify_detect_skill(skill: Skill) -> tuple[bool, list[str], list[str]]:
+    """Functional verification for ``mode: detect`` skills -- the
+    detection-shaped branch of the unified extension model (see
+    docs/extension-model-unification-plan-2026-07-18.md). Mirrors
+    ``verify_skill()``'s ``(passed, issues, warnings)`` contract, but checks
+    the fields a detection rule actually needs (``rule``/``severity``/
+    ``description``/``recommendation``) instead of the
+    remediation-shaped ``triggers``/``outputs``/body-template checks
+    ``verify_skill()`` runs for template/llm-mode skills, which are
+    meaningless here (a detect-mode skill never generates a
+    ``GeneratedFile``, so there's nothing to functionally smoke-test by
+    generating one).
+    """
+    issues: list[str] = []
+    warnings: list[str] = []
+
+    if not skill.rule:
+        issues.append("mode: detect skill has no rule defined")
+    if not skill.severity:
+        issues.append("mode: detect skill has no severity defined")
+    if not skill.description:
+        issues.append("mode: detect skill has no description defined")
+    if not skill.recommendation:
+        issues.append("mode: detect skill has no recommendation defined")
+    if skill.status not in ("active", "deprecated", "retired", "draft"):
+        issues.append(f"invalid status: {skill.status}")
+    if issues:
+        return False, issues, warnings
+
+    defn = _skill_to_check_definition(skill)
+    if defn is None:
+        issues.append(
+            "rule failed to compile to a runnable check -- invalid rule.type or severity"
+        )
+        return False, issues, warnings
+
+    return True, issues, warnings
+
+
 def verify_skill(skill: Skill, *, llm_client: object | None = None) -> tuple[bool, list[str], list[str]]:
     """Functionally verify a skill before promoting it from draft to active.
 
@@ -599,7 +758,16 @@ def verify_skill(skill: Skill, *, llm_client: object | None = None) -> tuple[boo
     - ``warnings``: non-blocking notes (e.g. "couldn't functionally verify
       an LLM-only skill without an LLM client configured") -- activation
       may still proceed, but the caller should surface these to the human.
+
+    ``mode: detect`` skills are verified by ``_verify_detect_skill()``
+    instead of the checks below: they never generate a ``GeneratedFile``
+    (so "no triggers"/"no outputs"/"matches a synthetic fixture" are
+    meaningless for them), but they do need a real, runnable ``rule`` --
+    the check-shaped half of this function's contract.
     """
+    if skill.mode == "detect":
+        return _verify_detect_skill(skill)
+
     issues: list[str] = []
     warnings: list[str] = []
 

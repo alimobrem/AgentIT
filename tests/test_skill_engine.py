@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from agentit.check_engine import run_checks
+from agentit.models import Severity
 from agentit.platform_context import offline_context
 from agentit.skill_engine import (
     Skill,
@@ -15,6 +17,9 @@ from agentit.skill_engine import (
     UnresolvedPlaceholderError,
     _pluralize_kind,
     _render_template,
+    _skill_to_check_definition,
+    detect_check_definitions,
+    load_all_skills,
     load_skill,
     verify_skill,
 )
@@ -615,3 +620,334 @@ class TestResourceQuotaContextualLiveBugRepro:
         assert fake_llm.max_tokens_requested, "LLM was never called"
         assert fake_llm.max_tokens_requested[0] == _SKILL_GENERATION_MAX_TOKENS
         assert fake_llm.max_tokens_requested[0] > 512
+
+
+# ---------------------------------------------------------------------------
+# mode: detect -- the detection-shaped half of the unified extension model
+# (docs/extension-model-unification-plan-2026-07-18.md, Phase 1)
+# ---------------------------------------------------------------------------
+
+_DETECT_SKILL_MD = """\
+---
+name: {name}
+domain: observability
+version: 1
+mode: detect
+triggers: []
+outputs: []
+severity: high
+category: health
+description: No liveness/readiness probes detected in manifests
+recommendation: Add livenessProbe and readinessProbe to all containers
+rule:
+  type: file_contains
+  pattern: livenessProbe
+status: {status}
+---
+
+# Health Probes Check (test fixture)
+"""
+
+
+def _write_detect_skill(tmp_path: Path, name: str = "health-probes-check", status: str = "active") -> Path:
+    p = tmp_path / f"{name}.md"
+    p.write_text(_DETECT_SKILL_MD.format(name=name, status=status))
+    return p
+
+
+class TestDetectModeLoading:
+    """load_skill() must parse the new mode: detect fields (rule/severity/
+    category/description/recommendation) alongside every pre-existing
+    field, with zero behavior change for template/llm-mode skills that
+    never set them."""
+
+    def test_load_skill_parses_detect_fields(self, tmp_path: Path) -> None:
+        skill = load_skill(_write_detect_skill(tmp_path))
+        assert skill is not None
+        assert skill.mode == "detect"
+        assert skill.rule == {"type": "file_contains", "pattern": "livenessProbe"}
+        assert skill.severity == "high"
+        assert skill.category == "health"
+        assert skill.description == "No liveness/readiness probes detected in manifests"
+        assert skill.recommendation == "Add livenessProbe and readinessProbe to all containers"
+
+    def test_template_mode_skill_has_empty_detect_fields_by_default(self, tmp_path: Path) -> None:
+        """Regression guard: a pre-existing template/llm-mode skill file
+        (no rule/severity/category/description/recommendation keys at all)
+        must still load exactly as before -- these new fields default to
+        empty, never required."""
+        skill = _make_skill("plain-skill", outputs=["NetworkPolicy"])
+        assert skill.rule == {}
+        assert skill.severity == ""
+        assert skill.category == ""
+        assert skill.description == ""
+        assert skill.recommendation == ""
+
+
+class TestDetectModeNeverRemediates:
+    """A mode: detect skill must never participate in remediation matching
+    or generation -- it only ever contributes Findings via
+    detect_check_definitions(), never a GeneratedFile."""
+
+    def test_matches_always_false_regardless_of_triggers(self, tmp_path: Path) -> None:
+        skill = load_skill(_write_detect_skill(tmp_path))
+        assert skill is not None
+        report = make_report()
+        assert skill.matches(report) is False
+
+    def test_generate_returns_empty_list(self, tmp_path: Path) -> None:
+        skill = load_skill(_write_detect_skill(tmp_path))
+        assert skill is not None
+        engine = SkillEngine(tmp_path, platform=offline_context())
+        report = make_report()
+        assert engine.generate(skill, report, llm_client=None) == []
+
+    def test_skill_engine_match_never_returns_a_detect_mode_skill(self, tmp_path: Path) -> None:
+        _write_detect_skill(tmp_path)
+        engine = SkillEngine(tmp_path, platform=offline_context())
+        report = make_report()
+        assert engine.match(report) == []
+
+
+class TestSkillToCheckDefinition:
+    """_skill_to_check_definition()/detect_check_definitions() -- the bridge
+    that runs a mode: detect skill's rule through check_engine's own
+    runners, so a Markdown-defined rule and a legacy checks/*.yaml file
+    behave identically."""
+
+    def test_compiles_a_valid_detect_skill(self, tmp_path: Path) -> None:
+        skill = load_skill(_write_detect_skill(tmp_path))
+        assert skill is not None
+        defn = _skill_to_check_definition(skill)
+        assert defn is not None
+        assert defn.name == "health-probes-check"
+        assert defn.dimension == "observability"
+        assert defn.category == "health"
+        assert defn.check_type == "file_contains"
+        assert defn.pattern == "livenessProbe"
+
+    def test_returns_none_for_invalid_rule_type(self, tmp_path: Path) -> None:
+        p = tmp_path / "bad.md"
+        p.write_text(_DETECT_SKILL_MD.format(name="bad", status="active").replace(
+            "type: file_contains", "type: not_a_real_type",
+        ))
+        skill = load_skill(p)
+        assert skill is not None
+        assert _skill_to_check_definition(skill) is None
+
+    def test_returns_none_for_invalid_severity(self, tmp_path: Path) -> None:
+        p = tmp_path / "bad.md"
+        p.write_text(_DETECT_SKILL_MD.format(name="bad", status="active").replace(
+            "severity: high", "severity: extreme",
+        ))
+        skill = load_skill(p)
+        assert skill is not None
+        assert _skill_to_check_definition(skill) is None
+
+    def test_category_falls_back_to_domain_when_unset(self, tmp_path: Path) -> None:
+        p = tmp_path / "nocat.md"
+        p.write_text(_DETECT_SKILL_MD.format(name="nocat", status="active").replace(
+            "category: health\n", "",
+        ))
+        skill = load_skill(p)
+        assert skill is not None
+        defn = _skill_to_check_definition(skill)
+        assert defn is not None
+        assert defn.category == "observability"
+
+    def test_detect_check_definitions_includes_active_skill(self, tmp_path: Path) -> None:
+        _write_detect_skill(tmp_path, status="active")
+        skills = load_all_skills(tmp_path)
+        defs = detect_check_definitions(skills)
+        assert len(defs) == 1
+        assert defs[0].name == "health-probes-check"
+
+    def test_detect_check_definitions_excludes_draft(self, tmp_path: Path) -> None:
+        _write_detect_skill(tmp_path, status="draft")
+        skills = load_all_skills(tmp_path)
+        assert detect_check_definitions(skills) == []
+
+    def test_detect_check_definitions_excludes_retired(self, tmp_path: Path) -> None:
+        _write_detect_skill(tmp_path, status="retired")
+        skills = load_all_skills(tmp_path)
+        assert detect_check_definitions(skills) == []
+
+    def test_detect_check_definitions_includes_deprecated(self, tmp_path: Path) -> None:
+        """Deprecated is a "still runs, but flagged" state -- mirrors
+        Skill.matches()'s own "deprecated matches but warns" behavior for
+        template-mode skills."""
+        _write_detect_skill(tmp_path, status="deprecated")
+        skills = load_all_skills(tmp_path)
+        defs = detect_check_definitions(skills)
+        assert len(defs) == 1
+
+    def test_detect_check_definitions_ignores_template_mode_skills(self, tmp_path: Path) -> None:
+        """A directory with only ordinary template-mode skills produces no
+        CheckDefinitions at all -- zero impact on the existing skill catalog."""
+        skill_path = tmp_path / "netpol.md"
+        skill_path.write_text(
+            "---\nname: netpol\ndomain: security\nversion: 1\n"
+            "triggers: [network]\noutputs: [NetworkPolicy]\nmode: template\n---\n\nbody\n"
+        )
+        skills = load_all_skills(tmp_path)
+        assert detect_check_definitions(skills) == []
+
+
+class TestDetectModeParity:
+    """Proves the ported skills/observability/health-probes-check.md
+    produces exactly the same Finding the deleted
+    checks/observability/health-check.yaml used to, before that YAML file
+    was removed in the same commit as this test -- the Phase 1 cutover
+    proof, mirroring the discipline
+    docs/extension-model-unification-plan.md's own (rescued, superseded)
+    Task 3 established for the checks-vs-analyzers migration: prove
+    identical output, then delete the old artifact in the same commit."""
+
+    REAL_SKILL_PATH = Path(__file__).resolve().parent.parent / "skills" / "observability" / "health-probes-check.md"
+
+    def test_real_ported_skill_loads_and_compiles(self) -> None:
+        skill = load_skill(self.REAL_SKILL_PATH)
+        assert skill is not None
+        assert skill.mode == "detect"
+        defn = _skill_to_check_definition(skill)
+        assert defn is not None
+
+    def test_fires_identically_to_the_deleted_yaml_check_when_probe_absent(self, create_mock_repo) -> None:
+        repo = create_mock_repo({"deploy/deployment.yaml": "apiVersion: apps/v1\nkind: Deployment\n"})
+        skill = load_skill(self.REAL_SKILL_PATH)
+        assert skill is not None
+        defs = detect_check_definitions([skill])
+        findings = run_checks(defs, repo)
+        assert len(findings) == 1
+        assert findings[0].category == "health"
+        assert findings[0].description == "No liveness/readiness probes detected in manifests"
+        assert findings[0].recommendation == "Add livenessProbe and readinessProbe to all containers"
+        assert findings[0].severity == Severity.high
+
+    def test_passes_identically_to_the_deleted_yaml_check_when_probe_present(self, create_mock_repo) -> None:
+        repo = create_mock_repo({
+            "deploy/deployment.yaml": "livenessProbe:\n  httpGet:\n    path: /health\n",
+        })
+        skill = load_skill(self.REAL_SKILL_PATH)
+        assert skill is not None
+        defs = detect_check_definitions([skill])
+        findings = run_checks(defs, repo)
+        assert findings == []
+
+
+class TestVerifyDetectSkill:
+    """verify_skill() must branch to detect-shaped verification for mode:
+    detect skills instead of running the remediation-shaped
+    triggers/outputs/generation checks, which are meaningless here."""
+
+    def test_valid_detect_skill_passes(self, tmp_path: Path) -> None:
+        skill = load_skill(_write_detect_skill(tmp_path))
+        assert skill is not None
+        passed, issues, warnings = verify_skill(skill)
+        assert passed is True
+        assert issues == []
+
+    def test_missing_rule_blocks_activation(self, tmp_path: Path) -> None:
+        p = tmp_path / "norule.md"
+        p.write_text(_DETECT_SKILL_MD.format(name="norule", status="active").replace(
+            "rule:\n  type: file_contains\n  pattern: livenessProbe\n", "",
+        ))
+        skill = load_skill(p)
+        assert skill is not None
+        passed, issues, _warnings = verify_skill(skill)
+        assert passed is False
+        assert any("rule" in i for i in issues)
+
+    def test_missing_severity_blocks_activation(self, tmp_path: Path) -> None:
+        p = tmp_path / "nosev.md"
+        p.write_text(_DETECT_SKILL_MD.format(name="nosev", status="active").replace("severity: high\n", ""))
+        skill = load_skill(p)
+        assert skill is not None
+        passed, issues, _warnings = verify_skill(skill)
+        assert passed is False
+        assert any("severity" in i for i in issues)
+
+    def test_invalid_rule_type_blocks_activation_even_with_all_fields_present(self, tmp_path: Path) -> None:
+        p = tmp_path / "badtype.md"
+        p.write_text(_DETECT_SKILL_MD.format(name="badtype", status="active").replace(
+            "type: file_contains", "type: not_a_real_type",
+        ))
+        skill = load_skill(p)
+        assert skill is not None
+        passed, issues, _warnings = verify_skill(skill)
+        assert passed is False
+        assert any("compile" in i for i in issues)
+
+
+class TestRunAssessmentPicksUpDetectModeSkills:
+    """End-to-end: runner.run_assessment() must merge findings from mode:
+    detect skills exactly like it already does for legacy checks/*.yaml
+    files -- the actual integration point a caller (portal/CLI) depends on."""
+
+    def test_detect_skill_finding_appears_in_report(self, tmp_path: Path, create_mock_repo) -> None:
+        from agentit.runner import run_assessment
+
+        repo = create_mock_repo({"main.py": "print('hi')\n"})
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        obs_dir = skills_dir / "observability"
+        obs_dir.mkdir()
+        _write_detect_skill(obs_dir)
+        empty_checks_dir = tmp_path / "empty_checks"
+        empty_checks_dir.mkdir()
+
+        report = run_assessment(
+            repo, repo_url="https://github.com/test/app",
+            checks_dir=empty_checks_dir, skills_dir=skills_dir,
+        )
+        obs = next(s for s in report.scores if s.dimension == "observability")
+        assert any(f.category == "health" for f in obs.findings)
+
+    def test_checks_only_dimension_appears_with_clean_score_when_skill_check_passes(
+        self, tmp_path: Path, create_mock_repo,
+    ) -> None:
+        """A dimension whose only producer is a mode: detect skill (no
+        analyzer at all -- true today for every skill-only domain, e.g.
+        chaos/cost/incident) must still appear in report.scores with a
+        clean 100/100 score when its check passes -- not silently vanish.
+        This is the runner._merge_check_findings fix
+        (docs/extension-model-unification-plan-2026-07-18.md, Phase 1)."""
+        from agentit.runner import run_assessment
+
+        repo = create_mock_repo({"main.py": "print('hi')\n"})
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        chaos_dir = skills_dir / "chaos"
+        chaos_dir.mkdir()
+        (chaos_dir / "synthetic-check.md").write_text(
+            "---\n"
+            "name: synthetic-check\n"
+            "domain: totally_synthetic_dimension\n"
+            "version: 1\n"
+            "mode: detect\n"
+            "triggers: []\n"
+            "outputs: []\n"
+            "severity: low\n"
+            "category: synthetic\n"
+            "type: file_missing\n"
+            "description: synthetic finding that should never fire\n"
+            "recommendation: n/a\n"
+            "rule:\n"
+            "  type: file_missing\n"
+            '  pattern: "this-file-should-never-exist.xyz"\n'
+            "status: active\n"
+            "---\n\nbody\n"
+        )
+        empty_checks_dir = tmp_path / "empty_checks"
+        empty_checks_dir.mkdir()
+
+        report = run_assessment(
+            repo, repo_url="https://github.com/test/app",
+            checks_dir=empty_checks_dir, skills_dir=skills_dir,
+        )
+        synthetic = next(
+            (s for s in report.scores if s.dimension == "totally_synthetic_dimension"), None,
+        )
+        assert synthetic is not None, "checks-only dimension vanished when its only check passed"
+        assert synthetic.score == 100
+        assert synthetic.findings == []
