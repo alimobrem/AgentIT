@@ -41,6 +41,16 @@ def _default_checks_dir() -> Path:
     return Path(__file__).resolve().parent.parent.parent / "checks"
 
 
+def _default_skills_dir() -> Path:
+    """Return the ``skills/`` directory at the project root -- the same
+    default-resolution convention as ``_default_checks_dir()`` above, used
+    here only to find ``mode: detect`` skills (see
+    ``skill_engine.detect_check_definitions()``). Template/llm-mode skill
+    matching for remediation is a separate, unrelated call path
+    (``SkillEngine``, invoked from the onboarding flow, not from here)."""
+    return Path(__file__).resolve().parent.parent.parent / "skills"
+
+
 def run_assessment(
     repo_path: Path,
     repo_url: str,
@@ -48,6 +58,7 @@ def run_assessment(
     llm_client: object | None = None,
     infra_repo_url: str | None = None,
     checks_dir: Path | None = None,
+    skills_dir: Path | None = None,
     suppressions: set[str] | None = None,
     check_results_out: list[dict] | None = None,
     secret_decisions_out: list[dict] | None = None,
@@ -57,7 +68,14 @@ def run_assessment(
     ``check_results_out``, if provided, is populated (in place) with one
     ``{"check_name", "dimension", "passed"}`` row per data-driven check that
     ran — the caller (typically the portal, once it has an `assessment_id`)
-    can then persist this via `AssessmentStore.save_check_results`.
+    can then persist this via `AssessmentStore.save_check_results`. This
+    includes both legacy ``checks/*.yaml`` files (from ``checks_dir``) and
+    ``mode: detect`` Markdown skills (from ``skills_dir``) — see
+    docs/extension-model-unification-plan-2026-07-18.md, Phase 1: both
+    formats are converted to the same ``check_engine.CheckDefinition`` and
+    run through the exact same engine, so a caller reading
+    ``check_results_out`` cannot tell (and does not need to care) which
+    format produced any given row.
 
     ``secret_decisions_out``, if provided, is populated (in place) with one
     row per real `classify_secret` LLM call the security analyzer made (see
@@ -83,9 +101,16 @@ def run_assessment(
 
     scores = [analyzer.analyze(repo_path) for analyzer in analyzers]
 
-    # Run data-driven checks and merge findings into dimension scores
+    # Run data-driven checks -- both legacy checks/*.yaml files and
+    # mode: detect Markdown skills (docs/extension-model-unification-plan-2026-07-18.md,
+    # Phase 1) -- and merge findings into dimension scores.
     resolved_checks_dir = checks_dir if checks_dir is not None else _default_checks_dir()
     check_defs = load_checks(resolved_checks_dir)
+
+    resolved_skills_dir = skills_dir if skills_dir is not None else _default_skills_dir()
+    from agentit.skill_engine import detect_check_definitions, load_all_skills
+    check_defs = check_defs + detect_check_definitions(load_all_skills(resolved_skills_dir))
+
     if check_defs:
         scores, check_statuses = _merge_check_findings(scores, check_defs, repo_path)
         if check_results_out is not None:
@@ -130,14 +155,21 @@ def _merge_check_findings(
 
     New findings from checks supplement (don't replace) analyzer findings.
     Findings are deduplicated by (category, description) so overlapping
-    checks don't double-count. Returns the merged scores plus a pass/fail
-    status row for every check that ran (for `check_results_out`).
+    checks don't double-count. Every dimension covered by *any* check
+    (legacy YAML or a `mode: detect` skill) gets a DimensionScore row --
+    even one with zero failing checks (a clean 100/100), exactly like an
+    analyzer already always does -- so a dimension whose only producer is
+    checks (true today for every skill-only domain that gains a `mode:
+    detect` skill, e.g. `chaos`/`cost`/`incident`, none of which have an
+    analyzer at all) never silently disappears from report.scores just
+    because every one of its checks passed. Returns the merged scores plus
+    a pass/fail status row for every check that ran (for
+    `check_results_out`).
     """
     extra, check_statuses = run_checks_by_dimension_with_status(check_defs, repo_path)
-    if not extra:
-        return scores, check_statuses
 
     score_map = {s.dimension: s for s in scores}
+    original_dims = {s.dimension for s in scores}
 
     for dimension, findings in extra.items():
         existing = score_map.get(dimension)
@@ -166,7 +198,13 @@ def _merge_check_findings(
                 findings=findings,
             )
 
-    original_dims = {s.dimension for s in scores}
+    checked_dims = {s["dimension"] for s in check_statuses}
+    for dimension in checked_dims:
+        if dimension not in score_map:
+            score_map[dimension] = DimensionScore(
+                dimension=dimension, score=100, max_score=100, findings=[],
+            )
+
     merged_scores = [score_map[s.dimension] for s in scores] + [
         score_map[d] for d in score_map if d not in original_dims
     ]
