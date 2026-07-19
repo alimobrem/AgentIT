@@ -25,6 +25,8 @@ from agentit.portal.pr_tracking import (
     LIFECYCLE_REJECTED,
     annotate_lifecycle,
     collect_fleet_pr_records,
+    count_fleet_prs_waiting_for_approval,
+    fleet_prs_waiting_for_approval,
 )
 
 
@@ -72,6 +74,46 @@ class TestAnnotateLifecycle:
         record = {"source": "delivery", "gate_status": None, "state": "unknown"}
         annotate_lifecycle(record)
         assert record["lifecycle"] == "unknown"
+
+
+class TestFleetPrsWaitingForApproval:
+    """2026-07-19 fix: Ledger's "Waiting for your approval" bucket is purely
+    PR-status-derived (``state == "open"``), not the narrower gate-tracked
+    ``needs_attention``/``lifecycle == "needs_approval"`` flag -- a
+    source-repo-pr/app-repo-pr/onboarding PR is never gated inside AgentIT
+    at all (see pr_tracking.py's module docstring), so the old
+    ``needs_attention``-only definition silently dropped every one of those
+    from this bucket even while genuinely open and unreviewed on GitHub."""
+
+    def test_pending_gate_pr_counts(self):
+        records = [{"source": "gate", "gate_status": "pending", "state": "open"}]
+        assert fleet_prs_waiting_for_approval(records) == records
+
+    def test_open_delivery_pr_with_no_gate_counts(self):
+        """The exact bug this fixes: a genuinely open PR with no gate row
+        at all must still show up as waiting for approval."""
+        records = [{"source": "delivery", "gate_status": None, "state": "open"}]
+        assert fleet_prs_waiting_for_approval(records) == records
+
+    def test_open_onboarding_pr_with_no_gate_counts(self):
+        records = [{"source": "onboarding", "gate_status": None, "state": "open"}]
+        assert fleet_prs_waiting_for_approval(records) == records
+
+    def test_merged_pr_does_not_count(self):
+        records = [{"source": "delivery", "gate_status": None, "state": "merged"}]
+        assert fleet_prs_waiting_for_approval(records) == []
+
+    def test_closed_pr_does_not_count(self):
+        records = [{"source": "gate", "gate_status": "rejected", "state": "closed"}]
+        assert fleet_prs_waiting_for_approval(records) == []
+
+    def test_unknown_state_pr_does_not_count(self):
+        """A PR whose live GitHub state couldn't be resolved is neither
+        confirmed open nor confirmed done -- it stays out of both "waiting
+        for approval" (not confirmed open) and gets surfaced in history
+        with its own "Unknown" badge instead."""
+        records = [{"source": "delivery", "gate_status": None, "state": "unknown"}]
+        assert fleet_prs_waiting_for_approval(records) == []
 
 
 # ── Integration: fleet-wide aggregation ─────────────────────────────────────
@@ -162,6 +204,28 @@ class TestCollectFleetPrRecords:
         assert record["needs_attention"] is False
         assert record["category"] == "source_patch"
 
+    async def test_count_fleet_prs_waiting_for_approval_matches_open_records(self, portal_client):
+        """2026-07-19 fix: the nav badge (base.html) and Fleet's quiet
+        pointer banner both go through count_fleet_prs_waiting_for_approval()
+        instead of a gate-only count -- it must agree with the underlying
+        records' real open/unmerged state, gate-tracked or not."""
+        client, store, aid = portal_client
+        report = await store.get(aid)
+        await store.create_gate(
+            aid, "gitops-pr-pending", "PR opened", pr_url="https://github.com/org/app/pull/60",
+        )
+        await store.create_delivery(
+            aid, report.repo_name, {"source_patch": 1}, mechanism="source_patch:source-repo-pr",
+            status="delivered",
+            details={"outcomes": {"source_patch": {"pr_url": "https://github.com/org/app/pull/61"}}},
+        )
+        with patch(
+            "agentit.portal.github_pr.get_pr_status",
+            return_value={"state": "open", "html_url": "https://github.com/org/app/pull/61", "title": "fix", "merged_at": ""},
+        ):
+            count = await count_fleet_prs_waiting_for_approval(store)
+        assert count == 2
+
 
 # ── Integration: the /ledger route ──────────────────────────────────────────
 
@@ -191,6 +255,76 @@ class TestLedgerPage:
         resp = await client.get("/ledger")
         assert resp.status_code == 200
         assert "Waiting for your approval (0)" in resp.text
+
+    async def test_open_delivery_pr_with_no_gate_counts_as_waiting_for_approval(self, portal_client):
+        """The exact bug this fixes: a source-repo-pr delivery outcome
+        never gets an in-app gate row (see pr_tracking.py's module
+        docstring) -- before 2026-07-19 it silently fell into the
+        read-only "PR history" table below instead of here, even while
+        genuinely open and unreviewed on GitHub."""
+        client, store, aid = portal_client
+        report = await store.get(aid)
+        pr_url = "https://github.com/org/app/pull/70"
+        await store.create_delivery(
+            aid, report.repo_name, {"source_patch": 1}, mechanism="source_patch:source-repo-pr",
+            status="delivered",
+            details={"outcomes": {"source_patch": {"pr_url": pr_url}}},
+        )
+        with patch(
+            "agentit.portal.github_pr.get_pr_status",
+            return_value={"state": "open", "html_url": pr_url, "title": "fix the thing", "merged_at": ""},
+        ):
+            resp = await client.get("/ledger")
+        assert resp.status_code == 200
+        assert "Waiting for your approval (1)" in resp.text
+        assert "PR history (0)" in resp.text
+        assert pr_url in resp.text
+        # No in-app gate exists for this PR -- it renders as a plain
+        # GitHub pointer, not an Approve & Deliver/Reject action card.
+        assert "Approve &amp; Deliver" not in resp.text and "Approve & Deliver" not in resp.text
+        assert "No in-app approval step for this PR type" in resp.text
+
+    async def test_mixed_gate_and_non_gate_open_prs_both_count(self, portal_client):
+        client, store, aid = portal_client
+        report = await store.get(aid)
+        gate_pr_url = "https://github.com/org/app/pull/71"
+        delivery_pr_url = "https://github.com/org/app/pull/72"
+        await store.create_gate(aid, "gitops-pr-pending", "PR opened", pr_url=gate_pr_url)
+        await store.create_delivery(
+            aid, report.repo_name, {"source_patch": 1}, mechanism="source_patch:source-repo-pr",
+            status="delivered",
+            details={"outcomes": {"source_patch": {"pr_url": delivery_pr_url}}},
+        )
+        with patch(
+            "agentit.portal.github_pr.get_pr_status",
+            return_value={"state": "open", "html_url": delivery_pr_url, "title": "fix", "merged_at": ""},
+        ):
+            resp = await client.get("/ledger")
+        assert resp.status_code == 200
+        assert "Waiting for your approval (2)" in resp.text
+        assert gate_pr_url in resp.text
+        assert delivery_pr_url in resp.text
+
+    async def test_closed_delivery_pr_with_no_gate_stays_in_history(self, portal_client):
+        """A delivery PR that's genuinely closed (not open) must still land
+        in the history table, not "Waiting for your approval" -- this fix
+        only broadens what counts as *open*, it doesn't move everything."""
+        client, store, aid = portal_client
+        report = await store.get(aid)
+        pr_url = "https://github.com/org/app/pull/73"
+        await store.create_delivery(
+            aid, report.repo_name, {"source_patch": 1}, mechanism="source_patch:source-repo-pr",
+            status="delivered",
+            details={"outcomes": {"source_patch": {"pr_url": pr_url}}},
+        )
+        with patch(
+            "agentit.portal.github_pr.get_pr_status",
+            return_value={"state": "closed", "html_url": pr_url, "title": "fix", "merged_at": ""},
+        ):
+            resp = await client.get("/ledger")
+        assert resp.status_code == 200
+        assert "Waiting for your approval (0)" in resp.text
+        assert pr_url in resp.text
 
     async def test_history_shows_merged_pr(self, portal_client):
         client, store, aid = portal_client

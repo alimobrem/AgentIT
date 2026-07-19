@@ -133,6 +133,37 @@ async def test_fleet_quiet_pointer_to_ledger_counts_pr_gates_only(ui_client):
     assert "3 pending action" in resp.text
 
 
+async def test_fleet_pointer_and_nav_badge_also_count_gateless_open_prs(ui_client):
+    """2026-07-19 fix: a source-repo-pr delivery PR never gets an in-app
+    gate row at all -- both the Fleet pointer banner and the nav badge
+    must still count it as "waiting for your approval" (the same
+    PR-status-derived definition Ledger's own stat now uses), not just
+    gate-tracked PRs."""
+    client, store = ui_client
+    aid = await store.save(make_report(repo_name="gateless-pointer-app"))
+    report = await store.get(aid)
+    pr_url = "https://github.com/org/gateless-pointer-app/pull/1"
+    await store.create_delivery(
+        aid, report.repo_name, {"source_patch": 1}, mechanism="source_patch:source-repo-pr",
+        status="delivered",
+        details={"outcomes": {"source_patch": {"pr_url": pr_url}}},
+    )
+    with patch(
+        "agentit.portal.helpers._nav_gate_badges_cache",
+        {"pending_actions": 0, "ts": 0.0},
+    ), patch(
+        "agentit.portal.github_pr.get_pr_status",
+        return_value={"state": "open", "html_url": pr_url, "title": "fix", "merged_at": ""},
+    ):
+        fleet_resp = await client.get("/fleet")
+        ledger_resp = await client.get("/ledger")
+    assert fleet_resp.status_code == 200
+    assert "1 PR(s) need your approval → Ledger" in fleet_resp.text
+    assert "Waiting for your approval (1)" in ledger_resp.text
+    primary = ledger_resp.text.split('id="nav-primary"', 1)[1].split("links-secondary", 1)[0]
+    assert re.search(r'Ledger\s*<span class="nav-badge">1</span>', primary)
+
+
 async def test_admin_review_nav_and_page_are_gone(ui_client):
     """Admin Review (nav link, account-menu entry, and page) was retired
     2026-07-18 along with the `cluster-admin-review` gate type it existed

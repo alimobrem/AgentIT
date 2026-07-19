@@ -157,10 +157,20 @@ async def ledger_page(
     """Ledger's whole job (product direction, superseding the earlier
     generic A-P event-union design in docs/ledger-design-spec.md): a
     fleet-wide list of every PR AgentIT has ever opened, across every app,
-    with each PR's real lifecycle -- waiting for your approval, open,
-    merged, rejected (with the real reason), or closed -- filterable by
-    category and app. "Which PRs need my attention, and what happened to
-    every PR", not a generic system-activity feed.
+    with each PR's real lifecycle -- waiting for your approval, merged,
+    rejected (with the real reason), or closed -- filterable by category
+    and app. "Which PRs need my attention, and what happened to every PR",
+    not a generic system-activity feed.
+
+    "Waiting for your approval" means exactly what it says: any PR that's
+    still open and unmerged on GitHub (``pr_tracking.
+    fleet_prs_waiting_for_approval()``), whether or not AgentIT happens to
+    have an in-app approval gate for it. Gate-tracked ones additionally
+    get the real Approve & Deliver/Reject actions rendered inline; every
+    other open PR is a plain pointer to review it on GitHub -- but it
+    still counts here, because it's still genuinely waiting on a human
+    (2026-07-19: this used to require a gate, silently undercounting every
+    source-repo-pr/app-repo-pr/onboarding PR, which never gets one).
 
     Deliberately NOT a replacement for:
 
@@ -187,7 +197,7 @@ async def ledger_page(
     PR History tab already read) -- this route only filters/paginates/
     renders what that function returns.
     """
-    from agentit.portal.pr_tracking import collect_fleet_pr_records
+    from agentit.portal.pr_tracking import collect_fleet_pr_records, fleet_prs_waiting_for_approval
 
     s = await get_store()
     records = await collect_fleet_pr_records(s)
@@ -210,21 +220,33 @@ async def ledger_page(
         records = [r for r in records if r.get("category") == category]
     if app:
         records = [r for r in records if r.get("app_name") == app]
-    if lifecycle:
+    if lifecycle == "needs_approval":
+        # "Waiting for approval" is purely PR-status-derived (see
+        # fleet_prs_waiting_for_approval()) -- filter by real state, not by
+        # the narrower gate-tracked `lifecycle` value, so this option
+        # matches the section it's named after.
+        records = [r for r in records if r["state"] == "open"]
+    elif lifecycle:
         records = [r for r in records if r.get("lifecycle") == lifecycle]
 
-    # Needs-attention PRs (gate-tracked and still pending your Approve/
-    # Reject inside AgentIT) always render in full, ungated by pagination
-    # -- this is the one bucket the whole page exists to make impossible to
-    # miss. `gate_card` (the exact same Approve & Deliver/Reject/Dismiss
-    # macro Admin Review and Assessment Detail's Actions tab already use)
-    # renders directly off each record's own `raw` gate row -- one real
-    # action surface, not a second copy of the resolve-gate wiring.
-    needs_approval = [r for r in records if r["needs_attention"]]
+    # Every PR that's still open and unmerged on GitHub always renders in
+    # full, ungated by pagination -- this is the one bucket the whole page
+    # exists to make impossible to miss. Deliberately NOT the narrower
+    # `needs_attention` (gate-tracked-and-pending) flag: only the cluster-
+    # config/CI-CD-shared-namespace delivery categories ever create an
+    # in-app gate at all (see pr_tracking.py's module docstring), so a
+    # source-repo-pr/app-repo-pr/onboarding PR that's genuinely open on
+    # GitHub used to fall through to the read-only history table below
+    # instead of here -- the exact undercount this fixes (2026-07-19).
+    # Gate-tracked records still render the real Approve & Deliver/Reject
+    # actions via `gate_card` (off each record's own `raw` gate row); every
+    # other open PR renders as a plain "review it on GitHub" pointer.
+    needs_approval = fleet_prs_waiting_for_approval(records)
     for r in needs_approval:
-        r["raw"]["severity"] = "warning"
+        if r.get("source") == "gate":
+            r["raw"]["severity"] = "warning"
 
-    history = [r for r in records if not r["needs_attention"]]
+    history = [r for r in records if r["state"] != "open"]
     total_history = len(history)
     total_pages = max(1, (total_history + per_page - 1) // per_page)
     page = max(1, min(page, total_pages))

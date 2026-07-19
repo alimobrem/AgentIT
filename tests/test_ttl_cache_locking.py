@@ -211,7 +211,13 @@ class TestNavGateBadgesCacheLock:
         helpers._nav_gate_badges_cache["ts"] = 0.0
 
         class _SlowStore:
-            async def list_gates(self, status="pending"):
+            # get_nav_gate_badge_counts() now goes through pr_tracking.py's
+            # count_fleet_prs_waiting_for_approval()/collect_fleet_pr_records()
+            # (2026-07-19, PR-status-derived Ledger fix) -- get_fleet_data()
+            # is its first, unguarded call, so slowing it down is enough to
+            # exercise the same "many concurrent callers" scenario this test
+            # existed for; an empty fleet short-circuits everything after it.
+            async def get_fleet_data(self):
                 await asyncio.sleep(0.02)
                 return []
 
