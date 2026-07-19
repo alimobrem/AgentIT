@@ -33,6 +33,17 @@ class TestRegistryLookup:
             result = lookup(cat)
             assert result is not None, f"No fix registered for '{cat}'"
 
+    def test_rbac_autoscaling_monitoring_resolve(self):
+        """Added for auto_delivery.py's validate/fix loop, which dispatches
+        by exactly these category names (property_verifier.py's check
+        names, lowercased) -- none of the substring keys above happened to
+        match any of the three (e.g. "metrics" is not a substring of
+        "monitoring"), so these previously resolved to None despite a real
+        matching skill existing for each."""
+        assert lookup("rbac") == ("security", "rbac")
+        assert lookup("autoscaling") == ("infrastructure", "hpa")
+        assert lookup("monitoring") == ("observability", "service-monitor")
+
 
 # ── patch_base_image ────────────────────────────────────────────────
 
@@ -113,6 +124,28 @@ class TestDispatcher:
         assert result["agent"] == "security"
         assert len(result["files"]) > 0
         assert any("network" in f["path"].lower() for f in result["files"])
+
+    async def test_dispatch_rbac_generates_rbac_manifest(self, store):
+        """Real, deterministic (template-mode, no LLM) generation for the
+        registry entry added alongside auto_delivery.py -- proves the fix
+        the validate/fix loop dispatches for a failed RBAC property check
+        actually produces the ServiceAccount/Role/RoleBinding
+        property_verifier looks for, not just that lookup() resolves."""
+        from agentit.models import DimensionScore, Finding, Severity
+        async_store, raw = store
+        report = make_report(scores=[
+            DimensionScore(dimension="security", score=30, max_score=100, findings=[
+                Finding(category="rbac", severity=Severity.high,
+                        description="No dedicated ServiceAccount", recommendation="Add one"),
+            ]),
+        ])
+        aid = await raw.save(report)
+        dispatcher = RemediationDispatcher(async_store)
+        result = await dispatcher.dispatch(aid, "rbac")
+        assert result["error"] is None
+        assert result["agent"] == "security"
+        content = "\n".join(f["content"] for f in result["files"])
+        assert "ServiceAccount" in content and "RoleBinding" in content
 
     async def test_dispatch_sbom_generates_task(self, store):
         from agentit.models import DimensionScore, Finding, Severity
