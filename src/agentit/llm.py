@@ -304,6 +304,88 @@ class LLMClient:
             logger.warning("LLM returned unparseable fix review: %s", raw)
             return None
 
+    def review_final_manifests(
+        self,
+        files: list[dict],
+        app_summary: str,
+    ) -> dict | None:
+        """Final pre-PR quality/safety gate over the WHOLE validated batch of
+        generated manifests -- distinct from ``review_fix()`` above, which
+        reviews one fix against one finding. Answers a different question:
+        "looking at everything about to be committed together, does this
+        look complete, internally consistent, and safe to open as a PR for
+        a human to merge." Called once by ``portal/auto_delivery.py``, after
+        its validate/fix loop has already converged (or given up), as the
+        automated pipeline's own last look before it calls the real,
+        non-dry-run ``route_and_deliver()``.
+
+        This is a NEW, narrowly-scoped method, not a resurrection of
+        AutoMode's removed ``classify_action`` -- that was a
+        *destructiveness* classifier whose "safe" verdict let a batch skip
+        human review entirely. This is a *quality/completeness* opinion
+        that never skips anything: a human still reviews and merges the
+        resulting PR on GitHub regardless of what this returns. Callers
+        should therefore treat a "not approved" result as something to
+        surface clearly on the PR/delivery record for that human, not as a
+        reason to block PR creation.
+
+        Returns {"approved": bool, "confidence": float, "reason": str,
+        "concerns": list[str]}, or ``None`` on failure -- unlike
+        ``review_fix()``, callers must NOT treat ``None`` as "rejected":
+        there is still a full human review waiting on the PR itself, so an
+        LLM outage here degrades to "no extra opinion offered", not "block
+        everything".
+        """
+        max_files_shown = 30
+        max_content_chars = 1200
+        summaries = [
+            f"--- {f.get('path', '?')} ({f.get('category', '?')}) ---\n"
+            f"{(f.get('content') or '')[:max_content_chars]}"
+            for f in files[:max_files_shown]
+        ]
+        files_text = "\n\n".join(summaries)
+        if len(files) > max_files_shown:
+            files_text += f"\n\n... and {len(files) - max_files_shown} more file(s) not shown."
+
+        system = (
+            "You are a senior platform engineer doing the final review of a batch of "
+            "auto-generated Kubernetes/GitOps manifests before they are opened as a pull "
+            "request. Look at the WHOLE batch together, not one file in isolation. "
+            "Respond with JSON only:\n"
+            '{"approved": true/false, "confidence": 0.0-1.0, "reason": "one or two '
+            'sentences", "concerns": ["short phrase", ...]}\n\n'
+            "Approve if: the manifests are internally consistent (e.g. Service/Deployment "
+            "selectors match, referenced ConfigMaps/Secrets are accounted for), use "
+            "correct API versions, and collectively look complete for what they claim "
+            "to fix.\n"
+            "Flag concerns (approved=false) if: manifests reference each other "
+            "inconsistently, look incomplete, contain placeholder-looking values, or "
+            "something about the batch as a whole looks wrong even if each file in "
+            "isolation looked fine. 'concerns' should be empty when approved is true."
+        )
+        user = (
+            f"Application: {app_summary}\n\n"
+            f"Manifests about to be opened as a pull request ({len(files)} total):\n{files_text}\n\n"
+            "Does this batch, taken as a whole, look complete and safe to open as a PR? JSON only."
+        )
+        raw = self._chat(system, user, max_tokens=1024)
+        if raw is None:
+            return None
+        try:
+            parsed = json.loads(raw)
+            concerns = parsed.get("concerns", [])
+            if not isinstance(concerns, list):
+                concerns = []
+            return {
+                "approved": bool(parsed["approved"]),
+                "confidence": float(parsed["confidence"]),
+                "reason": str(parsed["reason"]),
+                "concerns": [str(c) for c in concerns],
+            }
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            logger.warning("LLM returned unparseable final manifest review: %s", raw)
+            return None
+
     def detect_eol_risks(
         self,
         stack_info: dict,

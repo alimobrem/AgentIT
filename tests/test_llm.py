@@ -288,6 +288,82 @@ def test_review_fix_missing_field_returns_none():
     assert result is None
 
 
+# ── review_final_manifests (auto_delivery.py's final pre-PR quality gate) ──
+
+
+def test_review_final_manifests_approved():
+    response = _mock_response(json.dumps(
+        {"approved": True, "confidence": 0.9, "reason": "internally consistent", "concerns": []}
+    ))
+    client = _make_client(MagicMock(return_value=response))
+    files = [{"path": "netpol.yaml", "category": "security", "content": "kind: NetworkPolicy"}]
+    result = client.review_final_manifests(files, "Go microservice")
+
+    assert result is not None
+    assert result["approved"] is True
+    assert result["concerns"] == []
+
+
+def test_review_final_manifests_flags_concerns():
+    response = _mock_response(json.dumps({
+        "approved": False, "confidence": 0.6, "reason": "Service selector doesn't match Deployment labels",
+        "concerns": ["selector mismatch"],
+    }))
+    client = _make_client(MagicMock(return_value=response))
+    files = [
+        {"path": "svc.yaml", "category": "skills", "content": "kind: Service"},
+        {"path": "deploy.yaml", "category": "skills", "content": "kind: Deployment"},
+    ]
+    result = client.review_final_manifests(files, "Go microservice")
+
+    assert result is not None
+    assert result["approved"] is False
+    assert result["concerns"] == ["selector mismatch"]
+
+
+def test_review_final_manifests_unavailable_returns_none():
+    """Unlike review_fix(), a caller must NOT treat None as "rejected" --
+    there's still a full human review waiting on the PR itself."""
+    import anthropic
+    client = _make_client(MagicMock(side_effect=anthropic.APIConnectionError(request=MagicMock())))
+    result = client.review_final_manifests([{"path": "f.yaml", "content": "x"}], "app")
+
+    assert result is None
+
+
+def test_review_final_manifests_malformed_json_returns_none():
+    client = _make_client(MagicMock(return_value=_mock_response("not JSON, sorry")))
+    result = client.review_final_manifests([{"path": "f.yaml", "content": "x"}], "app")
+
+    assert result is None
+
+
+def test_review_final_manifests_missing_field_returns_none():
+    response = _mock_response(json.dumps({"approved": True, "reason": "fine"}))  # no confidence
+    client = _make_client(MagicMock(return_value=response))
+    result = client.review_final_manifests([{"path": "f.yaml", "content": "x"}], "app")
+
+    assert result is None
+
+
+def test_review_final_manifests_truncates_large_batches():
+    """Never sends unbounded content/file counts to the LLM -- caps at 30
+    files and 1200 chars/file, same defensive shape review_fix()'s own
+    fix_content[:3000] slice already uses."""
+    files = [{"path": f"f{i}.yaml", "category": "skills", "content": "x" * 5000} for i in range(40)]
+    captured = {}
+
+    def _capture(**kwargs):
+        captured["user"] = kwargs["messages"][0]["content"]
+        return _mock_response(json.dumps({"approved": True, "confidence": 0.8, "reason": "ok", "concerns": []}))
+
+    client = _make_client(MagicMock(side_effect=lambda **kw: _capture(**kw)))
+    result = client.review_final_manifests(files, "app")
+
+    assert result is not None
+    assert "more file(s) not shown" in captured["user"]
+
+
 # ── markdown code-fence stripping (capability-scout "unparseable" bug) ────
 #
 # Live capability-scout cycles logged as "unparseable no-proposal" even after
