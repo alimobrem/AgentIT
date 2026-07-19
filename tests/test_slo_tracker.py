@@ -103,7 +103,8 @@ class TestBreachDirection:
 
 class TestOneTickPerApp:
     """list_all() returns every historical assessment; the tracker must tick
-    each repo_url once so re-assessed apps do not get N rollback-review gates."""
+    each repo_url once so re-assessed apps do not get N rollback
+    recommendations."""
 
     @patch("agentit.watchers.slo_tracker.collect_slo")
     async def test_check_once_dedupes_assessments_of_same_app(self, mock_collect):
@@ -129,9 +130,61 @@ class TestOneTickPerApp:
 
         assert breached_count == 1
         mock_collect.assert_called_once_with("error_rate", "app-triple")
-        gates = await store.list_gates_for_assessment(new_id, status="pending")
-        rollback = [g for g in gates if g["gate_type"] == "rollback-review"]
-        assert len(rollback) == 1
+        rollback_events = [
+            e for e in await store.list_events() if e["action"] == "rollback-recommended"
+        ]
+        assert len(rollback_events) == 1
+
+    @patch("agentit.watchers.slo_tracker.collect_slo")
+    async def test_repeated_ticks_of_an_ongoing_breach_never_pile_up_recommendations(self, mock_collect):
+        """The retired gates table's (repo_url, gate_type) dedup used to
+        prevent this; list_unresolved_events() must do the same job now."""
+        async_store, store = await make_async_store()
+        aid = await store.save(make_report(repo_name="app-ongoing-breach"))
+        await store.save_slo(aid, "error_rate", 0.5)
+        await store.save_apply_results(
+            aid, {"applied": ["deployment.yaml"], "skipped": [], "errors": []},
+            "app-ongoing-breach", dry_run=False,
+        )
+        mock_collect.return_value = 5.0  # breach, every tick
+
+        tracker = _tracker(async_store)
+        await tracker.check_once()
+        await tracker.check_once()
+        await tracker.check_once()
+
+        rollback_events = [
+            e for e in await store.list_events() if e["action"] == "rollback-recommended"
+        ]
+        assert len(rollback_events) == 1
+
+    @patch("agentit.watchers.slo_tracker.collect_slo")
+    async def test_a_new_recommendation_is_logged_once_the_prior_one_is_resolved(self, mock_collect):
+        async_store, store = await make_async_store()
+        aid = await store.save(make_report(repo_name="app-resolved-breach"))
+        await store.save_slo(aid, "error_rate", 0.5)
+        await store.save_apply_results(
+            aid, {"applied": ["deployment.yaml"], "skipped": [], "errors": []},
+            "app-resolved-breach", dry_run=False,
+        )
+        mock_collect.return_value = 5.0  # breach
+
+        tracker = _tracker(async_store)
+        await tracker.check_once()
+        first_event = next(
+            e for e in await store.list_events() if e["action"] == "rollback-recommended"
+        )
+        await store.log_event(
+            "human", "rollback-dismissed", "app-resolved-breach", "info", "dismissed",
+            correlation_id=first_event["id"],
+        )
+
+        await tracker.check_once()
+
+        rollback_events = [
+            e for e in await store.list_events() if e["action"] == "rollback-recommended"
+        ]
+        assert len(rollback_events) == 2
 
 
 class TestRollbackRecommendationLogged:

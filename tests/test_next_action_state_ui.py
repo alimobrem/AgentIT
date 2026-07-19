@@ -158,7 +158,7 @@ class TestAssessmentDetailNextActionIndicator:
         client, store = next_action_client
         aid = await store.save(make_report(repo_name="ad-esc-app"))
         await store.save_onboarding(aid, [{"category": "security", "path": "x.yaml", "content": "a: b", "description": "d"}])
-        gate_id = await escalate_unresolved_finding(store, aid, "ad-esc-app", _NETWORK_TARGET, FINDING_ESCALATION_THRESHOLD)
+        event_id = await escalate_unresolved_finding(store, aid, "ad-esc-app", _NETWORK_TARGET, FINDING_ESCALATION_THRESHOLD)
 
         text = (await client.get(f"/assessments/{aid}")).text
 
@@ -168,9 +168,11 @@ class TestAssessmentDetailNextActionIndicator:
         assert "alert-error" in text
         assert f"/assessments/{aid}?tab=actions" in text
         assert f"/assessments/{aid}?tab=ledger" in text
-        # Confirm the escalation gate this message points to is the real one.
-        gates = await store.list_gates(status="pending")
-        assert any(g["id"] == gate_id for g in gates)
+        # Confirm the escalation event this message points to is the real one, and unresolved.
+        unresolved = await store.list_unresolved_events(
+            "finding-escalated", ["finding-escalation-acknowledged"], target_app="ad-esc-app",
+        )
+        assert any(e["id"] == event_id for e in unresolved)
 
     async def test_honest_no_schedule_message_for_a_previously_onboarded_clean_app(self, next_action_client):
         """A previously-onboarded app with nothing currently pending or

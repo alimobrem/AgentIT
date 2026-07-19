@@ -139,31 +139,43 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
 
 
 async def _attach_pending_actions(fleet: list[dict], s: object) -> None:
-    """"Needs action" badge per app (docs/ui-redesign-proposal.md §2) -- a
-    cheap ``GROUP BY repo_url`` count of pending gates. Every gate type is
-    per-app now (``cluster-admin-review``, the one cross-app type this used
-    to exclude for a separate Admin Review nav badge, was retired
-    2026-07-18 -- see delivery.py). Mutates each fleet row in place with
-    ``pending_actions_count``.
+    """"Needs action" badge per app (docs/ui-redesign-proposal.md §2) --
+    unresolved rollback/escalation recommendations plus any still-pending
+    gate (the ``gates`` table itself is being phased out in favor of real
+    PR state / plain unresolved events -- see ``routes/recommendations.py``;
+    this still counts any legacy pending gate row until that migration is
+    complete). Mutates each fleet row in place with ``pending_actions_count``.
 
-    Keyed by ``repo_url`` (not ``assessment_id``): ``list_gates()`` joins
-    each gate back to the specific historical assessment it was created
-    against, but a fleet row's ``id`` is always the app's LATEST
-    assessment_id (``get_fleet_data()``). A gate created against an older
-    assessment of the same app would never match the latest assessment_id
-    and would silently drop out of this badge count the moment the app is
-    re-assessed -- the same orphaned-gate-attribution bug fixed in
-    ``store.py``/``store_pg.py``'s ``list_gates_for_assessment()``.
+    Keyed by ``repo_url``: a fleet row's ``id`` is always the app's LATEST
+    assessment_id (``get_fleet_data()``), but recommendations/gates are
+    keyed by app name/repo_url directly, not by which historical assessment
+    happened to be current when they were created.
     """
+    counts: dict[str, int] = {}
+
     try:
         pending_gates = await s.list_gates(status="pending")
     except Exception:
         log.debug("Failed to fetch pending gates for fleet 'needs action' badges", exc_info=True)
         pending_gates = []
-
-    counts: dict[str, int] = {}
     for g in pending_gates:
         repo_url = g.get("repo_url")
+        if repo_url:
+            counts[repo_url] = counts.get(repo_url, 0) + 1
+
+    repo_url_by_app_name = {app_item["repo_name"]: app_item["repo_url"] for app_item in fleet}
+    try:
+        unresolved_rollbacks = await s.list_unresolved_events(
+            "rollback-recommended", ["rollback-executed", "rollback-dismissed"],
+        )
+        unresolved_escalations = await s.list_unresolved_events(
+            "finding-escalated", ["finding-escalation-acknowledged"],
+        )
+    except Exception:
+        log.debug("Failed to fetch unresolved recommendations for fleet 'needs action' badges", exc_info=True)
+        unresolved_rollbacks, unresolved_escalations = [], []
+    for event in unresolved_rollbacks + unresolved_escalations:
+        repo_url = repo_url_by_app_name.get(event.get("target_app"))
         if repo_url:
             counts[repo_url] = counts.get(repo_url, 0) + 1
 
@@ -174,30 +186,32 @@ async def _attach_pending_actions(fleet: list[dict], s: object) -> None:
 async def _attach_next_action_state(fleet: list[dict], s: object) -> None:
     """Real "what happens next" per app (docs/onboarding-loop-vision-gap-
     analysis.md's Step 8 discussion / Phase 5) -- reuses
-    ``delivery.get_next_action_state()``'s priority-ordered check
-    (escalation gate > bounded auto-retry in flight > pending finding-
+    ``delivery.get_next_action_state()``'s priority-ordered check (unresolved
+    escalation > bounded auto-retry in flight > pending finding-
     verification > nothing pending) over the exact same Phase 3/4 data
     (``deliveries.target_findings_json``/``finding_resolution``,
-    ``get_finding_failure_count()``, the ``finding-unresolved-escalation``
-    gate type) rather than a new query. One fleet-wide
-    ``list_gates(status="pending")`` call, mirroring
-    ``_attach_pending_actions()`` just above, so this doesn't add a second
-    per-app gates query on top of that one. Mutates each fleet row in place
-    with ``next_action`` (``None`` when nothing pending/failing -- Fleet
-    omits the indicator entirely rather than showing a fabricated "all
-    clear" for every row).
+    ``get_finding_failure_count()``, unresolved ``finding-escalated``
+    events) rather than a new query. One fleet-wide, unscoped
+    ``list_unresolved_events()`` call so this doesn't add a second per-app
+    query on top of ``_attach_pending_actions()`` just above. Mutates each
+    fleet row in place with ``next_action`` (``None`` when nothing pending/
+    failing -- Fleet omits the indicator entirely rather than showing a
+    fabricated "all clear" for every row).
     """
     from agentit.portal.delivery import NEXT_ACTION_NONE, get_next_action_state
     try:
-        pending_gates = await s.list_gates(status="pending")
+        unresolved_escalations = await s.list_unresolved_events(
+            "finding-escalated", ["finding-escalation-acknowledged"],
+        )
     except Exception:
-        log.debug("Failed to fetch pending gates for fleet next-action state", exc_info=True)
-        pending_gates = []
+        log.debug("Failed to fetch unresolved escalations for fleet next-action state", exc_info=True)
+        unresolved_escalations = []
 
     for app_item in fleet:
         try:
             state = await get_next_action_state(
-                s, app_item["repo_name"], repo_url=app_item["repo_url"], pending_gates=pending_gates,
+                s, app_item["repo_name"], repo_url=app_item["repo_url"], assessment_id=app_item["id"],
+                unresolved_escalations=unresolved_escalations,
             )
         except Exception:
             log.debug("Failed to compute next-action state for %s", app_item["repo_name"], exc_info=True)

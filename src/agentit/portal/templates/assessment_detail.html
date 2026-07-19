@@ -139,9 +139,9 @@
 
 {# Next-step hint: ties the stepper above directly to the one action that
    actually moves this app forward. While lifecycle is still "assessed",
-   Onboard This App is always the primary path — leftover Actions gates
+   Onboard This App is always the primary path — leftover Actions-tab items
    (often from an earlier apply / SLO tick on a prior assessment of the
-   same app) must not compete with it. After onboard, pending gates win
+   same app) must not compete with it. After onboard, pending actions win
    because they are the human delivery / rollback decisions. #}
 <div class="next-step-hint {% if lifecycle_stage == 'assessed' %}next-step-hint-primary{% elif pending_actions %}next-step-hint-attention{% endif %}">
   {% if lifecycle_stage == "assessed" %}
@@ -156,7 +156,7 @@
     {% endif %}
     {% if pending_actions %}
     <span class="text-muted">
-      ({{ pending_actions|length }} leftover gate{{ 's' if pending_actions|length != 1 }} from earlier deliveries can wait —
+      ({{ pending_actions|length }} leftover action{{ 's' if pending_actions|length != 1 }} from earlier deliveries can wait —
       <a href="/assessments/{{ assessment_id }}?tab=actions">Actions</a>.)
     </span>
     {% endif %}
@@ -545,16 +545,20 @@
   {% if lifecycle_stage == "assessed" %}
   <p class="text-muted text-sm mb-1" role="status">
     Your next step is <strong>Onboard This App</strong> above — it generates remediations for all findings at once.
-    This tab is for post-onboard approval gates (Approve &amp; Deliver / Reject), not a parallel fix list.
+    This tab is for post-onboard actions (merging an open PR, deciding on a rollback, acknowledging an escalated finding), not a parallel fix list.
     {% if pending_actions %}
-    The item{{ 's' if pending_actions|length != 1 }} below are leftover gates from earlier deliveries for this app; optional cleanup only.
+    The item{{ 's' if pending_actions|length != 1 }} below are leftover from earlier deliveries for this app; optional cleanup only.
     {% endif %}
   </p>
   {% endif %}
   {% if pending_actions %}
-  {% from "_macros.html" import gate_card %}
-  {% for gate in pending_actions %}
-  {{ gate_card(gate) }}
+  {% from "_macros.html" import gate_card, recommendation_card %}
+  {% for item in pending_actions %}
+  {% if item.kind in ("rollback", "escalation") %}
+  {{ recommendation_card(item, assessment_id) }}
+  {% else %}
+  {{ gate_card(item) }}
+  {% endif %}
   {% endfor %}
   {% else %}
   <div class="empty-state">

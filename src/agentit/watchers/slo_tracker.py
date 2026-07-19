@@ -111,7 +111,16 @@ class SloTracker:
             slo["status"] = status
 
     async def _recommend_rollback(self, assessment: dict, breaches: list[dict]) -> None:
-        """If a recent apply exists for this assessment, create a rollback gate."""
+        """If a recent apply exists for this assessment, recommend a
+        rollback -- a real event a human must act on directly (the
+        Rollback/Dismiss buttons on the Actions tab, see
+        ``routes/recommendations.py``), not a generic gate row. Deduped the
+        same way the retired ``gates`` table's ``(repo_url, gate_type)``
+        dedup used to (via ``store.create_gate()``): skip logging a new
+        recommendation while an unresolved one already exists for this app
+        -- otherwise N ticks of an ongoing breach would create N
+        recommendations instead of one.
+        """
         apply_result = await self._store.get_apply_results(assessment["id"])
         if not (apply_result and apply_result.get("applied")):
             return
@@ -119,9 +128,15 @@ class SloTracker:
         repo_name = assessment["repo_name"]
         breach_names = ", ".join(s["metric_name"] for s in breaches)
 
+        already_unresolved = await self._store.list_unresolved_events(
+            "rollback-recommended", ["rollback-executed", "rollback-dismissed"], target_app=repo_name,
+        )
+        if already_unresolved:
+            return
+
         rollback_summary = (
-            f"SLO breach after recent apply — consider rollback: "
-            f"kubectl argo rollouts undo {repo_name}"
+            f"SLO breach detected for {repo_name} after recent apply. Breached: {breach_names}. "
+            f"Review and decide: rollback or investigate. (kubectl argo rollouts undo {repo_name})"
         )
         self._publisher.publish(
             TOPIC_ALERTS,
@@ -134,7 +149,8 @@ class SloTracker:
         # Mirrors the Kafka publish above with a store-persisted event so a
         # rollback recommendation is visible on this app's own timeline, not
         # only to whatever's consuming TOPIC_ALERTS (docs/ledger-design-spec.md
-        # Phase 0, card type J).
+        # Phase 0, card type J). This event IS the recommendation now -- see
+        # this method's own docstring -- there is no separate gate row.
         try:
             await self._store.log_event(
                 "slo-tracker", "rollback-recommended", repo_name, "critical",
@@ -142,13 +158,6 @@ class SloTracker:
             )
         except Exception:
             logger.warning("Failed to log rollback-recommended event", exc_info=True)
-        await self._store.create_gate(
-            assessment["id"],
-            "rollback-review",
-            f"SLO breach detected for {repo_name} after recent apply. "
-            f"Breached: {breach_names}. "
-            f"Review and decide: rollback or investigate.",
-        )
         click.echo(f"[slo-track] ROLLBACK RECOMMENDED: {repo_name}", err=True)
 
     async def run(self) -> None:

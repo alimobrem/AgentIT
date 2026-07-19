@@ -405,6 +405,7 @@ from agentit.portal.routes.schedules import router as schedules_router  # noqa: 
 from agentit.portal.routes.fleet import router as fleet_router  # noqa: E402
 from agentit.portal.routes.assessments import router as assessments_router  # noqa: E402
 from agentit.portal.routes.gates import router as gates_router  # noqa: E402
+from agentit.portal.routes.recommendations import router as recommendations_router  # noqa: E402
 from agentit.portal.routes.capabilities import router as capabilities_router  # noqa: E402
 from agentit.portal.routes.settings import router as settings_router  # noqa: E402
 from agentit.portal.routes.insights import router as insights_router  # noqa: E402
@@ -416,6 +417,7 @@ app.include_router(schedules_router)
 app.include_router(fleet_router)
 app.include_router(assessments_router)
 app.include_router(gates_router)
+app.include_router(recommendations_router)
 app.include_router(capabilities_router)
 app.include_router(settings_router)
 app.include_router(insights_router)

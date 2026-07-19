@@ -2,9 +2,8 @@
 discussion: `delivery.get_next_action_state()`, the backend helper that
 answers, per app, a real "what happens next" fact -- built entirely from
 Phase 3/4's own data (``deliveries.target_findings_json``/
-``finding_resolution``, ``store.get_finding_failure_count()``, the
-``finding-unresolved-escalation`` gate) -- never a fabricated re-check
-cadence.
+``finding_resolution``, ``store.get_finding_failure_count()``, an unresolved
+``finding-escalated`` event) -- never a fabricated re-check cadence.
 
 Covers the four states (escalated, retrying, pending_verification, none) and
 the priority ordering when more than one could apply for the same app. See
@@ -120,21 +119,30 @@ class TestGetNextActionState:
         assert state["category"] == "network"
         assert state["failure_count"] == 1
 
-    async def test_escalated_when_a_gate_is_open(self):
+    async def test_escalated_when_an_unresolved_escalation_event_exists(self):
         store, _ = await make_async_store()
         aid = await store.save(make_report(repo_name="esc-app"))
 
-        gate_id = await escalate_unresolved_finding(
+        event_id = await escalate_unresolved_finding(
             store, aid, "esc-app", _NETWORK_TARGET, FINDING_ESCALATION_THRESHOLD,
         )
 
         state = await get_next_action_state(store, "esc-app")
 
         assert state["state"] == NEXT_ACTION_ESCALATED
-        assert state["gate_id"] == gate_id
+        assert state["event_id"] == event_id
         assert state["category"] == "network"
         assert "network" in state["message"]
         assert "Needs your review" in state["message"]
+
+    async def test_escalated_state_embeds_the_given_assessment_id(self):
+        store, _ = await make_async_store()
+        aid = await store.save(make_report(repo_name="esc-app-aid"))
+        await escalate_unresolved_finding(store, aid, "esc-app-aid", _NETWORK_TARGET, FINDING_ESCALATION_THRESHOLD)
+
+        state = await get_next_action_state(store, "esc-app-aid", assessment_id=aid)
+
+        assert state["assessment_id"] == aid
 
     async def test_escalation_takes_priority_over_an_unrelated_pending_delivery(self):
         """An app can have one finding already escalated (needs a human)
@@ -153,7 +161,7 @@ class TestGetNextActionState:
 
         assert state["state"] == NEXT_ACTION_ESCALATED
 
-    async def test_escalation_gate_for_a_different_app_is_ignored(self):
+    async def test_escalation_for_a_different_app_is_ignored(self):
         store, _ = await make_async_store()
         other_aid = await store.save(make_report(repo_name="other-app"))
         await escalate_unresolved_finding(store, other_aid, "other-app", _NETWORK_TARGET, FINDING_ESCALATION_THRESHOLD)
@@ -163,19 +171,38 @@ class TestGetNextActionState:
 
         assert state["state"] == NEXT_ACTION_NONE
 
-    async def test_reuses_a_pre_fetched_pending_gates_list_without_a_new_query(self):
-        """Fleet enrichment fetches ``list_gates(status="pending")`` once for
-        the whole page -- passing it in as ``pending_gates`` must skip this
-        function's own gates query entirely, not issue a second one."""
+    async def test_acknowledged_escalation_no_longer_counts(self):
+        store, _ = await make_async_store()
+        aid = await store.save(make_report(repo_name="ack-app"))
+        event_id = await escalate_unresolved_finding(store, aid, "ack-app", _NETWORK_TARGET, FINDING_ESCALATION_THRESHOLD)
+        await store.log_event(
+            "human", "finding-escalation-acknowledged", "ack-app", "info", "acknowledged", correlation_id=event_id,
+        )
+
+        state = await get_next_action_state(store, "ack-app")
+
+        assert state["state"] == NEXT_ACTION_NONE
+
+    async def test_reuses_a_pre_fetched_unresolved_escalations_list_without_a_new_query(self):
+        """Fleet enrichment fetches ``list_unresolved_events(...)`` once for
+        the whole page -- passing it in as ``unresolved_escalations`` must
+        skip this function's own query entirely, not issue a second one."""
         store, _ = await make_async_store()
         aid = await store.save(make_report(repo_name="prefetch-app"))
-        gate_id = await escalate_unresolved_finding(
+        event_id = await escalate_unresolved_finding(
             store, aid, "prefetch-app", _NETWORK_TARGET, FINDING_ESCALATION_THRESHOLD,
         )
-        pending_gates = await store.list_gates(status="pending")
+        unresolved_escalations = await store.list_unresolved_events(
+            "finding-escalated", ["finding-escalation-acknowledged"],
+        )
 
-        with patch.object(store, "list_gates", side_effect=AssertionError("list_gates should not be called again")):
-            state = await get_next_action_state(store, "prefetch-app", pending_gates=pending_gates)
+        with patch.object(
+            store, "list_unresolved_events",
+            side_effect=AssertionError("list_unresolved_events should not be called again"),
+        ):
+            state = await get_next_action_state(
+                store, "prefetch-app", unresolved_escalations=unresolved_escalations,
+            )
 
         assert state["state"] == NEXT_ACTION_ESCALATED
-        assert state["gate_id"] == gate_id
+        assert state["event_id"] == event_id

@@ -1066,20 +1066,24 @@ async def correlate_delivery_finding(
 
 async def _log_finding_resolution_outcome(
     store: object, app_name: str, action: str, severity: str, summary: str,
-) -> None:
+) -> str | None:
     """Mirrors ``_log_verification_outcome()`` above (introduced for the
     SLO-verification tail, 69e09b9) for the finding-resolution tail -- same
     Kafka-publish-plus-store-event pattern, same best-effort try/except
     around the store write, so a finding's resolved/still-present/escalated
     outcome produces a real Ledger card/observable event instead of only a
-    column update nobody's watching.
+    column update nobody's watching. Returns the new event's id (or
+    ``None`` if the store write itself failed) -- ``escalate_unresolved_
+    finding()`` below needs it as the real recommendation identity a human
+    later acknowledges (``routes/recommendations.py``).
     """
     from agentit.portal.helpers import publish_event
     publish_event(action, app_name, summary, agent_id="delivery-verifier")
     try:
-        await store.log_event("delivery-verifier", action, app_name, severity, summary)
+        return await store.log_event("delivery-verifier", action, app_name, severity, summary)
     except Exception:
         logger.warning("Failed to log %s event for %s", action, app_name, exc_info=True)
+        return None
 
 
 def _describe_finding(key: tuple[str, str]) -> str:
@@ -1089,27 +1093,39 @@ def _describe_finding(key: tuple[str, str]) -> str:
 
 async def escalate_unresolved_finding(
     store: object, assessment_id: str, app_name: str, finding: tuple[str, str], failure_count: int,
-) -> str:
+) -> str | None:
     """Phase 4's stop condition: a real, visible "needs you" signal for a
     finding that has now failed to resolve ``failure_count`` (>=
-    ``FINDING_ESCALATION_THRESHOLD``) times in a row -- a new gate type
-    (``ESCALATION_GATE_TYPE``), not a silent give-up and not another
-    identical auto-retry. Dedupes per (app, gate_type) the same way every
-    other gate type already does (``store.create_gate()``); this stays a
-    real, visible, pending item -- surfaced on Fleet's per-app "needs
-    action" badge and the Ledger's card type D, exactly like any other
-    pending gate -- until a human resolves it.
+    ``FINDING_ESCALATION_THRESHOLD``) times in a row -- a plain
+    ``finding-escalated`` event (see ``routes/recommendations.py``'s
+    ``acknowledge_finding_escalation``), not a generic gate row. Not a
+    silent give-up and not another identical auto-retry either way.
+
+    Deduped per ``(app_name, category)`` via ``store.list_unresolved_
+    events()`` -- the same "don't pile up duplicates for the same still-
+    unresolved thing" job the retired ``gates`` table's ``(repo_url,
+    gate_type)`` dedup used to do (this is actually a correctness
+    improvement over that: the old dedup was keyed on ``gate_type`` alone,
+    so two DIFFERENT finding categories escalating for the same app would
+    have collided into a single gate -- the second escalation silently
+    never got its own row). Returns the existing unresolved event's id when
+    one for this exact category is already open, or the newly-logged
+    event's id otherwise.
     """
     category, desc_key = finding[0], finding[1]
+
+    existing = await store.list_unresolved_events(
+        "finding-escalated", ["finding-escalation-acknowledged"], target_app=app_name,
+    )
+    for event in existing:
+        if _escalation_event_category(event.get("summary", "")) == category:
+            return event["id"]
+
     summary = (
         f"'{category}' finding has failed to resolve after {failure_count} automated fix "
         f"attempt(s) -- human review needed. Target finding: {desc_key}"
     )
-    gate_id = await store.create_gate(assessment_id, ESCALATION_GATE_TYPE, summary)
-    await _log_finding_resolution_outcome(
-        store, app_name, "finding-escalated", "critical", f"{summary} (gate {gate_id})",
-    )
-    return gate_id
+    return await _log_finding_resolution_outcome(store, app_name, "finding-escalated", "critical", summary)
 
 
 async def redispatch_finding_fix(
@@ -1269,12 +1285,14 @@ NEXT_ACTION_NONE = "none"
 _ESCALATION_CATEGORY_RE = re.compile(r"^'([^']+)'")
 
 
-def _escalation_gate_category(summary: str) -> str:
+def _escalation_event_category(summary: str) -> str:
     """Recover the finding category ``escalate_unresolved_finding()`` named
-    in its own gate summary (``"'{category}' finding has failed to resolve
-    ..."``) -- ``gates`` has no structured category column of its own (see
-    ``store.py``'s schema), and this deterministic summary shape, produced
-    by this same module, is the one place that category still lives.
+    in its own event summary (``"'{category}' finding has failed to
+    resolve ..."``) -- plain ``events`` rows have no structured category
+    column of their own, and this deterministic summary shape, produced by
+    this same module, is the one place that category still lives. Used both
+    to dedup a repeat escalation for the same (app, category) and to label
+    the "what happens next" state below.
     """
     match = _ESCALATION_CATEGORY_RE.match(summary or "")
     return match.group(1) if match else "finding"
@@ -1285,22 +1303,24 @@ async def get_next_action_state(
     app_name: str,
     *,
     repo_url: str | None = None,
-    pending_gates: list[dict] | None = None,
+    assessment_id: str | None = None,
+    unresolved_escalations: list[dict] | None = None,
 ) -> dict:
     """The one real "what happens next" fact for ``app_name`` -- reusing
-    Phase 3/4's own data access (``store.list_gates``/``list_deliveries_
-    pending_finding_check``/``get_finding_failure_count``) rather than a new
-    query, and never inventing a re-check cadence that doesn't exist.
+    Phase 3/4's own data access (``store.list_unresolved_events``/
+    ``list_deliveries_pending_finding_check``/``get_finding_failure_count``)
+    rather than a new query, and never inventing a re-check cadence that
+    doesn't exist.
 
     Checked in priority order, since these three states are (by
     construction, see ``handle_confirmed_finding_failure()``) close to
     mutually exclusive per finding but a real app can have more than one
     finding in flight at once:
 
-    1. ``NEXT_ACTION_ESCALATED`` -- an ``ESCALATION_GATE_TYPE`` gate is open
-       for this app: automated retries are exhausted for some finding, a
-       human is needed now. Takes priority over the other two because it's
-       the one state that actually requires a person to act.
+    1. ``NEXT_ACTION_ESCALATED`` -- an unresolved ``finding-escalated``
+       event is open for this app: automated retries are exhausted for some
+       finding, a human is needed now. Takes priority over the other two
+       because it's the one state that actually requires a person to act.
     2. ``NEXT_ACTION_RETRYING`` -- a pending (not yet finding-checked)
        delivery exists whose target finding has already failed at least
        once (``get_finding_failure_count() > 0``) -- i.e. this pending
@@ -1316,40 +1336,39 @@ async def get_next_action_state(
        clean app on any schedule, so this state says that plainly rather
        than implying a cadence that doesn't exist.
 
-    ``pending_gates``, when given, is an already-fetched pending-gates list
-    (either fleet-wide from ``list_gates()``, or already scoped to this app
-    from ``list_gates_for_assessment()``) -- lets a caller enriching many
-    apps at once (Fleet) fetch gates once instead of once per app. Left
-    ``None`` (the default), this fetches its own -- the right choice for a
-    single-app caller (Assessment Detail already has its own scoped list to
-    pass in instead).
+    ``unresolved_escalations``, when given, is an already-fetched
+    unresolved-escalation-events list (either fleet-wide via
+    ``list_unresolved_events(..., target_app=None)``, or already scoped to
+    this app) -- lets a caller enriching many apps at once (Fleet) fetch it
+    once instead of once per app. Left ``None`` (the default), this fetches
+    its own, scoped to ``app_name`` -- the right choice for a single-app
+    caller. ``assessment_id``, when given, is embedded verbatim into the
+    escalated state's own dict so a caller (Fleet's badge, Assessment
+    Detail) can link straight to that app's Actions tab.
     """
-    if pending_gates is None:
+    if unresolved_escalations is None:
         try:
-            pending_gates = await store.list_gates(status="pending")
+            unresolved_escalations = await store.list_unresolved_events(
+                "finding-escalated", ["finding-escalation-acknowledged"], target_app=app_name,
+            )
         except Exception:
-            logger.debug("Failed to fetch pending gates for %s's next-action state", app_name, exc_info=True)
-            pending_gates = []
+            logger.debug("Failed to fetch unresolved escalations for %s's next-action state", app_name, exc_info=True)
+            unresolved_escalations = []
 
-    # Fleet-wide lists (list_gates()) carry app_name via a join; assessment-
-    # scoped lists (list_gates_for_assessment()) don't need it -- they're
-    # already scoped to this exact app by their own query.
-    escalation_gate = next(
-        (
-            g for g in pending_gates
-            if g.get("gate_type") == ESCALATION_GATE_TYPE and g.get("app_name", app_name) == app_name
-        ),
-        None,
+    # A fleet-wide, unscoped list needs its own target_app filter; an
+    # already-per-app-scoped one is already exactly this app's events.
+    escalation_event = next(
+        (e for e in unresolved_escalations if e.get("target_app", app_name) == app_name), None,
     )
-    if escalation_gate is not None:
-        category = _escalation_gate_category(escalation_gate.get("summary", ""))
+    if escalation_event is not None:
+        category = _escalation_event_category(escalation_event.get("summary", ""))
         return {
             "state": NEXT_ACTION_ESCALATED,
             "label": "Needs review",
             "message": f"Needs your review -- automated fixes exhausted for '{category}'.",
             "category": category,
-            "gate_id": escalation_gate["id"],
-            "assessment_id": escalation_gate.get("assessment_id"),
+            "event_id": escalation_event["id"],
+            "assessment_id": assessment_id,
         }
 
     pending_deliveries = await store.list_deliveries_pending_finding_check(app_name)

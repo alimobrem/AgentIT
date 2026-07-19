@@ -51,6 +51,52 @@
 </div>
 {% endmacro %}
 
+{% macro recommendation_card(event, assessment_id) %}
+{# A real, direct action for the two recommendation types that never had a
+   PR to track (rollback-review, finding-unresolved-escalation) -- replaces
+   the generic gate_card for these two kinds now that the gates table/
+   generic gate-resolution machinery is gone (see routes/recommendations.py).
+   `event.kind` is set by routes/assessments.py to "rollback" or
+   "escalation" -- everything else on `event` is the plain events row
+   itself (id/target_app/summary/timestamp/severity). #}
+<div class="card mb-1">
+  <div class="card-header">
+    <div>
+      <span class="badge badge-{{ event.severity | default('info') }}">
+        {{ 'Rollback recommendation' if event.kind == 'rollback' else 'Escalated finding' }}
+      </span>
+      <span class="text-muted text-sm" data-timestamp="{{ event.timestamp }}">{{ event.timestamp[:16] }}</span>
+    </div>
+  </div>
+
+  <p class="my-4">{{ event.summary }}</p>
+
+  <div class="action-bar">
+    {% if event.kind == "rollback" %}
+    <form method="POST" action="/rollback/{{ event.id }}/execute" x-data x-ref="rollbackForm{{ event.id }}">
+      <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
+      <button type="button" class="btn btn-danger"
+        @click="$dispatch('show-confirm', {
+          title: 'Roll Back',
+          message: 'Roll back ' + {{ event.target_app | tojson | forceescape }} + ' now? This reverts the deployment to its previous stable state.',
+          form: $refs.rollbackForm{{ event.id }},
+          opts: { confirmText: 'Roll Back', danger: true }
+        })">Roll Back</button>
+    </form>
+    <form method="POST" action="/rollback/{{ event.id }}/dismiss">
+      <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
+      <button type="submit" class="btn btn-outline btn-sm">Dismiss</button>
+    </form>
+    {% else %}
+    <form method="POST" action="/findings/{{ event.id }}/acknowledge">
+      <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
+      <button type="submit" class="btn btn-outline">Acknowledge</button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+{% endmacro %}
+
 {% macro gate_card(gate) %}
 {# Approve & Deliver / Reject / Dismiss card for one pending gate. Every
    gate type is per-app now and renders here, on Assessment Detail's Actions

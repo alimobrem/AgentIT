@@ -465,6 +465,7 @@ async def portal_client():
          patch("agentit.portal.routes.fleet.get_store", return_value=store), \
          patch("agentit.portal.routes.assessments.get_store", return_value=store), \
          patch("agentit.portal.routes.gates.get_store", return_value=store), \
+         patch("agentit.portal.routes.recommendations.get_store", return_value=store), \
          patch("agentit.portal.routes.capabilities.get_store", return_value=store), \
          patch("agentit.portal.routes.settings.get_store", return_value=store), \
          patch("agentit.portal.routes.insights.get_store", return_value=store), \

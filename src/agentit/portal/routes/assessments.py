@@ -385,10 +385,14 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     all_findings = [f for sc in report.scores for f in sc.findings]
     fixable_categories = {f.category for f in all_findings if lookup(f.category) is not None}
 
-    # Every gate type now lives here (Actions tab) instead of the retired
-    # global Gates page -- including a stale ``cluster-admin-review`` row, if
-    # one somehow still exists (that type, and the separate Admin Review
-    # page it used to live on, were retired 2026-07-18 -- see delivery.py).
+    # Every remaining gate type lives here (Actions tab) instead of the
+    # retired global Gates page -- including a stale ``cluster-admin-review``
+    # row, if one somehow still exists (that type, and the separate Admin
+    # Review page it used to live on, were retired 2026-07-18 -- see
+    # delivery.py). rollback-review/finding-unresolved-escalation are no
+    # longer gates at all -- they're plain, unresolved events (see
+    # routes/recommendations.py) rendered here via recommendation_card
+    # instead of gate_card.
     from agentit.portal.delivery import (
         gate_delivery_confirmation,
         get_next_action_state,
@@ -396,30 +400,53 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     )
     assessment_gates = await s.list_gates_for_assessment(assessment_id, status="pending") \
         if hasattr(s, "list_gates_for_assessment") else []
-    pending_actions = assessment_gates
-    for g in pending_actions:
+    for g in assessment_gates:
         g["delivery_confirmation"] = await gate_delivery_confirmation(s, g)
+        g["kind"] = "gate"
+
+    unresolved_rollbacks = await s.list_unresolved_events(
+        "rollback-recommended", ["rollback-executed", "rollback-dismissed"], target_app=report.repo_name,
+    )
+    for e in unresolved_rollbacks:
+        e["kind"] = "rollback"
+    unresolved_escalations = await s.list_unresolved_events(
+        "finding-escalated", ["finding-escalation-acknowledged"], target_app=report.repo_name,
+    )
+    for e in unresolved_escalations:
+        e["kind"] = "escalation"
+
+    pending_actions = assessment_gates + unresolved_rollbacks + unresolved_escalations
 
     # Real "what happens next" fact (docs/onboarding-loop-vision-gap-
-    # analysis.md's Step 8 discussion / Phase 5) -- reuses `assessment_gates`
-    # (already fetched above, already scoped to this app) instead of a
-    # second gates query.
+    # analysis.md's Step 8 discussion / Phase 5) -- reuses
+    # `unresolved_escalations` (already fetched above, already scoped to
+    # this app) instead of a second query.
     next_action = await get_next_action_state(
-        s, report.repo_name, repo_url=report.repo_url, pending_gates=assessment_gates,
+        s, report.repo_name, repo_url=report.repo_url, assessment_id=assessment_id,
+        unresolved_escalations=unresolved_escalations,
     )
 
     # Real, specific empty-state copy for the Actions tab (docs/ux-design-
-    # requirements.md checklist #10) -- how many of THIS app's gates were
-    # actually resolved recently, instead of a bare "nothing here".
+    # requirements.md checklist #10) -- how many of THIS app's actions were
+    # actually resolved recently (gates, plus rollback/escalation events
+    # resolved the same way -- a real resolving event correlated to the
+    # original one), instead of a bare "nothing here".
     recently_resolved_actions_count = 0
-    if not pending_actions and hasattr(s, "list_gates_for_assessment"):
-        all_app_gates = await s.list_gates_for_assessment(assessment_id)
+    if not pending_actions:
         from datetime import datetime, timedelta, timezone
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-        recently_resolved_actions_count = sum(
-            1 for g in all_app_gates
-            if g["status"] in ("approved", "rejected", "expired", "cancelled")
-            and (g.get("resolved_at") or g.get("created_at") or "") >= cutoff
+        if hasattr(s, "list_gates_for_assessment"):
+            all_app_gates = await s.list_gates_for_assessment(assessment_id)
+            recently_resolved_actions_count += sum(
+                1 for g in all_app_gates
+                if g["status"] in ("approved", "rejected", "expired", "cancelled")
+                and (g.get("resolved_at") or g.get("created_at") or "") >= cutoff
+            )
+        recent_events = await s.list_events(target_app=report.repo_name, limit=200)
+        recently_resolved_actions_count += sum(
+            1 for e in recent_events
+            if e["action"] in ("rollback-executed", "rollback-dismissed", "finding-escalation-acknowledged")
+            and e["timestamp"] >= cutoff
         )
 
     gitops_registered, infra_repo_url = await is_gitops_registered(report.repo_name, report)
