@@ -234,6 +234,25 @@ def _get_deploy_status_bounded(include_commit_info: bool = False) -> dict:
 _TASK_RESOLUTION_FAILURE_REASONS = ("CouldntGetTask", "CouldntGetPipeline")
 
 
+def _is_confirmed_unreleased_revision(pipeline_revision: str, running_commit: str) -> bool:
+    """True only when both commits are known and *provably* different.
+
+    Deliberately fails closed: an "unknown" `running_commit` (build info not
+    yet populated) or a missing `pipeline_revision` must never be treated as
+    "different" -- that would let an ambiguous read excuse a real failure.
+    Reuses the same startswith-either-direction comparison already used
+    below for the `resolved` healthy/rolled_back check, since one side is
+    sometimes a short hash.
+    """
+    if not pipeline_revision or running_commit in ("unknown", ""):
+        return False
+    return not (
+        running_commit == pipeline_revision
+        or running_commit.startswith(pipeline_revision)
+        or pipeline_revision.startswith(running_commit)
+    )
+
+
 def _get_deploy_status(include_commit_info: bool = False) -> dict:
     """"Is a deploy in progress, and what's changing" -- combines the
     currently-running build (`agentit_build` Info metric, via
@@ -314,6 +333,22 @@ def _get_deploy_status(include_commit_info: bool = False) -> dict:
             # built or pushed, so this can't be a regression in what's live.
             # Record it separately and let Argo/Rollout (checked below)
             # decide the real live state, same as the Cancelled carve-out.
+            status["unreleased_ci_failure"] = {"reason": reason, "revision": revision}
+        elif reason not in ("Succeeded", "Completed") and _is_confirmed_unreleased_revision(
+            revision, status["running"].get("commit", "unknown"),
+        ):
+            # Verified live (2026-07-18, `TaskRunTimeout` on `run-tests` under
+            # heavy concurrent CI load): a real task failure/timeout can occur
+            # on *any* task, for *any* reason string -- an allowlist of known
+            # reasons (like the two carve-outs above) will always be one
+            # incident behind. The one fact that's actually true regardless of
+            # reason: if this run's target `revision` provably differs from
+            # the commit this very instance is running (`get_build_info()`,
+            # real build-time data, not a guess), that commit was never
+            # deployed here, so its build/test failure cannot be a live
+            # regression. Only trust this when *both* commits are known and
+            # unambiguous -- an "unknown" build-info commit must not be used
+            # to excuse a real failure (see `_is_confirmed_unreleased_revision`).
             status["unreleased_ci_failure"] = {"reason": reason, "revision": revision}
         elif reason not in ("Succeeded", "Completed"):
             status["state"] = "failed"
