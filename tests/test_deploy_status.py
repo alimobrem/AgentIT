@@ -733,6 +733,64 @@ def test_deploy_status_argo_operation_running_is_deploying_not_failed():
     assert status["stage"] == "syncing"
 
 
+def test_deploy_status_task_timeout_on_confirmed_unreleased_commit_is_not_deploy_failed():
+    """Regression guard for the 2026-07-18 `TaskRunTimeout` incident: a real,
+    generic task failure (not one of the two known-safe reason strings
+    above) must still not pin the badge to "Deploy failed" when its
+    PipelineRun's target revision is *provably* not what this instance is
+    actually running -- confirmed live: `run-tests` hit its 10m timeout for
+    the newest commit on `main` while the already-deployed, older commit
+    kept serving healthy traffic the whole time."""
+    running_revision = "5" * 40
+    unreleased_revision = "d" * 40
+    failed_pr = _pipelinerun(
+        "Failed", "False", revision=unreleased_revision,
+        task_names=["git-clone", "run-tests"],
+    )
+    set_build_info("1.0.0", running_revision, running_revision)
+    try:
+        with patch("agentit.portal.routes.health.kube") as mock_kube:
+            mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
+                [failed_pr] if "tekton" in group
+                else [_argo_app("Synced", "Healthy", image_tag=running_revision)]
+            )
+            mock_kube.get_custom_resource.side_effect = _taskrun_get_custom_resource(
+                {"git-clone": "Succeeded", "run-tests": "TaskRunTimeout"}
+            )
+            status = _get_deploy_status()
+    finally:
+        set_build_info("unknown", "unknown", "unknown")
+
+    assert status["state"] == "idle"
+    assert status["reason"] is None
+    assert status["pipeline"]["reason"] == "Failed"
+    assert status["unreleased_ci_failure"] == {"reason": "Failed", "revision": unreleased_revision}
+
+
+def test_deploy_status_generic_failure_on_currently_running_commit_still_reported_failed():
+    """If the failed PipelineRun's revision actually matches what's live
+    right now, this *is* a real live regression -- must not be carved out
+    just because the reason string isn't "Succeeded"."""
+    revision = "7" * 40
+    failed_pr = _pipelinerun("Failed", "False", revision=revision, task_names=["git-clone", "run-tests"])
+    set_build_info("1.0.0", revision, revision)
+    try:
+        with patch("agentit.portal.routes.health.kube") as mock_kube:
+            mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
+                [failed_pr] if "tekton" in group else [_argo_app("Synced", "Healthy", image_tag=revision)]
+            )
+            mock_kube.get_custom_resource.side_effect = _taskrun_get_custom_resource(
+                {"git-clone": "Succeeded", "run-tests": "TaskRunTimeout"}
+            )
+            status = _get_deploy_status()
+    finally:
+        set_build_info("unknown", "unknown", "unknown")
+
+    assert status["state"] == "failed"
+    assert "Failed" in status["reason"]
+    assert status["unreleased_ci_failure"] is None
+
+
 def test_deploy_status_argo_suspended_is_deploying_canary_pause():
     with patch("agentit.portal.routes.health.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
