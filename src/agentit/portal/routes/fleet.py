@@ -316,18 +316,18 @@ async def fleet_page(request: Request) -> HTMLResponse:
         })
     avg_score = sum(r["latest_score"] for r in fleet) / total_apps
     critical_total = sum(r["critical_count"] for r in fleet)
-    # PR-approval-specific (not every pending gate -- see
-    # _attach_pending_actions()'s own per-row badge for the rest), and
-    # deliberately its own fresh, uncached query rather than reusing the
-    # nav bar's cached badge count (helpers.get_nav_gate_badge_counts()) --
-    # this banner should always reflect this exact request's real state,
+    # Same PR-status-derived definition as Ledger's own "Waiting for your
+    # approval" stat and base.html's nav badge (pr_tracking.py's
+    # count_fleet_prs_waiting_for_approval()) -- any PR that's still open
+    # and unmerged on GitHub, not just gate-tracked ones (2026-07-19: the
+    # old `gate_type == "gitops-pr-pending"` count both missed the
+    # "-shared-namespace" gate variant and every source-repo-pr/app-repo-
+    # pr/onboarding PR, which never gets a gate at all -- see
+    # pr_tracking.py's module docstring). A free sum over the `open_prs`
+    # column `_attach_pr_counts()` already computed above, not a second
+    # query -- this banner still reflects this exact request's real state,
     # matching every other Fleet stat on this page.
-    try:
-        all_pending_gates = await s.list_gates(status="pending")
-    except Exception:
-        log.debug("Failed to fetch pending gates for Fleet's PR-approval pointer", exc_info=True)
-        all_pending_gates = []
-    pending_need_you = sum(1 for g in all_pending_gates if g.get("gate_type") == "gitops-pr-pending")
+    pending_need_you = sum(app_item.get("open_prs", 0) for app_item in fleet)
 
     from agentit.portal.metrics import fleet_size as _fs, fleet_avg_score as _fas
     _fs.set(total_apps)

@@ -8,13 +8,14 @@
 
 <div class="action-bar">
   <button class="btn" @click="assessOpen = true; $nextTick(() => $refs.repoUrlInput.focus())">Assess New App</button>
-  {# pending_need_you is now specifically "PRs waiting for your approval"
-     -- Ledger is strictly PR-focused (see
-     routes/insights.py::ledger_page()'s docstring), so this banner always
-     agrees with what clicking through actually shows. Every other
-     pending, app-owner-scoped gate type still shows via each app's own
-     "pending action" row badge below and Assessment Detail's Actions tab
-     -- never silently dropped, just not a PR. #}
+  {# pending_need_you is "PRs waiting for your approval" -- any PR still
+     open and unmerged on GitHub, the same PR-status-derived definition
+     Ledger's own stat uses (see routes/insights.py::ledger_page()'s
+     docstring), so this banner always agrees with what clicking through
+     actually shows. Every other pending, app-owner-scoped gate type still
+     shows via each app's own "pending action" row badge below and
+     Assessment Detail's Actions tab -- never silently dropped, just not a
+     PR. #}
   {% if pending_need_you %}
   <a href="/ledger" class="text-muted text-sm">{{ pending_need_you }} PR(s) need your approval → Ledger</a>
   {% endif %}

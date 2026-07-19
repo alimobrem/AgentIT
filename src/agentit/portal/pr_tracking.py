@@ -336,6 +336,41 @@ def annotate_lifecycle(record: dict) -> dict:
     return record
 
 
+def fleet_prs_waiting_for_approval(records: list[dict]) -> list[dict]:
+    """Every currently open, unmerged PR across the fleet -- the Ledger's
+    "Waiting for your approval" bucket (and base.html's nav badge / Fleet's
+    pointer banner, which must always agree with it).
+
+    Deliberately PR-status-derived (``state == "open"``, from
+    ``resolve_pr_states()`` -- the exact same definition ``routes/
+    fleet.py::_attach_pr_counts()`` already uses for each app's own "Open
+    PRs" column), NOT gated on whether an in-app ``gitops-pr-pending``/
+    ``-shared-namespace`` gate row exists: only the cluster-config/CI-CD-
+    shared-namespace delivery categories ever create one (see
+    ``gate_pr_records()``/``delivery_pr_records()`` above) -- a
+    source-repo-pr/app-repo-pr/onboarding PR is never gated inside AgentIT
+    at all, so a "gate-tracked and pending" definition silently dropped
+    every one of those from this count even while it sat genuinely open
+    and unreviewed on GitHub (2026-07-19 fix). Gate-tracked records here
+    still carry their own ``raw`` gate row so a caller can render the real
+    Approve & Deliver/Reject actions (``needs_attention`` is still the
+    narrower "has an in-app action" flag Fleet's per-app badge and
+    Assessment Detail's Actions tab key off of -- unaffected by this
+    function).
+    """
+    return [r for r in records if r["state"] == "open"]
+
+
+async def count_fleet_prs_waiting_for_approval(store: object) -> int:
+    """Count-only sibling of ``fleet_prs_waiting_for_approval()`` for
+    callers (the nav badge) that don't need full records -- still goes
+    through ``collect_fleet_pr_records()`` so it shares that function's
+    queries and fleet-wide GitHub-status cache rather than a second,
+    drifting computation."""
+    records = await collect_fleet_pr_records(store)
+    return len(fleet_prs_waiting_for_approval(records))
+
+
 _FLEET_PR_CACHE_TTL = 120  # seconds -- mirrors fleet.py's own PR-status cache TTL.
 _fleet_pr_status_cache: dict[str, Any] = {"data": {}, "ts": 0.0}
 _fleet_pr_status_cache_lock = threading.Lock()

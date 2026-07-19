@@ -272,18 +272,18 @@ async def get_store():
 # ── Nav gate badges ───────────────────────────────────────────────────
 #
 # base.html's nav bar shows the fleet-wide count of PRs waiting for your
-# approval on Ledger's link -- a pending `gitops-pr-pending`/
-# `gitops-pr-pending-shared-namespace` gate, the only gate types Ledger's
-# PR-lifecycle view renders/acts on, now that Ledger is strictly PR-focused
-# rather than every app-owner-scoped gate type (docs/ui-redesign-proposal.md
-# §2/§5). Every other app-owner gate type (`rollback-review`,
-# `finding-unresolved-escalation`, ...) stays visible via Fleet's per-app
-# "needs action"/escalation badges and Assessment Detail's Actions tab, not
-# this nav badge. This also closes a real pre-existing defect: the old nav
-# referenced a `pending_gates` template variable no context processor ever
-# actually supplied (only Insights' own page context computed it, so the
-# badge was silently blank everywhere else). Cached briefly since nav
-# renders on every page.
+# approval on Ledger's link -- the same PR-status-derived count Ledger's
+# own "Waiting for your approval" stat shows (pr_tracking.py's
+# count_fleet_prs_waiting_for_approval()/fleet_prs_waiting_for_approval()):
+# any PR that's still open and unmerged on GitHub, whether or not an in-app
+# gitops-pr-pending/-shared-namespace gate row exists for it (2026-07-19:
+# this used to count only pending gates of those two types, silently
+# missing every source-repo-pr/app-repo-pr/onboarding PR, which never gets
+# one -- see pr_tracking.py's module docstring). Every other app-owner gate
+# type (`rollback-review`, `finding-unresolved-escalation`, ...) stays
+# visible via Fleet's per-app "needs action"/escalation badges and
+# Assessment Detail's Actions tab, not this nav badge. Cached briefly since
+# nav renders on every page.
 #
 # Used to also split out a separate `admin_review` count for a second,
 # cross-app "Admin Review" nav link -- retired 2026-07-18 along with the
@@ -309,16 +309,11 @@ async def get_nav_gate_badge_counts(store: object) -> dict[str, int]:
         if now - _nav_gate_badges_cache["ts"] < _NAV_GATE_BADGES_CACHE_TTL:
             return {"pending_actions": _nav_gate_badges_cache["pending_actions"]}
         try:
-            gates = await store.list_gates(status="pending")
+            from agentit.portal.pr_tracking import count_fleet_prs_waiting_for_approval
+            pending_actions = await count_fleet_prs_waiting_for_approval(store)
         except Exception:
             log.debug("Failed to refresh nav gate badge counts", exc_info=True)
-            gates = []
-
-        from agentit.portal.delivery import _CICD_SHARED_NAMESPACE_GATE_TYPE
-        pending_actions = sum(
-            1 for g in gates
-            if g.get("gate_type") in ("gitops-pr-pending", _CICD_SHARED_NAMESPACE_GATE_TYPE)
-        )
+            pending_actions = 0
 
         _nav_gate_badges_cache["pending_actions"] = pending_actions
         _nav_gate_badges_cache["ts"] = now
