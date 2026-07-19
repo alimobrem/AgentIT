@@ -670,6 +670,50 @@ class TestGates:
         assert [g["id"] for g in gates] == [gate_id]
 
 
+class TestUpdateRemediationJobConcurrentSteps:
+    """Regression guard for the `steps_completed` lost-update race found
+    during the 2026-07-18 resilience audit (see
+    docs/resilience-audit-2026-07-18.md): `update_remediation_job()` used
+    to `SELECT` (no row lock), mutate `steps_completed` in Python, then
+    `UPDATE` -- two genuinely concurrent callers appending a *different*
+    `current_step` for the same `job_id` could both read the same starting
+    array and each overwrite the other's append, the same lost-update
+    shape as the `create_gate` race fixed above. `SELECT ... FOR UPDATE`
+    serializes them instead."""
+
+    async def test_concurrent_distinct_steps_are_all_recorded(self, store):
+        import asyncio
+
+        assessment_id = await store.save(_make_report("repo-concurrent-steps"))
+        job_id = await store.create_remediation_job(assessment_id, auto_deliver=False)
+
+        steps = [f"step-{i}" for i in range(10)]
+        await asyncio.gather(
+            *(store.update_remediation_job(job_id, "assessing", current_step=s) for s in steps)
+        )
+
+        job = await store.get_remediation_job(job_id)
+        # Every one of the 10 concurrently-appended steps must survive --
+        # a lost update would leave fewer than 10 entries in the array.
+        assert sorted(job["steps_completed"]) == sorted(steps)
+
+    async def test_sequential_steps_still_accumulate_correctly(self, store):
+        """Non-concurrent regression guard: the `FOR UPDATE` lock must not
+        change the ordinary, non-racing behavior -- steps still accumulate
+        in the array one at a time, and a duplicate step is not
+        double-added."""
+        assessment_id = await store.save(_make_report("repo-sequential-steps"))
+        job_id = await store.create_remediation_job(assessment_id, auto_deliver=False)
+
+        await store.update_remediation_job(job_id, "assessing", current_step="clone")
+        await store.update_remediation_job(job_id, "assessing", current_step="scan")
+        await store.update_remediation_job(job_id, "completed", current_step="scan")
+
+        job = await store.get_remediation_job(job_id)
+        assert job["steps_completed"] == ["clone", "scan"]
+        assert job["status"] == "completed"
+
+
 class TestSlos:
     async def test_save_list_update_delete(self, store):
         assessment_id = await store.save(_make_report())

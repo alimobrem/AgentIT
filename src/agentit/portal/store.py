@@ -1953,12 +1953,27 @@ class AssessmentStore:
     async def update_remediation_job(
         self, job_id: str, status: str, current_step: str = "", error: str = "",
     ) -> None:
+        """Read-modify-write on ``steps_completed`` (append ``current_step``
+        if not already present) happens inside one transaction with the row
+        locked by ``SELECT ... FOR UPDATE`` -- without the row lock, two
+        genuinely concurrent callers for the same ``job_id`` (e.g. a
+        webhook-retriggered onboard racing the original run's own progress
+        update, or a duplicate `BackgroundTasks` dispatch) could both read
+        the same ``steps_completed`` array before either writes, each append
+        their own step, and whichever commits last silently overwrites the
+        other's step -- a lost update, same shape as the `create_gate`/
+        `save_remediation` dedup races fixed elsewhere in this file. Postgres
+        default `READ COMMITTED` isolation does not prevent this on its own;
+        `FOR UPDATE` makes the second transaction's `SELECT` block until the
+        first commits, so it reads the already-appended array instead of a
+        stale one.
+        """
         now = _now()
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 if current_step:
                     row = await conn.fetchrow(
-                        "SELECT steps_completed FROM remediation_jobs WHERE id = $1", job_id,
+                        "SELECT steps_completed FROM remediation_jobs WHERE id = $1 FOR UPDATE", job_id,
                     )
                     steps = json.loads(row["steps_completed"]) if row else []
                     if current_step not in steps:
