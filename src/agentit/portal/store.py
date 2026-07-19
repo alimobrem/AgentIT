@@ -497,14 +497,47 @@ class AssessmentStore:
         *,
         min_size: int = 5,
         max_size: int = 20,
+        command_timeout: float = 30.0,
+        connect_timeout: float = 15.0,
     ) -> "AssessmentStore":
+        """``command_timeout``/``connect_timeout`` are exposed as
+        parameters (not just hardcoded) so a fault-injection test can
+        construct a store with an aggressively short bound and prove the
+        timeout actually fires against a real, deliberately-wedged query
+        (``pg_sleep()``) in well under a second, instead of the real
+        30s/15s defaults every production caller gets.
+        """
         if dsn is None:
             dsn = os.environ.get("AGENTIT_DB_DSN")
         if not dsn:
             raise ValueError(
                 "No Postgres DSN provided and AGENTIT_DB_DSN is not set."
             )
-        pool = await asyncpg.create_pool(dsn, min_size=min_size, max_size=max_size)
+        # `command_timeout`/`timeout` are unset (unbounded) by default in
+        # asyncpg -- every query issued through this pool (`fetch`/
+        # `fetchrow`/`fetchval`/`execute`) would otherwise wait *forever*
+        # against a wedged (not fully down, just stuck -- a lock wait, a
+        # runaway query on someone else's connection, a half-open TCP
+        # session) Postgres, with no timeout error ever raised. Worse,
+        # since every FastAPI route holds its connection for that whole
+        # wait, enough concurrently-stuck requests exhaust the pool
+        # (`max_size=20`) and every *other* route needing the store hangs
+        # too -- a single wedged query cascading into total portal
+        # unavailability with zero user-facing signal. `command_timeout`
+        # (default 30s) bounds every query to a generous ceiling well above
+        # this app's real query shapes (raw hand-written SQL against a
+        # modest-sized table set, no multi-second aggregations) while still
+        # turning "wedged" into a clear, fast `asyncpg.QueryCanceledError`
+        # instead of an indefinite hang. `connect_timeout` (default 15s,
+        # vs. asyncpg's own 60s default) bounds each new connection attempt
+        # to roughly the same ceiling this app already uses for its other
+        # external dependencies (`kube.py`'s `_request_timeout`,
+        # `github_pr.py`'s `requests.*` calls) rather than a 60s wait per
+        # connection before a caller even learns Postgres is unreachable.
+        pool = await asyncpg.create_pool(
+            dsn, min_size=min_size, max_size=max_size,
+            command_timeout=command_timeout, timeout=connect_timeout,
+        )
         await pool.execute(SCHEMA_SQL)
         store = cls(pool)
         # Heal any repo_url duplicates inherited from before the
