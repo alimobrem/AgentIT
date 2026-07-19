@@ -127,8 +127,8 @@ class TestDeliverRegisteredCommitsToInfraRepo:
         # Per-Agent stay enabled after the flash URL is cleared.
         page = await client.get(f"/assessments/{aid}/onboard-results")
         assert page.status_code == 200
-        assert "No dry run yet" not in page.text
-        assert "Dry run passed" in page.text
+        assert "No validation yet" not in page.text
+        assert "Validation passed" in page.text
         assert 'data-dry-done="true"' in page.text
         assert 'data-action="apply-override"' not in page.text
         assert not re.search(
@@ -178,7 +178,7 @@ class TestOnboardResultsWarnsBeforeDryRun:
         await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
         resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert resp.status_code == 200
-        assert "No dry run yet" in resp.text
+        assert "No validation yet" in resp.text
         # Chip is in the status region, not packed into the Apply CTA label.
         assert "delivery-step-status" in resp.text
         assert 'class="btn btn-green btn-lg"' not in resp.text
@@ -199,9 +199,9 @@ class TestOnboardResultsWarnsBeforeDryRun:
 
         resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert resp.status_code == 200
-        assert "No dry run yet" not in resp.text
+        assert "No validation yet" not in resp.text
         assert "NO DRY RUN YET" not in resp.text
-        assert "Dry run passed" in resp.text
+        assert "Validation passed" in resp.text
         assert 'data-action="apply-override"' not in resp.text
         assert 'data-dry-done="true"' in resp.text
         assert "dryDone: true" in resp.text
@@ -242,9 +242,9 @@ class TestOnboardResultsWarnsBeforeDryRun:
         assert flash_resp.status_code == 200
         html = flash_resp.text
         assert "Dry run complete" in html
-        assert "No dry run yet" not in html
+        assert "No validation yet" not in html
         assert "NO DRY RUN YET" not in html
-        assert "Dry run passed" in html
+        assert "Validation passed" in html
         assert 'data-dry-done="true"' in html
         assert "dryDone: true" in html
         # Label depends on is_gitops_registered() at GET time (Argo may be
@@ -262,7 +262,7 @@ class TestOnboardResultsWarnsBeforeDryRun:
 
         clean = await client.get(f"/assessments/{aid}/onboard-results")
         assert clean.status_code == 200
-        assert "No dry run yet" not in clean.text
+        assert "No validation yet" not in clean.text
         assert 'data-dry-done="true"' in clean.text
         persisted = await store.get_apply_results(aid)
         assert persisted is not None
@@ -279,7 +279,7 @@ class TestOnboardResultsWarnsBeforeDryRun:
         )
         assert resp.status_code == 200
         assert "Dry run complete" in resp.text
-        assert "No dry run yet" not in resp.text
+        assert "No validation yet" not in resp.text
         assert "NO DRY RUN YET" not in resp.text
         assert 'data-dry-done="true"' in resp.text
         assert "dryDone: true" in resp.text
@@ -310,4 +310,4 @@ class TestOnboardResultsWarnsBeforeDryRun:
 
         resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert resp.status_code == 200
-        assert "No dry run yet" not in resp.text
+        assert "No validation yet" not in resp.text

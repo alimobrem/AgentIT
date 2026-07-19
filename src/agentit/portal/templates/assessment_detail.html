@@ -171,7 +171,8 @@
   <a href="/assessments/{{ assessment_id }}?tab=actions">see the Actions tab below</a>.
   {% elif lifecycle_stage == "onboarded" %}
   <span class="next-step-icon" aria-hidden="true">&#9679;</span>
-  Onboarding complete — <a href="/assessments/{{ assessment_id }}/onboard-results">Review &amp; Deliver</a> (Dry Run → Apply).
+  Onboarding complete — automatic validation is running (or has finished); see
+  <a href="/assessments/{{ assessment_id }}/onboard-results">Onboard Results</a> for progress and any pull request(s).
   {% elif lifecycle_stage == "applied" %}
   <span class="next-step-icon next-step-icon-done" aria-hidden="true">&#10003;</span>
   Applied to the cluster — add SLOs (via Re-onboard) to reach the Monitored stage.
@@ -259,7 +260,7 @@
     <button type="button" class="btn btn-outline btn-sm"
       @click="$dispatch('show-confirm', {
         title: 'Re-scan',
-        message: 'Re-scan ' + {{ report.repo_name | tojson | forceescape }} + ' and regenerate onboard manifests in one step. You will land on Onboard Results to Dry Run \u2192 Apply.',
+        message: 'Re-scan ' + {{ report.repo_name | tojson | forceescape }} + ' and regenerate onboard manifests in one step. You will land on Onboard Results while automatic validation and delivery run.',
         form: $refs.reassessForm,
         opts: { confirmText: 'Re-scan' }
       })">
@@ -419,8 +420,8 @@
          verb for incremental remediations. #}
       {% if lifecycle_stage == "assessed" and fixable_categories %}
       <p class="text-muted text-sm mb-1" role="status">
-        To fix these findings, use <strong>Onboard This App</strong> above, then Dry Run → Apply on Onboard Results.
-        Per-finding Fix appears here after onboarding.
+        To fix these findings, use <strong>Onboard This App</strong> above -- automatic validation and delivery
+        run on their own from there. Per-finding Fix appears here after onboarding.
       </p>
       {% endif %}
       <ul class="finding-list">
@@ -561,7 +562,7 @@
     {% if recently_resolved_actions_count %}
     <p>No pending actions. {{ recently_resolved_actions_count }} resolved in the last 24 hours for this app.</p>
     {% else %}
-    <p>No pending actions for this app. After Onboard → Dry Run → Apply, gates needing your review will show up here.</p>
+    <p>No pending actions for this app. After Onboard, automatic validation runs and opens pull request(s) -- anything needing your review will show up here.</p>
     {% endif %}
   </div>
   {% endif %}

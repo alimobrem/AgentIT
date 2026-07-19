@@ -386,7 +386,7 @@ async def test_onboard_results_page(client, _override_store):
     assert "Commit &amp; Open PR" in resp.text or "Commit & Open PR" in resp.text
     assert "Deliver Now" not in resp.text
     assert "Per-Agent PRs" in resp.text
-    assert "Dry Run" in resp.text
+    assert "Run Automatic Validation" in resp.text
     assert "delivery-actions" in resp.text
     assert "delivery-primary" in resp.text
     assert "delivery-choice" in resp.text

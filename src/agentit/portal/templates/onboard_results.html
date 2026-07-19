@@ -21,6 +21,11 @@
 {# One primary status region: error XOR dry-run/delivery flash. #}
 {% if request.query_params.get('error') %}
 <div class="alert alert-error" role="status">{{ request.query_params.get('error') }}</div>
+{% elif request.query_params.get('auto_delivered') %}
+<div class="alert alert-success" role="status">
+  <strong>Automatic validation complete.</strong> AgentIT ran the validation/fix loop, a final
+  quality review, and opened the pull request(s) below — waiting for your approval.
+</div>
 {% elif request.query_params.get('dry_run_summary') %}
 <div class="alert alert-info" role="status">
   <strong>Dry run complete — nothing was delivered.</strong>
@@ -237,9 +242,15 @@
 {% endif %}
 {% endif %}
 
-{# EDL §7: Dry Run → deliver choice (combined vs per-agent). Status chips
-   outside CTAs. Both deliver options soft-gated until Dry Run succeeds;
-   dry_run_done is server-computed (persisted apply_results and/or flash). #}
+{# EDL §7 (updated for the automatic validation pipeline, auto_delivery.py):
+   step 1 no longer runs a bare Dry Run -- it runs the same validate -> fix
+   -> re-validate -> final review pipeline onboarding already triggers
+   automatically once manifests are generated. This button is the manual
+   re-trigger for it (after an edit, or to retry a prior "needs
+   attention" outcome) -- both deliver options below stay soft-gated on
+   the SAME dry_run_done signal as before (now also set once this
+   pipeline's own validation converges, not only by a bare manual dry
+   run -- see auto_delivery.py::auto_validate_and_deliver()). #}
 {% set _dry_done = dry_run_done|default(false) %}
 {% set _delivered = apply_results and not apply_results.get('dry_run') and not apply_results.get('errors') %}
 {% set _dry_failed = apply_results and apply_results.get('dry_run') and apply_results.get('errors') %}
@@ -250,24 +261,28 @@
     <div class="delivery-step">
       <div class="delivery-step-row">
         <span class="delivery-step-num {% if _dry_done or _delivered %}is-done{% elif not apply_results %}is-active{% endif %}" aria-hidden="true">1</span>
-        <form method="post" action="/assessments/{{ assessment_id }}/deliver" class="inline-form"
+        <form method="post" action="/assessments/{{ assessment_id }}/onboard-results/run-validation" class="inline-form"
               @submit="busy = 'dry-run'">
-          <input type="hidden" name="dry_run" value="true">
           <button type="submit" class="btn btn-outline" data-action="dry-run"
                   :disabled="busy !== ''" :aria-busy="busy === 'dry-run'"
                   :class="{ 'btn-loading': busy === 'dry-run', 'submitting': busy === 'dry-run' }">
-            <span class="btn-label">Dry Run</span>
+            <span class="btn-label">Run Automatic Validation</span>
             <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Working&hellip;</span>
           </button>
         </form>
       </div>
-      {% if _dry_done and not _delivered %}
+      {% if pr_opened_count %}
       <div class="delivery-step-status">
-        <span class="badge badge-low">Dry run passed</span>
+        <span class="badge badge-low">Delivered automatically</span>
+        <span>{{ pr_opened_count }} pull request{{ 's' if pr_opened_count != 1 }} already opened above.</span>
+      </div>
+      {% elif _dry_done and not _delivered %}
+      <div class="delivery-step-status">
+        <span class="badge badge-low">Validation passed</span>
       </div>
       {% elif _dry_failed %}
       <div class="delivery-step-status">
-        <span class="badge badge-critical">Dry run failed</span>
+        <span class="badge badge-critical">Validation failed</span>
         <span>Fix errors in the Apply Report below, then retry.</span>
       </div>
       {% endif %}
@@ -319,8 +334,8 @@
         <span class="badge badge-critical" title="No GitOps infra repo is known for this assessment -- Direct Apply has been removed, so this app must be registered for GitOps before it can be delivered.">Not GitOps-registered</span>
         <span>Register this app for GitOps (see Assessment Detail) before delivering.</span>
         {% elif not _dry_done and not _delivered %}
-        <span class="badge badge-warning" title="No successful Dry Run yet — run Dry Run first.">No dry run yet</span>
-        <span>Run Dry Run before delivering.</span>
+        <span class="badge badge-warning" title="No successful validation yet — run automatic validation first.">No validation yet</span>
+        <span>Run automatic validation before delivering.</span>
         {% elif _delivered %}
         <span class="badge badge-low">Delivered</span>
         {% elif _dry_done %}
