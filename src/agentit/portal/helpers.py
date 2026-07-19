@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time as _time
 from urllib.parse import urlparse
 
@@ -18,7 +19,25 @@ def get_retention_days() -> int:
 
 
 class CircuitBreaker:
-    """Simple circuit breaker: opens after threshold failures, resets after reset_after seconds."""
+    """Simple circuit breaker: opens after threshold failures, resets after reset_after seconds.
+
+    ``llm_breaker``/``kube_breaker`` below are each one shared instance
+    called concurrently from many real OS threads (every ``LLMClient._chat()``
+    call and most of ``kube.py``'s real API-calling functions run inside
+    ``asyncio.to_thread`` from the portal's request handlers, plus every
+    watcher's own thread) -- ``record_failure()``/``record_success()``/
+    ``is_open`` used to read-modify-write ``self._failures``/
+    ``self._last_failure`` with no lock at all. Two concurrent failures
+    could interleave their ``+= 1`` (a lost update, undercounting real
+    failures and delaying an open breaker exactly when the dependency is
+    genuinely down) and a concurrent ``record_success()`` reset racing a
+    failing caller's ``record_failure()`` could similarly drop a real
+    failure. A ``threading.Lock`` (not an ``asyncio.Lock``) is correct here
+    the same way ``portal/routes/*.py``'s other to_thread-invoked TTL
+    caches use one: this class has no ``await`` in its critical section and
+    is called from plain synchronous code on worker threads, not
+    coroutines.
+    """
 
     def __init__(self, name: str, threshold: int = 3, reset_after: float = 30.0):
         self.name = name
@@ -26,19 +45,23 @@ class CircuitBreaker:
         self._reset_after = reset_after
         self._failures = 0
         self._last_failure: float = 0
+        self._lock = threading.Lock()
 
     @property
     def is_open(self) -> bool:
-        if self._failures < self._threshold:
-            return False
-        return (_time.monotonic() - self._last_failure) < self._reset_after
+        with self._lock:
+            if self._failures < self._threshold:
+                return False
+            return (_time.monotonic() - self._last_failure) < self._reset_after
 
     def record_failure(self) -> None:
-        self._failures += 1
-        self._last_failure = _time.monotonic()
+        with self._lock:
+            self._failures += 1
+            self._last_failure = _time.monotonic()
 
     def record_success(self) -> None:
-        self._failures = 0
+        with self._lock:
+            self._failures = 0
 
     def __repr__(self) -> str:
         state = "OPEN" if self.is_open else "CLOSED"
