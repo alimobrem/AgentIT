@@ -1172,16 +1172,19 @@ async def escalate_unresolved_finding(
 
 
 async def redispatch_finding_fix(
-    store: object, llm_client: object, report: AssessmentReport, assessment_id: str,
+    store: object, report: AssessmentReport, assessment_id: str,
     app_name: str, finding: tuple[str, str],
 ) -> dict:
     """Phase 4's below-threshold branch: re-dispatch a fresh fix attempt for
     this exact finding through the same mechanism the original fix went
     through -- ``RemediationDispatcher.dispatch()`` to generate, then
-    ``AutoMode.execute()`` (-> ``route_and_deliver()``) to deliver -- reusing
-    the auto-chain machinery this same effort already wired end-to-end
-    (``webhook_github_push``'s auto-fixable loop, Phase 0's 9ccfa21) rather
-    than re-implementing delivery logic here.
+    ``route_and_deliver()`` directly to deliver (AutoMode has been removed;
+    it never did anything beyond an extra LLM safety classification on top
+    of this exact call for the cluster-config category -- see its own
+    former module docstring) -- reusing the auto-chain machinery this same
+    effort already wired end-to-end (``webhook_github_push``'s
+    auto-fixable loop, Phase 0's 9ccfa21) rather than re-implementing
+    delivery logic here.
 
     A category's skill/template renders deterministically (no LLM in the
     generation step itself, see ``RemediationDispatcher``'s module comment)
@@ -1190,10 +1193,11 @@ async def redispatch_finding_fix(
     still enough (a transient delivery failure, a race, a since-changed
     repo state), not as a mechanism for trying a materially different fix;
     a structurally wrong fix is exactly what ``FINDING_ESCALATION_THRESHOLD``
-    -- not this function -- is meant to catch.
+    -- not this function -- is meant to catch. Delivering a cluster-config
+    fix here still only ever opens a GitOps PR gated on a human merge,
+    never a direct cluster mutation.
     """
     category = finding[0]
-    from agentit.automode import AutoMode
     from agentit.remediation.dispatcher import RemediationDispatcher
 
     dispatcher = RemediationDispatcher(store)
@@ -1207,21 +1211,30 @@ async def redispatch_finding_fix(
         return {"action": "no-fix-available", "reason": reason}
 
     namespace = app_name.lower().replace("_", "-").replace(".", "-")
-    auto = AutoMode(store=store, publisher=None, llm_client=llm_client)
-    auto_result = await auto.execute(
-        assessment_id, dispatch_result["files"], namespace, report.criticality, True,
-        app_name, dispatch_result["agent"], report=report, target_findings=[finding],
+    delivery = await route_and_deliver(
+        dispatch_result["files"], app_name=app_name, namespace=namespace, report=report,
+        store=store, assessment_id=assessment_id, actor="delivery-verifier",
+        dry_run=False, target_findings=[finding],
     )
+    cluster_outcome = delivery["outcomes"].get(CATEGORY_CLUSTER_CONFIG)
+    if isinstance(cluster_outcome, dict) and cluster_outcome.get("gate_id"):
+        action = "delivered"
+        reason = f"Opened PR {cluster_outcome.get('pr_url', '')} -- awaiting human merge".strip()
+    elif isinstance(cluster_outcome, dict) and cluster_outcome.get("error"):
+        action, reason = "routing-error", cluster_outcome["error"]
+    else:
+        action, reason = "delivered", "Delivered via the unified router"
+
     await _log_finding_resolution_outcome(
         store, app_name, "finding-redispatched", "info",
         f"Re-dispatched a fresh fix for '{category}' after a confirmed still-present finding: "
-        f"{auto_result['action']} -- {auto_result['reason']}",
+        f"{action} -- {reason}",
     )
-    return {"action": auto_result["action"], "reason": auto_result["reason"], "agent": dispatch_result["agent"]}
+    return {"action": action, "reason": reason, "agent": dispatch_result["agent"]}
 
 
 async def handle_confirmed_finding_failure(
-    store: object, llm_client: object, report: AssessmentReport, assessment_id: str,
+    store: object, report: AssessmentReport, assessment_id: str,
     app_name: str, finding: tuple[str, str],
 ) -> dict:
     """Phase 4's single decision point, called once per still-present
@@ -1240,32 +1253,32 @@ async def handle_confirmed_finding_failure(
         gate_id = await escalate_unresolved_finding(store, assessment_id, app_name, finding, failure_count)
         return {"action": "escalated", "gate_id": gate_id, "failure_count": failure_count}
     # Nested (not flattened via `**result`) deliberately: redispatch_finding_
-    # fix() returns its own "action" key (the underlying AutoMode outcome,
-    # e.g. "gated"/"applied") -- flattening it would silently overwrite this
-    # function's own "redispatched" vs. "escalated" decision, the one thing
-    # a caller most needs to tell apart.
-    result = await redispatch_finding_fix(store, llm_client, report, assessment_id, app_name, finding)
+    # fix() returns its own "action" key (the underlying delivery outcome,
+    # e.g. "delivered"/"routing-error") -- flattening it would silently
+    # overwrite this function's own "redispatched" vs. "escalated"
+    # decision, the one thing a caller most needs to tell apart.
+    result = await redispatch_finding_fix(store, report, assessment_id, app_name, finding)
     return {"action": "redispatched", "failure_count": failure_count, "redispatch_result": result}
 
 
 async def check_pending_delivery_verifications(
     store: object, app_name: str, new_report: AssessmentReport, new_assessment_id: str,
-    *, auto_mode: bool = False, llm_client: object | None = None,
 ) -> list[dict]:
     """Phase 3 + Phase 4's single entry point, called from
     ``webhook_github_push``'s existing diff-triggered re-assessment flow
-    (routes/webhooks.py) for every push-triggered re-assessment, regardless
-    of ``auto_mode``: for every delivery on this app awaiting a finding
-    check (``store.list_deliveries_pending_finding_check()``), correlate
-    against ``new_report`` and persist+log the real outcome (Phase 3).
+    (routes/webhooks.py) for every push-triggered re-assessment: for every
+    delivery on this app awaiting a finding check
+    (``store.list_deliveries_pending_finding_check()``), correlate against
+    ``new_report`` and persist+log the real outcome (Phase 3), then react
+    to a confirmed ``"still_present"`` outcome (Phase 4: bounded auto-
+    retry, then escalate).
 
-    ``auto_mode`` additionally gates Phase 4's reaction to a confirmed
-    ``"still_present"`` outcome (bounded auto-retry, then escalate) -- the
-    same toggle this webhook's own existing ``diff.auto_fixable`` loop
-    already respects for its own auto-dispatch decision, so re-dispatching
-    (an automated delivery) never fires when the repo owner hasn't opted
-    into automated delivery at all; ``False`` still fully completes Phase
-    3's correlation+logging, it just never re-dispatches or escalates.
+    Both phases are unconditional -- there is no more ``auto_mode`` toggle
+    to gate Phase 4 behind (AutoMode has been removed): a still-present
+    target finding always either re-dispatches a fresh fix attempt (below
+    ``FINDING_ESCALATION_THRESHOLD`` confirmed failures) or escalates to a
+    real, visible human-review gate (at or above it) -- see
+    ``handle_confirmed_finding_failure()``.
     """
     pending = await store.list_deliveries_pending_finding_check(app_name)
     results: list[dict] = []
@@ -1295,11 +1308,10 @@ async def check_pending_delivery_verifications(
         )
 
         escalations = []
-        if auto_mode:
-            for key in outcome["still_present_findings"]:
-                escalations.append(await handle_confirmed_finding_failure(
-                    store, llm_client, new_report, new_assessment_id, app_name, tuple(key),
-                ))
+        for key in outcome["still_present_findings"]:
+            escalations.append(await handle_confirmed_finding_failure(
+                store, new_report, new_assessment_id, app_name, tuple(key),
+            ))
         results.append({"delivery_id": d["id"], **outcome, "escalations": escalations})
     return results
 
