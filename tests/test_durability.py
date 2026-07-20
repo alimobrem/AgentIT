@@ -120,12 +120,6 @@ class TestRefreshDbMetrics:
         await refresh_db_metrics(store)  # must not raise even with no Kafka configured
 
 
-class TestRemediationThreadLimits:
-    def test_active_job_count(self):
-        from agentit.remediation_loop import active_job_count
-        assert isinstance(active_job_count(), int)
-
-
 class TestDataExport:
     async def test_export_all_returns_tables(self):
         store = await make_store()

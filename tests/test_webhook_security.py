@@ -19,8 +19,8 @@ def _fake_request(headers: dict | None = None) -> MagicMock:
 class TestGetDeliveryIdFallback:
     """Unit tests for `_get_delivery_id`'s no-header content-hash fallback --
     see its docstring in `webhooks.py` for the real bug this time-bucketing
-    fixes (Tekton's `register-self-in-fleet` step and `RemediationLoop.
-    _assess()` both repeat an identical body on every real call, with no
+    fixes (Tekton's `register-self-in-fleet` step and the `reassess-scheduler`
+    watcher both repeat an identical body on every real call, with no
     delivery-id header)."""
 
     def test_prefers_the_github_delivery_header_when_present(self):
@@ -42,8 +42,8 @@ class TestGetDeliveryIdFallback:
     def test_same_body_in_a_later_time_bucket_yields_a_different_id(self):
         """The actual fix: without this, the Tekton `register-self-in-fleet`
         step's identical {repo_url, criticality} body on every CI run (and
-        every same-app/criticality `RemediationLoop._assess()` retrigger)
-        would collide forever within the dedup retention window."""
+        every same-app/criticality `reassess-scheduler` retrigger) would
+        collide forever within the dedup retention window."""
         from agentit.portal.routes.webhooks import _DEDUP_TIME_BUCKET_SECONDS, _get_delivery_id
 
         request = _fake_request()
@@ -154,18 +154,6 @@ class TestInternalWebhookToken:
     async def test_onboard_requires_token(self, portal_client):
         client, _, _ = portal_client
         resp = await client.post("/api/webhook/onboard", json={"eventId": "evt-1"})
-        assert resp.status_code == 401
-
-    @patch.dict(os.environ, {"AGENTIT_INTERNAL_WEBHOOK_TOKEN": "s3cr3t-token"})
-    async def test_auto_apply_requires_token(self, portal_client):
-        client, _, _ = portal_client
-        resp = await client.post("/api/webhook/auto-apply", json={"assessment_id": "x"})
-        assert resp.status_code == 401
-
-    @patch.dict(os.environ, {"AGENTIT_INTERNAL_WEBHOOK_TOKEN": "s3cr3t-token"})
-    async def test_remediate_requires_token(self, portal_client):
-        client, _, _ = portal_client
-        resp = await client.post("/api/webhook/remediate", json={"repo_url": "https://github.com/t/r"})
         assert resp.status_code == 401
 
     @patch.dict(os.environ, {"AGENTIT_INTERNAL_WEBHOOK_TOKEN": "s3cr3t-token"})
@@ -352,8 +340,8 @@ class TestWebhookDedup:
         share an identical body (the normal case for both
         `chart/templates/tekton/pipeline.yaml`'s `register-self-in-fleet`
         step, which POSTs the exact same {repo_url, criticality} on every
-        CI run, and `RemediationLoop._assess()`, which does the same for
-        every remediation of a given app) must each be processed, not
+        CI run, and the `reassess-scheduler` watcher, which does the same
+        for every re-assessment of a given app) must each be processed, not
         silently collapsed into "duplicate" for the whole dedup retention
         window. `_get_delivery_id()`'s time-bucketed fallback should let a
         call from a later bucket through even with an identical body."""

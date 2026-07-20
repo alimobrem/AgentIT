@@ -39,14 +39,15 @@ def _get_delivery_id(request: Request, body: dict) -> str:
     window -- not just a theoretical edge case here: `/api/webhook/assess`
     is called with the exact same `{repo_url, criticality}` body on every
     Tekton CI run for a given app (`chart/templates/tekton/pipeline.yaml`'s
-    `register-self-in-fleet` step) and on every `RemediationLoop._assess()`
-    call for a given app/criticality (`remediation_loop.py`) -- neither
-    caller ever supplies a delivery-id header. Confirmed live-shaped bug:
-    a second, legitimate trigger for the same app+criticality within the
-    window got silently treated as a duplicate of the first, and
-    `RemediationLoop.trigger()` then raised an unhandled `KeyError` trying
-    to read `assessment_id` out of the resulting `{"status": "duplicate"}`
-    response instead of a real assessment result.
+    `register-self-in-fleet` step) and on every `reassess-scheduler` tick
+    for a given app/criticality (`watchers/reassess_scheduler.py`) -- neither
+    caller ever supplies a delivery-id header. Confirmed live-shaped bug (via
+    the now-deleted `RemediationLoop`, which called this same route the same
+    way): a second, legitimate trigger for the same app+criticality within
+    the window got silently treated as a duplicate of the first, and the
+    caller raised an unhandled `KeyError` trying to read `assessment_id` out
+    of the resulting `{"status": "duplicate"}` response instead of a real
+    assessment result.
     Folding in a coarse time bucket keeps near-simultaneous duplicate
     POSTs deduped while letting later, content-identical-but-unrelated
     calls each go through. (`/api/webhook/github-push` always carries a
@@ -390,50 +391,6 @@ async def webhook_onboard(request: Request):
     })
 
 
-@router.post("/api/webhook/auto-apply", dependencies=[Depends(verify_internal_token)])
-async def webhook_auto_apply(request: Request):
-    """Point onboarding's generated manifests at Onboard Results for human review.
-
-    AutoMode (which used to decide here whether to auto-deliver via an LLM
-    safety classification) has been removed: delivery now always requires
-    an explicit human action -- the Deliver button on Onboard Results --
-    consistent with every other former AutoMode call site. No gate is
-    created (the ``gates`` table has been removed entirely): the generated
-    manifests are already real, durably-saved onboarding files
-    (``s.get_onboarding()``), so "review and deliver from Onboard Results"
-    is directly actionable with no separate approval row needed. (This
-    route is only reached via RemediationLoop's own pipeline, itself only
-    reachable today via a direct call to /api/webhook/remediate; it's kept,
-    unreachable from any autonomous trigger, for that explicit-invocation
-    case.)
-    """
-    body = await request.json()
-    assessment_id = body.get("assessment_id")
-    if not assessment_id:
-        raise HTTPException(400, "assessment_id required")
-
-    s = await get_store()
-    report = await s.get(assessment_id)
-    if report is None:
-        raise HTTPException(404, "Assessment not found")
-
-    files = await s.get_onboarding(assessment_id)
-    if files is None:
-        raise HTTPException(404, "Onboarding not found -- run onboarding first")
-
-    await s.log_event(
-        "dispatcher", "ready-for-delivery", report.repo_name, "info",
-        f"Generated {len(files)} manifest(s) for {report.repo_name} -- review and deliver from Onboard Results.",
-    )
-    result = {
-        "action": "ready_for_delivery",
-        "reason": "Delivery now always requires human review -- open Onboard Results to Deliver.",
-        "details": {"assessment_id": assessment_id},
-    }
-    log.info("auto-apply result for %s: %s -- %s", assessment_id, result["action"], result["reason"])
-    return JSONResponse(result)
-
-
 @router.post("/api/webhook/finding", dependencies=[Depends(verify_internal_token)])
 async def webhook_finding(request: Request):
     """Generic finding remediation -- routes to the right agent generator via the dispatcher.
@@ -495,38 +452,6 @@ async def webhook_finding(request: Request):
     return JSONResponse({"status": "accepted", "action": "alert-only"})
 
 
-@router.post("/api/webhook/remediate", dependencies=[Depends(verify_internal_token)])
-async def webhook_remediate(request: Request):
-    """Trigger the full remediation loop asynchronously.
-
-    Returns HTTP 202 with a job_id for polling status.
-    """
-    body = await request.json()
-    repo_url = body.get("repo_url")
-    if not repo_url:
-        raise HTTPException(400, "repo_url required")
-
-    app_name = body.get("app_name", repo_url.rstrip("/").split("/")[-1].removesuffix(".git"))
-    criticality = body.get("criticality", "medium")
-    reason = body.get("reason", "webhook trigger")
-
-    from agentit.remediation_loop import RemediationLoop
-    from agentit.events import get_publisher
-
-    # RemediationLoop is now genuinely async -- await it directly. start()
-    # itself schedules the actual pipeline as a background asyncio Task
-    # (see remediation_loop.py) so this route still returns immediately.
-    s = await get_store()
-    loop = RemediationLoop(store=s, publisher=get_publisher())
-    try:
-        job_id = await loop.start(repo_url, app_name, criticality, reason, store=s)
-    except Exception as exc:
-        log.exception("Failed to start remediation loop for %s", app_name)
-        return JSONResponse({"outcome": "failed", "error": str(exc)}, status_code=500)
-
-    return JSONResponse({"status": "accepted", "job_id": job_id}, status_code=202)
-
-
 @router.post("/api/webhook/skill-draft", dependencies=[Depends(verify_internal_token)])
 async def webhook_skill_draft(request: Request):
     """Internal-only endpoint so the ``skill-learner`` watcher's drafts land
@@ -542,8 +467,8 @@ async def webhook_skill_draft(request: Request):
     both EBS-backed/ReadWriteOnce), so a watcher-drafted skill was
     previously only ever visible via `oc exec` into that one pod. This
     mirrors the exact same ``AGENTIT_PORTAL_URL`` + internal-token pattern
-    ``RemediationLoop`` already uses (``remediation_loop.py``) to call back
-    into the portal from a separate watcher pod, and the
+    ``reassess-scheduler`` already uses (``watchers/reassess_scheduler.py``)
+    to call back into the portal from a separate watcher pod, and the
     ``/api/webhook/*`` + ``verify_internal_token`` convention every other
     in-cluster-only route above already follows.
 

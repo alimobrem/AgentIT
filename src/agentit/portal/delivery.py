@@ -1115,10 +1115,10 @@ async def handle_confirmed_finding_failure(
     below ``FINDING_ESCALATION_THRESHOLD`` confirmed failures for this
     (app, finding-category), re-dispatch a fresh attempt; at or above it,
     stop and escalate instead. This is the one place that decision is made
-    -- not scattered across ``RemediationLoop``/``VulnWatcher`` (a
-    structurally separate, watcher-triggered pipeline this phase never
-    touches -- neither one has any relationship to ``deliveries.
-    target_findings``/``finding_resolution`` today) or any other call site.
+    -- not scattered across ``VulnWatcher`` (a structurally separate,
+    watcher-triggered detection pipeline this phase never touches -- it has
+    no relationship to ``deliveries.target_findings``/``finding_resolution``
+    today) or any other call site.
     """
     category = finding[0]
     failure_count = await store.get_finding_failure_count(app_name, category)

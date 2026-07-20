@@ -40,11 +40,11 @@ async def test_check_fleet_with_empty_fleet_is_a_noop():
 
 
 class TestCriticalFindingsSurfaceAsAlertsOnly:
-    """AutoMode (and the remediation loop it used to trigger here for
-    critical/high findings) has been removed: check_fleet() now only ever
-    publishes an alert -- fixing a finding always requires a human to
-    explicitly Assess/Onboard/Deliver for that app, never an autonomous
-    background trigger."""
+    """AutoMode (and the RemediationLoop pipeline it used to trigger here for
+    critical/high findings -- both since fully deleted) has been removed:
+    check_fleet() now only ever publishes an alert -- fixing a finding
+    always requires a human to explicitly Assess/Onboard/Deliver for that
+    app, never an autonomous background trigger."""
 
     async def test_critical_findings_publish_alert_and_never_trigger_remediation(self):
         async_store, raw_store = await make_async_store()
@@ -53,10 +53,8 @@ class TestCriticalFindingsSurfaceAsAlertsOnly:
         publisher = MagicMock()
         watcher = await _watcher(store=(async_store, raw_store), publisher=publisher)
 
-        with patch("agentit.remediation_loop.RemediationLoop") as mock_loop_cls:
-            await watcher.check_fleet()
+        await watcher.check_fleet()
 
-        mock_loop_cls.assert_not_called()
         alert_calls = [
             c for c in publisher.publish.call_args_list
             if c.kwargs.get("action") == "critical-findings-detected"

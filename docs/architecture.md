@@ -441,7 +441,7 @@ deployment via `argocd/application.yaml`):
 
 | Watcher | Default interval | Role |
 |---|---|---|
-| **vuln-watcher** | 6h | Fleet CVE monitoring, triggers RemediationLoop |
+| **vuln-watcher** | 6h | Fleet CVE monitoring -- surfaces critical/high findings as alerts; fixing them requires a human to Assess/Onboard/Deliver (no autonomous fix pipeline) |
 | **slo-tracker** | 5m | SLO polling (real Prometheus `latency_p99_ms` + pod-status `availability`/`error_rate`), breach alerts, rollback gates |
 | **drift-detector** | 10m | Argo CD sync + API drift detection, auto-deprecation |
 | **skill-learner** | 24h | Researches CVEs via LLM, drafts new skills for human review (chart default: disabled; needs an LLM connection) |

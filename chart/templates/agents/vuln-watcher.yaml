@@ -60,17 +60,6 @@ spec:
               value: "postgresql://$(PGUSER):$(PGPASSWORD)@{{ .Release.Name }}-postgres-bundled.{{ .Release.Namespace }}.svc:5432/{{ .Values.postgres.bundled.credentials.database }}"
             - name: AGENTIT_PORTAL_URL
               value: http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc:8080
-            # RemediationLoop (remediation_loop.py) calls back into the
-            # portal's verify_internal_token-gated /api/webhook/* routes
-            # from this pod -- same pattern as skill-learner.yaml below.
-            # This was missing entirely, so every _assess() call 401'd
-            # once the portal started enforcing the token.
-            - name: AGENTIT_INTERNAL_WEBHOOK_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: agentit-internal-webhook-token
-                  key: token
-                  optional: true
           volumeMounts:
             - name: data
               mountPath: /data

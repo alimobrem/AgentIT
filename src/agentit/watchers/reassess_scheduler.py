@@ -9,12 +9,11 @@ on (``portal/routes/schedules.py::create_schedule()``). This is the first
 real mechanism: every tick, it asks the store which apps are due
 (``AssessmentStore.get_apps_due_for_reassessment()``) and, for each one,
 calls the exact same ``/api/webhook/assess`` route the manual Fleet
-"Scan" button and ``RemediationLoop._assess()``
-already use -- not a second, parallel assessment code path.
+"Scan" button already uses -- not a second, parallel assessment code path.
 
-Runs cross-pod (like ``RemediationLoop``/``SkillLearner``), so it calls back
-into the portal over HTTP via ``internal_webhook_client`` rather than
-importing the assess pipeline directly.
+Runs cross-pod (like ``SkillLearner``), so it calls back into the portal
+over HTTP via ``internal_webhook_client`` rather than importing the assess
+pipeline directly.
 """
 
 from __future__ import annotations
