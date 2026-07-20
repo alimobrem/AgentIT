@@ -209,7 +209,7 @@ class TestDefaultSlosDedup:
         assert len(first_slos) == 3
 
         # Re-onboard: a second orchestrator run against the *same*
-        # assessment_id, exactly what re-clicking "Onboard This App" does.
+        # assessment_id, exactly what re-clicking Scan/retrying Onboard does.
         orch2 = FleetOrchestrator(report, tmp_path / "out2", store=store, assessment_id=aid)
         await orch2.run()
 

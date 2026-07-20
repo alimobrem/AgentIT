@@ -189,14 +189,15 @@ class TestAssessmentDetailNextActionIndicator:
         assert "next push" in text
 
     async def test_no_next_action_noise_for_a_brand_new_never_onboarded_app(self, next_action_client):
-        """A fresh, never-onboarded app's only real next step is "Onboard
-        This App" (the existing lifecycle hint) -- restating "nothing
-        pending" underneath it would just be noise."""
+        """A fresh, never-onboarded app's only real next step is Scan (the
+        existing lifecycle hint, which always chains into onboarding
+        automatically) -- restating "nothing pending" underneath it would
+        just be noise."""
         client, store = next_action_client
         aid = await store.save(make_report(repo_name="ad-fresh-app"))
 
         text = (await client.get(f"/assessments/{aid}")).text
 
-        assert "Onboard This App" in text
+        assert "Onboard This App" not in text
         assert "Next action:" not in text
         assert "no periodic re-check on a schedule" not in text

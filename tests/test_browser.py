@@ -939,8 +939,9 @@ class TestFixButtonVisibility:
         assert unmatched_item.locator("button:has-text('Fix')").count() == 0
 
     def test_fix_button_hidden_pre_onboard_with_next_step_copy(self, page: Page, app_url):
-        """Pre-onboard Findings must not ship a Fix control — Onboard This App
-        is the generation path; Fix appears only after onboarding."""
+        """Pre-onboard Findings must not ship a Fix control — Scan (which
+        always chains into onboarding) is the generation path; Fix appears
+        only after onboarding."""
         from agentit.models import DimensionScore, Finding, Severity
 
         url, _, store = app_url
@@ -960,7 +961,7 @@ class TestFixButtonVisibility:
         item = page.locator(".finding-item", has_text="Pre-onboard finding: no NetworkPolicy")
         expect(item).to_be_visible()
         assert item.locator("button:has-text('Fix')").count() == 0
-        expect(page.locator("text=use Onboard This App")).to_be_visible()
+        expect(page.locator("text=running automatically")).to_be_visible()
 
     def test_fix_button_opens_confirm_modal(self, page: Page, app_url):
         """Post-onboard Fix must open the shared confirm modal (not a silent no-op)."""
