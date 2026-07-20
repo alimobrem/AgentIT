@@ -76,6 +76,44 @@ def check_github_token() -> dict:
     }
 
 
+def _find_existing_pr_url(base_url: str, hdrs: dict, owner: str, branch_name: str, fallback_url: str) -> str:
+    """GitHub's ``POST .../pulls`` returns 422 "pull request already exists"
+    when ``branch_name`` already has one open -- e.g. a second Deliver click
+    re-committing to the same branch before the first PR merged/closed.
+    Every PR-opening function in this module used to fall back to
+    constructing an inert ``{repo_url}/compare/{branch_name}`` link for this
+    case -- clickable, but never resolvable to a real lifecycle:
+    ``get_pr_status()`` can look one up by head branch (the same query this
+    function makes), but that only ever runs on a *later* page load, so the
+    very PR history/Ledger row this call's own return value seeds starts
+    out permanently stuck on "Unknown" until then, and every fresh delivery
+    to an already-open PR (e.g. a rejection-review edit + re-deliver) kept
+    re-showing that same dead-end link instead of the real, already-open
+    PR a human could actually click through to.
+
+    Looks up and returns that real PR's own ``html_url`` immediately instead,
+    so this never happens: an already-open PR's URL comes back exactly the
+    same whether this is the first commit or the fifth. Falls back to
+    ``fallback_url`` (the same ``/compare/{branch_name}`` link, still a
+    valid, clickable way to find the PR manually) only if the lookup itself
+    fails -- never raises, since a URL-resolution problem here must not
+    turn an otherwise-successful commit into an error.
+    """
+    try:
+        resp = requests.get(
+            f"{base_url}/pulls",
+            headers=hdrs, timeout=10,
+            params={"head": f"{owner}:{branch_name}", "state": "all", "per_page": 1},
+        )
+        resp.raise_for_status()
+        prs = resp.json()
+        if prs:
+            return prs[0]["html_url"]
+    except Exception:
+        logger.warning("Failed to look up existing PR for %s:%s", owner, branch_name, exc_info=True)
+    return fallback_url
+
+
 def get_pr_status(pr_url: str) -> dict:
     """Check the merge status of a GitHub PR.
 
@@ -440,7 +478,8 @@ def create_onboarding_pr(
             },
         )
         if resp.status_code == 422 and "pull request already exists" in resp.text.lower():
-            return {"pr_url": f"{repo_url}/compare/{branch_name}", "branch": branch_name, "files_added": len(files)}
+            pr_url = _find_existing_pr_url(base_url, hdrs, owner, branch_name, f"{repo_url}/compare/{branch_name}")
+            return {"pr_url": pr_url, "branch": branch_name, "files_added": len(files)}
         resp.raise_for_status()
 
         pr_url = resp.json()["html_url"]
@@ -640,7 +679,7 @@ def create_agent_prs(
                 },
             )
             if resp.status_code == 422 and "pull request already exists" in resp.text.lower():
-                pr_url = f"{repo_url}/compare/{branch_name}"
+                pr_url = _find_existing_pr_url(base_url, hdrs, owner, branch_name, f"{repo_url}/compare/{branch_name}")
             else:
                 resp.raise_for_status()
                 pr_url = resp.json()["html_url"]
@@ -797,7 +836,8 @@ def create_source_patch_pr(
             },
         )
         if resp.status_code == 422 and "pull request already exists" in resp.text.lower():
-            return {"pr_url": f"{repo_url}/compare/{branch_name}", "branch": branch_name, "files_committed": len(files)}
+            pr_url = _find_existing_pr_url(base_url, hdrs, owner, branch_name, f"{repo_url}/compare/{branch_name}")
+            return {"pr_url": pr_url, "branch": branch_name, "files_committed": len(files)}
         resp.raise_for_status()
 
         return {"pr_url": resp.json()["html_url"], "branch": branch_name, "files_committed": len(files)}
@@ -911,7 +951,7 @@ def commit_to_infra_repo(
             },
         )
         if resp.status_code == 422 and "pull request already exists" in resp.text.lower():
-            pr_url = f"{infra_repo_url}/compare/{branch_name}"
+            pr_url = _find_existing_pr_url(base_url, hdrs, owner, branch_name, f"{infra_repo_url}/compare/{branch_name}")
         else:
             resp.raise_for_status()
             pr_url = resp.json()["html_url"]

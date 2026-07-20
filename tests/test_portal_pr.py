@@ -5,6 +5,7 @@ import os
 from unittest.mock import MagicMock, patch
 
 from agentit.portal.github_pr import (
+    commit_to_infra_repo,
     create_agent_prs,
     create_onboarding_pr,
     ensure_applicationset,
@@ -78,6 +79,157 @@ def test_create_onboarding_pr_structure(mock_requests):
     paths = {t["path"] for t in tree_items}
     assert ".agentit/security/networkpolicy.yaml" in paths
     assert ".agentit/observability/servicemonitor.yaml" in paths
+
+
+@patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"})
+@patch("agentit.portal.github_pr.requests")
+def test_create_onboarding_pr_already_open_returns_the_real_pr_url_not_a_compare_link(mock_requests):
+    """GitHub's `POST .../pulls` 422s "pull request already exists" when
+    `branch_name` already has one open (a second commit to the same branch
+    before the first PR merged/closed). Used to fall back to an inert
+    `{repo_url}/compare/{branch_name}` link -- clickable, but never
+    resolvable to a real lifecycle (pr_tracking.py's annotate_lifecycle()
+    stays stuck on "Unknown" forever for it, since there's no PR number to
+    look up). Must look up and return the real, already-open PR's own
+    `html_url` instead."""
+    def mock_get(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        if url.endswith("/repos/org/my-app"):
+            resp.json.return_value = {"default_branch": "main"}
+        elif "git/ref/heads/main" in url:
+            resp.json.return_value = {"object": {"sha": "abc123"}}
+        elif url.endswith("/pulls"):
+            assert kwargs["params"]["head"] == "org:agentit/onboarding"
+            resp.json.return_value = [{"html_url": "https://github.com/org/my-app/pull/17"}]
+        return resp
+
+    def mock_post(url, **kwargs):
+        resp = MagicMock()
+        if url.endswith("/pulls"):
+            resp.status_code = 422
+            resp.text = "A pull request already exists for org:agentit/onboarding."
+            return resp
+        resp.status_code = 201
+        if "git/trees" in url:
+            resp.json.return_value = {"sha": "tree456"}
+        elif "git/commits" in url:
+            resp.json.return_value = {"sha": "commit789"}
+        elif "git/refs" in url:
+            resp.json.return_value = {"ref": "refs/heads/agentit/onboarding"}
+        return resp
+
+    mock_requests.get.side_effect = mock_get
+    mock_requests.post.side_effect = mock_post
+
+    result = create_onboarding_pr(
+        repo_url="https://github.com/org/my-app.git",
+        repo_name="my-app",
+        files=SAMPLE_FILES,
+        branch_name="agentit/onboarding",
+    )
+
+    assert result["pr_url"] == "https://github.com/org/my-app/pull/17"
+    assert "compare" not in result["pr_url"]
+
+
+@patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"})
+@patch("agentit.portal.github_pr.requests")
+def test_create_onboarding_pr_already_open_falls_back_to_compare_link_if_lookup_fails(mock_requests):
+    """The existing-PR lookup itself is best-effort -- a failure there must
+    still return a clickable (if unresolvable) link, never turn an
+    otherwise-successful commit into an error."""
+    def mock_get(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        if url.endswith("/repos/org/my-app"):
+            resp.json.return_value = {"default_branch": "main"}
+        elif "git/ref/heads/main" in url:
+            resp.json.return_value = {"object": {"sha": "abc123"}}
+        elif url.endswith("/pulls"):
+            resp.json.return_value = []
+        return resp
+
+    def mock_post(url, **kwargs):
+        resp = MagicMock()
+        if url.endswith("/pulls"):
+            resp.status_code = 422
+            resp.text = "A pull request already exists for org:agentit/onboarding."
+            return resp
+        resp.status_code = 201
+        if "git/trees" in url:
+            resp.json.return_value = {"sha": "tree456"}
+        elif "git/commits" in url:
+            resp.json.return_value = {"sha": "commit789"}
+        elif "git/refs" in url:
+            resp.json.return_value = {"ref": "refs/heads/agentit/onboarding"}
+        return resp
+
+    mock_requests.get.side_effect = mock_get
+    mock_requests.post.side_effect = mock_post
+
+    result = create_onboarding_pr(
+        repo_url="https://github.com/org/my-app.git",
+        repo_name="my-app",
+        files=SAMPLE_FILES,
+        branch_name="agentit/onboarding",
+    )
+
+    assert result["pr_url"] == "https://github.com/org/my-app.git/compare/agentit/onboarding"
+
+
+@patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"})
+@patch("agentit.portal.github_pr.requests")
+def test_commit_to_infra_repo_already_open_returns_the_real_pr_url_not_a_compare_link(mock_requests):
+    """Same fix as `create_onboarding_pr`'s -- and the one actually reported
+    live (a "Cluster config" delivery card kept rendering an inert
+    /compare/ link with a permanent "Unknown" lifecycle badge). Also
+    exercises `git/refs`' own, unrelated 422 (branch ref already exists,
+    force-updated) alongside `/pulls`' 422 (PR already exists) in the same
+    call -- they must not be confused with each other."""
+    def mock_get(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        if url.endswith("/repos/org/agentit-gitops"):
+            resp.json.return_value = {"default_branch": "main"}
+        elif "git/ref/heads/main" in url:
+            resp.json.return_value = {"object": {"sha": "abc123"}}
+        elif url.endswith("/pulls"):
+            assert kwargs["params"]["head"] == "org:agentit/agentit"
+            resp.json.return_value = [{"html_url": "https://github.com/org/agentit-gitops/pull/22"}]
+        return resp
+
+    def mock_post(url, **kwargs):
+        resp = MagicMock()
+        if url.endswith("/pulls"):
+            resp.status_code = 422
+            resp.text = "A pull request already exists for org:agentit/agentit."
+            return resp
+        resp.status_code = 201
+        if "git/trees" in url:
+            resp.json.return_value = {"sha": "tree456"}
+        elif "git/commits" in url:
+            resp.json.return_value = {"sha": "commit789"}
+        elif "git/refs" in url:
+            # The branch ref already exists too -- a real, separate 422
+            # this same call also has to handle (force-update via PATCH),
+            # unrelated to the /pulls one this test is about.
+            resp.status_code = 422
+        return resp
+
+    mock_requests.get.side_effect = mock_get
+    mock_requests.post.side_effect = mock_post
+    mock_requests.patch.return_value = MagicMock(status_code=200)
+
+    result = commit_to_infra_repo(
+        infra_repo_url="https://github.com/org/agentit-gitops",
+        app_name="agentit",
+        files=SAMPLE_FILES,
+        branch_name="agentit/agentit",
+    )
+
+    assert result["pr_url"] == "https://github.com/org/agentit-gitops/pull/22"
+    assert "compare" not in result["pr_url"]
 
 
 @patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"})
