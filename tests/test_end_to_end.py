@@ -133,7 +133,6 @@ async def _override_store():
          patch("agentit.portal.routes.schedules.get_store", return_value=async_store), \
          patch("agentit.portal.routes.fleet.get_store", return_value=async_store), \
          patch("agentit.portal.routes.assessments.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.gates.get_store", return_value=async_store), \
          patch("agentit.portal.routes.capabilities.get_store", return_value=async_store), \
          patch("agentit.portal.routes.settings.get_store", return_value=async_store), \
          patch("agentit.portal.routes.insights.get_store", return_value=async_store), \
@@ -233,24 +232,6 @@ async def test_onboard_generates_files_for_all_dimensions(client, _override_stor
     assert any("service-monitor" in p for p in paths), paths
     assert any("tekton-pipeline" in p for p in paths), paths
     assert any("kyverno" in p for p in paths), paths
-
-
-# ------------------------------------------------------------------
-# 3. Onboard creates a gate
-# ------------------------------------------------------------------
-
-
-async def test_onboard_does_not_auto_create_gate(client, _override_store):
-    """POST onboard should NOT auto-create a gate — gates are only for risky actions."""
-    store = _override_store
-    report = _make_report_with_findings("gate-repo")
-    aid = await store.save(report)
-
-    await client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
-
-    pending = await store.list_gates(status="pending")
-    gate_aids = [g["assessment_id"] for g in pending]
-    assert aid not in gate_aids
 
 
 # ------------------------------------------------------------------

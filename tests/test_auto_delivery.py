@@ -205,9 +205,9 @@ class TestNotifyPrReady:
         pr_urls = await notify_pr_ready(store, report.repo_name, aid, delivery, review=None)
 
         assert pr_urls == ["https://github.com/org/infra/pull/9"]
-        # No gate was queried or created to produce this signal.
-        gates = await store.list_gates(status="pending")
-        assert gates == []
+        # The `gates` table/generic gate-resolution machinery has been
+        # removed entirely (2026-07-19) -- this signal is sourced purely
+        # from the delivery's own outcomes, confirmed above.
         events = await store.list_events_by_correlation_id(aid)
         assert any(e["action"] == "onboarding-pr-ready" for e in events)
 

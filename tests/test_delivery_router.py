@@ -9,7 +9,6 @@ from unittest.mock import patch
 
 from agentit import kube
 from agentit.portal.delivery import (
-    _CICD_SHARED_NAMESPACE_GATE_TYPE,
     CATEGORY_CICD_SHARED_NAMESPACE,
     CATEGORY_CLUSTER_CONFIG,
     CATEGORY_MANIFEST_AT_REST,
@@ -340,10 +339,11 @@ class TestRouteAndDeliverClusterConfig:
         mock_commit.assert_called_once()
         mock_ensure.assert_called_once()
         mock_apply.assert_not_called()
-        gate_id = result["outcomes"]["cluster_config"].get("gate_id")
-        assert gate_id
-        gates = await raw.list_gates(status="pending")
-        assert any(g["id"] == gate_id and g["gate_type"] == "gitops-pr-pending" for g in gates)
+        # No gate is created (the `gates` table/generic gate-resolution
+        # machinery has been removed entirely, 2026-07-19) -- the PR itself
+        # is the only durable record; pr_tracking.py derives "waiting for
+        # your approval" from its live GitHub state.
+        assert result["outcomes"]["cluster_config"]["pr_url"] == "https://github.com/org/infra-gitops/pull/1"
 
     async def test_not_yet_registered_with_infra_repo_url_bootstraps_infra_commit(self):
         """The bootstrap-circularity fix (docs/onboarding-loop-vision-gap-
@@ -378,14 +378,10 @@ class TestRouteAndDeliverClusterConfig:
         mock_commit.assert_called_once()
         mock_ensure.assert_called_once()
         mock_apply.assert_not_called()
-        # And it still opens the gitops-pr-pending gate, exactly like the
-        # already-registered infra-repo-commit path -- a human still
-        # merges, AgentIT still never auto-merges, for the bootstrap
-        # delivery too.
-        gate_id = result["outcomes"]["cluster_config"].get("gate_id")
-        assert gate_id
-        gates = await raw.list_gates(status="pending")
-        assert any(g["id"] == gate_id and g["gate_type"] == "gitops-pr-pending" for g in gates)
+        # And it still opens the real PR, exactly like the already-
+        # registered infra-repo-commit path -- a human still merges,
+        # AgentIT still never auto-merges, for the bootstrap delivery too.
+        assert result["outcomes"]["cluster_config"]["pr_url"] == "https://github.com/org/infra-gitops/pull/1"
 
     async def test_placeholder_files_are_not_committed(self):
         store, raw = await make_async_store()
@@ -450,18 +446,19 @@ class TestRouteAndDeliverCicdLane:
         mock_commit.assert_called_once()
         outcome = result["outcomes"][CATEGORY_CICD_SHARED_NAMESPACE]
         assert outcome["pr_url"] == "https://github.com/org/infra-gitops/pull/1"
-        gates = await raw.list_gates(status="pending")
-        assert len(gates) == 1
-        # Its own distinct gate type -- see _CICD_SHARED_NAMESPACE_GATE_TYPE
-        # -- not the standard "gitops-pr-pending" (avoids colliding with a
-        # same-app cluster-config gate in a mixed batch; see the mixed-
-        # batch test below).
-        assert gates[0]["gate_type"] == _CICD_SHARED_NAMESPACE_GATE_TYPE
-        assert "openshift-pipelines" in gates[0]["summary"]
-        assert "shared, cluster-wide operator namespace" in gates[0]["summary"]
-        assert outcome["gate_id"] == gates[0]["id"]
-        # Never a direct apply -- this is now a plain GitOps PR merge-review
-        # gate, same as cluster-config's, not an elevated-RBAC apply.
+        # No gate is created anymore (the `gates` table/generic gate-
+        # resolution machinery has been removed entirely, 2026-07-19) -- the
+        # only durable record of this delivery is the observability event
+        # logged by _deliver_via_gitops_pr(); real "waiting for your
+        # approval"/merged/rejected status comes from pr_tracking.py's live
+        # PR-status derivation instead.
+        events = await raw.list_events(target_app=report.repo_name)
+        opened_events = [e for e in events if e["action"] == "gitops-pr-opened"]
+        assert len(opened_events) == 1
+        assert "openshift-pipelines" in opened_events[0]["summary"]
+        assert "shared, cluster-wide operator namespace" in opened_events[0]["summary"]
+        # Never a direct apply -- this is now a plain GitOps PR merge-review,
+        # same as cluster-config's, not an elevated-RBAC apply.
         mock_apply.assert_not_called()
 
     async def test_cicd_commit_uses_a_distinct_path_prefix_and_branch(self):
@@ -499,7 +496,7 @@ class TestRouteAndDeliverCicdLane:
         -> Deliver chain (assessments.py's onboarding auto-chain): a Dry
         Run that now runs unconditionally after every onboarding surfaced
         that this branch had no such guard, unlike every other mechanism
-        here -- a "preview" call was silently opening a real, pending gate."""
+        here -- a "preview" call was silently opening a real PR."""
         store, raw = await make_async_store()
         report = make_report()
         report.infra_repo_url = "https://github.com/org/infra-gitops"
@@ -511,11 +508,11 @@ class TestRouteAndDeliverCicdLane:
                 actor="tester", dry_run=True,
             )
         mock_commit.assert_not_called()
-        gates = await raw.list_gates(status="pending")
-        assert gates == []
+        events = await raw.list_events(target_app=report.repo_name)
+        assert not any(e["action"] == "gitops-pr-opened" for e in events)
         outcome = result["outcomes"][CATEGORY_CICD_SHARED_NAMESPACE]
         assert outcome["dry_run"] is True
-        assert "gate_id" not in outcome
+        assert "pr_url" not in outcome
         assert outcome["files"] == ["pipeline.yaml"]
 
     async def test_no_infra_repo_refuses_cicd_delivery_with_no_direct_apply_fallback(self):
@@ -539,8 +536,8 @@ class TestRouteAndDeliverCicdLane:
         outcome = result["outcomes"][CATEGORY_CICD_SHARED_NAMESPACE]
         assert "error" in outcome
         assert "GitOps" in outcome["error"]
-        gates = await raw.list_gates(status="pending")
-        assert gates == []
+        events = await raw.list_events(target_app=report.repo_name)
+        assert not any(e["action"] == "gitops-pr-opened" for e in events)
 
     async def test_cicd_and_cluster_config_lanes_both_deliver_via_gitops_independently(self):
         """The product-owner question this guards against (originally about
@@ -581,14 +578,16 @@ class TestRouteAndDeliverCicdLane:
         # distinct, explicit one -- see _CICD_SHARED_NAMESPACE_PATH_PREFIX.
         branches = {call.args[3] for call in mock_commit.call_args_list}
         assert branches == {None, f"agentit/{report.repo_name}-cicd-shared-namespace"}
-        # Two distinct PRs -> two distinct gitops-pr-pending gates.
+        # Two distinct, independent PRs -- no gate is created for either
+        # (the `gates` table/generic gate-resolution machinery has been
+        # removed entirely, 2026-07-19); each PR's own live GitHub state is
+        # the only source of truth for "waiting for your approval" now.
         cluster_pr = result["outcomes"][CATEGORY_CLUSTER_CONFIG]["pr_url"]
         cicd_pr = result["outcomes"][CATEGORY_CICD_SHARED_NAMESPACE]["pr_url"]
         assert cluster_pr != cicd_pr
-        gates = await raw.list_gates(status="pending")
-        assert len(gates) == 2
-        assert {g["gate_type"] for g in gates} == {"gitops-pr-pending", _CICD_SHARED_NAMESPACE_GATE_TYPE}
-        assert {g["pr_url"] for g in gates} == {cluster_pr, cicd_pr}
+        events = await raw.list_events(target_app=report.repo_name)
+        opened_events = [e for e in events if e["action"] == "gitops-pr-opened"]
+        assert len(opened_events) == 2
         # Neither branch performed a direct cluster apply.
         mock_apply.assert_not_called()
 

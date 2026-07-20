@@ -109,30 +109,16 @@ class TestInfraRepoFlow:
                     assert tree_items[0]["path"].startswith("apps/myapp/")
 
 
-class TestGateLifecycleFlow:
-    """Gates: dedup, expire, cascade delete."""
+class TestDeleteCascade:
+    """Delete removes every dependent record for the assessment."""
 
-    async def test_full_gate_lifecycle(self):
+    async def test_delete_cascades_slos(self):
         store = await make_store()
         aid = await store.save(make_report())
-
-        g1 = await store.create_gate(aid, "deploy", "Approve")
-        g2 = await store.create_gate(aid, "deploy", "Duplicate")
-        assert g1 == g2
-
-        await store.resolve_gate(g1, "approved", "user")
-        assert len(await store.list_gates("pending")) == 0
-        assert len(await store.list_gates("approved")) == 1
-
-    async def test_delete_cascades_gates(self):
-        store = await make_store()
-        aid = await store.save(make_report())
-        await store.create_gate(aid, "deploy", "Gate")
         await store.save_slo(aid, "avail", 99.9)
 
         await store.delete(aid)
         assert await store.get(aid) is None
-        assert await store.list_gates_for_assessment(aid) == []
         assert await store.list_slos(aid) == []
 
 

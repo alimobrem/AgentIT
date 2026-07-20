@@ -39,7 +39,6 @@ async def ui_client():
     store = await make_store()
     with patch("agentit.portal.app.get_store", return_value=store), \
          patch("agentit.portal.routes.assessments.get_store", return_value=store), \
-         patch("agentit.portal.routes.gates.get_store", return_value=store), \
          patch("agentit.portal.routes.fleet.get_store", return_value=store):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True) as client:
             await prime_csrf(client)
@@ -230,34 +229,40 @@ class TestDeliverFlowFlashRepoLabels:
         assert "PR opened against the code repo" in page.text
 
 
-class TestGitopsGateMergeRepoLabel:
-    """gitops-pr-pending gates only ever exist for a merged commit against
-    the GitOps infra repo (routes/gates.py) -- confirm the redirect/flash
-    it produces is labeled accordingly rather than a bare PR link."""
+class TestGitopsPrMergeRedirect:
+    """A `cluster_config`-delivered PR (via the GitOps infra repo) merges
+    through the same real `/prs/merge` action every other PR-backed
+    category uses now (the `gates` table/generic gate-resolution
+    machinery has been removed entirely, 2026-07-19) -- confirm merging it
+    lands back on that app's own Ledger tab, where the PR's real GitOps-
+    repo link is already visible in the PR history table."""
 
-    async def test_approving_gitops_pr_pending_gate_labels_gitops_repo(self, ui_client):
+    async def test_merging_a_gitops_delivered_pr_redirects_to_own_ledger_tab(self, ui_client):
         client, store = ui_client
         report = make_report(repo_name="gate-merge-gitops-app")
         aid = await store.save(report)
         await store.save_onboarding(aid, [_skill_file()])
-        gate_id = await store.create_gate(
-            aid, "gitops-pr-pending",
-            "AgentIT will: commit to `https://github.com/org/gate-merge-infra-gitops` and open a PR. "
-            "PR opened: https://github.com/org/gate-merge-infra-gitops/pull/3. "
-            "Approving this gate merges the PR -- AgentIT never auto-merges.",
+        pr_url = "https://github.com/org/gate-merge-infra-gitops/pull/3"
+        await store.create_delivery(
+            aid, report.repo_name, {"cluster_config": 1}, mechanism="cluster_config:infra-repo-commit",
+            status="delivered", details={"outcomes": {"cluster_config": {"pr_url": pr_url}}},
         )
 
         with patch("agentit.portal.github_pr.merge_pr") as mock_merge:
             mock_merge.return_value = {"merged": True, "sha": "abc123"}
             resp = await client.post(
-                f"/gates/{gate_id}/resolve",
-                data={"status": "approved", "resolved_by": "tester"},
+                "/prs/merge",
+                data={"pr_url": pr_url, "assessment_id": aid},
                 follow_redirects=False,
             )
 
         assert resp.status_code == 303
-        assert "pr_url_repo=gitops" in resp.headers["location"]
+        assert f"/assessments/{aid}?tab=ledger" in resp.headers["location"]
 
-        page = await client.get(resp.headers["location"])
+        with patch(
+            "agentit.portal.github_pr.get_pr_status",
+            return_value={"state": "merged", "html_url": pr_url, "title": "fix", "merged_at": "2026-01-05T00:00:00"},
+        ):
+            page = await client.get(resp.headers["location"])
         assert page.status_code == 200
-        assert "PR opened against the GitOps repo" in page.text
+        assert pr_url in page.text

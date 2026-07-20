@@ -174,14 +174,17 @@ class TestCVEWebhook:
         data = resp.json()
         assert data["action"] == "alert-only"
 
-    async def test_finding_webhook_always_gates_for_human_review(
+    async def test_finding_webhook_never_auto_delivers(
         self, client, _override_store,
     ) -> None:
         """AutoMode (which used to conditionally auto-apply here via an LLM
         safety classification, logged as a per-agent-attributed 'decision'
-        event) has been removed -- a dispatched fix always gates for human
-        review now, with no LLM classification step and no 'decision' event
-        at all for this path."""
+        event) has been removed -- a dispatched fix is now generated but
+        never delivered (no gate is created either, the `gates` table/
+        generic gate-resolution machinery has been removed entirely) --
+        the real next step is re-running Onboard for this app to review
+        and deliver it from Onboard Results, with no LLM classification
+        step and no 'decision' event at all for this path."""
         store = _override_store
         report = make_report(
             repo_name="netpol-app",
@@ -200,13 +203,13 @@ class TestCVEWebhook:
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert data["action"] == "gated"
-        assert data["gate_id"]
+        assert data["action"] == "fix-not-delivered"
+        assert data["files_generated"] >= 1
 
         # No more LLM safety classification -- no "decision" event for this
         # path anymore.
         decision_events = await store.list_events_by_action("decision")
         assert decision_events == []
 
-        gates = await store.list_gates(status="pending")
-        assert any(g["gate_type"] == "finding-network" for g in gates)
+        events = await store.list_events(target_app="netpol-app")
+        assert any(e["action"] == "fix-not-delivered" for e in events)

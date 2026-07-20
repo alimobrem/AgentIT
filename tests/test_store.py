@@ -170,15 +170,14 @@ class TestAssessments:
 
     async def test_delete_removes_every_historical_assessment_for_the_app(self, store):
         """A Delete on the app's LATEST assessment must remove every prior
-        assessment of that same repo_url too (plus their gates/
-        slos/onboarding), not just the one id passed in --
-        otherwise get_fleet_data()'s MAX(assessed_at) join resurrects the
-        "deleted" app via an older surviving assessment row, contradicting
-        fleet.html's "cannot be undone" confirm text."""
+        assessment of that same repo_url too (plus their slos/onboarding),
+        not just the one id passed in -- otherwise get_fleet_data()'s
+        MAX(assessed_at) join resurrects the "deleted" app via an older
+        surviving assessment row, contradicting fleet.html's "cannot be
+        undone" confirm text."""
         old_id = await store.save(_make_report("multi-run-app"))
         new_id = await store.save(_make_report("multi-run-app"))
 
-        gate_id = await store.create_gate(old_id, "rollback-review", "old gate")
         slo_id = await store.save_slo(old_id, "latency_p99_ms", 200)
         await store.save_onboarding(old_id, [{"category": "x", "path": "a.yaml", "content": "", "description": ""}])
 
@@ -197,11 +196,8 @@ class TestAssessments:
         assert await store.get(new_id) is None
 
         # Every dependent of the OLD assessment (not just the latest) is gone too.
-        assert await store.list_gates_for_assessment(old_id) == []
         assert await store.list_slos(old_id) == []
         assert await store.get_onboarding(old_id) is None
-        gate_row = await store._pool.fetchrow("SELECT 1 FROM gates WHERE id = $1", gate_id)
-        assert gate_row is None
         slo_row = await store._pool.fetchrow("SELECT 1 FROM slos WHERE id = $1", slo_id)
         assert slo_row is None
 
@@ -524,19 +520,19 @@ class TestDedupeRepoUrls:
         assert gone is None
 
     async def test_dependents_of_the_merged_variant_survive_the_merge(self, store):
-        """Gates/SLOs/onboarding hanging off the non-canonical
-        variant's assessment id must still resolve after the merge --
-        they're keyed by `assessment_id`, which never changes; only the
-        parent assessment's `repo_url` string does."""
+        """SLOs/onboarding hanging off the non-canonical variant's
+        assessment id must still resolve after the merge -- they're keyed
+        by `assessment_id`, which never changes; only the parent
+        assessment's `repo_url` string does."""
         dotgit_id = await self._insert_legacy_unnormalized_row(
             store, repo_url="https://github.com/org/deps-dup.git", repo_name="deps-dup",
         )
-        gate_id = await store.create_gate(dotgit_id, "rollback-review", "gate on the dup variant")
+        slo_id = await store.save_slo(dotgit_id, "latency_p99_ms", 200)
 
         await store.dedupe_repo_urls()
 
-        gates = await store.list_gates_for_assessment(dotgit_id)
-        assert any(g["id"] == gate_id for g in gates)
+        slos = await store.list_slos(dotgit_id)
+        assert any(s["id"] == slo_id for s in slos)
 
 
 class TestReapOrphanedJobs:
@@ -595,79 +591,6 @@ class TestReapOrphanedJobs:
         assert reaped == []
         job = await store.get_remediation_job(job_id)
         assert job["status"] == "completed"
-
-
-class TestGates:
-    async def test_create_gate_dedupes_pending(self, store):
-        assessment_id = await store.save(_make_report())
-        id1 = await store.create_gate(assessment_id, "security", "needs review")
-        id2 = await store.create_gate(assessment_id, "security", "needs review")
-        assert id1 == id2
-
-    async def test_create_gate_dedupes_pending_across_assessments_of_same_app(self, store):
-        """Gates are app-scoped: a second assessment of the same repo_url
-        must not create a second pending gate of the same type (Actions
-        tab ×N / SLO-tracker rollback-review triples)."""
-        old_id = await store.save(_make_report("repo-dedupe-gates"))
-        id1 = await store.create_gate(old_id, "rollback-review", "breach on v1")
-        new_id = await store.save(_make_report("repo-dedupe-gates"))
-        assert new_id != old_id
-        id2 = await store.create_gate(new_id, "rollback-review", "breach on v2")
-        assert id1 == id2
-        gates = await store.list_gates_for_assessment(new_id, status="pending")
-        assert len([g for g in gates if g["gate_type"] == "rollback-review"]) == 1
-
-    async def test_resolve_gate(self, store):
-        assessment_id = await store.save(_make_report())
-        gate_id = await store.create_gate(assessment_id, "security", "needs review")
-        assert await store.resolve_gate(gate_id, "approved", "alice") is True
-        gates = await store.list_all_gates()
-        assert gates[0]["status"] == "approved"
-        assert gates[0]["resolved_by"] == "alice"
-
-    async def test_resolve_gate_twice_fails(self, store):
-        assessment_id = await store.save(_make_report())
-        gate_id = await store.create_gate(assessment_id, "security", "needs review")
-        await store.resolve_gate(gate_id, "approved", "alice")
-        assert await store.resolve_gate(gate_id, "rejected", "bob") is False
-
-    async def test_list_gates_includes_repo_url_for_fleet_attribution(self, store):
-        """`fleet.py::_attach_pending_actions` keys gate counts by
-        `repo_url`, not `assessment_id` -- `list_gates()` must surface
-        `repo_url` on every row for that to work (parity with store.py)."""
-        assessment_id = await store.save(_make_report("repo-y"))
-        await store.create_gate(assessment_id, "security", "needs review")
-        gates = await store.list_gates(status="pending")
-        assert gates[0]["repo_url"] == "https://github.com/org/repo-y"
-
-    async def test_create_gate_concurrent_calls_create_only_one_pending_gate(self, store):
-        """Regression guard for the check-then-act create_gate race
-        (Priority 1c): genuinely concurrent callers for the same app+type
-        (e.g. slo-tracker's tick racing a webhook-triggered dispatch) must
-        not both see "no pending gate" and both insert one. The advisory
-        lock inside create_gate() serializes them instead."""
-        import asyncio
-
-        assessment_id = await store.save(_make_report("repo-concurrent-gate"))
-        ids = await asyncio.gather(
-            *(store.create_gate(assessment_id, "security", "needs review") for _ in range(10))
-        )
-        assert len(set(ids)) == 1
-        gates = await store.list_gates_for_assessment(assessment_id, status="pending")
-        assert len([g for g in gates if g["gate_type"] == "security"]) == 1
-
-    async def test_gate_from_old_assessment_visible_after_reassessment(self, store):
-        """Orphaned-gate-attribution regression (parity with store.py): a
-        gate created against an app's OLD assessment_id must still be
-        visible from `list_gates_for_assessment()` called with that same
-        app's CURRENT (re-assessed) assessment_id."""
-        old_id = await store.save(_make_report("repo-x"))
-        gate_id = await store.create_gate(old_id, "security", "needs review")
-        new_id = await store.save(_make_report("repo-x"))
-        assert new_id != old_id
-
-        gates = await store.list_gates_for_assessment(new_id, status="pending")
-        assert [g["id"] for g in gates] == [gate_id]
 
 
 class TestUpdateRemediationJobConcurrentSteps:

@@ -387,23 +387,6 @@ class TestPortalStore:
         events = await store.list_events()
         assert len(events) >= 3
 
-    async def test_store_gate_lifecycle(self):
-        store = await make_store()
-        aid = await store.save(make_report())
-        gid = await store.create_gate(aid, "deploy", "Approve deploy?")
-
-        pending = await store.list_gates(status="pending")
-        assert len(pending) == 1
-        assert pending[0]["status"] == "pending"
-
-        ok = await store.resolve_gate(gid, "approved", "admin")
-        assert ok is True
-
-        assert await store.list_gates(status="pending") == []
-        resolved = await store.list_gates(status="approved")
-        assert len(resolved) == 1
-        assert resolved[0]["resolved_by"] == "admin"
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # Sanitize name (shared agents/base.py helper)

@@ -39,9 +39,9 @@ def _build_legacy_sqlite(path: Path, *, with_orphan_child: bool = False) -> dict
     one representative row in each of a handful of tables that exercise
     every translation concern this migration handles: a JSONB-cast text
     column (``assessments.report_json``), an INTEGER-as-boolean column
-    (``apply_results.dry_run``), a FK child (``onboarding_results`` /
-    ``gates`` -> ``assessments``), and a table with a non-``id`` primary
-    key (``settings``).
+    (``apply_results.dry_run``), a FK child (``onboarding_results`` ->
+    ``assessments``), and a table with a non-``id`` primary key
+    (``settings``).
 
     Returns the ids used, so the test can assert on them after migrating.
     """
@@ -59,13 +59,6 @@ def _build_legacy_sqlite(path: Path, *, with_orphan_child: bool = False) -> dict
                 id TEXT PRIMARY KEY, assessment_id TEXT NOT NULL,
                 created_at TEXT, files_json TEXT NOT NULL,
                 orchestration_json TEXT NOT NULL DEFAULT '{}', pr_url TEXT
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE gates (
-                id TEXT PRIMARY KEY, assessment_id TEXT NOT NULL,
-                gate_type TEXT, status TEXT DEFAULT 'pending', summary TEXT,
-                created_at TEXT, resolved_at TEXT, resolved_by TEXT
             )
         """)
         conn.execute("""
@@ -98,13 +91,6 @@ def _build_legacy_sqlite(path: Path, *, with_orphan_child: bool = False) -> dict
             (onboarding_id, assessment_id, _iso(), json.dumps([{"path": "a.yaml"}]), json.dumps({}), None),
         )
 
-        gate_id = f"gate-{uuid.uuid4().hex[:8]}"
-        conn.execute(
-            "INSERT INTO gates (id, assessment_id, gate_type, status, summary, created_at, resolved_at, resolved_by) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (gate_id, assessment_id, "auto-apply", "pending", "needs review", _iso(), None, None),
-        )
-
         # dry_run stored as SQLite's 0/1 INTEGER -- must land as a real
         # Postgres BOOLEAN (True), not the integer 1.
         conn.execute(
@@ -118,17 +104,18 @@ def _build_legacy_sqlite(path: Path, *, with_orphan_child: bool = False) -> dict
         )
 
         if with_orphan_child:
-            # A gate whose assessment_id matches nothing in `assessments` --
-            # real-world data-integrity edge case (e.g. a pre-FK-enforcement
-            # SQLite file). Postgres's FK constraint should reject this.
+            # An onboarding_results row whose assessment_id matches nothing
+            # in `assessments` -- real-world data-integrity edge case (e.g.
+            # a pre-FK-enforcement SQLite file). Postgres's FK constraint
+            # should reject this.
             conn.execute(
-                "INSERT INTO gates (id, assessment_id, gate_type, status, summary, created_at, resolved_at, resolved_by) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (f"gate-{uuid.uuid4().hex[:8]}", "does-not-exist", "auto-apply", "pending", "orphan", _iso(), None, None),
+                "INSERT INTO onboarding_results (id, assessment_id, created_at, files_json, orchestration_json, pr_url) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (f"onb-{uuid.uuid4().hex[:8]}", "does-not-exist", _iso(), json.dumps([]), json.dumps({}), None),
             )
 
         conn.commit()
-        return {"assessment_id": assessment_id, "onboarding_id": onboarding_id, "gate_id": gate_id}
+        return {"assessment_id": assessment_id, "onboarding_id": onboarding_id}
     finally:
         conn.close()
 
@@ -151,7 +138,6 @@ class TestMigrateSqliteToPostgres:
 
         assert counts["assessments"] == 1
         assert counts["onboarding_results"] == 1
-        assert counts["gates"] == 1
         assert counts["apply_results"] == 1
         assert counts["settings"] == 1
         # Tables absent from the legacy file are reported as 0, not omitted.
@@ -203,7 +189,7 @@ class TestMigrateSqliteToPostgres:
 
         second = await migrate_sqlite_to_postgres(sqlite_path, postgres_dsn)
         assert second["assessments"] == 0
-        assert second["gates"] == 0
+        assert second["onboarding_results"] == 0
 
         await _truncate_all(postgres_dsn)
 
@@ -237,12 +223,13 @@ class TestMigrateSqliteToPostgres:
         await _truncate_all(postgres_dsn)
 
     async def test_orphan_fk_row_raises_instead_of_silently_dropping(self, tmp_path, postgres_dsn):
-        """A gate whose assessment_id has no matching assessment (real-world
-        data-integrity edge case in an old, pre-FK-enforcement SQLite file)
-        must surface loudly via Postgres's FK constraint, not be silently
-        skipped -- the whole point of not wrapping each row in its own
-        try/except is that partial, silently-incomplete migrations are worse
-        than a loud failure the operator can inspect and fix.
+        """An onboarding_results row whose assessment_id has no matching
+        assessment (real-world data-integrity edge case in an old, pre-FK-
+        enforcement SQLite file) must surface loudly via Postgres's FK
+        constraint, not be silently skipped -- the whole point of not
+        wrapping each row in its own try/except is that partial, silently-
+        incomplete migrations are worse than a loud failure the operator
+        can inspect and fix.
         """
         await _truncate_all(postgres_dsn)
         sqlite_path = tmp_path / "legacy_orphan.db"

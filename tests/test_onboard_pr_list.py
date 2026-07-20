@@ -211,8 +211,7 @@ def _mock_kube():
 async def ui_client():
     store = await make_store()
     with patch("agentit.portal.app.get_store", return_value=store), \
-         patch("agentit.portal.routes.assessments.get_store", return_value=store), \
-         patch("agentit.portal.routes.gates.get_store", return_value=store):
+         patch("agentit.portal.routes.assessments.get_store", return_value=store):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True) as client:
             await prime_csrf(client)
             yield client, store
@@ -286,54 +285,63 @@ class TestPullRequestsSectionPostDelivery:
         aid = await store.save(report)
         await store.set_infra_repo_url(aid, "https://github.com/org/gitops-pending-infra")
         await store.save_onboarding(aid, [_cluster_config_file()])
-        await store.create_gate(
-            aid, "gitops-pr-pending",
-            "AgentIT will: commit and open a PR. PR opened: "
-            "https://github.com/org/gitops-pending-infra/pull/4.",
-            pr_url="https://github.com/org/gitops-pending-infra/pull/4",
+        pr_url = "https://github.com/org/gitops-pending-infra/pull/4"
+        await store.create_delivery(
+            aid, report.repo_name, {"cluster_config": 1}, mechanism="cluster_config:infra-repo-commit",
+            status="delivered", details={"outcomes": {"cluster_config": {"pr_url": pr_url}}},
         )
 
-        resp = await client.get(f"/assessments/{aid}/onboard-results")
+        with patch(
+            "agentit.portal.github_pr.get_pr_status",
+            return_value={"state": "open", "html_url": pr_url, "title": "fix", "merged_at": ""},
+        ):
+            resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert resp.status_code == 200
         assert "Waiting for your approval" in resp.text
-        assert "https://github.com/org/gitops-pending-infra/pull/4" in resp.text
+        assert pr_url in resp.text
         assert "Not opened yet" not in resp.text
         # Still lists the real file(s) this PR covers.
         assert "Deny-all baseline NetworkPolicy for this app" in resp.text
 
-    async def test_merged_gate_shows_merged_badge(self, ui_client):
+    async def test_merged_pr_shows_merged_badge(self, ui_client):
         client, store = ui_client
         report = make_report(repo_name="gitops-merged-app")
         aid = await store.save(report)
         await store.save_onboarding(aid, [_cluster_config_file()])
         pr_url = "https://github.com/org/gitops-merged-infra/pull/5"
-        await store.create_gate(aid, "gitops-pr-pending", f"PR opened: {pr_url}.", pr_url=pr_url)
-        gates = await store.list_gates_for_assessment(aid, status="pending")
-        gate_id = next(g["id"] for g in gates if g["gate_type"] == "gitops-pr-pending")
-        with patch("agentit.portal.github_pr.merge_pr", return_value={"merged": True, "sha": "abc"}):
-            resolve_resp = await client.post(f"/gates/{gate_id}/resolve", data={"status": "approved"})
-        assert resolve_resp.status_code in (200, 303)
+        await store.create_delivery(
+            aid, report.repo_name, {"cluster_config": 1}, mechanism="cluster_config:infra-repo-commit",
+            status="delivered", details={"outcomes": {"cluster_config": {"pr_url": pr_url}}},
+        )
 
-        resp = await client.get(f"/assessments/{aid}/onboard-results")
+        with patch(
+            "agentit.portal.github_pr.get_pr_status",
+            return_value={"state": "merged", "html_url": pr_url, "title": "fix", "merged_at": "2026-01-05T00:00:00"},
+        ):
+            resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert "Merged" in resp.text
         assert "Waiting for your approval" not in resp.text
 
-    async def test_rejected_gate_shows_rejected_badge_and_real_reason(self, ui_client):
+    async def test_rejected_pr_shows_rejected_badge_and_real_reason(self, ui_client):
         client, store = ui_client
         report = make_report(repo_name="gitops-rejected-app")
         aid = await store.save(report)
         await store.save_onboarding(aid, [_cluster_config_file()])
         pr_url = "https://github.com/org/gitops-rejected-infra/pull/6"
-        await store.create_gate(aid, "gitops-pr-pending", f"PR opened: {pr_url}.", pr_url=pr_url)
-        gates = await store.list_gates_for_assessment(aid, status="pending")
-        gate_id = next(g["id"] for g in gates if g["gate_type"] == "gitops-pr-pending")
-        resolve_resp = await client.post(
-            f"/gates/{gate_id}/resolve",
-            data={"status": "rejected", "reason": "breaks the readiness probe"},
+        await store.create_delivery(
+            aid, report.repo_name, {"cluster_config": 1}, mechanism="cluster_config:infra-repo-commit",
+            status="delivered", details={"outcomes": {"cluster_config": {"pr_url": pr_url}}},
         )
-        assert resolve_resp.status_code in (200, 303)
+        await store.record_pr_outcome(
+            pr_url, report.repo_name, "rejected",
+            assessment_id=aid, category="cluster_config", reject_reason="breaks the readiness probe",
+        )
 
-        resp = await client.get(f"/assessments/{aid}/onboard-results")
+        with patch(
+            "agentit.portal.github_pr.get_pr_status",
+            return_value={"state": "closed", "html_url": pr_url, "title": "fix", "merged_at": ""},
+        ):
+            resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert "Rejected" in resp.text
         assert "breaks the readiness probe" in resp.text
 

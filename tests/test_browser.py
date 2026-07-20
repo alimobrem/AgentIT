@@ -62,7 +62,7 @@ def _free_port() -> int:
 
 class _SyncStoreBridge:
     """Wraps a real async ``AssessmentStore`` so its coroutine methods can
-    be called synchronously -- every ``store.save(...)``/``store.create_gate(...)``
+    be called synchronously -- every ``store.save(...)``/``store.log_event(...)``
     call already scattered across this file's (deliberately synchronous,
     ``playwright.sync_api``-based) test bodies keeps working unchanged.
 
@@ -96,7 +96,7 @@ def app_url():
     real Postgres, real uvicorn server) on a dedicated background event
     loop, exposing a synchronous store bridge so every existing
     ``playwright.sync_api`` test body in this file -- including the ones
-    that call ``store.save(...)``/``store.create_gate(...)`` etc directly --
+    that call ``store.save(...)``/``store.log_event(...)`` etc directly --
     keeps working unchanged.
 
     Previously constructed ``AssessmentStore(":memory:")`` (no such
@@ -158,7 +158,6 @@ def app_url():
          "description": "test file"}
     ])
     store.log_event("test-agent", "completed", report.repo_name, "info", "test event")
-    store.create_gate(aid, "deploy-approval", "Test gate for approval")
 
     async def _noop_close(_self=None) -> None:
         return None
@@ -174,7 +173,6 @@ def app_url():
          patch("agentit.portal.routes.schedules.get_store", return_value=async_store), \
          patch("agentit.portal.routes.fleet.get_store", return_value=async_store), \
          patch("agentit.portal.routes.assessments.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.gates.get_store", return_value=async_store), \
          patch("agentit.portal.routes.capabilities.get_store", return_value=async_store), \
          patch("agentit.portal.routes.settings.get_store", return_value=async_store), \
          patch("agentit.portal.routes.insights.get_store", return_value=async_store), \
@@ -780,25 +778,6 @@ class TestAdminReviewPage:
         response = page.goto(f"{url}/admin-review")
         assert response.status == 404
 
-    def test_stale_cluster_admin_review_gate_shows_on_own_ledger_tab(self, page: Page, app_url):
-        """A stale, already-persisted `cluster-admin-review` gate now
-        surfaces on its own app's Ledger tab like any other non-PR gate
-        type -- there's no separate cross-app page left for it to live on."""
-        url, _, store = app_url
-        aid = store.save(make_report(repo_name="browser-admin-review-app"))
-        store.create_gate(aid, "cluster-admin-review",
-                           "Browser test: CI/CD manifests need elevated review")
-
-        page.goto(f"{url}/assessments/{aid}")
-        page.click(".tab-nav >> text=Ledger")
-        gate_card = page.locator(".card", has_text="Browser test: CI/CD manifests need elevated review")
-        expect(gate_card).to_be_visible()
-        # cluster-admin-review's delivery_confirmation echoes its own
-        # summary verbatim (delivery.py's gate_delivery_confirmation()) --
-        # gate_card only renders that second line when it says something
-        # summary doesn't, so the text must appear exactly once, not twice.
-        expect(gate_card.get_by_text("Browser test: CI/CD manifests need elevated review")).to_have_count(1)
-
 
 # ── Fleet "Needs Action" / GitOps Badge Tests ────────────────────────
 
@@ -810,21 +789,6 @@ class TestFleetBadges:
         url, aid, _ = app_url
         page.goto(f"{url}/fleet")
         expect(page.locator("text=need you → Ledger")).to_be_visible()
-
-    def test_no_per_row_pending_badge_on_fleet_regardless_of_gate_type(self, page: Page, app_url):
-        """Fleet never shows a per-row pending badge for ANY gate type
-        (removed as a concept -- pending ops are Ledger's job, a quiet
-        pointer is all Fleet offers). Was previously phrased around
-        `cluster-admin-review` specifically ("must not inflate Fleet's
-        Ledger pointer") back when that gate type was excluded from the
-        per-app pending count -- retired 2026-07-18, it counts like any
-        other gate type now, but the per-row badge itself is still gone."""
-        url, _, store = app_url
-        aid2 = store.save(make_report(repo_name="browser-admin-only-fleet-app-2"))
-        store.create_gate(aid2, "cluster-admin-review", "Browser test: elevated review only")
-
-        page.goto(f"{url}/fleet")
-        assert page.locator("tr", has_text="browser-admin-only-fleet-app-2").locator("text=pending").count() == 0
 
     def test_gitops_badge_for_registered_app(self, page: Page, app_url):
         import time
@@ -869,23 +833,23 @@ class TestFleetBadges:
 
 
 class TestAssessmentDetailLedgerTab:
-    def test_ledger_tab_renders_gate_approval_ui_for_non_pr_gates(self, page: Page, app_url):
+    def test_ledger_tab_renders_recommendation_ui_for_non_pr_recommendations(self, page: Page, app_url):
+        """`recommendation_card()` (replacing the retired `gate_card()`,
+        2026-07-19) renders the real Roll Back/Dismiss actions for a
+        rollback recommendation."""
         url, _, store = app_url
+        report = make_report(repo_name="browser-gate-approval-app")
         # Deliberately avoids the substring "ledger" in the repo name --
         # that would make Playwright's unquoted `text=Ledger` selector
         # below also match this app's own <h1>/repo-url link.
-        aid = store.save(make_report(repo_name="browser-gate-approval-app"))
-        store.create_gate(aid, "auto-mode-review", "Browser test: auto-mode gated pending review")
+        aid = store.save(report)
+        store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "Browser test: auto-mode gated pending review")
 
         page.goto(f"{url}/assessments/{aid}")
         page.click(".tab-nav >> text=Ledger")
         gate_card = page.locator(".card", has_text="Browser test: auto-mode gated pending review")
         expect(gate_card).to_be_visible()
-        expect(gate_card.locator("button:has-text('Approve')")).to_be_visible()
-        # .first: "Reject" is itself a substring of the reveal-on-click
-        # "Confirm Reject" button also inside this card -- only the first
-        # (always-visible) one is being asserted on here.
-        expect(gate_card.locator("button:has-text('Reject')").first).to_be_visible()
+        expect(gate_card.locator("button:has-text('Roll Back')")).to_be_visible()
         expect(gate_card.locator("button:has-text('Dismiss')")).to_be_visible()
 
 # ── Retired Routes Tests ─────────────────────────────────────────────
@@ -1109,15 +1073,16 @@ class TestConfirmModalFocusAndTypeToConfirm:
         assert store.get(aid) is None
 
     def test_ordinary_confirm_has_no_type_to_confirm_input(self, page: Page, app_url):
-        """A routine confirm (Reject via the Ledger tab's Dismiss button)
-        must never show the type-to-confirm input -- overusing it cheapens
-        the pattern (checklist #1's own warning)."""
+        """A routine, real-danger confirm (Roll Back via the Ledger tab's
+        recommendation card) must never show the type-to-confirm input --
+        overusing it cheapens the pattern (checklist #1's own warning)."""
         url, _, store = app_url
-        aid = store.save(make_report(repo_name="browser-ordinary-gate-app"))
-        store.create_gate(aid, "auto-mode-review", "Browser test: ordinary gate")
+        report = make_report(repo_name="browser-ordinary-gate-app")
+        aid = store.save(report)
+        store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "Browser test: ordinary gate")
         page.goto(f"{url}/assessments/{aid}?tab=ledger")
         gate_card = page.locator(".card", has_text="Browser test: ordinary gate")
-        gate_card.locator("button:has-text('Dismiss')").click()
+        gate_card.locator("button:has-text('Roll Back')").click()
         expect(page.locator("#confirm-modal")).to_have_class(re.compile("open"))
         expect(page.locator("#type-confirm-input")).not_to_be_visible()
         # Regression guard: Alpine's boolean-attribute normalization only
@@ -1126,7 +1091,7 @@ class TestConfirmModalFocusAndTypeToConfirm:
         # the falsy string '' (not boolean false) for every ordinary confirm,
         # which Alpine previously (mis)treated as truthy and left the button
         # permanently disabled -- see the onboard-results "Deliver Now" bug.
-        expect(page.locator("#confirm-modal button", has_text="Dismiss")).to_be_enabled()
+        expect(page.locator("#confirm-modal button", has_text="Roll Back")).to_be_enabled()
 
 
 # ── UX Requirements: Command Palette (#4, #5) ────────────────────────────

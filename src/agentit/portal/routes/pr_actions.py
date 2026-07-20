@@ -24,11 +24,12 @@ router = APIRouter()
 
 
 def _redirect_target(assessment_id: str | None) -> str:
-    """Same "land on the Actions tab, not the Overview tab" convention the
-    retired ``routes/gates.py::resolve_gate()`` used -- the next actionable
-    item in the same queue is immediately visible."""
+    """Same "land on the Ledger tab, not the Overview tab" convention the
+    retired ``routes/gates.py::resolve_gate()`` used (Actions was merged
+    into Ledger 2026-07-19) -- the next actionable item in the same queue
+    is immediately visible."""
     if assessment_id:
-        return f"/assessments/{assessment_id}?tab=actions"
+        return f"/assessments/{assessment_id}?tab=ledger"
     return "/ledger"
 
 

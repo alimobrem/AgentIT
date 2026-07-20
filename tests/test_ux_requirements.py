@@ -80,7 +80,6 @@ async def _override_store():
          patch("agentit.portal.routes.schedules.get_store", return_value=async_store), \
          patch("agentit.portal.routes.fleet.get_store", return_value=async_store), \
          patch("agentit.portal.routes.assessments.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.gates.get_store", return_value=async_store), \
          patch("agentit.portal.routes.capabilities.get_store", return_value=async_store), \
          patch("agentit.portal.routes.settings.get_store", return_value=async_store), \
          patch("agentit.portal.routes.insights.get_store", return_value=async_store), \
@@ -161,26 +160,20 @@ async def test_routine_fix_confirm_does_not_use_type_to_confirm(client, _overrid
     assert "typeToConfirm:" not in resp.text
 
 
-async def test_stale_cluster_admin_review_approval_no_longer_uses_type_to_confirm(client, _override_store):
+async def test_ordinary_recommendation_action_does_not_use_type_to_confirm(client, _override_store):
     """`cluster-admin-review` used to be one of only two actions reserved
     for the heaviest, type-to-confirm friction pattern (approving it
     performed a real, elevated-RBAC direct apply into a shared namespace).
-    Retired 2026-07-18: a stale, already-persisted pending gate of this type
-    now falls through to the same generic, plain-confirm approval flow as
-    any other gate -- it delivers via a GitOps PR now, never a direct
-    apply, so the extra friction is no longer warranted."""
-    store = _override_store
-    aid = await store.save(_make_report("admin-review-app"))
-    await store.create_gate(aid, "cluster-admin-review", "Needs elevated RBAC")
-    resp = await client.get(f"/assessments/{aid}?tab=ledger")
-    assert resp.status_code == 200
-    assert "typeToConfirm:" not in resp.text
-
-
-async def test_ordinary_gate_approval_does_not_use_type_to_confirm(client, _override_store):
+    That gate type -- and the `gates` table/generic gate-resolution
+    machinery entirely -- has since been removed (2026-07-19): the two
+    remaining non-PR recommendation kinds (rollback-review, finding-
+    unresolved-escalation) use the same generic, plain-confirm flow as any
+    other action -- neither delivers via a direct apply anymore, so the
+    extra friction is no longer warranted."""
     store = _override_store
     aid = await store.save(_make_report("ordinary-gate-app"))
-    await store.create_gate(aid, "auto-mode-review", "Needs review")
+    report = await store.get(aid)
+    await store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "Needs review")
     resp = await client.get(f"/assessments/{aid}?tab=ledger")
     assert resp.status_code == 200
     assert "typeToConfirm:" not in resp.text
@@ -453,55 +446,6 @@ async def test_single_manifest_delivery_does_not_celebrate(client, _override_sto
 # ── #12: gate resolution redirects to the next actionable item ──────────
 
 
-async def test_resolve_per_app_gate_redirects_to_ledger_tab(client, _override_store):
-    store = _override_store
-    aid = await store.save(_make_report("gate-redirect-app"))
-    gate_id = await store.create_gate(aid, "deploy", "Approve deployment")
-    resp = await client.post(
-        f"/gates/{gate_id}/resolve",
-        data={"status": "approved", "resolved_by": "tester"},
-        follow_redirects=False,
-    )
-    assert resp.status_code == 303
-    assert resp.headers["location"] == f"/assessments/{aid}?tab=ledger"
-
-
-async def test_resolve_stale_cluster_admin_review_gate_lands_on_own_onboard_results(
-    client, _override_store, _mock_kube,
-):
-    """`cluster-admin-review`'s own special "jump to the next pending gate
-    in the (now-removed) Admin Review queue" redirect was retired 2026-07-18
-    along with that queue -- a stale gate of this type now falls through to
-    the exact same generic redirect any other gate type gets (its own
-    app's onboard-results), even with a second one still pending elsewhere."""
-    store = _override_store
-    report1 = _make_report("admin-queue-app-1")
-    report1.infra_repo_url = "https://github.com/org/infra-gitops"
-    aid1 = await store.save(report1)
-    await store.save_onboarding(aid1, [_cicd_file()])
-    gate1 = await store.create_gate(aid1, "cluster-admin-review", "Needs elevated RBAC (1)")
-
-    report2 = _make_report("admin-queue-app-2")
-    report2.infra_repo_url = "https://github.com/org/infra-gitops"
-    aid2 = await store.save(report2)
-    await store.save_onboarding(aid2, [_cicd_file()])
-    await store.create_gate(aid2, "cluster-admin-review", "Needs elevated RBAC (2)")
-
-    with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
-         patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
-         patch("agentit.portal.github_pr.ensure_applicationset"):
-        mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
-                                      "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
-        resp = await client.post(
-            f"/gates/{gate1}/resolve",
-            data={"status": "approved", "resolved_by": "admin"},
-            follow_redirects=False,
-        )
-    assert resp.status_code == 303
-    assert f"/assessments/{aid1}/onboard-results" in resp.headers["location"]
-    assert "gate_approved=true" in resp.headers["location"]
-
-
 # ── #13: cause/responsibility/next-step error messages ──────────────────
 
 
@@ -537,48 +481,34 @@ async def test_onboarding_failure_states_cause_and_next_step(client, _override_s
     assert "retry Onboard" in location
 
 
-async def test_stale_cluster_admin_review_delivery_failure_states_cause_and_next_step(
-    client, _override_store, _mock_kube,
-):
-    """The "Elevated apply failed" error message this originally guarded
-    (from the now-removed direct-apply branch) is gone along with that
-    branch -- a stale `cluster-admin-review` gate's GitOps commit failing
-    now surfaces the exact same generic "Delivery failed" cause-and-next-
-    step message any other gate type's failed delivery does."""
-    store = _override_store
-    report = _make_report("elevated-fail-app")
-    report.infra_repo_url = "https://github.com/org/infra-gitops"
-    aid = await store.save(report)
-    await store.save_onboarding(aid, [_cicd_file()])
-    gate_id = await store.create_gate(aid, "cluster-admin-review", "Needs elevated RBAC")
-
-    with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
-         patch("agentit.portal.github_pr.commit_to_infra_repo",
-               side_effect=RuntimeError("Forbidden: cannot create in openshift-pipelines")):
-        resp = await client.post(
-            f"/gates/{gate_id}/resolve",
-            data={"status": "approved", "resolved_by": "admin"},
-            follow_redirects=False,
-        )
-    assert resp.status_code == 303
-    from urllib.parse import unquote
-    location = unquote(resp.headers["location"])
-    assert "Delivery failed" in location
-    assert "Forbidden" in location
-    assert "gate remains pending" in location
-    assert "re-approve" in location or "Reject" in location
-
-
 # ── #10: specific, real empty-state copy ─────────────────────────────────
 
 
 async def test_ledger_tab_empty_state_shows_real_recent_resolution_count(client, _override_store):
+    """The "recently resolved" empty-state count reflects real, recently
+    merged/closed PRs -- the `gates` table/generic gate-resolution
+    machinery it used to also count has been removed entirely
+    (2026-07-19)."""
     store = _override_store
     aid = await store.save(_make_report("empty-state-actions-app"))
-    gate_id = await store.create_gate(aid, "deploy", "Approve deployment")
-    await client.post(f"/gates/{gate_id}/resolve", data={"status": "approved", "resolved_by": "tester"})
+    report = await store.get(aid)
+    pr_url = "https://github.com/org/empty-state-actions-app/pull/1"
+    await store.create_delivery(
+        aid, report.repo_name, {"cluster_config": 1}, mechanism="cluster_config:infra-repo-commit",
+        status="delivered", details={"outcomes": {"cluster_config": {"pr_url": pr_url}}},
+    )
+    with patch("agentit.portal.github_pr.merge_pr", return_value={"merged": True, "sha": "abc123"}):
+        await client.post("/prs/merge", data={"pr_url": pr_url, "assessment_id": aid})
 
-    resp = await client.get(f"/assessments/{aid}?tab=ledger")
+    from datetime import datetime, timezone
+    with patch(
+        "agentit.portal.github_pr.get_pr_status",
+        return_value={
+            "state": "merged", "html_url": pr_url, "title": "fix",
+            "merged_at": datetime.now(timezone.utc).isoformat(),
+        },
+    ):
+        resp = await client.get(f"/assessments/{aid}?tab=ledger")
     assert resp.status_code == 200
     assert "No pending actions" in resp.text
     assert "resolved in the last 24 hours" in resp.text

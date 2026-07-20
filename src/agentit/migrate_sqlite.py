@@ -56,7 +56,6 @@ _MIGRATION_ORDER = [
     "apps",
     "onboarding_results",
     "events",
-    "gates",
     "agent_registry",
     "slos",
     "apply_results",
@@ -72,6 +71,13 @@ _MIGRATION_ORDER = [
     "check_results",
     "deliveries",
 ]
+# `gates` was deliberately dropped from this list (2026-07-19): the `gates`
+# table/generic gate-resolution machinery has been removed entirely from
+# the live schema, so a legacy SQLite file's `gates` rows (if any) have no
+# destination table to migrate into -- they're skipped the same way an
+# older SQLite file missing a *newer* table already is (see
+# `_read_sqlite_tables()`'s docstring), rather than crashing the migration
+# on a real INSERT into a table that no longer exists.
 
 # Columns that are JSON-blob TEXT in SQLite and JSONB in Postgres -- these
 # need an explicit `::jsonb` cast on insert (a plain positional `$n` with a
@@ -110,7 +116,6 @@ _BOOLEAN_COLUMNS: dict[str, set[str]] = {
 _TEXT_DEFAULT_COLUMNS: dict[str, dict[str, str]] = {
     "onboarding_results": {"pr_url": ""},
     "events": {"severity": "info"},
-    "gates": {"status": "pending"},
     "agent_registry": {"status": "active", "capabilities": "[]"},
     "slos": {"status": "unknown"},
     "remediation_jobs": {"assessment_id": "", "status": "pending", "current_step": "", "error": ""},
@@ -131,7 +136,6 @@ _TIMESTAMP_COLUMNS: dict[str, set[str]] = {
     "apps": {"created_at", "updated_at"},
     "onboarding_results": {"created_at"},
     "events": {"timestamp"},
-    "gates": {"created_at", "resolved_at"},
     "agent_registry": {"last_heartbeat", "registered_at"},
     "slos": {"created_at", "updated_at"},
     "apply_results": {"created_at"},

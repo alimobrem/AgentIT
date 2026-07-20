@@ -107,7 +107,6 @@ async def _override_store():
          patch("agentit.portal.routes.schedules.get_store", return_value=test_store), \
          patch("agentit.portal.routes.fleet.get_store", return_value=test_store), \
          patch("agentit.portal.routes.assessments.get_store", return_value=test_store), \
-         patch("agentit.portal.routes.gates.get_store", return_value=test_store), \
          patch("agentit.portal.routes.capabilities.get_store", return_value=test_store), \
          patch("agentit.portal.routes.settings.get_store", return_value=test_store), \
          patch("agentit.portal.routes.insights.get_store", return_value=test_store), \
@@ -877,14 +876,21 @@ async def test_events_target_app_links_to_assessment_when_resolvable(client, _ov
 async def test_ledger_page_renders_pr_list(client, _override_store):
     store = _override_store
     aid = await store.save(_make_report("ledger-fleet-app"))
-    await store.create_gate(
-        aid, "gitops-pr-pending", "PR opened", pr_url="https://github.com/org/ledger-fleet-app/pull/1",
+    report = await store.get(aid)
+    pr_url = "https://github.com/org/ledger-fleet-app/pull/1"
+    await store.create_delivery(
+        aid, report.repo_name, {"cluster_config": 1}, mechanism="cluster_config:infra-repo-commit",
+        status="delivered", details={"outcomes": {"cluster_config": {"pr_url": pr_url}}},
     )
 
-    resp = await client.get("/ledger")
+    with patch(
+        "agentit.portal.github_pr.get_pr_status",
+        return_value={"state": "open", "html_url": pr_url, "title": "fix", "merged_at": ""},
+    ):
+        resp = await client.get("/ledger")
     assert resp.status_code == 200
     assert "Ledger" in resp.text
-    assert "https://github.com/org/ledger-fleet-app/pull/1" in resp.text
+    assert pr_url in resp.text
 
 
 async def test_ledger_page_empty_state(client, _override_store):
@@ -930,13 +936,15 @@ async def test_next_step_hint_prompts_onboarding_when_freshly_assessed(client, _
     assert "pending action" not in hint
 
 
-async def test_next_step_hint_onboard_wins_over_leftover_gates_when_assessed(client, _override_store):
-    """Leftover Ledger gates (e.g. rollback-review from a prior apply of
-    the same app) must not steal the primary CTA while lifecycle is still
-    assessed — founder confusion: "do these 3 Ledger items or Onboard?"."""
+async def test_next_step_hint_onboard_wins_over_leftover_actions_when_assessed(client, _override_store):
+    """Leftover Ledger recommendations (e.g. rollback-review from a prior
+    apply of the same app) must not steal the primary CTA while lifecycle
+    is still assessed — founder confusion: "do these 3 Ledger items or
+    Onboard?"."""
     store = _override_store
     aid = await store.save(_make_report("gated-assessed-app"))
-    await store.create_gate(aid, "auto-mode-review", "needs review")
+    report = await store.get(aid)
+    await store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "needs review")
     resp = await client.get(f"/assessments/{aid}")
     assert resp.status_code == 200
     hint = _next_step_hint_html(resp.text)
@@ -947,11 +955,11 @@ async def test_next_step_hint_onboard_wins_over_leftover_gates_when_assessed(cli
     assert f'href="/assessments/{aid}?tab=ledger"' in hint
     # Ledger tab count badge is demoted while assessed (no "Ledger (1)").
     assert "Ledger (1)" not in resp.text
-    assert "leftover gates from earlier deliveries" in resp.text
+    assert "leftover" in resp.text and "from earlier deliveries" in resp.text
 
 
 async def test_next_step_hint_prioritizes_pending_actions_after_onboard(client, _override_store):
-    """After onboarding, a pending gate is the urgent human work."""
+    """After onboarding, a pending recommendation is the urgent human work."""
     store = _override_store
     aid = await store.save(_make_report("gated-onboarded-app"))
     await store.save_onboarding(aid, [{
@@ -960,7 +968,8 @@ async def test_next_step_hint_prioritizes_pending_actions_after_onboard(client, 
         "content": "kind: Deployment",
         "description": "test",
     }])
-    await store.create_gate(aid, "auto-mode-review", "needs review")
+    report = await store.get(aid)
+    await store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "needs review")
     resp = await client.get(f"/assessments/{aid}")
     assert resp.status_code == 200
     assert "1</strong> pending action" in resp.text
@@ -1007,16 +1016,17 @@ async def test_finding_source_badge_strips_absolute_path(client, _override_store
     assert 'name="check_source" value="check:/opt/app-root/src/checks/cicd/ci-pipeline.yaml"' in resp.text
 
 
-async def test_ledger_no_longer_shows_non_pr_gates_or_healthy_app_needs_you(client, _override_store):
-    """Ledger's old fleet-wide "Needs You" (any pending gate, any app) is
+async def test_ledger_no_longer_shows_non_pr_recommendations_or_healthy_app_needs_you(client, _override_store):
+    """Ledger's old fleet-wide "Needs You" (any pending action, any app) is
     gone -- Ledger is strictly PR-focused now (see
-    routes/insights.py::ledger_page()'s docstring). A `finding-security`
-    gate is a real pending action, but never a PR, so it must never appear
-    in Ledger's "Waiting for your approval" list."""
+    routes/insights.py::ledger_page()'s docstring). A rollback
+    recommendation is a real pending action, but never a PR, so it must
+    never appear in Ledger's "Waiting for your approval" list."""
     store = _override_store
     await store.save(_make_report("healthy-app"))
     needs_aid = await store.save(_make_report("needs-app"))
-    await store.create_gate(needs_aid, "finding-security", "Review this finding")
+    needs_report = await store.get(needs_aid)
+    await store.log_event("slo-tracker", "rollback-recommended", needs_report.repo_name, "warning", "Review this finding")
 
     resp = await client.get("/ledger")
     assert resp.status_code == 200
@@ -1043,14 +1053,18 @@ async def test_ledger_chain_route_replays_a_real_chain_read_only(client, _overri
     one-card-so-far chain to replay -- no fabricated correlation id needed."""
     store = _override_store
     aid = await store.save(_make_report("chain-route-app"))
-    await store.create_gate(aid, "finding-security", "Review this finding")
+    report = await store.get(aid)
+    await store.log_event(
+        "orchestrator", "finding-escalated", report.repo_name, "warning", "Review this finding",
+        correlation_id=aid,
+    )
 
     resp = await client.get(f"/ledger/chain/{aid}")
     assert resp.status_code == 200
     assert "Replay this chain" in resp.text
     assert "assessment-complete" in resp.text
-    assert "finding-security" in resp.text
-    assert 'action="/gates/' not in resp.text  # read-only: no gate-resolution form here
+    assert "finding-escalated" in resp.text
+    assert 'action="/gates/' not in resp.text  # read-only, and gates are gone entirely
 
 
 async def test_ledger_chain_route_humanizes_raw_delivery_mechanism(client, _override_store):
@@ -1273,10 +1287,12 @@ async def test_api_events_filter_target_app(client, _override_store):
 # ------------------------------------------------------------------
 
 
-async def test_gates_redirects_to_ledger(client):
+async def test_gates_page_is_gone(client):
+    """`/gates` (and the `gates` table/generic gate-resolution machinery
+    behind it) has been removed entirely (2026-07-19) -- it's a plain 404
+    now, not even a redirect to Ledger."""
     resp = await client.get("/gates", follow_redirects=False)
-    assert resp.status_code == 301
-    assert resp.headers["location"] == "/ledger"
+    assert resp.status_code == 404
 
 
 async def test_admin_review_page_is_gone(client):
@@ -1284,84 +1300,20 @@ async def test_admin_review_page_is_gone(client):
     assert resp.status_code == 404
 
 
-async def test_resolve_gate_approve(client, _override_store):
-    store = _override_store
-    report = _make_report()
-    aid = await store.save(report)
-    gate_id = await store.create_gate(aid, "deploy", "Approve deployment of test-repo")
-
+async def test_resolve_gate_route_is_gone(client, _override_store):
+    """The `/gates/{id}/resolve` route (and the `gates` table/generic
+    gate-resolution machinery behind it) has been removed entirely
+    (2026-07-19) -- the real Merge/Close actions now live at
+    `/prs/merge`/`/prs/close` (for PR-backed deliveries) and
+    `/rollback/{id}/execute`/`/findings/{id}/acknowledge` (for the two
+    remaining non-PR recommendation kinds)."""
     resp = await client.post(
-        f"/gates/{gate_id}/resolve",
+        "/gates/nonexistent-id/resolve",
         data={"status": "approved", "resolved_by": "tester"},
         follow_redirects=False,
     )
-    assert resp.status_code == 303
-    # A per-app ("deploy") gate with no onboarding files to deliver falls
-    # through to the generic resolve path, which lands back on that app's
-    # own Assessment Detail Ledger tab (not the Overview tab, and not the
-    # retired global Gates page) -- the next pending gate in the same
-    # queue is immediately visible there (docs/ux-design-requirements.md
-    # checklist #12).
-    assert resp.headers["location"] == f"/assessments/{aid}?tab=ledger"
+    assert resp.status_code == 404
 
-    pending = await store.list_gates(status="pending")
-    assert len(pending) == 0
-    approved = await store.list_gates(status="approved")
-    assert len(approved) == 1
-    assert approved[0]["resolved_by"] == "tester"
-
-
-async def test_resolve_stale_cluster_admin_review_gate_redirects_to_own_ledger_tab(client, _override_store):
-    """`cluster-admin-review`'s own cross-app redirect target (the now-
-    removed Admin Review page) was retired 2026-07-18 -- a gate of this
-    type is per-app like any other now, so rejecting one redirects to its
-    own app's Ledger tab, same as every other gate type."""
-    store = _override_store
-    report = _make_report()
-    aid = await store.save(report)
-    gate_id = await store.create_gate(aid, "cluster-admin-review", "CI/CD manifests need elevated review")
-
-    resp = await client.post(
-        f"/gates/{gate_id}/resolve",
-        data={"status": "rejected", "resolved_by": "tester", "reason": "not now"},
-        follow_redirects=False,
-    )
-    assert resp.status_code == 303
-    assert resp.headers["location"] == f"/assessments/{aid}?tab=ledger"
-
-
-async def test_gate_card_badge_shows_human_label_not_raw_gate_type(client, _override_store):
-    """gate_card() (Assessment Detail's Ledger tab, shared with the
-    now-retired Admin Review page) rendered a gate's real gate_type as
-    `{{ gate.gate_type | upper }}` -- an all-caps hyphenated identifier
-    with no explanation. Fixed via ledger.py's humanize_gate_type()."""
-    store = _override_store
-    report = _make_report_with_findings("gate-label-app")
-    aid = await store.save(report)
-    await store.create_gate(aid, "auto-mode-review", "needs review")
-
-    resp = await client.get(f"/assessments/{aid}?tab=ledger")
-    assert resp.status_code == 200
-    assert "AUTO-MODE-REVIEW" not in resp.text
-    assert 'title="Gate type: auto-mode-review">Auto-mode review<' in resp.text
-
-
-async def test_list_gates_includes_app_name(client, _override_store):
-    """docs/ui-redesign-proposal.md §2's confirmed defect: gates never
-    carried which app they belonged to. list_gates()/list_all_gates() now
-    join back to the assessment so every gate row is attributable."""
-    store = _override_store
-    report = _make_report("attributable-app")
-    aid = await store.save(report)
-    await store.create_gate(aid, "deploy", "Some gate summary with no app name in it")
-
-    pending = await store.list_gates(status="pending")
-    assert len(pending) == 1
-    assert pending[0]["app_name"] == "attributable-app"
-
-    all_gates = await store.list_all_gates()
-    assert len(all_gates) == 1
-    assert all_gates[0]["app_name"] == "attributable-app"
 
 
 # ------------------------------------------------------------------
@@ -1578,11 +1530,11 @@ async def test_no_inline_styles_events(client):
             assert False, f"Inline style found: {line.strip()}"
 
 
-async def test_no_inline_styles_gates(client, _override_store):
+async def test_no_inline_styles_ledger_tab_recommendation_card(client, _override_store):
     store = _override_store
     report = _make_report()
     aid = await store.save(report)
-    await store.create_gate(aid, "cluster-admin-review", "Test gate")
+    await store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "Test recommendation")
     resp = await client.get(f"/assessments/{aid}?tab=ledger")
     html = resp.text
     for line in html.split("\n"):
@@ -1710,15 +1662,15 @@ async def test_assess_form_uses_design_system_classes(client):
     assert "htmx-indicator" in resp.text
 
 
-async def test_gates_uses_design_system_classes(client, _override_store):
+async def test_ledger_tab_recommendation_card_uses_design_system_classes(client, _override_store):
     store = _override_store
     report = _make_report()
     aid = await store.save(report)
-    await store.create_gate(aid, "cluster-admin-review", "Gate test")
+    await store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "Recommendation test")
     resp = await client.get(f"/assessments/{aid}?tab=ledger")
-    assert "gate-actions" in resp.text
-    assert "btn-approve" in resp.text
-    assert "btn-danger-outline" in resp.text
+    assert "action-bar" in resp.text
+    assert "btn btn-danger" in resp.text
+    assert "btn btn-outline" in resp.text
     assert "section-title" in resp.text
 
 
@@ -2576,7 +2528,7 @@ async def test_all_pages_return_200(client, _override_store):
         "/",
         "/assess",
         "/events",
-        "/gates",
+        "/ledger",
         "/agents",
         "/schedules",
         "/settings",
@@ -2780,38 +2732,6 @@ async def test_operator_status_escapes_reflected_package_param(client):
     assert "&lt;script&gt;" in resp.text
 
 
-# ── Gate deduplication and expiry ──────────────────────────────────────
-
-
-async def test_gate_deduplication(client, _override_store):
-    store = _override_store
-    aid = await store.save(_make_report())
-    g1 = await store.create_gate(aid, "deploy", "First gate")
-    g2 = await store.create_gate(aid, "deploy", "Duplicate gate")
-    assert g1 == g2  # same gate returned
-
-
-async def test_gate_different_types_not_deduped(client, _override_store):
-    store = _override_store
-    aid = await store.save(_make_report())
-    g1 = await store.create_gate(aid, "deploy", "Deploy gate")
-    g2 = await store.create_gate(aid, "security-review", "Security gate")
-    assert g1 != g2
-
-
-async def test_stale_gate_expiry(client, _override_store):
-    store = _override_store
-    aid = await store.save(_make_report())
-    await store.create_gate(aid, "deploy", "Old gate")
-    # Manually backdate the gate
-    await store._pool.execute(
-        "UPDATE gates SET created_at = '2020-01-01T00:00:00Z' WHERE status = 'pending'"
-    )
-    expired = await store.expire_stale_gates(hours=1)
-    assert expired == 1
-    assert len(await store.list_gates("pending")) == 0
-
-
 # ── Delete ─────────────────────────────────────────────────────────────
 
 
@@ -2824,11 +2744,10 @@ async def test_delete_assessment_route(client, _override_store):
 
 
 async def test_delete_cascades(client, _override_store):
-    """Delete removes all related data — SLOs, gates, onboarding."""
+    """Delete removes all related data — SLOs, onboarding."""
     store = _override_store
     aid = await store.save(_make_report())
     await store.save_slo(aid, "availability", 99.9)
-    await store.create_gate(aid, "deploy", "Approve deploy")
     await store.save_onboarding(aid, [{"category": "sec", "path": "x.yaml", "content": "y", "description": "d"}])
 
     resp = await client.post(f"/assessments/{aid}/delete", follow_redirects=False)
@@ -2852,13 +2771,12 @@ async def test_delete_slo_route(client, _override_store):
     assert len(await store.list_slos(aid)) == 0
 
 
-async def test_cancel_gate_route(client, _override_store):
-    store = _override_store
-    aid = await store.save(_make_report())
-    gid = await store.create_gate(aid, "deploy", "Approve")
-    resp = await client.post(f"/gates/{gid}/cancel", follow_redirects=False)
-    assert resp.status_code == 303
-    assert len(await store.list_gates("pending")) == 0
+async def test_cancel_gate_route_is_gone(client, _override_store):
+    """The `/gates/{id}/cancel` route (and the `gates` table/generic
+    gate-resolution machinery behind it) has been removed entirely
+    (2026-07-19)."""
+    resp = await client.post("/gates/nonexistent-id/cancel", follow_redirects=False)
+    assert resp.status_code == 404
 
 
 # ── Capabilities: learn (research CVEs & generate skills) ──────────────
@@ -4013,12 +3931,13 @@ async def test_capability_run_detail_shows_live_pr_status(client, _override_stor
 
 async def test_fleet_pending_action_badge_uses_badge_accent(client, _override_store):
     """Pending-action counts are attention signals — badge-accent, not
-    badge-warning. This gate type isn't a PR, so it renders on Fleet's own
-    per-row badge now (Ledger's job narrowed to strictly PRs -- see
-    routes/insights.py::ledger_page())."""
+    badge-warning. A non-PR recommendation isn't a PR, so it renders on
+    Fleet's own per-row badge now (Ledger's job narrowed to strictly PRs
+    -- see routes/insights.py::ledger_page())."""
     store = _override_store
     aid = await store.save(_make_report("ledger-pending-badge"))
-    await store.create_gate(aid, "auto-mode-review", "needs review")
+    report = await store.get(aid)
+    await store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "needs review")
     resp = await client.get("/fleet")
     assert resp.status_code == 200
     assert 'class="badge badge-accent"' in resp.text

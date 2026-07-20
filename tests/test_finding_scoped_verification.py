@@ -310,8 +310,10 @@ class TestWebhookWiring:
             )
 
         assert resp.status_code == 200
-        gates = await store.list_gates(status="pending")
-        assert not any(g["gate_type"] == "finding-unresolved-escalation" for g in gates)
-
         events = await store.list_events(target_app=old_report.repo_name, limit=50)
+        # Escalation would fire a real "finding-escalated" event (the
+        # `gates` table/generic gate-resolution machinery has been removed
+        # entirely, 2026-07-19) -- below threshold, it must redispatch
+        # instead, never escalate.
+        assert not any(e["action"] == "finding-escalated" for e in events)
         assert any(e["action"] == "finding-redispatched" for e in events)

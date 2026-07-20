@@ -12,7 +12,6 @@ from agentit.ledger import (
     group_cards_by_app,
     humanize_action,
     humanize_card_type,
-    humanize_gate_type,
     recent_watcher_failures,
 )
 from agentit.llm_decisions import build_secret_classify_events
@@ -107,44 +106,6 @@ class TestEventCards:
         assert len(c_cards) == 1
         assert c_cards[0]["target_app"] == "app1"
         assert c_cards[0]["title"] == "secret-classify"
-
-
-class TestGateCards:
-    async def test_pending_gate_is_card_type_d(self):
-        async_store, store = await make_async_store()
-        aid = await store.save(make_report(repo_name="app2"))
-        await store.create_gate(aid, "finding-security", "Review this finding")
-
-        cards = await get_ledger_cards(async_store, target_app="app2", assessment_id=aid)
-
-        d_cards = [c for c in cards if c["card_type"] == "D"]
-        assert len(d_cards) == 1
-        assert d_cards[0]["target_app"] == "app2"
-        assert d_cards[0]["gate_status"] == "pending"
-
-    async def test_resolved_gate_is_card_type_e(self):
-        async_store, store = await make_async_store()
-        aid = await store.save(make_report(repo_name="app3"))
-        gate_id = await store.create_gate(aid, "finding-security", "Review this finding")
-        await store.resolve_gate(gate_id, "approved", "alice")
-
-        cards = await get_ledger_cards(async_store, target_app="app3", assessment_id=aid)
-
-        e_cards = [c for c in cards if c["card_type"] == "E"]
-        assert len(e_cards) == 1
-        assert e_cards[0]["gate_status"] == "approved"
-
-    async def test_global_view_resolves_app_name_via_join(self):
-        """The fleet-wide path uses list_all_gates(), which already joins
-        app_name -- unlike list_gates_for_assessment(), which doesn't."""
-        async_store, store = await make_async_store()
-        aid = await store.save(make_report(repo_name="app4"))
-        await store.create_gate(aid, "finding-security", "Review this finding")
-
-        cards = await get_ledger_cards(async_store)
-
-        d_cards = [c for c in cards if c["card_type"] == "D"]
-        assert any(c["target_app"] == "app4" for c in d_cards)
 
 
 class TestDeliveryCards:
@@ -301,17 +262,17 @@ class TestChainCountAnnotation:
         card = next(c for c in cards if c.get("correlation_id") == "only-one")
         assert card["chain_count"] == 1
 
-    async def test_gate_and_delivery_cards_have_no_chain_count(self):
-        """Per spec §1, correlation_id is an events-only column -- gates and
-        deliveries never carry one, so they never claim a chain size."""
+    async def test_delivery_cards_have_no_chain_count(self):
+        """Per spec §1, correlation_id is an events-only column -- deliveries
+        never carry one, so they never claim a chain size."""
         async_store, store = await make_async_store()
         aid = await store.save(make_report(repo_name="no-chain-app"))
-        await store.create_gate(aid, "finding-security", "Review this finding")
+        await store.create_delivery(aid, "no-chain-app", {"cluster_config": ["a.yaml"]}, "direct-apply")
 
         cards = await get_ledger_cards(async_store, target_app="no-chain-app", assessment_id=aid)
 
-        d_card = next(c for c in cards if c["card_type"] == "D")
-        assert "chain_count" not in d_card
+        f_card = next(c for c in cards if c["card_type"] == "F")
+        assert "chain_count" not in f_card
 
 
 class TestGroupCardsByApp:
@@ -347,31 +308,6 @@ class TestHumanizeCardType:
 
     def test_unknown_card_type_falls_back_to_itself_not_a_crash(self):
         assert humanize_card_type("Z") == "Z"
-
-
-class TestHumanizeGateType:
-    """gate_card() (_macros.html) used to render a gate's real gate_type
-    as `{{ gate.gate_type | upper }}` -- an all-caps, hyphenated internal
-    identifier ("GITOPS-PR-PENDING-SHARED-NAMESPACE") with no explanation,
-    on every app's Actions tab."""
-
-    def test_known_gate_types_get_a_real_phrase(self):
-        assert humanize_gate_type("cluster-admin-review") == "Cluster-admin review"
-        assert humanize_gate_type("gitops-pr-pending") == "GitOps PR pending"
-        assert humanize_gate_type("auto-mode-review") == "Auto-mode review"
-        assert humanize_gate_type("rollback-review") == "Rollback review"
-
-    def test_finding_category_gates_degrade_to_a_readable_phrase(self):
-        assert humanize_gate_type("finding-security") == "Security finding"
-        assert humanize_gate_type("finding-data_governance") == "Data governance finding"
-        assert humanize_gate_type("finding-unresolved-escalation") == "Unresolved finding escalation"
-
-    def test_unknown_gate_type_still_reads_as_a_phrase_not_a_raw_identifier(self):
-        assert humanize_gate_type("some-future-gate-type") == "Some future gate type"
-        assert "-" not in humanize_gate_type("some-future-gate-type")
-
-    def test_empty_gate_type_does_not_crash(self):
-        assert humanize_gate_type("") == ""
 
 
 class TestHumanizeAction:
@@ -423,10 +359,10 @@ class TestChainCards:
     page's existing "Chain" link runs) plus the gates/deliveries/fix-review
     rows for whichever apps the chain touched."""
 
-    async def test_chain_includes_events_and_the_related_gate(self):
+    async def test_chain_includes_events_and_the_related_delivery(self):
         async_store, store = await make_async_store()
         aid = await store.save(make_report(repo_name="chain-app"))
-        await store.create_gate(aid, "finding-security", "Review this finding")
+        await store.create_delivery(aid, "chain-app", {"cluster_config": ["a.yaml"]}, "direct-apply")
 
         # store.save() itself logs "assessment-complete" with
         # correlation_id=assessment_id -- the real chain this app already has.
@@ -434,7 +370,7 @@ class TestChainCards:
 
         card_types = {c["card_type"] for c in cards}
         assert "A" in card_types  # assessment-complete
-        assert "D" in card_types  # the pending gate
+        assert "F" in card_types  # the delivery
         timestamps = [c["timestamp"] for c in cards]
         assert timestamps == sorted(timestamps)  # oldest first, for scrubbing forward in time
 

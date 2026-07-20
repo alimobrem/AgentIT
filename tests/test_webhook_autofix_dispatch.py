@@ -49,13 +49,16 @@ def _push_body(repo_url: str) -> dict:
 
 
 class TestWebhookAutoFixDispatchIsNotDiscarded:
-    async def test_dispatched_finding_is_saved_and_gated_not_discarded(self, portal_client):
+    async def test_dispatched_finding_is_saved_not_discarded(self, portal_client):
         """End-to-end: a git push triggers a re-assessment that surfaces a
         new, auto-fixable "network" finding. Before this fix,
         `dispatcher.dispatch()`'s result was discarded -- no logged event,
-        no gate, no trace at all. It must now show up both as a durable
-        "fix-generated" event and as a real, visible gate for human review
-        -- never an autonomous delivery (AutoMode has been removed)."""
+        no trace at all. It must now show up as a durable "fix-generated"
+        event, never delivered autonomously (AutoMode has been removed)
+        nor gated (the `gates` table/generic gate-resolution machinery has
+        been removed entirely, 2026-07-19) -- the real next step is
+        re-running Onboard for this app to review and deliver it from
+        Onboard Results."""
         client, store, old_aid = portal_client
         old_report = await store.get(old_aid)
         repo_url = old_report.repo_url
@@ -82,23 +85,20 @@ class TestWebhookAutoFixDispatchIsNotDiscarded:
         assert len(fix_generated) == 1
         assert "security" in fix_generated[0]["summary"]
 
-        # 2. Gated for human review, not delivered autonomously -- AutoMode
-        # has been removed, so nothing here ever calls route_and_deliver()
-        # or touches Git/the cluster on its own.
-        gated = [e for e in events if e["action"] == "gated"]
-        assert len(gated) == 1
-        gates = await store.list_gates(status="pending")
-        matching = [g for g in gates if g["gate_type"] == "finding-network"]
-        assert len(matching) == 1
+        # 2. Not delivered autonomously -- AutoMode has been removed, so
+        # nothing here ever calls route_and_deliver() or touches Git/the
+        # cluster on its own; no gate is created either.
+        not_delivered = [e for e in events if e["action"] == "fix-not-delivered"]
+        assert len(not_delivered) == 1
         mock_commit.assert_not_called()
         mock_apply.assert_not_called()
 
-    async def test_dispatch_gates_regardless_of_llm_availability(self, portal_client):
+    async def test_dispatch_generates_fix_regardless_of_llm_availability(self, portal_client):
         """AutoMode's LLM safety classification (and its fail-closed-when-
         unavailable behavior) has been removed along with AutoMode itself
-        -- gating a dispatched fix for human review no longer depends on an
-        LLM client at all, so this must behave identically whether or not
-        one is configured."""
+        -- generating (but never auto-delivering) a dispatched fix no
+        longer depends on an LLM client at all, so this must behave
+        identically whether or not one is configured."""
         client, store, old_aid = portal_client
         old_report = await store.get(old_aid)
         repo_url = old_report.repo_url
@@ -116,4 +116,4 @@ class TestWebhookAutoFixDispatchIsNotDiscarded:
         events = await store.list_events(target_app=old_report.repo_name, limit=50)
         actions = [e["action"] for e in events]
         assert "fix-generated" in actions
-        assert "gated" in actions
+        assert "fix-not-delivered" in actions

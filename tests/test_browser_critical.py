@@ -132,7 +132,6 @@ async def critical_portal():
             "agentit.portal.routes.schedules.get_store",
             "agentit.portal.routes.fleet.get_store",
             "agentit.portal.routes.assessments.get_store",
-            "agentit.portal.routes.gates.get_store",
             "agentit.portal.routes.capabilities.get_store",
             "agentit.portal.routes.settings.get_store",
             "agentit.portal.routes.insights.get_store",

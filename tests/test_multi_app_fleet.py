@@ -28,7 +28,6 @@ async def fleet_client():
          patch("agentit.portal.routes.schedules.get_store", return_value=async_store), \
          patch("agentit.portal.routes.fleet.get_store", return_value=async_store), \
          patch("agentit.portal.routes.assessments.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.gates.get_store", return_value=async_store), \
          patch("agentit.portal.routes.capabilities.get_store", return_value=async_store), \
          patch("agentit.portal.routes.settings.get_store", return_value=async_store), \
          patch("agentit.portal.routes.insights.get_store", return_value=async_store), \
@@ -76,13 +75,13 @@ class TestFleetOperations:
         assert trend["delta"] is not None
 
     async def test_needs_you_pointer_survives_reassessment(self, fleet_client):
-        """Orphaned-gate-attribution regression: a gate created against
-        "frontend"'s OLD assessment must still count toward that app's own
-        "pending action" row badge after re-assessment (`repo_url` keying
-        in `_attach_pending_actions`) -- this gate type (`security`) isn't
-        a PR, so it shows via the per-row badge, not Ledger (strictly
-        PR-focused -- see routes/insights.py::ledger_page()) or the
-        fleet-wide banner (PR-approval-specific too).
+        """Orphaned-attribution regression: a rollback recommendation logged
+        against "frontend" (keyed by `target_app`, not `assessment_id`)
+        must still count toward that app's own "pending action" row badge
+        after re-assessment -- this recommendation isn't a PR, so it shows
+        via the per-row badge, not Ledger (strictly PR-focused -- see
+        routes/insights.py::ledger_page()) or the fleet-wide banner
+        (PR-approval-specific too).
         """
         client, store, ids = fleet_client
         frontend_id = None
@@ -91,7 +90,7 @@ class TestFleetOperations:
             if report.repo_url == "https://github.com/org/frontend":
                 frontend_id = aid
                 break
-        await store.create_gate(frontend_id, "security", "needs review")
+        await store.log_event("slo-tracker", "rollback-recommended", "frontend", "warning", "needs review")
 
         report2 = make_report()
         report2.repo_url = "https://github.com/org/frontend"

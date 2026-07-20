@@ -132,7 +132,6 @@ class TestDataExport:
         data = await store.export_all()
         assert "assessments" in data
         assert "events" in data
-        assert "gates" in data
         assert isinstance(data["assessments"], list)
 
 

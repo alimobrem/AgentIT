@@ -151,7 +151,7 @@
       <td class="text-sm text-muted">{{ r.deploy_namespace | default("—") }}</td>
       <td>
         <span class="badge badge-{{ r.criticality }}"
-          title="How much oversight this app needs -- set at Assess time, not inferred. High/critical apps can never auto-deliver (a human must click Deliver, or approve a gate, before any PR opens) and get stricter default SLO targets.">{{ r.criticality }}</span>
+          title="How much oversight this app needs -- set at Assess time, not inferred. High/critical apps can never auto-deliver (a human must click Deliver before any PR opens) and get stricter default SLO targets.">{{ r.criticality }}</span>
       </td>
       <td class="{% if r.critical_count > 0 %}text-danger text-bold{% endif %}">{{ r.critical_count }}</td>
       <td class="text-sm">

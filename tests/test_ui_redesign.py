@@ -5,15 +5,13 @@
 2. The Remediation Plan table's Fix button uses the same `fixable_categories`
    source of truth as the Findings tab, and posts `category` (a finding
    category), not `dimension`.
-3. Gate app attribution: `list_gates()`/`list_all_gates()` join back to the
-   assessment for an `app_name`; every non-PR gate type surfaces on
-   Assessment Detail's own Ledger tab (formerly Actions -- merged with
-   Timeline/PR History 2026-07-19) and Ledger Needs You (Fleet keeps only a
-   quiet pointer) -- including a stale `cluster-admin-review` row, since
-   that gate type (and the separate Admin Review page it used to live on)
-   was retired 2026-07-18. A PR-backed gate type no longer gets its own
-   gate_card there -- it's covered by the Ledger tab's own PR history
-   instead (gate-approval UI is being eliminated system-wide).
+3. Recommendation/PR attribution: the `gates` table/generic gate-resolution
+   machinery has been removed entirely (2026-07-19) -- a delivered PR
+   surfaces on Assessment Detail's own Ledger tab (formerly Actions --
+   merged with Timeline/PR History) via the real PR history, while the two
+   remaining non-PR recommendation kinds (rollback-review,
+   finding-unresolved-escalation) render via `recommendation_card` instead
+   of the retired `gate_card`.
 4. The orphaned `/apply` and `/create-pr` routes are gone (404).
 5. GitOps-registration visibility on Fleet and Assessment Detail.
 6. Nav: Gates retired as a standalone concept (Admin Review briefly took its
@@ -57,7 +55,6 @@ async def ui_client():
     async_store = store
     with patch("agentit.portal.app.get_store", return_value=async_store), \
          patch("agentit.portal.routes.assessments.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.gates.get_store", return_value=async_store), \
          patch("agentit.portal.routes.fleet.get_store", return_value=async_store), \
          patch("agentit.portal.routes.capabilities.get_store", return_value=async_store):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True) as client:
@@ -281,58 +278,48 @@ class TestRemediationPlanFixButtonUsesCategory:
 class TestGateAppAttributionAndActionsTab:
     """2026-07-19: Assessment Detail's Actions/Timeline/PR History tabs
     merged into one Ledger tab (docs/ledger-design-spec.md Phase 2's own
-    plan for the first two, extended to fold in PR History too). Gate
-    approval is also being eliminated system-wide (the `gates` table
-    itself, not just AutoMode-era gate types) -- a PR-backed gate type
-    (`gitops-pr-pending`/the CI/CD-shared-namespace variant) no longer
-    renders its own gate_card here at all; it's covered by the real PR
-    list instead. Non-PR gate types (`auto-mode-review`,
-    `cluster-admin-review`, `rollback-review`,
-    `finding-unresolved-escalation`) still render gate_card -- there's no
-    PR to point at for those yet."""
+    plan for the first two, extended to fold in PR History too). The
+    `gates` table/generic gate-resolution machinery has been removed
+    entirely -- a PR-backed delivery (`cluster_config`/
+    `cicd_shared_namespace`) is covered by the real PR list, and the two
+    remaining non-PR recommendation kinds (rollback-review,
+    finding-unresolved-escalation) render via `recommendation_card`
+    instead of the retired `gate_card`."""
 
-    async def test_assessment_detail_ledger_tab_shows_non_pr_pending_gates(self, ui_client):
+    async def test_assessment_detail_ledger_tab_shows_non_pr_pending_recommendation(self, ui_client):
         client, store = ui_client
         aid = await store.save(make_report(repo_name="actions-app"))
-        await store.create_gate(aid, "auto-mode-review", "Auto-mode gated: low confidence")
-
-        resp = await client.get(f"/assessments/{aid}")
-        assert resp.status_code == 200
-        assert "Auto-mode gated: low confidence" in resp.text
-        assert "Approve &amp; Deliver" in resp.text or "Approve & Deliver" in resp.text
-
-    async def test_assessment_detail_ledger_tab_includes_stale_cluster_admin_review(self, ui_client):
-        """`cluster-admin-review` (retired 2026-07-18 -- see delivery.py)
-        used to be a different audience's gate, excluded from an app
-        owner's Actions tab entirely. That audience split no longer exists
-        -- every gate type is per-app now, so a stale, already-persisted
-        pending row of this type surfaces on its own app's Ledger tab like
-        any other non-PR gate, rather than being invisible everywhere but a
-        now-removed separate Admin Review page."""
-        client, store = ui_client
-        aid = await store.save(make_report(repo_name="cicd-app"))
-        await store.create_gate(aid, "cluster-admin-review", "CI/CD manifests need elevated review")
-
-        resp = await client.get(f"/assessments/{aid}")
-        assert resp.status_code == 200
-        ledger_tab = resp.text.split('x-show="tab === \'ledger\'"', 1)[1]
-        assert "CI/CD manifests need elevated review" in ledger_tab
-
-    async def test_assessment_detail_ledger_tab_hides_pr_backed_gitops_gate_card(self, ui_client):
-        """A `gitops-pr-pending` gate already has a real PR -- it must not
-        get its own gate_card on Assessment Detail anymore (that was the
-        exact "another Approve and Deliver" duplication reported against
-        this page); it shows up in the PR history table below instead."""
-        client, store = ui_client
-        aid = await store.save(make_report(repo_name="pr-gate-app"))
-        await store.create_gate(
-            aid, "gitops-pr-pending",
-            "AgentIT will: commit manifests to the GitOps infra repo and open a PR. "
-            "https://github.com/org/agentit-gitops/pull/42",
-            pr_url="https://github.com/org/agentit-gitops/pull/42",
+        report = await store.get(aid)
+        await store.log_event(
+            "slo-tracker", "rollback-recommended", report.repo_name, "warning",
+            "Rollback recommended: low confidence",
         )
 
-        resp = await client.get(f"/assessments/{aid}?tab=ledger")
+        resp = await client.get(f"/assessments/{aid}")
+        assert resp.status_code == 200
+        assert "Rollback recommended: low confidence" in resp.text
+        assert "Roll Back" in resp.text
+
+    async def test_assessment_detail_ledger_tab_hides_pr_backed_delivery_from_recommendation_cards(self, ui_client):
+        """A delivered PR already has a real PR row -- it must not also get
+        a `recommendation_card` on Assessment Detail's Ledger tab (that was
+        the exact "another Approve and Deliver" duplication reported
+        against this page); it shows up in the PR history table below
+        instead."""
+        client, store = ui_client
+        aid = await store.save(make_report(repo_name="pr-gate-app"))
+        report = await store.get(aid)
+        await store.create_delivery(
+            aid, report.repo_name, {"cluster_config": 1}, mechanism="cluster_config:infra-repo-commit",
+            status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/org/agentit-gitops/pull/42"}}},
+        )
+
+        with patch(
+            "agentit.portal.github_pr.get_pr_status",
+            return_value={"state": "open", "html_url": "https://github.com/org/agentit-gitops/pull/42", "title": "fix", "merged_at": ""},
+        ):
+            resp = await client.get(f"/assessments/{aid}?tab=ledger")
         assert resp.status_code == 200
         ledger_tab = resp.text.split('x-show="tab === \'ledger\'"', 1)[1]
         assert "Needs your review" not in ledger_tab
@@ -346,23 +333,26 @@ class TestGateAppAttributionAndActionsTab:
         assert resp.status_code == 200
         assert "No pending actions" in resp.text
 
-    async def test_assessment_detail_ledger_tab_shows_gate_from_old_assessment_of_same_app(self, ui_client):
-        """Orphaned-gate-attribution regression: a gate created against an
-        app's OLD assessment_id must still be visible/actionable from the
-        Ledger tab of that SAME app's CURRENT (re-assessed) assessment --
-        `gates.assessment_id` is a FK to whichever assessment existed at
-        gate-creation time, not a live pointer that follows the app forward.
-        """
+    async def test_assessment_detail_ledger_tab_shows_recommendation_across_reassessment(self, ui_client):
+        """An app-scoped recommendation event (rollback/escalation) is keyed
+        by `target_app`, not `assessment_id` -- it must still be visible/
+        actionable from the Ledger tab of that SAME app's CURRENT
+        (re-assessed) assessment, not just the one that existed when it
+        fired."""
         client, store = ui_client
         old_aid = await store.save(make_report(repo_name="reassessed-app"))
-        await store.create_gate(old_aid, "auto-mode-review", "Auto-mode gated: low confidence")
+        old_report = await store.get(old_aid)
+        await store.log_event(
+            "slo-tracker", "rollback-recommended", old_report.repo_name, "warning",
+            "Rollback recommended: low confidence",
+        )
 
         new_aid = await store.save(make_report(repo_name="reassessed-app"))
         assert new_aid != old_aid
 
         resp = await client.get(f"/assessments/{new_aid}")
         assert resp.status_code == 200
-        assert "Auto-mode gated: low confidence" in resp.text
+        assert "Rollback recommended: low confidence" in resp.text
 
     async def test_assessment_detail_ledger_tab_shows_pr_history(self, ui_client):
         """Former PR History tab's job, folded into the Ledger tab --
@@ -395,34 +385,32 @@ class TestGateAppAttributionAndActionsTab:
         assert resp.status_code == 200
         assert "x-data=\"{ tab: 'ledger', findingsCount: 0 }\"" in resp.text
 
-    async def test_fleet_quiet_ledger_pointer_counts_pr_gates_only(self, ui_client):
-        """Fleet's quiet Ledger pointer is PR-approval-specific now (Ledger's
-        own job narrowed to strictly PRs -- see
-        routes/insights.py::ledger_page()): auto-mode-review/dry-run-failed/
-        cluster-admin-review must never inflate it, even though they're real
-        pending gates -- only a pending gitops-pr-pending gate does. (Before
-        Ledger's PR redesign, every pending gate counted toward this banner
-        -- including, briefly, a legacy `cluster-admin-review` gate after
-        the standalone Admin Review page/gate type were retired 2026-07-18
-        -- this test's assertions supersede that intermediate behavior.)"""
+    async def test_fleet_quiet_ledger_pointer_counts_prs_only(self, ui_client):
+        """Fleet's quiet Ledger pointer is PR-approval-specific (Ledger's own
+        job narrowed to strictly PRs -- see routes/insights.py::
+        ledger_page()): non-PR recommendation events (rollback/escalation)
+        must never inflate it -- only a genuinely open, unmerged PR does.
+        They still show via this app's own real "pending action" row
+        badge instead, not silently dropped."""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="needs-action-app"))
-        await store.create_gate(aid, "auto-mode-review", "gate 1")
-        await store.create_gate(aid, "dry-run-failed", "gate 2")
-        await store.create_gate(aid, "cluster-admin-review", "gate 3")
+        report = await store.get(aid)
+        # Two rollback recommendations, not one rollback + one escalation --
+        # an unresolved escalation takes over the per-row badge entirely
+        # (see get_next_action_state()'s NEXT_ACTION_ESCALATED priority),
+        # which would pre-empt the "N pending action" count below.
+        await store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "recommendation 1")
+        await store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "recommendation 2")
 
         resp = await client.get("/fleet")
         assert resp.status_code == 200
         assert "need your approval → Ledger" not in resp.text
         assert "Needs Action" not in resp.text
-        # All three non-PR gates (including the now-legacy
-        # cluster-admin-review, which counts here like any other gate type
-        # since the standalone Admin Review page/exclusion were retired)
-        # still show as this app's own real "pending action" row badge --
-        # not silently dropped.
-        assert "3 pending action" in resp.text
+        # Both non-PR recommendations still show as this app's own real
+        # "pending action" row badge -- not silently dropped.
+        assert "2 pending action" in resp.text
 
-    async def test_fleet_no_pending_pointer_when_no_pending_gates(self, ui_client):
+    async def test_fleet_no_pending_pointer_when_nothing_pending(self, ui_client):
         client, store = ui_client
         await store.save(make_report(repo_name="clean-app"))
 
@@ -431,15 +419,16 @@ class TestGateAppAttributionAndActionsTab:
         assert "need your approval → Ledger" not in resp.text
         assert "pending action" not in resp.text
 
-    async def test_fleet_pending_pointer_links_to_ledger_tab_for_non_pr_gates(self, ui_client):
-        """A non-PR pending gate (auto-mode-review) never moves the
+    async def test_fleet_pending_pointer_links_to_ledger_tab_for_non_pr_recommendations(self, ui_client):
+        """A non-PR pending recommendation (rollback) never moves the
         fleet-wide "→ Ledger" pointer -- it shows via this app's own
         per-row "pending action" badge (linking straight to its own Ledger
         tab) instead, since it's not a PR the fleet-wide Ledger would ever
         list."""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="linked-badge-app"))
-        await store.create_gate(aid, "auto-mode-review", "needs review")
+        report = await store.get(aid)
+        await store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "needs review")
 
         resp = await client.get("/fleet")
         assert resp.status_code == 200
@@ -751,38 +740,40 @@ class TestNavUpdate:
     async def test_nav_has_no_admin_review_link(self, ui_client):
         """Admin Review (the separate, elevated-approvals nav item) was
         retired 2026-07-18 along with the `cluster-admin-review` gate type
-        it existed solely for -- every gate type is per-app now, so there's
-        no cross-app queue left to link here, even with a pending gate of
-        that (now-legacy) type in the fleet."""
+        it existed solely for -- every gate type (and the `gates` table
+        itself) is gone now, so there's no cross-app queue left to link
+        here at all."""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="admin-badge-app"))
-        await store.create_gate(aid, "cluster-admin-review", "needs elevated review")
+        report = await store.get(aid)
+        await store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "needs elevated review")
 
         resp = await client.get("/ledger")
         assert resp.status_code == 200
         assert 'href="/admin-review"' not in resp.text
         assert "Admin Review" not in resp.text
 
-    async def test_ledger_nav_badge_ignores_legacy_and_app_owner_gate_types(self, ui_client):
+    async def test_ledger_nav_badge_ignores_non_pr_recommendations(self, ui_client):
         """The single remaining nav badge (Ledger's) is PR-approval-specific
-        now (Ledger's own job narrowed to strictly PRs -- see
-        routes/insights.py::ledger_page()) -- neither a stale
-        `cluster-admin-review` gate nor an ordinary app-owner
-        `auto-mode-review` gate is a PR, so neither moves it. (Before
-        Ledger's PR redesign, every pending gate counted toward this badge
-        once the separate Admin Review badge was retired -- this test's
-        assertion supersedes that intermediate behavior.)"""
+        (Ledger's own job narrowed to strictly PRs -- see
+        routes/insights.py::ledger_page()) -- a non-PR recommendation event
+        is never a PR, so it never moves it."""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="admin-badge-app-2"))
-        await store.create_gate(aid, "cluster-admin-review", "needs elevated review")
-        await store.create_gate(aid, "auto-mode-review", "app-owner gate")
+        report = await store.get(aid)
+        # Two rollback recommendations, not one rollback + one escalation --
+        # an unresolved escalation takes over the per-row badge entirely
+        # (see get_next_action_state()'s NEXT_ACTION_ESCALATED priority),
+        # which would pre-empt the "N pending action" count below.
+        await store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "recommendation 1")
+        await store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "recommendation 2")
 
         with patch("agentit.portal.helpers._nav_gate_badges_cache", {"pending_actions": 0, "ts": 0.0}):
             resp = await client.get("/fleet")
         assert resp.status_code == 200
         assert not re.search(r'Ledger\s*<span class="nav-badge">', resp.text)
-        # Both gates are still real pending actions -- visible via this
-        # app's own row badge instead.
+        # Both recommendations are still real pending actions -- visible via
+        # this app's own row badge instead.
         assert "2 pending action" in resp.text
 
 

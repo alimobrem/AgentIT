@@ -546,7 +546,7 @@ async def _deliver_via_gitops_pr(
     pr_url = outcome.get("pr_url") if isinstance(outcome, dict) and not dry_run else None
     if pr_url and "error" not in outcome:
         mechanism_text = confirmation_text(MECHANISM_INFRA_REPO_COMMIT, infra_repo_url=infra_repo_url)
-        summary = f"{mechanism_text} PR opened: {pr_url}. Merge it (or Close it) from the Actions tab -- AgentIT never auto-merges."
+        summary = f"{mechanism_text} PR opened: {pr_url}. Merge it (or Close it) on the Ledger tab -- AgentIT never auto-merges."
         if note:
             summary = f"{note} {summary}"
         try:

@@ -39,12 +39,6 @@ class TestPagePerformance:
         assert resp.status_code == 200
         assert t < MEDIUM
 
-    async def test_gates_page(self, portal_client):
-        client, _, _ = portal_client
-        resp, t = await _timed_get(client, "/gates")
-        assert resp.status_code == 200
-        assert t < MEDIUM
-
     async def test_agents_page(self, portal_client):
         client, _, _ = portal_client
         resp, t = await _timed_get(client, "/agents")

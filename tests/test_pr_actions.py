@@ -51,7 +51,7 @@ class TestMergePr:
         mock_merge.assert_called_once_with("https://github.com/org/infra-gitops/pull/9")
         assert resp.status_code == 303
         assert "success=" in resp.headers["location"]
-        assert f"/assessments/{aid}?tab=actions" in resp.headers["location"]
+        assert f"/assessments/{aid}?tab=ledger" in resp.headers["location"]
         events = await store.list_events()
         assert any(e["action"] == "gitops-pr-merged" for e in events)
 

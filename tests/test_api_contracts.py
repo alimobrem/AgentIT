@@ -36,11 +36,6 @@ class TestAPIContracts:
             assert "agent_id" in data[0]
             assert "action" in data[0]
 
-    async def test_gates_shape(self, portal_client):
-        client, _, _ = portal_client
-        data = (await client.get("/api/gates")).json()
-        assert isinstance(data, list)
-
     async def test_health_shape(self, portal_client):
         client, _, _ = portal_client
         data = (await client.get("/api/health")).json()
@@ -55,7 +50,7 @@ class TestAPIContracts:
     async def test_export_shape(self, portal_client):
         client, _, _ = portal_client
         data = (await client.get("/api/export")).json()
-        for key in ("assessments", "events", "gates", "slos", "deliveries"):
+        for key in ("assessments", "events", "slos", "deliveries"):
             assert key in data
             assert isinstance(data[key], list)
 

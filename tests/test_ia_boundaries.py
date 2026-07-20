@@ -29,7 +29,6 @@ async def ui_client():
     store = await make_store()
     with patch("agentit.portal.app.get_store", return_value=store), \
          patch("agentit.portal.routes.assessments.get_store", return_value=store), \
-         patch("agentit.portal.routes.gates.get_store", return_value=store), \
          patch("agentit.portal.routes.fleet.get_store", return_value=store), \
          patch("agentit.portal.routes.insights.get_store", return_value=store):
         async with AsyncClient(
@@ -69,33 +68,38 @@ async def test_ledger_is_the_pr_list_not_a_generic_inbox(ui_client):
     assert "PR history" in resp.text
 
 
-async def test_ledger_never_shows_non_pr_gates(ui_client):
-    """auto-mode-review is a real, pending, app-owner gate -- but not a PR
-    gate -- so it must never appear in Ledger's "Waiting for your approval"
-    list (it belongs on Fleet's needs-action badge / Assessment Detail's
-    own Ledger tab instead)."""
+async def test_ledger_never_shows_non_pr_recommendations(ui_client):
+    """A rollback recommendation is a real, pending, app-owner action -- but
+    not a PR -- so it must never appear in Ledger's "Waiting for your
+    approval" list (it belongs on Fleet's needs-action badge / Assessment
+    Detail's own Ledger tab instead)."""
     client, store = ui_client
     aid = await store.save(make_report(repo_name="non-pr-gate-app"))
-    await store.create_gate(aid, "auto-mode-review", "needs review")
+    report = await store.get(aid)
+    await store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "needs review")
     resp = await client.get("/ledger")
     assert resp.status_code == 200
     assert "Waiting for your approval (0)" in resp.text
 
 
-async def test_nav_needs_you_badge_on_ledger_reflects_pr_gates_only(ui_client):
+async def test_nav_needs_you_badge_on_ledger_reflects_prs_only(ui_client):
     client, store = ui_client
     aid = await store.save(make_report(repo_name="nav-badge-app"))
-    # A non-PR pending gate must NOT move this badge -- only a pending
-    # gitops-pr-pending gate (a PR waiting for approval) does.
-    await store.create_gate(aid, "auto-mode-review", "needs review")
-    await store.create_gate(
-        aid, "gitops-pr-pending",
-        "PR opened: https://github.com/org/nav-badge-app-gitops/pull/1. Approving this gate merges the PR.",
-        pr_url="https://github.com/org/nav-badge-app-gitops/pull/1",
+    report = await store.get(aid)
+    pr_url = "https://github.com/org/nav-badge-app-gitops/pull/1"
+    # A non-PR pending recommendation must NOT move this badge -- only a
+    # genuinely open, unmerged PR does.
+    await store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "needs review")
+    await store.create_delivery(
+        aid, report.repo_name, {"cluster_config": 1}, mechanism="cluster_config:infra-repo-commit",
+        status="delivered", details={"outcomes": {"cluster_config": {"pr_url": pr_url}}},
     )
     with patch(
         "agentit.portal.helpers._nav_gate_badges_cache",
         {"pending_actions": 0, "ts": 0.0},
+    ), patch(
+        "agentit.portal.github_pr.get_pr_status",
+        return_value={"state": "open", "html_url": pr_url, "title": "fix", "merged_at": ""},
     ):
         resp = await client.get("/ledger")
     assert resp.status_code == 200
@@ -106,29 +110,37 @@ async def test_nav_needs_you_badge_on_ledger_reflects_pr_gates_only(ui_client):
     assert not re.search(r'Fleet\s*<span class="nav-badge">', primary)
 
 
-async def test_fleet_quiet_pointer_to_ledger_counts_pr_gates_only(ui_client):
+async def test_fleet_quiet_pointer_to_ledger_counts_prs_only(ui_client):
     client, store = ui_client
     aid = await store.save(make_report(repo_name="quiet-pointer-app"))
-    # Two non-PR gates must not inflate the "N PR(s) need your approval"
-    # banner -- only the one real gitops-pr-pending gate below does.
-    await store.create_gate(aid, "auto-mode-review", "gate 1")
-    await store.create_gate(aid, "dry-run-failed", "gate 2")
-    await store.create_gate(
-        aid, "gitops-pr-pending",
-        "PR opened: https://github.com/org/quiet-pointer-app-gitops/pull/1. Approving this gate merges the PR.",
-        pr_url="https://github.com/org/quiet-pointer-app-gitops/pull/1",
+    report = await store.get(aid)
+    pr_url = "https://github.com/org/quiet-pointer-app-gitops/pull/1"
+    # Two non-PR recommendations must not inflate the "N PR(s) need your
+    # approval" banner -- only the one real open PR below does.
+    # Two rollback recommendations, not one rollback + one escalation --
+    # an unresolved escalation takes over the per-row badge entirely (see
+    # get_next_action_state()'s NEXT_ACTION_ESCALATED priority), which
+    # would pre-empt the "N pending action" count this test is checking.
+    await store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "recommendation 1")
+    await store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "recommendation 2")
+    await store.create_delivery(
+        aid, report.repo_name, {"cluster_config": 1}, mechanism="cluster_config:infra-repo-commit",
+        status="delivered", details={"outcomes": {"cluster_config": {"pr_url": pr_url}}},
     )
     with patch(
         "agentit.portal.helpers._nav_gate_badges_cache",
         {"pending_actions": 0, "ts": 0.0},
+    ), patch(
+        "agentit.portal.github_pr.get_pr_status",
+        return_value={"state": "open", "html_url": pr_url, "title": "fix", "merged_at": ""},
     ):
         resp = await client.get("/fleet")
     assert resp.status_code == 200, resp.text[:500]
     assert 'href="/ledger"' in resp.text
     assert "1 PR(s) need your approval → Ledger" in resp.text
-    # The two non-PR gates are real pending actions too -- they show via
-    # this app's own row badge (linking straight to its Ledger tab)
-    # instead of inflating the PR-specific fleet-wide pointer above.
+    # The two non-PR recommendations are real pending actions too -- they
+    # show via this app's own row badge (linking straight to its Ledger
+    # tab) instead of inflating the PR-specific fleet-wide pointer above.
     assert f'/assessments/{aid}?tab=ledger' in resp.text
     assert "3 pending action" in resp.text
 
@@ -167,12 +179,11 @@ async def test_fleet_pointer_and_nav_badge_also_count_gateless_open_prs(ui_clien
 async def test_admin_review_nav_and_page_are_gone(ui_client):
     """Admin Review (nav link, account-menu entry, and page) was retired
     2026-07-18 along with the `cluster-admin-review` gate type it existed
-    solely for -- every gate type is per-app now, so there's no cross-app
-    elevated-approvals queue left to link to, even with a pending gate of
-    that (now-legacy) type in the fleet."""
+    solely for -- the `gates` table/generic gate-resolution machinery has
+    since been removed entirely too, so there's no cross-app
+    elevated-approvals queue left to link to at all."""
     client, store = ui_client
     aid = await store.save(make_report(repo_name="admin-nav-app"))
-    await store.create_gate(aid, "cluster-admin-review", "needs elevated review")
     with patch(
         "agentit.portal.helpers._nav_gate_badges_cache",
         {"pending_actions": 0, "ts": 0.0},

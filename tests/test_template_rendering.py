@@ -295,30 +295,41 @@ class TestDeliverButtonClickAttributeIntact:
             f"complete function call -- looks truncated:\n{click!r}"
         )
 
-    async def test_gate_card_click_attr_is_unbroken(self, portal_client):
-        """Was previously exercised via the (now-removed, 2026-07-18) Admin
-        Review page's `cluster-admin-review` gate card -- `gate_card()` is
-        shared, so any pending gate on Assessment Detail's Ledger tab
-        exercises the exact same macro/click-attribute rendering."""
+    async def test_pr_action_card_click_attr_is_unbroken(self, portal_client):
+        """`pr_action_card()` (the real Merge/Close action, replacing the
+        retired `gate_card()`) is shared across every PR-backed delivery
+        category -- any open PR on the fleet-wide Ledger's "Waiting for
+        your approval" section exercises the exact same macro/click-
+        attribute rendering (Assessment Detail's own Ledger tab shows
+        PR history read-only; the real Merge/Close actions live here)."""
         client, store, aid = portal_client
-        await store.create_gate(aid, "auto-mode-review", "Approve deployment of test-app")
+        report = await store.get(aid)
+        pr_url = "https://github.com/org/test-app/pull/1"
+        await store.create_delivery(
+            aid, report.repo_name, {"cluster_config": 1}, mechanism="cluster_config:infra-repo-commit",
+            status="delivered", details={"outcomes": {"cluster_config": {"pr_url": pr_url}}},
+        )
 
-        resp = await client.get(f"/assessments/{aid}?tab=ledger")
+        with patch(
+            "agentit.portal.github_pr.get_pr_status",
+            return_value={"state": "open", "html_url": pr_url, "title": "fix", "merged_at": ""},
+        ):
+            resp = await client.get("/ledger")
         assert resp.status_code == 200
 
         parser = _ClickAttrCapture()
         parser.feed(resp.text)
-        approve_clicks = [c for c in parser.clicks if "Approve & Deliver" in c]
-        assert approve_clicks, "no @click attribute found for the Approve & Deliver button"
+        merge_clicks = [c for c in parser.clicks if "Merge PR" in c]
+        assert merge_clicks, "no @click attribute found for the Merge PR button"
 
-        click = approve_clicks[0]
+        click = merge_clicks[0]
         assert "This action modifies production resources" in click, (
-            f"gate_card's Approve & Deliver @click attribute was "
+            f"pr_action_card's Merge PR @click attribute was "
             f"truncated -- it never reaches the tail of the JS "
             f"expression:\n{click!r}"
         )
         assert click.rstrip().endswith("})"), (
-            f"gate_card's Approve & Deliver @click attribute doesn't end "
+            f"pr_action_card's Merge PR @click attribute doesn't end "
             f"with a complete function call -- looks truncated:\n{click!r}"
         )
 
@@ -522,9 +533,9 @@ class TestTemplateRendering:
         client, _, _ = portal_client
         assert (await client.get("/events")).status_code == 200
 
-    async def test_gates_page_renders(self, portal_client):
+    async def test_ledger_page_renders(self, portal_client):
         client, _, _ = portal_client
-        assert (await client.get("/gates")).status_code == 200
+        assert (await client.get("/ledger")).status_code == 200
 
     async def test_agents_page_renders(self, portal_client):
         client, _, _ = portal_client
@@ -623,7 +634,7 @@ class TestTemplateRendering:
 
     async def test_all_pages_have_css(self, portal_client):
         client, _, aid = portal_client
-        for page in ["/", "/assess", f"/assessments/{aid}", "/events", "/gates",
+        for page in ["/", "/assess", f"/assessments/{aid}", "/events", "/ledger",
                      "/agents", "/settings", "/workflows", "/health"]:
             resp = await client.get(page)
             assert resp.status_code == 200, f"{page} returned {resp.status_code}"

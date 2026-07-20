@@ -101,7 +101,6 @@ async def edl_client():
     with patch("agentit.portal.app.get_store", return_value=async_store), \
          patch("agentit.portal.routes.fleet.get_store", return_value=async_store), \
          patch("agentit.portal.routes.assessments.get_store", return_value=async_store), \
-         patch("agentit.portal.routes.gates.get_store", return_value=async_store), \
          patch("agentit.portal.routes.capabilities.get_store", return_value=async_store), \
          patch("agentit.portal.routes.settings.get_store", return_value=async_store), \
          patch("agentit.portal.routes.insights.get_store", return_value=async_store), \
@@ -155,24 +154,41 @@ async def test_fleet_assess_modal_has_dialog_semantics(edl_client):
 async def test_criticality_field_has_help_text_on_both_assess_entry_points(edl_client):
     """Setting/changing Criticality must explain what it actually does today
     (2026-07-18 re-verification -- see README's Criticality paragraph):
-    auto-approve eligibility and default SLO strictness are real; a
-    'deploy-approval' gate is not, so the help text must not claim one."""
+    auto-deliver eligibility and default SLO strictness are real; neither
+    a 'deploy-approval' gate nor AutoMode/gate-approval (both removed
+    2026-07-19) is, so the help text must not claim either."""
     client, store = edl_client
+
+    def _criticality_help_text(html: str) -> str:
+        """Slice from the <select ...criticality...> tag to the very next
+        </span> (its help text), rather than a bare name="criticality"
+        substring search -- fleet.html's own Assess modal has two earlier,
+        unrelated hidden name="criticality" inputs on Row actions above the
+        real <select>."""
+        marker = re.search(r"<select[^>]*criticality[^>]*>", html)
+        assert marker, "no <select ...criticality...> found on the page"
+        return html[marker.end():].split("</select>", 1)[1].split("</span>", 1)[0].lower()
 
     # Dashboard's empty-state hero form (no assessments yet).
     resp = await client.get("/fleet")
     assert resp.status_code == 200
-    assert "auto-open a GitOps PR" in resp.text
-    assert "deploy-approval" not in resp.text.lower()
+    help_text = _criticality_help_text(resp.text)
+    assert "always needs an explicit human deliver click" in help_text
+    assert "deploy-approval" not in help_text
+    assert "auto-mode" not in help_text
+    assert "gate approval" not in help_text
 
     # Fleet's own Assess modal (served once >=1 assessment exists).
     await store.save(make_report())
     resp = await client.get("/fleet")
     assert resp.status_code == 200
     assert 'id="criticality"' in resp.text
-    assert "auto-open a GitOps PR" in resp.text
-    assert "stricter default SLO targets" in resp.text
-    assert "deploy-approval" not in resp.text.lower()
+    help_text = _criticality_help_text(resp.text)
+    assert "always needs an explicit human deliver click" in help_text
+    assert "stricter default slo targets" in help_text
+    assert "deploy-approval" not in help_text
+    assert "auto-mode" not in help_text
+    assert "gate approval" not in help_text
 
 
 async def test_onboard_results_dry_run_apply_status_outside_button(edl_client):

@@ -84,7 +84,7 @@
         <option value="high">High</option>
         <option value="critical">Critical</option>
       </select>
-      <span class="text-muted text-xs">How much oversight this app needs. Low/Medium can auto-open a GitOps PR with no clicks (if Auto-Mode is on and the safety check passes); High/Critical always needs an explicit human Deliver click (or gate approval) before any PR opens. Higher criticality also sets stricter default SLO targets.</span>
+      <span class="text-muted text-xs">How much oversight this app needs. High/Critical always needs an explicit human Deliver click, then a PR merge, before any change reaches the cluster/repo. Higher criticality also sets stricter default SLO targets.</span>
     </div>
     <div class="action-bar">
       <button type="submit" class="btn btn-lg">

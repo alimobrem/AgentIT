@@ -197,7 +197,7 @@ class TestFindingWebhook:
         assert resp.status_code == 200
         assert resp.json()["action"] == "alert-only"
 
-    async def test_gates_fix_for_human_review(self, client, _override_store):
+    async def test_generates_fix_but_never_auto_delivers(self, client, _override_store):
         from agentit.models import DimensionScore, Finding, Severity
         store = _override_store
         report = make_report(
@@ -216,6 +216,9 @@ class TestFindingWebhook:
         })
         assert resp.status_code == 200
         data = resp.json()
-        assert data["action"] == "gated"
+        # The `gates` table/generic gate-resolution machinery has been
+        # removed entirely (2026-07-19) -- a dispatched fix is generated
+        # but never gated/auto-delivered; re-running Onboard is the real
+        # next step to review and deliver it from Onboard Results.
+        assert data["action"] == "fix-not-delivered"
         assert data["files_generated"] > 0
-        assert data["gate_id"]
