@@ -1388,9 +1388,9 @@ class AssessmentStore:
     async def repo_urls_with_onboarding(self) -> set[str]:
         """Repo URLs that have at least one onboarding_results row (any assessment).
 
-        Used so Fleet can offer a single "Re-scan" CTA for apps that
-        already generated manifests — re-assess alone would drop lifecycle
-        back to assessed and force a second Onboard click.
+        Used so Fleet can offer a single "Scan" CTA for apps that already
+        generated manifests — re-assess alone would drop lifecycle back to
+        assessed and force a second Onboard click.
         """
         rows = await self._pool.fetch(
             """
@@ -1458,7 +1458,7 @@ class AssessmentStore:
                 # own `report_json`.
                 "infra_repo_url": r["app_infra_repo_url"],
                 # Prior onboard of any assessment for this repo — drives
-                # Fleet's chained "Re-scan" CTA.
+                # Fleet's chained "Scan" CTA (confirm-gated once true).
                 "ever_onboarded": r["repo_url"] in ever_onboarded,
             })
         return fleet
@@ -1767,7 +1767,7 @@ class AssessmentStore:
 
         When ``continue_onboard`` is True, ``steps_completed`` starts with
         ``["continue_onboard"]`` so ``assess_progress`` can chain into
-        onboarding after the scorecard is saved (Fleet "Re-scan").
+        onboarding after the scorecard is saved (Fleet "Scan").
         """
         job_id = uuid.uuid4().hex
         now = _now()

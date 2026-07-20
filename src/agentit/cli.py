@@ -513,7 +513,7 @@ async def reassess_watch(interval: int) -> None:
     """Long-lived re-assessment scheduler — automatically re-Assesses apps
     once their configured cadence (apps.assessment_cadence: daily/weekly/
     monthly) has elapsed, via the same /api/webhook/assess route the manual
-    Fleet Scan/Re-scan button and RemediationLoop already use. Apps on the
+    Fleet Scan button and RemediationLoop already use. Apps on the
     'manual' cadence are never touched.
     """
     from agentit.watchers.reassess_scheduler import ReassessScheduler

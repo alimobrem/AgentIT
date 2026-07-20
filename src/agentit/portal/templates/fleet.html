@@ -4,7 +4,7 @@
 <div x-data="{ assessOpen: {{ 'true' if request.query_params.get('assess') else 'false' }} }" @keydown.escape.window="assessOpen = false"
      x-init="if (assessOpen) $nextTick(() => $refs.repoUrlInput.focus())">
 <h1>Fleet</h1>
-<p class="text-muted text-sm mb-1">Portfolio scoreboard — apps, scores, Scan (or Re-scan) / Delete.</p>
+<p class="text-muted text-sm mb-1">Portfolio scoreboard — apps, scores, Scan / Delete.</p>
 
 <div class="action-bar">
   <button class="btn" @click="assessOpen = true; $nextTick(() => $refs.repoUrlInput.focus())">Assess New App</button>
@@ -167,14 +167,14 @@
       </td>
       <td>
         <div class="gate-actions">
-          {# One consolidated Scan action per row -- both branches POST the
-             same /assess route and both auto-chain into Onboard→Dry Run→
-             Deliver (assess_submit()'s continue_onboard default now covers
-             every Assess, not just this ever_onboarded case). The only real
-             remaining difference is the confirm dialog: shown for
-             ever_onboarded apps ("Re-scan", since re-scanning regenerates
-             existing onboard manifests), skipped for never-onboarded apps
-             ("Scan", nothing to overwrite yet). #}
+          {# One consolidated Scan action per row -- same label either way,
+             both branches POST the same /assess route and both auto-chain
+             into Onboard/automatic validation/Deliver (assess_submit()'s
+             continue_onboard default now covers every Assess, not just this
+             ever_onboarded case). The only real remaining difference is the
+             confirm dialog: shown for ever_onboarded apps (since re-scanning
+             regenerates and re-delivers existing onboard manifests), skipped
+             for never-onboarded apps (nothing to overwrite yet). #}
           {% if r.ever_onboarded %}
           <form method="post" action="/assess" class="inline-form"
                 x-data x-ref="rescanForm{{ r.id }}">
@@ -183,12 +183,12 @@
             <input type="hidden" name="continue_onboard" value="1">
             <button type="button" class="btn btn-sm btn-action"
               @click="$dispatch('show-confirm', {
-                title: 'Re-scan',
-                message: 'Re-scan ' + {{ r.repo_name | tojson | forceescape }} + ' and regenerate onboard manifests in one step. You will land on Onboard Results to Dry Run → Apply.',
+                title: 'Scan',
+                message: 'Scan ' + {{ r.repo_name | tojson | forceescape }} + ' and regenerate onboard manifests in one step. You will land on Onboard Results while automatic validation and delivery run.',
                 form: $refs.rescanForm{{ r.id }},
-                opts: { confirmText: 'Re-scan' }
+                opts: { confirmText: 'Scan' }
               })">
-              <span class="btn-label">Re-scan</span>
+              <span class="btn-label">Scan</span>
               <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Scanning&hellip;</span>
             </button>
           </form>
@@ -258,7 +258,7 @@
           <option value="high">High</option>
           <option value="critical">Critical</option>
         </select>
-        <span class="text-muted text-xs">How much oversight this app needs. High/Critical always needs an explicit human Deliver click, then a PR merge, before any change reaches the cluster/repo. Higher criticality also sets stricter default SLO targets. Sticky across Re-scan -- change it here, or via a fresh Assess of the same repo.</span>
+        <span class="text-muted text-xs">How much oversight this app needs. High/Critical always needs an explicit human Deliver click, then a PR merge, before any change reaches the cluster/repo. Higher criticality also sets stricter default SLO targets. Sticky across Scan -- change it here, or via a fresh Assess of the same repo.</span>
       </div>
       <button type="submit" class="btn">
         <span class="btn-label">Run Assessment</span>

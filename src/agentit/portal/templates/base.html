@@ -1681,7 +1681,7 @@
           </div>
           <div class="cmdk-item-actions" x-show="r.type === 'app'">
             <button type="button" class="btn btn-sm btn-outline" @click.stop="reassess(r)"
-                    x-text="r.everOnboarded ? 'Re-scan' : 'Scan'"></button>
+                    x-text="'Scan'"></button>
           </div>
         </div>
       </template>
@@ -2138,7 +2138,6 @@ function commandPalette() {
           hint: 'Score ' + Math.round(m.a.latest_score || 0) + '/100 · ' + (m.a.criticality || ''),
           href: '/assessments/' + m.a.id,
           repoUrl: m.a.repo_url, criticality: m.a.criticality,
-          everOnboarded: !!m.a.ever_onboarded,
         }));
       this.results = navMatches.concat(appMatches);
       this.activeIndex = 0;
@@ -2147,8 +2146,10 @@ function commandPalette() {
       this.close();
       window.location.href = r.href;
     },
-    // Same /assess endpoint as Fleet — posts continue_onboard=1 when the
-    // app was previously onboarded so assess→onboard chains (Re-scan).
+    // Same /assess endpoint as Fleet's own Scan button -- assess_submit()
+    // already defaults continue_onboard to "1" server-side (chains straight
+    // into onboard) for every caller, so there's nothing case-specific to
+    // set here either way.
     async reassess(r) {
       this.close();
       try {
@@ -2156,7 +2157,6 @@ function commandPalette() {
           repo_url: r.repoUrl || '',
           criticality: r.criticality || 'medium',
         };
-        if (r.everOnboarded) body.continue_onboard = '1';
         const res = await fetch('/assess', {
           method: 'POST',
           headers: { 'X-CSRF-Token': getCsrfCookie(), 'Content-Type': 'application/x-www-form-urlencoded' },

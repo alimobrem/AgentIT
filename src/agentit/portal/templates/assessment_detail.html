@@ -143,13 +143,13 @@
    (often from an earlier delivery / SLO tick on a prior assessment of the
    same app) must not compete with it. After onboard, pending actions win
    because they are the human delivery / rollback decisions. #}
-<div class="next-step-hint {% if lifecycle_stage == 'assessed' %}next-step-hint-primary{% elif pending_actions %}next-step-hint-attention{% endif %}">
+<div class="next-step-hint {% if lifecycle_stage == 'assessed' %}next-step-hint-primary{% elif pending_actions and next_action.state == 'none' %}next-step-hint-attention{% endif %}">
   {% if lifecycle_stage == "assessed" %}
   <span class="next-step-icon" aria-hidden="true">&#9679;</span>
   <span>
     {% if prior_onboarded %}
-    New scorecard after re-scan — click <strong>Onboard This App</strong> below to regenerate manifests
-    (next time use Fleet <strong>Re-scan</strong> to re-assess and onboard in one step).
+    New scorecard after a scan — click <strong>Onboard This App</strong> below to regenerate manifests
+    (next time use <strong>Scan</strong> below to re-assess and onboard in one step).
     {% else %}
     Next step: click <strong>Onboard This App</strong> below.
     Onboard generates remediations for all findings — do not fix them one-by-one on the Findings tab first.
@@ -161,7 +161,11 @@
     </span>
     {% endif %}
   </span>
-  {% elif pending_actions %}
+  {# next_action.state != "none" gets its own, more specific "Next action:"
+     alert right below this hint (escalated/retrying/pending_verification) --
+     showing this generic count too would just say "go check Ledger" twice
+     in a row. Only shown here when nothing more specific applies. #}
+  {% elif pending_actions and next_action.state == "none" %}
   <span class="next-step-icon" aria-hidden="true">&#9679;</span>
   <strong>{{ pending_actions|length }}</strong> pending action{{ 's' if pending_actions|length != 1 }} need{{ '' if pending_actions|length != 1 else 's' }} your review —
   {# Real ?tab=ledger href — this hint sits outside the tab strip's
@@ -175,7 +179,7 @@
   <a href="/assessments/{{ assessment_id }}/onboard-results">Onboard Results</a> for progress and any pull request(s).
   {% elif lifecycle_stage == "applied" %}
   <span class="next-step-icon next-step-icon-done" aria-hidden="true">&#10003;</span>
-  Applied to the cluster — add SLOs (via Re-onboard) to reach the Monitored stage.
+  Applied to the cluster — add SLOs (via Scan, which also regenerates manifests) to reach the Monitored stage.
   {% elif lifecycle_stage == "monitored" %}
   <span class="next-step-icon next-step-icon-done" aria-hidden="true">&#10003;</span>
   Fully onboarded and monitored — no action needed right now.
@@ -215,7 +219,11 @@
 {% endif %}
 
 {# Primary CTA follows lifecycle: Onboard only while assessed; after onboard
-   the giant Onboard button would teach the wrong next step. #}
+   the giant Onboard button would teach the wrong next step. Scan (below)
+   already covers "regenerate manifests" as a side effect of its own
+   auto-chain into onboard (see assess_submit()'s continue_onboard default)
+   -- a separate Re-onboard button duplicated that with no re-score, which
+   was one CTA too many for what most visits here need. #}
 <div class="action-bar mt-2 mb-2">
   {% if lifecycle_stage == "assessed" %}
   <form method="post" action="/assessments/{{ assessment_id }}/onboard" class="inline-form">
@@ -226,33 +234,19 @@
   </form>
   {% elif lifecycle_stage == "onboarded" %}
   <a href="/assessments/{{ assessment_id }}/onboard-results" class="btn btn-action btn-lg" title="Review the generated manifests/PRs, then deliver them">Review &amp; Deliver</a>
-  <form method="post" action="/assessments/{{ assessment_id }}/onboard" class="inline-form">
-    <button type="submit" class="btn btn-outline btn-sm" title="Regenerate manifests for this app's CURRENT score, without re-scanning the repo. Use Re-scan instead if the code itself changed.">
-      <span class="btn-label">Re-onboard</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Running agents&hellip;</span>
-    </button>
-  </form>
-  {% else %}
-  <form method="post" action="/assessments/{{ assessment_id }}/onboard" class="inline-form">
-    <button type="submit" class="btn btn-outline" title="Regenerate manifests for this app's CURRENT score, without re-scanning the repo. Use Re-scan instead if the code itself changed.">
-      <span class="btn-label">Re-onboard</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Running agents&hellip;</span>
-    </button>
-  </form>
   {% endif %}
-  {# Manual Scan/Re-scan trigger for this exact app -- same underlying POST
-     /assess Fleet's own row action already uses (repo_url + criticality,
-     re-scored from scratch), just reachable from the app's own detail page
-     too instead of only from the Fleet table. Re-onboard above regenerates
-     manifests for the CURRENT score without touching the repo; this
-     re-clones and re-scores the app first (then auto-chains into onboard,
-     same default every Assess/Scan entry point in the app already has --
-     see assess_submit()'s continue_onboard default) -- the right one when
-     the app's CODE has changed since the last scan, not just when you want
-     fresh manifests for the score you already have. Mirrors Fleet's own
-     ever_onboarded split exactly: a never-onboarded app's plain "Scan"
-     skips a confirm dialog; the more consequential re-assess+auto-onboard
-     case ("Re-scan") gets one. #}
+  {# Manual Scan trigger for this exact app -- same underlying POST /assess
+     Fleet's own row action already uses (repo_url + criticality, re-scored
+     from scratch), just reachable from the app's own detail page too
+     instead of only from the Fleet table. Re-clones and re-scores the app,
+     then auto-chains into onboard (same default every Assess/Scan entry
+     point in the app already has), so this alone covers both "the code
+     changed" and "just want fresh manifests for the score I already have"
+     -- one button, not two. A confirm dialog only guards the more
+     consequential case (an app that's already been onboarded once, where
+     re-scoring regenerates and re-delivers real manifests); a never-
+     onboarded app's plain Scan skips it, mirroring Fleet's own
+     ever_onboarded split. #}
   {% set ever_onboarded = lifecycle_stage != "assessed" or prior_onboarded %}
   <form method="post" action="/assess" class="inline-form"
         x-data x-ref="reassessForm">
@@ -260,14 +254,14 @@
     <input type="hidden" name="criticality" value="{{ report.criticality }}">
     {% if ever_onboarded %}
     <button type="button" class="btn btn-outline btn-sm"
-      title="Re-clone and re-score the repo from scratch, then regenerate manifests for the new score. Use Re-onboard instead if you just want fresh manifests for the score you already have."
+      title="Re-clone and re-score the repo from scratch, then regenerate and re-deliver manifests for the new score."
       @click="$dispatch('show-confirm', {
-        title: 'Re-scan',
-        message: 'Re-scan ' + {{ report.repo_name | tojson | forceescape }} + ' and regenerate onboard manifests in one step. You will land on Onboard Results while automatic validation and delivery run.',
+        title: 'Scan',
+        message: 'Scan ' + {{ report.repo_name | tojson | forceescape }} + ' and regenerate onboard manifests in one step. You will land on Onboard Results while automatic validation and delivery run.',
         form: $refs.reassessForm,
-        opts: { confirmText: 'Re-scan' }
+        opts: { confirmText: 'Scan' }
       })">
-      <span class="btn-label">Re-scan</span>
+      <span class="btn-label">Scan</span>
       <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Scanning&hellip;</span>
     </button>
     {% else %}
@@ -292,7 +286,7 @@
 {# Real, per-app setting -- read by watchers/reassess_scheduler.py's tick
    loop (get_apps_due_for_reassessment()) to decide when to automatically
    re-Assess this app, via the same /api/webhook/assess route the Fleet
-   page's Scan/Re-scan buttons use. Saving this is always real
+   page's own Scan button uses. Saving this is always real
    (persisted on the app row) -- the note below is honest about whether
    anything is currently deployed to act on it. #}
 <div class="mb-2">

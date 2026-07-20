@@ -292,7 +292,7 @@ async def home() -> RedirectResponse:
 
 @router.get("/fleet", response_class=HTMLResponse)
 async def fleet_page(request: Request) -> HTMLResponse:
-    """Portfolio scoreboard: apps, scores, Assess / Scan (Re-scan) / Delete.
+    """Portfolio scoreboard: apps, scores, Assess / Scan / Delete.
 
     PRs waiting for approval are owned by Ledger's "Needs You" section —
     this page only offers a quiet pointer, never an ops-inbox badge column.

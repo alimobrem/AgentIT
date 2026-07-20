@@ -57,8 +57,8 @@ class VulnWatcher:
         now purely detection and visibility -- every critical/high finding
         always surfaces as a real, actionable alert, and fixing it always
         requires a human to explicitly Assess/Onboard/Deliver for that app
-        (Fleet's "Scan"/"Re-scan" -- there's no more autonomous fix
-        pipeline behind the scenes to gate on a toggle).
+        (Fleet's "Scan" -- there's no more autonomous fix pipeline behind
+        the scenes to gate on a toggle).
         """
         fleet = await self._store.get_fleet_data()
         click.echo(f"[vuln-watch] Monitoring {len(fleet)} apps", err=True)
