@@ -416,13 +416,13 @@ class TestModals:
         # The assess modal lives on Fleet (fleet.html) -- root now lands on
         # Ledger (docs/ui-redesign-proposal.md), which has no such modal.
         page.goto(f"{url}/fleet")
-        page.click("text=Assess New App")
+        page.click("text=Add App")
         expect(page.locator("#assess-modal")).to_have_class(re.compile("open"))
 
     def test_assess_modal_closes_with_x(self, page: Page, app_url):
         url, _, _ = app_url
         page.goto(f"{url}/fleet")
-        page.click("text=Assess New App")
+        page.click("text=Add App")
         expect(page.locator("#assess-modal")).to_have_class(re.compile("open"))
         page.click("#assess-modal .modal-close")
         expect(page.locator("#assess-modal")).not_to_have_class(re.compile("open"))
@@ -430,7 +430,7 @@ class TestModals:
     def test_assess_modal_has_form_fields(self, page: Page, app_url):
         url, _, _ = app_url
         page.goto(f"{url}/fleet")
-        page.click("text=Assess New App")
+        page.click("text=Add App")
         expect(page.locator("#assess-modal input[name='repo_url']")).to_be_visible()
         expect(page.locator("#assess-modal select[name='criticality']")).to_be_visible()
         expect(page.locator("#assess-modal button[type='submit']")).to_be_visible()
@@ -439,7 +439,7 @@ class TestModals:
         """EDL §5: assess overlay is a dialog and Escape dismisses it."""
         url, _, _ = app_url
         page.goto(f"{url}/fleet")
-        page.click("text=Assess New App")
+        page.click("text=Add App")
         modal = page.locator("#assess-modal")
         expect(modal).to_have_class(re.compile("open"))
         expect(modal).to_have_attribute("role", "dialog")

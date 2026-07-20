@@ -4,10 +4,10 @@
 <div x-data="{ assessOpen: {{ 'true' if request.query_params.get('assess') else 'false' }} }" @keydown.escape.window="assessOpen = false"
      x-init="if (assessOpen) $nextTick(() => $refs.repoUrlInput.focus())">
 <h1>Fleet</h1>
-<p class="text-muted text-sm mb-1">Portfolio scoreboard — apps, scores, Scan / Delete.</p>
+<p class="text-muted text-sm mb-1">Portfolio scoreboard — apps, scores, Add / Scan / Delete.</p>
 
 <div class="action-bar">
-  <button class="btn" @click="assessOpen = true; $nextTick(() => $refs.repoUrlInput.focus())">Assess New App</button>
+  <button class="btn" @click="assessOpen = true; $nextTick(() => $refs.repoUrlInput.focus())">Add App</button>
   {# pending_need_you is "PRs waiting for your approval" -- any PR still
      open and unmerged on GitHub, the same PR-status-derived definition
      Ledger's own stat uses (see routes/insights.py::ledger_page()'s
@@ -229,7 +229,7 @@
 {% if not fleet %}
 <div class="empty-state">
   <h3>Assess your first app</h3>
-  <p class="text-muted">AgentIT assesses your repository across 7 enterprise readiness dimensions — security, observability, CI/CD, infrastructure, compliance, data governance, and HA/DR — generates Kubernetes manifests to close gaps, and monitors your apps continuously. Click "Assess New App" above to start — including AgentIT's own repo, if you want AgentIT to assess itself.</p>
+  <p class="text-muted">AgentIT assesses your repository across 7 enterprise readiness dimensions — security, observability, CI/CD, infrastructure, compliance, data governance, and HA/DR — generates Kubernetes manifests to close gaps, and monitors your apps continuously. Click "Add App" above to start — including AgentIT's own repo, if you want AgentIT to assess itself.</p>
 </div>
 {% endif %}
 
