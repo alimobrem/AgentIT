@@ -367,6 +367,45 @@ class TestPullRequestsSectionPostDelivery:
         assert "fix: pin base image" in resp.text
         assert pr_url in resp.text
 
+    async def test_fully_auto_delivered_hides_the_manual_deliver_buttons(self, ui_client):
+        """auto_delivery.py deliberately never marks apply_results as a real
+        (non-dry-run) delivery once its validate/fix loop converges (see its
+        own save_apply_results() call, dry_run=True) -- pr_cards/
+        pr_opened_count are the sole source of truth for "was this actually
+        delivered". Before this fix, Step 2 still offered "Commit & Open PR"/
+        "Per-Agent PRs" with a "Ready -- choose a deliver option" hint even
+        though every PR this onboarding needed was already open above --
+        confusing, and a real risk of a redundant second delivery attempt."""
+        client, store = ui_client
+        report = make_report(repo_name="fully-auto-delivered-app")
+        report.infra_repo_url = "https://github.com/org/fully-auto-delivered-infra"
+        aid = await store.save(report)
+        await store.save_onboarding(aid, [_source_patch_file()])
+        # Mirrors auto_delivery.py's own save_apply_results() call once its
+        # validate/fix loop converges -- always dry_run=True, never a real
+        # delivery marker.
+        await store.save_apply_results(
+            aid, {"applied": [], "skipped": [], "errors": [], "repo_files": []}, "ns", dry_run=True,
+        )
+        pr_url = "https://github.com/org/fully-auto-delivered-app/pull/11"
+        await store.create_delivery(
+            aid, report.repo_name, {"source_patch": 1}, mechanism="source_patch:source-repo-pr",
+            status="delivered", details={"outcomes": {"source_patch": {"pr_url": pr_url}}},
+        )
+
+        with patch(
+            "agentit.portal.github_pr.get_pr_status",
+            return_value={"state": "open", "html_url": pr_url, "title": "fix: pin base image", "merged_at": ""},
+        ):
+            resp = await client.get(f"/assessments/{aid}/onboard-results")
+
+        assert resp.status_code == 200
+        assert 'data-action="apply"' not in resp.text
+        assert 'data-action="prs"' not in resp.text
+        assert "Ready — choose a deliver option." not in resp.text
+        assert "One PR for everything, or a PR per agent." not in resp.text
+        assert "1 pull request already opened above -- nothing left to deliver." in resp.text
+
     async def test_per_agent_prs_shown_separately_from_combined_prs(self, ui_client):
         client, store = ui_client
         report = make_report(repo_name="per-agent-app")

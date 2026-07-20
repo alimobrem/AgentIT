@@ -248,7 +248,14 @@
    pipeline's own validation converges, not only by a bare manual dry
    run -- see auto_delivery.py::auto_validate_and_deliver()). #}
 {% set _dry_done = dry_run_done|default(false) %}
-{% set _delivered = apply_results and not apply_results.get('dry_run') and not apply_results.get('errors') %}
+{# auto_delivery.py deliberately never marks apply_results as a real (non-
+   dry-run) delivery -- pr_cards/pr_opened_count are the sole source of
+   truth for "was anything actually delivered" (see its own docstring on
+   save_apply_results()). Every PR that was going to be opened is open
+   (pr_opened_count, no pr_pending_count left) counts as delivered too, or
+   Step 2 would keep offering "Commit & Open PR" for PRs that already
+   exist right above it. #}
+{% set _delivered = (apply_results and not apply_results.get('dry_run') and not apply_results.get('errors')) or (pr_opened_count and not pr_pending_count) %}
 {% set _dry_failed = apply_results and apply_results.get('dry_run') and apply_results.get('errors') %}
 {% set _deliver_disabled = not _dry_done or _delivery_blocked %}
 <div class="delivery-actions" x-data="{ busy: '', dryDone: {{ 'true' if _dry_done else 'false' }} }"
@@ -289,6 +296,7 @@
     <div class="delivery-step">
       <div class="delivery-step-row">
         <span class="delivery-step-num {% if _delivered %}is-done{% elif _dry_done %}is-active{% endif %}" aria-hidden="true">2</span>
+        {% if not _delivered %}
         <div class="delivery-choice" role="group" aria-label="Deliver choice">
           <form method="post" action="/assessments/{{ assessment_id }}/deliver" class="inline-form"
                 x-ref="deliverForm" @submit="busy = 'apply'">
@@ -323,8 +331,11 @@
             </button>
           </form>
         </div>
+        {% endif %}
       </div>
+      {% if not _delivered %}
       <p class="delivery-choice-hint">One PR for everything, or a PR per agent.</p>
+      {% endif %}
       <div class="delivery-step-status">
         {% if _delivery_blocked %}
         <span class="badge badge-critical" title="No GitOps infra repo is known for this assessment -- Direct Apply has been removed, so this app must be registered for GitOps before it can be delivered.">Not GitOps-registered</span>
@@ -334,6 +345,9 @@
         <span>Run automatic validation before delivering.</span>
         {% elif _delivered %}
         <span class="badge badge-low">Delivered</span>
+        {% if pr_opened_count %}
+        <span>{{ pr_opened_count }} pull request{{ 's' if pr_opened_count != 1 }} already opened above -- nothing left to deliver.</span>
+        {% endif %}
         {% elif _dry_done %}
         <span>Ready — choose a deliver option.</span>
         {% endif %}
