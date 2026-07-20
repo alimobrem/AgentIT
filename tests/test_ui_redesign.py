@@ -150,9 +150,10 @@ class TestFixFindingIsPureGeneration:
 
 
 class TestFixHiddenDuringOnboarding:
-    """Pre-onboard Assessment Detail must not ship per-finding Fix — Onboard
-    This App is the generation path. After onboarding, Fix returns with
-    shared confirm + busy indicator (EDL)."""
+    """Pre-onboard Assessment Detail must not ship per-finding Fix — Scan
+    (which always chains into onboarding, 2026-07-20) is the generation
+    path. After onboarding, Fix returns with shared confirm + busy
+    indicator (EDL)."""
 
     async def test_findings_fix_hidden_when_assessed(self, ui_client):
         client, store = ui_client
@@ -160,9 +161,9 @@ class TestFixHiddenDuringOnboarding:
 
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
-        assert "Onboard This App" in resp.text
+        assert "Scan" in resp.text
         assert f'action="/assessments/{aid}/fix"' not in resp.text
-        assert "use <strong>Onboard This App</strong> above" in resp.text
+        assert "via <strong>Scan</strong> below" in resp.text
         assert "btn-label\">Fix</span>" not in resp.text
 
     async def test_findings_fix_shown_after_onboard_with_confirm(self, ui_client):
@@ -179,7 +180,7 @@ class TestFixHiddenDuringOnboarding:
         assert f'action="/assessments/{aid}/fix"' in resp.text
         assert "Generate Fix" in resp.text
         assert "htmx-indicator" in resp.text
-        assert "use <strong>Onboard This App</strong> above" not in resp.text
+        assert "via <strong>Scan</strong> below" not in resp.text
 
 
 # ── 2. Remediation Plan table's Fix button uses the shared category set ──

@@ -10,7 +10,7 @@ import os
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from agentit.portal.helpers import (
@@ -108,7 +108,7 @@ router = APIRouter()
 
 
 @router.post("/api/webhook/assess", dependencies=[Depends(verify_internal_token)])
-async def webhook_assess(request: Request):
+async def webhook_assess(request: Request, background_tasks: BackgroundTasks):
     """Trigger an assessment via webhook. Accepts JSON body: {repo_url, criticality}"""
     body = await request.json()
 
@@ -147,11 +147,26 @@ async def webhook_assess(request: Request):
                   {"assessment_id": assessment_id, "score": report.overall_score},
                   correlation_id=assessment_id,
                   extra_topic=TOPIC_ASSESSMENTS)
+
+    # Deterministic, server-side assess->onboard chain (2026-07-20, closing
+    # root cause #2 of the Onboard/Scan button investigation, PR #99): this
+    # route used to save a new assessment with no `continue_onboard`
+    # concept at all, so ReassessScheduler's cadence tick / a GitHub push /
+    # Tekton's self-registration step (every real caller of this route)
+    # could never chain into onboarding, full stop. Fires the exact same
+    # background job `onboard_submit()` uses (`_run_onboarding_job()`),
+    # scheduled the same way (FastAPI `BackgroundTasks`) rather than
+    # depending on anything a human does afterward.
+    onboard_job_id = await s.create_remediation_job(assessment_id)
+    from agentit.portal.routes.assessments import _get_trusted_base_url, _run_onboarding_job
+    base_url = _get_trusted_base_url(request)
+    background_tasks.add_task(_run_onboarding_job, onboard_job_id, assessment_id, base_url)
+
     return JSONResponse({"assessment_id": assessment_id, "overall_score": report.overall_score})
 
 
 @router.post("/api/webhook/github-push")
-async def webhook_github_push(request: Request):
+async def webhook_github_push(request: Request, background_tasks: BackgroundTasks):
     """Handle GitHub push webhooks -- triggers re-assessment for managed repos."""
     event_type = request.headers.get("X-GitHub-Event", "")
     if event_type == "ping":
@@ -220,6 +235,16 @@ async def webhook_github_push(request: Request):
                       {"assessment_id": assessment_id, "score": report.overall_score},
                       correlation_id=assessment_id,
                       extra_topic=_TOPIC_ASSESSMENTS)
+
+        # Deterministic, server-side assess->onboard chain (2026-07-20,
+        # closing root cause #2 of the Onboard/Scan button investigation,
+        # PR #99) -- see webhook_assess()'s identical addition above for
+        # the full rationale. A push-triggered re-assessment used to save a
+        # new assessment with no chaining concept at all.
+        onboard_job_id = await s.create_remediation_job(assessment_id)
+        from agentit.portal.routes.assessments import _get_trusted_base_url, _run_onboarding_job
+        base_url = _get_trusted_base_url(request)
+        background_tasks.add_task(_run_onboarding_job, onboard_job_id, assessment_id, base_url)
 
         # --- Change impact analysis and targeted re-hardening ---
         commits = body.get("commits", [])

@@ -146,19 +146,24 @@ class TestRunOnboardingJobAutomaticallyValidatesAndDelivers:
 
 
 class TestAssessOnboardChainNeverAutoDelivers:
-    """assess_progress()'s assess->onboard chain must behave identically --
-    it always starts a plain onboarding job (which itself now runs the
-    automatic pipeline once generation succeeds)."""
+    """The assess->onboard chain must behave identically to a plain manual
+    Onboard -- it always starts a plain onboarding job (which itself now
+    runs the automatic pipeline once generation succeeds). 2026-07-20:
+    the chain is created deterministically by assess_submit()'s background
+    thread (or webhook_assess()/webhook_github_push()) BEFORE the assess
+    job is marked completed -- assess_progress() itself no longer creates
+    anything, it only redirects to whatever onboard job already exists."""
 
     async def test_chained_onboard_job_has_no_auto_deliver_field(self, onboard_client):
         client, store = onboard_client
         job_id = await store.create_assessment_job("https://github.com/org/chain-app", continue_onboard=True)
         aid = await _seed_assessment(store, repo_name="chain-app")
+        onboard_job_id = await store.create_remediation_job(aid)
         await store.update_assessment_job(job_id, "completed", "Assessment complete", assessment_id=aid)
 
         resp = await client.get(f"/assess/progress/{job_id}", follow_redirects=False)
         assert resp.status_code == 303
-        onboard_job_id = resp.headers["location"].rsplit("/", 1)[1]
+        assert resp.headers["location"].rsplit("/", 1)[1] == onboard_job_id
         job = await store.get_remediation_job(onboard_job_id)
         assert "auto_deliver" not in job["steps_completed"]
 

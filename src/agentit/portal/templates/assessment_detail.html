@@ -36,7 +36,22 @@
 </p>
 
 {% if request.query_params.get('error') %}
-<div class="alert alert-error mb-2" role="alert">{{ request.query_params.get('error') }}</div>
+<div class="alert alert-error mb-2" role="alert">
+  <span class="text-sm">{{ request.query_params.get('error') }}</span>
+  {% if failed_onboard_job %}
+  {# The one narrow, secondary recovery action this page keeps for onboarding
+     (2026-07-20, single-button collapse): the automatic chain's onboard step
+     itself crashed before generating any manifests (_run_onboarding_job()'s
+     "failed" status -- see _onboard_terminal_redirect_url()) -- retrying via
+     plain Onboard re-runs generation against the score already computed, no
+     re-scoring/re-cloning needed. Deliberately NOT a permanent button next
+     to Scan below: it only appears here, inside this failure banner, for
+     this exact failure mode. #}
+  <form method="post" action="/assessments/{{ assessment_id }}/onboard" class="inline-form">
+    <button type="submit" class="btn btn-sm btn-outline">Retry Onboard</button>
+  </form>
+  {% endif %}
+</div>
 {% endif %}
 {% if request.query_params.get('warning') %}
 {% for w in request.query_params.get('warning').split('|') %}
@@ -139,39 +154,38 @@
 
 {# Next-step hint: ties the stepper above directly to the one action that
    actually moves this app forward. While lifecycle is still "assessed",
-   Onboard This App is always the primary path — leftover Ledger actions
-   (often from an earlier delivery / SLO tick on a prior assessment of the
-   same app) must not compete with it. After onboard, pending actions win
+   this hint is always the primary path — leftover Ledger actions (often
+   from an earlier delivery / SLO tick on a prior assessment of the same
+   app) must not compete with it. After onboard, pending actions win
    because they are the human delivery / rollback decisions.
 
-   prior_onboarded copy (2026-07-20): this used to promise "(next time use
-   Scan below to re-assess and onboard in one step)", implying every scan
-   chains into onboarding and this was just a one-off manual catch-up. That
-   is only true for a human clicking Scan on THIS page and staying on the
-   resulting progress page long enough for it to redirect
-   (assess_progress() claims continue_onboard only when something actually
-   polls `GET /assess/progress/{job_id}` after it completes — store.py's
-   claim_continue_onboard()/create_assessment_job()). The scenario that
-   actually produces "a fresh score sitting here unconsumed" most often has
-   nothing to do with that page at all: `/api/webhook/assess`
-   (routes/webhooks.py's webhook_assess(), the route ReassessScheduler's
-   scheduled cadence and webhook_github_push's push-triggered re-assess
-   both call) clones, scores, and saves a new assessment directly — it
-   never calls create_assessment_job/continue_onboard, so it can never
-   chain into onboarding no matter what a human does "next time". Onboard
-   This App is the only way to consume a score that arrived this way
-   without paying for another full re-scan; the copy below no longer
-   promises a guarantee that doesn't hold for it (see the Onboard button's
-   own tooltip for the fuller why). #}
+   2026-07-20 (single-button collapse): "assessed" with no error is now a
+   genuinely transient state -- every Assess/Scan (manual UI, cadence tick,
+   webhook push) chains straight into onboarding server-side the moment
+   the assessment is saved (assess_submit()'s background thread /
+   webhook_assess() / webhook_github_push(), see README's Unified apply
+   flow entry), never dependent on a human polling any progress page. The
+   separate "Onboard This App" button this hint used to point at has been
+   removed -- Scan below is now the one action, and it already chains
+   automatically every time. active_onboard_job/failed_onboard_job (route-
+   computed from the real remediation_jobs row for this assessment) tell
+   this hint whether the chain is already running or genuinely needs a
+   retry, instead of ever implying a human still needs to click something
+   that's already happening. #}
 <div class="next-step-hint {% if lifecycle_stage == 'assessed' %}next-step-hint-primary{% elif pending_actions and next_action.state == 'none' %}next-step-hint-attention{% endif %}">
   {% if lifecycle_stage == "assessed" %}
   <span class="next-step-icon" aria-hidden="true">&#9679;</span>
   <span>
-    {% if prior_onboarded %}
-    This score hasn't been onboarded yet — click <strong>Onboard This App</strong> below to generate manifests for it now, no re-scoring needed.
+    {% if active_onboard_job %}
+    Onboarding is running automatically for this score — see
+    <a href="/assessments/{{ assessment_id }}/onboard/progress/{{ active_onboard_job.id }}">live progress</a>.
+    {% elif failed_onboard_job %}
+    The automatic onboarding step failed for this score (see the error above) — click <strong>Retry Onboard</strong> above, or <strong>Scan</strong> below to start over.
+    {% elif prior_onboarded %}
+    This score hasn't been onboarded yet — click <strong>Scan</strong> below to onboard it now.
     {% else %}
-    Next step: click <strong>Onboard This App</strong> below.
-    Onboard generates remediations for all findings — do not fix them one-by-one on the Findings tab first.
+    Next step: click <strong>Scan</strong> below.
+    Scan assesses and onboards in one step, generating remediations for all findings automatically — do not fix them one-by-one on the Findings tab first.
     {% endif %}
     {% if pending_actions %}
     <span class="text-muted">
@@ -237,31 +251,19 @@
   {% endif %}
 {% endif %}
 
-{# Primary CTA follows lifecycle: Onboard only while assessed; after onboard
-   the giant Onboard button would teach the wrong next step. This is
-   different from the now-removed Re-onboard button (2026-07-20, see
-   README): Re-onboard was a SECOND button next to Scan for apps already
-   past "assessed", purely redundant with what Scan's own auto-chain did.
-   This button has no such redundant twin -- Scan below is a genuinely
-   different, more expensive action (re-clone + re-score from scratch) that
-   only chains into onboarding when a human clicks it interactively and
-   stays on the resulting progress page (assess_progress()'s
-   claim_continue_onboard, assessments.py:319-337). Every automatic
-   re-assessment (ReassessScheduler's cadence tick, a git push) instead
-   goes through /api/webhook/assess (routes/webhooks.py:110-150), which has
-   no continue_onboard/chaining concept at all -- so this button stays the
-   one way to onboard a fresh, already-computed score without paying for
-   another full re-scan, not a narrow recovery path. #}
+{# Primary CTA follows lifecycle. "Onboard This App" (a separate, permanently-
+   visible button next to Scan) has been removed entirely (2026-07-20,
+   single-button collapse per product directive: "one button only,
+   have it do the full chain automatically"). Scan below now
+   deterministically, server-side chains straight through onboard -> automatic
+   validation -> Deliver for every trigger (manual click, cadence tick, push
+   webhook) -- see assess_submit()/webhook_assess()/webhook_github_push() --
+   so a second "just onboard this score" button would only ever duplicate
+   what Scan already does. The one narrow exception -- a genuinely failed
+   onboard step needing a retry without repaying the re-score cost -- lives
+   in the error banner above (failed_onboard_job), not here. #}
 <div class="action-bar mt-2 mb-2">
-  {% if lifecycle_stage == "assessed" %}
-  <form method="post" action="/assessments/{{ assessment_id }}/onboard" class="inline-form">
-    <button type="submit" class="btn btn-action btn-lg"
-      title="Generate manifests for this score exactly as computed -- no re-scoring. Automatic re-assessments (scheduled or push-triggered) always land here needing this same manual step; use Scan instead only if you want to re-check the repo itself first.">
-      <span class="btn-label">Onboard This App</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Running agents&hellip;</span>
-    </button>
-  </form>
-  {% elif lifecycle_stage == "onboarded" %}
+  {% if lifecycle_stage == "onboarded" %}
   <a href="/assessments/{{ assessment_id }}/onboard-results" class="btn btn-action btn-lg" title="Review the generated manifests/PRs, then deliver them">Review &amp; Deliver</a>
   {% endif %}
   {# Manual Scan trigger for this exact app -- same underlying POST /assess
@@ -444,15 +446,17 @@
       Findings (<span x-text="findingsCount"></span>)
     </h2>
     <div class="collapse-body" x-show="open" x-transition>
-      {# Pre-onboard: Onboard This App already generates manifests for every
-         finding. Per-finding Fix is a competing generation path that lands on
-         the same Dry Run → Apply flow and was shipping as a dead/confusing
-         control (confirm without busy feedback; Remediation Plan Fix had no
-         confirm). Hide it until onboarding has run; then Fix is the right
-         verb for incremental remediations. #}
+      {# Pre-onboard: Scan (which always chains into onboarding, 2026-07-20)
+         already generates manifests for every finding. Per-finding Fix is a
+         competing generation path that lands on the same Dry Run → Apply
+         flow and was shipping as a dead/confusing control (confirm without
+         busy feedback; Remediation Plan Fix had no confirm). Hide it until
+         onboarding has run; then Fix is the right verb for incremental
+         remediations. #}
       {% if lifecycle_stage == "assessed" and fixable_categories %}
       <p class="text-muted text-sm mb-1" role="status">
-        To fix these findings, use <strong>Onboard This App</strong> above -- automatic validation and delivery
+        Onboarding for these findings is running automatically (or about to)
+        via <strong>Scan</strong> below -- automatic validation and delivery
         run on their own from there. Per-finding Fix appears here after onboarding.
       </p>
       {% endif %}
@@ -631,7 +635,7 @@
    so they get recommendation_card instead. #}
   {% if lifecycle_stage == "assessed" and non_pr_pending_actions %}
   <p class="text-muted text-sm mb-1" role="status">
-    Your next step is <strong>Onboard This App</strong> above — it generates remediations for all findings at once.
+    Onboarding for this score is running automatically (or about to, via <strong>Scan</strong>) — it generates remediations for all findings at once.
     The item{{ 's' if non_pr_pending_actions|length != 1 }} below are leftover from earlier deliveries for this app; optional cleanup only.
   </p>
   {% endif %}
