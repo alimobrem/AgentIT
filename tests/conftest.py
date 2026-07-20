@@ -122,6 +122,43 @@ def _hermetic_llm_env(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_kube_env(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force ``AGENTIT_OFFLINE=1`` for every test by default.
+
+    Root cause this closes: unlike ``_hermetic_llm_env`` above (which strips
+    ambient LLM credentials so no test can accidentally reach a real LLM),
+    nothing previously stopped a test run from reaching a real Kubernetes
+    API server. A developer with an expired-but-still-configured ``oc
+    login`` session (a live kubeconfig context pointing at a real cluster,
+    just with a stale/invalid token) gets a real, slow, failing HTTPS round
+    trip out of any code path that calls ``kube.get_client()`` -- not a fast
+    local failure. That latency-plus-failure pattern was enough to
+    intermittently fail a *different* set of tests on every run (observed:
+    two full-suite runs on the exact same uncommitted diff produced two
+    disjoint sets of ~11 failures each), because it interacts with
+    wall-clock-sensitive shared state (``kube_breaker``'s
+    ``reset_after``, background-task timing) in a way that depends on
+    exactly how slow the failing real call was and how much other work
+    happened to be scheduled around it -- classic environment-dependent
+    flakiness, not a code bug in whatever test happened to fail.
+
+    ``kube.py``'s own ``AGENTIT_OFFLINE`` (see ``get_client()``'s
+    docstring) already exists as exactly this hard-offline guarantee --
+    it was just opt-in, so every dev had to remember to export it by hand
+    before running tests locally (the recovery step used once to diagnose
+    this very issue). Defaulting it on for the whole suite makes that the
+    guarantee rather than a manual step, while still stepping aside
+    (leaving any real ``AGENTIT_OFFLINE`` the caller already set alone,
+    and never touching it at all) when ``--live-cluster`` is passed, so
+    ``live_cluster``-marked tests still see real cluster access when
+    explicitly opted in.
+    """
+    if request.config.getoption("--live-cluster"):
+        return
+    monkeypatch.setenv("AGENTIT_OFFLINE", "1")
+
+
+@pytest.fixture(autouse=True)
 def _reset_kube_breaker() -> None:
     """Reset the shared, process-global ``kube_breaker`` (portal/helpers.py)
     before and after every test.
