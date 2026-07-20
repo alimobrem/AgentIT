@@ -298,7 +298,6 @@ async def orchestrate(repo_url: str, output_dir: str, criticality: str, use_llm:
             plan = result.plan
             click.echo(f"\n=== Orchestration Plan ===", err=True)
             click.echo(f"Agents: {', '.join(plan.agents_to_run)}", err=True)
-            click.echo(f"Auto-approve: {plan.auto_approve}", err=True)
 
             # Print results
             click.echo(f"\n=== Agent Results ===", err=True)
@@ -314,12 +313,9 @@ async def orchestrate(repo_url: str, output_dir: str, criticality: str, use_llm:
                 for c in result.conflicts:
                     click.echo(f"  {c['type']}: {c['resolution']}", err=True)
 
-            # Print recommendation and gates
+            # Print recommendation
             click.echo(f"\n=== Recommendation ===", err=True)
             click.echo(f"  {result.recommendation}", err=True)
-            click.echo(f"\n=== Gates ===", err=True)
-            for g in result.gates_created:
-                click.echo(f"  [ ] {g}", err=True)
     except CloneError as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
@@ -513,8 +509,8 @@ async def reassess_watch(interval: int) -> None:
     """Long-lived re-assessment scheduler — automatically re-Assesses apps
     once their configured cadence (apps.assessment_cadence: daily/weekly/
     monthly) has elapsed, via the same /api/webhook/assess route the manual
-    Fleet Scan button and RemediationLoop already use. Apps on the
-    'manual' cadence are never touched.
+    Fleet Scan button already uses. Apps on the 'manual' cadence are never
+    touched.
     """
     from agentit.watchers.reassess_scheduler import ReassessScheduler
 

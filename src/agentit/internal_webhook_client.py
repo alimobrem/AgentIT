@@ -3,19 +3,19 @@
 ``verify_internal_token``) from a separate pod.
 
 Every long-lived watcher/loop that runs outside the portal process
-(``RemediationLoop``, ``SkillLearner``, and any future cross-pod caller)
+(``ReassessScheduler``, ``SkillLearner``, and any future cross-pod caller)
 needs to attach the exact same ``X-Internal-Webhook-Token`` header the
 receiving side checks for. Before this module existed, each caller built
 its own ``httpx.AsyncClient`` and re-derived the "read
 ``AGENTIT_INTERNAL_WEBHOOK_TOKEN``, attach the header if set" logic by
-hand -- inconsistently: ``RemediationLoop``'s client shipped without the
-header at all for a while (a real incident, confirmed live via repeated
-"loop-failed" events with "Missing or invalid internal webhook token"),
-while ``SkillLearner`` built the header correctly but per-call instead of
-once at construction. This module is now the one place that knows how to
-build a correctly-configured client, so there's structurally only one way
-to make this call, not one fixed instance plus an ad-hoc pattern
-elsewhere.
+hand -- inconsistently: the now-deleted ``RemediationLoop``'s client
+shipped without the header at all for a while (a real incident, confirmed
+live via repeated "loop-failed" events with "Missing or invalid internal
+webhook token"), while ``SkillLearner`` built the header correctly but
+per-call instead of once at construction. This module is now the one place
+that knows how to build a correctly-configured client, so there's
+structurally only one way to make this call, not one fixed instance plus
+an ad-hoc pattern elsewhere.
 """
 
 from __future__ import annotations

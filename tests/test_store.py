@@ -804,12 +804,6 @@ class TestApplyResultsJsonRoundtrip:
 
 
 class TestScheduledOperations:
-    async def test_toggle_schedule(self, store):
-        schedule_id = await store.create_schedule("app", "job", "agent", "* * * * *", "cmd")
-        assert await store.toggle_schedule(schedule_id, False) is True
-        schedules = await store.list_schedules()
-        assert schedules[0]["enabled"] is False
-
     async def test_has_schedules_for_app(self, store):
         assert await store.has_schedules_for_app("app") is False
         await store.create_schedule("app", "job", "agent", "* * * * *", "cmd")
@@ -817,16 +811,8 @@ class TestScheduledOperations:
 
 
 class TestWebhookDedup:
-    async def test_mark_and_check_processed(self, store):
-        assert await store.webhook_already_processed("delivery-1") is False
-        await store.mark_webhook_processed("delivery-1")
-        assert await store.webhook_already_processed("delivery-1") is True
-        # ON CONFLICT DO NOTHING must not raise on a repeat delivery id.
-        await store.mark_webhook_processed("delivery-1")
-
     async def test_claim_webhook_first_caller_wins(self, store):
         assert await store.claim_webhook("delivery-claim-1") is True
-        assert await store.webhook_already_processed("delivery-claim-1") is True
 
     async def test_claim_webhook_second_caller_loses(self, store):
         assert await store.claim_webhook("delivery-claim-2") is True
@@ -836,10 +822,10 @@ class TestWebhookDedup:
         """Regression guard for the check-then-act webhook dedup race: fire
         many genuinely concurrent claims for the *same* delivery_id (real
         asyncpg connections from the pool, not a mocked sequential call)
-        and assert exactly one wins. Before this fix, callers used
-        `webhook_already_processed()` (a SELECT) then, much later,
-        `mark_webhook_processed()` (an INSERT) as two separate round trips
-        -- concurrent callers could both pass the SELECT before either
+        and assert exactly one wins. Before this fix, callers used the
+        now-deleted `webhook_already_processed()` (a SELECT) then, much
+        later, `mark_webhook_processed()` (an INSERT) as two separate round
+        trips -- concurrent callers could both pass the SELECT before either
         INSERT landed. `claim_webhook()` collapses both into one
         INSERT ... ON CONFLICT DO NOTHING RETURNING, so the database's own
         PRIMARY KEY constraint -- not caller-side timing -- decides the
@@ -853,16 +839,60 @@ class TestWebhookDedup:
         assert results.count(False) == 19
 
 
+class TestDeliveryLocking:
+    """Regression coverage for the per-app delivery race github_pr.py's
+    fixed `agentit/{app}` branch + force-push-on-conflict fallback
+    otherwise leaves open between two overlapping `route_and_deliver()`
+    calls for the same app -- see `claim_delivery_lock()`'s own docstring."""
+
+    async def test_claim_delivery_lock_first_caller_wins(self, store):
+        assert await store.claim_delivery_lock("delivery:app-a") is True
+
+    async def test_claim_delivery_lock_second_caller_loses(self, store):
+        assert await store.claim_delivery_lock("delivery:app-b") is True
+        assert await store.claim_delivery_lock("delivery:app-b") is False
+
+    async def test_release_then_reclaim_succeeds(self, store):
+        assert await store.claim_delivery_lock("delivery:app-c") is True
+        await store.release_delivery_lock("delivery:app-c")
+        assert await store.claim_delivery_lock("delivery:app-c") is True
+
+    async def test_stale_lock_can_be_stolen(self, store):
+        """A lock left behind by a process that crashed mid-delivery must
+        not block that app's deliveries forever -- a claim older than
+        `stale_after_seconds` is stolen by the next caller, atomically."""
+        assert await store.claim_delivery_lock("delivery:app-d", stale_after_seconds=0) is True
+        # Still "held" per a caller using the real (900s) default window...
+        assert await store.claim_delivery_lock("delivery:app-d") is False
+        # ...but a caller willing to treat it as stale immediately can steal it.
+        assert await store.claim_delivery_lock("delivery:app-d", stale_after_seconds=0) is True
+
+    async def test_claim_delivery_lock_atomic_under_real_concurrency(self, store):
+        """Fire many genuinely concurrent claims for the *same* lock_key
+        (real asyncpg connections from the pool, not a mocked sequential
+        call) and assert exactly one wins -- the database's own PRIMARY
+        KEY constraint, not caller-side timing, decides the single winner
+        (mirrors `test_claim_webhook_atomic_under_real_concurrency` above
+        for the identical shape of race)."""
+        import asyncio
+
+        results = await asyncio.gather(
+            *(store.claim_delivery_lock("delivery:race-app") for _ in range(20))
+        )
+        assert results.count(True) == 1
+        assert results.count(False) == 19
+
+
 class TestSuppressedChecks:
     async def test_suppress_and_unsuppress(self, store):
         await store.suppress_check("app", "check-a", reason="flaky")
-        assert await store.get_suppressed_sources("app") == {"check-a"}
+        assert {s["check_source"] for s in await store.get_suppressions("app")} == {"check-a"}
         await store.suppress_check("app", "check-a", reason="still flaky")
         suppressions = await store.get_suppressions("app")
         assert len(suppressions) == 1
         assert suppressions[0]["reason"] == "still flaky"
         await store.unsuppress_check("app", "check-a")
-        assert await store.get_suppressed_sources("app") == set()
+        assert await store.get_suppressions("app") == []
 
 
 class TestSkillInventorySnapshots:
@@ -1011,9 +1041,6 @@ class TestAgentRuns:
         runs = await store.list_agent_runs("hardening")
         assert len(runs) == 2
         assert runs[0]["status"] == "failed"  # most recent first
-
-        by_assessment = await store.list_agent_runs_for_assessment(assessment_id)
-        assert [r["status"] for r in by_assessment] == ["success", "failed"]  # ascending
 
 
 class TestGetAgentStats:

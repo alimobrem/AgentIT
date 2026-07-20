@@ -20,7 +20,7 @@ draft this watcher generates is therefore pushed straight to the portal via
 an internal-token-authenticated API call
 (`POST /api/webhook/skill-draft`, `routes/webhooks.py`) -- the same
 `AGENTIT_PORTAL_URL` + `AGENTIT_INTERNAL_WEBHOOK_TOKEN` pattern
-`RemediationLoop` already uses to call back into the portal from a
+`reassess-scheduler` already uses to call back into the portal from a
 separate watcher pod. That endpoint calls the exact same `save_skill()`
 the portal's own in-process "Research CVEs & Generate Skills" button
 uses, into the portal's own `skills/` tree, and busts its 60s skills
@@ -85,9 +85,9 @@ class SkillLearner:
         self._portal_url = portal_url.rstrip("/")
         # `internal_webhook_client` attaches the X-Internal-Webhook-Token
         # header once, at construction -- the same shared helper
-        # `RemediationLoop` uses for the identical "separate watcher pod
-        # calling back into the portal" problem, so there's structurally
-        # only one way to make this call correctly.
+        # `reassess_scheduler.py` uses for the identical "separate watcher
+        # pod calling back into the portal" problem, so there's
+        # structurally only one way to make this call correctly.
         self._client = internal_webhook_client(timeout=timeout)
         self._draft_retry_attempts = draft_retry_attempts
         self._draft_retry_delay = draft_retry_delay
@@ -283,10 +283,10 @@ class SkillLearner:
         filesystem. ``self._client`` already carries the
         ``X-Internal-Webhook-Token`` header from construction (via the
         shared ``internal_webhook_client`` helper -- the same one
-        ``RemediationLoop`` uses for the same "separate watcher pod calling
-        back into the portal" problem). Returns the saved skill's name, or
-        ``None`` if the portal couldn't be reached or rejected the draft
-        this cycle.
+        ``reassess_scheduler.py`` uses for the same "separate watcher pod
+        calling back into the portal" problem). Returns the saved skill's
+        name, or ``None`` if the portal couldn't be reached or rejected the
+        draft this cycle.
 
         Retries specifically on HTTP 404 (not other statuses): confirmed
         root cause of a real incident is that ``AGENTIT_PORTAL_URL`` points

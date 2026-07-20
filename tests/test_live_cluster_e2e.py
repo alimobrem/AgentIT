@@ -20,7 +20,6 @@ import pytest
 
 from agentit.agents.base import validate_manifest
 from agentit.agents.orchestrator import FleetOrchestrator
-from agentit.portal.cluster_apply import apply_manifests_to_cluster
 from agentit.portal.store import AssessmentStore
 from agentit.runner import run_assessment
 
@@ -189,20 +188,20 @@ class TestClusterApply:
                         "description": fname,
                     })
 
-        apply_result = apply_manifests_to_cluster(files, test_namespace, dry_run=True)
-        logger.info("Dry-run: %d applied, %d skipped, %d errors",
-                     len(apply_result["applied"]), len(apply_result["skipped"]),
-                     len(apply_result["errors"]))
-
-        for err in apply_result["errors"]:
-            if "resource mapping not found" in err:
-                logger.warning("CRD missing (expected in test): %s", err.split(":")[0])
-            else:
-                logger.error("Unexpected apply error: %s", err)
-
-        crd_errors = [e for e in apply_result["errors"] if "resource mapping not found" in e]
-        real_errors = [e for e in apply_result["errors"] if "resource mapping not found" not in e]
-        assert len(real_errors) == 0, f"Non-CRD errors during dry-run: {real_errors}"
+        # cluster_apply.apply_manifests_to_cluster() (the dry-run-apply
+        # primitive this test used to exercise here) was deleted 2026-07-20
+        # -- it had zero production callers since the cluster-admin-review
+        # gate retirement, and AgentIT no longer performs a direct cluster
+        # apply for any delivery path. This live-cluster smoke test is
+        # already broken independent of that removal (references a
+        # nonexistent AsyncSQLiteStore -- pre-existing, out of scope for
+        # this pass); left as a TODO for whoever revives --live-cluster
+        # testing to replace this dry-run-apply check with a real
+        # `kube.apply_yaml(..., dry_run=True)` call per generated file, or
+        # decide a live-cluster dry-run check isn't needed anymore now
+        # that every delivery goes through a GitOps PR + Argo CD sync
+        # instead.
+        assert len(files) > 0, "No YAML manifests generated"
 
 
 # ── Phase 5: Store + Portal Integration ────────────────────────────
@@ -276,12 +275,9 @@ class TestFullPipeline:
 
         assert len(files) > 0, "No YAML manifests generated"
 
-        apply_result = apply_manifests_to_cluster(files, test_namespace, dry_run=True)
-        real_errors = [
-            e for e in apply_result["errors"]
-            if "resource mapping not found" not in e
-        ]
-        assert len(real_errors) == 0, f"Pipeline dry-run errors: {real_errors}"
+        # cluster_apply.apply_manifests_to_cluster()'s dry-run-apply check
+        # was removed here for the same reason noted in TestClusterApply
+        # above (function deleted 2026-07-20, zero production callers).
 
         pipeline_files = [f for f in files if "pipeline" in f["path"].lower()]
         assert len(pipeline_files) > 0, "No Tekton pipeline generated"

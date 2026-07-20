@@ -58,28 +58,6 @@ class TestAssessOnboardFlow:
         assert len(agents) >= 3
 
 
-class TestRemediationLoopFlow:
-    """Remediation loop: assess failure doesn't crash."""
-
-    async def test_loop_handles_assess_failure(self):
-        from agentit.remediation_loop import RemediationLoop
-        store, _raw = await make_async_store()
-        loop = RemediationLoop(portal_url="http://bad-host:9999", store=store, timeout=2)
-        result = await loop.trigger("https://github.com/org/app", "app", reason="test")
-        assert result["outcome"] == "failed"
-        assert result["step"] == "assess"
-        await loop.close()
-
-    async def test_loop_logs_events(self):
-        from agentit.remediation_loop import RemediationLoop
-        store, raw = await make_async_store()
-        loop = RemediationLoop(portal_url="http://bad-host:9999", store=store, timeout=2)
-        await loop.trigger("https://github.com/org/app", "test-app", reason="test")
-        events = await raw.list_events()
-        assert any(e["action"] == "loop-started" for e in events)
-        await loop.close()
-
-
 class TestInfraRepoFlow:
     """Infra repo: commit_to_infra_repo lowercases app name."""
 

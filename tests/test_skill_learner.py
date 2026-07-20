@@ -504,8 +504,7 @@ class TestCrossPodVisibility:
         """The token header is now attached once, at client construction,
         via the shared `internal_webhook_client` helper -- not rebuilt
         per-call -- so the client itself must already carry it (matches the
-        assertion style of `test_internal_webhook_client.py` and
-        `RemediationLoop`'s own regression test)."""
+        assertion style of `test_internal_webhook_client.py`)."""
         monkeypatch.setenv("AGENTIT_INTERNAL_WEBHOOK_TOKEN", "s3cr3t-token")
         learner, _ = _learner()
 
@@ -519,8 +518,7 @@ class TestCrossPodVisibility:
 
     async def test_submit_draft_to_portal_returns_none_when_unreachable(self):
         """Real, unmocked failure mode -- the portal is genuinely
-        unreachable (matches the established RemediationLoop test
-        convention of pointing at a bad host with a short timeout)."""
+        unreachable (points at a bad host with a short timeout)."""
         learner, _ = _learner(portal_url="http://bad-host:9999", timeout=2)
 
         assert await learner._submit_draft_to_portal("content", "security") is None

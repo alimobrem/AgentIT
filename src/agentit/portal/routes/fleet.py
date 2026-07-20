@@ -305,11 +305,7 @@ async def fleet_page(request: Request) -> HTMLResponse:
     await _attach_pending_actions(fleet, s)
     await _attach_next_action_state(fleet, s)
     total_apps = len(fleet)
-    if total_apps == 0:
-        return get_templates().TemplateResponse(request, "dashboard.html", {
-            "assessments": [], "total_apps": 0, "avg_score": 0, "critical_total": 0, "trends": {},
-        })
-    avg_score = sum(r["latest_score"] for r in fleet) / total_apps
+    avg_score = (sum(r["latest_score"] for r in fleet) / total_apps) if total_apps else 0
     critical_total = sum(r["critical_count"] for r in fleet)
     # Same PR-status-derived definition as Ledger's own "Waiting for your
     # approval" stat and base.html's nav badge (pr_tracking.py's

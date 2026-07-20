@@ -4,8 +4,7 @@ re-Assesses apps once their configured cadence (apps.assessment_cadence)
 has elapsed, following the exact same long-lived-watcher pattern
 (``run()``/``sleep_with_heartbeat``/``record_tick``) as
 vuln_watcher.py/drift_detector.py, and calling back into the portal via
-``internal_webhook_client`` exactly like RemediationLoop/SkillLearner
-already do.
+``internal_webhook_client`` exactly like SkillLearner already does.
 """
 from __future__ import annotations
 
@@ -34,8 +33,8 @@ class TestCheckDueApps:
 
     async def test_triggers_assess_for_a_due_app_via_the_shared_webhook_route(self):
         """The real mechanism: calling POST /api/webhook/assess -- the
-        exact same route RemediationLoop/Tekton/the manual Fleet Re-assess
-        button already use -- not a second, parallel assess code path."""
+        exact same route Tekton/the manual Fleet Re-assess button already
+        use -- not a second, parallel assess code path."""
         store, raw = await make_async_store()
         report = make_report(repo_name="due-app")
         report.assessed_at = datetime.now(timezone.utc) - timedelta(days=2)
@@ -97,8 +96,7 @@ class TestCheckDueApps:
     async def test_handles_duplicate_response_without_raising_or_logging_failure(self):
         """/api/webhook/assess's own dedup guard (claim_webhook) can return
         {"status": "duplicate", ...} instead of a real assessment result --
-        this must not be treated as an error (see RemediationLoop._assess's
-        identical handling of the same shape)."""
+        this must not be treated as an error."""
         store, raw = await make_async_store()
         report = make_report(repo_name="due-app-duplicate")
         report.assessed_at = datetime.now(timezone.utc) - timedelta(days=2)

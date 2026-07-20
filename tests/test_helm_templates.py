@@ -1997,8 +1997,7 @@ class TestReassessSchedulerDeployment:
         """Every re-assessment goes through the portal's own
         /api/webhook/assess -- not a second, parallel assess pipeline --
         so this Deployment needs the same AGENTIT_PORTAL_URL/
-        AGENTIT_INTERNAL_WEBHOOK_TOKEN wiring RemediationLoop/SkillLearner
-        already use."""
+        AGENTIT_INTERNAL_WEBHOOK_TOKEN wiring SkillLearner already uses."""
         doc = _load(self.TEMPLATE)
         container = doc["spec"]["template"]["spec"]["containers"][0]
         env_by_name = {e["name"]: e for e in container["env"] if "name" in e}

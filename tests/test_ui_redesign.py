@@ -79,19 +79,20 @@ def _report_with_network_finding(**kwargs):
 
 class TestFixFindingIsPureGeneration:
     async def test_fix_does_not_call_apply_manifests_to_cluster(self, ui_client):
+        """cluster_apply.apply_manifests_to_cluster() no longer exists at
+        all (deleted 2026-07-20, zero production callers) -- this is now a
+        structural guarantee rather than something to mock-assert."""
         client, store = ui_client
         aid = await store.save(_report_with_network_finding())
 
-        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
-            resp = await client.post(
-                f"/assessments/{aid}/fix",
-                data={"category": "network", "description": "No NetworkPolicy"},
-                follow_redirects=False,
-            )
+        resp = await client.post(
+            f"/assessments/{aid}/fix",
+            data={"category": "network", "description": "No NetworkPolicy"},
+            follow_redirects=False,
+        )
 
         assert resp.status_code == 303
         assert "onboard-results" in resp.headers["location"]
-        mock_apply.assert_not_called()
 
     async def test_fix_does_not_save_apply_results(self, ui_client):
         """No apply_results row should be written by a Fix click -- that

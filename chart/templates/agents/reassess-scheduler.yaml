@@ -44,8 +44,9 @@ spec:
             - name: AGENTIT_IMAGE_TAG
               value: {{ .Values.image.tag | quote }}
             # Every re-assessment is triggered via the portal's own
-            # /api/webhook/assess -- the same route RemediationLoop/Tekton
-            # already call -- not a second, parallel assess code path.
+            # /api/webhook/assess -- the same route Tekton's
+            # register-self-in-fleet step already calls -- not a second,
+            # parallel assess code path.
             - name: AGENTIT_PORTAL_URL
               value: http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc:8080
             - name: AGENTIT_INTERNAL_WEBHOOK_TOKEN

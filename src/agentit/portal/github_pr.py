@@ -382,6 +382,110 @@ def get_commits_behind(repo_url: str, base_sha: str, head_ref: str = "main") -> 
     }
 
 
+# ── Shared PR-opening primitives ────────────────────────────────────────
+#
+# create_onboarding_pr(), create_agent_prs()'s per-agent loop,
+# create_source_patch_pr(), and commit_to_infra_repo() each independently
+# repeated the same 8-step sequence (fetch default branch -> fetch base
+# SHA -> build tree_items -> POST /git/trees -> POST /git/commits ->
+# POST /git/refs with a 422-force-push fallback -> build a PR body ->
+# POST /pulls with a 422-already-exists fallback), including the
+# `requests.HTTPError`/`Response.__bool__` gotcha (`exc.response` is falsy
+# for every real error response, since `Response.__bool__` returns
+# `self.ok` -- checking `exc.response is not None` instead of a bare
+# truthiness check is what actually surfaces GitHub's real error body)
+# explained identically in 3 separate `except requests.HTTPError` blocks
+# below. Consolidated 2026-07-20 (architecture-review follow-up) into the
+# 4 helpers below so a future fix to any one step only needs to land once
+# -- each of the 4 callers now only builds its own `tree_items`/PR title
+# and body text, then calls these in sequence. Pure refactor: every
+# function's external behavior/return shape is unchanged -- verified
+# against the existing test_portal_pr.py/test_delivery_router.py/
+# test_create_agent_prs_route.py suites, all passing unchanged.
+
+
+def _get_default_branch_and_base_sha(base_url: str, hdrs: dict) -> tuple[str, str]:
+    """Fetch a repo's default branch and its current head SHA -- the first
+    two GitHub API calls every PR-opening function below makes before
+    building a tree. Raises (``requests.HTTPError`` or otherwise) exactly
+    like the inlined calls this replaces did; each caller's own
+    try/except handles it identically to before."""
+    resp = requests.get(base_url, headers=hdrs, timeout=10)
+    resp.raise_for_status()
+    default_branch = resp.json()["default_branch"]
+
+    resp = requests.get(
+        f"{base_url}/git/ref/heads/{default_branch}",
+        headers=hdrs, timeout=10,
+    )
+    resp.raise_for_status()
+    base_sha = resp.json()["object"]["sha"]
+    return default_branch, base_sha
+
+
+def _commit_tree(base_url: str, hdrs: dict, base_sha: str, tree_items: list[dict], message: str) -> str:
+    """Build a tree from ``tree_items`` on top of ``base_sha``, then a
+    commit with ``message`` on top of that tree -- the middle two GitHub
+    API calls every PR-opening function below makes. Returns the new
+    commit's SHA."""
+    resp = requests.post(
+        f"{base_url}/git/trees",
+        headers=hdrs, timeout=30,
+        json={"base_tree": base_sha, "tree": tree_items},
+    )
+    resp.raise_for_status()
+    tree_sha = resp.json()["sha"]
+
+    resp = requests.post(
+        f"{base_url}/git/commits",
+        headers=hdrs, timeout=10,
+        json={"message": message, "tree": tree_sha, "parents": [base_sha]},
+    )
+    resp.raise_for_status()
+    return resp.json()["sha"]
+
+
+def _create_or_update_branch_ref(base_url: str, hdrs: dict, branch_name: str, commit_sha: str) -> None:
+    """Point ``branch_name`` at ``commit_sha`` -- create the ref if it
+    doesn't exist yet, force-update (force-push) it if it does (a 422
+    means the ref already exists). The identical create-or-force-push
+    fallback every PR-opening function below already repeated."""
+    resp = requests.post(
+        f"{base_url}/git/refs",
+        headers=hdrs, timeout=10,
+        json={"ref": f"refs/heads/{branch_name}", "sha": commit_sha},
+    )
+    if resp.status_code == 422:
+        requests.patch(
+            f"{base_url}/git/refs/heads/{branch_name}",
+            headers=hdrs, timeout=10,
+            json={"sha": commit_sha, "force": True},
+        ).raise_for_status()
+    else:
+        resp.raise_for_status()
+
+
+def _open_pr_with_fallback(
+    base_url: str, hdrs: dict, owner: str, branch_name: str, base_branch: str,
+    title: str, body: str, repo_url: str,
+) -> str:
+    """Open a PR from ``branch_name`` into ``base_branch`` -- if one
+    already exists for this branch (HTTP 422, "pull request already
+    exists"), resolve its real URL via ``_find_existing_pr_url()`` instead
+    of treating that as a failure. Returns the PR's ``html_url`` either
+    way. The identical open-or-find-existing fallback every PR-opening
+    function below already repeated."""
+    resp = requests.post(
+        f"{base_url}/pulls",
+        headers=hdrs, timeout=10,
+        json={"title": title, "body": body, "head": branch_name, "base": base_branch},
+    )
+    if resp.status_code == 422 and "pull request already exists" in resp.text.lower():
+        return _find_existing_pr_url(base_url, hdrs, owner, branch_name, f"{repo_url}/compare/{branch_name}")
+    resp.raise_for_status()
+    return resp.json()["html_url"]
+
+
 def create_onboarding_pr(
     repo_url: str,
     repo_name: str,
@@ -399,16 +503,7 @@ def create_onboarding_pr(
         owner, repo = _parse_owner_repo(repo_url)
         base_url = f"{_API}/repos/{owner}/{repo}"
 
-        resp = requests.get(f"{base_url}", headers=hdrs, timeout=10)
-        resp.raise_for_status()
-        default_branch = resp.json()["default_branch"]
-
-        resp = requests.get(
-            f"{base_url}/git/ref/heads/{default_branch}",
-            headers=hdrs, timeout=10,
-        )
-        resp.raise_for_status()
-        base_sha = resp.json()["object"]["sha"]
+        default_branch, base_sha = _get_default_branch_and_base_sha(base_url, hdrs)
 
         tree_items = []
         for f in files:
@@ -421,39 +516,11 @@ def create_onboarding_pr(
                 "content": f["content"],
             })
 
-        resp = requests.post(
-            f"{base_url}/git/trees",
-            headers=hdrs, timeout=30,
-            json={"base_tree": base_sha, "tree": tree_items},
+        commit_sha = _commit_tree(
+            base_url, hdrs, base_sha, tree_items,
+            "feat: add AgentIT enterprise onboarding manifests\n\nGenerated by AgentIT Enterprise Readiness Platform",
         )
-        resp.raise_for_status()
-        tree_sha = resp.json()["sha"]
-
-        resp = requests.post(
-            f"{base_url}/git/commits",
-            headers=hdrs, timeout=10,
-            json={
-                "message": "feat: add AgentIT enterprise onboarding manifests\n\nGenerated by AgentIT Enterprise Readiness Platform",
-                "tree": tree_sha,
-                "parents": [base_sha],
-            },
-        )
-        resp.raise_for_status()
-        commit_sha = resp.json()["sha"]
-
-        resp = requests.post(
-            f"{base_url}/git/refs",
-            headers=hdrs, timeout=10,
-            json={"ref": f"refs/heads/{branch_name}", "sha": commit_sha},
-        )
-        if resp.status_code == 422:
-            requests.patch(
-                f"{base_url}/git/refs/heads/{branch_name}",
-                headers=hdrs, timeout=10,
-                json={"sha": commit_sha, "force": True},
-            ).raise_for_status()
-        else:
-            resp.raise_for_status()
+        _create_or_update_branch_ref(base_url, hdrs, branch_name, commit_sha)
 
         file_list = "\n".join(
             f"- `.agentit/{f['category']}/{Path(f['path']).name}` — {f['description']}"
@@ -467,22 +534,10 @@ def create_onboarding_pr(
             "> Generated by [AgentIT](https://github.com/alimobrem/AgentIT)"
         )
 
-        resp = requests.post(
-            f"{base_url}/pulls",
-            headers=hdrs, timeout=10,
-            json={
-                "title": "AgentIT Enterprise Onboarding",
-                "body": pr_body,
-                "head": branch_name,
-                "base": default_branch,
-            },
+        pr_url = _open_pr_with_fallback(
+            base_url, hdrs, owner, branch_name, default_branch,
+            "AgentIT Enterprise Onboarding", pr_body, repo_url,
         )
-        if resp.status_code == 422 and "pull request already exists" in resp.text.lower():
-            pr_url = _find_existing_pr_url(base_url, hdrs, owner, branch_name, f"{repo_url}/compare/{branch_name}")
-            return {"pr_url": pr_url, "branch": branch_name, "files_added": len(files)}
-        resp.raise_for_status()
-
-        pr_url = resp.json()["html_url"]
         return {"pr_url": pr_url, "branch": branch_name, "files_added": len(files)}
 
     except requests.HTTPError as exc:
@@ -606,16 +661,7 @@ def create_agent_prs(
         owner, repo = _parse_owner_repo(repo_url)
         base_url = f"{_API}/repos/{owner}/{repo}"
 
-        resp = requests.get(base_url, headers=hdrs, timeout=10)
-        resp.raise_for_status()
-        default_branch = resp.json()["default_branch"]
-
-        resp = requests.get(
-            f"{base_url}/git/ref/heads/{default_branch}",
-            headers=hdrs, timeout=10,
-        )
-        resp.raise_for_status()
-        base_sha = resp.json()["object"]["sha"]
+        default_branch, base_sha = _get_default_branch_and_base_sha(base_url, hdrs)
     except Exception as exc:
         logger.exception("Failed to get repo info for per-agent PRs")
         return [{"agent_name": "setup", "error": str(exc)}]
@@ -654,39 +700,11 @@ def create_agent_prs(
                     "content": f["content"],
                 })
 
-            resp = requests.post(
-                f"{base_url}/git/trees",
-                headers=hdrs, timeout=30,
-                json={"base_tree": base_sha, "tree": tree_items},
+            commit_sha = _commit_tree(
+                base_url, hdrs, base_sha, tree_items,
+                f"feat(agentit): {agent_name} — {len(files)} manifests for {repo_name}",
             )
-            resp.raise_for_status()
-            tree_sha = resp.json()["sha"]
-
-            resp = requests.post(
-                f"{base_url}/git/commits",
-                headers=hdrs, timeout=10,
-                json={
-                    "message": f"feat(agentit): {agent_name} — {len(files)} manifests for {repo_name}",
-                    "tree": tree_sha,
-                    "parents": [base_sha],
-                },
-            )
-            resp.raise_for_status()
-            commit_sha = resp.json()["sha"]
-
-            resp = requests.post(
-                f"{base_url}/git/refs",
-                headers=hdrs, timeout=10,
-                json={"ref": f"refs/heads/{branch_name}", "sha": commit_sha},
-            )
-            if resp.status_code == 422:
-                requests.patch(
-                    f"{base_url}/git/refs/heads/{branch_name}",
-                    headers=hdrs, timeout=10,
-                    json={"sha": commit_sha, "force": True},
-                ).raise_for_status()
-            else:
-                resp.raise_for_status()
+            _create_or_update_branch_ref(base_url, hdrs, branch_name, commit_sha)
 
             file_list = "\n".join(
                 f"- `.agentit/{category}/{Path(f['path']).name}`"
@@ -699,21 +717,10 @@ def create_agent_prs(
                 f"> Generated by [AgentIT](https://github.com/alimobrem/AgentIT)"
             )
 
-            resp = requests.post(
-                f"{base_url}/pulls",
-                headers=hdrs, timeout=10,
-                json={
-                    "title": f"[AgentIT] {agent_name}: {len(files)} manifests for {repo_name}",
-                    "body": pr_body,
-                    "head": branch_name,
-                    "base": default_branch,
-                },
+            pr_url = _open_pr_with_fallback(
+                base_url, hdrs, owner, branch_name, default_branch,
+                f"[AgentIT] {agent_name}: {len(files)} manifests for {repo_name}", pr_body, repo_url,
             )
-            if resp.status_code == 422 and "pull request already exists" in resp.text.lower():
-                pr_url = _find_existing_pr_url(base_url, hdrs, owner, branch_name, f"{repo_url}/compare/{branch_name}")
-            else:
-                resp.raise_for_status()
-                pr_url = resp.json()["html_url"]
 
             results.append({
                 "agent_name": agent_name,
@@ -790,16 +797,7 @@ def create_source_patch_pr(
         owner, repo = _parse_owner_repo(repo_url)
         base_url = f"{_API}/repos/{owner}/{repo}"
 
-        resp = requests.get(base_url, headers=hdrs, timeout=10)
-        resp.raise_for_status()
-        default_branch = resp.json()["default_branch"]
-
-        resp = requests.get(
-            f"{base_url}/git/ref/heads/{default_branch}",
-            headers=hdrs, timeout=10,
-        )
-        resp.raise_for_status()
-        base_sha = resp.json()["object"]["sha"]
+        default_branch, base_sha = _get_default_branch_and_base_sha(base_url, hdrs)
 
         tree_items = []
         for f in files:
@@ -811,39 +809,11 @@ def create_source_patch_pr(
                 "content": f["content"],
             })
 
-        resp = requests.post(
-            f"{base_url}/git/trees",
-            headers=hdrs, timeout=30,
-            json={"base_tree": base_sha, "tree": tree_items},
+        commit_sha = _commit_tree(
+            base_url, hdrs, base_sha, tree_items,
+            f"fix(agentit): {len(files)} source-level change(s) for {repo_name}",
         )
-        resp.raise_for_status()
-        tree_sha = resp.json()["sha"]
-
-        resp = requests.post(
-            f"{base_url}/git/commits",
-            headers=hdrs, timeout=10,
-            json={
-                "message": f"fix(agentit): {len(files)} source-level change(s) for {repo_name}",
-                "tree": tree_sha,
-                "parents": [base_sha],
-            },
-        )
-        resp.raise_for_status()
-        commit_sha = resp.json()["sha"]
-
-        resp = requests.post(
-            f"{base_url}/git/refs",
-            headers=hdrs, timeout=10,
-            json={"ref": f"refs/heads/{branch_name}", "sha": commit_sha},
-        )
-        if resp.status_code == 422:
-            requests.patch(
-                f"{base_url}/git/refs/heads/{branch_name}",
-                headers=hdrs, timeout=10,
-                json={"sha": commit_sha, "force": True},
-            ).raise_for_status()
-        else:
-            resp.raise_for_status()
+        _create_or_update_branch_ref(base_url, hdrs, branch_name, commit_sha)
 
         file_list = "\n".join(
             f"- `{f.get('target_path') or f['path']}` — {f.get('description', '')}"
@@ -856,22 +826,11 @@ def create_source_patch_pr(
             "> Generated by [AgentIT](https://github.com/alimobrem/AgentIT)"
         )
 
-        resp = requests.post(
-            f"{base_url}/pulls",
-            headers=hdrs, timeout=10,
-            json={
-                "title": f"[AgentIT] {len(files)} source-level fix(es) for {repo_name}",
-                "body": pr_body,
-                "head": branch_name,
-                "base": default_branch,
-            },
+        pr_url = _open_pr_with_fallback(
+            base_url, hdrs, owner, branch_name, default_branch,
+            f"[AgentIT] {len(files)} source-level fix(es) for {repo_name}", pr_body, repo_url,
         )
-        if resp.status_code == 422 and "pull request already exists" in resp.text.lower():
-            pr_url = _find_existing_pr_url(base_url, hdrs, owner, branch_name, f"{repo_url}/compare/{branch_name}")
-            return {"pr_url": pr_url, "branch": branch_name, "files_committed": len(files)}
-        resp.raise_for_status()
-
-        return {"pr_url": resp.json()["html_url"], "branch": branch_name, "files_committed": len(files)}
+        return {"pr_url": pr_url, "branch": branch_name, "files_committed": len(files)}
 
     except requests.HTTPError as exc:
         msg = exc.response.text if exc.response is not None else str(exc)
@@ -904,9 +863,7 @@ def commit_to_infra_repo(
         owner, repo = _parse_owner_repo(infra_repo_url)
         base_url = f"{_API}/repos/{owner}/{repo}"
 
-        resp = requests.get(base_url, headers=hdrs, timeout=10)
-        resp.raise_for_status()
-        default_branch = resp.json()["default_branch"]
+        default_branch, base_sha = _get_default_branch_and_base_sha(base_url, hdrs)
 
         if _infra_repo_content_unchanged(base_url, hdrs, app_name, files, default_branch):
             logger.info(
@@ -917,13 +874,6 @@ def commit_to_infra_repo(
                 "skipped": True,
                 "reason": f"content already matches {default_branch} -- no PR needed",
             }
-
-        resp = requests.get(
-            f"{base_url}/git/ref/heads/{default_branch}",
-            headers=hdrs, timeout=10,
-        )
-        resp.raise_for_status()
-        base_sha = resp.json()["object"]["sha"]
 
         tree_items = []
         for f in files:
@@ -936,39 +886,11 @@ def commit_to_infra_repo(
                 "content": f["content"],
             })
 
-        resp = requests.post(
-            f"{base_url}/git/trees",
-            headers=hdrs, timeout=30,
-            json={"base_tree": base_sha, "tree": tree_items},
+        commit_sha = _commit_tree(
+            base_url, hdrs, base_sha, tree_items,
+            f"feat(agentit): onboard {app_name} — {len(files)} manifests",
         )
-        resp.raise_for_status()
-        tree_sha = resp.json()["sha"]
-
-        resp = requests.post(
-            f"{base_url}/git/commits",
-            headers=hdrs, timeout=10,
-            json={
-                "message": f"feat(agentit): onboard {app_name} — {len(files)} manifests",
-                "tree": tree_sha,
-                "parents": [base_sha],
-            },
-        )
-        resp.raise_for_status()
-        commit_sha = resp.json()["sha"]
-
-        resp = requests.post(
-            f"{base_url}/git/refs",
-            headers=hdrs, timeout=10,
-            json={"ref": f"refs/heads/{branch_name}", "sha": commit_sha},
-        )
-        if resp.status_code == 422:
-            requests.patch(
-                f"{base_url}/git/refs/heads/{branch_name}",
-                headers=hdrs, timeout=10,
-                json={"sha": commit_sha, "force": True},
-            ).raise_for_status()
-        else:
-            resp.raise_for_status()
+        _create_or_update_branch_ref(base_url, hdrs, branch_name, commit_sha)
 
         file_list = "\n".join(
             f"- `apps/{app_name}/{f.get('category', 'misc')}/{Path(f['path']).name}`"
@@ -981,21 +903,10 @@ def commit_to_infra_repo(
             f"> Generated by [AgentIT](https://github.com/alimobrem/AgentIT)"
         )
 
-        resp = requests.post(
-            f"{base_url}/pulls",
-            headers=hdrs, timeout=10,
-            json={
-                "title": f"[AgentIT] Onboard {app_name}",
-                "body": pr_body,
-                "head": branch_name,
-                "base": default_branch,
-            },
+        pr_url = _open_pr_with_fallback(
+            base_url, hdrs, owner, branch_name, default_branch,
+            f"[AgentIT] Onboard {app_name}", pr_body, infra_repo_url,
         )
-        if resp.status_code == 422 and "pull request already exists" in resp.text.lower():
-            pr_url = _find_existing_pr_url(base_url, hdrs, owner, branch_name, f"{infra_repo_url}/compare/{branch_name}")
-        else:
-            resp.raise_for_status()
-            pr_url = resp.json()["html_url"]
 
         return {
             "pr_url": pr_url,

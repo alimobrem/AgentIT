@@ -448,8 +448,8 @@ class TestEditCannotBypassSafetyRouting:
 
     async def test_editing_manifest_still_goes_through_route_and_deliver(self, edit_client, _mock_kube):
         """A non-adversarial edit (still a ConfigMap) must still be routed
-        through the exact same route_and_deliver()/apply_with_verification()
-        path as an unedited file -- no separate, edit-only code path."""
+        through the exact same route_and_deliver() path as an unedited file
+        -- no separate, edit-only code path."""
         client, store, aid = edit_client
         with patch("agentit.portal.delivery.route_and_deliver") as mock_route:
             mock_route.return_value = {

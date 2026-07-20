@@ -23,6 +23,17 @@ from agentit.skill_engine import record_skill_outcomes
 
 logger = logging.getLogger(__name__)
 
+
+class DeliveryInProgressError(RuntimeError):
+    """Raised by ``route_and_deliver()`` when another delivery for the same
+    app is already in flight (see ``store.claim_delivery_lock()``'s own
+    docstring for the race this closes). Callers with their own generic
+    exception handling (``routes/assessments.py``'s ``_run_onboarding_job``/
+    ``_run_manual_validation_job``, both broad ``except Exception``) don't
+    need to special-case this; ``deliver()`` (the one direct, synchronous
+    user click) does, for a clearer message than a generic failure."""
+
+
 # ── Taxonomy categories (docs/unified-apply-flow.md section (D)) ──────────
 CATEGORY_CLUSTER_CONFIG = "cluster_config"
 CATEGORY_CICD_SHARED_NAMESPACE = "cicd_shared_namespace"
@@ -170,30 +181,24 @@ def confirmation_text(mechanism: str, *, infra_repo_url: str | None = None) -> s
     confirmation dialog, so the two can never say different things about
     the same decision.
 
-    For the direct-apply path, this names the *target cluster* (API server
-    host, or in-cluster) alongside the *action* -- ``kube.get_client()``
-    resolves silently to whatever cluster the ambient kubeconfig/in-cluster
-    config happens to point at, with no prior visibility to the human
-    approving the apply. Naming it here (still synchronous --
-    ``kube.get_current_cluster_identity()`` never makes a live call to the
-    API server, just reads back the already-resolved client config) is
-    real safety signal a human needs before a destructive action, not
-    cosmetic.
-
-    ``MECHANISM_DIRECT_APPLY`` handling below is kept for two reasons even
-    though ``resolve_cluster_config_mechanism()`` can never select it as a
-    live outcome anymore: historical ``deliveries`` rows already persisted
-    with this mechanism string still need honest, renderable text if ever
-    re-derived rather than a `KeyError`/blank string, and this function has
-    no way to distinguish "asked to describe a mechanism that
-    can no longer be chosen" from "asked to describe a legacy record."
+    A dedicated ``MECHANISM_DIRECT_APPLY`` branch (naming the target
+    cluster identity alongside the action) used to live here, but every
+    real caller of this function always passes a freshly-computed
+    mechanism from ``resolve_cluster_config_mechanism()`` or a hardcoded
+    non-direct-apply constant (verified 2026-07-20 -- confirmation_text()
+    is never called with a value read back from a stored ``deliveries``
+    row's ``mechanism`` column anywhere in this codebase), and that
+    function can never select ``MECHANISM_DIRECT_APPLY`` as a live outcome
+    -- so the branch was dead code, not defensive coverage for a real
+    caller shape. Removed; ``MECHANISM_DESCRIPTIONS[MECHANISM_DIRECT_APPLY]``
+    (still present, for the same historical-record-rendering reason
+    ``MECHANISM_CLUSTER_ADMIN_REVIEW_GATE`` is kept) still provides a
+    sensible fallback via the generic path below if this is ever somehow
+    reached with that mechanism string.
     """
     base = MECHANISM_DESCRIPTIONS.get(mechanism, mechanism)
     if mechanism == MECHANISM_INFRA_REPO_COMMIT and infra_repo_url:
         return f"AgentIT will: commit to `{infra_repo_url}` and open a PR -- this app is GitOps-registered via a live Argo CD Application. A human must merge; AgentIT will never auto-merge."
-    if mechanism == MECHANISM_DIRECT_APPLY:
-        cluster_label = kube.get_current_cluster_identity()["label"]
-        return f"AgentIT will: apply these manifests directly to the cluster ({cluster_label}) -- no GitOps registration was found for this app."
     return f"AgentIT will: {base}"
 
 
@@ -605,13 +610,26 @@ async def verify_and_close_delivery(
 ) -> dict:
     """The shared verify step every delivery ends in (docs/unified-apply-
     flow.md section (C)): 60s SLO watch, then close the delivery row as
-    verified, or roll back (direct-apply) / report-and-stop (GitOps --
-    rollback semantics for that branch are explicitly out of scope, see the
-    design doc's "Deliberately not addressed" #3: reverting a merged commit
-    and waiting for a second human merge is a real, honestly-named gap, not
-    something this router auto-shortcuts).
+    verified, or report-and-stop on a breach (rollback semantics are
+    explicitly out of scope, see the design doc's "Deliberately not
+    addressed" #3: reverting a merged commit and waiting for a second human
+    merge is a real, honestly-named gap, not something this router
+    auto-shortcuts).
+
+    A dedicated ``mechanism == MECHANISM_DIRECT_APPLY`` branch (auto-
+    rollback via ``kube.rollout_undo`` on a breach) used to live here, but
+    was removed 2026-07-20: ``resolve_cluster_config_mechanism()`` can
+    never select ``MECHANISM_DIRECT_APPLY`` as a live outcome anymore, and
+    both real callers of this function (``_maybe_schedule_verification()``
+    above, ``drift_detector.py``'s Argo-sync-confirmed verify) only ever
+    pass ``MECHANISM_INFRA_REPO_COMMIT`` in practice -- the branch was dead
+    code, not defensive coverage for a real caller shape. ``namespace`` is
+    kept as a parameter (still used by real callers building it from
+    ``app_name``) even though nothing in this function's body reads it
+    anymore, to avoid an unrelated signature-shape change to both callers
+    for a purely-internal simplification.
     """
-    from agentit.remediation_loop import rollback_action, verify_slos
+    from agentit.remediation_loop import verify_slos
 
     try:
         result = await verify_slos(store, assessment_id, app_name)
@@ -628,27 +646,15 @@ async def verify_and_close_delivery(
         )
         return result
 
-    if mechanism == MECHANISM_DIRECT_APPLY:
-        rb = await rollback_action(app_name, namespace)
-        await store.update_delivery(
-            delivery_id, status="rolled_back", verification="breached",
-            details={"rollback": rb, "breach_reason": result.get("reason")},
-        )
-        await _log_verification_outcome(
-            store, "delivery-rolled-back", app_name, "critical",
-            f"Delivery {delivery_id} breached SLOs after direct apply -- "
-            f"rolled back automatically ({result.get('reason')})",
-        )
-    else:
-        await store.update_delivery(
-            delivery_id, status="breach-reported", verification="breached",
-            details={"breach_reason": result.get("reason")},
-        )
-        await _log_verification_outcome(
-            store, "delivery-breach-reported", app_name, "critical",
-            f"Delivery {delivery_id} breached SLOs after {mechanism} -- no automatic "
-            f"rollback for GitOps deliveries ({result.get('reason')}); manual review needed",
-        )
+    await store.update_delivery(
+        delivery_id, status="breach-reported", verification="breached",
+        details={"breach_reason": result.get("reason")},
+    )
+    await _log_verification_outcome(
+        store, "delivery-breach-reported", app_name, "critical",
+        f"Delivery {delivery_id} breached SLOs after {mechanism} -- no automatic "
+        f"rollback for GitOps deliveries ({result.get('reason')}); manual review needed",
+    )
     return result
 
 
@@ -788,6 +794,23 @@ async def route_and_deliver(
     if at_rest_files:
         mechanisms[CATEGORY_MANIFEST_AT_REST] = MECHANISM_APP_REPO_PR
 
+    # Serialize the actual delivery-commit step per app -- see
+    # store.claim_delivery_lock()'s own docstring for the exact race this
+    # closes (github_pr.py's fixed agentit/{app} branch + force-push-on-
+    # conflict fallback). A dry run never commits anything (every
+    # mechanism's real work is gated behind `if dry_run: return ...` in
+    # deliver_with_verification()), so there's nothing to race and no lock
+    # is taken -- dry-run previews stay instant even while a real delivery
+    # for the same app is in flight.
+    lock_key = f"delivery:{app_name}"
+    lock_held = False
+    if not dry_run:
+        if not await store.claim_delivery_lock(lock_key):
+            raise DeliveryInProgressError(
+                f"A delivery is already in progress for {app_name} -- try again shortly."
+            )
+        lock_held = True
+
     delivery_id = await store.create_delivery(
         assessment_id, app_name, categories_summary,
         mechanism=",".join(f"{c}:{m}" for c, m in mechanisms.items()) or MECHANISM_NONE,
@@ -907,6 +930,9 @@ async def route_and_deliver(
             delivery_id, status="failed", details={"error": str(exc)[:500]},
         )
         raise
+    finally:
+        if lock_held:
+            await store.release_delivery_lock(lock_key)
 
     return {
         "delivery_id": delivery_id,
@@ -1115,10 +1141,10 @@ async def handle_confirmed_finding_failure(
     below ``FINDING_ESCALATION_THRESHOLD`` confirmed failures for this
     (app, finding-category), re-dispatch a fresh attempt; at or above it,
     stop and escalate instead. This is the one place that decision is made
-    -- not scattered across ``RemediationLoop``/``VulnWatcher`` (a
-    structurally separate, watcher-triggered pipeline this phase never
-    touches -- neither one has any relationship to ``deliveries.
-    target_findings``/``finding_resolution`` today) or any other call site.
+    -- not scattered across ``VulnWatcher`` (a structurally separate,
+    watcher-triggered detection pipeline this phase never touches -- it has
+    no relationship to ``deliveries.target_findings``/``finding_resolution``
+    today) or any other call site.
     """
     category = finding[0]
     failure_count = await store.get_finding_failure_count(app_name, category)

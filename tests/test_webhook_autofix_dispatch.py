@@ -66,8 +66,7 @@ class TestWebhookAutoFixDispatchIsNotDiscarded:
         new_report = _report_with_network_finding(repo_name=old_report.repo_name, repo_url=repo_url)
 
         with patch("agentit.portal.routes.webhooks.clone_assess_cleanup", return_value=new_report), \
-             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
-             patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit:
             resp = await client.post(
                 "/api/webhook/github-push",
                 json=_push_body(repo_url),
@@ -91,7 +90,6 @@ class TestWebhookAutoFixDispatchIsNotDiscarded:
         not_delivered = [e for e in events if e["action"] == "fix-not-delivered"]
         assert len(not_delivered) == 1
         mock_commit.assert_not_called()
-        mock_apply.assert_not_called()
 
     async def test_dispatch_generates_fix_regardless_of_llm_availability(self, portal_client):
         """AutoMode's LLM safety classification (and its fail-closed-when-
