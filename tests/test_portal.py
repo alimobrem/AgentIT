@@ -2184,57 +2184,11 @@ async def test_schedules_onboarding_row_has_no_save_or_enable_disable_controls(c
     assert "does not" in resp.text.lower() or "cannot" in resp.text.lower()
 
 
-async def test_schedules_update_route_no_longer_affects_display(client, _override_store):
-    """Even hitting the (now UI-unreachable) update/toggle routes directly
-    must not change what /schedules displays -- the override they write is
-    no longer read back for display, since it was never real anywhere else
-    either."""
-    store = _override_store
-    aid = await store.save(_make_report("schedule-honesty-app2"))
-    await store.save_onboarding(aid, [{
-        "category": "cost",
-        "path": "schedule-honesty-app2-cost-cronjob.yaml",
-        "content": "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: x\nspec:\n  schedule: '0 4 * * 1'\n",
-        "description": "cost cronjob",
-    }])
-
-    await client.post("/schedules/update", data={
-        "app_name": "schedule-honesty-app2", "job_key": "cost", "schedule": "0 0 * * *",
-    })
-    resp = await client.get("/schedules")
-    assert resp.status_code == 200
-    # The stale override must never leak back into the display.
-    assert "0 0 * * *" not in resp.text
-    assert "0 4 * * 1" in resp.text
-
-
 async def test_schedules_nav_link(client):
     """/schedules is no longer a top-level nav item — it's reachable via the
     Settings tab strip. The umbrella "Settings" link still appears globally."""
     resp = await client.get("/")
     assert 'href="/settings"' in resp.text
-
-
-async def test_update_schedule(client, _override_store):
-    store = _override_store
-    resp = await client.post("/schedules/update", data={
-        "app_name": "test-app",
-        "job_key": "compliance",
-        "schedule": "0 6 1 * *",
-    }, follow_redirects=False)
-    assert resp.status_code == 303
-    assert await store.get_setting("schedule:test-app:compliance") == "0 6 1 * *"
-
-
-async def test_toggle_schedule(client, _override_store):
-    store = _override_store
-    resp = await client.post("/schedules/toggle", data={
-        "app_name": "test-app",
-        "job_key": "chaos",
-        "enabled": "false",
-    }, follow_redirects=False)
-    assert resp.status_code == 303
-    assert await store.get_setting("schedule:test-app:chaos:enabled") == "false"
 
 
 # ── "Create Schedule" is an honest DB-only reminder, not a real CronJob ─

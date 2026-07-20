@@ -267,6 +267,12 @@ CREATE TABLE IF NOT EXISTS remediation_jobs (
     updated_at TIMESTAMPTZ NOT NULL
 );
 
+-- `schedule`/`enabled` are effectively frozen at creation time: their only
+-- mutators (`update_schedule_cron()`/`toggle_schedule()`, and the
+-- `POST /schedules/update`/`POST /schedules/toggle` routes that called
+-- them) were dead code -- self-documented as unreachable -- and were
+-- deleted 2026-07-20. No live bug; this is just a schema note for why a
+-- row's `schedule`/`enabled` never change after `create_schedule()`.
 CREATE TABLE IF NOT EXISTS scheduled_operations (
     id TEXT PRIMARY KEY,
     app_name TEXT NOT NULL,
@@ -1639,6 +1645,17 @@ class AssessmentStore:
         return row["id"]
 
     async def list_agents(self, status: str = "active") -> list[dict]:
+        """List registered agents, filtered by ``status``.
+
+        In practice every row in ``agent_registry`` is always ``'active'``:
+        both writers (``register_agent()``/``agent_heartbeat()`` above)
+        hardcode ``status = 'active'`` in their own SQL, and
+        ``prune_stale_agents()`` hard-deletes a stale row rather than
+        marking it inactive -- there is currently no code path that can
+        ever write any other status. The parameter is kept (rather than
+        removed) since it costs nothing and documents the schema's intent
+        for a future status this table doesn't use yet.
+        """
         rows = await self._pool.fetch(
             "SELECT * FROM agent_registry WHERE status = $1 ORDER BY agent_name", status,
         )
@@ -1966,47 +1983,21 @@ class AssessmentStore:
         rows = await self._pool.fetch("SELECT * FROM scheduled_operations ORDER BY created_at DESC")
         return _rows_to_dicts(rows)
 
-    async def update_schedule_cron(self, schedule_id: str, schedule: str) -> bool:
-        result = await self._pool.execute(
-            "UPDATE scheduled_operations SET schedule = $1, updated_at = $2 WHERE id = $3",
-            schedule, _now(), schedule_id,
-        )
-        return _affected(result) > 0
-
     async def delete_schedule(self, schedule_id: str) -> bool:
         result = await self._pool.execute(
             "DELETE FROM scheduled_operations WHERE id = $1", schedule_id,
         )
         return _affected(result) > 0
 
-    async def toggle_schedule(self, schedule_id: str, enabled: bool) -> bool:
-        result = await self._pool.execute(
-            "UPDATE scheduled_operations SET enabled = $1, updated_at = $2 WHERE id = $3",
-            enabled, _now(), schedule_id,
-        )
-        return _affected(result) > 0
-
     # ── Webhook Deduplication ────────────────────────────────────────────
-
-    async def webhook_already_processed(self, delivery_id: str) -> bool:
-        row = await self._pool.fetchrow(
-            "SELECT 1 FROM processed_webhooks WHERE delivery_id = $1", delivery_id,
-        )
-        return row is not None
-
-    async def mark_webhook_processed(self, delivery_id: str) -> None:
-        await self._pool.execute(
-            "INSERT INTO processed_webhooks (delivery_id, processed_at) VALUES ($1, $2) "
-            "ON CONFLICT (delivery_id) DO NOTHING",
-            delivery_id, _now(),
-        )
 
     async def claim_webhook(self, delivery_id: str) -> bool:
         """Atomically claim a webhook delivery for processing.
 
-        Unlike `webhook_already_processed()` + `mark_webhook_processed()`
-        (a check-then-act pair with a race window between the two round
-        trips), this does the check-and-mark as a single INSERT relying on
+        Unlike the now-deleted `webhook_already_processed()` +
+        `mark_webhook_processed()` (a check-then-act pair with a race
+        window between the two round trips), this does the check-and-mark
+        as a single INSERT relying on
         `processed_webhooks.delivery_id`'s PRIMARY KEY constraint: only one
         concurrent caller for a given delivery_id can ever get a row back
         from `RETURNING`. Callers must call this *before* doing any of the
@@ -2042,31 +2033,12 @@ class AssessmentStore:
         )
         return feedback_id
 
-    async def get_feedback_for_app(
-        self,
-        app_name: str,
-        agent_name: str = "",
-        finding_category: str = "",
-    ) -> list[dict]:
-        """Get feedback history for an app, optionally filtered by agent/category."""
-        query = "SELECT * FROM agent_feedback WHERE app_name = $1"
-        params: list[str] = [app_name]
-        if agent_name:
-            params.append(agent_name)
-            query += f" AND agent_name = ${len(params)}"
-        if finding_category:
-            params.append(finding_category)
-            query += f" AND finding_category = ${len(params)}"
-        query += " ORDER BY created_at DESC"
-        rows = await self._pool.fetch(query, *params)
-        return _rows_to_dicts(rows)
-
     async def get_all_feedback(self, limit: int = 50) -> list[dict]:
         """Fleet-wide feedback history across all apps, most recent first.
 
-        Used by the Insights page — ``get_feedback_for_app("")`` filters on
-        ``WHERE app_name = ''`` and always returns nothing useful, so this is
-        the fleet-wide equivalent for that view.
+        Used by the Insights page — the now-deleted ``get_feedback_for_app("")``
+        used to filter on ``WHERE app_name = ''`` and always return nothing
+        useful, so this is the fleet-wide equivalent for that view.
         """
         rows = await self._pool.fetch(
             "SELECT * FROM agent_feedback ORDER BY created_at DESC LIMIT $1",
@@ -2176,32 +2148,6 @@ class AssessmentStore:
         )
         return {d["pr_url"]: d for r in rows if (d := _pr_outcome_row_to_dict(r)) is not None}
 
-    async def list_pr_outcomes(
-        self, app_name: str = "", finding_category: str = "", skill_name: str = "",
-    ) -> list[dict]:
-        """Queryable history of rejections/pre-merge edits -- "what happened
-        to content generated by skill X / for finding-category Y / for app
-        Z" -- backing a future learning mechanism. Any combination of
-        filters may be given; none given returns the fleet-wide history,
-        newest first."""
-        query = "SELECT * FROM pr_outcomes WHERE 1=1"
-        params: list[str] = []
-        if app_name:
-            params.append(app_name)
-            query += f" AND app_name = ${len(params)}"
-        if finding_category:
-            params.append(finding_category)
-            query += f" AND finding_category = ${len(params)}"
-        if skill_name:
-            params.append(skill_name)
-            query += (
-                f" AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(skill_names_json) elem "
-                f"WHERE elem = ${len(params)})"
-            )
-        query += " ORDER BY detected_at DESC"
-        rows = await self._pool.fetch(query, *params)
-        return [_pr_outcome_row_to_dict(r) for r in rows]
-
     async def get_human_override(self, app_name: str, finding_category: str) -> str | None:
         """Get the most recent human override value for this app/category."""
         row = await self._pool.fetchrow(
@@ -2288,13 +2234,6 @@ class AssessmentStore:
         )
         return _rows_to_dicts(rows)
 
-    async def list_agent_runs_for_assessment(self, assessment_id: str) -> list[dict]:
-        rows = await self._pool.fetch(
-            "SELECT * FROM agent_runs WHERE assessment_id = $1 ORDER BY started_at ASC",
-            assessment_id,
-        )
-        return _rows_to_dicts(rows)
-
     # ── Check Result Snapshots ───────────────────────────────────────────
 
     async def save_check_results(self, assessment_id: str, results: list[dict]) -> None:
@@ -2342,19 +2281,6 @@ class AssessmentStore:
                 "pass_rate": round(pass_rate, 1),
             })
         return result
-
-    async def get_assessment_timeline(self, assessment_id: str) -> list[dict]:
-        """Get chronological timeline of all events for an assessment."""
-        events = await self._pool.fetch(
-            """SELECT timestamp, agent_id, action, target_app, severity, summary
-               FROM events
-               WHERE details_json::text LIKE $1 OR summary LIKE $2
-               ORDER BY timestamp ASC""",
-            f'%{assessment_id}%', f'%{assessment_id[:12]}%',
-        )
-        timeline = _rows_to_dicts(events)
-        timeline.sort(key=lambda x: x.get("timestamp", ""))
-        return timeline
 
     async def get_fleet_insights(self) -> dict:
         """Get fleet-wide statistics for the insights dashboard."""
@@ -2557,12 +2483,6 @@ class AssessmentStore:
             app_name,
         )
         return _rows_to_dicts(rows)
-
-    async def get_suppressed_sources(self, app_name: str) -> set[str]:
-        rows = await self._pool.fetch(
-            "SELECT check_source FROM suppressed_checks WHERE app_name = $1", app_name,
-        )
-        return {row["check_source"] for row in rows}
 
     async def export_all(self) -> dict:
         """Export all tables as JSON for disaster recovery (and as the seed

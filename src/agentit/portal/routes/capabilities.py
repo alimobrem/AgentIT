@@ -209,9 +209,14 @@ async def agent_detail(request: Request, agent_name: str) -> HTMLResponse:
 
 
 @router.get("/api/agents")
-async def api_agents(status: str = "active"):
+async def api_agents():
+    """Every ``agent_registry`` row is always ``status = 'active'`` (see
+    ``AssessmentStore.list_agents()``'s own docstring) -- this route used
+    to accept a ``?status=`` query param, but passing anything other than
+    the default could never return a row, so it was dropped rather than
+    kept as a misleading no-op knob."""
     s = await get_store()
-    return JSONResponse(await s.list_agents(status=status))
+    return JSONResponse(await s.list_agents())
 
 
 # ── Workflows ─────────────────────────────────────────────────────────

@@ -29,8 +29,14 @@ the first time it's observed closed/merged.
 
 Nothing here builds the "learn from this" logic itself (out of scope, a
 separate future task per the product directive) -- this only guarantees the
-raw evidence is captured durably and queryably (``store.list_pr_outcomes()``),
-not thrown away after being displayed once.
+raw evidence is captured durably and queryably (``store.get_pr_outcome()``/
+``store.get_pr_outcomes_for_urls()``), not thrown away after being displayed
+once. (The fleet-wide/filtered ``store.list_pr_outcomes()`` this module
+originally shipped alongside was deleted 2026-07-20 -- an architecture
+review found it had no caller anywhere, including the "future learning
+mechanism" this docstring used to promise, which was never built; nothing
+here loses evidence-capture as a result, since every PR outcome row is
+still written and still individually queryable by URL.)
 """
 from __future__ import annotations
 

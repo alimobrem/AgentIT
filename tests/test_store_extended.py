@@ -734,8 +734,9 @@ class TestOnboardingHistory:
 
 class TestGetAllFeedback:
     async def test_get_all_feedback_returns_feedback_across_apps(self):
-        """Regression: get_feedback_for_app("") filters on app_name = '' and
-        always returns nothing -- get_all_feedback is the fleet-wide fix."""
+        """Regression: the now-deleted get_feedback_for_app("") filtered on
+        app_name = '' and always returned nothing -- get_all_feedback is the
+        fleet-wide fix."""
         store = await make_store()
         await store.record_feedback("app-a", "security", "network-policy", "approved")
         await store.record_feedback("app-b", "compliance", "sbom", "rejected", human_reason="not needed")
@@ -743,8 +744,6 @@ class TestGetAllFeedback:
         feedback = await store.get_all_feedback()
         assert len(feedback) == 2
         assert {f["app_name"] for f in feedback} == {"app-a", "app-b"}
-        # get_feedback_for_app("") remains the old (broken for this use case) behavior
-        assert await store.get_feedback_for_app("") == []
 
     async def test_get_all_feedback_respects_limit_and_order(self):
         store = await make_store()
@@ -890,17 +889,6 @@ class TestAgentRuns:
         assert stats[0]["successes"] == 2
         assert stats[0]["failures"] == 1
         assert stats[0]["success_rate"] == round(2 / 3 * 100, 1)
-
-    async def test_list_agent_runs_for_assessment(self):
-        store = await make_store()
-        aid = await store.save(make_report())
-        await store.save_agent_run("security", "local", "success", assessment_id=aid)
-        await store.save_agent_run("cicd", "local", "success", assessment_id="other-assessment")
-
-        runs = await store.list_agent_runs_for_assessment(aid)
-        assert len(runs) == 1
-        assert runs[0]["agent_name"] == "security"
-
 
 # ── Check Result Snapshots ────────────────────────────────────────────────
 

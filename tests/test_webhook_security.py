@@ -376,10 +376,10 @@ class TestWebhookDedup:
         """Regression guard for the check-then-act webhook dedup race
         (Priority 1a): two genuinely concurrent, identical deliveries must
         not both execute the full (slow) assessment pipeline. Before the
-        fix, `webhook_already_processed()` (a SELECT) ran up front but
-        `mark_webhook_processed()` (the INSERT) only ran after the whole
-        pipeline finished, so two near-simultaneous requests could both
-        pass the SELECT before either INSERT landed. `clone_assess_cleanup`
+        fix, the now-deleted `webhook_already_processed()` (a SELECT) ran up
+        front but `mark_webhook_processed()` (the INSERT) only ran after the
+        whole pipeline finished, so two near-simultaneous requests could
+        both pass the SELECT before either INSERT landed. `clone_assess_cleanup`
         sleeps briefly here to widen that race window the way the real,
         multi-second clone-and-scan pipeline would.
         """

@@ -261,54 +261,6 @@ async def schedules_page(request: Request) -> HTMLResponse:
     })
 
 
-@router.post("/schedules/update", response_model=None)
-async def update_schedule(request: Request):
-    """No longer reachable from any UI control (see ``schedules_page()``
-    above/schedules.html) -- this used to look like it edited a live
-    CronJob's real schedule, but only ever wrote a display-only settings
-    key nothing (not even this page anymore) reads back. Kept only for
-    ``AGENTIT_DB_DSN``-level introspection/tests; a real schedule change
-    goes through editing the generated manifest + Dry Run + Apply/Commit
-    (or a GitOps PR) on that app's Onboarding Results page instead.
-    """
-    form = await request.form()
-    app_name = str(form.get("app_name", ""))
-    job_key = str(form.get("job_key", ""))
-    schedule = str(form.get("schedule", "")).strip()
-    if not (app_name and job_key and schedule):
-        return RedirectResponse(url="/schedules?error=Missing+required+fields", status_code=303)
-    if len(schedule.split()) != 5:
-        return RedirectResponse(url="/schedules?error=Invalid+cron+expression", status_code=303)
-    s = await get_store()
-    await s.set_setting(f"schedule:{app_name}:{job_key}", schedule)
-    await s.log_event(
-        "portal", "schedule-updated", app_name, "info",
-        f"Schedule for {job_key} updated to: {schedule}",
-    )
-    return RedirectResponse(url="/schedules", status_code=303)
-
-
-@router.post("/schedules/toggle", response_model=None)
-async def toggle_schedule(request: Request):
-    """No longer reachable from any UI control -- see ``update_schedule()``
-    above for why (same display-only settings key, same lack of any real
-    effect on a live CronJob)."""
-    form = await request.form()
-    app_name = str(form.get("app_name", ""))
-    job_key = str(form.get("job_key", ""))
-    enabled = str(form.get("enabled", "true"))
-    if not (app_name and job_key):
-        return RedirectResponse(url="/schedules?error=Missing+required+fields", status_code=303)
-    s = await get_store()
-    await s.set_setting(f"schedule:{app_name}:{job_key}:enabled", enabled)
-    action = "enabled" if enabled == "true" else "disabled"
-    await s.log_event(
-        "portal", f"schedule-{action}", app_name, "info",
-        f"Schedule {job_key} {action} for {app_name}",
-    )
-    return RedirectResponse(url="/schedules", status_code=303)
-
-
 @router.post("/schedules/create", response_model=None)
 async def create_schedule(request: Request):
     """Saves a plain reminder row in ``scheduled_operations`` -- nothing

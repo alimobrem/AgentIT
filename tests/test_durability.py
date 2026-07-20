@@ -10,20 +10,6 @@ import pytest
 from conftest import make_report, make_store
 
 
-class TestWebhookDedup:
-    async def test_mark_and_check_processed(self):
-        store = await make_store()
-        assert not await store.webhook_already_processed("delivery-123")
-        await store.mark_webhook_processed("delivery-123")
-        assert await store.webhook_already_processed("delivery-123")
-
-    async def test_duplicate_mark_is_noop(self):
-        store = await make_store()
-        await store.mark_webhook_processed("delivery-456")
-        await store.mark_webhook_processed("delivery-456")  # no error
-        assert await store.webhook_already_processed("delivery-456")
-
-
 class TestCircuitBreaker:
     def test_starts_closed(self):
         from agentit.portal.helpers import CircuitBreaker

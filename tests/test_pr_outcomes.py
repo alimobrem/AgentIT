@@ -233,22 +233,7 @@ class TestSyncPrOutcomesSkipsOpen:
         assert newly == []
 
 
-class TestListPrOutcomes:
-    async def test_list_pr_outcomes_filters_by_app_and_finding_category(self):
-        store = await make_store()
-        await store.record_pr_outcome(
-            "https://github.com/o/r/pull/1", "app-a", "rejected",
-            category="cluster_config", finding_category="security", reject_reason="wontfix",
-        )
-        await store.record_pr_outcome(
-            "https://github.com/o/r/pull/2", "app-b", "edited_before_merge",
-            category="cluster_config", finding_category="cost", skill_names=["add-hpa"],
-        )
-        assert len(await store.list_pr_outcomes(app_name="app-a")) == 1
-        assert len(await store.list_pr_outcomes(finding_category="cost")) == 1
-        assert len(await store.list_pr_outcomes(skill_name="add-hpa")) == 1
-        assert len(await store.list_pr_outcomes()) == 2
-
+class TestGetPrOutcomesForUrls:
     async def test_get_pr_outcomes_for_urls_batches_lookup(self):
         store = await make_store()
         await store.record_pr_outcome("https://github.com/o/r/pull/1", "app-a", "rejected", reject_reason="wontfix")
