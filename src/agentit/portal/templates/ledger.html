@@ -85,7 +85,7 @@
     {% for r in history %}
     <tr>
       <td>
-        {% if r.assessment_id %}<a href="/assessments/{{ r.assessment_id }}?tab=prs">{{ r.app_name }}</a>{% else %}{{ r.app_name }}{% endif %}
+        {% if r.assessment_id %}<a href="/assessments/{{ r.assessment_id }}?tab=ledger">{{ r.app_name }}</a>{% else %}{{ r.app_name }}{% endif %}
       </td>
       <td><span class="badge badge-muted">{{ r.category | dimension_label }}</span></td>
       <td><a href="{{ r.html_url | safe_url }}" target="_blank" hx-boost="false">{{ r.title or r.pr_url }}</a></td>

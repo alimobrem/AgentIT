@@ -14,8 +14,8 @@
      docstring), so this banner always agrees with what clicking through
      actually shows. Every other pending, app-owner-scoped recommendation
      (rollback/escalation) still shows via each app's own "pending action"
-     row badge below and Assessment Detail's Actions tab -- never silently
-     dropped, just not a PR. #}
+     row badge below and Assessment Detail's own Ledger tab -- never
+     silently dropped, just not a PR. #}
   {% if pending_need_you %}
   <a href="/ledger" class="text-muted text-sm">{{ pending_need_you }} PR(s) need your approval → Ledger</a>
   {% endif %}
@@ -91,7 +91,7 @@
         {% if r.next_action %}
         <div class="mt-1">
           {% if r.next_action.state == "escalated" %}
-          <a href="/assessments/{{ r.next_action.assessment_id }}?tab=actions" class="badge badge-accent" title="{{ r.next_action.message }}">{{ r.next_action.label }}</a>
+          <a href="/assessments/{{ r.next_action.assessment_id }}?tab=ledger" class="badge badge-accent" title="{{ r.next_action.message }}">{{ r.next_action.label }}</a>
           {% elif r.next_action.state == "retrying" %}
           <span class="badge badge-warning" title="{{ r.next_action.message }}">{{ r.next_action.label }}</span>
           {% else %}
@@ -108,7 +108,7 @@
            recommendation is still a real pending action on this app even
            though it's never a PR, so it needs this per-app surface too. #}
         <div class="mt-1">
-          <a href="/assessments/{{ r.id }}?tab=actions" class="badge badge-accent" title="{{ r.pending_actions_count }} action(s) awaiting your review on this app's Actions tab">{{ r.pending_actions_count }} pending action{{ 's' if r.pending_actions_count != 1 }}</a>
+          <a href="/assessments/{{ r.id }}?tab=ledger" class="badge badge-accent" title="{{ r.pending_actions_count }} action(s) awaiting your review on this app's Ledger tab">{{ r.pending_actions_count }} pending action{{ 's' if r.pending_actions_count != 1 }}</a>
         </div>
         {% endif %}
       </td>
@@ -160,7 +160,7 @@
            DB count; Open additionally reflects a live, fleet-wide-cached GitHub
            check (routes/fleet.py::_attach_pr_counts). #}
         {% if r.total_prs %}
-        <a href="/assessments/{{ r.id }}?tab=prs" class="{% if r.open_prs > 0 %}text-warning text-bold{% else %}text-muted{% endif %}">{{ r.open_prs }} / {{ r.total_prs }}</a>
+        <a href="/assessments/{{ r.id }}?tab=ledger" class="{% if r.open_prs > 0 %}text-warning text-bold{% else %}text-muted{% endif %}">{{ r.open_prs }} / {{ r.total_prs }}</a>
         {% else %}
         <span class="text-muted">—</span>
         {% endif %}

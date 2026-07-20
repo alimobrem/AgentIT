@@ -271,15 +271,14 @@ async def get_store():
 
 # ── Nav gate badges ───────────────────────────────────────────────────
 #
-# base.html's nav bar shows the fleet-wide count of PRs waiting for your
 # approval on Ledger's link -- the same PR-status-derived count Ledger's
 # own "Waiting for your approval" stat shows (pr_tracking.py's
 # count_fleet_prs_waiting_for_approval()/fleet_prs_waiting_for_approval()):
 # any PR that's still open and unmerged on GitHub. Every other app-owner
 # recommendation (`rollback-review`, `finding-unresolved-escalation`, ...)
 # stays visible via Fleet's per-app "needs action"/escalation badges and
-# Assessment Detail's Actions tab, not this nav badge. Cached briefly since
-# nav renders on every page.
+# Assessment Detail's own Ledger tab, not this nav badge. Cached briefly
+# since nav renders on every page.
 
 _nav_gate_badges_cache: dict = {"pending_actions": 0, "ts": 0.0}
 _NAV_GATE_BADGES_CACHE_TTL = 20  # seconds

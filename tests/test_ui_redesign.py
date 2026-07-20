@@ -6,11 +6,14 @@
    source of truth as the Findings tab, and posts `category` (a finding
    category), not `dimension`.
 3. Gate app attribution: `list_gates()`/`list_all_gates()` join back to the
-   assessment for an `app_name`; every gate type surfaces on Assessment
-   Detail's Actions tab and Ledger Needs You (Fleet keeps only a quiet
-   pointer) -- including a stale `cluster-admin-review` row, since that gate
-   type (and the separate Admin Review page it used to live on) was retired
-   2026-07-18.
+   assessment for an `app_name`; every non-PR gate type surfaces on
+   Assessment Detail's own Ledger tab (formerly Actions -- merged with
+   Timeline/PR History 2026-07-19) and Ledger Needs You (Fleet keeps only a
+   quiet pointer) -- including a stale `cluster-admin-review` row, since
+   that gate type (and the separate Admin Review page it used to live on)
+   was retired 2026-07-18. A PR-backed gate type no longer gets its own
+   gate_card there -- it's covered by the Ledger tab's own PR history
+   instead (gate-approval UI is being eliminated system-wide).
 4. The orphaned `/apply` and `/create-pr` routes are gone (404).
 5. GitOps-registration visibility on Fleet and Assessment Detail.
 6. Nav: Gates retired as a standalone concept (Admin Review briefly took its
@@ -276,7 +279,19 @@ class TestRemediationPlanFixButtonUsesCategory:
 
 
 class TestGateAppAttributionAndActionsTab:
-    async def test_assessment_detail_actions_tab_shows_own_pending_gates(self, ui_client):
+    """2026-07-19: Assessment Detail's Actions/Timeline/PR History tabs
+    merged into one Ledger tab (docs/ledger-design-spec.md Phase 2's own
+    plan for the first two, extended to fold in PR History too). Gate
+    approval is also being eliminated system-wide (the `gates` table
+    itself, not just AutoMode-era gate types) -- a PR-backed gate type
+    (`gitops-pr-pending`/the CI/CD-shared-namespace variant) no longer
+    renders its own gate_card here at all; it's covered by the real PR
+    list instead. Non-PR gate types (`auto-mode-review`,
+    `cluster-admin-review`, `rollback-review`,
+    `finding-unresolved-escalation`) still render gate_card -- there's no
+    PR to point at for those yet."""
+
+    async def test_assessment_detail_ledger_tab_shows_non_pr_pending_gates(self, ui_client):
         client, store = ui_client
         aid = await store.save(make_report(repo_name="actions-app"))
         await store.create_gate(aid, "auto-mode-review", "Auto-mode gated: low confidence")
@@ -286,47 +301,55 @@ class TestGateAppAttributionAndActionsTab:
         assert "Auto-mode gated: low confidence" in resp.text
         assert "Approve &amp; Deliver" in resp.text or "Approve & Deliver" in resp.text
 
-    async def test_assessment_detail_actions_tab_includes_stale_cluster_admin_review(self, ui_client):
+    async def test_assessment_detail_ledger_tab_includes_stale_cluster_admin_review(self, ui_client):
         """`cluster-admin-review` (retired 2026-07-18 -- see delivery.py)
         used to be a different audience's gate, excluded from an app
         owner's Actions tab entirely. That audience split no longer exists
         -- every gate type is per-app now, so a stale, already-persisted
-        pending row of this type surfaces on its own app's Actions tab like
-        any other gate, rather than being invisible everywhere but a now-
-        removed separate Admin Review page."""
+        pending row of this type surfaces on its own app's Ledger tab like
+        any other non-PR gate, rather than being invisible everywhere but a
+        now-removed separate Admin Review page."""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="cicd-app"))
         await store.create_gate(aid, "cluster-admin-review", "CI/CD manifests need elevated review")
 
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
-        actions_tab = resp.text.split('x-show="tab === \'actions\'"', 1)[1].split('x-show="tab === \'timeline\'"', 1)[0]
-        assert "CI/CD manifests need elevated review" in actions_tab
+        ledger_tab = resp.text.split('x-show="tab === \'ledger\'"', 1)[1]
+        assert "CI/CD manifests need elevated review" in ledger_tab
 
-    async def test_assessment_detail_actions_tab_empty_state(self, ui_client):
+    async def test_assessment_detail_ledger_tab_hides_pr_backed_gitops_gate_card(self, ui_client):
+        """A `gitops-pr-pending` gate already has a real PR -- it must not
+        get its own gate_card on Assessment Detail anymore (that was the
+        exact "another Approve and Deliver" duplication reported against
+        this page); it shows up in the PR history table below instead."""
+        client, store = ui_client
+        aid = await store.save(make_report(repo_name="pr-gate-app"))
+        await store.create_gate(
+            aid, "gitops-pr-pending",
+            "AgentIT will: commit manifests to the GitOps infra repo and open a PR. "
+            "https://github.com/org/agentit-gitops/pull/42",
+            pr_url="https://github.com/org/agentit-gitops/pull/42",
+        )
+
+        resp = await client.get(f"/assessments/{aid}?tab=ledger")
+        assert resp.status_code == 200
+        ledger_tab = resp.text.split('x-show="tab === \'ledger\'"', 1)[1]
+        assert "Needs your review" not in ledger_tab
+        assert "Waiting for your approval" in ledger_tab
+
+    async def test_assessment_detail_ledger_tab_empty_state(self, ui_client):
         client, store = ui_client
         aid = await store.save(make_report(repo_name="quiet-app"))
 
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
-        assert "No pending actions for this app" in resp.text
+        assert "No pending actions" in resp.text
 
-    async def test_assessment_detail_timeline_tab_empty_state(self, ui_client):
-        """The Timeline tab rendered nothing at all (not even an empty-state
-        message) when there were no matching events -- every sibling tab
-        (e.g. Actions above) has a specific one."""
-        client, store = ui_client
-        aid = await store.save(make_report(repo_name="no-timeline-app"))
-
-        resp = await client.get(f"/assessments/{aid}")
-        assert resp.status_code == 200
-        timeline_tab = resp.text.split('x-show="tab === \'timeline\'"', 1)[1].split('x-show="tab === \'ledger\'"', 1)[0]
-        assert "No timeline events for this app yet" in timeline_tab
-
-    async def test_assessment_detail_actions_tab_shows_gate_from_old_assessment_of_same_app(self, ui_client):
+    async def test_assessment_detail_ledger_tab_shows_gate_from_old_assessment_of_same_app(self, ui_client):
         """Orphaned-gate-attribution regression: a gate created against an
         app's OLD assessment_id must still be visible/actionable from the
-        Actions tab of that SAME app's CURRENT (re-assessed) assessment --
+        Ledger tab of that SAME app's CURRENT (re-assessed) assessment --
         `gates.assessment_id` is a FK to whichever assessment existed at
         gate-creation time, not a live pointer that follows the app forward.
         """
@@ -341,50 +364,28 @@ class TestGateAppAttributionAndActionsTab:
         assert resp.status_code == 200
         assert "Auto-mode gated: low confidence" in resp.text
 
-    async def test_assessment_detail_ledger_tab_renders_pending_gate_read_only(self, ui_client):
-        """docs/ledger-design-spec.md Phase 1: the same pending gate that
-        renders interactive Approve/Reject/Dismiss buttons on the Actions
-        tab also shows up on the new Ledger tab, but read-only (linking
-        back to Actions instead of duplicating gate_card's form)."""
+    async def test_assessment_detail_ledger_tab_shows_pr_history(self, ui_client):
+        """Former PR History tab's job, folded into the Ledger tab --
+        every PR AgentIT has opened for this app, newest first."""
         client, store = ui_client
-        aid = await store.save(make_report(repo_name="ledger-app"))
-        await store.create_gate(aid, "auto-mode-review", "Auto-mode gated: low confidence")
+        report = make_report(repo_name="pr-history-app")
+        aid = await store.save(report)
+        await store.save_onboarding(aid, [
+            {"category": "security", "path": "x.yaml", "content": "kind: ConfigMap", "description": "x"},
+        ])
+        pr_url = "https://github.com/org/pr-history-app/pull/7"
+        await store.update_pr_url(aid, pr_url)
 
-        resp = await client.get(f"/assessments/{aid}")
+        with patch(
+            "agentit.portal.github_pr.get_pr_status",
+            return_value={"state": "open", "html_url": pr_url, "title": "onboard: fresh manifests", "merged_at": ""},
+        ):
+            resp = await client.get(f"/assessments/{aid}?tab=ledger")
+
         assert resp.status_code == 200
         ledger_tab = resp.text.split('x-show="tab === \'ledger\'"', 1)[1]
-        assert "Auto-mode gated: low confidence" in ledger_tab
-        assert f'/assessments/{aid}?tab=actions' in ledger_tab
-
-    async def test_assessment_detail_ledger_tab_shows_the_assessment_complete_card(self, ui_client):
-        """store.save() itself calls log_event(action='assessment-complete')
-        -- every assessed app has at least this one real card, so the empty
-        state is exercised separately below via a store with no assessments
-        rendered at all (there's no assessment-complete-free assessed app
-        to construct through the real save() path)."""
-        client, store = ui_client
-        aid = await store.save(make_report(repo_name="quiet-ledger-app"))
-
-        resp = await client.get(f"/assessments/{aid}")
-        assert resp.status_code == 200
-        ledger_tab = resp.text.split('x-show="tab === \'ledger\'"', 1)[1]
-        assert "assessment-complete" in ledger_tab
-        assert "No Ledger activity yet for this app." not in ledger_tab
-
-    async def test_assessment_detail_ledger_tab_shows_human_card_type_label(self, ui_client):
-        """This per-app Ledger tab (unlike the fleet-wide /ledger page,
-        redesigned as a strictly PR-focused list -- see
-        routes/insights.py::ledger_page()) still renders the full A-P
-        card-type system via the shared ledger_card macro -- its badge must
-        decode the bare letter into ledger.py's humanize_card_type() label,
-        never a bare "A" a user would have to read the source to decode."""
-        client, store = ui_client
-        aid = await store.save(make_report(repo_name="card-label-app"))
-
-        resp = await client.get(f"/assessments/{aid}?tab=ledger")
-        assert resp.status_code == 200
-        ledger_tab = resp.text.split('x-show="tab === \'ledger\'"', 1)[1]
-        assert 'title="Card type A">Assessment<' in ledger_tab
+        assert "PR history" in ledger_tab
+        assert "pull/7" in ledger_tab
 
     async def test_assessment_detail_tab_query_param_opens_ledger_tab(self, ui_client):
         client, store = ui_client
@@ -430,11 +431,12 @@ class TestGateAppAttributionAndActionsTab:
         assert "need your approval → Ledger" not in resp.text
         assert "pending action" not in resp.text
 
-    async def test_fleet_pending_pointer_links_to_ledger_for_pr_gates_only(self, ui_client):
+    async def test_fleet_pending_pointer_links_to_ledger_tab_for_non_pr_gates(self, ui_client):
         """A non-PR pending gate (auto-mode-review) never moves the
         fleet-wide "→ Ledger" pointer -- it shows via this app's own
-        per-row "pending action" badge (linking straight to its Actions
-        tab) instead, since it's not a PR Ledger would ever list."""
+        per-row "pending action" badge (linking straight to its own Ledger
+        tab) instead, since it's not a PR the fleet-wide Ledger would ever
+        list."""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="linked-badge-app"))
         await store.create_gate(aid, "auto-mode-review", "needs review")
@@ -443,26 +445,21 @@ class TestGateAppAttributionAndActionsTab:
         assert resp.status_code == 200
         assert "need your approval → Ledger" not in resp.text
         assert "1 pending action" in resp.text
-        assert f'/assessments/{aid}?tab=actions' in resp.text
-
-    async def test_assessment_detail_tab_query_param_opens_actions_tab(self, ui_client):
-        """The badge above links with ?tab=actions -- the Alpine tab state
-        must actually honor it, not always default to 'overview'."""
-        client, store = ui_client
-        aid = await store.save(make_report(repo_name="tab-param-app"))
-        await store.create_gate(aid, "auto-mode-review", "needs review")
-
-        resp = await client.get(f"/assessments/{aid}?tab=actions")
-        assert resp.status_code == 200
-        assert "x-data=\"{ tab: 'actions', findingsCount: 0 }\"" in resp.text
+        assert f'/assessments/{aid}?tab=ledger' in resp.text
 
     async def test_assessment_detail_unknown_tab_query_param_falls_back_to_overview(self, ui_client):
         """An unrecognized/garbage ?tab= value must never be interpolated
-        as-is into the Alpine expression -- falls back to 'overview'."""
+        as-is into the Alpine expression -- falls back to 'overview'. This
+        includes the now-retired 'actions'/'timeline'/'prs' tab keys --
+        their content lives on the Ledger tab now."""
         client, store = ui_client
         aid = await store.save(make_report(repo_name="bad-tab-param-app"))
 
         resp = await client.get(f"/assessments/{aid}?tab=" + "'};alert(1);//")
+        assert resp.status_code == 200
+        assert "x-data=\"{ tab: 'overview', findingsCount: 0 }\"" in resp.text
+
+        resp = await client.get(f"/assessments/{aid}?tab=actions")
         assert resp.status_code == 200
         assert "x-data=\"{ tab: 'overview', findingsCount: 0 }\"" in resp.text
 

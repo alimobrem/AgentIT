@@ -171,8 +171,13 @@ async def page(critical_portal):
 
 
 class TestDryRunUnlocksDeliver:
-    """Dry Run success must enable Commit & Open PR / Apply — never leave
-    a contradictory 'NO DRY RUN YET' / 'No dry run yet' chip."""
+    """A successful automatic validation run must enable Commit & Open PR /
+    Apply — never leave a contradictory 'NO VALIDATION YET' / 'No
+    validation yet' chip. The "Run Automatic Validation" button (formerly a
+    bare "Dry Run") now redirects through the same real-time progress page
+    onboarding itself uses (auto_delivery.py's validate/fix/review
+    pipeline) before landing back on Onboard Results -- hence the longer
+    wait_for_url timeout below."""
 
     async def test_gitops_dry_run_enables_commit_and_open_pr(self, page, critical_portal):
         url, aid, store, _kube = critical_portal
@@ -188,11 +193,15 @@ class TestDryRunUnlocksDeliver:
             await expect(apply_btn).to_contain_text("Commit & Open PR")
             await expect(apply_btn).to_be_disabled()
             await expect(
-                page.locator(".delivery-step-status", has_text="No dry run yet"),
+                page.locator(".delivery-step-status", has_text="No validation yet"),
             ).to_be_visible()
 
             await page.locator("button[data-action='dry-run']").click()
-            await page.wait_for_url(re.compile(r".*/onboard-results"), timeout=15000)
+            # Goes through /onboard/progress/{job_id} (auto_delivery.py's
+            # pipeline running in the background) before redirecting back
+            # here once terminal -- longer timeout than a single synchronous
+            # dry-run POST used to need.
+            await page.wait_for_url(re.compile(r".*/onboard-results.*"), timeout=30000)
             # hx-boost settle: deliver CTA unlocked, status chip gone.
             await expect(page.locator("button[data-action='apply']")).to_be_enabled(
                 timeout=10000,
@@ -201,10 +210,10 @@ class TestDryRunUnlocksDeliver:
                 "Commit & Open PR",
             )
             body = await page.content()
-            assert "NO DRY RUN YET" not in body
-            assert "No dry run yet" not in body
+            assert "NO VALIDATION YET" not in body
+            assert "No validation yet" not in body
             await expect(
-                page.locator(".delivery-step-status", has_text="Dry run passed"),
+                page.locator(".delivery-step-status", has_text="Validation passed"),
             ).to_be_visible()
             await expect(page.locator("[data-dry-done='true']")).to_be_attached()
 

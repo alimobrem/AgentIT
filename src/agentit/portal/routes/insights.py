@@ -169,15 +169,16 @@ async def ledger_page(
       fix-review (``skill_effectiveness``) outcomes.
     - Non-PR gate types (``cluster-admin-review``, ``rollback-review``,
       ``finding-unresolved-escalation``) -- these were never PRs; they stay
-      visible via Admin Review, Fleet's per-app "needs action"/escalation
-      badges, and Assessment Detail's own Actions tab.
-    - Per-app history -- Assessment Detail's Timeline/Ledger tabs and PR
-      History tab still own "everything that happened to this one app".
+      visible via Fleet's per-app "needs action"/escalation badges and
+      Assessment Detail's own Ledger tab.
+    - Per-app history -- Assessment Detail's own Ledger tab still owns
+      "everything that happened to this one app" (its former Actions/
+      Timeline/PR History tabs merged into it).
 
     ``pr_tracking.collect_fleet_pr_records()`` does the real aggregation
     (from ``gates``/``deliveries``/``onboarding_results``, the same three
     places Fleet's "Open PRs"/"Total PRs" columns and Assessment Detail's
-    PR History tab already read) -- this route only filters/paginates/
+    own Ledger tab already read) -- this route only filters/paginates/
     renders what that function returns.
     """
     from agentit.portal.pr_tracking import collect_fleet_pr_records, fleet_prs_waiting_for_approval
@@ -214,20 +215,14 @@ async def ledger_page(
 
     # Every PR that's still open and unmerged on GitHub always renders in
     # full, ungated by pagination -- this is the one bucket the whole page
-    # exists to make impossible to miss. Deliberately NOT the narrower
-    # `needs_attention` (gate-tracked-and-pending) flag: only the cluster-
-    # config/CI-CD-shared-namespace delivery categories ever create an
-    # in-app gate at all (see pr_tracking.py's module docstring), so a
-    # source-repo-pr/app-repo-pr/onboarding PR that's genuinely open on
-    # GitHub used to fall through to the read-only history table below
-    # instead of here -- the exact undercount this fixes (2026-07-19).
-    # Gate-tracked records still render the real Approve & Deliver/Reject
-    # actions via `gate_card` (off each record's own `raw` gate row); every
-    # other open PR renders as a plain "review it on GitHub" pointer.
+    # exists to make impossible to miss (the exact undercount fixed
+    # 2026-07-19: a source-repo-pr/app-repo-pr/onboarding PR that's
+    # genuinely open on GitHub used to fall through to the read-only
+    # history table below instead of here). The `gates` table/generic
+    # gate-resolution machinery has been removed entirely (2026-07-19) --
+    # every record here is a real PR, rendered with the same Merge/Close
+    # `pr_action_card` regardless of which delivery path produced it.
     needs_approval = fleet_prs_waiting_for_approval(records)
-    for r in needs_approval:
-        if r.get("source") == "gate":
-            r["raw"]["severity"] = "warning"
 
     history = [r for r in records if r["state"] != "open"]
     total_history = len(history)

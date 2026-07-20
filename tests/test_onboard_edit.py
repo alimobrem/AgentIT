@@ -262,13 +262,14 @@ class TestEditInvalidatesStaleDryRun:
         assert await store.get_apply_results(aid) is None
 
     async def test_onboard_results_page_reverts_to_dry_run_needed_after_edit(self, edit_client):
-        """End-to-end: the page itself must stop claiming dryDone/"Dry run
-        passed" once a file is edited after a successful Dry Run."""
+        """End-to-end: the page itself must stop claiming dryDone/
+        "Validation passed" once a file is edited after a successful
+        validation."""
         client, store, aid = edit_client
-        # A known infra_repo_url so the "No dry run yet" nudge (rather than
-        # the separate, unrelated "Not GitOps-registered" block) is what
-        # actually renders -- this test is about edit-invalidates-dry-run,
-        # not about GitOps registration state.
+        # A known infra_repo_url so the "No validation yet" nudge (rather
+        # than the separate, unrelated "Not GitOps-registered" block) is
+        # what actually renders -- this test is about edit-invalidates-
+        # validation, not about GitOps registration state.
         await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
         await store.save_apply_results(
             aid, {"applied": [], "skipped": [], "errors": [], "repo_files": [{"path": "app-config.yaml", "purpose": "dry-run"}]},
@@ -276,7 +277,7 @@ class TestEditInvalidatesStaleDryRun:
         )
         before = await client.get(f"/assessments/{aid}/onboard-results")
         assert 'data-dry-done="true"' in before.text
-        assert "Dry run passed" in before.text
+        assert "Validation passed" in before.text
 
         await client.post(
             f"/assessments/{aid}/onboard-results/edit-file",
@@ -289,8 +290,8 @@ class TestEditInvalidatesStaleDryRun:
 
         after = await client.get(f"/assessments/{aid}/onboard-results")
         assert 'data-dry-done="false"' in after.text
-        assert "Dry run passed" not in after.text
-        assert "No dry run yet" in after.text
+        assert "Validation passed" not in after.text
+        assert "No validation yet" in after.text
 
     async def test_edit_after_real_delivery_also_clears_apply_results(self, edit_client, _mock_kube):
         """A real (non-dry-run) delivery-outcome row also describes content

@@ -236,30 +236,42 @@ controls; desktop always shows the horizontal wrap row.
 
 Ordered primary path on `/assessments/{id}/onboard-results`:
 
-1. **Dry Run** (secondary, `.btn-outline`) — preview only; nothing delivered.
+1. **Run Automatic Validation** (secondary, `.btn-outline`) — the manual
+   re-trigger for `auto_delivery.py`'s validate → fix → re-validate → final-
+   review pipeline (`POST .../onboard-results/run-validation`). Onboarding
+   itself already runs this pipeline automatically the moment manifests are
+   generated (no human click required for the common case) — this button
+   exists for re-running it after an edit, or to retry a prior
+   `needs_attention` outcome. It is a strict superset of the old bare "Dry
+   Run" (a plain, un-auto-fixed dry run is still its first, always-run
+   step) — nothing a "Dry Run" click used to do is lost, only upgraded.
 2. **Deliver choice** — two equal primary options (both `.btn-green`), both
-   soft-gated until a successful Dry Run:
+   soft-gated until a successful validation pass (persisted the same way a
+   bare dry run used to, whether that pass came from the automatic pipeline
+   or this manual button):
    - **Commit & Open PR** / **Apply to Cluster** — single combined delivery
      (mechanism via `{% set _deliver_label = … %}`).
    - **Per-Agent PRs** — separate PR per agent/issue.
    One short hint line explains the choice (“One PR for everything, or a PR
    per agent”). Status chips stay outside the buttons.
 
-**MUST [check]** Dry Run appear as its own control (not only inside Apply).
+**MUST [check]** Run Automatic Validation appear as its own control (not
+only inside Apply).
 
-**MUST [check]** deliver labels stay short; dry-run / warning status **MUST**
-live *outside* the deliver buttons (chip or step-guide), never nested inside.
+**MUST [check]** deliver labels stay short; validation / warning status
+**MUST** live *outside* the deliver buttons (chip or step-guide), never
+nested inside.
 
 **MUST** restate `delivery.confirmation_text()` in the confirm modal before
 the combined deliver fires.
 
 **SHOULD** keep **Download** as the only secondary action (visually quieter
-than the Dry Run → deliver-choice stack). Do not demote Per-Agent PRs beside
-Download — it is a peer of Commit & Open PR.
+than the Run Automatic Validation → deliver-choice stack). Do not demote
+Per-Agent PRs beside Download — it is a peer of Commit & Open PR.
 
-> Concurrent redesigns of this action bar should keep Dry Run → deliver-choice
-> ordering and “no status inside buttons”; rebase onto this EDL rather than
-> inventing a parallel primary.
+> Concurrent redesigns of this action bar should keep Run Automatic
+> Validation → deliver-choice ordering and “no status inside buttons”;
+> rebase onto this EDL rather than inventing a parallel primary.
 
 ---
 
@@ -312,7 +324,7 @@ ancestor (same template scope). Dead handlers are bugs.
 | EDL-BADGE-MIN | MUST | `.badge { font-size: … }` ≥ 12px / `var(--font-xs)` |
 | EDL-TOKEN-HEX | SHOULD | No `style="…#hex…"` on `.btn` / links in templates |
 | EDL-NAV-EVENTS | MUST | Events bell + drawer present in `base.html` |
-| EDL-ONBOARD-ORDER | MUST | Onboard results: Dry Run + deliver choice labels; status outside CTAs |
+| EDL-ONBOARD-ORDER | MUST | Onboard results: Run Automatic Validation + deliver choice labels; status outside CTAs |
 | EDL-DANGER-CLASS | MUST | `.btn-danger` defined when confirm modal uses it |
 | EDL-TOASTS | MUST | `#toasts` present in `base.html` |
 | EDL-FILTER-BAR | MUST | Decisions / Events / Ledger GET filters use `.filter-bar` (not `.action-bar`) |

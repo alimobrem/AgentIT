@@ -413,6 +413,22 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
 
     pending_actions = open_prs + unresolved_rollbacks + unresolved_escalations
 
+    # The `gates` table/concept is being eliminated system-wide (a separate,
+    # dedicated effort) -- a gate type that already resolves to a real PR
+    # (``gitops-pr-pending``/the CI/CD-shared-namespace variant) is fully
+    # covered by the PR list below (``pr_history``, lifecycle="needs_approval")
+    # now, so it no longer gets its own gate_card here; that would just be
+    # the same "Approve & Deliver" duplicated a second time on this same
+    # page. The remaining gate types (``rollback-review``,
+    # ``finding-unresolved-escalation``, and any stale/unrecognized one) have
+    # no PR of their own to point at -- a human acknowledgment with nothing
+    # to review on GitHub -- so they get recommendation_card, not a PR row.
+    # `pending_actions` is built entirely from open_prs (kind="pr") plus the
+    # two recommendation-event kinds above -- no gate_type left to filter on
+    # now that the gates table is gone, so filtering on `kind` is the real
+    # (and only) distinction.
+    non_pr_pending_actions = [g for g in pending_actions if g.get("kind") != "pr"]
+
     # Real "what happens next" fact (docs/onboarding-loop-vision-gap-
     # analysis.md's Step 8 discussion / Phase 5) -- reuses
     # `unresolved_escalations` (already fetched above, already scoped to
@@ -422,11 +438,11 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
         unresolved_escalations=unresolved_escalations,
     )
 
-    # Real, specific empty-state copy for the Actions tab (docs/ux-design-
-    # requirements.md checklist #10) -- how many of THIS app's actions
-    # (merged/closed PRs, rollback/escalation events resolved the same way
-    # -- a real resolving event correlated to the original one) were
-    # actually resolved recently, instead of a bare "nothing here".
+    # Real, specific empty-state copy for the Ledger tab's approval section
+    # (docs/ux-design-requirements.md checklist #10) -- how many of THIS
+    # app's actions (merged/closed PRs, rollback/escalation events resolved
+    # the same way -- a real resolving event correlated to the original
+    # one) were actually resolved recently, instead of a bare "nothing here".
     recently_resolved_actions_count = 0
     if not pending_actions:
         from datetime import datetime, timedelta, timezone
@@ -458,11 +474,6 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
                 infra_repo_creation_failed = ev["action"] == "infra-repo-creation-failed"
                 break
 
-    timeline = await s.get_assessment_timeline(assessment_id) if hasattr(s, 'get_assessment_timeline') else []
-    # docs/ledger-design-spec.md Phase 1: additive 5th tab, alongside (not
-    # replacing) Actions/Timeline above.
-    from agentit.ledger import get_ledger_cards
-    ledger_cards = await get_ledger_cards(s, target_app=report.repo_name, assessment_id=assessment_id)
     trend = await s.get_trend(report.repo_url) if hasattr(s, 'get_trend') else {}
     score_history = await s.get_score_history(report.repo_url) if hasattr(s, 'get_score_history') else []
     for i, h in enumerate(score_history):
@@ -521,12 +532,11 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "onboarding_count": len(onboardings),
             "fixable_categories": fixable_categories,
             "pending_actions": pending_actions,
+            "non_pr_pending_actions": non_pr_pending_actions,
             "next_action": next_action,
             "gitops_registered": gitops_registered,
             "infra_repo_url": infra_repo_url,
             "infra_repo_creation_failed": infra_repo_creation_failed,
-            "timeline": timeline,
-            "ledger_cards": ledger_cards,
             "trend": trend,
             "score_history": score_history,
             "lifecycle_stage": lifecycle_stage,
@@ -780,13 +790,21 @@ async def _run_onboarding_job(
     already writes live, per agent, via ``list_events_by_correlation_id()``
     -- not fabricated here.
 
-    Always stops at ``completed`` once manifests are generated and saved --
-    AutoMode (and the automatic Dry Run -> Deliver chain it used to gate
-    behind an LLM safety classification) has been removed, so there is no
-    more mechanism deciding "should this go automatically" for onboarding.
-    A human always clicks Deliver on Onboard Results to proceed, the same
-    as every other GitOps delivery in this app, which always needs a human
-    to merge the resulting PR anyway.
+    No longer stops at "completed" the moment manifests are saved: once
+    generation succeeds, this automatically runs ``auto_delivery.py``'s
+    validate -> fix -> re-validate loop, a final LLM quality review, and
+    (once that converges) the real ``route_and_deliver()`` -- closing
+    docs/onboarding-loop-vision-gap-analysis.md's Part 3 gap for real, this
+    time with an actual fix-and-retry step, not just a straight-through
+    chain. This is NOT the removed AutoMode/``auto_dry_run_then_deliver()``
+    chain come back: nothing here decides "should a human review be
+    skipped" -- the resulting PR (and its merge on GitHub) remains the one
+    human gate, exactly as every other delivery in this app already
+    requires. If the automatic loop can't converge, or the real delivery
+    itself produces no PR, this ends at ``needs_attention`` instead of
+    quietly declaring success -- a human then finishes the job by hand on
+    Onboard Results, the same manual Dry Run/Deliver path this replaces for
+    the common case.
 
     Uses its own store handle (not the request-scoped one) since this
     coroutine keeps running after the request/response cycle that started
@@ -805,8 +823,6 @@ async def _run_onboarding_job(
 
         from agentit.portal.metrics import onboardings_total as _ot
         _ot.labels(status="success").inc()
-        await s.update_remediation_job(job_id, "saving", "Saving generated manifests...")
-        await s.save_onboarding(assessment_id, files, orchestration=orch_summary)
 
         publish_event("onboarding-complete", report.repo_name,
                        f"Generated {len(files)} manifests",
@@ -849,7 +865,29 @@ async def _run_onboarding_job(
         # job's `error` column, which is reserved for a genuine failure.
         _ = warnings
 
-        await s.update_remediation_job(job_id, "completed", "Onboarding complete")
+        from agentit.assessment_diff import current_finding_keys
+        from agentit.portal.auto_delivery import auto_validate_and_deliver
+
+        namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
+        result = await auto_validate_and_deliver(
+            store=s, report=report, app_name=report.repo_name, namespace=namespace,
+            assessment_id=assessment_id, actor="auto-delivery", files=files,
+            orchestration=orch_summary, target_findings=sorted(current_finding_keys(report)),
+            job_id=job_id,
+        )
+
+        if result["status"] == "delivered":
+            pr_count = len(result["pr_urls"])
+            await s.update_remediation_job(
+                job_id, "completed",
+                f"Onboarding complete -- {pr_count} pull request{'s' if pr_count != 1 else ''} ready for your approval.",
+            )
+        else:
+            await s.update_remediation_job(
+                job_id, "needs_attention",
+                "Onboarding complete, but automatic validation/delivery needs your attention.",
+                error=result["reason"],
+            )
     except Exception as exc:
         log.exception("Onboarding failed for %s", assessment_id)
         from agentit.portal.metrics import onboardings_total as _ot
@@ -874,10 +912,12 @@ async def onboard_submit(
     instead of blocking the request for however long agent orchestration
     takes -- mirrors ``assess_submit()``'s existing job-tracking pattern.
 
-    Onboarding always stops at "completed" once manifests are generated
-    and saved -- AutoMode (and the automatic Dry Run -> Deliver chain it
-    used to gate) has been removed, so a human always clicks Deliver on
-    Onboard Results to proceed.
+    Once manifests are generated, ``_run_onboarding_job()`` automatically
+    runs the validate/fix loop, a final LLM review, and (once clean) the
+    real Deliver -- see ``auto_delivery.py``. A human's one remaining
+    action is reviewing/merging the resulting PR on GitHub; there is no
+    more manual Dry Run/Deliver click for the common case (Onboard Results
+    still exposes both by hand for the ``needs_attention`` fallback case).
     """
     s = await get_store()
     report = await s.get(assessment_id)
@@ -893,11 +933,13 @@ async def onboard_submit(
 
 
 # Job statuses that end a human's wait on the progress page -- no further
-# polling/SSE ticks matter once one of these is reached. AutoMode has been
-# removed, along with the automatic Dry Run -> Deliver chain it used to
-# gate -- onboarding now only ever ends at "completed" (manifests
-# generated and saved) or "failed" (generation itself failed).
-_ONBOARD_JOB_TERMINAL_STATUSES = ("completed", "failed")
+# polling/SSE ticks matter once one of these is reached.
+# ``"needs_attention"`` is the honest fallback outcome (added alongside
+# auto_delivery.py): manifests exist and were saved, but the automatic
+# validate/fix loop couldn't converge, or the real delivery produced no
+# PR -- distinct from ``"failed"`` (generation itself failed, no manifests
+# exist at all).
+_ONBOARD_JOB_TERMINAL_STATUSES = ("completed", "failed", "needs_attention")
 
 
 async def _onboard_terminal_redirect_url(assessment_id: str, job: dict) -> str:
@@ -911,13 +953,21 @@ async def _onboard_terminal_redirect_url(assessment_id: str, job: dict) -> str:
     - ``"failed"`` (onboarding generation itself failed, no manifests
       exist) -> Assessment Detail, with the error flash CLAUDE.md's
       "errors must always be visible" convention requires.
-    - ``"completed"`` -> Onboard Results, where a human clicks Deliver by
-      hand -- onboarding never auto-delivers now, so there's no PR to
-      decorate this redirect with yet.
+    - ``"needs_attention"`` (manifests exist, but the automatic validate/
+      fix/deliver pipeline could not finish on its own) -> Onboard Results,
+      with a warning flash naming what still needs a human's attention.
+    - ``"completed"`` (the automatic pipeline actually opened one or more
+      pull requests) -> Onboard Results, with a success flash -- the PR
+      cards there already show the real, freshly-opened PR(s).
     """
     if job["status"] == "failed":
         return f"/assessments/{assessment_id}?error={quote(job.get('error') or 'Onboarding failed')}"
-    return f"/assessments/{assessment_id}/onboard-results"
+    if job["status"] == "needs_attention":
+        return (
+            f"/assessments/{assessment_id}/onboard-results?warning="
+            f"{quote(job.get('error') or 'Automatic validation needs your attention')}"
+        )
+    return f"/assessments/{assessment_id}/onboard-results?auto_delivered=true"
 
 
 @router.get("/assessments/{assessment_id}/onboard/progress/{job_id}", response_class=HTMLResponse)
@@ -1058,13 +1108,94 @@ async def edit_onboarding_file(request: Request, assessment_id: str):
 
     await s.log_event(
         "portal", "onboarding-file-edited", report.repo_name, "info",
-        f"Edited generated file before delivery: {path} — any prior Dry Run/delivery result is "
-        "now stale; Dry Run must be re-run against the edited content before Apply/Commit unlocks.",
+        f"Edited generated file before delivery: {path} — any prior validation/delivery result is "
+        "now stale; validation must be re-run against the edited content before Commit/Per-Agent PRs unlocks.",
         correlation_id=assessment_id,
     )
     return RedirectResponse(
         url=f"/assessments/{assessment_id}/onboard-results?edited={quote(path)}",
         status_code=303,
+    )
+
+
+async def _run_manual_validation_job(job_id: str, assessment_id: str) -> None:
+    """Background body for the manual "Run Automatic Validation" button on
+    Onboard Results -- the same ``auto_validate_and_deliver()`` pipeline
+    ``_run_onboarding_job()`` already runs right after generation, just
+    invoked again against whatever onboarding files are currently saved
+    (e.g. after a human edits one by hand, or to retry a prior
+    ``needs_attention`` outcome) instead of freshly-generated ones. Reuses
+    the identical job-tracking/progress-page machinery -- there is no
+    second, parallel progress UI for this manual re-trigger.
+    """
+    s = await get_store()
+    try:
+        report = await s.get(assessment_id)
+        if report is None:
+            await s.update_remediation_job(job_id, "failed", "Assessment not found", error="Assessment not found")
+            return
+        files = await s.get_onboarding(assessment_id)
+        if files is None:
+            await s.update_remediation_job(
+                job_id, "failed", "No onboarding manifests to validate",
+                error="No onboarding manifests to validate -- run Onboard first.",
+            )
+            return
+        orchestration = await s.get_orchestration(assessment_id) or {}
+
+        from agentit.assessment_diff import current_finding_keys
+        from agentit.portal.auto_delivery import auto_validate_and_deliver
+
+        namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
+        result = await auto_validate_and_deliver(
+            store=s, report=report, app_name=report.repo_name, namespace=namespace,
+            assessment_id=assessment_id, actor="auto-delivery", files=files,
+            orchestration=orchestration, target_findings=sorted(current_finding_keys(report)),
+            job_id=job_id,
+        )
+
+        if result["status"] == "delivered":
+            pr_count = len(result["pr_urls"])
+            await s.update_remediation_job(
+                job_id, "completed",
+                f"Validation complete -- {pr_count} pull request{'s' if pr_count != 1 else ''} ready for your approval.",
+            )
+        else:
+            await s.update_remediation_job(
+                job_id, "needs_attention",
+                "Automatic validation/delivery needs your attention.",
+                error=result["reason"],
+            )
+    except Exception as exc:
+        log.exception("Manual validation run failed for %s", assessment_id)
+        detail = getattr(exc, "detail", None) or str(exc)
+        await s.update_remediation_job(
+            job_id, "failed", f"Validation failed: {str(detail)[:180]}",
+            error=f"Validation failed: {str(detail)[:180]}",
+        )
+
+
+@router.post("/assessments/{assessment_id}/onboard-results/run-validation", response_model=None)
+async def run_validation(assessment_id: str, background_tasks: BackgroundTasks):
+    """Replaces the old manual "Dry Run" button: kicks off the same
+    validate -> fix -> re-validate -> final review -> real Deliver pipeline
+    onboarding already runs automatically, as a background job, redirecting
+    to the exact same real-time progress page onboarding itself uses. A
+    plain, un-auto-fixed dry run is no longer a separate action -- it is
+    strictly the first, always-run step of this pipeline, so nothing a bare
+    "Dry Run" click used to do is lost, only upgraded.
+    """
+    s = await get_store()
+    report = await s.get(assessment_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    if await s.get_onboarding(assessment_id) is None:
+        raise HTTPException(status_code=404, detail="Onboarding not found")
+
+    job_id = await s.create_remediation_job(assessment_id)
+    background_tasks.add_task(_run_manual_validation_job, job_id, assessment_id)
+    return RedirectResponse(
+        url=f"/assessments/{assessment_id}/onboard/progress/{job_id}", status_code=303,
     )
 
 

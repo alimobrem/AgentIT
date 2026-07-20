@@ -10,7 +10,7 @@ lifecycle view (waiting for approval / open / merged / rejected / closed),
 not a generic "everything that needs a human" inbox -- non-PR gate types
 (``auto-mode-review``, ``rollback-review``, ``finding-unresolved-
 escalation``) never show up there; they stay on Fleet's per-app badges and
-Assessment Detail's Actions tab.
+Assessment Detail's own Ledger tab (formerly Actions -- merged 2026-07-19).
 """
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ async def test_ledger_never_shows_non_pr_gates(ui_client):
     """auto-mode-review is a real, pending, app-owner gate -- but not a PR
     gate -- so it must never appear in Ledger's "Waiting for your approval"
     list (it belongs on Fleet's needs-action badge / Assessment Detail's
-    Actions tab instead)."""
+    own Ledger tab instead)."""
     client, store = ui_client
     aid = await store.save(make_report(repo_name="non-pr-gate-app"))
     await store.create_gate(aid, "auto-mode-review", "needs review")
@@ -127,9 +127,9 @@ async def test_fleet_quiet_pointer_to_ledger_counts_pr_gates_only(ui_client):
     assert 'href="/ledger"' in resp.text
     assert "1 PR(s) need your approval → Ledger" in resp.text
     # The two non-PR gates are real pending actions too -- they show via
-    # this app's own row badge (linking straight to its Actions tab)
+    # this app's own row badge (linking straight to its Ledger tab)
     # instead of inflating the PR-specific fleet-wide pointer above.
-    assert f'/assessments/{aid}?tab=actions' in resp.text
+    assert f'/assessments/{aid}?tab=ledger' in resp.text
     assert "3 pending action" in resp.text
 
 

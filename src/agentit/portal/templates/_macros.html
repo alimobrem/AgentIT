@@ -42,7 +42,7 @@
     </div>
     <p class="text-sm text-muted">{{ card.summary[:200] }}</p>
     {% if card.card_type == 'D' and card.assessment_id %}
-    <a href="/assessments/{{ card.assessment_id }}?tab=actions" class="text-sm">Review &amp; resolve on Actions tab &rarr;</a>
+    <a href="/assessments/{{ card.assessment_id }}?tab=ledger" class="text-sm">Review &amp; resolve on Ledger tab &rarr;</a>
     {% endif %}
     {% if card.chain_count | default(0) > 1 %}
     <a href="/ledger/chain/{{ card.correlation_id }}" class="btn btn-sm btn-outline mt-1">&#9664; Part of a chain ({{ card.chain_count }} events) -- Replay</a>
@@ -103,8 +103,8 @@
    machinery has been removed entirely, 2026-07-19). Every delivery
    category gets this exact same real GitHub-API action now: the PR merge
    review IS the approval step, not an in-app gate row that only a subset
-   of categories used to have. Renders on Assessment Detail's Actions tab
-   and the Ledger's "Waiting for your approval" section. #}
+   of categories used to have. Renders on the fleet-wide Ledger's "Waiting
+   for your approval" section and Assessment Detail's own Ledger tab. #}
 <div class="card mb-1" x-data="{ showReason: false }">
   <div class="card-header">
     <div>

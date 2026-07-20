@@ -174,12 +174,21 @@ async def get_app_pr_history(store: object, assessment_id: str, repo_url: str, a
     existing per-assessment ``get_pr_status()`` precedent (``routes/
     assessments.py``'s onboarding-history / capability-run-detail pages)
     rather than the fleet-wide batched+cached path ``routes/fleet.py`` uses
-    for the whole Fleet list."""
+    for the whole Fleet list.
+
+    Each record also gets ``annotate_lifecycle()``'s ``lifecycle``/
+    ``lifecycle_label``/``needs_attention`` fields -- the same ones
+    ``collect_fleet_pr_records()`` attaches for the fleet-wide Ledger -- so
+    Assessment Detail's own PR list (part of its Ledger tab) renders
+    identical lifecycle badges/labels instead of re-deriving "Open"/
+    "Merged"/"Closed" from ``state`` a second, drifting way.
+    """
     deliveries = await store.list_deliveries_for_app(app_name) if hasattr(store, "list_deliveries_for_app") else []
     onboardings = await store.list_onboardings_for_repo(repo_url) if hasattr(store, "list_onboardings_for_repo") else []
     records = collect_pr_records(deliveries, onboardings)
     await resolve_pr_states(records)
-    return await sync_and_attach_pr_outcomes(store, records)
+    records = await sync_and_attach_pr_outcomes(store, records)
+    return [annotate_lifecycle(r) for r in records]
 
 
 # ── Fleet-wide PR lifecycle (the Ledger) ───────────────────────────────────

@@ -176,15 +176,16 @@ async def test_criticality_field_has_help_text_on_both_assess_entry_points(edl_c
 
 
 async def test_onboard_results_dry_run_apply_status_outside_button(edl_client):
-    """EDL §7: Dry Run → deliver choice; 'No dry run yet' is a sibling chip."""
+    """EDL §7: Run Automatic Validation → deliver choice; 'No validation
+    yet' is a sibling chip."""
     client, store = edl_client
     report = make_report()
     aid = await store.save(report)
     # A known infra_repo_url -- Direct Apply has been removed as a concept
     # entirely, so an app with none at all is blocked from delivering
-    # outright (a separate "Not GitOps-registered" state, not "No dry run
-    # yet"); this test is about the Dry Run/deliver-choice chip layout, not
-    # GitOps registration state.
+    # outright (a separate "Not GitOps-registered" state, not "No
+    # validation yet"); this test is about the validation/deliver-choice
+    # chip layout, not GitOps registration state.
     await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
     await store.save_onboarding(aid, [
         {
@@ -197,7 +198,7 @@ async def test_onboard_results_dry_run_apply_status_outside_button(edl_client):
     resp = await client.get(f"/assessments/{aid}/onboard-results")
     assert resp.status_code == 200
     html = resp.text
-    assert "Dry Run" in html
+    assert "Run Automatic Validation" in html
     assert (
         "Apply to Cluster" in html
         # Jinja autoescape turns "&" into "&amp;" in rendered HTML text.
@@ -210,10 +211,10 @@ async def test_onboard_results_dry_run_apply_status_outside_button(edl_client):
     assert "Per-Agent PRs" in html
     assert "delivery-choice" in html
     assert "One PR for everything, or a PR per agent." in html
-    assert "No dry run yet" in html
+    assert "No validation yet" in html
     # No button may contain the status chip.
     for m in re.finditer(r"<button\b[^>]*>[\s\S]*?</button>", html, re.I):
-        assert "No dry run yet" not in m.group(0), "status chip nested inside a button"
+        assert "No validation yet" not in m.group(0), "status chip nested inside a button"
 
 
 async def test_async_feedback_surfaces_present_on_key_pages(edl_client):

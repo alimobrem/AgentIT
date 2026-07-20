@@ -14,17 +14,31 @@
    `_onboard_terminal_redirect_url()` so the GET route's redirect and this
    SSE-driven client-side one can never disagree.
 
-   AutoMode (and the automatic Dry Run -> Deliver chain it used to gate)
-   has been removed -- onboarding always ends at "completed" once
-   manifests are saved, so this stepper no longer branches on whether the
-   run was auto-chained. #}
+   Onboarding no longer stops once manifests are saved -- it automatically
+   runs auto_delivery.py's validate/fix loop, a final LLM review, and (once
+   clean) the real Deliver, so this stepper now has stages for each of
+   those (docs/onboarding-loop-vision-gap-analysis.md's Part 3, finally
+   wired up). Still never a fabricated percentage: `_stage_order` below
+   only encodes DISPLAY ORDER for the job's own real `status` values, never
+   an invented in-between progress amount. #}
 <div class="card" id="onboard-progress-card">
   <div class="lifecycle-stepper">
-    {% set stages = [("running", "Running Agents"), ("saving", "Saving Manifests"), ("completed", "Done")] %}
+    {% set stages = [
+      ("running", "Running Agents"),
+      ("saving", "Saving Manifests"),
+      ("validating", "Validating"),
+      ("reviewing", "Final Review"),
+      ("delivering", "Creating PR(s)"),
+      ("completed", "Done"),
+    ] %}
+    {% set _stage_order = {
+      "pending": -1, "running": 0, "saving": 1, "validating": 2, "reviewing": 3,
+      "delivering": 4, "completed": 5, "needs_attention": 4, "failed": 0,
+    } %}
+    {% set _current_idx = _stage_order.get(job.status, -1) %}
     {% for key, label in stages %}
-    {% set is_active = job.status == key %}
-    {% set is_done = job.status == "completed" or
-       (key == "running" and job.status not in ("pending", "running")) %}
+    {% set is_active = loop.index0 == _current_idx %}
+    {% set is_done = loop.index0 < _current_idx or job.status == "completed" %}
     <div class="lifecycle-step {% if is_active %}step-active{% elif is_done %}step-done{% else %}step-pending{% endif %}">
       <div class="step-marker">{% if is_done and not is_active %}&#10003;{% else %}{{ loop.index }}{% endif %}</div>
       <div class="step-label">{{ label }}</div>
@@ -60,6 +74,12 @@
   <div class="alert alert-error mt-1">{{ job.error or "Onboarding failed" }}</div>
   <a href="/assessments/{{ assessment_id }}?error={{ (job.error or 'Onboarding failed') | urlencode }}"
      class="btn btn-outline" data-nav="back-to-assessment" hx-boost="false">Back to Assessment</a>
+  {% elif job.status == "needs_attention" %}
+  <div class="alert alert-warn mt-1">
+    {{ job.error or "Automatic validation could not finish on its own." }}
+    Manifests were saved -- review and deliver manually on Onboard Results.
+  </div>
+  <a href="/assessments/{{ assessment_id }}/onboard-results" class="btn btn-outline" hx-boost="false">Review Manifests</a>
   {% endif %}
 </div>
 {% if redirect_url %}

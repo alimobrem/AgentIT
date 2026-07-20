@@ -295,7 +295,7 @@ async def test_list_gates_includes_repo_url_for_fleet_attribution():
 async def test_gate_from_old_assessment_visible_after_reassessment():
     """Orphaned-gate-attribution regression: a gate created against an
     app's OLD assessment_id must still be visible/actionable from the
-    Actions tab of that SAME app's CURRENT (re-assessed) assessment_id --
+    Ledger tab of that SAME app's CURRENT (re-assessed) assessment_id --
     `gates.assessment_id` is a FK to a specific historical assessment, but
     `get_fleet_data()` (and the Assessment Detail page) always key off the
     latest one.

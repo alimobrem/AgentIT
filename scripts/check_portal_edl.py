@@ -332,10 +332,15 @@ def check_file(path: Path) -> list[Violation]:
             ))
 
     if path.name == "onboard_results.html":
-        if not re.search(r"btn-label\">Dry Run<|\"Dry Run\"|>Dry Run<", text):
+        if not re.search(
+            r"btn-label\">Run Automatic Validation<|\"Run Automatic Validation\"|>Run Automatic Validation<",
+            text,
+        ):
             vios.append(Violation(
                 "EDL-ONBOARD-ORDER", "MUST", rel, 1,
-                "Dry Run control missing from onboard results action bar",
+                "Run Automatic Validation control missing from onboard results action bar "
+                "(step 1 of the delivery flow -- auto_delivery.py's validate/fix/review pipeline, "
+                "manually re-triggerable; no more bare, un-auto-fixed \"Dry Run\" button)",
             ))
         # Labels may be inline ("Apply to Cluster") or via Jinja
         # `{% set _deliver_label = "Open PR" if … else "Apply" %}`.
@@ -352,10 +357,10 @@ def check_file(path: Path) -> list[Violation]:
                 "Apply step label missing (Apply / Open PR / Apply to Cluster / Commit & Open PR)",
             ))
         for line_no, _attrs, inner in _iter_buttons(text):
-            if "No dry run yet" in inner:
+            if "No validation yet" in inner:
                 vios.append(Violation(
                     "EDL-ONBOARD-ORDER", "MUST", rel, line_no,
-                    "dry-run status must be outside the Apply button",
+                    "validation status must be outside the Apply button",
                 ))
 
     # Compact filter toolbar on list/log pages (EDL §6 Filters).

@@ -175,7 +175,8 @@ class TestAssessmentDetailPrHistory:
         assert resp.status_code == 200
         assert "Open PRs (" not in resp.text
 
-    async def test_pr_history_tab_shows_merged_outcome(self, portal_client):
+    async def test_ledger_tab_pr_history_shows_merged_outcome(self, portal_client):
+        """Former PR History tab, merged into the Ledger tab 2026-07-19."""
         client, store, aid = portal_client
         pr_url = "https://github.com/org/gitops/pull/21"
         # resolve_gate()'s own merge step re-parses the PR URL out of the
@@ -191,12 +192,12 @@ class TestAssessmentDetailPrHistory:
             resp = await client.post(f"/gates/{gate_id}/resolve", data={"status": "approved"})
         assert resp.status_code in (200, 303)
 
-        resp = await client.get(f"/assessments/{aid}?tab=prs")
+        resp = await client.get(f"/assessments/{aid}?tab=ledger")
         assert resp.status_code == 200
-        assert "PR History (1)" in resp.text
+        assert "PR history (1)" in resp.text
         assert "Merged" in resp.text
 
-    async def test_pr_history_tab_shows_rejected_reason(self, portal_client):
+    async def test_ledger_tab_pr_history_shows_rejected_reason(self, portal_client):
         client, store, aid = portal_client
         await store.create_gate(
             aid, "gitops-pr-pending", "PR opened", pr_url="https://github.com/org/gitops/pull/22",
@@ -208,14 +209,14 @@ class TestAssessmentDetailPrHistory:
         )
         assert resp.status_code in (200, 303)
 
-        resp = await client.get(f"/assessments/{aid}?tab=prs")
+        resp = await client.get(f"/assessments/{aid}?tab=ledger")
         assert resp.status_code == 200
         assert "Rejected" in resp.text
         assert "manifest regressed a required probe" in resp.text
 
-    async def test_pr_history_empty_state(self, portal_client):
+    async def test_ledger_tab_pr_history_empty_state(self, portal_client):
         client, store, aid = portal_client
-        resp = await client.get(f"/assessments/{aid}?tab=prs")
+        resp = await client.get(f"/assessments/{aid}?tab=ledger")
         assert resp.status_code == 200
         assert "No PRs opened for this app yet" in resp.text
 

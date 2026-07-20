@@ -27,6 +27,17 @@ FIX_REGISTRY: dict[str, tuple[str, str]] = {
     "gitops":        ("cicd", "argocd-application"),
     "metrics":       ("observability", "service-monitor"),
     "tracing":       ("observability", "otel-collector"),
+    # Added for auto_delivery.py's validation-fix loop, which dispatches a
+    # fix by the exact category name property_verifier.py's checks report
+    # (rbac/autoscaling/monitoring) -- none of the substring keys above
+    # happened to match any of the three (e.g. "metrics" is not a substring
+    # of "monitoring"), so RemediationDispatcher.dispatch() would have
+    # failed closed with "No fix registered" for every one of them despite
+    # a real matching skill existing (skills/security/rbac.md,
+    # skills/infrastructure/hpa.md, skills/observability/service-monitor.md).
+    "rbac":          ("security", "rbac"),
+    "autoscaling":   ("infrastructure", "hpa"),
+    "monitoring":    ("observability", "service-monitor"),
 }
 
 
