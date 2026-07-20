@@ -550,6 +550,37 @@ def _agent_content_unchanged(
     return True
 
 
+def _infra_repo_content_unchanged(
+    base_url: str, hdrs: dict, app_name: str, files: list[dict], default_branch: str,
+) -> bool:
+    """True only if every one of ``files`` is byte-identical to what's
+    already committed at its destination path
+    (``apps/{app_name}/{category}/{filename}``) on the freshly-fetched
+    ``default_branch``.
+
+    ``commit_to_infra_repo()`` is the primary onboarding delivery mechanism
+    (every GitOps-registered app's cluster-config/CI-CD-shared-namespace
+    manifests route through it via ``delivery.py``'s
+    ``_deliver_via_gitops_pr()``) and, unlike ``create_agent_prs()`` (which
+    got the analogous dedup check for the "recurring redundant-PR pattern",
+    PRs #85/#89/#90/#91), never had this guard. That was a latent gap
+    while onboarding only ever ran from an explicit human click; the
+    2026-07-20 unify-scan-onboard-chain work makes every Assess/Scan
+    (including cadence/webhook-triggered re-assessments of an app that's
+    already onboarded and unchanged) automatically chain into onboarding
+    every time, which would otherwise branch/commit/force-push/open-a-PR
+    on every single tick even when nothing changed.
+    """
+    for f in files:
+        category = f.get("category", "misc")
+        filename = Path(f["path"]).name
+        target_path = f"apps/{app_name}/{category}/{filename}"
+        existing = _get_file_content_at_ref(base_url, hdrs, target_path, default_branch)
+        if existing != f["content"]:
+            return False
+    return True
+
+
 def create_agent_prs(
     repo_url: str,
     repo_name: str,
@@ -876,6 +907,16 @@ def commit_to_infra_repo(
         resp = requests.get(base_url, headers=hdrs, timeout=10)
         resp.raise_for_status()
         default_branch = resp.json()["default_branch"]
+
+        if _infra_repo_content_unchanged(base_url, hdrs, app_name, files, default_branch):
+            logger.info(
+                "agentit: onboarding manifests for %s unchanged from %s -- skipping commit/PR",
+                app_name, default_branch,
+            )
+            return {
+                "skipped": True,
+                "reason": f"content already matches {default_branch} -- no PR needed",
+            }
 
         resp = requests.get(
             f"{base_url}/git/ref/heads/{default_branch}",
