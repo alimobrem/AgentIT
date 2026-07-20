@@ -6,7 +6,7 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -643,16 +643,22 @@ async def test_verify_properties_runs_against_generated_files(client, _override_
     assert "Network Isolation" in properties
 
 
-async def test_assessment_detail_has_onboard_button(client, _override_store):
+async def test_assessment_detail_single_scan_button_no_separate_onboard_button(client, _override_store):
+    """2026-07-20 single-button collapse: a freshly-assessed app (no error,
+    no onboard job yet -- e.g. the tiny window before the automatic chain's
+    onboard job row is created, or a legacy pre-migration row) shows only
+    the Scan button, never a separate, permanently-visible 'Onboard This
+    App' button -- Scan alone always performs the full assess -> onboard ->
+    deliver chain now."""
     store = _override_store
     report = _make_report()
     aid = await store.save(report)
 
     resp = await client.get(f"/assessments/{aid}")
     assert resp.status_code == 200
-    assert f"/assessments/{aid}/onboard" in resp.text
-    assert "Onboard This App" in resp.text
-    assert "btn-action btn-lg" in resp.text
+    assert "Onboard This App" not in resp.text
+    assert 'action="/assess"' in resp.text
+    assert "btn-label\">Scan</span>" in resp.text
     assert "&larr; Fleet" in resp.text or "← Fleet" in resp.text or "Fleet</a>" in resp.text
     assert "Dashboard" not in resp.text or "Fleet" in resp.text
 
@@ -932,9 +938,10 @@ async def test_next_step_hint_prompts_onboarding_when_freshly_assessed(client, _
     aid = await store.save(_make_report("fresh-app"))
     resp = await client.get(f"/assessments/{aid}")
     assert resp.status_code == 200
-    assert "Onboard This App" in resp.text
+    assert "Onboard This App" not in resp.text
     hint = _next_step_hint_html(resp.text)
     assert "Next step: click" in hint
+    assert "Scan" in hint
     assert "pending action" not in hint
 
 
@@ -951,7 +958,7 @@ async def test_next_step_hint_onboard_wins_over_leftover_actions_when_assessed(c
     assert resp.status_code == 200
     hint = _next_step_hint_html(resp.text)
     assert "Next step: click" in hint
-    assert "Onboard This App" in hint
+    assert "Scan" in hint
     assert "do not fix them one-by-one" in hint
     assert "1</strong> pending action" not in hint
     assert f'href="/assessments/{aid}?tab=ledger"' in hint
@@ -1592,33 +1599,63 @@ async def test_fleet_scan_cta_when_ever_onboarded(client, _override_store):
     assert "Scan" in resp2.text
 
 
-async def test_assess_progress_chains_to_onboard_when_continue_flag(
+async def test_assess_progress_redirects_to_already_existing_onboard_job(
     client, _override_store,
 ):
-    """Completed assess job with continue_onboard redirects into onboard progress."""
+    """2026-07-20: assess_progress() no longer creates (or claims) the
+    onboard job itself -- that now happens deterministically, server-side,
+    inside assess_submit()'s background thread, BEFORE the assess job is
+    marked "completed" (so a poller can never observe "completed" with no
+    onboard job yet). This route is now a passive viewer only: it finds
+    and redirects to whatever onboard job already exists for this
+    assessment, and repeated polls give the identical, idempotent redirect
+    -- it never creates a second one."""
     store = _override_store
     aid = await store.save(_make_report_scored("chain-app", 50))
     job_id = await store.create_assessment_job(
         "https://github.com/org/chain-app", continue_onboard=True,
     )
+    onboard_job_id = await store.create_remediation_job(aid)
     await store.update_assessment_job(
         job_id, "completed", "Assessment complete", assessment_id=aid,
     )
-    with patch(
-        "agentit.portal.routes.assessments._run_onboarding_job",
-        new=AsyncMock(return_value=None),
-    ):
-        resp = await client.get(f"/assess/progress/{job_id}", follow_redirects=False)
+
+    resp = await client.get(f"/assess/progress/{job_id}", follow_redirects=False)
     assert resp.status_code == 303
-    loc = resp.headers["location"]
-    assert f"/assessments/{aid}/onboard/progress/" in loc
-    # Second poll must not start another onboard job.
+    assert resp.headers["location"] == f"/assessments/{aid}/onboard/progress/{onboard_job_id}"
+    # Second poll gives the exact same redirect -- no second onboard job.
     resp2 = await client.get(f"/assess/progress/{job_id}", follow_redirects=False)
     assert resp2.status_code == 303
-    assert resp2.headers["location"] == f"/assessments/{aid}"
+    assert resp2.headers["location"] == f"/assessments/{aid}/onboard/progress/{onboard_job_id}"
+
+
+async def test_assess_progress_opted_out_redirects_to_assessment_detail(
+    client, _override_store,
+):
+    """continue_onboard=0 (the opt-out mechanism stays available -- see
+    assess_submit() -- even though no real caller sets it today) means no
+    onboard job was ever created for this assessment, so this route falls
+    back to plain Assessment Detail, same as before."""
+    store = _override_store
+    aid = await store.save(_make_report_scored("no-chain-app", 50))
+    job_id = await store.create_assessment_job(
+        "https://github.com/org/no-chain-app", continue_onboard=False,
+    )
+    await store.update_assessment_job(
+        job_id, "completed", "Assessment complete", assessment_id=aid,
+    )
+
+    resp = await client.get(f"/assess/progress/{job_id}", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/assessments/{aid}"
 
 
 async def test_assessment_detail_prior_onboarded_hint(client, _override_store):
+    """2026-07-20 single-button collapse: no separate "Onboard This App"
+    button exists anymore -- for a freshly-(re)assessed app with no onboard
+    job yet, the hint says the score hasn't been onboarded yet and points
+    at Scan (which now deterministically, server-side chains all the way
+    through onboard -> deliver on its own)."""
     store = _override_store
     old_id = await store.save(_make_report_scored("prior-onboard", 40))
     await store.save_onboarding(old_id, [{
@@ -1627,9 +1664,41 @@ async def test_assessment_detail_prior_onboarded_hint(client, _override_store):
     }])
     new_id = await store.save(_make_report_scored("prior-onboard", 45))
     resp = await client.get(f"/assessments/{new_id}")
-    assert "New scorecard after a scan" in resp.text
+    hint = _next_step_hint_html(resp.text)
+    assert "hasn" in hint and "been onboarded yet" in hint
+    assert "in one step" not in hint
     assert "Scan" in resp.text
-    assert "Onboard This App" in resp.text
+    assert "Onboard This App" not in resp.text
+
+
+async def test_assessment_detail_hint_matches_webhook_triggered_rescan(client, _override_store):
+    """Pins the exact screenshot scenario a product owner flagged: an app
+    that was onboarded once, then got a fresh scorecard from a background
+    trigger (ReassessScheduler's cadence tick or a GitHub push). 2026-07-20:
+    webhook_assess()/webhook_github_push() now create the onboard job
+    themselves immediately after saving the new assessment (the same
+    deterministic, server-side chain the manual UI path uses) -- so the app
+    must land on Assessment Detail showing the chain as already/about to be
+    running, never a stale "Onboard This App" button implying a human still
+    needs to click something."""
+    store = _override_store
+    old_id = await store.save(_make_report_scored("webhook-rescanned-app", 55))
+    await store.save_onboarding(old_id, [{
+        "category": "hardening", "path": "deploy.yaml",
+        "content": "kind: Deployment\n", "description": "deploy",
+    }])
+    # Simulates webhook_assess()'s/webhook_github_push()'s own save+chain
+    # path (webhooks.py) -- store.save() immediately followed by
+    # create_remediation_job(), exactly like ReassessScheduler's cadence
+    # tick or a GitHub push now produces.
+    new_id = await store.save(_make_report_scored("webhook-rescanned-app", 62))
+    await store.create_remediation_job(new_id)
+    resp = await client.get(f"/assessments/{new_id}")
+    assert resp.status_code == 200
+    assert "Onboard This App" not in resp.text
+    hint = _next_step_hint_html(resp.text)
+    assert "in one step" not in hint
+    assert "running automatically" in hint
 
 
 async def test_fleet_uses_design_system_classes(client, _override_store):

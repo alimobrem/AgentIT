@@ -269,7 +269,36 @@ async def assess_submit(
                     {'assessment_id': assessment_id, 'score': report.overall_score},
                     correlation_id=assessment_id,
                 )
+
+            # Deterministic, server-side assess->onboard chain (2026-07-20,
+            # closing root cause #1 of the Onboard/Scan button
+            # investigation, PR #99): the onboard job is created HERE, in
+            # the same background thread that just saved the assessment --
+            # never dependent on a browser polling `GET /assess/progress`
+            # afterward. Created BEFORE this assess job is marked
+            # "completed" below so a poller can never observe "completed"
+            # with no onboard job yet (assess_progress() below only reads
+            # this, it never creates it). The actual onboarding run is then
+            # scheduled (fire-and-forget, not awaited by this thread) onto
+            # the same persistent event loop `_bridge()` already targets,
+            # via the exact same `_run_onboarding_job()` `onboard_submit()`
+            # uses -- just scheduled from a thread instead of FastAPI's
+            # `BackgroundTasks`, since this thread outlives the request/
+            # response cycle those are tied to.
+            onboard_job_id = _bridge(store.create_remediation_job(assessment_id)) if chain else None
+
             _bridge(store.update_assessment_job(job_id, "completed", "Assessment complete", assessment_id=assessment_id))
+
+            if onboard_job_id:
+                # Computed lazily, only once we know the chain will actually
+                # fire -- `request` is unused by every other line of this
+                # function (direct-call tests, e.g. test_assess_submit_
+                # postgres.py, pass `request=None` and always opt out of
+                # chaining, so this must never be evaluated for them).
+                base_url = _get_trusted_base_url(request)
+                asyncio.run_coroutine_threadsafe(
+                    _run_onboarding_job(onboard_job_id, assessment_id, base_url), loop,
+                )
         except InfraRepoRequiredError as exc:
             # A hard stop, never a fallback to Direct Apply -- all apps must
             # be GitOps-registered now. Reuses the visible-failure event
@@ -308,9 +337,25 @@ async def assess_submit(
 
 
 @router.get("/assess/progress/{job_id}", response_class=HTMLResponse)
-async def assess_progress(
-    request: Request, job_id: str, background_tasks: BackgroundTasks,
-):
+async def assess_progress(request: Request, job_id: str):
+    """Passive progress viewer only (2026-07-20) -- the assess->onboard
+    chain itself is now fired deterministically, server-side, by whichever
+    background job actually performed the assessment
+    (``assess_submit()``'s thread / ``webhook_assess()`` /
+    ``webhook_github_push()``), immediately once the new assessment is
+    saved. It no longer depends on a browser polling this route at all: a
+    closed tab (root cause #1 of the earlier Onboard/Scan investigation,
+    PR #99) can no longer silently skip the chain.
+
+    This route's only remaining job is to redirect a human still watching
+    to wherever the chain already is: onboarding's own progress page if an
+    onboard job already exists for this assessment (``list_remediation_
+    jobs()`` -- filtered to exclude this assess job's own row, since both
+    kinds of job share the same ``remediation_jobs`` table), or plain
+    Assessment Detail if this assess explicitly opted out of chaining
+    (``continue_onboard=0``, still available -- see ``assess_submit()`` --
+    even though no real caller sets it today).
+    """
     s = await get_store()
     job = await s.get_remediation_job(job_id)
     if not job:
@@ -318,19 +363,11 @@ async def assess_progress(
 
     if job["status"] == "completed" and job.get("assessment_id"):
         assessment_id = job["assessment_id"]
-        # Atomically claim continue_onboard so the htmx 2s poll cannot
-        # start two onboarding jobs for the same completed assess.
-        if hasattr(s, "claim_continue_onboard") and await s.claim_continue_onboard(job_id):
-            # The assess->onboard chain continues straight into onboarding,
-            # same as before -- but AutoMode (and the automatic Dry Run ->
-            # Deliver chain it gated) has been removed, so onboarding
-            # always stops once manifests are generated now, requiring an
-            # explicit human "Deliver" click on Onboard Results.
-            onboard_job_id = await s.create_remediation_job(assessment_id)
-            base_url = _get_trusted_base_url(request)
-            background_tasks.add_task(
-                _run_onboarding_job, onboard_job_id, assessment_id, base_url,
-            )
+        onboard_jobs = [
+            j for j in await s.list_remediation_jobs(assessment_id) if j["id"] != job_id
+        ]
+        if onboard_jobs:
+            onboard_job_id = onboard_jobs[0]["id"]
             return RedirectResponse(
                 url=f"/assessments/{assessment_id}/onboard/progress/{onboard_job_id}",
                 status_code=303,
@@ -494,8 +531,28 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     # True when an older assessment of this repo already onboarded — so a
     # fresh "assessed" stage after Re-assess is a refresh, not first-time.
     prior_onboarded = False
-    if lifecycle_stage == "assessed" and hasattr(s, "repo_has_onboarding"):
-        prior_onboarded = await s.repo_has_onboarding(report.repo_url)
+    # The single-button Scan flow (2026-07-20) always chains straight into
+    # onboarding server-side the moment a new assessment is saved
+    # (assess_submit()'s background thread / webhook_assess() /
+    # webhook_github_push() -- see README's Unified apply flow entry) --
+    # "assessed" with no error is now a genuinely transient state
+    # (onboarding is either already running or about to be, not a button
+    # waiting on a human). list_remediation_jobs() (ordered newest-first)
+    # finds that already-running/failed job, if any, so the page can say so
+    # honestly instead of showing a stale "Onboard This App" call to action
+    # that duplicates what Scan already does automatically.
+    active_onboard_job = None
+    failed_onboard_job = None
+    if lifecycle_stage == "assessed":
+        if hasattr(s, "repo_has_onboarding"):
+            prior_onboarded = await s.repo_has_onboarding(report.repo_url)
+        onboard_jobs = await s.list_remediation_jobs(assessment_id)
+        if onboard_jobs:
+            latest_onboard_job = onboard_jobs[0]
+            if latest_onboard_job["status"] == "failed":
+                failed_onboard_job = latest_onboard_job
+            elif latest_onboard_job["status"] not in _ONBOARD_JOB_TERMINAL_STATUSES:
+                active_onboard_job = latest_onboard_job
 
     suppressions = await s.get_suppressions(report.repo_name)
 
@@ -541,6 +598,8 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "score_history": score_history,
             "lifecycle_stage": lifecycle_stage,
             "prior_onboarded": prior_onboarded,
+            "active_onboard_job": active_onboard_job,
+            "failed_onboard_job": failed_onboard_job,
             "suppressions": suppressions,
             "celebrate_first_perfect_score": celebrate_first_perfect_score,
             "recently_resolved_actions_count": recently_resolved_actions_count,
@@ -882,6 +941,16 @@ async def _run_onboarding_job(
                 job_id, "completed",
                 f"Onboarding complete -- {pr_count} pull request{'s' if pr_count != 1 else ''} ready for your approval.",
             )
+        elif result["status"] == "unchanged":
+            # Not a failure: generated manifests already match what's
+            # deployed (github_pr.py's content-unchanged dedup) -- the
+            # expected outcome for a chained, automatic re-onboard of an
+            # already-onboarded, unchanged app (e.g. a cadence/webhook-
+            # triggered re-scan). See auto_delivery.py's own docstring.
+            await s.update_remediation_job(
+                job_id, "completed",
+                "Onboarding complete -- manifests already match what's deployed; nothing new to deliver.",
+            )
         else:
             await s.update_remediation_job(
                 job_id, "needs_attention",
@@ -1159,6 +1228,11 @@ async def _run_manual_validation_job(job_id: str, assessment_id: str) -> None:
             await s.update_remediation_job(
                 job_id, "completed",
                 f"Validation complete -- {pr_count} pull request{'s' if pr_count != 1 else ''} ready for your approval.",
+            )
+        elif result["status"] == "unchanged":
+            await s.update_remediation_job(
+                job_id, "completed",
+                "Validation complete -- manifests already match what's deployed; nothing new to deliver.",
             )
         else:
             await s.update_remediation_job(

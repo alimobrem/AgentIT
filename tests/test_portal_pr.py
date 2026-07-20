@@ -540,6 +540,177 @@ def test_create_agent_prs_fetches_default_branch_ref_fresh_every_call(mock_reque
     assert len(ref_calls) == 2, "expected a fresh ref fetch on every call, not a cached/stale one"
 
 
+# ── commit_to_infra_repo — dedup against current default branch ─────────
+#
+# 2026-07-20 (unify-scan-onboard-chain): `commit_to_infra_repo()` is the
+# PRIMARY onboarding delivery mechanism (every GitOps-registered app's
+# cluster-config/CI-CD-shared-namespace manifests route through it via
+# delivery.py's `_deliver_via_gitops_pr()`), and unlike `create_agent_prs()`
+# above, it never had the analogous dedup check -- a latent gap while
+# onboarding only ever ran from an explicit human click, but a real problem
+# now that every Assess/Scan (including a cadence/webhook-triggered
+# re-assessment of an app that's already onboarded and unchanged) chains
+# into onboarding automatically every time. These mirror the
+# `create_agent_prs` dedup tests above, proving `_infra_repo_content_
+# unchanged()` actually prevents a redundant commit/PR for this path too.
+
+_NETPOL_CONTENT = "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: test\n"
+
+
+def _infra_repo_files(content: str = _NETPOL_CONTENT) -> list[dict]:
+    return [{"category": "skills", "path": "netpol.yaml", "content": content, "description": "network policy"}]
+
+
+@patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"})
+@patch("agentit.portal.github_pr.requests")
+def test_commit_to_infra_repo_skips_when_content_already_matches_default_branch(mock_requests):
+    """Byte-identical generated manifests vs. what's already at their
+    destination path (apps/{app}/{category}/{filename}) on the (freshly
+    fetched) default branch must skip the commit/PR entirely -- no
+    mutating call is made at all."""
+    def mock_get(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        if url.endswith("/repos/org/steady-app-gitops"):
+            resp.json.return_value = {"default_branch": "main"}
+        elif "git/ref/heads/main" in url:
+            resp.json.return_value = {"object": {"sha": "sha-main-1"}}
+        elif url.endswith("/contents/apps/steady-app/skills/netpol.yaml"):
+            resp.json.return_value = {"content": base64.b64encode(_NETPOL_CONTENT.encode()).decode()}
+        return resp
+
+    mock_requests.get.side_effect = mock_get
+
+    result = commit_to_infra_repo(
+        infra_repo_url="https://github.com/org/steady-app-gitops",
+        app_name="steady-app",
+        files=_infra_repo_files(),
+    )
+
+    assert result == {
+        "skipped": True,
+        "reason": "content already matches main -- no PR needed",
+    }
+    mock_requests.post.assert_not_called()
+
+
+@patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"})
+@patch("agentit.portal.github_pr.requests")
+def test_commit_to_infra_repo_commits_when_content_differs(mock_requests):
+    """When the file doesn't exist yet on the default branch (or differs),
+    the normal branch/commit/PR flow must still run unchanged."""
+    def mock_get(url, **kwargs):
+        resp = MagicMock()
+        if url.endswith("/repos/org/fresh-app-gitops"):
+            resp.status_code = 200
+            resp.json.return_value = {"default_branch": "main"}
+        elif "git/ref/heads/main" in url:
+            resp.status_code = 200
+            resp.json.return_value = {"object": {"sha": "sha-main-1"}}
+        elif url.endswith("/contents/apps/fresh-app/skills/netpol.yaml"):
+            resp.status_code = 404
+        return resp
+
+    def mock_post(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 201
+        if "git/trees" in url:
+            resp.json.return_value = {"sha": "tree-1"}
+        elif "git/commits" in url:
+            resp.json.return_value = {"sha": "commit-1"}
+        elif "git/refs" in url:
+            resp.json.return_value = {"ref": "refs/heads/agentit/fresh-app"}
+        elif "/pulls" in url:
+            resp.json.return_value = {"html_url": "https://github.com/org/fresh-app-gitops/pull/1"}
+        return resp
+
+    mock_requests.get.side_effect = mock_get
+    mock_requests.post.side_effect = mock_post
+
+    result = commit_to_infra_repo(
+        infra_repo_url="https://github.com/org/fresh-app-gitops",
+        app_name="fresh-app",
+        files=_infra_repo_files(),
+    )
+
+    assert result["pr_url"] == "https://github.com/org/fresh-app-gitops/pull/1"
+    assert "skipped" not in result
+    assert len([c for c in mock_requests.post.call_args_list if "git/trees" in str(c)]) == 1
+
+
+@patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"})
+@patch("agentit.portal.github_pr.requests")
+def test_commit_to_infra_repo_second_identical_run_noops_after_first_merges(mock_requests):
+    """The exact steady-state sequence this dedup exists for: run 1 commits
+    genuinely new manifests and opens a PR; that PR merges to the default
+    branch (which also advances to a new commit sha, proving the dedup
+    check reads a live, current ref rather than a cached/stale one); a
+    later automatic re-onboard (a cadence-triggered re-scan of an app
+    that's already onboarded and unchanged) regenerates the *same*
+    manifests and must no-op instead of opening a second, redundant PR."""
+    main_state = {"content": None, "sha": "sha-main-1"}
+
+    def mock_get(url, **kwargs):
+        resp = MagicMock()
+        if url.endswith("/repos/org/steady-app2-gitops"):
+            resp.status_code = 200
+            resp.json.return_value = {"default_branch": "main"}
+        elif "git/ref/heads/main" in url:
+            resp.status_code = 200
+            resp.json.return_value = {"object": {"sha": main_state["sha"]}}
+        elif url.endswith("/contents/apps/steady-app2/skills/netpol.yaml"):
+            if main_state["content"] is None:
+                resp.status_code = 404
+            else:
+                resp.status_code = 200
+                resp.json.return_value = {"content": base64.b64encode(main_state["content"].encode()).decode()}
+        return resp
+
+    def mock_post(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 201
+        if "git/trees" in url:
+            resp.json.return_value = {"sha": "tree-1"}
+        elif "git/commits" in url:
+            resp.json.return_value = {"sha": "commit-1"}
+        elif "git/refs" in url:
+            resp.json.return_value = {"ref": "refs/heads/agentit/steady-app2"}
+        elif "/pulls" in url:
+            resp.json.return_value = {"html_url": "https://github.com/org/steady-app2-gitops/pull/1"}
+        return resp
+
+    mock_requests.get.side_effect = mock_get
+    mock_requests.post.side_effect = mock_post
+
+    # Run 1: nothing on main yet -- commits and opens a real PR.
+    run_1 = commit_to_infra_repo(
+        infra_repo_url="https://github.com/org/steady-app2-gitops",
+        app_name="steady-app2",
+        files=_infra_repo_files(),
+    )
+    assert run_1["pr_url"] == "https://github.com/org/steady-app2-gitops/pull/1"
+    assert mock_requests.post.call_count >= 1
+
+    # The PR from run 1 merges -- main now has the generated content and a
+    # new HEAD sha.
+    main_state["content"] = _NETPOL_CONTENT
+    main_state["sha"] = "sha-main-2"
+    mock_requests.post.reset_mock()
+
+    # A later automatic re-onboard regenerates byte-identical content --
+    # must no-op, not open a second PR.
+    run_2 = commit_to_infra_repo(
+        infra_repo_url="https://github.com/org/steady-app2-gitops",
+        app_name="steady-app2",
+        files=_infra_repo_files(),
+    )
+    assert run_2 == {
+        "skipped": True,
+        "reason": "content already matches main -- no PR needed",
+    }
+    mock_requests.post.assert_not_called()
+
+
 # ── ensure_applicationset ────────────────────────────────────────────────
 #
 # Previously this shelled out to `oc apply -f -`, which meant it could only

@@ -343,6 +343,11 @@ async def auto_validate_and_deliver(
     - ``{"status": "delivered", "delivery": {...}, "pr_urls": [...],
       "review": {...} | None}`` once a real PR (or more than one) has been
       opened.
+    - ``{"status": "unchanged", "delivery": {...}, "review": {...} | None}``
+      when validation converged and delivery produced no error, but also no
+      PR, because every category's generated content already matched what's
+      deployed (github_pr.py's content-unchanged dedup) -- a benign no-op,
+      not a failure.
     - ``{"status": "delivery_failed", "reason": str}`` when validation
       converged but the real ``route_and_deliver()`` call itself produced
       no successful outcome at all (every category errored) -- also
@@ -433,17 +438,41 @@ async def auto_validate_and_deliver(
             o["error"] for o in delivery["outcomes"].values()
             if isinstance(o, dict) and o.get("error")
         ]
-        reason = "; ".join(delivery_errors) if delivery_errors else "no pull request was opened"
-        logger.warning("Auto-delivery produced no PR for %s: %s", app_name, reason)
+        if delivery_errors:
+            reason = "; ".join(delivery_errors)
+            logger.warning("Auto-delivery produced no PR for %s: %s", app_name, reason)
+            try:
+                await store.log_event(
+                    "auto-delivery", "auto-delivery-failed", app_name, "warning",
+                    f"Automatic delivery did not open a pull request: {reason} -- "
+                    "manifests were saved; review and deliver manually on Onboard Results.",
+                    correlation_id=assessment_id,
+                )
+            except Exception:
+                logger.warning("Failed to log auto-delivery-failed event for %s", app_name, exc_info=True)
+            return {"status": "delivery_failed", "reason": reason}
+
+        # No pull request AND no error: every category either had nothing
+        # to deliver or its generated content was byte-identical to what's
+        # already on the target repo's default branch (github_pr.py's
+        # `_infra_repo_content_unchanged()` dedup, closing the gap
+        # `create_agent_prs()`'s own `_agent_content_unchanged()` dedup
+        # never covered for this delivery path). This is the expected,
+        # benign steady-state outcome now that every Assess/Scan chains
+        # into onboarding automatically (2026-07-20) -- a cadence/webhook-
+        # triggered re-scan of an app that's already onboarded and
+        # unchanged must not be treated as a failure needing a human's
+        # attention.
+        logger.info("Auto-delivery for %s: nothing to deliver -- manifests already match what's deployed", app_name)
         try:
             await store.log_event(
-                "auto-delivery", "auto-delivery-failed", app_name, "warning",
-                f"Automatic delivery did not open a pull request: {reason} -- "
-                "manifests were saved; review and deliver manually on Onboard Results.",
+                "auto-delivery", "auto-delivery-unchanged", app_name, "info",
+                "Automatic validation complete -- generated manifests already match what's deployed; "
+                "no new pull request needed.",
                 correlation_id=assessment_id,
             )
         except Exception:
-            logger.warning("Failed to log auto-delivery-failed event for %s", app_name, exc_info=True)
-        return {"status": "delivery_failed", "reason": reason}
+            logger.warning("Failed to log auto-delivery-unchanged event for %s", app_name, exc_info=True)
+        return {"status": "unchanged", "delivery": delivery, "review": review}
 
     return {"status": "delivered", "delivery": delivery, "pr_urls": pr_urls, "review": review}
