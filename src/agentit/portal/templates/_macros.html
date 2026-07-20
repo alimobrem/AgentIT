@@ -20,37 +20,6 @@
 </div>
 {% endmacro %}
 
-{% macro ledger_card(card, link_to_app=True) %}
-{# One read-only Ledger card (docs/ledger-design-spec.md §1) -- shared by
-   the fleet-wide /ledger page (flat and grouped-row-expand views) and
-   Assessment Detail's per-app Ledger tab, so all three surfaces render a
-   card identically instead of three copies drifting apart. #}
-<div class="timeline-item">
-  <div class="timeline-marker {% if card.severity == 'critical' %}marker-danger{% elif card.card_type in ('E', 'F') %}marker-success{% elif card.card_type == 'D' %}marker-info{% else %}marker-default{% endif %}"></div>
-  <div class="timeline-content">
-    <div class="timeline-header">
-      <span class="badge badge-muted" title="Card type {{ card.card_type }}">{{ card.card_type | humanize_card_type }}</span>
-      <span class="badge badge-{{ card.severity | default('info') }}">{{ card.title }}</span>
-      {% if link_to_app and card.target_app %}
-        {% if card.assessment_id %}
-        <a href="/assessments/{{ card.assessment_id }}?tab=ledger">{{ card.target_app }}</a>
-        {% else %}
-        <span class="text-muted">{{ card.target_app }}</span>
-        {% endif %}
-      {% endif %}
-      <span class="text-muted text-sm" data-timestamp="{{ card.timestamp }}">{{ card.timestamp[:16] }}</span>
-    </div>
-    <p class="text-sm text-muted">{{ card.summary[:200] }}</p>
-    {% if card.card_type == 'D' and card.assessment_id %}
-    <a href="/assessments/{{ card.assessment_id }}?tab=ledger" class="text-sm">Review &amp; resolve on Ledger tab &rarr;</a>
-    {% endif %}
-    {% if card.chain_count | default(0) > 1 %}
-    <a href="/ledger/chain/{{ card.correlation_id }}" class="btn btn-sm btn-outline mt-1">&#9664; Part of a chain ({{ card.chain_count }} events) -- Replay</a>
-    {% endif %}
-  </div>
-</div>
-{% endmacro %}
-
 {% macro recommendation_card(event, assessment_id) %}
 {# A real, direct action for the two recommendation types that never had a
    PR to track (rollback-review, finding-unresolved-escalation) -- replaces
