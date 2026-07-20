@@ -142,14 +142,33 @@
    Onboard This App is always the primary path — leftover Ledger actions
    (often from an earlier delivery / SLO tick on a prior assessment of the
    same app) must not compete with it. After onboard, pending actions win
-   because they are the human delivery / rollback decisions. #}
+   because they are the human delivery / rollback decisions.
+
+   prior_onboarded copy (2026-07-20): this used to promise "(next time use
+   Scan below to re-assess and onboard in one step)", implying every scan
+   chains into onboarding and this was just a one-off manual catch-up. That
+   is only true for a human clicking Scan on THIS page and staying on the
+   resulting progress page long enough for it to redirect
+   (assess_progress() claims continue_onboard only when something actually
+   polls `GET /assess/progress/{job_id}` after it completes — store.py's
+   claim_continue_onboard()/create_assessment_job()). The scenario that
+   actually produces "a fresh score sitting here unconsumed" most often has
+   nothing to do with that page at all: `/api/webhook/assess`
+   (routes/webhooks.py's webhook_assess(), the route ReassessScheduler's
+   scheduled cadence and webhook_github_push's push-triggered re-assess
+   both call) clones, scores, and saves a new assessment directly — it
+   never calls create_assessment_job/continue_onboard, so it can never
+   chain into onboarding no matter what a human does "next time". Onboard
+   This App is the only way to consume a score that arrived this way
+   without paying for another full re-scan; the copy below no longer
+   promises a guarantee that doesn't hold for it (see the Onboard button's
+   own tooltip for the fuller why). #}
 <div class="next-step-hint {% if lifecycle_stage == 'assessed' %}next-step-hint-primary{% elif pending_actions and next_action.state == 'none' %}next-step-hint-attention{% endif %}">
   {% if lifecycle_stage == "assessed" %}
   <span class="next-step-icon" aria-hidden="true">&#9679;</span>
   <span>
     {% if prior_onboarded %}
-    New scorecard after a scan — click <strong>Onboard This App</strong> below to regenerate manifests
-    (next time use <strong>Scan</strong> below to re-assess and onboard in one step).
+    This score hasn't been onboarded yet — click <strong>Onboard This App</strong> below to generate manifests for it now, no re-scoring needed.
     {% else %}
     Next step: click <strong>Onboard This App</strong> below.
     Onboard generates remediations for all findings — do not fix them one-by-one on the Findings tab first.
@@ -219,15 +238,25 @@
 {% endif %}
 
 {# Primary CTA follows lifecycle: Onboard only while assessed; after onboard
-   the giant Onboard button would teach the wrong next step. Scan (below)
-   already covers "regenerate manifests" as a side effect of its own
-   auto-chain into onboard (see assess_submit()'s continue_onboard default)
-   -- a separate Re-onboard button duplicated that with no re-score, which
-   was one CTA too many for what most visits here need. #}
+   the giant Onboard button would teach the wrong next step. This is
+   different from the now-removed Re-onboard button (2026-07-20, see
+   README): Re-onboard was a SECOND button next to Scan for apps already
+   past "assessed", purely redundant with what Scan's own auto-chain did.
+   This button has no such redundant twin -- Scan below is a genuinely
+   different, more expensive action (re-clone + re-score from scratch) that
+   only chains into onboarding when a human clicks it interactively and
+   stays on the resulting progress page (assess_progress()'s
+   claim_continue_onboard, assessments.py:319-337). Every automatic
+   re-assessment (ReassessScheduler's cadence tick, a git push) instead
+   goes through /api/webhook/assess (routes/webhooks.py:110-150), which has
+   no continue_onboard/chaining concept at all -- so this button stays the
+   one way to onboard a fresh, already-computed score without paying for
+   another full re-scan, not a narrow recovery path. #}
 <div class="action-bar mt-2 mb-2">
   {% if lifecycle_stage == "assessed" %}
   <form method="post" action="/assessments/{{ assessment_id }}/onboard" class="inline-form">
-    <button type="submit" class="btn btn-action btn-lg">
+    <button type="submit" class="btn btn-action btn-lg"
+      title="Generate manifests for this score exactly as computed -- no re-scoring. Automatic re-assessments (scheduled or push-triggered) always land here needing this same manual step; use Scan instead only if you want to re-check the repo itself first.">
       <span class="btn-label">Onboard This App</span>
       <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Running agents&hellip;</span>
     </button>

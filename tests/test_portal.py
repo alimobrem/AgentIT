@@ -1619,6 +1619,14 @@ async def test_assess_progress_chains_to_onboard_when_continue_flag(
 
 
 async def test_assessment_detail_prior_onboarded_hint(client, _override_store):
+    """2026-07-20: the hint used to promise "(next time use Scan below to
+    re-assess and onboard in one step)" -- true only for a human clicking
+    Scan on this exact page and staying to watch it redirect, never for the
+    /api/webhook/assess-driven background rescans (ReassessScheduler's
+    cadence, a git push) that most often produce this exact state. Copy no
+    longer makes that promise; see test_assessment_detail_hint_matches_
+    webhook_triggered_rescan below for the scenario that motivated dropping
+    it."""
     store = _override_store
     old_id = await store.save(_make_report_scored("prior-onboard", 40))
     await store.save_onboarding(old_id, [{
@@ -1627,9 +1635,43 @@ async def test_assessment_detail_prior_onboarded_hint(client, _override_store):
     }])
     new_id = await store.save(_make_report_scored("prior-onboard", 45))
     resp = await client.get(f"/assessments/{new_id}")
-    assert "New scorecard after a scan" in resp.text
+    hint = _next_step_hint_html(resp.text)
+    assert "hasn" in hint and "been onboarded yet" in hint
+    # The old copy's overclaim lived in the hint itself, not the Scan
+    # button's own (still-accurate, for an interactive click) confirm
+    # dialog text below it -- scope the negative assertion to the hint.
+    assert "in one step" not in hint
     assert "Scan" in resp.text
     assert "Onboard This App" in resp.text
+
+
+async def test_assessment_detail_hint_matches_webhook_triggered_rescan(client, _override_store):
+    """Pins the exact screenshot scenario a product owner flagged: an app
+    that was onboarded once, then got a fresh scorecard from a background
+    trigger (ReassessScheduler's cadence tick or a GitHub push -- both call
+    webhooks.py's webhook_assess(), which saves a new assessment directly
+    with no create_assessment_job/continue_onboard call at all, so it can
+    never auto-chain into onboarding). The app must still land on
+    Assessment Detail at the "assessed" stage with a real, working
+    "Onboard This App" button -- not a stale promise that Scan already
+    handled it "in one step"."""
+    store = _override_store
+    old_id = await store.save(_make_report_scored("webhook-rescanned-app", 55))
+    await store.save_onboarding(old_id, [{
+        "category": "hardening", "path": "deploy.yaml",
+        "content": "kind: Deployment\n", "description": "deploy",
+    }])
+    # Simulates webhook_assess()'s own save path (webhooks.py:139) -- a
+    # plain store.save() with no assessment job / continue_onboard flag
+    # ever created, exactly like ReassessScheduler's cadence tick or a
+    # GitHub push would produce.
+    new_id = await store.save(_make_report_scored("webhook-rescanned-app", 62))
+    resp = await client.get(f"/assessments/{new_id}")
+    assert resp.status_code == 200
+    assert f'action="/assessments/{new_id}/onboard"' in resp.text
+    assert "Onboard This App" in resp.text
+    hint = _next_step_hint_html(resp.text)
+    assert "in one step" not in hint
 
 
 async def test_fleet_uses_design_system_classes(client, _override_store):
