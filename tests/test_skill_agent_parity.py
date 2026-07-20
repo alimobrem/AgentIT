@@ -469,10 +469,15 @@ class TestAuditPolicyIsNoLongerAFabricatedApplyAttempt:
         `_classify_and_fix`'s CRD-missing check can never trigger for it,
         so `_CRD_TO_OPERATOR["Policy"]` (Kyverno) can never be
         misattributed to this skill's output -- even on a cluster with no
-        Kyverno installed at all."""
-        from unittest.mock import patch
+        Kyverno installed at all.
 
-        from agentit.portal.cluster_apply import apply_manifests_to_cluster
+        Exercises `_classify_and_fix()` directly rather than through the
+        now-deleted `apply_manifests_to_cluster()` orchestration wrapper
+        (removed 2026-07-20, zero production callers since the
+        cluster-admin-review gate retirement) -- the classification logic
+        this regression actually guards still lives in `_classify_and_fix`.
+        """
+        from agentit.portal.cluster_apply import _classify_and_fix
 
         repo_root = Path(__file__).resolve().parent.parent
         skill = load_skill(repo_root / "skills/compliance/audit-policy.md")
@@ -480,21 +485,11 @@ class TestAuditPolicyIsNoLongerAFabricatedApplyAttempt:
         files = engine.generate(skill, full_report, llm_client=None)
         assert files
 
-        file_dicts = [
-            {"category": "skills", "path": f.path, "content": f.content, "description": f.description}
-            for f in files
-        ]
-
-        with patch("agentit.portal.cluster_apply.kube") as mock_kube:
-            mock_kube.namespace_exists.return_value = True
-            # No Kyverno CRD ("policies") installed on this cluster --
-            # the exact scenario that used to misattribute the fabricated
-            # audit.k8s.io Policy failure to a missing Kyverno operator.
-            mock_kube.get_api_resources.return_value = {"configmaps", "deployments", "services"}
-            mock_kube.apply_yaml.return_value = {"applied": True, "error": None}
-
-            result = apply_manifests_to_cluster(file_dicts, namespace="parity-app")
-
-        assert result["applied"] == [f.path for f in files]
-        assert result["missing_operators"] == {}
-        assert result["errors"] == []
+        # No Kyverno CRD ("policies") installed on this cluster -- the
+        # exact scenario that used to misattribute the fabricated
+        # audit.k8s.io Policy failure to a missing Kyverno operator.
+        available_kinds = {"configmaps", "deployments", "services"}
+        for f in files:
+            doc = yaml.safe_load(f.content)
+            action, reason, _fixed = _classify_and_fix(doc, "parity-app", available_kinds)
+            assert action == "apply", f"unexpected action {action!r} ({reason}) for {f.path}"

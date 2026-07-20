@@ -32,11 +32,11 @@ async def _make_delivery(store, mechanism: str) -> tuple[str, str]:
 class TestVerifiedOutcomeLogsEvent:
     async def test_healthy_verification_logs_delivery_verified_event(self):
         store, raw = await make_async_store()
-        aid, delivery_id = await _make_delivery(store, MECHANISM_DIRECT_APPLY)
+        aid, delivery_id = await _make_delivery(store, MECHANISM_INFRA_REPO_COMMIT)
 
         with patch("agentit.remediation_loop.verify_slos", return_value={"healthy": True, "reason": "no breach"}):
             result = await verify_and_close_delivery(
-                store, delivery_id, aid, "verify-events-app", "verify-events-app", MECHANISM_DIRECT_APPLY,
+                store, delivery_id, aid, "verify-events-app", "verify-events-app", MECHANISM_INFRA_REPO_COMMIT,
             )
 
         assert result["healthy"] is True
@@ -51,25 +51,31 @@ class TestVerifiedOutcomeLogsEvent:
 
 
 class TestBreachedOutcomesLogEvents:
-    async def test_direct_apply_breach_logs_rolled_back_event(self):
+    async def test_a_delivery_stored_with_the_legacy_direct_apply_mechanism_still_no_longer_rolls_back(self):
+        """Regression guard for the 2026-07-20 removal of
+        `verify_and_close_delivery()`'s dedicated `MECHANISM_DIRECT_APPLY`
+        auto-rollback branch: even a delivery row stored (historically, or
+        by a caller passing the legacy mechanism string directly) with
+        `mechanism="direct-apply"` must fall through to the same
+        breach-reported-no-rollback handling every other mechanism gets --
+        `resolve_cluster_config_mechanism()` can never produce this
+        mechanism for a real delivery anymore, so there is no live shape
+        that should ever auto-rollback here."""
         store, raw = await make_async_store()
         aid, delivery_id = await _make_delivery(store, MECHANISM_DIRECT_APPLY)
 
         with patch("agentit.remediation_loop.verify_slos",
-                    return_value={"healthy": False, "reason": "latency_p99_ms breached"}), \
-             patch("agentit.remediation_loop.rollback_action",
-                   return_value={"outcome": "rolled_back", "details": "rollout undo"}) as mock_rollback:
+                    return_value={"healthy": False, "reason": "latency_p99_ms breached"}):
             result = await verify_and_close_delivery(
                 store, delivery_id, aid, "verify-events-app", "verify-events-app", MECHANISM_DIRECT_APPLY,
             )
 
         assert result["healthy"] is False
-        mock_rollback.assert_called_once()
         delivery = await raw.get_delivery(delivery_id)
-        assert delivery["status"] == "rolled_back"
+        assert delivery["status"] == "breach-reported"
 
         events = await raw.list_events(target_app="verify-events-app")
-        matching = [e for e in events if e["action"] == "delivery-rolled-back"]
+        matching = [e for e in events if e["action"] == "delivery-breach-reported"]
         assert len(matching) == 1
         assert matching[0]["severity"] == "critical"
         assert "latency_p99_ms breached" in matching[0]["summary"]

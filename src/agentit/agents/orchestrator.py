@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
-from agentit.models import AssessmentReport, Severity
+from agentit.models import AssessmentReport
 
 logger = logging.getLogger(__name__)
 
@@ -141,8 +141,6 @@ class OrchestrationPlan:
     criticality: str
     score: float
     agents_to_run: list[str]
-    gates_required: list[str]
-    auto_approve: bool = False
 
 
 @dataclass
@@ -150,7 +148,6 @@ class OrchestrationResult:
     plan: OrchestrationPlan
     agent_results: list[AgentResult] = field(default_factory=list)
     conflicts: list[dict] = field(default_factory=list)
-    gates_created: list[str] = field(default_factory=list)
     recommendation: str = ""
 
 
@@ -204,16 +201,12 @@ class FleetOrchestrator:
 
         Pure computation, no I/O -- stays synchronous."""
         agents = self._select_agents()
-        gates = self._determine_gates()
-        auto = self._can_auto_approve()
 
         return OrchestrationPlan(
             repo_url=self.report.repo_url,
             criticality=self.report.criticality,
             score=self.report.overall_score,
             agents_to_run=agents,
-            gates_required=gates,
-            auto_approve=auto,
         )
 
     async def run(self) -> OrchestrationResult:
@@ -398,16 +391,8 @@ class FleetOrchestrator:
                 "winner": "validation",
             })
 
-        # plan.auto_approve was computed from score/criticality alone at
-        # plan() time, before agents ran. A genuine conflict found for THIS
-        # actual run must override that and force auto_approve to False --
-        # it must never be trusted to auto-deploy when real conflicts exist.
-        non_blocker_conflicts = [c for c in conflicts if c["type"] != "blocker"]
-        if non_blocker_conflicts:
-            plan.auto_approve = False
-
         # Determine recommendation
-        recommendation = self._generate_recommendation(plan, results, conflicts)
+        recommendation = self._generate_recommendation(results, conflicts)
 
         # Write orchestration summary
         self._write_summary(plan, results, conflicts, recommendation)
@@ -416,7 +401,6 @@ class FleetOrchestrator:
             plan=plan,
             agent_results=results,
             conflicts=conflicts,
-            gates_created=plan.gates_required,
             recommendation=recommendation,
         )
 
@@ -695,51 +679,6 @@ class FleetOrchestrator:
 
         return agents
 
-    def _determine_gates(self) -> list[str]:
-        """Determine which human approval gates are needed.
-
-        This list is purely informational (rendered into the discarded
-        orchestration-summary.md checklist below and the CLI's plain echo)
-        -- nothing ever passes it to `store.create_gate()` or checks it
-        before delivery, so it has never been a real, resolvable gate a
-        human could act on. A `high`/`critical` "deploy-approval" entry
-        used to be appended here on the mistaken assumption that this list
-        was itself an enforcement mechanism; criticality's one real gating
-        effect on delivery is `_can_auto_approve()` below (consumed by
-        `AutoMode`/the onboarding auto-deliver chain), so that line was
-        removed as dead code rather than left to imply a gate that was
-        never actually created.
-        """
-        gates = []
-
-        critical_findings = sum(
-            1 for s in self.report.scores
-            for f in s.findings if f.severity == Severity.critical
-        )
-
-        if critical_findings > 0:
-            gates.append("security-review")
-
-        gates.append("final-approval")
-        return gates
-
-    def _can_auto_approve(self) -> bool:
-        """Determine if this onboarding can be auto-approved."""
-        if self.report.criticality in ("high", "critical"):
-            return False
-
-        critical = sum(
-            1 for s in self.report.scores
-            for f in s.findings if f.severity == Severity.critical
-        )
-        if critical > 0:
-            return False
-
-        if self.report.overall_score >= 70:
-            return True
-
-        return False
-
     def _manifest_kinds(self, result: AgentResult) -> dict[str, dict]:
         """Best-effort: parse `kind` -> manifest dict for every YAML file an agent generated."""
         kinds: dict[str, dict] = {}
@@ -768,20 +707,23 @@ class FleetOrchestrator:
         must be an actual collision: either a known-conflicting resource
         kind pair (e.g. VPA in Auto mode vs. HPA) both being produced for
         this run, or two agents writing a file at the same output path.
+
+        This used to also check for a failed ``"security"`` agent result
+        and append a ``"type": "blocker"`` conflict for it, but no
+        ``AgentResult`` with ``agent_name="security"`` has been
+        structurally possible since the security/observability/cicd/
+        compliance/infrastructure/incident/release/retirement/chaos Python
+        agents were removed once skills covered their domains (see
+        ``AGENT_CLASSES`` in ``agents/capabilities.py`` -- only ``cost``/
+        ``dependency``/``codechange`` remain, plus a synthetic ``"skills"``
+        result). Removed 2026-07-20 as dead code, along with the
+        now-equally-dead ``"BLOCKED: ..."`` branch of
+        ``_generate_recommendation()`` below, since this was the only
+        producer of a ``"type": "blocker"`` conflict anywhere.
         """
         conflicts: list[dict] = []
 
-        failed = {r.agent_name: r for r in results if not r.success}
         succeeded = {r.agent_name: r for r in results if r.success}
-
-        # Security blocker: if security agent failed, block everything
-        if "security" in failed:
-            conflicts.append({
-                "type": "blocker",
-                "agents": ["security"],
-                "resolution": "Security agent failed -- all deployments blocked until resolved",
-                "winner": "security",
-            })
 
         flagged_pairs: set[tuple[str, str]] = set()
 
@@ -861,7 +803,6 @@ class FleetOrchestrator:
 
     def _generate_recommendation(
         self,
-        plan: OrchestrationPlan,
         results: list[AgentResult],
         conflicts: list[dict],
     ) -> str:
@@ -869,19 +810,30 @@ class FleetOrchestrator:
         fail_count = sum(1 for r in results if not r.success)
         total_files = sum(len(r.files_generated) for r in results)
 
-        blockers = [c for c in conflicts if c["type"] == "blocker"]
-        warnings = [c for c in conflicts if c["type"] != "blocker"]
-        if blockers:
-            return f"BLOCKED: {len(blockers)} blocker(s) require resolution before proceeding."
+        # A "BLOCKED: ..." branch used to fire on a "type": "blocker"
+        # conflict here -- removed 2026-07-20 as dead code alongside
+        # _detect_conflicts()'s own removed producer of that conflict type
+        # (see its docstring); every conflict `_detect_conflicts()` can
+        # produce today is a "priority"/"validation" warning, never a
+        # blocker, so `warnings` below is simply every conflict.
+        warnings = conflicts
 
         if fail_count > 0:
             return f"PARTIAL: {success_count}/{success_count + fail_count} agents succeeded, {total_files} files generated. Review failures before deploying."
 
-        warn_suffix = f" ({len(warnings)} non-blocker conflict(s) — review before proceeding)" if warnings else ""
-
-        if plan.auto_approve and not warnings:
-            return f"AUTO-APPROVED: All {success_count} agents succeeded, {total_files} files generated. Safe for automated deployment."
-
+        # An "AUTO-APPROVED: ..." branch used to fire here on
+        # `plan.auto_approve` (computed from score/criticality alone) --
+        # removed 2026-07-20 alongside `plan.auto_approve` itself, since
+        # its one real consumer (AutoMode) is fully removed and every
+        # delivery always requires an explicit human Deliver click
+        # regardless of criticality/score (see the README's "AutoMode
+        # removed entirely" entry). `onboard_results.html`/
+        # `onboarding_history.html` still special-case "AUTO-APPROVED"/
+        # "BLOCKED" text for historical rows already persisted with those
+        # strings -- deliberately left alone so old records keep rendering
+        # correctly; no new onboarding will ever produce either string
+        # again.
+        warn_suffix = f" ({len(warnings)} conflict(s) — review before proceeding)" if warnings else ""
         return f"READY FOR REVIEW: All {success_count} agents succeeded, {total_files} files generated. Awaiting human approval.{warn_suffix}"
 
     _SLO_DEFAULTS = {
@@ -939,7 +891,14 @@ class FleetOrchestrator:
             except Exception as exc:
                 logger.warning("Failed to create SLO %s: %s", metric, exc)
         if created:
-            await self._log_event("release", "slos-created",
+            # "release" was never a real agent/category (skill-only now,
+            # like security/observability/cicd/compliance/infrastructure --
+            # see docs/agent-removal-readiness.md); "orchestrator" is the
+            # same non-agent-specific agent_id this class already uses for
+            # its own system events (see the "validation-issues" call
+            # above), so this event is actually findable when filtering
+            # the Events page by agent.
+            await self._log_event("orchestrator", "slos-created",
                             f"Created {created} default SLO(s) for {self.report.criticality} criticality")
 
     async def _log_event(self, agent_name: str, action: str, summary: str) -> None:
@@ -970,7 +929,6 @@ class FleetOrchestrator:
             "",
             f"**Score:** {plan.score:.0f}/100",
             f"**Criticality:** {plan.criticality}",
-            f"**Auto-approve:** {'Yes' if plan.auto_approve else 'No'}",
             f"**Recommendation:** {recommendation}",
             "",
             "## Agent Results",
@@ -989,11 +947,6 @@ class FleetOrchestrator:
             lines.extend(["", "## Conflicts", ""])
             for c in conflicts:
                 lines.append(f"- **{c['type']}**: {c['resolution']} (winner: {c['winner']})")
-
-        if plan.gates_required:
-            lines.extend(["", "## Required Gates", ""])
-            for g in plan.gates_required:
-                lines.append(f"- [ ] {g}")
 
         lines.append("")
         summary_path = self.output_dir / "orchestration-summary.md"

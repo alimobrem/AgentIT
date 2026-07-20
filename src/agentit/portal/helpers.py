@@ -509,8 +509,7 @@ async def run_onboarding(report, assessment_id: str | None = None, store: object
 
     This is the single shared implementation used by both the inline portal
     route (app.py) and the webhook-triggered path (routes/webhooks.py) — keep
-    the orchestration summary fields in sync between callers since
-    `auto_approve`/`gates` are read downstream (e.g. webhook_auto_apply).
+    the orchestration summary fields in sync between callers.
 
     ``store`` must be an async-compatible store (e.g. what ``await
     get_store()`` returns) -- ``FleetOrchestrator`` is now genuinely
@@ -597,8 +596,6 @@ async def run_onboarding(report, assessment_id: str | None = None, store: object
             ],
             "conflicts": result.conflicts,
             "recommendation": result.recommendation,
-            "auto_approve": result.plan.auto_approve,
-            "gates": result.gates_created,
         }
 
         return all_files, orch_summary

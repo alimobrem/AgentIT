@@ -738,7 +738,7 @@ async def _run_onboarding(
 
     Delegates to the shared implementation in helpers.py so this route and
     the webhook-triggered path (routes/webhooks.py) can never drift apart on
-    which summary fields get stored (e.g. auto_approve/gates).
+    which summary fields get stored.
 
     ``FleetOrchestrator`` is now genuinely async, so this is a plain
     coroutine `await`ed directly by the caller below -- ``store`` should be

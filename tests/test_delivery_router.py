@@ -16,7 +16,6 @@ from agentit.portal.delivery import (
     CATEGORY_SECRET_BLOCKED,
     CATEGORY_SOURCE_PATCH,
     MECHANISM_APP_REPO_PR,
-    MECHANISM_DIRECT_APPLY,
     MECHANISM_INFRA_REPO_COMMIT,
     MECHANISM_NONE,
     MECHANISM_SOURCE_REPO_PR,
@@ -103,29 +102,13 @@ def _placeholder_cronjob_file() -> dict:
 
 
 class TestConfirmationText:
-    """Regression coverage for naming the *target cluster* (not just the
-    *action*) in the direct-apply confirmation -- see the incident this
-    fixes in ``kube.get_current_cluster_identity()``'s docstring."""
-
-    def test_direct_apply_names_the_target_cluster(self):
-        with patch(
-            "agentit.portal.delivery.kube.get_current_cluster_identity",
-            return_value={"label": "https://api.example.com:6443 (context: my-cluster)",
-                          "host": "https://api.example.com:6443", "context": "my-cluster", "in_cluster": False},
-        ):
-            text = confirmation_text(MECHANISM_DIRECT_APPLY)
-
-        assert "https://api.example.com:6443 (context: my-cluster)" in text
-        assert "apply these manifests directly to the cluster" in text
-
-    def test_direct_apply_names_unreachable_cluster_when_unresolved(self):
-        with patch(
-            "agentit.portal.delivery.kube.get_current_cluster_identity",
-            return_value={"label": "unknown/unreachable cluster", "host": None, "context": None, "in_cluster": False},
-        ):
-            text = confirmation_text(MECHANISM_DIRECT_APPLY)
-
-        assert "unknown/unreachable cluster" in text
+    """``confirmation_text()``'s dedicated ``MECHANISM_DIRECT_APPLY`` branch
+    (which used to name the *target cluster*, not just the *action* --
+    see the incident in ``kube.get_current_cluster_identity()``'s
+    docstring) was deleted 2026-07-20: every real caller always passes a
+    freshly-computed mechanism, never one read back from a stored
+    ``deliveries`` row, and ``resolve_cluster_config_mechanism()`` can
+    never select ``MECHANISM_DIRECT_APPLY`` as a live outcome."""
 
     def test_infra_repo_commit_does_not_call_cluster_identity(self):
         """The GitOps-commit path never touches a cluster client at all --
@@ -295,23 +278,22 @@ class TestResolveClusterConfigMechanism:
 
 class TestRouteAndDeliverClusterConfig:
     async def test_no_infra_repo_refuses_with_no_direct_apply_fallback(self):
-        """Direct Apply has been removed as a concept entirely -- an app
-        with no known infra repo at all (only possible for an assessment
-        saved before GitOps registration became mandatory) cannot be
-        delivered, full stop. Never falls back to mutating the cluster
-        directly, and never calls apply_manifests_to_cluster."""
+        """Direct Apply has been removed as a concept entirely (including
+        cluster_apply.apply_manifests_to_cluster, which no longer exists)
+        -- an app with no known infra repo at all (only possible for an
+        assessment saved before GitOps registration became mandatory)
+        cannot be delivered, full stop. Never falls back to mutating the
+        cluster directly."""
         store, raw = await make_async_store()
         report = make_report()
         aid = await raw.save(report)
-        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
-            result = await route_and_deliver(
-                [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
-                report=report, store=store, assessment_id=aid,
-                actor="tester", dry_run=False,
-            )
+        result = await route_and_deliver(
+            [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
+            report=report, store=store, assessment_id=aid,
+            actor="tester", dry_run=False,
+        )
         assert result["registered"] is False
         assert result["mechanisms"]["cluster_config"] == MECHANISM_NONE
-        mock_apply.assert_not_called()
         outcome = result["outcomes"]["cluster_config"]
         assert "error" in outcome
         assert "GitOps" in outcome["error"]
@@ -325,8 +307,7 @@ class TestRouteAndDeliverClusterConfig:
         aid = await raw.save(report)
         with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
              patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
-             patch("agentit.portal.github_pr.ensure_applicationset") as mock_ensure, \
-             patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+             patch("agentit.portal.github_pr.ensure_applicationset") as mock_ensure:
             mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
                                           "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
             result = await route_and_deliver(
@@ -338,7 +319,6 @@ class TestRouteAndDeliverClusterConfig:
         assert result["mechanisms"]["cluster_config"] == MECHANISM_INFRA_REPO_COMMIT
         mock_commit.assert_called_once()
         mock_ensure.assert_called_once()
-        mock_apply.assert_not_called()
         # No gate is created (the `gates` table/generic gate-resolution
         # machinery has been removed entirely, 2026-07-19) -- the PR itself
         # is the only durable record; pr_tracking.py derives "waiting for
@@ -364,8 +344,7 @@ class TestRouteAndDeliverClusterConfig:
         aid = await raw.save(report)
         with patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None), \
              patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
-             patch("agentit.portal.github_pr.ensure_applicationset") as mock_ensure, \
-             patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+             patch("agentit.portal.github_pr.ensure_applicationset") as mock_ensure:
             mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
                                           "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
             result = await route_and_deliver(
@@ -377,7 +356,6 @@ class TestRouteAndDeliverClusterConfig:
         assert result["mechanisms"]["cluster_config"] == MECHANISM_INFRA_REPO_COMMIT
         mock_commit.assert_called_once()
         mock_ensure.assert_called_once()
-        mock_apply.assert_not_called()
         # And it still opens the real PR, exactly like the already-
         # registered infra-repo-commit path -- a human still merges,
         # AgentIT still never auto-merges, for the bootstrap delivery too.
@@ -433,8 +411,7 @@ class TestRouteAndDeliverCicdLane:
         aid = await raw.save(report)
         with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
              patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
-             patch("agentit.portal.github_pr.ensure_applicationset"), \
-             patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+             patch("agentit.portal.github_pr.ensure_applicationset"):
             mock_commit.return_value = {"pr_url": "https://github.com/org/infra-gitops/pull/1",
                                           "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
             result = await route_and_deliver(
@@ -458,8 +435,8 @@ class TestRouteAndDeliverCicdLane:
         assert "openshift-pipelines" in opened_events[0]["summary"]
         assert "shared, cluster-wide operator namespace" in opened_events[0]["summary"]
         # Never a direct apply -- this is now a plain GitOps PR merge-review,
-        # same as cluster-config's, not an elevated-RBAC apply.
-        mock_apply.assert_not_called()
+        # same as cluster-config's, not an elevated-RBAC apply
+        # (cluster_apply.apply_manifests_to_cluster no longer even exists).
 
     async def test_cicd_commit_uses_a_distinct_path_prefix_and_branch(self):
         """A human reviewer must be able to tell, from the PR/branch alone,
@@ -519,20 +496,19 @@ class TestRouteAndDeliverCicdLane:
         """Same refusal as the cluster-config category (see
         resolve_cluster_config_mechanism()): CI/CD manifests destined for a
         shared namespace can no longer fall back to a direct apply either,
-        now that the elevated-RBAC direct-apply gate is gone -- an
-        assessment with no known infra repo at all (only possible pre-
+        now that the elevated-RBAC direct-apply gate is gone (and
+        cluster_apply.apply_manifests_to_cluster no longer even exists) --
+        an assessment with no known infra repo at all (only possible pre-
         GitOps-mandatory) must refuse outright, never mutate the cluster."""
         store, raw = await make_async_store()
         report = make_report()
         aid = await raw.save(report)
-        with patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
-            result = await route_and_deliver(
-                [_cicd_file()], app_name=report.repo_name, namespace="ns",
-                report=report, store=store, assessment_id=aid,
-                actor="tester", dry_run=False,
-            )
+        result = await route_and_deliver(
+            [_cicd_file()], app_name=report.repo_name, namespace="ns",
+            report=report, store=store, assessment_id=aid,
+            actor="tester", dry_run=False,
+        )
         assert result["mechanisms"][CATEGORY_CICD_SHARED_NAMESPACE] == MECHANISM_NONE
-        mock_apply.assert_not_called()
         outcome = result["outcomes"][CATEGORY_CICD_SHARED_NAMESPACE]
         assert "error" in outcome
         assert "GitOps" in outcome["error"]
@@ -555,8 +531,7 @@ class TestRouteAndDeliverCicdLane:
         aid = await raw.save(report)
         with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {"name": "managed-test-app"}}), \
              patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
-             patch("agentit.portal.github_pr.ensure_applicationset"), \
-             patch("agentit.portal.cluster_apply.apply_manifests_to_cluster") as mock_apply:
+             patch("agentit.portal.github_pr.ensure_applicationset"):
             mock_commit.side_effect = [
                 {"pr_url": "https://github.com/org/infra-gitops/pull/1",
                  "commit_url": "https://github.com/org/infra-gitops/commit/aaa", "files_committed": 1},
@@ -588,8 +563,8 @@ class TestRouteAndDeliverCicdLane:
         events = await raw.list_events(target_app=report.repo_name)
         opened_events = [e for e in events if e["action"] == "gitops-pr-opened"]
         assert len(opened_events) == 2
-        # Neither branch performed a direct cluster apply.
-        mock_apply.assert_not_called()
+        # Neither branch performed a direct cluster apply
+        # (cluster_apply.apply_manifests_to_cluster no longer even exists).
 
     def test_a_real_current_skill_output_still_classifies_as_cicd_shared_namespace(self):
         """Not a synthetic fixture: this is exactly what

@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock
 
 import pytest
 
 from agentit.agents.orchestrator import (
     AgentResult,
     FleetOrchestrator,
-    OrchestrationPlan,
     PRIORITY_MATRIX,
 )
 from agentit.models import (
@@ -66,69 +65,6 @@ class TestPlanSelectsAgents:
         orch = FleetOrchestrator(report, tmp_path / "out")
         plan = orch.plan()
         assert "codechange" not in plan.agents_to_run
-
-    def test_gates_required_no_longer_varies_by_criticality(self, tmp_path: Path) -> None:
-        """`gates_required` (`_determine_gates()`) was never wired to
-        `store.create_gate()` or any delivery check -- the `high`/`critical`
-        "deploy-approval" entry it used to add was dead code implying a
-        gate that was never actually created. Criticality's one real
-        gating effect on delivery is `auto_approve` (see TestAutoApprove
-        below), which is unaffected by this."""
-        for crit in ("low", "medium", "high", "critical"):
-            report = make_report(criticality=crit)
-            orch = FleetOrchestrator(report, tmp_path / f"gates-{crit}")
-            plan = orch.plan()
-            assert "deploy-approval" not in plan.gates_required
-
-
-class TestAutoApprove:
-    def test_auto_approve_for_low_crit_high_score(self, tmp_path: Path) -> None:
-        """Low criticality, score 80, no criticals -> auto_approve=True."""
-        scores = [
-            DimensionScore(
-                dimension="security",
-                score=80,
-                max_score=100,
-                findings=[
-                    Finding(
-                        category="network",
-                        severity=Severity.low,
-                        description="Minor issue",
-                        recommendation="Optional fix",
-                    ),
-                ],
-            ),
-        ]
-        report = make_report(criticality="low", scores=scores)
-        report.overall_score = 80.0
-        orch = FleetOrchestrator(report, tmp_path / "out")
-        plan = orch.plan()
-
-        assert plan.auto_approve is True
-
-    def test_no_auto_approve_with_critical_findings(self, tmp_path: Path) -> None:
-        """Has critical findings -> auto_approve=False."""
-        scores = [
-            DimensionScore(
-                dimension="security",
-                score=80,
-                max_score=100,
-                findings=[
-                    Finding(
-                        category="auth",
-                        severity=Severity.critical,
-                        description="No authentication",
-                        recommendation="Add auth",
-                    ),
-                ],
-            ),
-        ]
-        report = make_report(criticality="low", scores=scores)
-        report.overall_score = 80.0
-        orch = FleetOrchestrator(report, tmp_path / "out")
-        plan = orch.plan()
-
-        assert plan.auto_approve is False
 
 
 class TestRun:
@@ -239,32 +175,6 @@ class TestDefaultSlosDedup:
 
 
 class TestConflicts:
-    def test_conflict_detection_security_blocker(self, tmp_path: Path) -> None:
-        """Mock security agent failure -> blocker conflict."""
-        report = make_report(criticality="medium")
-        orch = FleetOrchestrator(report, tmp_path / "out")
-
-        results = [
-            AgentResult(
-                agent_name="security",
-                category="security",
-                files_generated=[],
-                success=False,
-                error="Agent crashed",
-            ),
-            AgentResult(
-                agent_name="observability",
-                category="observability",
-                files_generated=["dashboards.json"],
-                success=True,
-            ),
-        ]
-
-        conflicts = orch._detect_conflicts(results)
-        blockers = [c for c in conflicts if c["type"] == "blocker"]
-        assert len(blockers) == 1
-        assert blockers[0]["winner"] == "security"
-
     def test_no_false_conflict_when_agents_just_both_succeed(self, tmp_path: Path) -> None:
         """Regression: two agents both succeeding with unrelated, non-colliding
         output is NOT a conflict. Before the fix, PRIORITY_MATRIX pairs like
@@ -410,102 +320,47 @@ class TestConflicts:
         priority = [c for c in result.conflicts if c["type"] == "priority"]
         assert priority == [], f"Unexpected false-positive conflicts: {priority}"
 
-    async def test_auto_approve_downgraded_by_real_conflict(self, tmp_path: Path) -> None:
-        """plan.auto_approve is computed from score/criticality alone at plan()
-        time -- but a real conflict found during this actual run must still
-        force auto_approve to False in the returned OrchestrationResult."""
-        report = make_report(criticality="low")
-        report.overall_score = 90.0
-        orch = FleetOrchestrator(report, tmp_path / "out")
-
-        # Sanity check: score/criticality alone would auto-approve.
-        assert orch.plan().auto_approve is True
-
-        sec_dir = tmp_path / "out" / "security"
-        sec_dir.mkdir(parents=True)
-        (sec_dir / "shared.yaml").write_text(
-            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: shared\n"
-        )
-        cicd_dir = tmp_path / "out" / "cicd"
-        cicd_dir.mkdir(parents=True)
-        (cicd_dir / "shared.yaml").write_text(
-            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: shared\n"
-        )
-        colliding_results = [
-            AgentResult(agent_name="security", category="security",
-                        files_generated=["shared.yaml"], success=True, findings_count=1),
-            AgentResult(agent_name="cicd", category="cicd",
-                        files_generated=["shared.yaml"], success=True, findings_count=1),
-        ]
-
-        with patch.object(orch, "_run_agents_local", AsyncMock(return_value=colliding_results)):
-            result = await orch.run()
-
-        assert any(c["type"] == "priority" for c in result.conflicts)
-        assert result.plan.auto_approve is False
-
 
 class TestRecommendation:
-    def test_recommendation_blocked(self, tmp_path: Path) -> None:
-        """Conflict present -> BLOCKED recommendation."""
-        report = make_report(criticality="medium")
-        orch = FleetOrchestrator(report, tmp_path / "out")
+    def test_recommendation_ready_for_review_when_all_succeed_no_conflicts(self, tmp_path: Path) -> None:
+        """All agents succeed, no conflicts -> READY FOR REVIEW recommendation.
 
-        plan = OrchestrationPlan(
-            repo_url="https://github.com/org/test-app",
-            criticality="medium",
-            score=50.0,
-            agents_to_run=["security"],
-            gates_required=["final-approval"],
-            auto_approve=False,
-        )
-        results = [
-            AgentResult(
-                agent_name="security",
-                category="security",
-                files_generated=[],
-                success=False,
-                error="crashed",
-            ),
-        ]
-        conflicts = [{"type": "blocker", "agents": ["security"], "resolution": "blocked", "winner": "security"}]
-
-        rec = orch._generate_recommendation(plan, results, conflicts)
-        assert rec.startswith("BLOCKED")
-
-    def test_recommendation_auto_approved(self, tmp_path: Path) -> None:
-        """auto_approve=True, all succeed -> AUTO-APPROVED recommendation."""
+        `_generate_recommendation()` no longer has an `AUTO-APPROVED` branch
+        (removed 2026-07-20 alongside `plan.auto_approve`, whose one real
+        consumer, AutoMode, is fully removed) -- every successful run is now
+        always READY FOR REVIEW, awaiting an explicit human Deliver click
+        regardless of score/criticality."""
         report = make_report(criticality="low")
         report.overall_score = 80.0
         orch = FleetOrchestrator(report, tmp_path / "out")
 
-        plan = OrchestrationPlan(
-            repo_url="https://github.com/org/test-app",
-            criticality="low",
-            score=80.0,
-            agents_to_run=["security", "observability"],
-            gates_required=["final-approval"],
-            auto_approve=True,
-        )
         results = [
             AgentResult(
-                agent_name="security",
-                category="security",
-                files_generated=["rbac.yaml", "security-context.yaml"],
-                success=True,
-                findings_count=2,
-            ),
-            AgentResult(
-                agent_name="observability",
-                category="observability",
-                files_generated=["dashboards.json"],
+                agent_name="cost",
+                category="cost",
+                files_generated=["resource-recommendations.yaml"],
                 success=True,
                 findings_count=1,
             ),
         ]
 
-        rec = orch._generate_recommendation(plan, results, [])
-        assert rec.startswith("AUTO-APPROVED")
+        rec = orch._generate_recommendation(results, [])
+        assert rec.startswith("READY FOR REVIEW")
+
+    def test_recommendation_notes_conflict_count(self, tmp_path: Path) -> None:
+        report = make_report(criticality="low")
+        orch = FleetOrchestrator(report, tmp_path / "out")
+
+        results = [
+            AgentResult(agent_name="cost", category="cost",
+                        files_generated=["x.yaml"], success=True, findings_count=1),
+        ]
+        conflicts = [{"type": "priority", "agents": ["cost", "skills"],
+                      "resolution": "cost wins", "winner": "cost"}]
+
+        rec = orch._generate_recommendation(results, conflicts)
+        assert rec.startswith("READY FOR REVIEW")
+        assert "1 conflict(s)" in rec
 
 
 class TestCostAgentRegistration:
