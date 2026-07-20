@@ -19,6 +19,7 @@ from agentit.portal.delivery import (
     MECHANISM_INFRA_REPO_COMMIT,
     MECHANISM_NONE,
     MECHANISM_SOURCE_REPO_PR,
+    DeliveryInProgressError,
     classify_file,
     confirmation_text,
     has_unresolved_placeholders,
@@ -324,6 +325,79 @@ class TestRouteAndDeliverClusterConfig:
         # is the only durable record; pr_tracking.py derives "waiting for
         # your approval" from its live GitHub state.
         assert result["outcomes"]["cluster_config"]["pr_url"] == "https://github.com/org/infra-gitops/pull/1"
+
+    async def test_concurrent_deliveries_for_same_app_only_one_proceeds(self):
+        """Regression guard for the delivery-commit race: two genuinely
+        overlapping `route_and_deliver()` calls for the same app must not
+        both reach `commit_to_infra_repo()` concurrently -- see
+        `store.claim_delivery_lock()`'s own docstring for the exact race
+        this closes (a fixed `agentit/{app}` branch + force-push-on-
+        conflict fallback, with no optimistic-concurrency check between
+        reading `base_sha` and pushing). `commit_to_infra_repo` sleeps
+        briefly here to widen the race window the way the real,
+        network-bound GitHub API calls would."""
+        import asyncio
+        import time
+
+        store, raw = await make_async_store()
+        report = make_report()
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
+        aid = await raw.save(report)
+
+        def _slow_commit(*args, **kwargs):
+            time.sleep(0.3)
+            return {"pr_url": "https://github.com/org/infra-gitops/pull/1",
+                    "commit_url": "https://github.com/org/infra-gitops/commit/abc123", "files_committed": 1}
+
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo", side_effect=_slow_commit) as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"):
+            results = await asyncio.gather(
+                route_and_deliver(
+                    [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
+                    report=report, store=store, assessment_id=aid,
+                    actor="tester", dry_run=False,
+                ),
+                route_and_deliver(
+                    [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
+                    report=report, store=store, assessment_id=aid,
+                    actor="tester", dry_run=False,
+                ),
+                return_exceptions=True,
+            )
+
+        succeeded = [r for r in results if not isinstance(r, Exception)]
+        rejected = [r for r in results if isinstance(r, DeliveryInProgressError)]
+        assert len(succeeded) == 1
+        assert len(rejected) == 1
+        # The lock genuinely prevented the second caller from ever reaching
+        # the GitHub call -- not just from double-counting a result.
+        assert mock_commit.call_count == 1
+        assert succeeded[0]["outcomes"]["cluster_config"]["pr_url"] == "https://github.com/org/infra-gitops/pull/1"
+
+    async def test_dry_run_never_takes_the_delivery_lock(self):
+        """Dry-run previews must stay instant and available even while a
+        real delivery for the same app is in flight -- a dry run never
+        commits anything for real (deliver_with_verification()'s own
+        `if dry_run: return ...` guard), so there's nothing to race and no
+        reason to serialize it behind the same-app lock."""
+        store, raw = await make_async_store()
+        report = make_report()
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
+        aid = await raw.save(report)
+
+        # Claim the lock directly, simulating a real delivery already in
+        # flight for this app -- a concurrent dry-run call must not be
+        # blocked by it.
+        assert await raw.claim_delivery_lock(f"delivery:{report.repo_name}") is True
+
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}):
+            result = await route_and_deliver(
+                [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=True,
+            )
+        assert result["outcomes"]["cluster_config"]["dry_run"] is True
 
     async def test_not_yet_registered_with_infra_repo_url_bootstraps_infra_commit(self):
         """The bootstrap-circularity fix (docs/onboarding-loop-vision-gap-

@@ -290,6 +290,15 @@ CREATE TABLE IF NOT EXISTS processed_webhooks (
     processed_at TIMESTAMPTZ NOT NULL
 );
 
+-- Per-app mutex for the actual delivery-commit step (route_and_deliver()),
+-- closing the race github_pr.py's fixed agentit/{app} branch name +
+-- force-push-on-conflict fallback otherwise leaves open between two
+-- overlapping deliveries for the same app (see claim_delivery_lock()).
+CREATE TABLE IF NOT EXISTS delivery_locks (
+    lock_key TEXT PRIMARY KEY,
+    claimed_at TIMESTAMPTZ NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS agent_feedback (
     id TEXT PRIMARY KEY,
     app_name TEXT NOT NULL,
@@ -426,6 +435,7 @@ _ALL_TABLES = [
     "processed_webhooks", "agent_feedback", "skill_effectiveness",
     "suppressed_checks", "skill_inventory_snapshots",
     "agent_runs", "check_results", "deliveries", "pr_outcomes",
+    "delivery_locks",
 ]
 
 
@@ -2009,6 +2019,54 @@ class AssessmentStore:
             delivery_id, _now(),
         )
         return row is not None
+
+    # ── Delivery Locking ─────────────────────────────────────────────────
+
+    async def claim_delivery_lock(self, lock_key: str, stale_after_seconds: int = 900) -> bool:
+        """Atomically claim a per-app mutex around the actual
+        delivery-commit step (``portal/delivery.py::route_and_deliver()``).
+
+        ``github_pr.py``'s ``commit_to_infra_repo()`` always targets the
+        same fixed branch name (``agentit/{app}``) and force-pushes over
+        any existing ref on a 422 after independently re-reading
+        ``base_sha`` -- with no optimistic-concurrency check between
+        reading it and pushing. Two overlapping deliveries for the same
+        app (e.g. the automatic background validate-and-deliver pipeline
+        still running while a human clicks "Run Automatic Validation," or
+        a Phase-4 ``redispatch_finding_fix()`` racing a fresh manual
+        Deliver) could otherwise silently clobber one another via that
+        force-push fallback while each independently reports success.
+
+        Uses the same single-round-trip ``INSERT ... RETURNING`` idiom
+        ``claim_webhook()`` already established for the identical
+        "check-and-mark atomically, no race window between the two"
+        problem -- extended here with a staleness override (``ON CONFLICT
+        ... DO UPDATE ... WHERE ...``, still one atomic statement) so a
+        lock left behind by a process that crashed mid-delivery doesn't
+        block that app's deliveries forever: 900s mirrors
+        ``reap_orphaned_jobs()``'s existing staleness-recovery window
+        (comfortably above ``with_timeout``'s 300s operation ceiling), the
+        established precedent in this codebase for "how long can a
+        real in-progress operation take before assuming the process that
+        started it is gone."
+
+        Callers must call ``release_delivery_lock()`` (in a ``finally``)
+        once the delivery-commit step is done, win or lose -- see
+        ``route_and_deliver()``.
+        """
+        row = await self._pool.fetchrow(
+            """
+            INSERT INTO delivery_locks (lock_key, claimed_at) VALUES ($1, $2)
+            ON CONFLICT (lock_key) DO UPDATE SET claimed_at = EXCLUDED.claimed_at
+            WHERE delivery_locks.claimed_at < $3
+            RETURNING lock_key
+            """,
+            lock_key, _now(), _now() - timedelta(seconds=stale_after_seconds),
+        )
+        return row is not None
+
+    async def release_delivery_lock(self, lock_key: str) -> None:
+        await self._pool.execute("DELETE FROM delivery_locks WHERE lock_key = $1", lock_key)
 
     # ── Agent Feedback ──────────────────────────────────────────────────
 

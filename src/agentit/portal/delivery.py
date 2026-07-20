@@ -23,6 +23,17 @@ from agentit.skill_engine import record_skill_outcomes
 
 logger = logging.getLogger(__name__)
 
+
+class DeliveryInProgressError(RuntimeError):
+    """Raised by ``route_and_deliver()`` when another delivery for the same
+    app is already in flight (see ``store.claim_delivery_lock()``'s own
+    docstring for the race this closes). Callers with their own generic
+    exception handling (``routes/assessments.py``'s ``_run_onboarding_job``/
+    ``_run_manual_validation_job``, both broad ``except Exception``) don't
+    need to special-case this; ``deliver()`` (the one direct, synchronous
+    user click) does, for a clearer message than a generic failure."""
+
+
 # ── Taxonomy categories (docs/unified-apply-flow.md section (D)) ──────────
 CATEGORY_CLUSTER_CONFIG = "cluster_config"
 CATEGORY_CICD_SHARED_NAMESPACE = "cicd_shared_namespace"
@@ -783,6 +794,23 @@ async def route_and_deliver(
     if at_rest_files:
         mechanisms[CATEGORY_MANIFEST_AT_REST] = MECHANISM_APP_REPO_PR
 
+    # Serialize the actual delivery-commit step per app -- see
+    # store.claim_delivery_lock()'s own docstring for the exact race this
+    # closes (github_pr.py's fixed agentit/{app} branch + force-push-on-
+    # conflict fallback). A dry run never commits anything (every
+    # mechanism's real work is gated behind `if dry_run: return ...` in
+    # deliver_with_verification()), so there's nothing to race and no lock
+    # is taken -- dry-run previews stay instant even while a real delivery
+    # for the same app is in flight.
+    lock_key = f"delivery:{app_name}"
+    lock_held = False
+    if not dry_run:
+        if not await store.claim_delivery_lock(lock_key):
+            raise DeliveryInProgressError(
+                f"A delivery is already in progress for {app_name} -- try again shortly."
+            )
+        lock_held = True
+
     delivery_id = await store.create_delivery(
         assessment_id, app_name, categories_summary,
         mechanism=",".join(f"{c}:{m}" for c, m in mechanisms.items()) or MECHANISM_NONE,
@@ -902,6 +930,9 @@ async def route_and_deliver(
             delivery_id, status="failed", details={"error": str(exc)[:500]},
         )
         raise
+    finally:
+        if lock_held:
+            await store.release_delivery_lock(lock_key)
 
     return {
         "delivery_id": delivery_id,

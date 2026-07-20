@@ -1414,7 +1414,7 @@ async def deliver(request: Request, assessment_id: str):
     GitOps commit+PR) is no longer a human choice, only ``dry_run`` is.
     """
     from agentit.assessment_diff import current_finding_keys
-    from agentit.portal.delivery import repo_kind_for_mechanism, route_and_deliver
+    from agentit.portal.delivery import DeliveryInProgressError, repo_kind_for_mechanism, route_and_deliver
 
     s = await get_store()
     report = await s.get(assessment_id)
@@ -1439,6 +1439,15 @@ async def deliver(request: Request, assessment_id: str):
             report=report, store=s, assessment_id=assessment_id,
             actor=get_current_user(request), dry_run=dry_run,
             target_findings=sorted(current_finding_keys(report)),
+        )
+    except DeliveryInProgressError as exc:
+        # A concurrent delivery for this same app (another human, or the
+        # automatic background validate-and-deliver pipeline) is already
+        # mid-commit -- a clear, specific message, not the generic
+        # "delivery failed" text below, since nothing here actually failed.
+        return RedirectResponse(
+            url=f"/assessments/{assessment_id}/onboard-results?error={quote(str(exc))}",
+            status_code=303,
         )
     except Exception as exc:
         log.exception("Delivery failed for assessment %s", assessment_id)
