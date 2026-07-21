@@ -123,21 +123,17 @@ class TestDeliverRegisteredCommitsToInfraRepo:
         )
         assert "infra-repo-commit" in location
 
-        # Persist unlock: GitOps dry-run must write apply_results so Commit /
-        # Per-Agent stay enabled after the flash URL is cleared.
+        # Dry-run still persists apply_results (API/tests), but Onboard
+        # Results no longer unlocks a Commit / Per-Agent CTA — Scan opens PRs.
         page = await client.get(f"/assessments/{aid}/onboard-results")
         assert page.status_code == 200
-        assert "No validation yet" not in page.text
-        assert "Validation passed" in page.text
-        assert 'data-dry-done="true"' in page.text
-        assert 'data-action="apply-override"' not in page.text
-        assert not re.search(
-            r'data-action="apply"[^>]*\sdisabled(?:\s|=|>)', page.text, re.I,
-        )
-        assert not re.search(
-            r'data-action="prs"[^>]*\sdisabled(?:\s|=|>)', page.text, re.I,
-        )
-        assert "delivery-choice" in page.text
+        assert 'data-action="apply"' not in page.text
+        assert 'data-action="prs"' not in page.text
+        assert "Commit & Open PR" not in page.text
+        assert "Commit &amp; Open PR" not in page.text
+        persisted = await store.get_apply_results(aid)
+        assert persisted is not None
+        assert persisted.get("dry_run") is True
 
     async def test_failed_infra_repo_commit_surfaces_a_visible_error(self, deliver_client, _mock_kube):
         """A real (non-dry-run) ``commit_to_infra_repo()`` failure returns
@@ -166,32 +162,25 @@ class TestDeliverRegisteredCommitsToInfraRepo:
         assert "Not+Found" in location or "Not%20Found" in location
 
 
-class TestOnboardResultsWarnsBeforeDryRun:
-    """Soft-gate Deliver until Dry Run succeeds: warning chip outside the
-    CTA, primary Deliver disabled. After a successful dry run the primary
-    unlocks with mechanism-specific confirm text. (The Override bypass has
-    been removed along with Direct Apply -- Deliver now requires an actual
-    successful Dry Run, no escape hatch.)"""
+class TestOnboardResultsScanOnlyNoManualDeliver:
+    """Onboard Results must not offer Commit / Per-Agent CTAs. Deliver API
+    routes remain for tests; the UI frames Scan + merge on GitHub."""
 
-    async def test_warning_badge_shown_before_any_apply_action(self, deliver_client):
+    async def test_no_manual_deliver_ctas_on_default_page(self, deliver_client):
         client, store, aid = deliver_client
         await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
         resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert resp.status_code == 200
-        assert "No validation yet" in resp.text
-        # Chip is in the status region, not packed into the Apply CTA label.
-        assert "delivery-step-status" in resp.text
-        assert 'class="btn btn-green btn-lg"' not in resp.text
-        assert "NO DRY RUN YET" not in resp.text
-        assert "Commit &amp; Open PR" in resp.text or "Commit & Open PR" in resp.text
-        assert "Apply to Cluster" not in resp.text
-        assert "Deliver Now" not in resp.text
+        assert "Commit & Open PR" not in resp.text
+        assert "Commit &amp; Open PR" not in resp.text
+        assert "Per-Agent PRs" not in resp.text
+        assert "Run Automatic Validation" not in resp.text
+        assert 'data-action="apply"' not in resp.text
+        assert 'data-action="prs"' not in resp.text
         assert 'data-action="apply-override"' not in resp.text
-        assert "Override</button>" not in resp.text
-        # Primary Apply carries a disabled attribute while ungated.
-        assert 'data-action="apply"' in resp.text
+        assert "Download" in resp.text
 
-    async def test_warning_badge_gone_after_a_dry_run(self, deliver_client, _mock_kube):
+    async def test_dry_run_flash_does_not_resurrect_commit_cta(self, deliver_client, _mock_kube):
         client, store, aid = deliver_client
         await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
         with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}):
@@ -199,32 +188,22 @@ class TestOnboardResultsWarnsBeforeDryRun:
 
         resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert resp.status_code == 200
-        assert "No validation yet" not in resp.text
-        assert "NO DRY RUN YET" not in resp.text
-        assert "Validation passed" in resp.text
-        assert 'data-action="apply-override"' not in resp.text
-        assert 'data-dry-done="true"' in resp.text
-        assert "dryDone: true" in resp.text
-        assert not re.search(
-            r'data-action="apply"[^>]*\sdisabled(?:\s|=|>)', resp.text, re.I,
-        )
-        assert "confirmText: " in resp.text or "Commit &amp; Open PR" in resp.text or "Commit & Open PR" in resp.text
+        assert 'data-action="apply"' not in resp.text
+        assert "Commit & Open PR" not in resp.text
+        assert "Commit &amp; Open PR" not in resp.text
+        persisted = await store.get_apply_results(aid)
+        assert persisted is not None
+        assert persisted.get("dry_run") is True
 
-    async def test_no_infra_repo_blocks_delivery_with_no_override_escape_hatch(self, deliver_client):
-        """The legacy (pre-mandatory-GitOps) case: no infra_repo_url known
-        at all -- Deliver is blocked entirely, with a clear message, not
-        just soft-gated behind Dry Run (there is nothing an Override could
-        meaningfully bypass to)."""
+    async def test_no_infra_repo_still_has_no_manual_deliver_cta(self, deliver_client):
         client, _store, aid = deliver_client
         resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert resp.status_code == 200
-        assert "Not GitOps-registered" in resp.text
-        assert "Register this app for GitOps" in resp.text or "Register for GitOps" in resp.text
+        assert 'data-action="apply"' not in resp.text
         assert 'data-action="apply-override"' not in resp.text
-        assert re.search(r'data-action="apply"[^>]*\sdisabled(?:\s|=|>)', resp.text, re.I)
+        assert "Commit & Open PR" not in resp.text
 
-    async def test_gitops_dry_run_unlocks_commit_and_never_contradicts(self, deliver_client, _mock_kube):
-        """P0: GitOps dry-run showed 'Dry run complete' + 'NO DRY RUN YET'."""
+    async def test_gitops_dry_run_flash_and_persist_without_commit_cta(self, deliver_client, _mock_kube):
         from urllib.parse import unquote
 
         client, store, aid = deliver_client
@@ -242,36 +221,20 @@ class TestOnboardResultsWarnsBeforeDryRun:
         assert flash_resp.status_code == 200
         html = flash_resp.text
         assert "Dry run complete" in html
-        assert "No validation yet" not in html
-        assert "NO DRY RUN YET" not in html
-        assert "Validation passed" in html
-        assert 'data-dry-done="true"' in html
-        assert "dryDone: true" in html
-        # Label depends on is_gitops_registered() at GET time (Argo may be
-        # unreachable in unit tests); unlock is what matters for the P0.
-        # Jinja escapes "&" as "&amp;" in rendered HTML text/attrs.
-        assert (
-            "Commit &amp; Open PR" in html
-            or "Commit & Open PR" in html
-            or "Apply to Cluster" in html
-        )
-        assert not re.search(
-            r'data-action="apply"[^>]*\sdisabled(?:\s|=|>)', html, re.I,
-        ), "Deliver CTA still has static disabled after GitOps dry run"
+        assert "Commit & Open PR" not in html
+        assert "Commit &amp; Open PR" not in html
+        assert 'data-action="apply"' not in html
         assert "Start with a Dry Run" not in html
 
         clean = await client.get(f"/assessments/{aid}/onboard-results")
         assert clean.status_code == 200
-        assert "No validation yet" not in clean.text
-        assert 'data-dry-done="true"' in clean.text
         persisted = await store.get_apply_results(aid)
         assert persisted is not None
         assert persisted["dry_run"] is True
         assert not persisted.get("errors")
         assert "infra-repo-commit" in unquote(location)
 
-    async def test_dry_run_summary_flash_alone_unlocks_without_contradiction(self, deliver_client):
-        """dry_run_summary flash must unlock Commit even before persistence."""
+    async def test_dry_run_summary_flash_still_renders(self, deliver_client):
         client, _store, aid = deliver_client
         resp = await client.get(
             f"/assessments/{aid}/onboard-results"
@@ -279,10 +242,8 @@ class TestOnboardResultsWarnsBeforeDryRun:
         )
         assert resp.status_code == 200
         assert "Dry run complete" in resp.text
-        assert "No validation yet" not in resp.text
-        assert "NO DRY RUN YET" not in resp.text
-        assert 'data-dry-done="true"' in resp.text
-        assert "dryDone: true" in resp.text
+        assert "choose how to deliver" not in resp.text.lower()
+        assert 'data-action="apply"' not in resp.text
 
     async def test_onboard_results_fewer_stacked_alerts_after_gitops_dry_run(
         self, deliver_client, _mock_kube,
@@ -304,10 +265,11 @@ class TestOnboardResultsWarnsBeforeDryRun:
         assert "delivery-meta" in html
         assert "Start with a Dry Run" not in html
 
-    async def test_warning_badge_gone_after_a_real_delivery(self, deliver_client, _mock_kube):
+    async def test_real_delivery_page_has_no_manual_commit_cta(self, deliver_client, _mock_kube):
         client, _store, aid = deliver_client
         await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "false"}, follow_redirects=False)
 
         resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert resp.status_code == 200
-        assert "No validation yet" not in resp.text
+        assert 'data-action="apply"' not in resp.text
+        assert "Commit & Open PR" not in resp.text

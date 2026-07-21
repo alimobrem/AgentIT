@@ -1034,9 +1034,9 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
     pr_opened_count = sum(1 for c in pr_cards if c["record"])
     pr_pending_count = len(pr_cards) - pr_opened_count
 
-    # Unlock Commit / Per-Agent when a successful dry-run is persisted, the
-    # flash query still carries dry_run_summary (redirect / hx-boost), or a
-    # real delivery already completed (keep Override hidden).
+    # dry_run_done is still computed for API/tests that inspect apply_results
+    # flash state; Onboard Results no longer gates a manual Commit/Per-Agent
+    # CTA on it — Scan (auto_delivery) is the only PR-creating path in the UI.
     apply_dry_ok = bool(
         apply_results
         and apply_results.get("dry_run")
@@ -1049,6 +1049,16 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
     )
     dry_run_flash = bool(request.query_params.get("dry_run_summary")) and not request.query_params.get("error")
     dry_run_done = delivered_ok or apply_dry_ok or dry_run_flash
+
+    # Retry Scan delivery: same auto_validate_and_deliver() pipeline Scan
+    # already runs — only when the latest onboard job needs attention and
+    # nothing is open yet (not a competing "Commit" product).
+    needs_attention_onboard = False
+    if hasattr(s, "list_remediation_jobs"):
+        onboard_jobs = await s.list_remediation_jobs(assessment_id)
+        if onboard_jobs and onboard_jobs[0].get("status") == "needs_attention":
+            needs_attention_onboard = True
+    show_retry_scan_delivery = needs_attention_onboard and pr_opened_count == 0
 
     return get_templates().TemplateResponse(
         request,
@@ -1070,6 +1080,7 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
             "per_agent_pr_records": per_agent_pr_records,
             "pr_opened_count": pr_opened_count,
             "pr_pending_count": pr_pending_count,
+            "show_retry_scan_delivery": show_retry_scan_delivery,
         },
     )
 

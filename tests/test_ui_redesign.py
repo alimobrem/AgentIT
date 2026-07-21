@@ -142,9 +142,9 @@ class TestFixFindingIsPureGeneration:
         resp = await client.get(f"/assessments/{aid}/onboard-results?fix_generated=1&agent=security")
         assert resp.status_code == 200
         assert "apply to cluster or create a PR" not in resp.text
-        # Direct Apply has been removed as a concept entirely -- the flash
-        # always names "Commit & Open PR" now, never "Apply to Cluster".
-        assert "Review below, then Commit &amp; Open PR" in resp.text or "Review below, then Commit & Open PR" in resp.text
+        assert "Commit & Open PR" not in resp.text
+        assert "Commit &amp; Open PR" not in resp.text
+        assert "Re-run" in resp.text and "Scan" in resp.text
 
 
 # ── 1b. Per-finding Fix is post-onboard only ─────────────────────────────
