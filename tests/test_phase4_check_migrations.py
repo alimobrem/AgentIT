@@ -328,3 +328,24 @@ class TestResourceQuotaExistsParity:
         _passes(self.SKILL_PATH, create_mock_repo, {
             "deploy/quota.yaml": "apiVersion: v1\nkind: ResourceQuota\n",
         })
+
+
+class TestPrometheusMetricsExistsParity:
+    """Ported from `checks/observability/metrics-endpoint.yaml` (deleted
+    in this commit) to `skills/observability/prometheus-metrics-exists.md`."""
+
+    SKILL_PATH = SKILLS_DIR / "observability" / "prometheus-metrics-exists.md"
+
+    def test_fires_when_no_servicemonitor_manifest(self, create_mock_repo) -> None:
+        finding = _fires(self.SKILL_PATH, create_mock_repo, {
+            "deploy/deployment.yaml": "apiVersion: apps/v1\nkind: Deployment\n",
+        })
+        assert finding.category == "metrics"
+        assert finding.severity == Severity.high
+        assert finding.description == "No Prometheus ServiceMonitor found"
+        assert finding.recommendation == "Create ServiceMonitor for Prometheus scraping"
+
+    def test_passes_when_servicemonitor_manifest_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {
+            "deploy/servicemonitor.yaml": "apiVersion: monitoring.coreos.com/v1\nkind: ServiceMonitor\n",
+        })
