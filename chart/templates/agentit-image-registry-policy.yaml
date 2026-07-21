@@ -1,0 +1,104 @@
+apiVersion: kyverno.io/v1
+kind: Policy
+metadata:
+  name: agentit-trusted-registries
+  namespace: agentit
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/part-of: agentit
+    app.kubernetes.io/managed-by: kyverno
+    app.kubernetes.io/component: security
+  annotations:
+    policies.kyverno.io/title: Trusted Image Registries for agentit
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Validates that all container images used by agentit pods originate
+      from Red Hat trusted registries only. Docker Hub, GitHub Container
+      Registry, and other unvetted public registries are not permitted.
+      This policy is set to Audit mode to allow gradual migration.
+    policies.kyverno.io/criticality: "94/100"
+    policies.kyverno.io/stack: "python, javascript"
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: validate-registries
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - agentit
+              selector:
+                matchLabels:
+                  app.kubernetes.io/name: agentit
+      validate:
+        message: >-
+          Images must come from a trusted registry:
+          registry.access.redhat.com, registry.redhat.io, quay.io,
+          or the OpenShift internal registry
+          (image-registry.openshift-image-registry.svc). Detected image
+          '{{request.object.spec.containers[*].image}}' does not match
+          any approved registry. Please migrate to a supported base image
+          such as registry.access.redhat.com/ubi9/ubi-minimal for Python
+          or JavaScript workloads.
+        pattern:
+          spec:
+            containers:
+              - image: "registry.access.redhat.com/* | registry.redhat.io/* | quay.io/* | image-registry.openshift-image-registry.svc*/*"
+    - name: validate-init-container-registries
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - agentit
+              selector:
+                matchLabels:
+                  app.kubernetes.io/name: agentit
+      preconditions:
+        any:
+          - key: "{{ request.object.spec.initContainers[] | length(@) }}"
+            operator: GreaterThanOrEquals
+            value: 1
+      validate:
+        message: >-
+          Init container images must also come from a trusted registry:
+          registry.access.redhat.com, registry.redhat.io, quay.io,
+          or the OpenShift internal registry
+          (image-registry.openshift-image-registry.svc). Untrusted init
+          container images pose the same supply chain risk as main containers.
+        pattern:
+          spec:
+            initContainers:
+              - image: "registry.access.redhat.com/* | registry.redhat.io/* | quay.io/* | image-registry.openshift-image-registry.svc*/*"
+    - name: validate-ephemeral-container-registries
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - agentit
+              selector:
+                matchLabels:
+                  app.kubernetes.io/name: agentit
+      preconditions:
+        any:
+          - key: "{{ request.object.spec.ephemeralContainers[] | length(@) }}"
+            operator: GreaterThanOrEquals
+            value: 1
+      validate:
+        message: >-
+          Ephemeral container images must also come from a trusted registry:
+          registry.access.redhat.com, registry.redhat.io, quay.io,
+          or the OpenShift internal registry
+          (image-registry.openshift-image-registry.svc). Debug containers
+          are subject to the same supply chain security requirements.
+        pattern:
+          spec:
+            ephemeralContainers:
+              - image: "registry.access.redhat.com/* | registry.redhat.io/* | quay.io/* | image-registry.openshift-image-registry.svc*/*"

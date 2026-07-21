@@ -1,0 +1,287 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: agentit-pipeline
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/part-of: agentit
+    app.kubernetes.io/managed-by: tekton
+spec:
+  params:
+    - name: repo-url
+      type: string
+      description: Source repository URL
+    - name: revision
+      type: string
+      description: Git revision to build
+      default: main
+    - name: image-ref
+      type: string
+      description: Target container image reference including tag
+  workspaces:
+    - name: shared-workspace
+      description: Shared workspace for source code and build artifacts
+    - name: docker-credentials
+      description: Docker config secret for image push authentication
+  tasks:
+    - name: git-clone
+      taskRef:
+        name: git-clone
+        kind: ClusterTask
+      params:
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.revision)
+        - name: deleteExisting
+          value: "true"
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+    - name: build-python
+      taskRef:
+        name: agentit-build-python
+        kind: Task
+      runAfter:
+        - git-clone
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+    - name: test-python
+      taskRef:
+        name: agentit-test-python
+        kind: Task
+      runAfter:
+        - build-python
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+    - name: build-javascript
+      taskRef:
+        name: agentit-build-javascript
+        kind: Task
+      runAfter:
+        - git-clone
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+    - name: test-javascript
+      taskRef:
+        name: agentit-test-javascript
+        kind: Task
+      runAfter:
+        - build-javascript
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+    - name: image-build
+      taskRef:
+        name: buildah
+        kind: ClusterTask
+      runAfter:
+        - test-python
+        - test-javascript
+      params:
+        - name: IMAGE
+          value: $(params.image-ref)
+        - name: DOCKERFILE
+          value: ./Containerfile
+        - name: CONTEXT
+          value: .
+        - name: TLSVERIFY
+          value: "true"
+        - name: FORMAT
+          value: oci
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+    - name: image-push
+      taskRef:
+        name: buildah
+        kind: ClusterTask
+      runAfter:
+        - image-build
+      params:
+        - name: IMAGE
+          value: $(params.image-ref)
+        - name: TLSVERIFY
+          value: "true"
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+        - name: dockerconfig
+          workspace: docker-credentials
+    - name: image-scan
+      taskRef:
+        name: image-scan
+        kind: Task
+      runAfter:
+        - image-push
+      params:
+        - name: IMAGE
+          value: $(params.image-ref)
+    - name: sbom-generate
+      taskRef:
+        name: agentit-sbom
+        kind: Task
+      runAfter:
+        - image-push
+      params:
+        - name: IMAGE
+          value: $(params.image-ref)
+    - name: deploy
+      taskRef:
+        name: kubernetes-actions
+        kind: ClusterTask
+      runAfter:
+        - image-scan
+        - sbom-generate
+      params:
+        - name: script
+          value: kubectl rollout restart deployment/agentit
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: agentit-build-python
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/part-of: agentit
+    app.kubernetes.io/managed-by: tekton
+spec:
+  workspaces:
+    - name: source
+      description: Workspace containing cloned source code
+  steps:
+    - name: pip-install
+      image: python:3.12-slim
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        echo "==> Installing Python dependencies for agentit"
+        if [ -f requirements.txt ]; then
+          pip install --no-cache-dir -r requirements.txt
+        elif [ -f pyproject.toml ]; then
+          pip install --no-cache-dir .
+        else
+          echo "No requirements.txt or pyproject.toml found — skipping pip install"
+        fi
+        echo "==> Python build step complete"
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: agentit-test-python
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/part-of: agentit
+    app.kubernetes.io/managed-by: tekton
+spec:
+  workspaces:
+    - name: source
+      description: Workspace containing cloned source code with installed dependencies
+  steps:
+    - name: pytest
+      image: python:3.12-slim
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        echo "==> Running Python tests for agentit"
+        if [ -f requirements.txt ]; then
+          pip install --no-cache-dir -r requirements.txt
+        elif [ -f pyproject.toml ]; then
+          pip install --no-cache-dir .
+        fi
+        pip install --no-cache-dir pytest pytest-cov
+        pytest --tb=short --junitxml=test-results-python.xml -v
+        echo "==> Python tests complete"
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: agentit-build-javascript
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/part-of: agentit
+    app.kubernetes.io/managed-by: tekton
+spec:
+  workspaces:
+    - name: source
+      description: Workspace containing cloned source code
+  steps:
+    - name: npm-ci
+      image: node:20-slim
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        echo "==> Installing JavaScript dependencies for agentit"
+        if [ -f package-lock.json ]; then
+          npm ci
+        elif [ -f package.json ]; then
+          npm install
+        else
+          echo "No package.json found — skipping npm install"
+        fi
+        echo "==> JavaScript build step complete"
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: agentit-test-javascript
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/part-of: agentit
+    app.kubernetes.io/managed-by: tekton
+spec:
+  workspaces:
+    - name: source
+      description: Workspace containing cloned source code with installed dependencies
+  steps:
+    - name: npm-test
+      image: node:20-slim
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        echo "==> Running JavaScript tests for agentit"
+        if [ -f package-lock.json ]; then
+          npm ci
+        elif [ -f package.json ]; then
+          npm install
+        fi
+        npm test
+        echo "==> JavaScript tests complete"
+---
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: agentit-pipeline-run-
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/part-of: agentit
+    app.kubernetes.io/managed-by: tekton
+spec:
+  pipelineRef:
+    name: agentit-pipeline
+  params:
+    - name: repo-url
+      value: "https://github.com/your-org/agentit.git"
+    - name: revision
+      value: "main"
+    - name: image-ref
+      value: "registry.your-org.com/agentit/agentit:latest"
+  workspaces:
+    - name: shared-workspace
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 2Gi
+    - name: docker-credentials
+      secret:
+        secretName: agentit-registry-credentials
