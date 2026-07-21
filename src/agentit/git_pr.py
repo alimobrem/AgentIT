@@ -1,4 +1,5 @@
-"""Shared git branch/commit/push mechanics, plus opening a draft PR via `gh`.
+"""Shared git branch/commit/push mechanics, plus opening a draft PR via the
+GitHub REST API (``portal/github_pr.open_draft_pull_request``).
 
 Extracted from `cli.py`'s `self-fix --create-pr` command -- the first (and,
 until `capability_scout.py`, only) code path in this repo that branches/
@@ -8,6 +9,10 @@ commits/pushes AgentIT's own checked-out working tree, as opposed to
 problem: no local git working tree involved at all). `capability_scout.py`
 reuses this exact path rather than re-implementing branch/push/PR-open logic
 a third time -- see docs/self-improvement-for-agentit.md.
+
+Local ``git`` subprocess remains for checkout/add/commit/push of the
+working tree (no Contents-API equivalent for a dirty scout checkout).
+PR *create* no longer shells out to ``gh``.
 """
 from __future__ import annotations
 
@@ -79,29 +84,18 @@ def open_draft_pr(
     body: str,
     base: str = "main",
     cwd: Path | None = None,
+    repo_url: str | None = None,
 ) -> dict:
-    """`gh pr create --draft` -- the actual PR-open step.
+    """Open a draft PR via the GitHub REST API (no ``gh`` CLI).
 
-    Requires the `gh` CLI to be installed and authenticated (`GITHUB_TOKEN`
-    or a prior `gh auth login`) in this process's environment -- per
-    docs/self-improvement-for-agentit.md, `gh` handles create-branch-and-PR
-    in one call and needs no extra credential beyond what PR creation
-    already requires. Never raises: a missing `gh` binary or an auth
-    failure returns ``{"error": ...}`` so a watcher tick can log a clean,
-    non-fatal outcome instead of crashing.
+    Requires ``GITHUB_TOKEN``. Resolves ``repo_url`` from the argument,
+    ``AGENTIT_REPO_URL`` / ``GITHUB_REPOSITORY``, or ``git remote origin``
+    in ``cwd``. Never raises: auth/API failures return ``{"error": ...}``
+    so a watcher tick can log a clean, non-fatal outcome instead of crashing.
     """
-    try:
-        result = subprocess.run(
-            ["gh", "pr", "create", "--draft", "--title", title, "--body", body,
-             "--head", branch, "--base", base],
-            capture_output=True, text=True, cwd=cwd, timeout=60,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.warning("gh pr create unavailable/failed: %s", exc)
-        return {"error": str(exc)}
-    if result.returncode != 0:
-        logger.warning("gh pr create failed: %s", result.stderr[:500])
-        return {"error": result.stderr[:500] or "gh pr create failed"}
-    stdout = result.stdout.strip()
-    pr_url = stdout.splitlines()[-1] if stdout else ""
-    return {"pr_url": pr_url}
+    from agentit.portal.github_pr import open_draft_pull_request, resolve_agentit_repo_url
+
+    url = (repo_url or "").strip() or resolve_agentit_repo_url(cwd)
+    return open_draft_pull_request(
+        url, head=branch, title=title, body=body, base=base,
+    )

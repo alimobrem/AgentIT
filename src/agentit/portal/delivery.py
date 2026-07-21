@@ -292,6 +292,7 @@ async def _deliver_self_managed_source_pr(
     assessment_id: str,
     actor: str,
     dry_run: bool,
+    namespace: str | None = None,
 ) -> dict:
     """Filter fleet junk → fail-closed gate → AgentIT.git source PR.
 
@@ -325,6 +326,7 @@ async def _deliver_self_managed_source_pr(
         mechanism=MECHANISM_SOURCE_REPO_PR, files=deliverable, report=report,
         app_name=app_name, store=store, assessment_id=assessment_id,
         actor=actor, dry_run=dry_run, record_skill_approval=False,
+        namespace=namespace or app_name,
     )
     if drop_reasons:
         outcome = {
@@ -803,6 +805,7 @@ async def deliver_with_verification(
     path_prefix: str | None = None,
     branch_name: str | None = None,
     record_skill_approval: bool = True,
+    namespace: str | None = None,
 ) -> dict:
     """Structurally parallel to ``cluster_apply.apply_with_verification()``,
     for the commit-and-PR delivery mechanisms
@@ -827,15 +830,72 @@ async def deliver_with_verification(
     on a COPY of each file dict, not ``files`` itself, so
     ``record_skill_outcomes()`` below still attributes outcomes using each
     file's real, original ``category``.
+
+    ``dry_run=True`` never opens a PR or commits -- it runs a real
+    Kubernetes server-side-apply ``dryRun=All`` (via
+    ``cluster_apply.dry_run_manifests_against_cluster``) against concrete
+    YAML that would be delivered, then returns a preview. Failures fail
+    closed with ``error`` set (auto_delivery / UI treat that as
+    needs_attention). Helm-shaped templates and non-YAML source patches
+    skip the apiserver call (not valid SSA input).
     """
     resource = f"assessment:{assessment_id}"
 
     if dry_run:
+        from agentit.portal.cluster_apply import dry_run_manifests_against_cluster
+
+        file_paths = [f["path"] for f in files]
+        concrete_yaml = [
+            f for f in files
+            if Path(f.get("path", "")).suffix.lower() in (".yaml", ".yml")
+            and not is_helm_shaped(f.get("content") or "")
+        ]
+        dry_errors: list[str] = []
+        dry_conflicts: list[dict] = []
+        missing_operators: dict = {}
+        validated: list[str] = []
+        if concrete_yaml and namespace:
+            validation = await asyncio.to_thread(
+                dry_run_manifests_against_cluster, concrete_yaml, namespace,
+            )
+            dry_errors = list(validation.get("errors") or [])
+            dry_conflicts = list(validation.get("conflicts") or [])
+            missing_operators = dict(validation.get("missing_operators") or {})
+            validated = list(validation.get("applied") or [])
+            for c in dry_conflicts:
+                dry_errors.append(f"{c.get('path')}: {c.get('error')}")
+
+        outcome = "dry-run-failed" if dry_errors else "dry-run"
         audit_log(
-            actor=actor, action="deliver", resource=resource, outcome="dry-run",
-            details={"mechanism": mechanism, "files": len(files)},
+            actor=actor, action="deliver", resource=resource, outcome=outcome,
+            details={
+                "mechanism": mechanism, "files": len(files),
+                "validated": len(validated), "errors": len(dry_errors),
+            },
         )
-        return {"mechanism": mechanism, "dry_run": True, "files": [f["path"] for f in files]}
+        result: dict = {
+            "mechanism": mechanism, "dry_run": True, "files": file_paths,
+            "validated": validated,
+        }
+        if missing_operators:
+            result["missing_operators"] = missing_operators
+        if dry_errors:
+            # Fail closed -- never report a clean dry-run when the apiserver
+            # rejected anything (missing CRD, RBAC, admission, unreachable).
+            hint = ""
+            if missing_operators:
+                ops = ", ".join(
+                    sorted({op.get("name") or k for k, op in missing_operators.items()})
+                )
+                hint = f" (related operator/CRD may be missing: {ops})"
+            result["error"] = (
+                "Kubernetes API dry-run (server-side apply dryRun=All) failed: "
+                + "; ".join(dry_errors[:5])
+                + ("…" if len(dry_errors) > 5 else "")
+                + hint
+            )
+            result["dry_run_errors"] = dry_errors
+        return result
 
     try:
         if mechanism == MECHANISM_INFRA_REPO_COMMIT:
@@ -918,6 +978,7 @@ async def _deliver_via_gitops_pr(
     path_prefix: str | None = None,
     branch_name: str | None = None,
     note: str = "",
+    namespace: str | None = None,
 ) -> dict:
     """Commit ``files`` to the GitOps infra repo and open a real PR -- the
     exact sequence the cluster/app-config category has always used, and
@@ -947,6 +1008,7 @@ async def _deliver_via_gitops_pr(
         mechanism=MECHANISM_INFRA_REPO_COMMIT, files=files, report=report,
         app_name=app_name, store=store, assessment_id=assessment_id,
         actor=actor, dry_run=dry_run, path_prefix=path_prefix, branch_name=branch_name,
+        namespace=namespace or getattr(report, "namespace", None) or app_name,
     )
     pr_url = outcome.get("pr_url") if isinstance(outcome, dict) and not dry_run else None
     if pr_url and "error" not in outcome:
@@ -1261,7 +1323,7 @@ async def route_and_deliver(
                 outcomes[CATEGORY_CLUSTER_CONFIG] = await _deliver_via_gitops_pr(
                     files=cluster_files, report=report, app_name=app_name, store=store,
                     assessment_id=assessment_id, actor=actor, dry_run=dry_run,
-                    infra_repo_url=infra_repo_url,
+                    infra_repo_url=infra_repo_url, namespace=namespace,
                 )
             elif mech == MECHANISM_SOURCE_REPO_PR and report is not None:
                 # Self-managed AgentIT: filter fleet junk, then PR against
@@ -1270,6 +1332,7 @@ async def route_and_deliver(
                 outcomes[CATEGORY_CLUSTER_CONFIG] = await _deliver_self_managed_source_pr(
                     remapped=remapped, report=report, app_name=app_name, store=store,
                     assessment_id=assessment_id, actor=actor, dry_run=dry_run,
+                    namespace=namespace,
                 )
             else:
                 # MECHANISM_NONE: no infra_repo_url is known for this
@@ -1306,6 +1369,7 @@ async def route_and_deliver(
                     path_prefix=_CICD_SHARED_NAMESPACE_PATH_PREFIX,
                     branch_name=f"agentit/{_sanitize_app_name(app_name)}-cicd-shared-namespace",
                     note=_cicd_shared_namespace_note(cicd_files),
+                    namespace=namespace,
                 )
             elif mech == MECHANISM_SOURCE_REPO_PR and report is not None:
                 # Self-managed AgentIT: filter fleet junk, then PR against
@@ -1314,6 +1378,7 @@ async def route_and_deliver(
                 outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = await _deliver_self_managed_source_pr(
                     remapped=remapped, report=report, app_name=app_name, store=store,
                     assessment_id=assessment_id, actor=actor, dry_run=dry_run,
+                    namespace=namespace,
                 )
             else:
                 outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = {
@@ -1336,6 +1401,7 @@ async def route_and_deliver(
                     mechanism=MECHANISM_SOURCE_REPO_PR, files=source_files, report=report,
                     app_name=app_name, store=store, assessment_id=assessment_id,
                     actor=actor, dry_run=dry_run, record_skill_approval=_approve_skills,
+                    namespace=namespace,
                 )
             else:
                 outcomes[CATEGORY_SOURCE_PATCH] = {"error": "no assessment report available -- cannot open a source-repo PR"}
@@ -1346,6 +1412,7 @@ async def route_and_deliver(
                     mechanism=MECHANISM_APP_REPO_PR, files=at_rest_files, report=report,
                     app_name=app_name, store=store, assessment_id=assessment_id,
                     actor=actor, dry_run=dry_run, record_skill_approval=_approve_skills,
+                    namespace=namespace,
                 )
             else:
                 outcomes[CATEGORY_MANIFEST_AT_REST] = {"error": "no assessment report available"}

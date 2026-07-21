@@ -35,6 +35,22 @@ from agentit.portal.auto_delivery import (
 )
 from conftest import make_report, make_store
 
+# API dry-run (SSA dryRun=All) is hermetic-offline in the suite; these tests
+# assert property/GitOps-registration behavior, not kube connectivity.
+_CLEAN_DRY_RUN = {
+    "applied": ["app-config.yaml"], "skipped": [], "errors": [],
+    "conflicts": [], "missing_operators": {}, "repo_files": [],
+}
+
+
+@pytest.fixture(autouse=True)
+def _mock_api_dry_run_success():
+    with patch(
+        "agentit.portal.cluster_apply.dry_run_manifests_against_cluster",
+        return_value=_CLEAN_DRY_RUN,
+    ):
+        yield
+
 
 def _configmap_file(path: str = "app-config.yaml") -> dict:
     return {

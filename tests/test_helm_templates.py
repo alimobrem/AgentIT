@@ -218,13 +218,15 @@ class TestTektonPipeline:
         script = steps["sync-application-spec"]["script"]
         assert "image.tag" in script
         assert "REVISION" in script
-        assert "oc apply -f argocd/application.yaml" in script
+        assert "kube.apply_yaml" in script
+        assert "oc apply" not in script
 
     def test_notify_argocd_pins_tag_before_applying_application_spec(self):
         """Regression: applying argocd/application.yaml with bootstrap
         image.tag=latest then patching afterward raced Argo selfHeal onto the
         stale :latest digest (scout CrashLoopBackOff). Rewrite REVISION into
-        the manifest, then apply once — no separate update-image-tag step."""
+        the manifest, then apply once via kube.apply_yaml — no separate
+        update-image-tag step and no oc CLI."""
         doc = _load(self.TEMPLATE)
         tasks = {t["name"]: t for t in doc["spec"]["tasks"]}
         task = tasks["notify-argocd"]
@@ -236,7 +238,8 @@ class TestTektonPipeline:
         )
         steps = {s["name"]: s for s in task["taskSpec"]["steps"]}
         script = steps["sync-application-spec"]["script"]
-        assert "sed" in script and "oc apply -f argocd/application.yaml" in script
+        assert "kube.apply_yaml" in script
+        assert "oc apply" not in script
         assert any(
             e.get("name") == "REVISION" for e in steps["sync-application-spec"].get("env", [])
         ), "sync-application-spec needs REVISION to pin image.tag before apply"
@@ -244,6 +247,8 @@ class TestTektonPipeline:
         assert "source" in ws_names
         task_ws_names = {w["name"] for w in task["workspaces"]}
         assert "source" in task_ws_names
+        # Uses the just-built AgentIT image (Python client), not openshift/cli.
+        assert "$(params.image)" in steps["sync-application-spec"]["image"]
 
     def test_pipeline_has_timeouts(self):
         doc = _load(self.TEMPLATE)
@@ -254,8 +259,9 @@ class TestTektonPipeline:
         """The image smoke test must gate promotion: it runs after
         build-image produces the real tag, and notify-argocd (which patches
         the live Argo CD Application to that tag) must wait on it -- so a
-        broken image (missing pytest/tests/chart/git/gh, discovered live and
-        one at a time this session) can never reach the deployed Rollout."""
+        broken image (missing pytest/tests/chart/git/agentit.kube, discovered
+        live and one at a time this session) can never reach the deployed
+        Rollout."""
         doc = _load(self.TEMPLATE)
         tasks = {t["name"]: t for t in doc["spec"]["tasks"]}
         assert "smoke-test-image" in tasks
@@ -265,7 +271,8 @@ class TestTektonPipeline:
 
     def test_smoke_test_image_checks_every_regressed_tool(self):
         """Each of these was discovered missing from the deployed image one
-        at a time, live: gh, a real .git checkout, pytest, tests/, chart/."""
+        at a time, live: a real .git checkout, pytest, tests/, chart/, and
+        (now) importable agentit.kube / github_pr — not the gh CLI."""
         doc = _load(self.TEMPLATE)
         tasks = {t["name"]: t for t in doc["spec"]["tasks"]}
         script = "\n".join(tasks["smoke-test-image"]["taskSpec"]["steps"][0]["args"])
@@ -274,11 +281,12 @@ class TestTektonPipeline:
             "test -d tests",
             "test -d chart",
             "git --version",
-            "gh --version",
+            "from agentit import kube",
             "safe.directory",
             "git -C /opt/app-root/src status",
         ):
             assert expected in script, f"smoke-test-image script missing check: {expected!r}"
+        assert "gh --version" not in script, "runtime must not require the gh CLI"
 
     def test_smoke_test_image_uses_the_just_built_image(self):
         """Must run the freshly-built tag, not some other/older image, so
@@ -1623,12 +1631,11 @@ class TestRBAC:
             ("operators.coreos.com", "clusterserviceversions"),
         }
 
-        # Regression guard: kube.apply_yaml() shells out to `oc apply
-        # --server-side`, which always issues a PATCH (even to create an
-        # object that doesn't exist yet) -- verified live against the real
-        # cluster, "create"+"get" alone still 403s with "cannot patch
-        # resource \"namespaces\"". Every resource this ClusterRole creates
-        # via that path needs "patch", not just "create".
+        # Regression guard: kube.apply_yaml() uses server-side-apply PATCH
+        # (even to create an object that doesn't exist yet) -- verified live
+        # against the real cluster, "create"+"get" alone still 403s with
+        # "cannot patch resource \"namespaces\"". Every resource this
+        # ClusterRole creates via that path needs "patch", not just "create".
         namespaces_rule = next(r for r in role["rules"] if "namespaces" in r["resources"])
         assert "patch" in namespaces_rule["verbs"]
         operatorgroups_rule = next(r for r in role["rules"] if "operatorgroups" in r["resources"])

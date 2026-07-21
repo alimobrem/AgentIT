@@ -1,18 +1,11 @@
 FROM registry.access.redhat.com/ubi9/python-312:latest
 
 USER 0
+# Optional oc/kubectl binaries for break-glass / live e2e from a pod shell.
+# Portal and agent runtime do NOT shell out to them — cluster ops use
+# agentit.kube (Python client SSA); GitHub PRs use portal/github_pr REST.
 RUN curl -sfL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz \
     | tar -xz -C /usr/local/bin oc kubectl && chmod +x /usr/local/bin/oc /usr/local/bin/kubectl
-
-# gh CLI -- capability_scout.py's git_pr.py shells out to `gh pr create`/`gh
-# pr list` to open and throttle self-improvement PRs; git alone (already in
-# the base image) can only branch/commit/push, not open a PR. Official RPM
-# install method for DNF4-based RHEL/UBI images:
-# https://github.com/cli/cli/blob/trunk/docs/install_linux.md#dnf4
-RUN dnf install -y 'dnf-command(config-manager)' && \
-    dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo && \
-    dnf install -y gh && \
-    dnf clean all
 USER 1001
 
 RUN git config --global user.email "agentit@agentit.local" && \

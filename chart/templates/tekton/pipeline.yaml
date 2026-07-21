@@ -210,12 +210,14 @@ spec:
 
     # Smoke-tests the actual image build-image just produced by running a
     # container from it and checking the exact tools/dirs capability-scout's
-    # own safety gates and self-fix flow need at runtime -- gh, a real .git
-    # checkout, pytest, tests/, chart/, and docs/. Each of these was previously
-    # discovered missing one at a time, live, only when a watcher pod
-    # happened to need it (see Containerfile's comments for each fix) --
-    # this task fails the pipeline loudly and immediately instead, before
-    # notify-argocd ever promotes the broken tag to the live Rollout.
+    # own safety gates and self-fix flow need at runtime -- git (local
+    # working-tree push), a real .git checkout, pytest, tests/, chart/, and
+    # docs/. GitHub PR create/list/status use the REST API (GITHUB_TOKEN),
+    # not the `gh` CLI. Each of these was previously discovered missing one
+    # at a time, live, only when a watcher pod happened to need it (see
+    # Containerfile's comments for each fix) -- this task fails the pipeline
+    # loudly and immediately instead, before notify-argocd ever promotes the
+    # broken tag to the live Rollout.
     - name: smoke-test-image
       retries: 1
       timeout: "5m0s"
@@ -247,9 +249,10 @@ spec:
                 echo "docs/ exists (capability-scout scan_doc_gaps needs it):"
                 test -d docs
                 [ -n "$(ls docs/*.md 2>/dev/null)" ]
-                echo "git and gh CLIs are present:"
+                echo "git CLI is present (working-tree push; GitHub PRs use REST):"
                 git --version
-                gh --version
+                echo "agentit.kube / github_pr importable (no oc/gh for cluster/PR ops):"
+                python -c "from agentit import kube; from agentit.portal import github_pr"
                 echo "/opt/app-root/src is a real, valid git checkout:"
                 # OpenShift/Tekton run this step as an arbitrary UID; the
                 # build-time `git config --global` (USER 1001 home) is not
@@ -281,43 +284,58 @@ spec:
         params:
           - name: revision
             type: string
+          - name: image
+            type: string
         workspaces:
           - name: source
         steps:
           # Re-apply the committed Application manifest FIRST so any new/changed Helm
           # parameter in argocd/application.yaml (e.g. a new agents.*.enabled flag) lands
-          # on the live object as part of the normal deploy flow, instead of requiring a
-          # separate manual `oc apply`. This closes the gap where the live Application's
-          # spec.source.helm.parameters could silently drift from git until someone
-          # noticed and force-applied it by hand (which also used to clobber image.tag —
-          # fixed by always running update-image-tag right after, below).
-          # Rewrite image.tag in the committed Application manifest to this
-          # build's REVISION *before* oc apply, then apply once. Applying the
-          # bootstrap `latest` value and patching afterward races Argo
-          # selfHeal / concurrent PipelineRuns onto the stale :latest tag
-          # (confirmed live: scout CrashLoopBackOff — "No such command
-          # 'propose-watch'" from a days-old latest digest).
+          # on the live object as part of the normal deploy flow. Uses
+          # agentit.kube.apply_yaml (Kubernetes Python client SSA) — not `oc apply`.
+          # Rewrite image.tag to this build's REVISION before apply so Argo never
+          # briefly sees the bootstrap `latest` tag.
           - name: sync-application-spec
-            image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+            image: $(params.image)
             workingDir: $(workspaces.source.path)
             env:
               - name: REVISION
                 value: $(params.revision)
             computeResources:
               requests:
-                memory: 64Mi
+                memory: 128Mi
                 cpu: 50m
             script: |
               set -euo pipefail
+              python - <<'PY'
+              import os, re
+              from pathlib import Path
+              from agentit import kube
+
+              path = Path("argocd/application.yaml")
+              text = path.read_text()
+              revision = os.environ["REVISION"]
               # Replace only the image.tag Helm parameter value (bootstrap is "latest").
-              sed -i -E '/name: image\.tag/{n;s/^([[:space:]]*value: ).*/\1'"${REVISION}"'/;}' \
-                argocd/application.yaml
-              grep -A1 'name: image.tag' argocd/application.yaml
-              oc apply -f argocd/application.yaml
-              echo "Synced argocd/application.yaml with image.tag=${REVISION}"
+              text, n = re.subn(
+                  r"(name:\s*image\.tag\n\s*value:\s*).*",
+                  rf"\g<1>{revision}",
+                  text,
+                  count=1,
+              )
+              if n != 1:
+                  raise SystemExit(f"expected to rewrite image.tag once, got {n}")
+              path.write_text(text)
+              print(path.read_text())
+              result = kube.apply_yaml(path.read_text(), "openshift-gitops")
+              if not result.get("applied"):
+                  raise SystemExit(f"kube.apply_yaml failed: {result.get('error')}")
+              print(f"Synced argocd/application.yaml with image.tag={revision}")
+              PY
       params:
         - name: revision
           value: $(params.revision)
+        - name: image
+          value: $(params.image-ref):$(params.revision)
       workspaces:
         - name: source
           workspace: source

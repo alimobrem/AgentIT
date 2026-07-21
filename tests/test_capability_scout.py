@@ -471,29 +471,22 @@ class TestDuplicateRejectionDetection:
         assert out["reject_reason"] == "duplicate"
 
     def test_fetch_pr_close_comments_returns_real_comment_bodies(self):
-        with patch("agentit.capability_scout.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout=json.dumps({"comments": [{"body": "Closing -- duplicates #63"}, {"body": "ok"}]}),
-                stderr="",
-            )
+        with patch(
+            "agentit.portal.github_pr.fetch_pr_issue_comments",
+            return_value=["Closing -- duplicates #63", "ok"],
+        ) as mock_fetch:
             comments = fetch_pr_close_comments("https://github.com/o/r/pull/88")
         assert comments == ["Closing -- duplicates #63", "ok"]
-        args, _kwargs = mock_run.call_args
-        assert args[0][:3] == ["gh", "pr", "view"]
-        assert "comments" in args[0][-1]
+        mock_fetch.assert_called_once_with("https://github.com/o/r/pull/88")
 
     def test_fetch_pr_close_comments_returns_empty_on_failure(self):
-        with patch("agentit.capability_scout.subprocess.run", side_effect=OSError("gh not found")):
-            assert fetch_pr_close_comments("https://github.com/o/r/pull/1") == []
-        with patch("agentit.capability_scout.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="not authenticated")
+        with patch("agentit.portal.github_pr.fetch_pr_issue_comments", return_value=[]):
             assert fetch_pr_close_comments("https://github.com/o/r/pull/1") == []
 
     async def test_sync_proposal_outcomes_reads_comments_only_for_closed_prs(self):
-        """The extra `gh pr view --json comments` call must only fire for
-        closed (not merged/open) PRs -- merged/open PRs have no close
-        reason worth reading, so this keeps the extra API call bounded."""
+        """The extra comments REST call must only fire for closed (not
+        merged/open) PRs -- merged/open PRs have no close reason worth
+        reading, so this keeps the extra API call bounded."""
         async_store, _raw = await make_async_store()
         get_comments = MagicMock(return_value=["Closing -- duplicates #63"])
 
@@ -1360,68 +1353,66 @@ class TestContainerfileShipsWhatTestsPassGateNeeds:
 
 class TestCheckNoOpenSelfImprovePr:
     def test_passes_when_no_open_prs(self):
-        with patch("agentit.capability_scout.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
+        with patch(
+            "agentit.portal.github_pr.list_pull_requests", return_value=[],
+        ):
             passed, _detail = check_no_open_self_improve_pr()
         assert passed is True
 
     def test_fails_when_at_or_over_cap(self):
-        with patch("agentit.capability_scout.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout='[{"url": "https://github.com/org/agentit/pull/1", '
-                       '"headRefName": "agentit/self-improve/some-proposal-1784150389"}]',
-                stderr="",
-            )
+        with patch(
+            "agentit.portal.github_pr.list_pull_requests",
+            return_value=[{
+                "pr_url": "https://github.com/org/agentit/pull/1",
+                "title": "x",
+                "headRefName": "agentit/self-improve/some-proposal-1784150389",
+                "state": "open",
+            }],
+        ):
             passed, detail = check_no_open_self_improve_pr(max_open_prs=1)
         assert passed is False
         assert "1" in detail
 
     def test_real_branch_names_have_a_slug_and_timestamp_suffix_and_still_count(self):
-        """Regression test for a real bug found live: `gh pr list --head
-        agentit/self-improve` does an *exact* branch-name match (confirmed
-        against the real repo), but every real branch this loop creates is
-        `agentit/self-improve/<slug>-<unix-timestamp>` (see _open_pr) --
-        never the literal string `agentit/self-improve`. That made this
-        gate's `gh pr list` call always return zero PRs regardless of how
-        many were actually open, silently disabling the cap entirely. A
-        real open PR with a real timestamped branch name must still be
-        counted, and the command itself must not filter by --head at all
-        (the filtering happens client-side by prefix instead)."""
-        with patch("agentit.capability_scout.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout='[{"url": "https://github.com/alimobrem/AgentIT/pull/15", '
-                       '"headRefName": "agentit/self-improve/add-failure-alerting-1784150389"}]',
-                stderr="",
-            )
+        """Prefix filter (not exact head match) must count timestamped
+        ``agentit/self-improve/<slug>-<unix-timestamp>`` branches — the
+        historical ``gh pr list --head`` exact-match bug silently disabled
+        this cap in production."""
+        with patch(
+            "agentit.portal.github_pr.list_pull_requests",
+            return_value=[{
+                "pr_url": "https://github.com/alimobrem/AgentIT/pull/15",
+                "title": "x",
+                "headRefName": "agentit/self-improve/add-failure-alerting-1784150389",
+                "state": "open",
+            }],
+        ) as mock_list:
             passed, detail = check_no_open_self_improve_pr(max_open_prs=1)
-        args, _kwargs = mock_run.call_args
-        command = args[0]
-        assert "--head" not in command
+        assert mock_list.call_args.kwargs.get("head_prefix") == "agentit/self-improve/"
         assert passed is False
         assert "1" in detail
 
     def test_prs_with_unrelated_branch_names_are_not_counted(self):
-        with patch("agentit.capability_scout.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout='[{"url": "https://github.com/org/agentit/pull/2", '
-                       '"headRefName": "someone-elses-feature-branch"}]',
-                stderr="",
-            )
+        # list_pull_requests already applies head_prefix; an empty return
+        # means no self-improve heads matched.
+        with patch("agentit.portal.github_pr.list_pull_requests", return_value=[]):
             passed, _detail = check_no_open_self_improve_pr(max_open_prs=1)
         assert passed is True
 
-    def test_fails_closed_when_gh_unavailable(self):
-        with patch("agentit.capability_scout.subprocess.run", side_effect=OSError("gh not found")):
+    def test_fails_closed_when_github_api_unavailable(self):
+        with patch(
+            "agentit.portal.github_pr.list_pull_requests",
+            side_effect=RuntimeError("GITHUB_TOKEN env var not set — cannot create PR"),
+        ):
             passed, detail = check_no_open_self_improve_pr()
         assert passed is False
-        assert "gh" in detail.lower()
+        assert "github api" in detail.lower() or "token" in detail.lower()
 
-    def test_fails_closed_when_gh_returns_nonzero(self):
-        with patch("agentit.capability_scout.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="not authenticated")
+    def test_fails_closed_when_github_api_returns_error(self):
+        with patch(
+            "agentit.portal.github_pr.list_pull_requests",
+            side_effect=RuntimeError("list_pull_requests failed: not authenticated"),
+        ):
             passed, detail = check_no_open_self_improve_pr()
         assert passed is False
         assert "not authenticated" in detail

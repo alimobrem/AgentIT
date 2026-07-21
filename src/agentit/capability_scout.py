@@ -584,74 +584,40 @@ def collect_tracked_prs(run_events: list[dict] | None) -> list[dict]:
 
 
 def list_self_improve_prs_from_gh(*, state: str = "all", limit: int = 50) -> list[dict]:
-    """Discover ``agentit/self-improve/*`` PRs via ``gh`` (url + title).
+    """Discover ``agentit/self-improve/*`` PRs via the GitHub REST API.
 
     Store-only tracking misses human/Cursor merges on self-improve branches
     that never logged a ``capability-run`` with ``pr_url`` (e.g. #23).
-    Same ``gh pr list`` + prefix filter as ``check_no_open_self_improve_pr``.
+    Same prefix filter as ``check_no_open_self_improve_pr``. Name keeps the
+    historical ``_from_gh`` suffix; implementation no longer shells out to
+    the ``gh`` CLI.
     """
-    try:
-        result = subprocess.run(
-            [
-                "gh", "pr", "list",
-                "--state", state,
-                "--limit", str(limit),
-                "--json", "url,title,headRefName",
-            ],
-            capture_output=True, text=True, timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.warning("capability-scout: gh pr list unavailable for outcome sync: %s", exc)
-        return []
-    if result.returncode != 0:
-        logger.warning("capability-scout: gh pr list failed: %s", (result.stderr or "")[:200])
-        return []
-    try:
-        rows = json.loads(result.stdout or "[]")
-    except json.JSONDecodeError:
-        logger.warning("capability-scout: could not parse gh pr list output")
-        return []
-    out: list[dict] = []
-    for pr in rows if isinstance(rows, list) else []:
-        head = str(pr.get("headRefName") or "")
-        if not head.startswith(_SELF_IMPROVE_BRANCH_PREFIX):
-            continue
-        url = str(pr.get("url") or "")
-        if not url:
-            continue
-        out.append({"pr_url": url, "title": str(pr.get("title") or "")})
-    return out
+    from agentit.portal.github_pr import list_pull_requests
+
+    rows = list_pull_requests(
+        state=state, limit=limit, head_prefix=_SELF_IMPROVE_BRANCH_PREFIX,
+    )
+    return [
+        {"pr_url": r["pr_url"], "title": r.get("title") or ""}
+        for r in rows if r.get("pr_url")
+    ]
 
 
 def fetch_pr_close_comments(pr_url: str) -> list[str]:
-    """Real comment bodies on ``pr_url`` via ``gh pr view --json comments``.
+    """Real comment bodies on ``pr_url`` via the GitHub REST API.
 
     ``get_pr_status()`` (``github_pr.py``) only ever reads a PR's own
-    body/labels/title via the REST API -- confirmed by reading it directly
-    -- it never fetches the comment thread. But every real capability-scout
-    PR closed so far (#47, #53, #63, #88) explains its close reason in a
-    plain issue comment, not a label or a body edit, so relying on
-    ``get_pr_status()`` alone leaves ``parse_reject_reason()`` blind to the
-    one place humans actually write the reason. Returns ``[]`` on any
-    failure -- callers must treat that as "no comment signal available,"
-    never fabricate one.
+    body/labels/title via the REST API -- it never fetches the comment
+    thread. But every real capability-scout PR closed so far (#47, #53,
+    #63, #88) explains its close reason in a plain issue comment, not a
+    label or a body edit, so relying on ``get_pr_status()`` alone leaves
+    ``parse_reject_reason()`` blind to the one place humans actually write
+    the reason. Returns ``[]`` on any failure -- callers must treat that
+    as "no comment signal available," never fabricate one.
     """
-    try:
-        result = subprocess.run(
-            ["gh", "pr", "view", pr_url, "--json", "comments"],
-            capture_output=True, text=True, timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.warning("capability-scout: gh pr view --json comments failed for %s: %s", pr_url, exc)
-        return []
-    if result.returncode != 0:
-        return []
-    try:
-        data = json.loads(result.stdout or "{}")
-    except json.JSONDecodeError:
-        return []
-    comments = data.get("comments") if isinstance(data, dict) else None
-    return [str(c.get("body") or "") for c in (comments or []) if isinstance(c, dict)]
+    from agentit.portal.github_pr import fetch_pr_issue_comments
+
+    return fetch_pr_issue_comments(pr_url)
 
 
 def merge_tracked_prs(*sources: list[dict] | None) -> list[dict]:
@@ -1314,32 +1280,21 @@ def run_test_suite(repo_dir: Path) -> tuple[bool, str]:
 def check_no_open_self_improve_pr(max_open_prs: int = 1) -> tuple[bool, str]:
     """Weekly-cap / not-daily-spam gate: only open a new PR if fewer than
     ``max_open_prs`` ``agentit/self-improve/*`` PRs are already open —
-    checked via ``gh pr list`` per the design doc, so a proposal never
-    piles up unreviewed.
+    checked via the GitHub REST API, so a proposal never piles up unreviewed.
 
-    ``gh pr list --head`` does an *exact* branch-name match (confirmed live
-    against the real repo), never a prefix -- but every real branch this
-    loop creates is ``agentit/self-improve/<slug>-<unix-timestamp>``
-    (see ``_open_pr``), which never equals the literal string
-    ``agentit/self-improve``. Filtering with ``--head`` that way always
-    returned zero results regardless of how many self-improve PRs were
-    actually open, silently disabling this cap entirely. List every open
-    PR's ``headRefName`` instead and filter by prefix ourselves."""
+    Lists open PRs and filters by the ``agentit/self-improve/`` head-ref
+    prefix (exact ``head`` query matching cannot express a prefix). Fail
+    closed when the API is unreachable / unauthenticated.
+    """
+    from agentit.portal.github_pr import list_pull_requests
+
     try:
-        result = subprocess.run(
-            ["gh", "pr", "list", "--state", "open", "--limit", "100", "--json", "url,headRefName"],
-            capture_output=True, text=True, timeout=30,
+        open_prs = list_pull_requests(
+            state="open", limit=100, head_prefix=_SELF_IMPROVE_BRANCH_PREFIX,
+            soft_fail=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return False, f"could not check for open PRs (gh unavailable): {exc}"
-    if result.returncode != 0:
-        return False, f"gh pr list failed: {result.stderr[:200]}"
-    import json as _json
-    try:
-        all_open_prs = _json.loads(result.stdout or "[]")
-    except _json.JSONDecodeError:
-        return False, "could not parse 'gh pr list' output"
-    open_prs = [pr for pr in all_open_prs if pr.get("headRefName", "").startswith(_SELF_IMPROVE_BRANCH_PREFIX)]
+    except Exception as exc:
+        return False, f"could not check for open PRs (GitHub API unavailable): {exc}"
     if len(open_prs) >= max_open_prs:
         return False, f"{len(open_prs)} open agentit/self-improve/* PR(s) already outstanding (cap: {max_open_prs})"
     return True, f"{len(open_prs)} open agentit/self-improve/* PR(s) — under the {max_open_prs} cap"

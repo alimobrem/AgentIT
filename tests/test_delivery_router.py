@@ -918,13 +918,17 @@ class TestRouteAndDeliverClusterConfig:
         # blocked by it.
         assert await raw.claim_delivery_lock(f"delivery:{report.repo_name}") is True
 
-        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}):
+        clean = {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": [],
+                 "conflicts": [], "missing_operators": {}, "repo_files": []}
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.cluster_apply.dry_run_manifests_against_cluster", return_value=clean):
             result = await route_and_deliver(
                 [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
                 actor="tester", dry_run=True,
             )
         assert result["outcomes"]["cluster_config"]["dry_run"] is True
+        assert "error" not in result["outcomes"]["cluster_config"]
 
     async def test_not_yet_registered_with_infra_repo_url_bootstraps_infra_commit(self):
         """The bootstrap-circularity fix (docs/onboarding-loop-vision-gap-
@@ -986,15 +990,47 @@ class TestRouteAndDeliverClusterConfig:
         report = make_report()
         report.infra_repo_url = "https://github.com/org/infra-gitops"
         aid = await raw.save(report)
+        clean = {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": [],
+                 "conflicts": [], "missing_operators": {}, "repo_files": []}
         with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
-             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit:
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.cluster_apply.dry_run_manifests_against_cluster", return_value=clean) as mock_dry:
             result = await route_and_deliver(
                 [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
                 actor="tester", dry_run=True,
             )
         mock_commit.assert_not_called()
+        mock_dry.assert_called_once()
+        assert mock_dry.call_args.args[1] == "ns"
         assert result["outcomes"]["cluster_config"]["dry_run"] is True
+        assert "error" not in result["outcomes"]["cluster_config"]
+
+    async def test_dry_run_api_failure_fail_closed_with_error(self):
+        """A real apiserver dry-run rejection must surface as outcome error
+        (needs_attention), never as a clean preview that unlocks Deliver."""
+        store, raw = await make_async_store()
+        report = make_report()
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
+        aid = await raw.save(report)
+        failed = {
+            "applied": [], "skipped": [],
+            "errors": ["app-network-policy.yaml: NetworkPolicy (networking.k8s.io/v1) not found on cluster"],
+            "conflicts": [], "missing_operators": {}, "repo_files": [],
+        }
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.cluster_apply.dry_run_manifests_against_cluster", return_value=failed):
+            result = await route_and_deliver(
+                [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=True,
+            )
+        mock_commit.assert_not_called()
+        outcome = result["outcomes"]["cluster_config"]
+        assert outcome["dry_run"] is True
+        assert "error" in outcome
+        assert "dryRun=All" in outcome["error"] or "dry-run" in outcome["error"].lower()
 
 
 class TestRouteAndDeliverCicdLane:
@@ -1079,7 +1115,10 @@ class TestRouteAndDeliverCicdLane:
         report = make_report()
         report.infra_repo_url = "https://github.com/org/infra-gitops"
         aid = await raw.save(report)
-        with patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit:
+        clean = {"applied": ["pipeline.yaml"], "skipped": [], "errors": [],
+                 "conflicts": [], "missing_operators": {}, "repo_files": []}
+        with patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.cluster_apply.dry_run_manifests_against_cluster", return_value=clean):
             result = await route_and_deliver(
                 [_cicd_file()], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
@@ -1092,6 +1131,7 @@ class TestRouteAndDeliverCicdLane:
         assert outcome["dry_run"] is True
         assert "pr_url" not in outcome
         assert outcome["files"] == ["pipeline.yaml"]
+        assert "error" not in outcome
 
     async def test_no_infra_repo_refuses_cicd_delivery_with_no_direct_apply_fallback(self):
         """Same refusal as the cluster-config category (see
