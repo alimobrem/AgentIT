@@ -26,6 +26,7 @@ from agentit.portal.delivery import (
     is_appset_excluded_app,
     is_gitops_registered,
     is_self_managed_delivery_target,
+    remap_self_managed_cicd_files,
     remap_self_managed_cluster_files,
     resolve_cluster_config_mechanism,
     route_and_deliver,
@@ -288,14 +289,14 @@ class TestResolveClusterConfigMechanism:
             == MECHANISM_SOURCE_REPO_PR
         )
 
-    def test_self_managed_cicd_fails_closed(self):
+    def test_self_managed_cicd_routes_to_source_repo_pr(self):
         assert (
             resolve_cluster_config_mechanism(
                 "https://github.com/org/infra-gitops",
                 self_managed=True,
                 category=CATEGORY_CICD_SHARED_NAMESPACE,
             )
-            == MECHANISM_NONE
+            == MECHANISM_SOURCE_REPO_PR
         )
 
 
@@ -320,6 +321,26 @@ class TestSelfManagedDeliveryTarget:
         remapped = remap_self_managed_cluster_files([_cluster_config_file()])
         assert remapped[0]["target_path"] == "chart/templates/app-network-policy.yaml"
 
+    def test_remap_cicd_tekton_under_chart_templates_tekton(self):
+        remapped = remap_self_managed_cicd_files([_cicd_file()])
+        assert remapped[0]["target_path"] == "chart/templates/tekton/pipeline.yaml"
+
+    def test_remap_cicd_agentit_application_to_argocd(self):
+        entry = {
+            "category": "skills",
+            "path": "argocd-application.yaml",
+            "content": (
+                "apiVersion: argoproj.io/v1alpha1\n"
+                "kind: Application\n"
+                "metadata:\n"
+                "  name: agentit\n"
+                "  namespace: openshift-gitops\n"
+            ),
+            "description": "Argo CD Application",
+        }
+        remapped = remap_self_managed_cicd_files([entry])
+        assert remapped[0]["target_path"] == "argocd/application.yaml"
+
     def test_confirmation_text_names_agentit_git_not_gitops(self):
         text = confirmation_text(
             MECHANISM_SOURCE_REPO_PR,
@@ -329,6 +350,19 @@ class TestSelfManagedDeliveryTarget:
         assert "AgentIT" in text or "chart/templates" in text
         assert "apps/agentit" in text
         assert "infra-gitops" not in text
+        assert "never auto-merge" in text
+
+    def test_confirmation_text_cicd_remaps_not_fails(self):
+        text = confirmation_text(
+            MECHANISM_SOURCE_REPO_PR,
+            self_managed=True,
+            app_repo_url="https://github.com/org/AgentIT",
+            category=CATEGORY_CICD_SHARED_NAMESPACE,
+        )
+        assert "chart/templates" in text
+        assert "apps/agentit" in text
+        assert "fail" not in text.lower()
+        assert "cannot deliver" not in text.lower()
         assert "never auto-merge" in text
 
 
@@ -372,21 +406,36 @@ class TestRouteAndDeliverSelfManagedAgentIT:
             "https://github.com/alimobrem/AgentIT/pull/99"
         )
 
-    async def test_self_managed_agentit_cicd_fails_closed_no_infra_pr(self):
+    async def test_self_managed_agentit_cicd_routes_to_agentit_git_not_infra(self):
         store, raw = await make_async_store()
         report = make_report(repo_name="agentit", repo_url="https://github.com/alimobrem/AgentIT")
         report.infra_repo_url = "https://github.com/alimobrem/agentit-gitops"
         aid = await raw.save(report)
-        with patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit:
+        with patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.create_source_patch_pr") as mock_source, \
+             patch("agentit.portal.github_pr.ensure_applicationset") as mock_ensure:
+            mock_source.return_value = {
+                "pr_url": "https://github.com/alimobrem/AgentIT/pull/100",
+                "branch": "agentit/codechange",
+                "files_committed": 1,
+            }
             result = await route_and_deliver(
                 [_cicd_file()], app_name="agentit", namespace="agentit",
                 report=report, store=store, assessment_id=aid,
                 actor="tester", dry_run=False,
             )
         assert result["self_managed"] is True
-        assert result["mechanisms"][CATEGORY_CICD_SHARED_NAMESPACE] == MECHANISM_NONE
+        assert result["mechanisms"][CATEGORY_CICD_SHARED_NAMESPACE] == MECHANISM_SOURCE_REPO_PR
         mock_commit.assert_not_called()
-        assert "apps/agentit" in result["outcomes"][CATEGORY_CICD_SHARED_NAMESPACE]["error"]
+        mock_ensure.assert_not_called()
+        mock_source.assert_called_once()
+        called_files = mock_source.call_args[0][2]
+        assert called_files[0]["target_path"] == "chart/templates/tekton/pipeline.yaml"
+        assert "apps/agentit" not in called_files[0]["target_path"]
+        assert result["outcomes"][CATEGORY_CICD_SHARED_NAMESPACE]["pr_url"] == (
+            "https://github.com/alimobrem/AgentIT/pull/100"
+        )
+        assert "error" not in result["outcomes"][CATEGORY_CICD_SHARED_NAMESPACE]
 
     async def test_fleet_app_still_uses_infra_repo_commit(self):
         store, raw = await make_async_store()
