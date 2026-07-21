@@ -1394,10 +1394,57 @@ def check_webhook_delivery_health(repo_url: str, url_suffix: str = "/api/webhook
             "ok": True, "status": "delivering",
             "detail": f"Last delivery at {delivered_at}: HTTP {status_code} ({latest.get('status', 'OK')})",
         }
+
+    # Gateway / timeout codes during canary or pod rollout (verified live
+    # 2026-07-21: tip promote of 7347003 produced a single 503 while earlier
+    # deliveries in the same hour were 200). Pinning Self-Health Critical
+    # with oauth-proxy remediation advice for that blip is wrong -- treat as
+    # inconclusive when recent history shows the hook was delivering.
+    _GATEWAY_BLIP_CODES = {502, 503, 504}
+    sample = deliveries[:5]
+    recent_ok = sum(
+        1 for d in sample
+        if isinstance(d.get("status_code"), int) and 200 <= d["status_code"] < 300
+    )
+    if status_code in _GATEWAY_BLIP_CODES and recent_ok >= 2:
+        return {
+            "ok": None, "status": "transient",
+            "detail": (
+                f"Last delivery at {delivered_at}: HTTP {status_code} "
+                f"({latest.get('status', 'unknown')}) -- but {recent_ok} of the "
+                f"last {len(sample)} deliveries succeeded. Likely a brief outage "
+                "during a canary/rollout; clears on the next successful push "
+                "(or a GitHub webhook ping)."
+            ),
+        }
+
+    if status_code in (301, 302, 303, 307, 308):
+        hint = (
+            "GitHub hit an HTTP redirect instead of the app -- check "
+            "oauth-proxy's --skip-auth-regex covers ^/api/webhook/ "
+            "(chart/templates/deployment.yaml)"
+        )
+    elif status_code in _GATEWAY_BLIP_CODES:
+        hint = (
+            "GitHub reached the Route but got a gateway/timeout error -- "
+            "check portal pods are Ready (canary/rollout) before blaming "
+            "oauth-proxy or insecure_ssl"
+        )
+    elif status_code == 0:
+        hint = (
+            "GitHub could not complete TLS to this app -- check the hook's "
+            "insecure_ssl setting for self-signed ingress certs "
+            "(docs/deployment.md webhook section)"
+        )
+    else:
+        hint = (
+            "GitHub is not reaching this app; check oauth-proxy's "
+            "--skip-auth-regex and the hook's insecure_ssl setting"
+        )
     return {
         "ok": False, "status": "failing",
         "detail": (
-            f"Last delivery at {delivered_at}: HTTP {status_code} ({latest.get('status', 'unknown')}) -- "
-            "GitHub is not reaching this app; check oauth-proxy's --skip-auth-regex and the hook's insecure_ssl setting"
+            f"Last delivery at {delivered_at}: HTTP {status_code} "
+            f"({latest.get('status', 'unknown')}) -- {hint}"
         ),
     }
