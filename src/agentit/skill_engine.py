@@ -347,12 +347,43 @@ def detect_check_definitions(skills: list[Skill]) -> list:
     return result
 
 
+# Kinds that must never be generated for self-managed AgentIT (Application
+# agentit → Helm chart/). Fleet apps may still emit these into gitops.
+_SELF_MANAGED_FORBIDDEN_OUTPUTS = frozenset({
+    "PipelineRun",
+    "ClusterRole",
+    "ClusterRoleBinding",
+    "ClusterTask",
+    "Application",
+})
+
+_SELF_MANAGED_GENERATION_CONSTRAINTS = (
+    "SELF-MANAGED AGENTIT MODE (Application agentit syncs Helm chart/ from "
+    "this repo — not fleet gitops apps/{app}/):\n"
+    "- Emit Helm chart templates only: use {{ .Release.Namespace }}, "
+    "{{ .Release.Name }}, and/or {{ .Values.* }} — never hardcoded "
+    "namespace: agentit.\n"
+    "- Do NOT emit PipelineRun, ClusterRole, ClusterRoleBinding, ClusterTask, "
+    "or Application manifests (forbidden on the Application agentit sync path).\n"
+    "- Do not duplicate resources that already exist under chart/templates/.\n"
+    "- If the fix belongs in the skill catalog rather than the chart, output "
+    "nothing (empty) — a skills/** markdown PR is preferred over raw K8s dumps.\n"
+)
+
+
 class SkillEngine:
     """Loads skills from a directory and applies them to assessment reports."""
 
-    def __init__(self, skills_dir: Path, *, platform: PlatformContext | None = None) -> None:
+    def __init__(
+        self,
+        skills_dir: Path,
+        *,
+        platform: PlatformContext | None = None,
+        self_managed: bool = False,
+    ) -> None:
         self.skills_dir = skills_dir
         self.platform = platform
+        self.self_managed = self_managed
         self.skills: list[Skill] = []
         self._load_all()
 
@@ -403,6 +434,13 @@ class SkillEngine:
             # detect_check_definitions(), not GeneratedFiles.
             return []
 
+        if self.self_managed and set(skill.outputs) & _SELF_MANAGED_FORBIDDEN_OUTPUTS:
+            logger.info(
+                "Skipping skill %s in self-managed mode — outputs %s are fleet-only",
+                skill.name, sorted(set(skill.outputs) & _SELF_MANAGED_FORBIDDEN_OUTPUTS),
+            )
+            return []
+
         app_name = _sanitize_name(report.repo_name)
 
         # Check if the output kind is available on the platform
@@ -432,6 +470,17 @@ class SkillEngine:
                         skill.name, app_name, exc,
                     )
                     return []
+                # Self-managed: plain fleet YAML from templates is not chart-
+                # safe. Prefer empty over dumping into chart/templates/ —
+                # delivery filter would drop it anyway; skipping here keeps
+                # onboarding_results honest.
+                if self.self_managed and not self._is_self_managed_safe_content(rendered):
+                    logger.info(
+                        "Skipping skill %s template fallback in self-managed mode — "
+                        "output is not Helm-shaped / has forbidden kinds",
+                        skill.name,
+                    )
+                    return []
                 return [GeneratedFile(
                     path=f"{app_name}-{skill.name}.yaml",
                     content=rendered,
@@ -441,6 +490,21 @@ class SkillEngine:
                 )]
 
         return []
+
+    @staticmethod
+    def _is_self_managed_safe_content(content: str) -> bool:
+        """True when content is acceptable for AgentIT.git chart/ delivery.
+
+        Mirrors ``delivery.is_helm_shaped`` + forbidden kinds without importing
+        ``portal.delivery`` (avoids a skill_engine ↔ delivery cycle).
+        """
+        from agentit.portal.cluster_apply import _parse_manifest
+
+        if not any(m in (content or "") for m in ("{{ .Values", "{{ .Release", "{{-")):
+            return False
+        docs = _parse_manifest(content)
+        kinds = {(doc.get("kind") or "") for doc in docs}
+        return not (kinds & _SELF_MANAGED_FORBIDDEN_OUTPUTS)
 
     def _generate_with_llm(self, skill: Skill, report: AssessmentReport,
                            app_name: str, llm_client: object,
@@ -466,12 +530,22 @@ class SkillEngine:
             "Multiple documents separated by '---'. "
             f"Use app name '{app_name}' in all metadata."
         )
+        if self.self_managed:
+            system += (
+                " For self-managed AgentIT, output Helm templates suitable for "
+                "chart/templates/ ({{ .Release.Namespace }} / {{ .Values }}), "
+                "never plain fleet K8s with hardcoded namespaces."
+            )
         user = (
             f"Application: {app_name}\n"
             f"Stack: {stack}\n"
             f"Criticality: {report.criticality}\n"
             f"Score: {report.overall_score:.0f}/100\n\n"
             f"Platform:\n{platform_ctx}\n\n"
+        )
+        if self.self_managed:
+            user += _SELF_MANAGED_GENERATION_CONSTRAINTS + "\n"
+        user += (
             f"Skill instructions:\n{skill.body}\n\n"
             f"Generate the appropriate {', '.join(skill.outputs)} for this application."
         )
@@ -494,6 +568,20 @@ class SkillEngine:
             if errors:
                 logger.debug("LLM output validation failed (attempt %d): %s", attempt + 1, errors)
                 user += f"\n\nYour previous output had errors: {errors}. Fix them."
+                continue
+
+            if self.self_managed and not self._is_self_managed_safe_content(content):
+                logger.debug(
+                    "LLM output for %s rejected in self-managed mode "
+                    "(not Helm-shaped or forbidden kinds); attempt %d",
+                    skill.name, attempt + 1,
+                )
+                user += (
+                    "\n\nYour previous output was rejected for self-managed AgentIT: "
+                    "it must be Helm-shaped ({{ .Values / {{ .Release / {{-) and must "
+                    "not include PipelineRun/ClusterRole/ClusterRoleBinding/ClusterTask/"
+                    "Application. Fix or return empty."
+                )
                 continue
 
             return [GeneratedFile(
