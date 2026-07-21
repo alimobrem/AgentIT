@@ -45,7 +45,19 @@ RUN mkdir -p src/agentit && touch src/agentit/__init__.py && \
 COPY src/ src/
 RUN pip install --no-cache-dir --no-deps --force-reinstall .
 COPY skills/ skills/
-COPY checks/ checks/
+# checks/ is intentionally NOT copied here -- Phase 4 of
+# docs/extension-model-unification-plan-2026-07-18.md ported every
+# checks/*.yaml file to a mode: detect skill under skills/, so checks/ now
+# has zero files in it. Git doesn't track empty directories, so checks/
+# doesn't exist at all in a checkout of this commit -- `COPY checks/
+# checks/` fails the build outright ("/checks": not found) rather than
+# copying nothing. check_engine.py's load_checks()/run_checks*() still
+# exist (detect_check_definitions() depends on the rule-running half) and
+# already handle a missing checks_dir gracefully (`if not
+# checks_dir.is_dir(): return []`), so nothing at runtime expects this
+# directory to exist. Re-add this COPY line if checks/ ever gains a real
+# file again (e.g. a legacy check that hasn't been ported yet, or a new
+# one added directly as YAML).
 # See the pytest/dev-extra comment above -- the tests-pass gate also needs
 # the actual test files to run, which this image never shipped. Most of
 # tests/test_helm_templates.py (plus a chart-consistency check in
