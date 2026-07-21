@@ -1,10 +1,22 @@
 {% extends "base.html" %}
-{% block title %}Assessing... - AgentIT{% endblock %}
+{% block title %}Onboarding... - AgentIT{% endblock %}
 {% block content %}
+{% from "_macros.html" import pipeline_stepper %}
 {# Poll refreshes #main-content only — never hx-target="body". Targeting
    body + hx-select=".container" replaced the whole document (masthead,
    Cmd+K, Events, Menu) with the content container after the first tick,
-   leaving a full-viewport progress view with no portal chrome (EDL §1). #}
+   leaving a full-viewport progress view with no portal chrome (EDL §1).
+
+   This div's own hx-get self-poll is what already carries a human
+   through the real 303 redirect assess_progress() issues once onboarding
+   starts (see that route's docstring) as an in-place AJAX swap -- htmx's
+   underlying XHR follows the redirect transparently, so #main-content is
+   replaced by onboard_progress.html's own markup with no full browser
+   navigation and no <title> flash. The one, unified `pipeline_stepper()`
+   macro below (shared with _onboard_progress_fragment.html) is what
+   makes that swap actually read as one page's steps lighting up in
+   sequence, instead of an unrelated stepper design replacing this one
+   (2026-07-20, "why are we showing two workflow pages" fix). #}
 <div id="assess-progress"
      hx-get="/assess/progress/{{ job_id }}"
      hx-trigger="every 2s"
@@ -13,29 +25,15 @@
      hx-swap="outerHTML"
      hx-push-url="true">
 
-<h1>Running Assessment</h1>
+<h1>Onboarding</h1>
 
-<div class="card form-narrow">
-  <div class="lifecycle-stepper">
-    {% set stages = [("cloning", "Cloning"), ("assessing", "Analyzing"), ("saving", "Saving")] %}
-    {% for key, label in stages %}
-    {% set step_lower = (job.current_step or "")|lower %}
-    {% set is_active = key in step_lower %}
-    {% set is_done = job.status == "completed" or
-       (key == "cloning" and "clon" not in step_lower and step_lower != "") or
-       (key == "assessing" and ("saving" in step_lower or job.status == "completed")) %}
-    <div class="lifecycle-step {% if is_active %}step-active{% elif is_done %}step-done{% else %}step-pending{% endif %}">
-      <div class="step-marker">{% if is_done and not is_active %}&#10003;{% else %}{{ loop.index }}{% endif %}</div>
-      <div class="step-label">{{ label }}</div>
-    </div>
-    {% if not loop.last %}<div class="step-connector {% if is_done %}connector-done{% endif %}"></div>{% endif %}
-    {% endfor %}
-  </div>
+<div class="card">
+  {{ pipeline_stepper(current_index, failed, stage_count) }}
 
   <p class="text-muted text-center">{{ job.current_step or "Starting..." }}</p>
 
   {% if "continue_onboard" in (job.steps_completed or []) %}
-  <p class="text-muted text-center text-sm">After scoring, onboarding will start automatically.</p>
+  <p class="text-muted text-center text-sm">After scoring, onboarding will start automatically — right here on this same page, with no new page to load.</p>
   {% endif %}
 
   {% if job.status == "failed" %}

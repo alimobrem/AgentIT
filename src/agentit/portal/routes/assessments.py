@@ -336,6 +336,56 @@ async def assess_submit(
     return RedirectResponse(url=f"/assess/progress/{job_id}", status_code=303)
 
 
+# ── Unified progress stepper (2026-07-20) ───────────────────────────────
+# One 9-stage roadmap spanning the whole assess -> onboard -> deliver
+# pipeline, rendered by _macros.html's `pipeline_stepper()` on BOTH
+# assess_progress.html and _onboard_progress_fragment.html. This does NOT
+# merge the two underlying jobs/routes/redirect (still two real
+# `remediation_jobs` rows, still a real 303 from assess_progress() to
+# onboard_progress() once an onboard job exists -- see that redirect's own
+# docstring below): investigation for this fix found that hand-off is
+# already an in-place htmx AJAX swap of #main-content, never a real
+# browser navigation or <title> change, so it was never the "hard
+# redirect" the two-workflow-pages complaint assumed. What actually read
+# as "two pages" was purely visual -- a 3-step stepper under "Running
+# Assessment" getting swapped for an unrelated 6-step stepper under
+# "Onboarding". These two helpers are the single source of truth mapping
+# each job's own real status to its position on the ONE shared roadmap,
+# so both templates always agree on where "step N of 9" actually is.
+_PIPELINE_STAGE_COUNT = 9
+
+_ASSESS_STAGE_INDEX = {"cloning": 0, "assessing": 1, "saving": 2, "completed": 3}
+
+_ONBOARD_STAGE_INDEX = {
+    "pending": 3, "running": 3, "saving": 4, "validating": 5,
+    "reviewing": 6, "delivering": 7, "needs_attention": 7,
+    "completed": _PIPELINE_STAGE_COUNT,
+}
+
+
+def _assess_pipeline_position(job: dict) -> tuple[int, bool]:
+    """Where this assess job sits on the unified 9-stage roadmap, and
+    whether it represents a failure. A failed assess job's
+    ``current_step`` holds a free-form, human-written error message (see
+    ``assess_submit()``'s ``except`` blocks), not a stage keyword -- there
+    is no reliable way to know which of the 3 assess stages actually
+    failed, so this never fabricates one; it just flags the failure at
+    stage 0 and leaves the real explanation to the error alert already
+    shown alongside the stepper.
+    """
+    if job["status"] == "failed":
+        return 0, True
+    return _ASSESS_STAGE_INDEX.get(job["status"], 0), False
+
+
+def _onboard_pipeline_position(job: dict) -> tuple[int, bool]:
+    """Where this onboard job sits on the same unified 9-stage roadmap
+    (indices 3-8) -- mirrors ``_assess_pipeline_position()`` above."""
+    if job["status"] == "failed":
+        return 3, True
+    return _ONBOARD_STAGE_INDEX.get(job["status"], 3), False
+
+
 @router.get("/assess/progress/{job_id}", response_class=HTMLResponse)
 async def assess_progress(request: Request, job_id: str):
     """Passive progress viewer only (2026-07-20) -- the assess->onboard
@@ -354,7 +404,12 @@ async def assess_progress(request: Request, job_id: str):
     kinds of job share the same ``remediation_jobs`` table), or plain
     Assessment Detail if this assess explicitly opted out of chaining
     (``continue_onboard=0``, still available -- see ``assess_submit()`` --
-    even though no real caller sets it today).
+    even though no real caller sets it today). That redirect is a real
+    HTTP 303, unchanged by the 2026-07-20 unified-stepper fix above: this
+    page's own ``hx-get`` self-poll (see assess_progress.html) already
+    follows it as an in-place AJAX swap, never a full browser navigation,
+    so there was nothing unreliable to fix there -- only the differently-
+    shaped stepper swapped in on the other end of it.
     """
     s = await get_store()
     job = await s.get_remediation_job(job_id)
@@ -374,8 +429,12 @@ async def assess_progress(request: Request, job_id: str):
             )
         return RedirectResponse(url=f"/assessments/{assessment_id}", status_code=303)
 
+    chained = "continue_onboard" in (job.get("steps_completed") or [])
+    current_index, failed = _assess_pipeline_position(job)
     return get_templates().TemplateResponse(request, "assess_progress.html", {
         "job": job, "job_id": job_id,
+        "current_index": current_index, "failed": failed,
+        "stage_count": _PIPELINE_STAGE_COUNT if chained else 3,
     })
 
 
@@ -1054,8 +1113,10 @@ async def onboard_progress(request: Request, assessment_id: str, job_id: str):
             url=await _onboard_terminal_redirect_url(assessment_id, job), status_code=303,
         )
     agent_steps = await _onboard_agent_steps(s, assessment_id)
+    current_index, failed = _onboard_pipeline_position(job)
     return get_templates().TemplateResponse(request, "onboard_progress.html", {
         "job": job, "job_id": job_id, "assessment_id": assessment_id, "agent_steps": agent_steps,
+        "current_index": current_index, "failed": failed,
     })
 
 
@@ -1101,8 +1162,10 @@ async def onboard_progress_stream(assessment_id: str, job_id: str):
             agent_steps = await _onboard_agent_steps(s, assessment_id)
             is_terminal = job["status"] in _ONBOARD_JOB_TERMINAL_STATUSES
             redirect_url = await _onboard_terminal_redirect_url(assessment_id, job) if is_terminal else None
+            current_index, failed = _onboard_pipeline_position(job)
             html = templates.get_template("_onboard_progress_fragment.html").render(
                 job=job, agent_steps=agent_steps, assessment_id=assessment_id, redirect_url=redirect_url,
+                current_index=current_index, failed=failed,
             )
             # SSE framing: every line of the payload must be its own "data:"
             # line per the spec -- a bare multi-line payload silently

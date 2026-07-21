@@ -1168,6 +1168,13 @@
     align-items: center;
     margin: var(--space-5) 0 var(--space-7);
     gap: 0;
+    /* The unified 9-stage assess->onboard->deliver roadmap (assess_progress.html /
+       _onboard_progress_fragment.html) is wider than this component's original
+       3-6 step callers (assessment_detail.html/health.html) ever needed --
+       scroll rather than let a narrower viewport clip or overlap the later
+       steps/connectors. */
+    overflow-x: auto;
+    padding-bottom: 2px;
   }
   .lifecycle-step {
     display: flex;
