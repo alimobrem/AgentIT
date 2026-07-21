@@ -301,7 +301,7 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: openshift-dns
     # propose_capability_improvement() calls the LLM (Anthropic direct API
-    # or Vertex AI), and git_pr.py's push/`gh pr create` calls GitHub -- both
+    # or Vertex AI), and git_pr.py's push + github_pr REST PR-create call GitHub -- both
     # reachable only over the public internet, not selectable via
     # podSelector/namespaceSelector, so this is scoped by port only. Unlike
     # the other 4 watchers, this one does NOT need egress to the portal

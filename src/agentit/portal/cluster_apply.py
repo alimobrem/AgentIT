@@ -1,12 +1,25 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import yaml
 
 from agentit import kube
 
 logger = logging.getLogger(__name__)
+
+_SKIP_EXTENSIONS = frozenset({".sh", ".md", ".json", ".txt", ".toml", ".cfg", ".ini"})
+
+_NON_MANIFEST_PURPOSE: dict[str, str] = {
+    ".md": "Documentation — review in your repo after merging the PR",
+    ".json": "Configuration — commit to your repo (e.g. Renovate config, Grafana dashboard)",
+    ".sh": "Script — should be a Tekton Task instead; report this as a bug",
+    ".toml": "Configuration — commit to your repo",
+    ".cfg": "Configuration — commit to your repo",
+    ".ini": "Configuration — commit to your repo",
+    ".txt": "Configuration — commit to your repo",
+}
 
 _OPERATOR_NAMESPACES = frozenset({
     "openshift-gitops", "openshift-operators", "openshift-pipelines",
@@ -189,6 +202,7 @@ def _parse_manifest(content: str) -> list[dict]:
 
 def _classify_and_fix(
     doc: dict, namespace: str, available_kinds: set[str],
+    *, for_dry_run: bool = False,
 ) -> tuple[str, str, dict]:
     """Classify a manifest document and fix namespace if needed.
 
@@ -196,18 +210,14 @@ def _classify_and_fix(
         apply, skip_non_k8s, skip_cluster_scope, skip_operator_ns,
         skip_crd_missing
 
-    This previously accepted an ``allow_operator_namespaces`` flag, set by
-    the unified delivery router's ``cluster-admin-review`` gate approval
-    path (``portal/delivery.py``/``routes/gates.py``) -- a human holding
-    elevated RBAC explicitly approving this exact apply, so the manifest's
-    own declared operator namespace (e.g. ``openshift-pipelines``) was
-    preserved and applied as-is instead of being skipped or silently
-    rewritten to the app's own namespace. That gate type (and every
-    direct-cluster-apply code path in this app) was retired 2026-07-18 --
-    CI/CD manifests destined for a shared operator namespace now deliver
-    via a GitOps PR instead, same as every other category (see the
-    README). The flag (and its now-permanently-unreachable branch) was
-    removed 2026-07-20 -- no live caller ever passed it.
+    ``for_dry_run=True`` prepares documents the way GitOps would eventually
+    land them (including operator-namespace and cluster-scoped kinds) so
+    ``dry_run_manifests_against_cluster()`` can SSA-validate them. Missing
+    CRDs are *not* pre-skipped on that path -- ``kube.apply_yaml(dry_run=True)``
+    surfaces a clear apiserver/discovery error instead (fail-closed).
+    When ``for_dry_run=False`` (legacy classify used by skill-parity tests /
+    operator-install helpers), operator-namespace and cluster-scoped docs
+    are still skipped: AgentIT never direct-applies those.
     """
     kind = doc.get("kind", "")
     api_version = doc.get("apiVersion", "")
@@ -215,28 +225,136 @@ def _classify_and_fix(
     if not kind or not api_version:
         return "skip_non_k8s", "not a K8s manifest (missing kind/apiVersion)", doc
 
-    if kind in _CLUSTER_SCOPED_KINDS:
-        return "skip_cluster_scope", f"{kind} is cluster-scoped (needs cluster-admin)", doc
-
     meta = doc.get("metadata") or {}
+    # Work on a shallow copy so callers' input docs are never mutated.
+    doc = {**doc, "metadata": dict(meta)}
+    meta = doc["metadata"]
     manifest_ns = meta.get("namespace", "")
 
-    if manifest_ns in _OPERATOR_NAMESPACES:
-        return "skip_operator_ns", f"targets operator namespace {manifest_ns}", doc
+    if not for_dry_run:
+        if kind in _CLUSTER_SCOPED_KINDS:
+            return "skip_cluster_scope", f"{kind} is cluster-scoped (needs cluster-admin)", doc
+        if manifest_ns in _OPERATOR_NAMESPACES:
+            return "skip_operator_ns", f"targets operator namespace {manifest_ns}", doc
+        if available_kinds:
+            kind_lower = kind.lower()
+            kind_plural_guess = kind_lower + "s"
+            if kind_lower not in available_kinds and kind_plural_guess not in available_kinds:
+                return "skip_crd_missing", f"{kind} ({api_version}) CRD not installed", doc
 
-    if available_kinds:
-        kind_lower = kind.lower()
-        kind_plural_guess = kind_lower + "s"
-        if kind_lower not in available_kinds and kind_plural_guess not in available_kinds:
-            return "skip_crd_missing", f"{kind} ({api_version}) CRD not installed", doc
-
-    if manifest_ns and manifest_ns != namespace:
-        meta["namespace"] = namespace
+    if kind not in _CLUSTER_SCOPED_KINDS:
+        if manifest_ns in _OPERATOR_NAMESPACES:
+            pass  # keep declared operator namespace (GitOps / dry-run)
+        elif manifest_ns and manifest_ns != namespace:
+            meta["namespace"] = namespace
+        elif for_dry_run and not manifest_ns:
+            # SSA dry-run needs an explicit namespace; real apply paths pass
+            # the target namespace into kube.apply_yaml() instead.
+            meta["namespace"] = namespace
 
     if "generateName" in meta and "name" not in meta:
         meta["name"] = meta.pop("generateName").rstrip("-") + "-applied"
 
     return "apply", "", doc
+
+
+def dry_run_manifests_against_cluster(
+    files: list[dict],
+    namespace: str = "default",
+) -> dict:
+    """Validate manifests via Kubernetes server-side-apply ``dryRun=All``.
+
+    Calls ``kube.apply_yaml(..., dry_run=True)`` for every concrete YAML
+    document that would be delivered -- never persists anything on the
+    cluster. This is the portal/auto_delivery Dry Run path (GitOps remains
+    the sole real apply via PR merge + Argo). Fail-closed: missing CRDs,
+    RBAC denials, admission rejections, and unreachable clusters all land
+    in ``errors`` / ``conflicts`` (never a false "OK").
+
+    Non-YAML / narrative files are listed under ``repo_files`` and skipped.
+    """
+    applied: list[str] = []
+    skipped: list[str] = []
+    errors: list[str] = []
+    conflicts: list[dict] = []
+    missing_operators: dict[str, dict] = {}
+    repo_files: list[dict] = []
+
+    for entry in files:
+        fpath = entry["path"]
+        suffix = Path(fpath).suffix.lower()
+
+        if suffix in _SKIP_EXTENSIONS or suffix not in (".yaml", ".yml"):
+            purpose = _NON_MANIFEST_PURPOSE.get(suffix, "Not a Kubernetes manifest")
+            repo_files.append({
+                "path": fpath,
+                "purpose": purpose,
+                "description": entry.get("description", ""),
+            })
+            continue
+
+        docs = _parse_manifest(entry.get("content") or "")
+        if not docs:
+            skipped.append(f"{fpath} (empty or unparseable)")
+            continue
+
+        apply_docs: list[dict] = []
+        skip_reasons: list[str] = []
+        for doc in docs:
+            action, reason, fixed = _classify_and_fix(
+                doc, namespace, available_kinds=set(), for_dry_run=True,
+            )
+            if action == "apply":
+                apply_docs.append(fixed)
+            else:
+                skip_reasons.append(reason)
+
+        if not apply_docs:
+            skipped.append(f"{fpath} ({'; '.join(skip_reasons) or 'nothing to validate'})")
+            continue
+
+        content = yaml.dump_all(apply_docs, default_flow_style=False)
+        try:
+            result = kube.apply_yaml(content, namespace, dry_run=True)
+        except Exception as exc:
+            # Fail closed: unreachable cluster / AGENTIT_OFFLINE / discovery
+            # blow-ups must never look like a clean dry-run.
+            err = str(exc)
+            errors.append(f"{fpath}: {err}")
+            logger.error("Dry-run failed for %s: %s", fpath, err)
+            continue
+        if result["applied"]:
+            applied.append(fpath)
+            logger.info("Dry-run (SSA dryRun=All): %s validated cleanly", fpath)
+        elif result.get("conflict"):
+            conflicts.append({
+                "path": fpath, "error": result["error"],
+                "details": result.get("conflict_details", []),
+            })
+            logger.warning("Dry-run field-manager conflict for %s: %s", fpath, result["error"])
+        else:
+            err = result["error"] or "unknown dry-run failure"
+            errors.append(f"{fpath}: {err}")
+            # Surface a clearer "install operator X" hint when discovery
+            # fails for a known CRD kind -- still counted as an error
+            # (fail-closed), not a silent skip.
+            for doc in apply_docs:
+                kind = doc.get("kind", "")
+                if kind in _CRD_TO_OPERATOR and (
+                    "not found on cluster" in err.lower()
+                    or "no matches for kind" in err.lower()
+                ):
+                    missing_operators[kind] = _CRD_TO_OPERATOR[kind]
+            logger.error("Dry-run failed for %s: %s", fpath, err)
+
+    return {
+        "applied": applied,
+        "skipped": skipped,
+        "errors": errors,
+        "conflicts": conflicts,
+        "missing_operators": missing_operators,
+        "repo_files": repo_files,
+    }
 
 
 # Packages whose CSV only supports the OwnNamespace install mode, so they must

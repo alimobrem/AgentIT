@@ -300,6 +300,176 @@ def close_pr(pr_url: str, reason: str = "") -> dict:
         return {"error": str(exc)}
 
 
+def resolve_agentit_repo_url(cwd: Path | str | None = None) -> str:
+    """Best-effort URL of AgentIT's own GitHub repo for REST PR helpers.
+
+    Order: ``AGENTIT_REPO_URL``, ``GITHUB_REPOSITORY`` (``owner/name``),
+    then ``git remote get-url origin`` in ``cwd`` (or process cwd). Falls
+    back to the public AgentIT GitHub URL when nothing else resolves --
+    callers that need a hard failure should check the returned host.
+    """
+    import subprocess
+
+    explicit = (os.environ.get("AGENTIT_REPO_URL") or "").strip()
+    if explicit:
+        return explicit.rstrip("/").removesuffix(".git")
+    gh_repo = (os.environ.get("GITHUB_REPOSITORY") or "").strip()
+    if gh_repo and "/" in gh_repo:
+        return f"https://github.com/{gh_repo}"
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(cwd) if cwd else None,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            url = result.stdout.strip()
+            if url.startswith("git@"):
+                # git@github.com:owner/repo.git -> https://github.com/owner/repo
+                path = url.split(":", 1)[-1].removesuffix(".git")
+                host = url.split("@", 1)[-1].split(":", 1)[0]
+                return f"https://{host}/{path}"
+            return url.rstrip("/").removesuffix(".git")
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return "https://github.com/alimobrem/AgentIT"
+
+
+def list_pull_requests(
+    repo_url: str | None = None,
+    *,
+    state: str = "open",
+    limit: int = 50,
+    head_prefix: str | None = None,
+    soft_fail: bool = True,
+) -> list[dict]:
+    """List PRs via ``GET /repos/{owner}/{repo}/pulls`` (no ``gh`` CLI).
+
+    Returns ``[{"pr_url", "title", "headRefName", "state"}, ...]``. When
+    ``head_prefix`` is set, only heads starting with that prefix are kept
+    (capability-scout's ``agentit/self-improve/*`` filter).
+
+    ``soft_fail=True`` (default): returns ``[]`` on any failure (outcome-
+    sync discovery). ``soft_fail=False``: raises so fail-closed gates
+    (open-PR cap) never confuse "API down" with "zero open PRs."
+    """
+    try:
+        token = _get_token()
+        hdrs = _headers(token)
+        url = repo_url or resolve_agentit_repo_url()
+        owner, repo = _parse_owner_repo(url)
+        # GitHub only accepts open|closed|all for this endpoint.
+        api_state = state if state in ("open", "closed", "all") else "all"
+        collected: list[dict] = []
+        page = 1
+        per_page = min(100, max(1, limit))
+        while len(collected) < limit:
+            resp = requests.get(
+                f"{_API}/repos/{owner}/{repo}/pulls",
+                headers=hdrs, timeout=30,
+                params={"state": api_state, "per_page": per_page, "page": page},
+            )
+            if resp.status_code >= 400:
+                msg = f"list_pull_requests failed for {owner}/{repo}: {resp.text[:200]}"
+                if soft_fail:
+                    logger.warning("%s", msg)
+                    return []
+                raise RuntimeError(msg)
+            batch = resp.json()
+            if not isinstance(batch, list) or not batch:
+                break
+            for pr in batch:
+                head = ((pr.get("head") or {}).get("ref")) or ""
+                if head_prefix and not head.startswith(head_prefix):
+                    continue
+                collected.append({
+                    "pr_url": pr.get("html_url") or "",
+                    "title": pr.get("title") or "",
+                    "headRefName": head,
+                    "state": "merged" if pr.get("merged_at") else (pr.get("state") or "unknown"),
+                })
+                if len(collected) >= limit:
+                    break
+            if len(batch) < per_page:
+                break
+            page += 1
+        return collected[:limit]
+    except Exception as exc:
+        if soft_fail:
+            logger.warning("list_pull_requests unavailable: %s", exc)
+            return []
+        raise
+
+
+def fetch_pr_issue_comments(pr_url: str) -> list[str]:
+    """PR/issue comment bodies via REST (replaces ``gh pr view --json comments``).
+
+    Uses ``GET /repos/{owner}/{repo}/issues/{n}/comments`` -- the same
+    thread humans write close/reject reasons on. Returns ``[]`` on failure.
+    """
+    try:
+        token = _get_token()
+        hdrs = _headers(token)
+        parts = pr_url.rstrip("/").split("/")
+        if "/pull/" not in pr_url or len(parts) < 2 or parts[-2] != "pull":
+            return []
+        owner, repo, pr_number = parts[-4], parts[-3], parts[-1]
+        resp = requests.get(
+            f"{_API}/repos/{owner}/{repo}/issues/{pr_number}/comments",
+            headers=hdrs, timeout=30, params={"per_page": 100},
+        )
+        if resp.status_code >= 400:
+            return []
+        rows = resp.json()
+        if not isinstance(rows, list):
+            return []
+        return [str(c.get("body") or "") for c in rows if isinstance(c, dict)]
+    except Exception as exc:
+        logger.warning("fetch_pr_issue_comments failed for %s: %s", pr_url, exc)
+        return []
+
+
+def open_draft_pull_request(
+    repo_url: str,
+    *,
+    head: str,
+    title: str,
+    body: str,
+    base: str = "main",
+) -> dict:
+    """Open a *draft* PR via ``POST /repos/{owner}/{repo}/pulls`` (no ``gh``).
+
+    Returns ``{"pr_url": ...}`` or ``{"error": ...}``. If a PR for ``head``
+    already exists (HTTP 422), resolves its real URL like
+    ``_open_pr_with_fallback``.
+    """
+    try:
+        token = _get_token()
+        hdrs = _headers(token)
+        owner, repo = _parse_owner_repo(repo_url)
+        base_url = f"{_API}/repos/{owner}/{repo}"
+        resp = requests.post(
+            f"{base_url}/pulls",
+            headers=hdrs, timeout=30,
+            json={
+                "title": title, "body": body, "head": head, "base": base,
+                "draft": True,
+            },
+        )
+        if resp.status_code == 422 and "pull request already exists" in resp.text.lower():
+            return {
+                "pr_url": _find_existing_pr_url(
+                    base_url, hdrs, owner, head, f"{repo_url.rstrip('/')}/compare/{head}",
+                ),
+            }
+        if resp.status_code >= 400:
+            return {"error": f"GitHub API error: {resp.text[:500]}"}
+        return {"pr_url": resp.json().get("html_url") or ""}
+    except Exception as exc:
+        logger.warning("open_draft_pull_request failed: %s", exc)
+        return {"error": str(exc)}
+
+
 def get_commit_info(repo_url: str, sha: str) -> dict:
     """Fetch a single commit's message/author/URL from the GitHub API.
 

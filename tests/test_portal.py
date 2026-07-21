@@ -1787,9 +1787,13 @@ async def test_onboard_results_uses_design_system_classes(client, _override_stor
     assert "manifest-title" in resp.text
     assert "manifest-desc" in resp.text
     assert "code-block" in resp.text
+    # Scan-only Onboard Results (#123): actions strip remains; no step rail /
+    # Commit connector (manual Deliver CTAs removed).
     assert "delivery-actions" in resp.text
-    assert "delivery-step" in resp.text
-    assert "delivery-connector" in resp.text
+    assert "delivery-secondary" in resp.text
+    assert "delivery-connector" not in resp.text
+    assert 'class="delivery-step"' not in resp.text
+    assert "Commit & Open PR" not in resp.text
     assert 'hx-boost="false"' in resp.text
 
 

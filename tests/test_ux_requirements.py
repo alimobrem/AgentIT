@@ -415,7 +415,10 @@ async def test_non_perfect_score_never_celebrates(client, _override_store):
     assert "First perfect score" not in resp.text
 
 
-async def test_clean_multi_manifest_delivery_celebrates(client, _override_store):
+async def test_onboard_results_does_not_celebrate_apply_results(client, _override_store):
+    """Scan-only Onboard Results (#123) dropped the multi-manifest Deliver
+    celebration (and Deliver itself). Checklist #9 joy stays on first
+    perfect score (assessment detail), not this page."""
     store = _override_store
     aid = await store.save(_make_report("multi-deliver-app"))
     await store.save_onboarding(aid, [
@@ -428,13 +431,12 @@ async def test_clean_multi_manifest_delivery_celebrates(client, _override_store)
     )
     resp = await client.get(f"/assessments/{aid}/onboard-results")
     assert resp.status_code == 200
-    assert "celebrate" in resp.text
-    assert "all 3 manifests applied clean" in resp.text
+    assert 'class="step-guide celebrate' not in resp.text
+    assert "all 3 manifests applied clean" not in resp.text
 
 
 async def test_single_manifest_delivery_does_not_celebrate(client, _override_store):
-    """A routine single-fix Deliver must never be gamified (checklist #9's
-    explicit warning against celebrating routine actions)."""
+    """Onboard Results must never gamify apply_results (checklist #9)."""
     store = _override_store
     aid = await store.save(_make_report("single-deliver-app"))
     await store.save_onboarding(aid, [

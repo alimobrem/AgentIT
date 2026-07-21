@@ -136,7 +136,7 @@ class SloTracker:
 
         rollback_summary = (
             f"SLO breach detected for {repo_name} after recent apply. Breached: {breach_names}. "
-            f"Review and decide: rollback or investigate. (kubectl argo rollouts undo {repo_name})"
+            f"Review and decide: rollback or investigate (Argo Rollout abort / portal rollback for {repo_name})."
         )
         self._publisher.publish(
             TOPIC_ALERTS,
