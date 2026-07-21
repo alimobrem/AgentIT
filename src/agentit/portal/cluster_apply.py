@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import yaml
@@ -8,6 +9,38 @@ import yaml
 from agentit import kube
 
 logger = logging.getLogger(__name__)
+
+# Soft: AgentIT SA cannot dry-run every Role/LimitRange; optional operator
+# CRDs (Kyverno, Litmus, …) may be absent. Neither means the manifest is
+# invalid for GitOps/Argo after merge. Hard: schema/admission/unreachable.
+_SOFT_FORBIDDEN_RE = re.compile(
+    r"\bForbidden\b|\(403\)|\b403\b.*\bForbidden\b",
+    re.IGNORECASE,
+)
+_SOFT_MISSING_CRD_RE = re.compile(
+    r"no matches for kind|"
+    r"not found on cluster|"
+    r"could not find the requested resource|"
+    r"the server could not find the requested resource|"
+    r"unable to recognize",
+    re.IGNORECASE,
+)
+
+
+def classify_dry_run_error(message: str | None) -> str:
+    """Classify an SSA dry-run failure as ``\"hard\"`` or ``\"soft\"``.
+
+    Soft → warn in PR body / apply_results; do not block Scan when hard
+    errors are empty. Hard → ``needs_attention`` / block PR open.
+    """
+    text = (message or "").strip()
+    if not text:
+        return "hard"
+    if _SOFT_FORBIDDEN_RE.search(text):
+        return "soft"
+    if _SOFT_MISSING_CRD_RE.search(text):
+        return "soft"
+    return "hard"
 
 _SKIP_EXTENSIONS = frozenset({".sh", ".md", ".json", ".txt", ".toml", ".cfg", ".ini"})
 
@@ -267,15 +300,21 @@ def dry_run_manifests_against_cluster(
     Calls ``kube.apply_yaml(..., dry_run=True)`` for every concrete YAML
     document that would be delivered -- never persists anything on the
     cluster. This is the portal/auto_delivery Dry Run path (GitOps remains
-    the sole real apply via PR merge + Argo). Fail-closed: missing CRDs,
-    RBAC denials, admission rejections, and unreachable clusters all land
-    in ``errors`` / ``conflicts`` (never a false "OK").
+    the sole real apply via PR merge + Argo).
 
+    Failures are classified via ``classify_dry_run_error``:
+    - **hard** (``errors``): schema/Bad Request, admission, unreachable —
+      block PR / ``needs_attention``
+    - **soft** (``warnings``): Forbidden (SA lacks dry-run RBAC), missing
+      optional CRD / GVK — warn in PR body; do not block when hard is empty
+
+    Field-manager conflicts stay hard (ownership fight needs a human).
     Non-YAML / narrative files are listed under ``repo_files`` and skipped.
     """
     applied: list[str] = []
     skipped: list[str] = []
     errors: list[str] = []
+    warnings: list[str] = []
     conflicts: list[dict] = []
     missing_operators: dict[str, dict] = {}
     repo_files: list[dict] = []
@@ -333,24 +372,45 @@ def dry_run_manifests_against_cluster(
             })
             logger.warning("Dry-run field-manager conflict for %s: %s", fpath, result["error"])
         else:
-            err = result["error"] or "unknown dry-run failure"
-            errors.append(f"{fpath}: {err}")
-            # Surface a clearer "install operator X" hint when discovery
-            # fails for a known CRD kind -- still counted as an error
-            # (fail-closed), not a silent skip.
-            for doc in apply_docs:
-                kind = doc.get("kind", "")
-                if kind in _CRD_TO_OPERATOR and (
-                    "not found on cluster" in err.lower()
-                    or "no matches for kind" in err.lower()
-                ):
-                    missing_operators[kind] = _CRD_TO_OPERATOR[kind]
-            logger.error("Dry-run failed for %s: %s", fpath, err)
+            # Prefer per-document ``errors`` so a soft Forbidden on doc 1
+            # cannot hide a hard Bad Request on doc 2.
+            per_doc = list(result.get("errors") or [])
+            if not per_doc and result.get("error"):
+                per_doc = [str(result["error"])]
+            file_hard: list[str] = []
+            file_soft: list[str] = []
+            for msg in per_doc:
+                tagged = f"{fpath}: {msg}"
+                if classify_dry_run_error(msg) == "soft":
+                    file_soft.append(tagged)
+                    for doc in apply_docs:
+                        kind = doc.get("kind", "")
+                        if kind in _CRD_TO_OPERATOR and (
+                            "not found on cluster" in msg.lower()
+                            or "no matches for kind" in msg.lower()
+                            or "could not find the requested resource" in msg.lower()
+                            or "unable to recognize" in msg.lower()
+                        ):
+                            missing_operators[kind] = _CRD_TO_OPERATOR[kind]
+                else:
+                    file_hard.append(tagged)
+            if file_hard:
+                errors.extend(file_hard)
+                logger.error("Dry-run hard failure for %s: %s", fpath, "; ".join(file_hard))
+            if file_soft:
+                warnings.extend(file_soft)
+                logger.warning(
+                    "Dry-run soft warning for %s (non-blocking): %s",
+                    fpath, "; ".join(file_soft),
+                )
+            if not file_hard and not file_soft:
+                errors.append(f"{fpath}: unknown dry-run failure")
 
     return {
         "applied": applied,
         "skipped": skipped,
         "errors": errors,
+        "warnings": warnings,
         "conflicts": conflicts,
         "missing_operators": missing_operators,
         "repo_files": repo_files,

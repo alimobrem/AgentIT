@@ -416,6 +416,10 @@ def apply_yaml(
     Returns a dict:
       - applied: True only if every document in `content` applied cleanly.
       - error: a short message (first failure) when `applied` is False.
+      - errors: per-document failure messages (non-conflict). Callers that
+        classify hard vs soft dry-run failures (Forbidden vs Bad Request)
+        must use this list — a soft failure on doc 1 must not hide a hard
+        failure on doc 2 if only ``error`` (first) were consulted.
       - conflict: True when the failure was purely field-manager conflict(s)
         (never true when `applied` is True, and never true alongside a
         non-conflict failure -- a hard error takes precedence for `error`/
@@ -432,23 +436,33 @@ def apply_yaml(
 
     if kube_breaker.is_open:
         logger.warning("Kube circuit breaker open — skipping apply_yaml(%s)", namespace)
+        msg = "Kubernetes circuit breaker open — too many recent API failures"
         return {
             "applied": False,
-            "error": "Kubernetes circuit breaker open — too many recent API failures",
+            "error": msg,
+            "errors": [msg],
             "conflict": False, "conflict_details": [],
         }
 
     try:
         docs = [d for d in _yaml.safe_load_all(content) if isinstance(d, dict)]
     except _yaml.YAMLError as exc:
-        return {"applied": False, "error": f"invalid YAML: {exc}", "conflict": False, "conflict_details": []}
+        msg = f"invalid YAML: {exc}"
+        return {
+            "applied": False, "error": msg, "errors": [msg],
+            "conflict": False, "conflict_details": [],
+        }
 
     if not docs:
-        return {"applied": True, "error": None, "conflict": False, "conflict_details": []}
+        return {
+            "applied": True, "error": None, "errors": [],
+            "conflict": False, "conflict_details": [],
+        }
 
     with _kube_breaker_scope():
         dyn = dynamic_client()
     conflict_details: list[dict] = []
+    doc_errors: list[str] = []
     first_error: str | None = None
     any_conflict = False
     any_failure = False
@@ -462,7 +476,9 @@ def apply_yaml(
 
         if not kind or not api_version or not name:
             any_failure = True
-            first_error = first_error or f"document missing kind/apiVersion/name (kind={kind!r}, name={name!r})"
+            msg = f"document missing kind/apiVersion/name (kind={kind!r}, name={name!r})"
+            doc_errors.append(msg)
+            first_error = first_error or msg
             continue
 
         try:
@@ -470,7 +486,9 @@ def apply_yaml(
                 resource = dyn.resources.get(api_version=api_version, kind=kind)
         except Exception as exc:
             any_failure = True
-            first_error = first_error or f"{kind} ({api_version}) not found on cluster: {exc}"
+            msg = f"{kind} ({api_version}) not found on cluster: {exc}"
+            doc_errors.append(msg)
+            first_error = first_error or msg
             continue
 
         try:
@@ -492,17 +510,25 @@ def apply_yaml(
                 first_error = first_error or f"{kind}/{name}: field-manager conflict -- {message}"
             else:
                 any_failure = True
-                first_error = first_error or f"{kind}/{name}: {exc.reason or exc.body or exc}"
+                msg = f"{kind}/{name}: {exc.reason or exc.body or exc}"
+                doc_errors.append(msg)
+                first_error = first_error or msg
         except Exception as exc:
             any_failure = True
-            first_error = first_error or f"{kind}/{name}: {exc}"
+            msg = f"{kind}/{name}: {exc}"
+            doc_errors.append(msg)
+            first_error = first_error or msg
 
     if not any_failure and not any_conflict:
-        return {"applied": True, "error": None, "conflict": False, "conflict_details": []}
+        return {
+            "applied": True, "error": None, "errors": [],
+            "conflict": False, "conflict_details": [],
+        }
 
     return {
         "applied": False,
         "error": first_error,
+        "errors": doc_errors,
         "conflict": any_conflict and not any_failure,
         "conflict_details": conflict_details if (any_conflict and not any_failure) else [],
     }

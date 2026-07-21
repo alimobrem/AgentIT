@@ -78,7 +78,7 @@ Shipped foundation (do not re-litigate):
 | Fail-closed chart gate | `validate_self_managed_chart_delivery()` (#119) |
 | Filter + generate better | `filter_self_managed_delivery_files()`, `SkillEngine(self_managed=True)` (#121) |
 | Scan-only PR creation | `auto_delivery.auto_validate_and_deliver()`; Onboard Results CTAs removed (#123) |
-| SSA dry-run preflight | `cluster_apply.dry_run_manifests_against_cluster()` via `deliver_with_verification(dry_run=True)` (#125) |
+| SSA dry-run preflight | `cluster_apply.dry_run_manifests_against_cluster()` via `deliver_with_verification(dry_run=True)` (#125); hard vs soft classification (`classify_dry_run_error`) — Forbidden / missing optional CRD warn, schema Bad Request still blocks |
 | Finding correlation plumbing | `route_and_deliver(..., target_findings=)`, `correlate_delivery_finding()`, Ledger |
 
 **Still broken relative to “good PR”:**

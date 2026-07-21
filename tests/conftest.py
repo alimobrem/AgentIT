@@ -168,6 +168,7 @@ _HERMETIC_API_DRY_RUN_OK = {
     "applied": [],
     "skipped": [],
     "errors": [],
+    "warnings": [],
     "conflicts": [],
     "missing_operators": {},
     "repo_files": [],

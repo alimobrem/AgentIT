@@ -214,7 +214,12 @@ def cluster_validation_ok(
     dry_run_errors: list[str],
     failed_properties: list[str],
 ) -> tuple[bool, str]:
-    """Phase C: per-cluster bar — SSA/dry-run errors or targeted property fails block the PR."""
+    """Phase C: per-cluster bar — hard SSA/dry-run errors or targeted property fails block the PR.
+
+    Soft dry-run warnings (Forbidden / missing optional CRD) are *not* passed
+    in ``dry_run_errors`` — callers keep those in a separate warnings list
+    for PR body notes without blocking open.
+    """
     if dry_run_errors:
         return False, "SSA/dry-run failed: " + "; ".join(dry_run_errors[:5])
     if failed_properties:

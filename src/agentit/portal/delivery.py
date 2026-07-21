@@ -837,9 +837,11 @@ async def deliver_with_verification(
     ``dry_run=True`` never opens a PR or commits -- it runs a real
     Kubernetes server-side-apply ``dryRun=All`` (via
     ``cluster_apply.dry_run_manifests_against_cluster``) against concrete
-    YAML that would be delivered, then returns a preview. Failures fail
-    closed with ``error`` set (auto_delivery / UI treat that as
-    needs_attention). Helm-shaped templates and non-YAML source patches
+    YAML that would be delivered, then returns a preview. Hard failures
+    (schema/admission/unreachable) set ``error`` (auto_delivery /
+    needs_attention). Soft failures (Forbidden / missing optional CRD)
+    land in ``dry_run_warnings`` and do **not** set ``error`` when hard
+    errors are empty. Helm-shaped templates and non-YAML source patches
     skip the apiserver call (not valid SSA input).
     """
     resource = f"assessment:{assessment_id}"
@@ -854,6 +856,7 @@ async def deliver_with_verification(
             and not is_helm_shaped(f.get("content") or "")
         ]
         dry_errors: list[str] = []
+        dry_warnings: list[str] = []
         dry_conflicts: list[dict] = []
         missing_operators: dict = {}
         validated: list[str] = []
@@ -862,6 +865,7 @@ async def deliver_with_verification(
                 dry_run_manifests_against_cluster, concrete_yaml, namespace,
             )
             dry_errors = list(validation.get("errors") or [])
+            dry_warnings = list(validation.get("warnings") or [])
             dry_conflicts = list(validation.get("conflicts") or [])
             missing_operators = dict(validation.get("missing_operators") or {})
             validated = list(validation.get("applied") or [])
@@ -874,6 +878,7 @@ async def deliver_with_verification(
             details={
                 "mechanism": mechanism, "files": len(files),
                 "validated": len(validated), "errors": len(dry_errors),
+                "warnings": len(dry_warnings),
             },
         )
         result: dict = {
@@ -882,9 +887,12 @@ async def deliver_with_verification(
         }
         if missing_operators:
             result["missing_operators"] = missing_operators
+        if dry_warnings:
+            result["dry_run_warnings"] = dry_warnings
         if dry_errors:
-            # Fail closed -- never report a clean dry-run when the apiserver
-            # rejected anything (missing CRD, RBAC, admission, unreachable).
+            # Fail closed on hard errors only (schema/admission/unreachable /
+            # field-manager conflict). Soft Forbidden / missing-CRD stay in
+            # dry_run_warnings and do not set error when hard is empty.
             hint = ""
             if missing_operators:
                 ops = ", ".join(
@@ -898,6 +906,20 @@ async def deliver_with_verification(
                 + hint
             )
             result["dry_run_errors"] = dry_errors
+        elif dry_warnings:
+            hint = ""
+            if missing_operators:
+                ops = ", ".join(
+                    sorted({op.get("name") or k for k, op in missing_operators.items()})
+                )
+                hint = f" (related operator/CRD may be missing: {ops})"
+            result["dry_run_note"] = (
+                "Kubernetes API dry-run warnings (non-blocking — Forbidden or "
+                "optional CRD missing, not treated as invalid manifests): "
+                + "; ".join(dry_warnings[:5])
+                + ("…" if len(dry_warnings) > 5 else "")
+                + hint
+            )
         return result
 
     try:

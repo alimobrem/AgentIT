@@ -39,7 +39,7 @@ class TestApplyYamlSuccess:
         with patch("agentit.kube.dynamic_client", return_value=dyn):
             result = kube.apply_yaml(_CM_YAML, "default")
 
-        assert result == {"applied": True, "error": None, "conflict": False, "conflict_details": []}
+        assert result == {"applied": True, "error": None, "errors": [], "conflict": False, "conflict_details": []}
         dyn.server_side_apply.assert_called_once()
         call_kwargs = dyn.server_side_apply.call_args.kwargs
         assert call_kwargs["field_manager"] == "agentit"
@@ -203,7 +203,7 @@ class TestApplyYamlDryRun:
         with patch("agentit.kube.dynamic_client", return_value=dyn):
             result = kube.apply_yaml(_CM_YAML, "default", dry_run=True)
 
-        assert result == {"applied": True, "error": None, "conflict": False, "conflict_details": []}
+        assert result == {"applied": True, "error": None, "errors": [], "conflict": False, "conflict_details": []}
 
 
 class TestApplyYamlInvalidInput:

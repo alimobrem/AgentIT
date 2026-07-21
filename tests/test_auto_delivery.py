@@ -39,7 +39,7 @@ from conftest import make_report, make_store
 # assert property/GitOps-registration behavior, not kube connectivity.
 _CLEAN_DRY_RUN = {
     "applied": ["app-config.yaml"], "skipped": [], "errors": [],
-    "conflicts": [], "missing_operators": {}, "repo_files": [],
+    "warnings": [], "conflicts": [], "missing_operators": {}, "repo_files": [],
 }
 
 
@@ -160,6 +160,42 @@ class TestValidateAndFixManifests:
         assert result["clean"] is False
         assert len(result["iterations"]) == 1
         assert any("GitOps" in e for e in result["iterations"][0]["dry_run_errors"])
+
+    async def test_soft_only_dry_run_warnings_still_converge(self):
+        """Forbidden / missing optional CRD must not block convergence —
+        pinky fleet PRs were stuck when AgentIT SA couldn't dry-run Roles
+        or Kyverno was absent. Soft warnings are returned, hard errors empty."""
+        store = await make_store()
+        report = make_report(repo_name="soft-dry-run-app")
+        report.infra_repo_url = "https://github.com/org/soft-dry-run-app-gitops"
+        aid = await store.save(report)
+
+        soft_only = {
+            "applied": [], "skipped": [], "errors": [],
+            "warnings": [
+                "role.yaml: Role/reader: Forbidden",
+                "policy.yaml: Policy (kyverno.io/v1) not found on cluster: no matches for kind",
+            ],
+            "conflicts": [],
+            "missing_operators": {"Policy": {"name": "Kyverno (community)"}},
+            "repo_files": [],
+        }
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None), \
+             patch(
+                 "agentit.portal.cluster_apply.dry_run_manifests_against_cluster",
+                 return_value=soft_only,
+             ):
+            result = await validate_and_fix_manifests(
+                [_configmap_file()], app_name=report.repo_name, namespace="ns", report=report,
+                store=store, assessment_id=aid, actor="tester",
+            )
+
+        assert result["clean"] is True
+        assert result["warnings"]
+        assert any("Forbidden" in w for w in result["warnings"])
+        assert result["iterations"][0]["dry_run_errors"] == []
+        assert result["iterations"][0]["dry_run_warnings"]
+
 
     async def test_never_fixes_a_property_that_was_not_a_real_finding(self):
         """property_verifier checks all four properties unconditionally --
