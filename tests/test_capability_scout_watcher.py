@@ -25,7 +25,11 @@ def _proposal(**overrides) -> dict:
         "has_proposal": True,
         "title": "Track stack signatures",
         "gap_description": "README documents an idea that was never built",
-        "evidence": "README.md:42 — Documented future idea (not built)",
+        # Cite dogfood/finding so evidence-usefulness gate passes.
+        "evidence": (
+            "Dogfood Scan finding still_present after merge — README.md:42 "
+            "documents a future idea that never cleared the finding"
+        ),
         "target_files": ["src/agentit/portal/store.py", "tests/test_store.py"],
         "change_summary": "Add a counter and a threshold check",
         "risk": "low",
