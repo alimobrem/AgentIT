@@ -14,6 +14,7 @@ configure_logging()
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from agentit.ledger import humanize_action as _humanize_action
@@ -43,8 +44,21 @@ from agentit.skill_inventory import diff_and_log_inventory_changes
 log = logging.getLogger(__name__)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
+STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(title="AgentIT Portal")
+
+# base.html's CSS/JS (extracted from an inline <style>/<script> block
+# 2026-07-20 -- see static/css/ and static/js/) is served from here, not
+# templated -- Jinja2Templates only renders *.html under TEMPLATES_DIR.
+# base.html references these with a `?v={{ build_info.commit }}` query
+# string for cache-busting (see `_build_info_context_processor` below),
+# not a Cache-Control header -- Starlette's StaticFiles already emits
+# ETag/Last-Modified for free (conditional-GET/304 support), and the
+# commit-scoped query string means a stale cached copy is never served
+# across a real deploy without needing any extra asset-versioning
+# machinery.
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 from agentit.portal.metrics import instrument_app
 instrument_app(app)

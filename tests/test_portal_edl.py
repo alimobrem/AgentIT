@@ -119,6 +119,9 @@ async def edl_client():
 
 
 async def test_base_shell_has_toasts_confirm_dialog_and_events_drawer(edl_client):
+    """base.html's CSS moved to static/css/ (2026-07-20 base.html split) --
+    the two CSS-rule assertions below now check that content there instead
+    of the rendered page's HTML."""
     client, _store = edl_client
     resp = await client.get("/")
     assert resp.status_code == 200
@@ -132,8 +135,10 @@ async def test_base_shell_has_toasts_confirm_dialog_and_events_drawer(edl_client
     assert "events-bell" in html
     assert 'id="events-drawer"' in html
     assert 'href="/decisions"' in html
-    assert re.search(r"\.btn-danger\s*\{", html)
-    assert "font-size: var(--font-xs)" in html or "font-size:var(--font-xs)" in html
+
+    css = (await client.get("/static/css/components.css")).text
+    assert re.search(r"\.btn-danger\s*\{", css)
+    assert "font-size: var(--font-xs)" in css or "font-size:var(--font-xs)" in css
 
 
 async def test_fleet_assess_modal_has_dialog_semantics(edl_client):
@@ -246,20 +251,24 @@ async def test_async_feedback_surfaces_present_on_key_pages(edl_client):
 
 
 async def test_filter_bar_pattern_on_list_pages(edl_client):
-    """EDL §6: Decisions / Events / Ledger use compact .filter-bar, not .action-bar."""
+    """EDL §6: Decisions / Events / Ledger use compact .filter-bar, not
+    .action-bar. The .filter-bar CSS rule assertions check
+    static/css/components.css (2026-07-20 base.html split moved base.html's
+    CSS there) instead of each page's own rendered HTML."""
     client, _store = edl_client
+    css = (await client.get("/static/css/components.css")).text
+    assert re.search(r"\.filter-bar\s*\{", css)
+    assert re.search(
+        r"\.filter-bar\s+input\s*,\s*\.filter-bar\s+select\s*\{[^}]*width\s*:\s*auto",
+        css,
+        re.S,
+    )
     for path in ("/decisions", "/events", "/ledger"):
         resp = await client.get(path)
         assert resp.status_code == 200, path
         html = resp.text
         assert "filter-bar" in html, path
         assert "filter-actions" in html, path
-        assert re.search(r"\.filter-bar\s*\{", html), path
-        assert re.search(
-            r"\.filter-bar\s+input\s*,\s*\.filter-bar\s+select\s*\{[^}]*width\s*:\s*auto",
-            html,
-            re.S,
-        ), path
         for m in re.finditer(r'<form\b[^>]*method=["\']get["\'][^>]*>', html, re.I):
             tag = m.group(0)
             if "filter-bar" in tag:

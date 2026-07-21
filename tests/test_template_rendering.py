@@ -9,6 +9,13 @@ from unittest.mock import patch
 import pytest
 
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "src" / "agentit" / "portal" / "templates"
+STATIC_DIR = Path(__file__).resolve().parent.parent / "src" / "agentit" / "portal" / "static"
+# base.html's core shell script (CSRF wiring, htmx error handling, the
+# confirm modal, toasts, timestamp formatting -- see static/js/base.js's own
+# module docstring) was extracted out of an inline <script> block into this
+# file (2026-07-20 base.html split); several assertions below that used to
+# read base.html's raw text for this JS now read this file instead.
+BASE_JS = STATIC_DIR / "js" / "base.js"
 
 
 class TestAlpineScoping:
@@ -112,21 +119,21 @@ class TestUrlParamToastsSurviveHtmxBoost:
     """
 
     def test_show_url_param_toasts_helper_exists(self):
-        html = (TEMPLATES_DIR / "base.html").read_text(encoding="utf-8")
-        assert "function showUrlParamToasts()" in html
-        assert "document.addEventListener('alpine:initialized', showUrlParamToasts)" in html
+        js = BASE_JS.read_text(encoding="utf-8")
+        assert "function showUrlParamToasts()" in js
+        assert "document.addEventListener('alpine:initialized', showUrlParamToasts)" in js
 
     def test_htmx_after_settle_reinvokes_url_param_toasts_on_boost(self):
-        html = (TEMPLATES_DIR / "base.html").read_text(encoding="utf-8")
-        reiniter_idx = html.find("Alpine.destroyTree(document.body)")
+        js = BASE_JS.read_text(encoding="utf-8")
+        reiniter_idx = js.find("Alpine.destroyTree(document.body)")
         assert reiniter_idx != -1
-        toast_idx = html.find("showUrlParamToasts()", reiniter_idx)
+        toast_idx = js.find("showUrlParamToasts()", reiniter_idx)
         assert toast_idx != -1, (
-            "base.html must call showUrlParamToasts() after Alpine.initTree "
-            "on boosted htmx:afterSettle — otherwise Register/Deliver flash "
-            "messages are silently dropped"
+            "static/js/base.js must call showUrlParamToasts() after "
+            "Alpine.initTree on boosted htmx:afterSettle — otherwise "
+            "Register/Deliver flash messages are silently dropped"
         )
-        else_idx = html.find("else if (e.detail.target", reiniter_idx)
+        else_idx = js.find("else if (e.detail.target", reiniter_idx)
         assert else_idx == -1 or toast_idx < else_idx
 
 
@@ -496,19 +503,19 @@ class TestHTMXErrorHandling:
     """Verify the portal has error handling for htmx requests."""
 
     def test_base_has_error_handlers(self):
-        html = (TEMPLATES_DIR / "base.html").read_text(encoding="utf-8")
-        assert "htmx:responseError" in html or "htmx:sendError" in html, \
-            "base.html should handle htmx errors"
+        js = BASE_JS.read_text(encoding="utf-8")
+        assert "htmx:responseError" in js or "htmx:sendError" in js, \
+            "static/js/base.js should handle htmx errors"
 
     def test_base_has_loading_reset(self):
-        html = (TEMPLATES_DIR / "base.html").read_text(encoding="utf-8")
-        assert "completeLoading" in html or "cursor" in html, \
-            "base.html should reset cursor/loading state"
+        js = BASE_JS.read_text(encoding="utf-8")
+        assert "completeLoading" in js or "cursor" in js, \
+            "static/js/base.js should reset cursor/loading state"
 
     def test_base_has_dead_button_detector(self):
-        html = (TEMPLATES_DIR / "base.html").read_text(encoding="utf-8")
-        assert "Dead button" in html, \
-            "base.html should have dead-button detector"
+        js = BASE_JS.read_text(encoding="utf-8")
+        assert "Dead button" in js, \
+            "static/js/base.js should have dead-button detector"
 
 
 class TestTemplateRendering:
@@ -633,12 +640,36 @@ class TestTemplateRendering:
         assert (await client.get("/nonexistent-xyz")).status_code == 404
 
     async def test_all_pages_have_css(self, portal_client):
+        """base.html's CSS moved from an inline <style> block to real static
+        files (2026-07-20) -- every page must still reference both, and the
+        referenced URLs must actually resolve (not just be present as text),
+        so a typo'd href/mount path fails this test instead of silently
+        shipping an unstyled page."""
         client, _, aid = portal_client
         for page in ["/", "/assess", f"/assessments/{aid}", "/events", "/ledger",
                      "/agents", "/settings", "/workflows", "/health"]:
             resp = await client.get(page)
             assert resp.status_code == 200, f"{page} returned {resp.status_code}"
-            assert "<style" in resp.text, f"{page} missing CSS"
+            assert '<link rel="stylesheet" href="/static/css/base.css' in resp.text, f"{page} missing base.css link"
+            assert '<link rel="stylesheet" href="/static/css/components.css' in resp.text, f"{page} missing components.css link"
+
+    async def test_static_css_and_js_actually_resolve(self, portal_client):
+        """Regression guard for the base.html CSS/JS extraction (2026-07-20):
+        confirms the /static mount actually serves real, non-empty CSS/JS --
+        catching a broken StaticFiles mount or a typo'd static/ path that
+        `test_all_pages_have_css` (a pure string-match on the <link>/<script>
+        href/src) could not, since that test never fetches the URL."""
+        client, _, _ = portal_client
+        for path, marker in [
+            ("/static/css/base.css", ":root"),
+            ("/static/css/components.css", ".stat-grid"),
+            ("/static/js/base.js", "function confirmModal()"),
+            ("/static/js/events-drawer.js", "function eventsDrawer()"),
+            ("/static/js/command-palette.js", "function commandPalette()"),
+        ]:
+            resp = await client.get(path)
+            assert resp.status_code == 200, f"{path} returned {resp.status_code}"
+            assert marker in resp.text, f"{path} missing expected content {marker!r}"
 
 
 class TestAuthNav:

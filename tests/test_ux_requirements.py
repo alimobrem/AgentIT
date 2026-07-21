@@ -122,11 +122,15 @@ def _cicd_file() -> dict:
 
 async def test_confirm_modal_focuses_cancel_on_show(client):
     """Every existing usage of the shared confirm component shares one
-    Alpine component (confirmModal()) -- the fix lives once, in show()."""
+    Alpine component (confirmModal()) -- the fix lives once, in show().
+    confirmModal() itself moved out of base.html's inline <script> block
+    into static/js/base.js (2026-07-20 base.html split); the `x-ref`
+    markup it targets is unchanged, still in the rendered page."""
     resp = await client.get("/")
     assert resp.status_code == 200
-    assert "this.$refs.cancelBtn.focus()" in resp.text
     assert 'x-ref="cancelBtn"' in resp.text
+    js = (await client.get("/static/js/base.js")).text
+    assert "this.$refs.cancelBtn.focus()" in js
 
 
 # ── #1: type-to-confirm reserved for highest-blast-radius actions only ──
@@ -206,8 +210,11 @@ async def test_command_palette_has_discoverable_shortcut_hint(client):
 
 async def test_command_palette_searches_real_fleet_data_not_mock(client, _override_store):
     """The palette's app search must hit the real /api/fleet endpoint --
-    never mock/fabricated data."""
-    resp = await client.get("/")
+    never mock/fabricated data. commandPalette() moved out of base.html's
+    inline <script> block into static/js/command-palette.js (2026-07-20
+    base.html split)."""
+    resp = await client.get("/static/js/command-palette.js")
+    assert resp.status_code == 200
     assert "fetch('/api/fleet')" in resp.text
 
 
@@ -518,7 +525,9 @@ async def test_ledger_tab_empty_state_shows_real_recent_resolution_count(client,
 
 
 async def test_prefers_reduced_motion_globally_handled(client):
-    resp = await client.get("/")
+    """This rule moved out of base.html's inline <style> block into
+    static/css/components.css (2026-07-20 base.html split)."""
+    resp = await client.get("/static/css/components.css")
     assert resp.status_code == 200
     assert "prefers-reduced-motion: reduce" in resp.text
     assert "transition-duration: 0.001ms !important" in resp.text
@@ -527,8 +536,9 @@ async def test_prefers_reduced_motion_globally_handled(client):
 async def test_toast_motion_classes_are_actually_defined(client):
     """Regression: toast-enter/toast-leave were referenced by x-transition
     but never defined anywhere in the stylesheet -- a real (if silent) bug
-    this pass also fixes while adding reduced-motion support."""
-    resp = await client.get("/")
+    this pass also fixes while adding reduced-motion support. Moved to
+    static/css/components.css (2026-07-20 base.html split)."""
+    resp = await client.get("/static/css/components.css")
     assert ".toast-enter {" in resp.text
     assert ".toast-leave {" in resp.text
 
@@ -537,7 +547,9 @@ async def test_toast_motion_classes_are_actually_defined(client):
 
 
 async def test_accent_color_not_used_for_plain_links_or_headings(client):
-    resp = await client.get("/")
+    """These rules moved out of base.html's inline <style> block into
+    static/css/base.css (2026-07-20 base.html split)."""
+    resp = await client.get("/static/css/base.css")
     assert resp.status_code == 200
     assert "a { color: var(--color-link); text-decoration: none; }" in resp.text
     assert "h1 { color: var(--color-heading);" in resp.text
@@ -546,6 +558,7 @@ async def test_accent_color_not_used_for_plain_links_or_headings(client):
 
 async def test_accent_color_still_reserved_for_attention_signals(client, _override_store):
     """nav-badge (pending-count bubble) and the confirm modal's danger
-    styling are legitimate "needs attention" uses -- still accent."""
-    resp = await client.get("/")
+    styling are legitimate "needs attention" uses -- still accent. Moved to
+    static/css/components.css (2026-07-20 base.html split)."""
+    resp = await client.get("/static/css/components.css")
     assert ".nav-badge { background: var(--color-accent);" in resp.text

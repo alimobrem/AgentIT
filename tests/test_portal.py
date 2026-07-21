@@ -702,21 +702,30 @@ async def test_fleet_h1_not_enterprise_readiness(client, _override_store):
 
 async def test_masthead_nav_structure(client, _override_store):
     """Ledger is primary nav (ops home); Decisions is in the user/main menu;
-    Events is a bell icon + drawer (full page still at /events). No Activity dropdown."""
+    Events is a bell icon + drawer (full page still at /events). No Activity
+    dropdown.
+
+    eventsDrawer() moved out of base.html's inline <script> block into
+    static/js/events-drawer.js (2026-07-20 base.html split) -- the markup
+    (nav/drawer HTML, Alpine bindings) is unchanged and still checked
+    against `html` below; assertions that used to grep that same `html` for
+    eventsDrawer()'s JS implementation details now check the static file.
+    """
     resp = await client.get("/ledger")
     assert resp.status_code == 200
     html = resp.text
+    js = (await client.get("/static/js/events-drawer.js")).text
     assert "events-bell" in html
     assert "events-bell-badge" in html
     assert 'id="events-drawer"' in html
     assert "eventsDrawer()" in html
-    assert "/api/events?limit=20" in html
+    assert "/api/events?limit=20" in js
     # Badge polls the same real feed (slightly larger window for unread).
-    assert "/api/events?limit=50" in html
-    assert "agentit.events.lastSeenAt" in html
-    assert "refreshBadge" in html
-    assert "_isBadgeSeverity" in html
-    assert "_eventHref" in html
+    assert "/api/events?limit=50" in js
+    assert "agentit.events.lastSeenAt" in js
+    assert "refreshBadge" in js
+    assert "_isBadgeSeverity" in js
+    assert "_eventHref" in js
     assert "activity-menu" not in html
     # Bell shares Alpine scope with the drawer (aria-expanded + focus restore).
     assert ':aria-expanded="open"' in html
@@ -725,25 +734,32 @@ async def test_masthead_nav_structure(client, _override_store):
     assert 'x-ref="drawerPanel"' in html
     # Overlay/panel closed by CSS default + `.open` class (not x-show alone) —
     # prevents a post-boost Alpine race from leaving a full-screen click trap.
-    assert ".events-drawer-overlay.open" in html
-    assert ".events-drawer-panel.open" in html
+    # These two CSS rules moved out of base.html's inline <style> block into
+    # static/css/base.css (2026-07-20 base.html split).
+    base_css = (await client.get("/static/css/base.css")).text
+    assert ".events-drawer-overlay.open" in base_css
+    assert ".events-drawer-panel.open" in base_css
     assert ":class=\"{ 'open': open }\"" in html
-    assert "destroy()" in html and "_removeTrap()" in html
+    assert "destroy()" in js and "_removeTrap()" in js
     # Mobile hamburger owns primary + secondary (not secondary-only).
     assert 'id="nav-primary"' in html
     assert 'id="nav-secondary"' in html
     assert 'aria-controls="nav-primary nav-secondary"' in html
     assert ":aria-expanded=\"navOpen\"" in html
-    assert 'nav .links.links-open' in html
+    # Moved to static/css/components.css (2026-07-20 base.html split).
+    components_css = (await client.get("/static/css/components.css")).text
+    assert 'nav .links.links-open' in components_css
     # Cmd+K search MUST live in the right cluster (.nav-end), not a center
     # overlay / absolute-centered layout — primary nav never covered (EDL §1).
     assert "cmdk-trigger" in html
     assert "cmdk-trigger-label" in html
     assert 'class="nav-start"' in html
     assert 'class="nav-end"' in html
-    assert "max-width: 20rem" in html
+    assert "max-width: 20rem" in components_css
     assert "left: 50%" not in html
     assert "translateX(-50%)" not in html
+    assert "left: 50%" not in base_css and "left: 50%" not in components_css
+    assert "translateX(-50%)" not in base_css and "translateX(-50%)" not in components_css
     # Search markup sits inside the right cluster with Events / Menu.
     nav_end = html.split('class="nav-end"', 1)[1].split("</nav>", 1)[0]
     assert "cmdk-trigger" in nav_end
@@ -756,9 +772,9 @@ async def test_masthead_nav_structure(client, _override_store):
     assert "Open full Events page" not in drawer
     assert "Run an assessment from Fleet" in drawer
     assert "events-drawer-empty-hint" in drawer
-    assert "_badgeClass" in html
+    assert "_badgeClass" in js
     # Esc is handled both by Alpine @keydown.escape.window and the trap.
-    assert "e.key === 'Escape'" in html
+    assert "e.key === 'Escape'" in js
     primary = html.split('id="nav-primary"', 1)[1].split("links-secondary", 1)[0]
     assert 'href="/ledger"' in primary
     assert 'href="/fleet"' in primary
@@ -1487,7 +1503,10 @@ async def test_base_has_hx_boost(client):
 
 
 async def test_base_has_css_variables(client):
-    resp = await client.get("/")
+    """Design tokens moved out of base.html's inline <style> block into
+    static/css/base.css (2026-07-20 base.html split)."""
+    resp = await client.get("/static/css/base.css")
+    assert resp.status_code == 200
     assert "--color-bg:" in resp.text
     assert "--color-accent:" in resp.text
     assert "--color-surface:" in resp.text
@@ -1707,8 +1726,17 @@ async def test_assessment_detail_hint_matches_webhook_triggered_rescan(client, _
 
 
 async def test_fleet_uses_design_system_classes(client, _override_store):
+    """`.stat-grid` only renders (fleet.html's `{% if total_apps > 1 %}`)
+    once the fleet has more than one app -- seed two so this test genuinely
+    exercises the markup, rather than relying on base.html's old inline
+    <style> block coincidentally containing the class name's CSS rule text
+    regardless of what actually rendered (a latent gap this base.html CSS/
+    JS extraction (2026-07-20) surfaced: moving that CSS to a separate
+    static file, as done here, makes a rendered page's HTML a true
+    reflection of its own markup again)."""
     store = _override_store
     await store.save(_make_report_scored("fleet-css", 80))
+    await store.save(_make_report_scored("fleet-css-2", 60))
     resp = await client.get("/fleet")
     assert "stat-grid" in resp.text
     assert "row-border-" in resp.text
@@ -1717,9 +1745,17 @@ async def test_fleet_uses_design_system_classes(client, _override_store):
 
 
 async def test_assessment_detail_uses_design_system_classes(client, _override_store):
+    """`.btn-action` (the "Review & Deliver" CTA) only renders once
+    lifecycle_stage is "onboarded" -- seed onboarding so this test
+    genuinely exercises the markup (see test_fleet_uses_design_system_
+    classes's docstring above for why this fixture gap was previously
+    masked)."""
     store = _override_store
     report = _make_report()
     aid = await store.save(report)
+    await store.save_onboarding(aid, [
+        {"category": "security", "path": "x.yaml", "content": "kind: ConfigMap", "description": "x"},
+    ])
     resp = await client.get(f"/assessments/{aid}")
     assert "score-hero" in resp.text
     assert "score-unit" in resp.text
@@ -1769,7 +1805,10 @@ async def test_onboard_results_uses_design_system_classes(client, _override_stor
 
 
 async def test_responsive_css_exists(client):
-    resp = await client.get("/")
+    """Responsive rules moved out of base.html's inline <style> block into
+    static/css/components.css (2026-07-20 base.html split)."""
+    resp = await client.get("/static/css/components.css")
+    assert resp.status_code == 200
     assert "@media (max-width: 768px)" in resp.text
 
 
