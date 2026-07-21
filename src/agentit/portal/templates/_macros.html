@@ -1,28 +1,12 @@
-{% macro pipeline_stepper(current_index, failed=False, stage_count=9) %}
-{# The one, unified progress stepper for the whole assess -> onboard ->
-   deliver pipeline (2026-07-20, "why are we showing two workflow pages"
-   fix). Shared verbatim by assess_progress.html (the assess phase,
-   indices 0-2) and _onboard_progress_fragment.html (the onboard phase,
-   indices 3-8, always rendered with 0-2 already marked done since an
-   onboarding job only ever exists for an assessment that already
-   completed) -- see routes/assessments.py's _assess_pipeline_position()/
-   _onboard_pipeline_position() for how each job's real status maps to
-   `current_index` here. Rendering the SAME 9-stage roadmap in both
-   places, instead of two differently-shaped/differently-labeled
-   steppers, is what makes the htmx-swapped hand-off between the two real
-   job rows/routes underneath (unchanged by this fix -- see those routes'
-   own docstrings) read as one continuously-progressing page rather than
-   two unrelated screens.
-
-   `stage_count` lets a caller that opted OUT of chaining
-   (continue_onboard=0 -- still a real, supported mechanism, see
-   assess_submit()) show only the 3 assess-only stages it will actually
-   ever reach, rather than 6 onboarding placeholders that will never
-   light up for this job. #}
+{% macro pipeline_stepper(current_index, failed=False, stage_count=3) %}
+{# The one, unified Scan progress stepper: Assess → Generate → Open PR /
+   waiting for merge. Shared by assess_progress.html and
+   _onboard_progress_fragment.html so the htmx hand-off between the two
+   real job rows/routes reads as one continuous page (jobs/routes stay
+   separate — see assessments.py). `stage_count` lets continue_onboard=0
+   show only Assess. #}
 {% set stages = [
-  "Cloning", "Analyzing", "Saving Score",
-  "Running Agents", "Saving Manifests", "Validating",
-  "Final Review", "Creating PR(s)", "Done",
+  "Assess", "Generate", "Open PR / waiting for merge",
 ][:stage_count] %}
 <div class="lifecycle-stepper">
   {% for label in stages %}

@@ -6,8 +6,8 @@ caller explicitly posted `continue_onboard=1` (in practice, only Fleet's
 "Refresh Onboard" button for already-onboarded apps). This proves a plain,
 fresh Assess -- the "New Assessment" modal / command-palette / "Re-assess"
 path, none of which ever set that field -- now chains by default too, and
-that the existing "onboarding will start automatically" signal
-(`assess_progress.html`) fires for it, not just Refresh Onboard.
+that the automatic Generate → Open PR signal (`assess_progress.html`)
+fires for it, not just Refresh Onboard.
 """
 from __future__ import annotations
 
@@ -84,8 +84,7 @@ class TestFreshAssessChainsByDefault:
 
     async def test_progress_page_shows_automatic_onboarding_signal(self, portal_client):
         """The visible-indication requirement: assess_progress.html's
-        existing "onboarding will start automatically" message must appear
-        for this plain Assess too, not just Refresh Onboard."""
+        automatic Generate → Open PR copy must appear for a plain Scan too."""
         client, store, _seed_aid = portal_client
         report = _make_report(repo_name="fresh-assess-signal-app")
 
@@ -102,7 +101,7 @@ class TestFreshAssessChainsByDefault:
 
             progress_resp = await client.get(f"/assess/progress/{job_id}")
         assert progress_resp.status_code == 200
-        assert "onboarding will start automatically" in progress_resp.text
+        assert "Generate and Open PR continue automatically" in progress_resp.text
 
     async def test_completed_fresh_assess_redirects_into_onboarding_progress(self, portal_client):
         """Once scoring completes, /assess/progress/{job_id} must redirect

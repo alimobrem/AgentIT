@@ -511,7 +511,14 @@
         {% for a in orchestration.agents %}
         <tr class="{% if a.success %}row-border-green{% else %}row-border-red{% endif %}">
           <td>{{ a.name }}</td>
-          <td>{% if a.success %}<span class="badge badge-low">OK</span>{% else %}<span class="badge badge-critical">FAIL</span>{% endif %}</td>
+          <td>
+            {% if a.success %}
+            <span class="badge badge-low">OK</span>
+            {% else %}
+            <span class="badge badge-critical">FAIL</span>
+            {% if a.error %}<div class="text-danger text-sm mt-1">{{ a.error }}</div>{% endif %}
+            {% endif %}
+          </td>
           <td>{{ a.files_count }}</td>
         </tr>
         {% endfor %}

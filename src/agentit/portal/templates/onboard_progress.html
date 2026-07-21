@@ -1,16 +1,12 @@
 {% extends "base.html" %}
-{% block title %}Onboarding... - AgentIT{% endblock %}
+{% block title %}Scan... - AgentIT{% endblock %}
 {% block content %}
 <p class="mb-1"><a href="/assessments/{{ assessment_id }}" data-nav="back-to-assessment" hx-boost="false">&larr; Assessment</a></p>
-<h1>Onboarding</h1>
-{# Same header/title as assess_progress.html, and the same unified
-   pipeline_stepper() macro rendered inside the fragment below with
-   stages 0-2 (Cloning/Analyzing/Saving Score) always pre-marked done --
-   an onboard job only ever exists for an assessment that already
-   completed. This is what keeps a human chained here straight from
-   assess_progress.html's own self-poll (see that route's docstring)
-   from ever perceiving a "new page": same title, same H1, same stepper
-   design, just later steps lighting up (2026-07-20 fix). #}
+<h1>Scan</h1>
+{# Same header/title as assess_progress.html, and the same 3-stage
+   pipeline_stepper() (Assess → Generate → Open PR / waiting for merge)
+   with Assess pre-marked done -- an onboard job only ever exists after
+   Assess completed. Keeps the chained hand-off reading as one page. #}
 {# Real step-level streaming via htmx's documented SSE extension (checklist
    #8) -- reuses the events table + remediation_jobs tracking as the source,
    no parallel notification mechanism. Falls back gracefully: if the
