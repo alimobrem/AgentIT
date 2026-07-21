@@ -56,6 +56,64 @@ def _cached_checks():
         return _checks_cache["data"]
 
 
+def _build_detections_by_dimension(checks: list, skills: list) -> dict[str, list[dict]]:
+    """Merge legacy `checks/*.yaml` `CheckDefinition`s with `mode: detect`
+    skills into one dimension-grouped "Detections" view -- Phase 5 of
+    docs/extension-model-unification-plan-2026-07-18.md, item (b): "fold
+    detect-mode skills into the same 'Checks' count/section... or merge
+    the two into one 'Detections' section entirely." Goes with the full
+    merge, since Phase 4 already ported every legacy check to a skill
+    (`checks/` is now empty) -- a page that only ever showed legacy YAML
+    checks would otherwise render an honest-looking but misleading "0
+    checks" the moment nothing is left in that directory, even though the
+    exact same detection rules are still running (as skills).
+
+    Returns one dict per detection, deliberately *not* the raw
+    `CheckDefinition`/`Skill` objects -- the two types don't share a
+    field name for "the matching rule" (`check_type`/`pattern` vs.
+    `skill.rule`), so the template would otherwise need to branch on
+    which kind of object it received. Shaped identically regardless of
+    source; only ``source``/``skill_name``/``status`` distinguish where a
+    given row actually lives on disk. ``severity`` is always the plain
+    lowercase name (``"high"``, not ``CheckDefinition.severity``'s raw
+    ``Severity`` `IntEnum` member) so a `badge-{{ severity }}` class
+    always resolves to a real CSS class for either source -- the old
+    checks-only table's `badge-{{ check.severity.value }}` rendered the
+    enum's *int* value (e.g. `badge-1`), which never matched any real
+    `badge-critical`/`badge-high`/etc. class; fixed here while rebuilding
+    this exact column rather than left in place for the merged view.
+    """
+    rows: dict[str, list[dict]] = {}
+    for check in checks:
+        rows.setdefault(check.dimension, []).append({
+            "name": check.name,
+            "check_type": check.check_type,
+            "pattern": check.pattern,
+            "severity": check.severity.name,
+            "category": check.category,
+            "description": check.description,
+            "source": "legacy_yaml",
+            "skill_name": None,
+            "status": None,
+        })
+    for skill in skills:
+        if skill.mode != "detect":
+            continue
+        rule = skill.rule or {}
+        rows.setdefault(skill.domain, []).append({
+            "name": skill.name,
+            "check_type": rule.get("type", "—"),
+            "pattern": rule.get("pattern", "—"),
+            "severity": skill.severity or "info",
+            "category": skill.category,
+            "description": skill.description,
+            "source": "skill",
+            "skill_name": skill.name,
+            "status": skill.status,
+        })
+    return rows
+
+
 def bust_skills_cache() -> None:
     """Invalidate the 60s skills cache so a newly-saved/activated skill
     shows up on the very next page load.
@@ -562,15 +620,18 @@ async def capabilities_page(request: Request) -> HTMLResponse:
     for skill in skills:
         skills_by_domain.setdefault(skill.domain, []).append(skill)
 
-    # Group checks by dimension
-    checks_by_dimension: dict[str, list] = {}
-    for check in checks:
-        checks_by_dimension.setdefault(check.dimension, []).append(check)
+    # Detections = legacy checks/*.yaml + mode: detect skills, merged into
+    # one dimension-grouped view (Phase 5 of
+    # docs/extension-model-unification-plan-2026-07-18.md) -- see
+    # _build_detections_by_dimension()'s own docstring for why a straight
+    # checks-only view would otherwise misleadingly show "0 checks" now
+    # that Phase 4 ported every legacy check to a skill.
+    detections_by_dimension = _build_detections_by_dimension(checks, skills)
+    total_detections = sum(len(v) for v in detections_by_dimension.values())
 
     total_skills = len(skills)
     active_skills = sum(1 for sk in skills if sk.status == "active")
     deprecated_skills = sum(1 for sk in skills if sk.status == "deprecated")
-    total_checks = len(checks)
 
     # Surfaced above the fold (not buried inside the collapsed "Skills by
     # Domain" section below) -- a draft skill needs a real human decision
@@ -591,7 +652,7 @@ async def capabilities_page(request: Request) -> HTMLResponse:
 
     return get_templates().TemplateResponse(request, "capabilities.html", {
         "skills_by_domain": skills_by_domain,
-        "checks_by_dimension": checks_by_dimension,
+        "detections_by_dimension": detections_by_dimension,
         "effectiveness": effectiveness,
         "recent_activity": recent_activity,
         "catalog_changes": catalog_changes,
@@ -599,7 +660,7 @@ async def capabilities_page(request: Request) -> HTMLResponse:
         "active_skills": active_skills,
         "deprecated_skills": deprecated_skills,
         "draft_skills": draft_skills,
-        "total_checks": total_checks,
+        "total_detections": total_detections,
         "agents": agents,
         "watchers": watchers,
         "fix_categories": fix_categories,

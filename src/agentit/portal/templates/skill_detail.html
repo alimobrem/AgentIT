@@ -68,10 +68,45 @@
 
 {% if skill %}
 <h2 class="section-title">What This Skill Does</h2>
+{% if skill.mode == "detect" %}
+<p class="mb-1">{{ skill.description or "No description in this skill's frontmatter." }}</p>
+{% else %}
 <p class="mb-1">{{ skill.property_description or "No property description in this skill's frontmatter." }}</p>
+{% endif %}
 {% if skill.status == "deprecated" and skill.deprecated_reason %}
 <p class="text-warning text-sm mb-1">Deprecated: {{ skill.deprecated_reason }}{% if skill.superseded_by %} — superseded by <a href="/capabilities/skills/{{ skill.superseded_by }}/history">{{ skill.superseded_by }}</a>{% endif %}</p>
 {% endif %}
+
+{% if skill.mode == "detect" %}
+{# Detection rule content -- Phase 5 of
+   docs/extension-model-unification-plan-2026-07-18.md, item (c): "surface
+   rule/pattern content on the skill detail page the way a check file's
+   YAML is currently inspectable." A detect-mode skill has no
+   triggers/outputs (always empty by design -- see
+   skill_engine.Skill.matches()), so this replaces that table entirely
+   rather than showing two empty rows next to it. #}
+<table class="mb-1">
+  <tbody>
+    <tr><th>Rule Type</th><td class="text-sm">{{ skill.rule.get('type', '—') }}</td></tr>
+    <tr><th>Pattern</th><td class="text-sm">
+      {% set pattern = skill.rule.get('pattern') %}
+      {% if pattern is iterable and pattern is not string %}
+        {% for p in pattern %}<code>{{ p }}</code> {% endfor %}
+      {% else %}
+        <code>{{ pattern }}</code>
+      {% endif %}
+    </td></tr>
+    {% if skill.rule.get('case_insensitive') %}<tr><th>Case Insensitive</th><td>yes</td></tr>{% endif %}
+    <tr><th>Severity</th><td><span class="badge badge-{{ skill.severity }}">{{ skill.severity }}</span></td></tr>
+    <tr><th>Category</th><td>{{ skill.category }}</td></tr>
+    <tr><th>Recommendation</th><td class="text-sm text-muted">{{ skill.recommendation }}</td></tr>
+    <tr><th>Domain</th><td>{{ skill.domain }}</td></tr>
+    <tr><th>Version</th><td>{{ skill.version }}</td></tr>
+    <tr><th>Source</th><td>{{ skill.source }}</td></tr>
+    {% if skill.created_at %}<tr><th>Created</th><td class="text-sm"><span data-timestamp="{{ skill.created_at }}">{{ skill.created_at[:10] }}</span></td></tr>{% endif %}
+  </tbody>
+</table>
+{% else %}
 <table class="mb-1">
   <tbody>
     <tr><th>Triggers</th><td>{% for t in skill.triggers %}<span class="badge badge-muted">{{ t }}</span> {% endfor %}</td></tr>
@@ -83,6 +118,7 @@
     {% if skill.conflicts_with %}<tr><th>Conflicts With</th><td>{% for c in skill.conflicts_with %}<a href="/capabilities/skills/{{ c }}/history">{{ c }}</a> {% endfor %}</td></tr>{% endif %}
   </tbody>
 </table>
+{% endif %}
 
 <div x-data="{ open: false }">
 <button type="button" class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
