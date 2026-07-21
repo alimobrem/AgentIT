@@ -3,223 +3,34 @@ kind: Application
 metadata:
   name: agentit
   namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/managed-by: argocd
+    app.kubernetes.io/part-of: agentit
+    app.kubernetes.io/component: gitops
+    criticality: high
+    stack: python-javascript
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
-    repoURL: https://github.com/alimobrem/AgentIT.git
-    targetRevision: main
-    path: chart
-    helm:
-      parameters:
-        - name: image.repository
-          value: image-registry.openshift-image-registry.svc:5000/agentit/agentit
-        # NOTE: the CI pipeline's notify-argocd step overwrites this value directly on the
-        # live Application object after every successful build (oc patch ... image.tag).
-        # This committed value is a bootstrap/disaster-recovery default only — it does NOT
-        # reflect what's currently deployed. Check the live Application or Rollout for that.
-        - name: image.tag
-          value: latest
-        - name: image.pullPolicy
-          value: Always
-        - name: rollout.enabled
-          value: "true"
-        - name: kafka.enabled
-          value: "true"
-        # NOTE: kafka.auth.enabled is deliberately left off here. Enabling it
-        # adds a TLS+SASL/SCRAM listener, KafkaUser CRs, and a Kafka broker
-        # NetworkPolicy (chart/templates/kafka/*.yaml) alongside today's live,
-        # unauthenticated single-broker Kafka -- but does NOT by itself move
-        # any producer/consumer off plaintext (that env-var wiring into
-        # deployment.yaml/agents/*.yaml is still pending, see
-        # docs/kafka-hardening-plan.md). Turning this on for real needs a
-        # coordinated cutover, same shape as the historical SQLite-to-
-        # Postgres cutover documented in docs/postgres-migration-plan.md §7:
-        # the existing plaintext
-        # producers/consumers and the new SASL_SSL ones can't both be "the"
-        # bootstrap at once without either a dual-listener transition window
-        # or a single all-Deployments-at-once switch. Once that wiring and a
-        # coordinated cutover plan exist, uncomment:
-        #   - name: kafka.auth.enabled
-        #     value: "true"
-        - name: argoEvents.enabled
-          value: "true"
-        - name: env.ANTHROPIC_VERTEX_PROJECT_ID
-          value: itpc-gcp-product-all-claude
-        - name: env.CLOUD_ML_REGION
-          value: global
-        - name: gcp.credentialsSecret
-          value: gcp-credentials
-        - name: tektonCI.enabled
-          value: "true"
-        - name: agents.vulnWatcher.enabled
-          value: "true"
-        - name: agents.sloTracker.enabled
-          value: "true"
-        - name: agents.driftDetector.enabled
-          value: "true"
-        # Per-app automatic re-assessment on the cadence set on the
-        # Assessment Detail page (apps.assessment_cadence:
-        # daily/weekly/monthly; manual opts an app out). Product decision
-        # 2026-07-18: every watcher/CronJob ships opt-in in the chart, but
-        # this live deployment now turns all of them on -- see README's
-        # "The agent fleet" section and this file's own header comment.
-        - name: agents.reassessScheduler.enabled
-          value: "true"
-        # Self-health-check: verifies AgentIT's own webhook/CI-pipeline/
-        # maintenance-CronJob health end to end -- see
-        # docs/self-health-check-backlog.md and README's Self-observability
-        # section. Enabled here as part of the same 2026-07-18 "every
-        # watcher/CronJob the chart ships is on for this live deployment"
-        # decision as every other agents.*.enabled flag on this page.
-        - name: agents.selfHealthCheck.enabled
-          value: "true"
-        - name: agents.skillLearner.enabled
-          value: "true"
-        - name: agents.skillLearner.interval
-          value: "86400"
-        - name: agents.skillLearner.limit
-          value: "3"
-        # Self-improvement loop over AgentIT's own codebase (not the skills
-        # catalog -- that's skillLearner above) -- see
-        # docs/self-improvement-for-agentit.md. Separate watcher, pod, and
-        # opt-in flag by design: proposes at most one small, evidence-cited
-        # code change per cycle as a draft PR, gated by tests/scope/diff-size
-        # checks before a human ever sees it.
-        - name: agents.capabilityScout.enabled
-          value: "true"
-        # Daily cadence restored after L3/L4 dogfood (was temporarily 3600).
-        # See docs/superpowers/plans/2026-07-15-autonomous-self-improve-dogfood.md
-        - name: agents.capabilityScout.interval
-          value: "86400"
-        # L3 dogfood: prefer skills/checks/tests source PRs when targets allow
-        - name: agents.capabilityScout.mode
-          value: "auto"
-        # OpenShift oauth-proxy in front of the portal Route — required for
-        # dogfood (privileged automation console must not stay open). See
-        # docs/deployment.md#authentication.
-        - name: auth.enabled
-          value: "true"
-        - name: monitoring.enabled
-          value: "true"
-        # Stands up AgentIT's own bundled, non-operator Postgres instance
-        # (Deployment+PVC+Service+Secret) live in the agentit namespace --
-        # explicit here even though it now matches the chart's own default
-        # (`postgres.bundled.enabled: true`), so this file stays the
-        # single source of truth for what's actually running live.
-        # Postgres itself is no longer a flag on the app side at all --
-        # every Deployment/CronJob gets AGENTIT_DB_DSN unconditionally
-        # (see docs/postgres-migration-plan.md for the full history of the
-        # SQLite-to-Postgres cutover this parameter used to gate; that doc
-        # is now marked historically-complete/superseded).
-        - name: postgres.bundled.enabled
-          value: "true"
-        # pg_dump-based backup CronJob for the bundled Postgres instance
-        # above (chart/templates/postgres/postgres-bundled-backup.yaml) --
-        # the real disaster-recovery backup coverage for the only store
-        # this app has. See docs/postgres-migration-plan.md's
-        # "Backup/retention" section.
-        - name: postgres.bundled.backup.enabled
-          value: "true"
-        # AgentIT is now registered in its own fleet (chart/templates/tekton/
-        # pipeline.yaml's register-self-in-fleet task, run on every CI build) --
-        # this turns on the one fleet-wide capability with no always-on
-        # equivalent (vuln-watcher already covers CVEs continuously; this
-        # covers the cost dimension weekly). See docs/deployment.md.
-        - name: cronJobs.costReport.enabled
-          value: "true"
-        # The other 3 fleet-rescan CronJobs (`watch --rescan`, same as
-        # cost-report above) -- product decision 2026-07-18 to enable every
-        # watcher/CronJob the chart ships opt-in. NOTE: `--dimension` only
-        # filters which findings this job's summary line counts -- every one
-        # of these 4 CronJobs does a full LLM re-assessment pass over the
-        # *entire* tracked fleet regardless of dimension (see cli.py's
-        # `_rescan_fleet()`), so all 4 are functionally the same expensive
-        # operation under different names/schedules. cveScan's default
-        # schedule was moved off cost-report's exact time (see values.yaml)
-        # to avoid two full-fleet LLM sweeps firing in the same minute;
-        # dependency-update (Mon 04:00) still runs ~2h before cost-report
-        # (Mon 06:00) -- not an exact collision, left as-is, but worth
-        # knowing if fleet size/LLM rate limits become a constraint.
-        - name: cronJobs.cveScan.enabled
-          value: "true"
-        - name: cronJobs.complianceRescan.enabled
-          value: "true"
-        - name: cronJobs.dependencyUpdate.enabled
-          value: "true"
-        # External synthetic uptime probe + TLS cert-expiry watch against the
-        # public Route -- see chart/templates/synthetic-probe-cronjob.yaml.
-        - name: syntheticProbe.enabled
-          value: "true"
-        # Monthly rotation of agentit-internal-webhook-token (+ consumer
-        # restarts) and a daily-equivalent existence check for
-        # github-webhook-secret -- see chart/templates/secret-rotation-cronjob.yaml.
-        - name: secretRotation.enabled
-          value: "true"
-        # Cheap in-memory rate limiting on the portal's own routes -- see
-        # rate_limit.py and values.yaml's rateLimit block for exactly what
-        # this does and doesn't guarantee.
-        - name: rateLimit.enabled
-          value: "true"
-        # NOTE: monitoring.slack.enabled is deliberately left off here -- it
-        # needs a real Slack incoming-webhook URL, which this repo never
-        # generates or hardcodes. Create it first:
-        #   oc create secret generic agentit-slack-webhook -n agentit \
-        #     --from-literal=url=https://hooks.slack.com/services/...
-        # then add `monitoring.slack.enabled: "true"` here.
-  ignoreDifferences:
-    - group: ""
-      kind: Service
-      jsonPointers:
-        - /spec/clusterIP
-        - /spec/clusterIPs
-        - /spec/ipFamilies
-        - /spec/ipFamilyPolicy
-        - /spec/selector
-    # Only ignore the controller-populated status (address/conditions) so that
-    # committed spec changes (e.g. trigger/interceptor config) still sync normally.
-    # Plus a handful of spec fields the EventListener admission/defaulting
-    # webhook fills in on write that the chart's raw YAML never sets (and has
-    # no need to): an empty `namespaceSelector`/`resources` struct, and the
-    # implicit `kind` on each binding/interceptor ref (TriggerBinding /
-    # ClusterInterceptor). None of these are ever set by us; they're always
-    # server-injected, so without this the resource is perpetually OutOfSync
-    # even though the actually-committed trigger/interceptor config matches.
-    - group: triggers.tekton.dev
-      kind: EventListener
-      jsonPointers:
-        - /status
-        - /spec/namespaceSelector
-        - /spec/resources
-      jqPathExpressions:
-        - .spec.triggers[].bindings[].kind
-        - .spec.triggers[].interceptors[].ref.kind
-    # Tekton's Pipeline API always round-trips each inline `taskSpec` (as
-    # opposed to `taskRef`) with an explicit `metadata: {}` and a deprecated
-    # `spec: null` field from the EmbeddedTask type -- present on every Get
-    # regardless of what was applied, never present in what we render. Same
-    # webhook/API-server-normalization class as the EventListener fields
-    # above (and the retryStrategy.factor Sensor fix in docs/deployment.md) --
-    # not something the chart can or should try to hand-encode, since it's a
-    # Tekton-API-version-specific serialization detail, not real spec drift.
-    # Sidecar `computeResources: {}` is also API-normalized; the chart now
-    # emits that empty object too, and this ignore covers older live objects
-    # until the next sync rewrites them.
-    - group: tekton.dev
-      kind: Pipeline
-      jqPathExpressions:
-        - .spec.tasks[].taskSpec.metadata
-        - .spec.tasks[].taskSpec.spec
-        - .spec.tasks[].taskSpec.sidecars[].computeResources
-        - .spec.finally[].taskSpec.metadata
-        - .spec.finally[].taskSpec.spec
+    repoURL: "https://github.com/org/agentit.git"
+    targetRevision: HEAD
+    path: deploy/
   destination:
     server: https://kubernetes.default.svc
     namespace: agentit
   syncPolicy:
     automated:
-      selfHeal: true
       prune: true
+      selfHeal: true
     syncOptions:
       - CreateNamespace=true
-      - ApplyOutOfSyncOnly=true
       - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
