@@ -27,6 +27,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from agentit.portal.app import app
@@ -144,6 +145,52 @@ class TestRunOnboardingJobAutomaticallyValidatesAndDelivers:
         assert resp.status_code == 200
         assert "will run automatically" not in resp.text
         assert "Running automatic Dry Run" not in resp.text
+
+    async def test_timeout_with_manifests_saved_ends_needs_attention(self, onboard_client):
+        """Regression for #114: when with_timeout / HTTP 504 fires *after*
+        onboarding manifests are already saved (typical auto-delivery
+        ceiling), the job must land ``needs_attention`` so the progress
+        page redirects to Onboard Results -- never ``failed`` with
+        "no manifests were generated"."""
+        _client, store = onboard_client
+        aid = await _seed_assessment(store, repo_name="onboard-timeout-saved-app")
+        job_id = await store.create_remediation_job(aid)
+
+        async def _save_then_timeout(**_kwargs):
+            await store.save_onboarding(aid, [_cluster_config_file()], orchestration=_ORCH_SUMMARY_AUTO_APPROVE)
+            raise HTTPException(504, "Operation timed out after 600s")
+
+        with patch.object(onboard_pipeline, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY_AUTO_APPROVE)), \
+             patch("agentit.portal.github_pr.ensure_webhook", return_value={"created": False}), \
+             patch("agentit.portal.auto_delivery.auto_validate_and_deliver", side_effect=_save_then_timeout):
+            await onboard_pipeline._run_onboarding_job(job_id, aid, "http://testserver")
+
+        job = await store.get_remediation_job(job_id)
+        assert job["status"] == "needs_attention", job
+        assert "timed out" in job["current_step"].lower()
+        assert "no manifests were generated" not in (job.get("error") or "")
+        assert await store.get_onboarding(aid) is not None
+
+    async def test_timeout_without_manifests_still_fails(self, onboard_client):
+        """A timeout before any onboarding row exists is a real generation
+        failure -- keep the honest ``failed`` / "no manifests" message so
+        humans retry Onboard rather than landing on an empty Results page."""
+        _client, store = onboard_client
+        aid = await _seed_assessment(store, repo_name="onboard-timeout-empty-app")
+        job_id = await store.create_remediation_job(aid)
+
+        async def _timeout_no_save(**_kwargs):
+            raise HTTPException(504, "Operation timed out after 600s")
+
+        with patch.object(onboard_pipeline, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY_AUTO_APPROVE)), \
+             patch("agentit.portal.github_pr.ensure_webhook", return_value={"created": False}), \
+             patch("agentit.portal.auto_delivery.auto_validate_and_deliver", side_effect=_timeout_no_save):
+            await onboard_pipeline._run_onboarding_job(job_id, aid, "http://testserver")
+
+        job = await store.get_remediation_job(job_id)
+        assert job["status"] == "failed", job
+        assert "no manifests were generated" in (job.get("error") or "")
+        assert await store.get_onboarding(aid) is None
 
 
 class TestAssessOnboardChainNeverAutoDelivers:

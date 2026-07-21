@@ -1,10 +1,11 @@
 """CI-gated Playwright journeys for Alpine/htmx critical paths.
 
 Kept lean on purpose — not a full portal crawl (see ``tests/test_browser.py``,
-which stays ignored in the default suite). These three journeys catch the
-class of bugs that unit/TestClient coverage misses: soft-gate unlock after
-Dry Run, Events-drawer overlay blocking Back to Assessment after hx-boost,
-and Register for GitOps feedback after a boosted redirect.
+which stays ignored in the default suite). These journeys catch the class of
+bugs that unit/TestClient coverage misses: soft-gate unlock after Dry Run,
+Events-drawer overlay blocking Back to Assessment after hx-boost, Register
+for GitOps feedback after a boosted redirect, and onboard-progress stall
+escape when SSE goes quiet (#114).
 
 Run locally / in CI::
 
@@ -308,3 +309,72 @@ class TestRegisterForGitOpsFeedback:
                 has_text=re.compile(r"Could not auto-create|infra repo", re.I),
             )
             await expect(err.first).to_be_visible(timeout=10000)
+
+
+class TestOnboardProgressStallEscape:
+    """#114: a silently stalled SSE must not trap humans on the spinner.
+
+    Uses Playwright's clock so the 20s / 60s stall windows finish instantly
+    in CI; the template contract itself is also asserted in
+    ``test_template_rendering.py::TestOnboardProgressStallEscape``.
+    """
+
+    async def test_hard_escape_to_onboard_results_after_long_stall(
+        self, page, critical_portal,
+    ):
+        url, aid, store, _kube = critical_portal
+        job_id = await store.create_remediation_job(aid)
+        await store.update_remediation_job(
+            job_id, "running", "Running onboarding agents...",
+        )
+
+        # Capture stall-fetch Accept header before location.replace wipes the
+        # page; credentials: 'same-origin' is asserted on the template contract.
+        progress_fetches: list[str] = []
+
+        def _on_request(request) -> None:
+            if (
+                request.resource_type == "fetch"
+                and f"/onboard/progress/{job_id}" in request.url
+            ):
+                progress_fetches.append(request.headers.get("accept", ""))
+
+        page.on("request", _on_request)
+        await page.clock.install()
+        await page.goto(f"{url}/assessments/{aid}/onboard/progress/{job_id}")
+        await expect(page.locator("[sse-connect]")).to_be_attached()
+
+        # Past stallMs (20s) the fallback fetch runs; job still running so
+        # no redirect. Past stallMs*3 the hard location.replace fires.
+        await page.clock.fast_forward(65000)
+        await page.wait_for_url(
+            re.compile(rf".*/assessments/{re.escape(aid)}/onboard-results"),
+            timeout=10000,
+        )
+        assert progress_fetches, "stall fallback must re-fetch the progress URL"
+        assert any("text/html" in accept for accept in progress_fetches)
+
+    async def test_follow_redirect_escape_when_job_becomes_terminal(
+        self, page, critical_portal,
+    ):
+        url, aid, store, _kube = critical_portal
+        job_id = await store.create_remediation_job(aid)
+        await store.update_remediation_job(
+            job_id, "running", "Running onboarding agents...",
+        )
+
+        await page.clock.install()
+        await page.goto(f"{url}/assessments/{aid}/onboard/progress/{job_id}")
+        await expect(page.locator("[sse-connect]")).to_be_attached()
+
+        await store.update_remediation_job(
+            job_id, "needs_attention",
+            "Onboarding timed out during automatic validation/delivery -- review manifests.",
+            error="Operation timed out after 600s",
+        )
+        # One stall window is enough: fetch follows the 303 to onboard-results.
+        await page.clock.fast_forward(25000)
+        await page.wait_for_url(
+            re.compile(rf".*/assessments/{re.escape(aid)}/onboard-results"),
+            timeout=10000,
+        )

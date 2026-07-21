@@ -499,6 +499,28 @@ class TestNoInlineCSS:
         )
 
 
+class TestOnboardProgressStallEscape:
+    """Alpine contract for #114's stuck-progress escape hatch.
+
+    Cheap string/structure assertions so the hard-escape path (credentials,
+    redirect follow, stallMs*3 → location.replace to onboard-results) cannot
+    regress without a unit failure. Behavior under a real browser clock is
+    covered in ``tests/test_browser_critical.py``.
+    """
+
+    def test_stall_escape_js_contract(self):
+        html = (TEMPLATES_DIR / "onboard_progress.html").read_text(encoding="utf-8")
+        assert "const stallMs = 20000;" in html
+        assert "const resultsUrl = '/assessments/{{ assessment_id }}/onboard-results';" in html
+        assert "credentials: 'same-origin'" in html
+        assert "redirect: 'follow'" in html
+        assert "stallMs * 3" in html
+        assert "window.location.replace(resp.url)" in html
+        assert "window.location.replace(resultsUrl)" in html
+        # Hard navigation, not a soft assign that leaves history traps.
+        assert "window.location.href = resp.url" not in html
+
+
 class TestHTMXErrorHandling:
     """Verify the portal has error handling for htmx requests."""
 
