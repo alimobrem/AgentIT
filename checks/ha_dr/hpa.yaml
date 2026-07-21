@@ -1,8 +1,0 @@
-name: hpa-exists
-dimension: ha_dr
-severity: medium
-category: scaling
-type: yaml_kind_exists
-pattern: HorizontalPodAutoscaler
-description: No HorizontalPodAutoscaler defined
-recommendation: Add HPA for automatic scaling under load

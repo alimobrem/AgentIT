@@ -208,3 +208,24 @@ class TestRetentionPolicyExistsParity:
         _passes(self.SKILL_PATH, create_mock_repo, {
             "docs/data-retention.md": "# Data Retention Policy\n\nretention period: 90 days.\n",
         })
+
+
+class TestHpaExistsParity:
+    """Ported from `checks/ha_dr/hpa.yaml` (deleted in this commit) to
+    `skills/ha_dr/hpa-exists.md`."""
+
+    SKILL_PATH = SKILLS_DIR / "ha_dr" / "hpa-exists.md"
+
+    def test_fires_when_no_hpa_manifest(self, create_mock_repo) -> None:
+        finding = _fires(self.SKILL_PATH, create_mock_repo, {
+            "deploy/deployment.yaml": "apiVersion: apps/v1\nkind: Deployment\n",
+        })
+        assert finding.category == "scaling"
+        assert finding.severity == Severity.medium
+        assert finding.description == "No HorizontalPodAutoscaler defined"
+        assert finding.recommendation == "Add HPA for automatic scaling under load"
+
+    def test_passes_when_hpa_manifest_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {
+            "deploy/hpa.yaml": "apiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\n",
+        })
