@@ -153,3 +153,20 @@ class TestLicenseFileExistsParity:
 
     def test_passes_when_license_file_present(self, create_mock_repo) -> None:
         _passes(self.SKILL_PATH, create_mock_repo, {"LICENSE": "Apache License 2.0\n"})
+
+
+class TestSbomExistsParity:
+    """Ported from `checks/compliance/sbom.yaml` (deleted in this commit)
+    to `skills/compliance/sbom-exists.md`."""
+
+    SKILL_PATH = SKILLS_DIR / "compliance" / "sbom-exists.md"
+
+    def test_fires_when_no_sbom_file(self, create_mock_repo) -> None:
+        finding = _fires(self.SKILL_PATH, create_mock_repo, {"main.py": "print('hi')\n"})
+        assert finding.category == "sbom"
+        assert finding.severity == Severity.high
+        assert finding.description == "No SBOM (Software Bill of Materials) found"
+        assert finding.recommendation == "Generate SBOM using Syft, store in ODF"
+
+    def test_passes_when_sbom_file_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {"sbom.json": "{}\n"})
