@@ -434,11 +434,20 @@ class TestRunnerIntegration:
             "description: No NetworkPolicy manifests found\n"
             "recommendation: Add deny-all default NetworkPolicy with explicit allow rules\n"
         )
+        # Isolated from the real skills/ catalog on purpose -- without this,
+        # run_assessment()'s skills_dir default picks up the real, live
+        # skills/security/network-policy-exists.md (Phase 4 of
+        # docs/extension-model-unification-plan-2026-07-18.md), which
+        # produces the exact same (category, description) finding this test
+        # is specifically trying to prove gets deduped against the analyzer
+        # -- a real third source that isn't what this test is about.
+        empty_skills_dir = tmp_path / "empty_skills_for_dedup_test"
+        empty_skills_dir.mkdir()
 
         from agentit.runner import run_assessment
         report = run_assessment(
             repo, repo_url="https://github.com/test/app",
-            checks_dir=checks_dir,
+            checks_dir=checks_dir, skills_dir=empty_skills_dir,
         )
         sec_score = next(s for s in report.scores if s.dimension == "security")
         # The analyzer already finds "No NetworkPolicy manifests found".
