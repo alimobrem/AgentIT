@@ -468,14 +468,32 @@ class TestRunnerIntegration:
 
 
 class TestSampleAppFixture:
-    """Run real checks against the sample-app fixture to verify end-to-end behavior."""
+    """Run real checks against the sample-app fixture to verify end-to-end behavior.
+
+    ``real_checks`` deliberately merges legacy ``checks/*.yaml`` files
+    with ``mode: detect`` skills (``skills/*/*.md``), exactly like
+    ``runner.run_assessment()`` does in production
+    (docs/extension-model-unification-plan-2026-07-18.md, Phase 1) --
+    Phase 4 is steadily porting individual checks from the former to the
+    latter (see tests/test_phase4_check_migrations.py), so a fixture that
+    only read the legacy YAML directory would silently lose coverage for
+    a specific check (e.g. dockerfile/network-policy) the moment it's
+    ported, even though the exact same rule keeps running in production
+    via the skill. Reading both sources the way production does makes
+    these tests robust to *where* a given rule currently lives.
+    """
+
+    REAL_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 
     @pytest.fixture()
     def real_checks(self) -> list[CheckDefinition]:
         if not REAL_CHECKS_DIR.is_dir():
             pytest.skip("checks/ dir not found")
+        from agentit.skill_engine import detect_check_definitions, load_all_skills
+
         checks = load_checks(REAL_CHECKS_DIR)
-        assert len(checks) >= 15
+        checks += detect_check_definitions(load_all_skills(self.REAL_SKILLS_DIR))
+        assert checks, "no legacy checks or detect-mode skills found on disk"
         return checks
 
     def test_dockerfile_check_passes(self, real_checks: list[CheckDefinition]) -> None:
