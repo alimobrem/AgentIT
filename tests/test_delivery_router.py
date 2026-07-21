@@ -1399,19 +1399,23 @@ class TestRouteAndDeliverSourcePatch:
 
 
 class TestRouteAndDeliverManifestAtRest:
-    async def test_non_yaml_config_routes_to_app_repo_pr(self):
+    async def test_non_yaml_config_refuses_agentit_dump_pr(self):
+        """`.agentit/` dumps are quarantined — classify still labels the
+        mechanism, but deliver refuses (no create_onboarding_pr)."""
         store, raw = await make_async_store()
         report = make_report()
         aid = await raw.save(report)
         with patch("agentit.portal.github_pr.create_onboarding_pr") as mock_pr:
-            mock_pr.return_value = {"pr_url": "https://github.com/org/test-app/pull/3", "branch": "agentit/onboarding", "files_added": 1}
             result = await route_and_deliver(
                 [_manifest_at_rest_file()], app_name=report.repo_name, namespace="ns",
                 report=report, store=store, assessment_id=aid,
                 actor="tester", dry_run=False,
             )
         assert result["mechanisms"][CATEGORY_MANIFEST_AT_REST] == MECHANISM_APP_REPO_PR
-        mock_pr.assert_called_once()
+        mock_pr.assert_not_called()
+        outcome = result["outcomes"][CATEGORY_MANIFEST_AT_REST]
+        assert "error" in outcome
+        assert "refused" in outcome["error"].lower() or ".agentit" in outcome["error"]
 
 
 class TestRouteAndDeliverSecretsAndNarrative:

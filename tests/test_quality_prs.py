@@ -171,11 +171,23 @@ class TestPrBodyPhaseD:
         assert "### Targeted findings" in body
         assert "`rbac`" in body
         assert "### Expected effect" in body
+        assert "### Finding-clear proof (post-merge)" in body
+        assert "correlate_delivery_finding" in body
         assert "### Validation" in body
         assert "`rbac.yaml`" in body
         assert "Not included" in body
         assert "does **not** auto-merge" in body
         assert "Argo deploys after merge" in body
+
+    def test_body_includes_shared_ns_blast_radius(self):
+        body = build_helpful_pr_body(
+            title_line="AgentIT Scan: cicd for pinky",
+            target_findings=[("cicd", "pipeline missing")],
+            files=[_rbac_file()],
+            shared_ns_note="2 manifest(s) target openshift-pipelines — elevated review.",
+        )
+        assert "### Shared-namespace blast radius" in body
+        assert "openshift-pipelines" in body
 
 
 class TestAutoDeliveryQualityGate:

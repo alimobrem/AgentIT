@@ -236,6 +236,7 @@ def build_helpful_pr_body(
     expected_effect: str = "",
     drop_reasons: list[str] | None = None,
     score_dimensions: list[str] | None = None,
+    shared_ns_note: str = "",
 ) -> str:
     """Phase D: finding → change → expected outcome (reviewable from GitHub alone)."""
     finding_lines = []
@@ -265,6 +266,12 @@ def build_helpful_pr_body(
         "### Expected effect",
         expected_effect,
         "",
+        "### Finding-clear proof (post-merge)",
+        "After merge + Argo sync, re-Assess this app. AgentIT correlates "
+        "`target_findings` on the delivery row — skills stay unapproved until "
+        "those keys are gone (`correlate_delivery_finding` → `resolved`). "
+        "If they remain, Ledger shows still-present and skills are rejected.",
+        "",
         "### Validation",
         validation_summary,
         "",
@@ -272,6 +279,12 @@ def build_helpful_pr_body(
         *(file_lines or ["- _(none)_"]),
         "",
     ]
+    if shared_ns_note:
+        parts.extend([
+            "### Shared-namespace blast radius",
+            shared_ns_note,
+            "",
+        ])
     if drop_reasons:
         parts.extend([
             "### Not included (filtered)",

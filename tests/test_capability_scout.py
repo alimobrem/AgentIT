@@ -18,6 +18,7 @@ from agentit.capability_scout import (
     MIN_SIGNAL_ROWS,
     build_diff,
     check_diff_size,
+    check_evidence_usefulness,
     check_has_test_plan,
     check_no_open_self_improve_pr,
     check_no_secrets,
@@ -49,7 +50,11 @@ def _proposal(**overrides) -> dict:
         "has_proposal": True,
         "title": "Track stack signatures",
         "gap_description": "README documents an idea that was never built",
-        "evidence": "README.md:42 — Documented future idea (not built)",
+        # Cite a dogfood/finding signal so evidence-usefulness gate passes.
+        "evidence": (
+            "Dogfood Scan finding still_present after merge — README.md:42 "
+            "documents a future idea that never cleared the finding"
+        ),
         "target_files": ["src/agentit/portal/store.py", "tests/test_store.py"],
         "change_summary": "Add a counter and a threshold check",
         "risk": "low",
@@ -1084,6 +1089,22 @@ class TestCheckHasTestPlan:
         assert "test_plan" in detail or "test" in detail.lower()
 
 
+class TestCheckEvidenceUsefulness:
+    def test_passes_when_dogfood_cited(self):
+        passed, _detail = check_evidence_usefulness(_proposal())
+        assert passed is True
+
+    def test_fails_without_concrete_failure_signal(self):
+        passed, detail = check_evidence_usefulness(_proposal(
+            evidence="We should maybe improve logging someday for operators.",
+            gap_description="Logging could be nicer in general.",
+            change_summary="Add a log line",
+            title="Nicer logs",
+        ))
+        assert passed is False
+        assert "concrete" in detail.lower() or "dogfood" in detail.lower()
+
+
 class TestCheckSyntax:
     def test_passes_for_valid_python(self):
         passed, _detail = check_syntax({"src/agentit/foo.py": "def foo():\n    return 1\n"})
@@ -1426,7 +1447,8 @@ class TestRunSafetyGates:
             result = run_safety_gates(_proposal(), diff, tmp_path)
 
         assert result["passed"] is True
-        assert len(result["gates"]) == 7
+        assert len(result["gates"]) == 8
+        assert "evidence-usefulness" in [g["name"] for g in result["gates"]]
         assert all(g["passed"] for g in result["gates"])
 
     def test_one_failing_gate_fails_the_whole_run(self, tmp_path):
