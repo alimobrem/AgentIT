@@ -5,6 +5,14 @@ Used by the orchestrator (for agent registration) and the portal
 """
 from __future__ import annotations
 
+import logging
+import re
+from pathlib import Path
+
+import yaml
+
+logger = logging.getLogger(__name__)
+
 # security, observability, cicd, compliance, infrastructure, incident,
 # release, retirement, and chaos are now skill-only domains -- their
 # Python agents (agents/hardening.py, cicd.py, compliance.py,
@@ -38,11 +46,95 @@ RESOURCE_TIERS: dict[str, dict[str, str]] = {
     "large": {"cpu_req": "250m", "cpu_lim": "1000m", "mem_req": "512Mi", "mem_lim": "1Gi"},
 }
 
-AGENT_CLASSES: dict[str, tuple[str, str, str, str]] = {
-    "cost": ("cost", "agentit.agents.cost", "CostOptimizationAgent", "small"),
-    "dependency": ("dependency", "agentit.agents.dependency", "DependencyAgent", "small"),
-    "codechange": ("codechange", "agentit.agents.codechange", "CodeChangeAgent", "large"),
-}
+
+def _agents_dir() -> Path:
+    """Repo-root ``agents/`` directory holding ``mode: agent`` registration
+    Markdown files -- the same default-resolution convention
+    ``runner.py``'s ``_default_checks_dir()``/``_default_skills_dir()``
+    already use for ``checks/``/``skills/``. This file lives at
+    ``src/agentit/agents/capabilities.py``, one directory deeper than
+    ``runner.py`` (``src/agentit/runner.py``), hence the extra ``.parent``.
+    """
+    return Path(__file__).resolve().parent.parent.parent.parent / "agents"
+
+
+def _parse_agent_registration(path: Path) -> dict | None:
+    """Parse one ``agents/*.md`` registration file's YAML frontmatter.
+
+    Returns ``None`` (logging a warning) for a malformed file, mirroring
+    ``check_engine._parse_check_file()``'s/``skill_engine.load_skill()``'s
+    own graceful-skip behavior for a bad file rather than crashing the
+    whole registry load.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Cannot read agent registration file %s: %s", path, exc)
+        return None
+
+    match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
+    if not match:
+        logger.warning("No YAML frontmatter in %s", path)
+        return None
+
+    try:
+        meta = yaml.safe_load(match.group(1))
+    except yaml.YAMLError as exc:
+        logger.warning("Bad YAML frontmatter in %s: %s", path, exc)
+        return None
+
+    if not isinstance(meta, dict):
+        return None
+
+    required = {"name", "category", "code_ref", "resource_tier", "description"}
+    missing = required - set(meta.keys())
+    if missing:
+        logger.warning("Agent registration %s missing fields: %s", path, missing)
+        return None
+
+    code_ref = str(meta["code_ref"])
+    if ":" not in code_ref:
+        logger.warning(
+            "Agent registration %s has malformed code_ref %r (expected 'module:ClassName')",
+            path, code_ref,
+        )
+        return None
+
+    return meta
+
+
+def load_agent_classes(agents_dir: Path | None = None) -> dict[str, tuple[str, str, str, str]]:
+    """Build the ``AGENT_CLASSES`` registry from ``agents/*.md`` Markdown
+    registration files instead of a hardcoded dict literal -- Phase 2 of
+    docs/extension-model-unification-plan-2026-07-18.md.
+
+    Each file's ``code_ref`` (a ``module:ClassName`` string) is only
+    *recorded* here, not imported -- ``get_agent_class()`` below still does
+    the actual lazy import, at the exact same call site it always has, so
+    nothing changes about *when* an agent's real Python class is loaded,
+    only *where its registration metadata comes from*. A new agent is now
+    a `git add agents/<name>.md` away instead of a Python dict-literal
+    edit; retiring one is a `git rm`.
+    """
+    resolved = agents_dir if agents_dir is not None else _agents_dir()
+    result: dict[str, tuple[str, str, str, str]] = {}
+    if not resolved.is_dir():
+        logger.warning(
+            "Agent registration directory %s not found -- AGENT_CLASSES will be empty", resolved,
+        )
+        return result
+    for path in sorted(resolved.glob("*.md")):
+        meta = _parse_agent_registration(path)
+        if meta is None:
+            continue
+        module_path, _, class_name = str(meta["code_ref"]).rpartition(":")
+        result[str(meta["name"])] = (
+            str(meta["category"]), module_path, class_name, str(meta["resource_tier"]),
+        )
+    return result
+
+
+AGENT_CLASSES: dict[str, tuple[str, str, str, str]] = load_agent_classes()
 
 
 AGENT_DISPLAY_NAMES: dict[str, str] = {
