@@ -170,3 +170,22 @@ class TestSbomExistsParity:
 
     def test_passes_when_sbom_file_present(self, create_mock_repo) -> None:
         _passes(self.SKILL_PATH, create_mock_repo, {"sbom.json": "{}\n"})
+
+
+class TestBackupConfigExistsParity:
+    """Ported from `checks/data_governance/backup-config.yaml` (deleted in
+    this commit) to `skills/data_governance/backup-config-exists.md`."""
+
+    SKILL_PATH = SKILLS_DIR / "data_governance" / "backup-config-exists.md"
+
+    def test_fires_when_no_backup_reference(self, create_mock_repo) -> None:
+        finding = _fires(self.SKILL_PATH, create_mock_repo, {"main.py": "print('hi')\n"})
+        assert finding.category == "backup"
+        assert finding.severity == Severity.high
+        assert finding.description == "No backup configuration detected"
+        assert finding.recommendation == "Configure Crunchy PostgreSQL backup schedule or add backup CronJob"
+
+    def test_passes_when_backup_reference_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {
+            "backup-cronjob.yaml": "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: backup\n",
+        })
