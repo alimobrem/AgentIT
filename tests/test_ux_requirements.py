@@ -518,7 +518,9 @@ async def test_ledger_tab_empty_state_shows_real_recent_resolution_count(client,
 
 
 async def test_prefers_reduced_motion_globally_handled(client):
-    resp = await client.get("/")
+    """This rule moved out of base.html's inline <style> block into
+    static/css/components.css (2026-07-20 base.html split)."""
+    resp = await client.get("/static/css/components.css")
     assert resp.status_code == 200
     assert "prefers-reduced-motion: reduce" in resp.text
     assert "transition-duration: 0.001ms !important" in resp.text
@@ -527,8 +529,9 @@ async def test_prefers_reduced_motion_globally_handled(client):
 async def test_toast_motion_classes_are_actually_defined(client):
     """Regression: toast-enter/toast-leave were referenced by x-transition
     but never defined anywhere in the stylesheet -- a real (if silent) bug
-    this pass also fixes while adding reduced-motion support."""
-    resp = await client.get("/")
+    this pass also fixes while adding reduced-motion support. Moved to
+    static/css/components.css (2026-07-20 base.html split)."""
+    resp = await client.get("/static/css/components.css")
     assert ".toast-enter {" in resp.text
     assert ".toast-leave {" in resp.text
 
@@ -537,7 +540,9 @@ async def test_toast_motion_classes_are_actually_defined(client):
 
 
 async def test_accent_color_not_used_for_plain_links_or_headings(client):
-    resp = await client.get("/")
+    """These rules moved out of base.html's inline <style> block into
+    static/css/base.css (2026-07-20 base.html split)."""
+    resp = await client.get("/static/css/base.css")
     assert resp.status_code == 200
     assert "a { color: var(--color-link); text-decoration: none; }" in resp.text
     assert "h1 { color: var(--color-heading);" in resp.text
@@ -546,6 +551,7 @@ async def test_accent_color_not_used_for_plain_links_or_headings(client):
 
 async def test_accent_color_still_reserved_for_attention_signals(client, _override_store):
     """nav-badge (pending-count bubble) and the confirm modal's danger
-    styling are legitimate "needs attention" uses -- still accent."""
-    resp = await client.get("/")
+    styling are legitimate "needs attention" uses -- still accent. Moved to
+    static/css/components.css (2026-07-20 base.html split)."""
+    resp = await client.get("/static/css/components.css")
     assert ".nav-badge { background: var(--color-accent);" in resp.text

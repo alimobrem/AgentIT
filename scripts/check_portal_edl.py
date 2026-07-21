@@ -24,6 +24,20 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = REPO_ROOT / "src" / "agentit" / "portal" / "templates"
+# base.html's CSS moved into these real static files (2026-07-20 base.html
+# split) -- the base.html-scoped CSS rule checks below (EDL-DANGER-CLASS,
+# EDL-BADGE-MIN, EDL-FILTER-CSS) now scan this concatenated text instead of
+# base.html's own (CSS-free) text, so they still see the rules they're
+# checking for.
+STATIC_CSS = REPO_ROOT / "src" / "agentit" / "portal" / "static" / "css"
+
+
+def _base_css_text() -> str:
+    if not STATIC_CSS.is_dir():
+        return ""
+    return "\n".join(
+        p.read_text(encoding="utf-8") for p in sorted(STATIC_CSS.glob("*.css"))
+    )
 
 _STATUS_IN_BTN = re.compile(
     r"(no dry run yet|warning|failed|error|pending|please wait|"
@@ -305,30 +319,34 @@ def check_file(path: Path) -> list[Violation]:
                 "EDL-NAV-EVENTS", "MUST", rel, 1,
                 "Decisions menu link missing from base.html",
             ))
-        if re.search(r"btn-danger(?!-outline)", text) and not re.search(r"\.btn-danger\s*\{", text):
+        # CSS rule checks below scan static/css/*.css, not base.html's own
+        # text -- base.html's <style> block was extracted there in full
+        # (2026-07-20 base.html split); see STATIC_CSS/_base_css_text() above.
+        css_text = _base_css_text()
+        if re.search(r"btn-danger(?!-outline)", text) and not re.search(r"\.btn-danger\s*\{", css_text):
             vios.append(Violation(
                 "EDL-DANGER-CLASS", "MUST", rel, 1,
-                ".btn-danger CSS class must be defined (confirm modal uses it)",
+                ".btn-danger CSS class must be defined in static/css/ (confirm modal uses it)",
             ))
-        for m in _BADGE_FONT.finditer(text):
+        for m in _BADGE_FONT.finditer(css_text):
             if not _badge_font_ok(m.group(1)):
                 vios.append(Violation(
-                    "EDL-BADGE-MIN", "MUST", rel, _line_of(text, m.start()),
-                    f".badge font-size {m.group(1).strip()!r} is below 12px / var(--font-xs)",
+                    "EDL-BADGE-MIN", "MUST", rel, 1,
+                    f".badge font-size {m.group(1).strip()!r} in static/css/ is below 12px / var(--font-xs)",
                 ))
-        if not re.search(r"\.filter-bar\s*\{", text):
+        if not re.search(r"\.filter-bar\s*\{", css_text):
             vios.append(Violation(
                 "EDL-FILTER-CSS", "MUST", rel, 1,
-                ".filter-bar CSS missing from base.html",
+                ".filter-bar CSS missing from static/css/",
             ))
         elif not re.search(
             r"\.filter-bar\s+input\s*,\s*\.filter-bar\s+select\s*\{[^}]*width\s*:\s*auto",
-            text,
+            css_text,
             re.S,
         ):
             vios.append(Violation(
                 "EDL-FILTER-CSS", "MUST", rel, 1,
-                ".filter-bar must override global input/select width:100% (width: auto)",
+                ".filter-bar must override global input/select width:100% (width: auto) in static/css/",
             ))
 
     if path.name == "onboard_results.html":

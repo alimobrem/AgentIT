@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "src" / "agentit" / "portal" / "templates"
+STATIC_DIR = Path(__file__).resolve().parent.parent / "src" / "agentit" / "portal" / "static"
 
 
 class TestAlpineScoping:
@@ -633,12 +634,33 @@ class TestTemplateRendering:
         assert (await client.get("/nonexistent-xyz")).status_code == 404
 
     async def test_all_pages_have_css(self, portal_client):
+        """base.html's CSS moved from an inline <style> block to real static
+        files (2026-07-20) -- every page must still reference both, and the
+        referenced URLs must actually resolve (not just be present as text),
+        so a typo'd href/mount path fails this test instead of silently
+        shipping an unstyled page."""
         client, _, aid = portal_client
         for page in ["/", "/assess", f"/assessments/{aid}", "/events", "/ledger",
                      "/agents", "/settings", "/workflows", "/health"]:
             resp = await client.get(page)
             assert resp.status_code == 200, f"{page} returned {resp.status_code}"
-            assert "<style" in resp.text, f"{page} missing CSS"
+            assert '<link rel="stylesheet" href="/static/css/base.css' in resp.text, f"{page} missing base.css link"
+            assert '<link rel="stylesheet" href="/static/css/components.css' in resp.text, f"{page} missing components.css link"
+
+    async def test_static_css_actually_resolves(self, portal_client):
+        """Regression guard for the base.html CSS extraction (2026-07-20):
+        confirms the /static mount actually serves real, non-empty CSS --
+        catching a broken StaticFiles mount or a typo'd static/ path that
+        `test_all_pages_have_css` (a pure string-match on the <link> href)
+        could not, since that test never fetches the URL."""
+        client, _, _ = portal_client
+        for path, marker in [
+            ("/static/css/base.css", ":root"),
+            ("/static/css/components.css", ".stat-grid"),
+        ]:
+            resp = await client.get(path)
+            assert resp.status_code == 200, f"{path} returned {resp.status_code}"
+            assert marker in resp.text, f"{path} missing expected content {marker!r}"
 
 
 class TestAuthNav:
