@@ -702,21 +702,30 @@ async def test_fleet_h1_not_enterprise_readiness(client, _override_store):
 
 async def test_masthead_nav_structure(client, _override_store):
     """Ledger is primary nav (ops home); Decisions is in the user/main menu;
-    Events is a bell icon + drawer (full page still at /events). No Activity dropdown."""
+    Events is a bell icon + drawer (full page still at /events). No Activity
+    dropdown.
+
+    eventsDrawer() moved out of base.html's inline <script> block into
+    static/js/events-drawer.js (2026-07-20 base.html split) -- the markup
+    (nav/drawer HTML, Alpine bindings) is unchanged and still checked
+    against `html` below; assertions that used to grep that same `html` for
+    eventsDrawer()'s JS implementation details now check the static file.
+    """
     resp = await client.get("/ledger")
     assert resp.status_code == 200
     html = resp.text
+    js = (await client.get("/static/js/events-drawer.js")).text
     assert "events-bell" in html
     assert "events-bell-badge" in html
     assert 'id="events-drawer"' in html
     assert "eventsDrawer()" in html
-    assert "/api/events?limit=20" in html
+    assert "/api/events?limit=20" in js
     # Badge polls the same real feed (slightly larger window for unread).
-    assert "/api/events?limit=50" in html
-    assert "agentit.events.lastSeenAt" in html
-    assert "refreshBadge" in html
-    assert "_isBadgeSeverity" in html
-    assert "_eventHref" in html
+    assert "/api/events?limit=50" in js
+    assert "agentit.events.lastSeenAt" in js
+    assert "refreshBadge" in js
+    assert "_isBadgeSeverity" in js
+    assert "_eventHref" in js
     assert "activity-menu" not in html
     # Bell shares Alpine scope with the drawer (aria-expanded + focus restore).
     assert ':aria-expanded="open"' in html
@@ -731,7 +740,7 @@ async def test_masthead_nav_structure(client, _override_store):
     assert ".events-drawer-overlay.open" in base_css
     assert ".events-drawer-panel.open" in base_css
     assert ":class=\"{ 'open': open }\"" in html
-    assert "destroy()" in html and "_removeTrap()" in html
+    assert "destroy()" in js and "_removeTrap()" in js
     # Mobile hamburger owns primary + secondary (not secondary-only).
     assert 'id="nav-primary"' in html
     assert 'id="nav-secondary"' in html
@@ -763,9 +772,9 @@ async def test_masthead_nav_structure(client, _override_store):
     assert "Open full Events page" not in drawer
     assert "Run an assessment from Fleet" in drawer
     assert "events-drawer-empty-hint" in drawer
-    assert "_badgeClass" in html
+    assert "_badgeClass" in js
     # Esc is handled both by Alpine @keydown.escape.window and the trap.
-    assert "e.key === 'Escape'" in html
+    assert "e.key === 'Escape'" in js
     primary = html.split('id="nav-primary"', 1)[1].split("links-secondary", 1)[0]
     assert 'href="/ledger"' in primary
     assert 'href="/fleet"' in primary

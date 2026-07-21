@@ -128,13 +128,17 @@ class TestHonestDeliverConfirm:
 
 class TestSeverityGatedEventsBadge:
     async def test_compute_badge_source_always_filters_severity(self, trust_client):
+        """eventsDrawer() moved out of an inline <script> block in base.html
+        into static/js/events-drawer.js (2026-07-20) -- fetch that static
+        file directly rather than grepping a rendered page's HTML for JS
+        that no longer lives there."""
         client, _store = trust_client
-        resp = await client.get("/ledger")
+        resp = await client.get("/static/js/events-drawer.js")
         assert resp.status_code == 200
-        html = resp.text
-        assert "_isBadgeSeverity" in html
-        assert "_computeBadge" in html
-        fn = html.split("function eventsDrawer()")[1].split("async openDrawer()")[0]
+        js = resp.text
+        assert "_isBadgeSeverity" in js
+        assert "_computeBadge" in js
+        fn = js.split("function eventsDrawer()")[1].split("async openDrawer()")[0]
         assert "critical" in fn and "high" in fn
         assert "_isBadgeSeverity" in fn
         assert not re.search(
@@ -156,8 +160,10 @@ class TestSeverityGatedEventsBadge:
         assert match[0].get("assessment_id") == aid
 
     async def test_drawer_prefers_assessment_ledger_href(self, trust_client):
+        """See test_compute_badge_source_always_filters_severity's docstring
+        above -- _eventHref lives in static/js/events-drawer.js now."""
         client, _store = trust_client
-        resp = await client.get("/ledger")
+        resp = await client.get("/static/js/events-drawer.js")
         assert resp.status_code == 200
         assert "_eventHref" in resp.text
         assert "?tab=ledger" in resp.text

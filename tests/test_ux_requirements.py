@@ -122,11 +122,15 @@ def _cicd_file() -> dict:
 
 async def test_confirm_modal_focuses_cancel_on_show(client):
     """Every existing usage of the shared confirm component shares one
-    Alpine component (confirmModal()) -- the fix lives once, in show()."""
+    Alpine component (confirmModal()) -- the fix lives once, in show().
+    confirmModal() itself moved out of base.html's inline <script> block
+    into static/js/base.js (2026-07-20 base.html split); the `x-ref`
+    markup it targets is unchanged, still in the rendered page."""
     resp = await client.get("/")
     assert resp.status_code == 200
-    assert "this.$refs.cancelBtn.focus()" in resp.text
     assert 'x-ref="cancelBtn"' in resp.text
+    js = (await client.get("/static/js/base.js")).text
+    assert "this.$refs.cancelBtn.focus()" in js
 
 
 # ── #1: type-to-confirm reserved for highest-blast-radius actions only ──
@@ -206,8 +210,11 @@ async def test_command_palette_has_discoverable_shortcut_hint(client):
 
 async def test_command_palette_searches_real_fleet_data_not_mock(client, _override_store):
     """The palette's app search must hit the real /api/fleet endpoint --
-    never mock/fabricated data."""
-    resp = await client.get("/")
+    never mock/fabricated data. commandPalette() moved out of base.html's
+    inline <script> block into static/js/command-palette.js (2026-07-20
+    base.html split)."""
+    resp = await client.get("/static/js/command-palette.js")
+    assert resp.status_code == 200
     assert "fetch('/api/fleet')" in resp.text
 
 
