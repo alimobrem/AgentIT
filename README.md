@@ -34,11 +34,11 @@ Self-managed delivery gates (#119/#121), watchers, and Scan→GitOps delivery ar
 
 ---
 
-<<<<<<< HEAD
 **Self-managed HPA correctness (2026-07-21).** Closed dogfood #134 (wrong `scaleTargetRef`: Deployment / `{{ .Release.Name }}-agentit`, unsafe `maxReplicas` on RWO). Scan now refuses or rewrites AgentIT chart HPAs via `portal/self_managed_hpa.py` + SkillEngine prompts: target Argo `Rollout` named `{{ .Release.Name }}` when the chart uses rollouts; cap or skip HPA when the data PVC is ReadWriteOnce; fail closed into `needs_attention` rather than open a PR that clears `hpa-exists` without attaching. Skill: `skills/infrastructure/hpa.md`. Tests: `TestSelfManagedHpaCorrectness`, skill-engine HPA self-managed cases.
-=======
+
+---
+
 **PR-types quality follow-ups (2026-07-21).** Inventory: [`docs/agentit-pr-types-quality-review.md`](docs/agentit-pr-types-quality-review.md). P0 HPA app-correctness (#136) + SSA soft dry-run (#137). P1/P2: refuse `.agentit/` dump PRs; source-repo patch titles by mechanism; finding-clear proof section + Ledger `finding-clear-pending`; shared-NS blast-radius in GitOps PR bodies; scout `evidence-usefulness` gate (cite dogfood/finding/PR failure). Activate already stages one skill file.
->>>>>>> 929eb137 (fix(portal): refuse .agentit/ dumps; harden finding-clear and scout yield)
 
 ---
 
