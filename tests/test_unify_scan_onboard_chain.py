@@ -31,7 +31,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from agentit.models import AssessmentReport
-from agentit.portal.routes import assessments
+from agentit.portal.services import assess_pipeline, onboard_pipeline
 from conftest import make_report
 
 
@@ -96,10 +96,10 @@ class TestManualAssessChainsToOpenPR:
             "manual-chain-app", infra_repo_url="https://github.com/org/manual-chain-app-gitops",
         )
 
-        with patch.object(assessments, "clone_repo", return_value=Path("/tmp/fake-manual-chain-repo")), \
-             patch.object(assessments, "run_assessment", return_value=report), \
-             patch.object(assessments, "_auto_create_infra_repo", return_value=report.infra_repo_url), \
-             patch.object(assessments, "_run_onboarding",
+        with patch.object(assess_pipeline, "clone_repo", return_value=Path("/tmp/fake-manual-chain-repo")), \
+             patch.object(assess_pipeline, "run_assessment", return_value=report), \
+             patch.object(assess_pipeline, "_auto_create_infra_repo", return_value=report.infra_repo_url), \
+             patch.object(onboard_pipeline, "_run_onboarding",
                           return_value=([_cluster_config_file()], _ORCH_SUMMARY)), \
              patch("agentit.portal.github_pr.ensure_webhook", return_value={"created": False}), \
              patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None), \
@@ -151,7 +151,7 @@ class TestWebhookAssessChainsToOpenPR:
         )
 
         with patch("agentit.portal.routes.webhooks.clone_assess_cleanup", return_value=report), \
-             patch.object(assessments, "_run_onboarding",
+             patch.object(onboard_pipeline, "_run_onboarding",
                           return_value=([_cluster_config_file()], _ORCH_SUMMARY)), \
              patch("agentit.portal.github_pr.ensure_webhook", return_value={"created": False}), \
              patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None), \
@@ -205,7 +205,7 @@ class TestCadenceReassessOfUnchangedOnboardedAppDoesNotSpam:
             return resp
 
         with patch("agentit.portal.routes.webhooks.clone_assess_cleanup", return_value=report), \
-             patch.object(assessments, "_run_onboarding",
+             patch.object(onboard_pipeline, "_run_onboarding",
                           return_value=([_cluster_config_file()], _ORCH_SUMMARY)), \
              patch("agentit.portal.github_pr.ensure_webhook", return_value={"created": False}), \
              patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None), \

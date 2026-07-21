@@ -1,10 +1,27 @@
-"""Assessment lifecycle: create, view, onboard, apply, and PR creation."""
+"""Assessment lifecycle: create, view, onboard, apply, and PR creation.
+
+The actual assess/onboard/deliver pipeline orchestration (background-thread
+and ``BackgroundTasks`` job bridging, the clone+assess work, the automatic
+validate-fix-deliver chain) lives in ``agentit.portal.services.
+assess_pipeline``/``onboard_pipeline`` (2026-07-20 reuse/refactor review --
+this file used to be ~2000 lines mixing that orchestration in with the HTTP
+route handlers below). Every ``@router.post``/``@router.get`` function here
+stays a thin wrapper: request parsing, a call into the pipeline/store, and
+building the HTTP response.
+
+Kept in this file rather than moved: the unified-progress-stepper position
+helpers (``_assess_pipeline_position``/``_onboard_pipeline_position``/
+``_onboard_terminal_redirect_url``/``_onboard_agent_steps`` and their
+supporting constants) -- these compute what a route should render/redirect
+to given a job's real status, which is response-building logic the routes
+below need directly, not pipeline orchestration that mutates job/store
+state.
+"""
 from __future__ import annotations
 
 import asyncio
 import io
 import logging
-import shutil
 import zipfile
 from urllib.parse import quote
 
@@ -12,149 +29,15 @@ from fastapi import APIRouter, BackgroundTasks, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.responses import StreamingResponse
 
-from agentit.cloner import clone_repo
-from agentit.models import AssessmentReport, Severity
+from agentit.models import Severity
 from agentit.portal.cluster_apply import install_operator
-from agentit.portal.helpers import get_current_user, get_llm_client, get_store, get_templates, publish_event, with_timeout
-from agentit.runner import run_assessment
+from agentit.portal.helpers import get_current_user, get_store, get_templates
+from agentit.portal.services.assess_pipeline import _auto_create_infra_repo, start_assess_job
+from agentit.portal.services.onboard_pipeline import start_manual_validation_job, start_onboarding_job
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-def _get_trusted_base_url(request: Request) -> str:
-    """This app's own externally-reachable base URL, for building outbound URLs
-    (e.g. the GitHub webhook registration below) that we hand to third parties.
-
-    Deliberately does NOT use `request.base_url` as the primary source: that's
-    derived from the client-supplied Host header, so a forged Host would make
-    us register a webhook pointing at an attacker-controlled server. Prefer an
-    explicit trusted override, then our own OpenShift Route (a cluster-side,
-    not client-side, source of truth). Only falls back to the request's Host
-    header if neither is available (e.g. local dev with no Route).
-    """
-    import os
-    override = os.environ.get("AGENTIT_EXTERNAL_URL")
-    if override:
-        return override.rstrip("/")
-    # Only attempt the Route lookup when actually running in-cluster (the
-    # standard KUBERNETES_SERVICE_HOST env var Kubernetes injects into every
-    # pod) -- otherwise this would fall through to a real, possibly slow or
-    # unreachable, kubeconfig-based cluster on the developer's machine (e.g.
-    # in local dev/tests) for every request, instead of a fast, correct
-    # no-op that lands on the same request.base_url fallback anyway.
-    if os.environ.get("KUBERNETES_SERVICE_HOST"):
-        try:
-            from agentit import kube
-            namespace = os.environ.get("AGENTIT_NAMESPACE", "agentit")
-            routes = kube.list_custom_resources("route.openshift.io", "v1", "routes", namespace)
-            for route in routes:
-                if route.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/name") == "agentit":
-                    host = route.get("spec", {}).get("host")
-                    if host:
-                        return f"https://{host}"
-        except Exception:
-            log.warning("Could not resolve own Route for trusted base URL; "
-                        "falling back to request Host header", exc_info=True)
-    return str(request.base_url).rstrip("/")
-
-
-def _clone_assess_cleanup(
-    repo_url: str,
-    criticality: str,
-    infra_repo_url: str | None = None,
-    check_results_out: list[dict] | None = None,
-    secret_decisions_out: list[dict] | None = None,
-):
-    repo_path = clone_repo(repo_url)
-    try:
-        return run_assessment(
-            repo_path, repo_url, criticality,
-            llm_client=get_llm_client(), infra_repo_url=infra_repo_url,
-            check_results_out=check_results_out,
-            secret_decisions_out=secret_decisions_out,
-        )
-    finally:
-        shutil.rmtree(repo_path, ignore_errors=True)
-
-
-class InfraRepoRequiredError(Exception):
-    """Raised when a real GitOps infra repo can't be resolved for a new
-    assessment -- the product directive that all apps must use GitOps means
-    this is a hard stop on Assess, never a fallback to Direct Apply. Carries
-    a human-readable, actionable message (trusted-domain rejection, a
-    repo-creation permission error, etc.) shown verbatim on the failed job.
-    """
-
-
-def _resolve_mandatory_infra_repo_url(repo_url: str, human_supplied: str | None) -> str:
-    """Resolve a real, usable GitOps infra repo URL for a brand-new
-    assessment -- auto-created via ``_auto_create_infra_repo()`` when the
-    human didn't supply one, otherwise the human-supplied URL itself.
-    Either way the result is validated against the same trusted-git-host
-    allowlist ``ensure_applicationset()`` enforces at first-delivery time
-    (``github_pr.is_trusted_git_host()``), so an untrusted or unusable infra
-    repo is rejected here -- at Assess time -- rather than silently accepted
-    only to discover, much later, that GitOps sync will never actually work.
-
-    Raises ``InfraRepoRequiredError`` (never returns ``None``/falls back to
-    Direct Apply) on any failure -- all apps must be GitOps-registered now.
-    """
-    from agentit.portal.github_pr import is_trusted_git_host
-
-    if human_supplied:
-        if not is_trusted_git_host(human_supplied):
-            raise InfraRepoRequiredError(
-                f"GitOps infra repo '{human_supplied}' is not on a trusted Git host "
-                "(set AGENTIT_TRUSTED_GIT_DOMAINS if it should be) -- Assess cannot "
-                "proceed without a usable GitOps infra repo."
-            )
-        return human_supplied
-
-    infra = _auto_create_infra_repo(repo_url)
-    if infra is None:
-        raise InfraRepoRequiredError(
-            "Could not auto-create a GitOps infra repo for this app (often a "
-            "GITHUB_TOKEN permissions issue, or the repo's GitHub org/token doesn't "
-            "allow AgentIT to create a private repo there) -- all apps must be "
-            "GitOps-registered now, with no Direct Apply fallback. Supply a GitOps "
-            "Infra Repo URL manually and retry Assess."
-        )
-    if not is_trusted_git_host(infra):
-        # Nothing in the request handed us this URL -- it came back from our
-        # own _auto_create_infra_repo()/GitHub API call -- so this branch is
-        # only reachable if AGENTIT_TRUSTED_GIT_DOMAINS was narrowed below the
-        # default GitHub host ensure_infra_repo() itself always creates
-        # against. Still validated (never assumed) rather than skipped.
-        raise InfraRepoRequiredError(
-            f"Auto-created GitOps infra repo '{infra}' is not on a trusted Git host -- "
-            "Assess cannot proceed without a usable GitOps infra repo."
-        )
-    return infra
-
-
-def _assess_sync(
-    repo_url: str,
-    criticality: str,
-    infra_repo_url: str | None = None,
-    check_results_out: list[dict] | None = None,
-    secret_decisions_out: list[dict] | None = None,
-):
-    """Run assessment synchronously. Used by webhooks and background threads.
-
-    GitOps registration is mandatory: resolves (and validates) a real
-    infra_repo_url BEFORE cloning/running the assessment pipeline at all --
-    see ``_resolve_mandatory_infra_repo_url()``. Raises
-    ``InfraRepoRequiredError`` (a hard stop, no Direct Apply fallback) if none
-    can be resolved, so the caller never wastes a clone+assess cycle on an
-    app that can't proceed anyway.
-    """
-    infra = _resolve_mandatory_infra_repo_url(repo_url, infra_repo_url)
-    return _clone_assess_cleanup(
-        repo_url, criticality, infra,
-        check_results_out=check_results_out, secret_decisions_out=secret_decisions_out,
-    )
 
 
 @router.get("/assess")
@@ -208,131 +91,12 @@ async def assess_submit(
     # to True for a caller that never resolved the field at all.
     continue_flag = continue_onboard if isinstance(continue_onboard, str) else ""
     chain = continue_flag.strip().lower() in ("1", "true", "yes", "on")
-    job_id = await s.create_assessment_job(repo_url, continue_onboard=chain)
-    # The work below runs in a background thread (long clone+assess pipeline)
-    # via a plain `threading.Thread`, not `asyncio.to_thread` -- unlike
-    # `to_thread` (awaited by the caller before the request finishes), this
-    # thread keeps running after the redirect below is returned, so the
-    # request coroutine can't stick around to `await` anything on its
-    # behalf.
-    #
-    # `AssessmentStore`'s `asyncpg` connection pool is bound to the event
-    # loop that created it and can't be driven from a different thread's
-    # loop, so every store call made from this background thread is
-    # scheduled back onto *this* coroutine's event loop via
-    # `asyncio.run_coroutine_threadsafe` -- the same pattern
-    # `EventConsumer._persist_dead_letter` uses for the identical
-    # constraint. This only works as long as that loop stays alive for the
-    # duration of the background thread (true for the portal's real,
-    # persistent uvicorn event loop; a test harness that tears its loop
-    # down per-request must exercise this path with its own long-lived loop
-    # -- see tests/test_watcher_cli_postgres.py's pattern).
-    loop = asyncio.get_running_loop()
-    store = s
-
-    import threading
-
-    def _bridge(coro):
-        """Schedule a coroutine `store.<method>(...)` call onto `loop` and
-        block this worker thread until it completes."""
-        return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=60)
-
-    def _run():
-        try:
-            _bridge(store.update_assessment_job(job_id, "cloning", "Cloning repository..."))
-            _bridge(store.update_assessment_job(job_id, "assessing", "Analyzing repository..."))
-            check_results: list[dict] = []
-            secret_decisions: list[dict] = []
-            report = _assess_sync(
-                repo_url, criticality, infra,
-                check_results_out=check_results, secret_decisions_out=secret_decisions,
-            )
-            _bridge(store.update_assessment_job(job_id, "saving", "Saving results..."))
-            from agentit.portal.metrics import assessments_total as _at
-            _at.labels(criticality=criticality, status="success").inc()
-            assessment_id = _bridge(store.save(report))
-            _bridge(store.save_check_results(assessment_id, check_results))
-            from agentit.llm_decisions import build_secret_classify_events
-            for ev in build_secret_classify_events(secret_decisions, report.repo_name):
-                _bridge(store.log_event(**ev, correlation_id=assessment_id))
-            # `_assess_sync()` now guarantees `report.infra_repo_url` is always
-            # set (`_resolve_mandatory_infra_repo_url()` raises
-            # `InfraRepoRequiredError` -- handled below -- rather than ever
-            # returning `None`) -- there is no more silent-failure/Direct-Apply-
-            # fallback case to detect and flag here.
-            # Publish event on first assessment for this repo
-            history = _bridge(store.list_history(report.repo_url))
-            if len(history) <= 1:
-                publish_event(
-                    'first-assessment', report.repo_name,
-                    f'First assessment — consider running: agentit learn-for {report.repo_url}',
-                    {'assessment_id': assessment_id, 'score': report.overall_score},
-                    correlation_id=assessment_id,
-                )
-
-            # Deterministic, server-side assess->onboard chain (2026-07-20,
-            # closing root cause #1 of the Onboard/Scan button
-            # investigation, PR #99): the onboard job is created HERE, in
-            # the same background thread that just saved the assessment --
-            # never dependent on a browser polling `GET /assess/progress`
-            # afterward. Created BEFORE this assess job is marked
-            # "completed" below so a poller can never observe "completed"
-            # with no onboard job yet (assess_progress() below only reads
-            # this, it never creates it). The actual onboarding run is then
-            # scheduled (fire-and-forget, not awaited by this thread) onto
-            # the same persistent event loop `_bridge()` already targets,
-            # via the exact same `_run_onboarding_job()` `onboard_submit()`
-            # uses -- just scheduled from a thread instead of FastAPI's
-            # `BackgroundTasks`, since this thread outlives the request/
-            # response cycle those are tied to.
-            onboard_job_id = _bridge(store.create_remediation_job(assessment_id)) if chain else None
-
-            _bridge(store.update_assessment_job(job_id, "completed", "Assessment complete", assessment_id=assessment_id))
-
-            if onboard_job_id:
-                # Computed lazily, only once we know the chain will actually
-                # fire -- `request` is unused by every other line of this
-                # function (direct-call tests, e.g. test_assess_submit_
-                # postgres.py, pass `request=None` and always opt out of
-                # chaining, so this must never be evaluated for them).
-                base_url = _get_trusted_base_url(request)
-                asyncio.run_coroutine_threadsafe(
-                    _run_onboarding_job(onboard_job_id, assessment_id, base_url), loop,
-                )
-        except InfraRepoRequiredError as exc:
-            # A hard stop, never a fallback to Direct Apply -- all apps must
-            # be GitOps-registered now. Reuses the visible-failure event
-            # pattern 9e036d9 introduced for the (formerly soft-warning)
-            # infra-repo-creation-failed case, but no assessment was saved
-            # here at all (this fires before the clone+assess pipeline ever
-            # runs), so there's no assessment_id/report to correlate to or
-            # show a banner on -- the failed job page itself (assess_progress.html)
-            # is where this human-readable, actionable message surfaces.
-            log.warning("Assess blocked for %s: %s", repo_url, exc)
-            from agentit.portal.metrics import assessments_total as _at
-            _at.labels(criticality=criticality, status="error").inc()
-            from agentit.portal.github_pr import _parse_owner_repo
-            try:
-                _, app_name = _parse_owner_repo(repo_url)
-            except Exception:
-                app_name = None
-            _bridge(store.log_event(
-                "portal", "infra-repo-creation-failed", app_name, "critical",
-                f"Assess blocked for {repo_url}: {exc}",
-            ))
-            _bridge(store.update_assessment_job(job_id, "failed", str(exc)[:280]))
-        except Exception as exc:
-            log.exception("Assessment failed for %s", repo_url)
-            from agentit.portal.metrics import assessments_total as _at
-            _at.labels(criticality=criticality, status="error").inc()
-            msg = str(exc)
-            if "clone" in msg.lower() or "git" in msg.lower():
-                msg = f"Could not clone repository. Check the URL and permissions. ({msg[:100]})"
-            elif "GITHUB_TOKEN" in msg:
-                msg = "GitHub integration is not configured. Contact your administrator."
-            _bridge(store.update_assessment_job(job_id, "failed", msg[:200]))
-
-    threading.Thread(target=_run, daemon=True).start()
+    # The real clone+assess pipeline, its background-thread/event-loop
+    # bridging, and (once complete) the deterministic chain into onboarding
+    # all live in `services/assess_pipeline.py::start_assess_job()` -- see
+    # that module's docstring for why the threading semantics are unchanged
+    # by this call moving out of this route.
+    job_id = await start_assess_job(request, s, repo_url, criticality, infra, chain)
     return RedirectResponse(url=f"/assess/progress/{job_id}", status_code=303)
 
 
@@ -436,21 +200,6 @@ async def assess_progress(request: Request, job_id: str):
         "current_index": current_index, "failed": failed,
         "stage_count": _PIPELINE_STAGE_COUNT if chained else 3,
     })
-
-
-def _auto_create_infra_repo(repo_url: str) -> str | None:
-    """Auto-create a GitOps infra repo based on the app repo owner."""
-    try:
-        from agentit.portal.github_pr import _parse_owner_repo, ensure_infra_repo
-        owner, _ = _parse_owner_repo(repo_url)
-        result = ensure_infra_repo(owner)
-        if "repo_url" in result:
-            log.info("Infra repo: %s (created=%s)", result["repo_url"], result.get("created", False))
-            return result["repo_url"]
-        log.warning("Failed to create infra repo: %s", result.get("error"))
-    except Exception as exc:
-        log.warning("Auto-create infra repo failed: %s", exc)
-    return None
 
 
 @router.get("/assessments/{assessment_id}", response_class=HTMLResponse)
@@ -842,24 +591,6 @@ async def delete_assessment(assessment_id: str):
     return RedirectResponse(url="/", status_code=303)
 
 
-async def _run_onboarding(
-    report: AssessmentReport, assessment_id: str | None = None, store: object | None = None,
-) -> tuple[list[dict], dict]:
-    """Run orchestrated onboarding. Returns (files, orchestration_summary).
-
-    Delegates to the shared implementation in helpers.py so this route and
-    the webhook-triggered path (routes/webhooks.py) can never drift apart on
-    which summary fields get stored.
-
-    ``FleetOrchestrator`` is now genuinely async, so this is a plain
-    coroutine `await`ed directly by the caller below -- ``store`` should be
-    whatever `get_store()` returned (async-compatible), no more `.raw`/
-    `asyncio.to_thread` bridge needed for this call path.
-    """
-    from agentit.portal.helpers import run_onboarding as _shared_run_onboarding
-    return await _shared_run_onboarding(report, assessment_id, store=store)
-
-
 @router.get("/assessments/{assessment_id}/onboarding-history", response_class=HTMLResponse)
 async def onboarding_history(request: Request, assessment_id: str) -> HTMLResponse:
     s = await get_store()
@@ -884,144 +615,6 @@ async def onboarding_history(request: Request, assessment_id: str) -> HTMLRespon
     })
 
 
-async def _run_onboarding_job(
-    job_id: str, assessment_id: str, base_url: str,
-) -> None:
-    """Background body of onboarding -- runs after ``onboard_submit`` has
-    already redirected the human to the real-time progress page below.
-
-    Real, determinate, per-stage progress (docs/ux-design-requirements.md
-    Part 3 item 11/checklist #6): each stage transition is a genuine
-    checkpoint this function actually reaches, written via the SAME
-    ``remediation_jobs`` job-tracking mechanism ``assess_submit()`` already
-    uses for assessment progress (``create_remediation_job``/
-    ``update_remediation_job``/``get_remediation_job`` -- no new store
-    method, no new table). The per-agent breakdown shown on the progress
-    page comes from the real events ``FleetOrchestrator._log_event()``
-    already writes live, per agent, via ``list_events_by_correlation_id()``
-    -- not fabricated here.
-
-    No longer stops at "completed" the moment manifests are saved: once
-    generation succeeds, this automatically runs ``auto_delivery.py``'s
-    validate -> fix -> re-validate loop, a final LLM quality review, and
-    (once that converges) the real ``route_and_deliver()`` -- closing
-    docs/onboarding-loop-vision-gap-analysis.md's Part 3 gap for real, this
-    time with an actual fix-and-retry step, not just a straight-through
-    chain. This is NOT the removed AutoMode/``auto_dry_run_then_deliver()``
-    chain come back: nothing here decides "should a human review be
-    skipped" -- the resulting PR (and its merge on GitHub) remains the one
-    human gate, exactly as every other delivery in this app already
-    requires. If the automatic loop can't converge, or the real delivery
-    itself produces no PR, this ends at ``needs_attention`` instead of
-    quietly declaring success -- a human then finishes the job by hand on
-    Onboard Results, the same manual Dry Run/Deliver path this replaces for
-    the common case.
-
-    Uses its own store handle (not the request-scoped one) since this
-    coroutine keeps running after the request/response cycle that started
-    it (via FastAPI's ``BackgroundTasks``, which awaits it on the same
-    event loop after the response is sent -- no cross-thread store
-    bridging needed, unlike ``assess_submit()``'s CLI-shared thread path).
-    """
-    s = await get_store()
-    try:
-        report = await s.get(assessment_id)
-        if report is None:
-            await s.update_remediation_job(job_id, "failed", "Assessment not found", error="Assessment not found")
-            return
-        await s.update_remediation_job(job_id, "running", "Running onboarding agents...")
-        files, orch_summary = await with_timeout(_run_onboarding(report, assessment_id, s))
-
-        from agentit.portal.metrics import onboardings_total as _ot
-        _ot.labels(status="success").inc()
-
-        publish_event("onboarding-complete", report.repo_name,
-                       f"Generated {len(files)} manifests",
-                       {"assessment_id": assessment_id, "file_count": len(files)},
-                       correlation_id=assessment_id, agent_id="onboarding")
-
-        # Trigger image build only if a Containerfile was generated
-        warnings = []
-        has_containerfile = any(
-            f["path"].lower() in ("containerfile", "dockerfile") for f in files
-        )
-        if has_containerfile:
-            await s.update_remediation_job(job_id, "running", "Triggering container image build...")
-            from agentit.image_builder import build_app_image
-            build_result = await asyncio.to_thread(build_app_image, report.repo_url, report.repo_name)
-            if "error" in build_result:
-                log.warning("Image build trigger failed for %s: %s", report.repo_name, build_result["error"])
-                await s.log_event("image-builder", "build-failed", report.repo_name, "warning",
-                                   f"Image build failed: {build_result['error'][:200]}")
-                warnings.append(f"Image build failed: {build_result['error'][:100]}")
-            else:
-                log.info("Image build triggered: %s → %s", report.repo_name, build_result.get("image_ref"))
-                await s.log_event("image-builder", "build-triggered", report.repo_name, "info",
-                                   f"Building image: {build_result.get('image_ref')}")
-
-        await s.update_remediation_job(job_id, "running", "Registering re-assessment webhook...")
-        from agentit.portal.github_pr import ensure_webhook
-        webhook_url = base_url + "/api/webhook/github-push"
-        hook_result = await asyncio.to_thread(ensure_webhook, report.repo_url, webhook_url)
-        if "error" in hook_result:
-            log.warning("Webhook registration failed for %s: %s", report.repo_name, hook_result["error"])
-            warnings.append(f"Auto-reassessment webhook not registered: {hook_result['error'][:100]}")
-        elif hook_result.get("created"):
-            await s.log_event("portal", "webhook-registered", report.repo_name,
-                               "info", "GitHub push webhook registered for auto-reassessment")
-
-        # Warnings (image build / webhook registration failures) are already
-        # persisted as real events above (visible on this app's Timeline
-        # tab and the global Events page) -- not re-threaded through the
-        # job's `error` column, which is reserved for a genuine failure.
-        _ = warnings
-
-        from agentit.assessment_diff import current_finding_keys
-        from agentit.portal.auto_delivery import auto_validate_and_deliver
-
-        namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
-        result = await auto_validate_and_deliver(
-            store=s, report=report, app_name=report.repo_name, namespace=namespace,
-            assessment_id=assessment_id, actor="auto-delivery", files=files,
-            orchestration=orch_summary, target_findings=sorted(current_finding_keys(report)),
-            job_id=job_id,
-        )
-
-        if result["status"] == "delivered":
-            pr_count = len(result["pr_urls"])
-            await s.update_remediation_job(
-                job_id, "completed",
-                f"Onboarding complete -- {pr_count} pull request{'s' if pr_count != 1 else ''} ready for your approval.",
-            )
-        elif result["status"] == "unchanged":
-            # Not a failure: generated manifests already match what's
-            # deployed (github_pr.py's content-unchanged dedup) -- the
-            # expected outcome for a chained, automatic re-onboard of an
-            # already-onboarded, unchanged app (e.g. a cadence/webhook-
-            # triggered re-scan). See auto_delivery.py's own docstring.
-            await s.update_remediation_job(
-                job_id, "completed",
-                "Onboarding complete -- manifests already match what's deployed; nothing new to deliver.",
-            )
-        else:
-            await s.update_remediation_job(
-                job_id, "needs_attention",
-                "Onboarding complete, but automatic validation/delivery needs your attention.",
-                error=result["reason"],
-            )
-    except Exception as exc:
-        log.exception("Onboarding failed for %s", assessment_id)
-        from agentit.portal.metrics import onboardings_total as _ot
-        _ot.labels(status="error").inc()
-        detail = getattr(exc, "detail", None) or str(exc)
-        await s.update_remediation_job(
-            job_id, "failed",
-            f"Onboarding failed: {str(detail)[:180]}",
-            error=f"Onboarding failed: {str(detail)[:180]} — no manifests were generated. "
-                  f"Check the repository is reachable and agents/skills ran cleanly, then retry Onboard.",
-        )
-
-
 @router.post("/assessments/{assessment_id}/onboard", response_model=None)
 async def onboard_submit(
     request: Request,
@@ -1033,6 +626,9 @@ async def onboard_submit(
     instead of blocking the request for however long agent orchestration
     takes -- mirrors ``assess_submit()``'s existing job-tracking pattern.
 
+    ``start_onboarding_job()`` (``services/onboard_pipeline.py``) owns the
+    actual job-creation/``BackgroundTasks`` scheduling -- this route stays a
+    thin wrapper: look up the assessment, delegate, build the redirect.
     Once manifests are generated, ``_run_onboarding_job()`` automatically
     runs the validate/fix loop, a final LLM review, and (once clean) the
     real Deliver -- see ``auto_delivery.py``. A human's one remaining
@@ -1045,9 +641,7 @@ async def onboard_submit(
     if report is None:
         raise HTTPException(status_code=404, detail="Assessment not found")
 
-    job_id = await s.create_remediation_job(assessment_id)
-    base_url = _get_trusted_base_url(request)
-    background_tasks.add_task(_run_onboarding_job, job_id, assessment_id, base_url)
+    job_id = await start_onboarding_job(s, assessment_id, request, background_tasks)
     return RedirectResponse(
         url=f"/assessments/{assessment_id}/onboard/progress/{job_id}", status_code=303,
     )
@@ -1243,68 +837,6 @@ async def edit_onboarding_file(request: Request, assessment_id: str):
     )
 
 
-async def _run_manual_validation_job(job_id: str, assessment_id: str) -> None:
-    """Background body for the manual "Run Automatic Validation" button on
-    Onboard Results -- the same ``auto_validate_and_deliver()`` pipeline
-    ``_run_onboarding_job()`` already runs right after generation, just
-    invoked again against whatever onboarding files are currently saved
-    (e.g. after a human edits one by hand, or to retry a prior
-    ``needs_attention`` outcome) instead of freshly-generated ones. Reuses
-    the identical job-tracking/progress-page machinery -- there is no
-    second, parallel progress UI for this manual re-trigger.
-    """
-    s = await get_store()
-    try:
-        report = await s.get(assessment_id)
-        if report is None:
-            await s.update_remediation_job(job_id, "failed", "Assessment not found", error="Assessment not found")
-            return
-        files = await s.get_onboarding(assessment_id)
-        if files is None:
-            await s.update_remediation_job(
-                job_id, "failed", "No onboarding manifests to validate",
-                error="No onboarding manifests to validate -- run Onboard first.",
-            )
-            return
-        orchestration = await s.get_orchestration(assessment_id) or {}
-
-        from agentit.assessment_diff import current_finding_keys
-        from agentit.portal.auto_delivery import auto_validate_and_deliver
-
-        namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
-        result = await auto_validate_and_deliver(
-            store=s, report=report, app_name=report.repo_name, namespace=namespace,
-            assessment_id=assessment_id, actor="auto-delivery", files=files,
-            orchestration=orchestration, target_findings=sorted(current_finding_keys(report)),
-            job_id=job_id,
-        )
-
-        if result["status"] == "delivered":
-            pr_count = len(result["pr_urls"])
-            await s.update_remediation_job(
-                job_id, "completed",
-                f"Validation complete -- {pr_count} pull request{'s' if pr_count != 1 else ''} ready for your approval.",
-            )
-        elif result["status"] == "unchanged":
-            await s.update_remediation_job(
-                job_id, "completed",
-                "Validation complete -- manifests already match what's deployed; nothing new to deliver.",
-            )
-        else:
-            await s.update_remediation_job(
-                job_id, "needs_attention",
-                "Automatic validation/delivery needs your attention.",
-                error=result["reason"],
-            )
-    except Exception as exc:
-        log.exception("Manual validation run failed for %s", assessment_id)
-        detail = getattr(exc, "detail", None) or str(exc)
-        await s.update_remediation_job(
-            job_id, "failed", f"Validation failed: {str(detail)[:180]}",
-            error=f"Validation failed: {str(detail)[:180]}",
-        )
-
-
 @router.post("/assessments/{assessment_id}/onboard-results/run-validation", response_model=None)
 async def run_validation(assessment_id: str, background_tasks: BackgroundTasks):
     """Replaces the old manual "Dry Run" button: kicks off the same
@@ -1314,6 +846,9 @@ async def run_validation(assessment_id: str, background_tasks: BackgroundTasks):
     plain, un-auto-fixed dry run is no longer a separate action -- it is
     strictly the first, always-run step of this pipeline, so nothing a bare
     "Dry Run" click used to do is lost, only upgraded.
+
+    ``start_manual_validation_job()`` (``services/onboard_pipeline.py``)
+    owns the actual job-creation/``BackgroundTasks`` scheduling.
     """
     s = await get_store()
     report = await s.get(assessment_id)
@@ -1322,8 +857,7 @@ async def run_validation(assessment_id: str, background_tasks: BackgroundTasks):
     if await s.get_onboarding(assessment_id) is None:
         raise HTTPException(status_code=404, detail="Onboarding not found")
 
-    job_id = await s.create_remediation_job(assessment_id)
-    background_tasks.add_task(_run_manual_validation_job, job_id, assessment_id)
+    job_id = await start_manual_validation_job(s, assessment_id, background_tasks)
     return RedirectResponse(
         url=f"/assessments/{assessment_id}/onboard/progress/{job_id}", status_code=303,
     )

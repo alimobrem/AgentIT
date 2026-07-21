@@ -25,6 +25,7 @@ from agentit.models import (
     Language, Severity, StackInfo,
 )
 from agentit.portal.routes import assessments
+from agentit.portal.services import assess_pipeline
 from conftest import make_store
 
 
@@ -47,9 +48,9 @@ def _make_report(repo_name: str = "infra-fail-app") -> AssessmentReport:
 
 async def _submit_and_wait_for_terminal_status(pg_store, report, *, auto_create_infra_return) -> dict:
     with patch.object(assessments, "get_store", return_value=pg_store), \
-         patch.object(assessments, "clone_repo", return_value=Path("/tmp/fake-infra-fail-repo")), \
-         patch.object(assessments, "run_assessment", return_value=report), \
-         patch.object(assessments, "_auto_create_infra_repo", return_value=auto_create_infra_return):
+         patch.object(assess_pipeline, "clone_repo", return_value=Path("/tmp/fake-infra-fail-repo")), \
+         patch.object(assess_pipeline, "run_assessment", return_value=report), \
+         patch.object(assess_pipeline, "_auto_create_infra_repo", return_value=auto_create_infra_return):
         response = await assessments.assess_submit(
             request=None, repo_url=report.repo_url, criticality="medium",
             infra_repo_url="", continue_onboard="",

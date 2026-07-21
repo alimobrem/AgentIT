@@ -31,6 +31,7 @@ from httpx import ASGITransport, AsyncClient
 
 from agentit.portal.app import app
 from agentit.portal.routes import assessments
+from agentit.portal.services import onboard_pipeline
 from conftest import make_report, make_store, prime_csrf
 
 
@@ -93,7 +94,7 @@ class TestRunOnboardingJobAutomaticallyValidatesAndDelivers:
         )
         job_id = await store.create_remediation_job(aid)
 
-        with patch.object(assessments, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY_AUTO_APPROVE)), \
+        with patch.object(onboard_pipeline, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY_AUTO_APPROVE)), \
              patch("agentit.portal.github_pr.ensure_webhook", return_value={"created": False}), \
              patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None), \
              patch("agentit.portal.github_pr.commit_to_infra_repo",
@@ -101,7 +102,7 @@ class TestRunOnboardingJobAutomaticallyValidatesAndDelivers:
                                  "commit_url": "https://github.com/org/onboard-completes-app-gitops/commit/abc",
                                  "files_committed": 1}), \
              patch("agentit.portal.github_pr.ensure_applicationset"):
-            await assessments._run_onboarding_job(job_id, aid, "http://testserver")
+            await onboard_pipeline._run_onboarding_job(job_id, aid, "http://testserver")
 
         job = await store.get_remediation_job(job_id)
         assert job["status"] == "completed"
@@ -119,11 +120,11 @@ class TestRunOnboardingJobAutomaticallyValidatesAndDelivers:
         aid = await _seed_assessment(store, repo_name="onboard-needs-attention-app", infra_repo_url=None)
         job_id = await store.create_remediation_job(aid)
 
-        with patch.object(assessments, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY_AUTO_APPROVE)), \
+        with patch.object(onboard_pipeline, "_run_onboarding", return_value=([_cluster_config_file()], _ORCH_SUMMARY_AUTO_APPROVE)), \
              patch("agentit.portal.github_pr.ensure_webhook", return_value={"created": False}), \
              patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None), \
              patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit:
-            await assessments._run_onboarding_job(job_id, aid, "http://testserver")
+            await onboard_pipeline._run_onboarding_job(job_id, aid, "http://testserver")
 
         job = await store.get_remediation_job(job_id)
         assert job["status"] == "needs_attention"

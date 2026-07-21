@@ -1,7 +1,8 @@
 """Regression tests: helpers.run_onboarding (webhook path) and
-routes/assessments.py's _run_onboarding (inline portal path) must produce
-orchestration summaries with the same fields, so the two call paths can
-never drift apart on what gets persisted.
+services/onboard_pipeline.py's _run_onboarding (portal onboard-job path,
+moved out of routes/assessments.py 2026-07-20) must produce orchestration
+summaries with the same fields, so the two call paths can never drift
+apart on what gets persisted.
 
 `auto_approve`/`gates` used to be two of those shared fields (persisted
 alongside every onboarding run as orchestrator risk-tier data) -- both were
@@ -58,22 +59,22 @@ async def test_run_onboarding_summary_has_expected_shape(tmp_path: Path):
 
 
 async def test_app_py_delegates_to_shared_run_onboarding():
-    """routes/assessments.py's _run_onboarding must be the same shared
-    implementation used by the webhook path, so the two can never drift on
-    which summary fields get stored (the original bug this file guards
-    against: the inline portal path included fields helpers.py silently
-    omitted)."""
-    from agentit.portal.routes import assessments as assessments_module
+    """services/onboard_pipeline.py's _run_onboarding must be the same
+    shared implementation used by the webhook path, so the two can never
+    drift on which summary fields get stored (the original bug this file
+    guards against: the portal onboard-job path included fields helpers.py
+    silently omitted)."""
+    from agentit.portal.services import onboard_pipeline
 
     async_store, store = await make_async_store()
     report = make_report(criticality="low")
     aid = await store.save(report)
 
-    # routes/assessments.py's _run_onboarding is now genuinely async
-    # (FleetOrchestrator is async throughout) -- its route caller resolves
+    # services/onboard_pipeline.py's _run_onboarding is now genuinely async
+    # (FleetOrchestrator is async throughout) -- its caller resolves
     # the async get_store() itself and passes that store in explicitly --
     # verify _run_onboarding forwards it unchanged.
-    files, orch_summary = await assessments_module._run_onboarding(report, aid, async_store)
+    files, orch_summary = await onboard_pipeline._run_onboarding(report, aid, async_store)
 
     assert "conflicts" in orch_summary
     assert "recommendation" in orch_summary

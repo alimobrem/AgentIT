@@ -475,7 +475,7 @@ async def test_deliver_failure_states_cause_and_next_step(client, _override_stor
 async def test_onboarding_failure_states_cause_and_next_step(client, _override_store):
     store = _override_store
     aid = await store.save(_make_report("onboard-fail-app"))
-    with patch("agentit.portal.routes.assessments._run_onboarding",
+    with patch("agentit.portal.services.onboard_pipeline._run_onboarding",
                side_effect=RuntimeError("repository not reachable")):
         resp = await client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
     progress_url = resp.headers["location"]

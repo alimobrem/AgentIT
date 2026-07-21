@@ -19,6 +19,7 @@ from agentit.models import (
 )
 from agentit.platform_context import PlatformContext
 from agentit.portal.app import app, get_store
+from agentit.portal.services import assess_pipeline
 from conftest import make_store, prime_csrf
 
 # Discovery returning an empty context (no k8s_version, no available_kinds)
@@ -164,10 +165,10 @@ async def test_assess_onboard_flow(client, _override_store):
     # onboard chaining (docs/onboarding-loop-vision-gap-analysis.md Phase 0
     # item 5) so this test can keep exercising the separate, manual
     # "Step 2: onboard" POST below in isolation.
-    with patch("agentit.portal.routes.assessments.clone_repo", return_value=Path("/tmp/fake")), \
-         patch("agentit.portal.routes.assessments.run_assessment", return_value=report), \
-         patch("agentit.portal.routes.assessments._auto_create_infra_repo",
-               return_value="https://github.com/org/flow-repo-gitops"):
+    with patch.object(assess_pipeline, "clone_repo", return_value=Path("/tmp/fake")), \
+         patch.object(assess_pipeline, "run_assessment", return_value=report), \
+         patch.object(assess_pipeline, "_auto_create_infra_repo",
+                      return_value="https://github.com/org/flow-repo-gitops"):
         resp = await client.post(
             "/assess",
             data={"repo_url": "https://github.com/org/flow-repo", "criticality": "high", "continue_onboard": "0"},
@@ -275,10 +276,10 @@ async def test_webhook_onboard_full_flow(client, _override_store):
 
 async def test_assess_error_shows_progress(client):
     """When run_assessment raises, the progress page shows the error."""
-    with patch("agentit.portal.routes.assessments.clone_repo", return_value=Path("/tmp/fake")), \
-         patch("agentit.portal.routes.assessments.run_assessment", side_effect=RuntimeError("clone failed: repo not found")), \
-         patch("agentit.portal.routes.assessments._auto_create_infra_repo",
-               return_value="https://github.com/org/bad-repo-gitops"):
+    with patch.object(assess_pipeline, "clone_repo", return_value=Path("/tmp/fake")), \
+         patch.object(assess_pipeline, "run_assessment", side_effect=RuntimeError("clone failed: repo not found")), \
+         patch.object(assess_pipeline, "_auto_create_infra_repo",
+                      return_value="https://github.com/org/bad-repo-gitops"):
         resp = await client.post(
             "/assess",
             data={"repo_url": "https://github.com/org/bad-repo", "criticality": "medium"},
@@ -314,10 +315,10 @@ async def test_reassess_from_dashboard(client, _override_store):
     # onboard chaining (docs/onboarding-loop-vision-gap-analysis.md Phase 0
     # item 5) -- this test only cares about the new-vs-original assessment
     # identity, not onboarding.
-    with patch("agentit.portal.routes.assessments.clone_repo", return_value=Path("/tmp/fake")), \
-         patch("agentit.portal.routes.assessments.run_assessment", return_value=new_report), \
-         patch("agentit.portal.routes.assessments._auto_create_infra_repo",
-               return_value="https://github.com/org/reassess-repo-gitops"):
+    with patch.object(assess_pipeline, "clone_repo", return_value=Path("/tmp/fake")), \
+         patch.object(assess_pipeline, "run_assessment", return_value=new_report), \
+         patch.object(assess_pipeline, "_auto_create_infra_repo",
+                      return_value="https://github.com/org/reassess-repo-gitops"):
         resp = await client.post(
             "/assess",
             data={"repo_url": "https://github.com/org/reassess-repo", "criticality": "high", "continue_onboard": "0"},

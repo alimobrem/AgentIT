@@ -159,7 +159,8 @@ async def webhook_assess(request: Request, background_tasks: BackgroundTasks):
     # scheduled the same way (FastAPI `BackgroundTasks`) rather than
     # depending on anything a human does afterward.
     onboard_job_id = await s.create_remediation_job(assessment_id)
-    from agentit.portal.routes.assessments import _get_trusted_base_url, _run_onboarding_job
+    from agentit.portal.helpers import _get_trusted_base_url
+    from agentit.portal.services.onboard_pipeline import _run_onboarding_job
     base_url = _get_trusted_base_url(request)
     background_tasks.add_task(_run_onboarding_job, onboard_job_id, assessment_id, base_url)
 
@@ -243,7 +244,8 @@ async def webhook_github_push(request: Request, background_tasks: BackgroundTask
         # the full rationale. A push-triggered re-assessment used to save a
         # new assessment with no chaining concept at all.
         onboard_job_id = await s.create_remediation_job(assessment_id)
-        from agentit.portal.routes.assessments import _get_trusted_base_url, _run_onboarding_job
+        from agentit.portal.helpers import _get_trusted_base_url
+        from agentit.portal.services.onboard_pipeline import _run_onboarding_job
         base_url = _get_trusted_base_url(request)
         background_tasks.add_task(_run_onboarding_job, onboard_job_id, assessment_id, base_url)
 
