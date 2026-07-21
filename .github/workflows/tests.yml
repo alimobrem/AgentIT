@@ -129,10 +129,12 @@ jobs:
   # build-image task builds via buildah) and smoke-tests it here too, so a
   # regression is caught on every PR -- not only after it's already merged
   # and reached the live cluster. Each of these checks was, one at a time,
-  # only discovered missing from the *deployed* image live: gh, a real .git
+  # only discovered missing from the *deployed* image live: git, a real .git
   # checkout, pytest, tests/, and chart/ (see Containerfile's own comments
   # for each fix, and chart/templates/tekton/pipeline.yaml's smoke-test-image
   # task for the equivalent gate on the actual promoted-to-Argo-CD tag).
+  # GitHub PR create/list/status use portal/github_pr REST (GITHUB_TOKEN),
+  # not the gh CLI — keep this job in sync with Tekton smoke-test-image.
   image-smoke-test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -153,9 +155,10 @@ jobs:
             [ -n "$(ls -A tests)" ]
             echo "chart/ exists (needed by capability-scout safety gates):"
             test -d chart
-            echo "git and gh CLIs are present:"
+            echo "git CLI is present (working-tree push; GitHub PRs use REST):"
             git --version
-            gh --version
+            echo "agentit.kube / github_pr importable (no oc/gh for cluster/PR ops):"
+            python -c "from agentit import kube; from agentit.portal import github_pr"
             echo "/opt/app-root/src is a real, valid git checkout:"
             # Mirror Tekton smoke: runtime UID may not see build-time gitconfig.
             git config --global --add safe.directory /opt/app-root/src

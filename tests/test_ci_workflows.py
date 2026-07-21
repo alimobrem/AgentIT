@@ -39,7 +39,9 @@ class TestImageSmokeTestJob:
 
     def test_checks_every_regressed_tool(self):
         """Each of these was discovered missing from the deployed image one
-        at a time, live: gh, a real .git checkout, pytest, tests/, chart/."""
+        at a time, live: a real .git checkout, pytest, tests/, chart/, and
+        (now) importable agentit.kube / github_pr — not the gh CLI.
+        Keep in sync with Tekton smoke-test-image (test_helm_templates)."""
         doc = _load("tests.yml")
         steps = doc["jobs"]["image-smoke-test"]["steps"]
         smoke_step = next(s for s in steps if "docker run" in s.get("run", ""))
@@ -49,11 +51,12 @@ class TestImageSmokeTestJob:
             "test -d tests",
             "test -d chart",
             "git --version",
-            "gh --version",
+            "from agentit import kube",
             "safe.directory",
             "git -C /opt/app-root/src status",
         ):
             assert expected in script, f"image-smoke-test script missing check: {expected!r}"
+        assert "gh --version" not in script, "runtime must not require the gh CLI"
 
     def test_smoke_test_step_runs_after_build(self):
         doc = _load("tests.yml")
