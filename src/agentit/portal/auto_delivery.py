@@ -448,20 +448,28 @@ async def auto_validate_and_deliver(
                 isinstance(o, dict) and o.get("gate_refused")
                 for o in delivery["outcomes"].values()
             )
+            filtered = any(
+                isinstance(o, dict) and o.get("filtered")
+                for o in delivery["outcomes"].values()
+            )
             logger.warning("Auto-delivery produced no PR for %s: %s", app_name, reason)
             try:
+                if gate_refused:
+                    attention_msg = (
+                        f"Self-managed delivery filter/gate refused: {reason}"
+                        if filtered
+                        else f"Self-managed chart delivery gate refused: {reason}"
+                    )
+                else:
+                    attention_msg = (
+                        f"Automatic delivery did not open a pull request: {reason} -- "
+                        "manifests were saved; review and deliver manually on Onboard Results."
+                    )
                 await store.log_event(
                     "auto-delivery",
                     "auto-delivery-gate-refused" if gate_refused else "auto-delivery-failed",
                     app_name, "warning",
-                    (
-                        f"Self-managed chart delivery gate refused: {reason}"
-                        if gate_refused
-                        else (
-                            f"Automatic delivery did not open a pull request: {reason} -- "
-                            "manifests were saved; review and deliver manually on Onboard Results."
-                        )
-                    ),
+                    attention_msg,
                     correlation_id=assessment_id,
                 )
             except Exception:

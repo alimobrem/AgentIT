@@ -103,6 +103,11 @@ _FORBIDDEN_CHART_KINDS = frozenset({
     "ClusterTask",
     "Application",
 })
+# Hardcoded AgentIT namespace in fleet-style skill dumps — self-managed chart
+# templates must use ``{{ .Release.Namespace }}`` instead.
+_HARDCODED_AGENTIT_NAMESPACE_RE = re.compile(
+    r"(?m)^\s*namespace:\s*[\"']?agentit[\"']?\s*$",
+)
 
 
 def has_unresolved_placeholders(content: str | None) -> bool:
@@ -115,6 +120,70 @@ def is_helm_shaped(content: str | None) -> bool:
     """True when content looks like a Helm template (not a raw skill dump)."""
     text = content or ""
     return any(marker in text for marker in _HELM_TEMPLATE_MARKERS)
+
+
+def self_managed_chart_drop_reason(file_entry: dict) -> str | None:
+    """Why a remapped self-managed file must not land under ``chart/``.
+
+    Returns ``None`` when the file is deliverable (skills markdown, or
+    Helm-shaped YAML without forbidden kinds / hardcoded ``namespace: agentit``).
+    Used by ``filter_self_managed_delivery_files`` before the fail-closed gate
+    so fleet-style skill dumps never become chart PR candidates.
+    """
+    target = str(file_entry.get("target_path") or file_entry.get("path") or "")
+    path = str(file_entry.get("path") or "")
+    suffix = Path(target or path).suffix.lower()
+    if suffix == ".md" or target.startswith("skills/"):
+        return None
+    if not target.startswith("chart/"):
+        # Non-chart, non-skills paths are unexpected for self-managed remap;
+        # refuse rather than guessing.
+        return f"{target or path}: not a skills/ or chart/ self-managed destination"
+    content = file_entry.get("content") or ""
+    docs = _parse_manifest(content)
+    bad_kinds = sorted(
+        {(doc.get("kind") or "") for doc in docs} & _FORBIDDEN_CHART_KINDS
+    )
+    if bad_kinds:
+        return f"{target}: forbidden kind(s) {', '.join(bad_kinds)} (fleet-only)"
+    if not is_helm_shaped(content):
+        return (
+            f"{target}: raw fleet-style YAML (not Helm-shaped) — "
+            "prefer a skills/** markdown improvement, or a curated Helm chart patch"
+        )
+    if _HARDCODED_AGENTIT_NAMESPACE_RE.search(content):
+        return (
+            f"{target}: hardcoded namespace: agentit — "
+            "use {{{{ .Release.Namespace }}}} for Application agentit sync"
+        )
+    return None
+
+
+def filter_self_managed_delivery_files(
+    files: list[dict],
+) -> tuple[list[dict], list[str]]:
+    """Keep self-managed deliverables; drop fleet-style chart junk with reasons.
+
+    After ``remap_self_managed_*``, call this **before** the fail-closed gate
+    so Auto-Scan can still open a PR for skills markdown and Helm-shaped
+    chart patches without the whole batch being refused by #119.
+
+    Returns ``(deliverable_files, drop_reasons)``. Dropped files must not
+    open a fake PR — callers surface reasons via Ledger / ``needs_attention``.
+    """
+    kept: list[dict] = []
+    reasons: list[str] = []
+    for f in files:
+        reason = self_managed_chart_drop_reason(f)
+        if reason is None:
+            kept.append(f)
+        else:
+            reasons.append(reason)
+            logger.info(
+                "Self-managed delivery filter dropped %s: %s",
+                f.get("target_path") or f.get("path"), reason,
+            )
+    return kept, reasons
 
 
 def validate_self_managed_chart_delivery(
@@ -212,6 +281,58 @@ async def _gate_self_managed_chart_files(
             for f in chart_files
         }
     return validate_self_managed_chart_delivery(chart_files, path_exists=path_exists)
+
+
+async def _deliver_self_managed_source_pr(
+    *,
+    remapped: list[dict],
+    report: AssessmentReport,
+    app_name: str,
+    store: object,
+    assessment_id: str,
+    actor: str,
+    dry_run: bool,
+) -> dict:
+    """Filter fleet junk → fail-closed gate → AgentIT.git source PR.
+
+    Skills markdown and Helm-shaped chart patches can still open a PR when
+    other files in the batch are dropped. Empty deliverable →
+    ``gate_refused`` / ``needs_attention`` with why (no fake PR). Never
+    records skill ``approved`` on PR open.
+    """
+    deliverable, drop_reasons = filter_self_managed_delivery_files(remapped)
+    if not deliverable:
+        reason = (
+            "Self-managed filter dropped all delivery candidates — "
+            + ("; ".join(drop_reasons) if drop_reasons else "nothing deliverable")
+            + ". Prefer skills/** markdown improvements or curated Helm chart "
+            "patches. See docs/architecture-agentit-vs-fleet-gitops.md. No PR opened."
+        )
+        return {
+            "error": reason,
+            "gate_refused": True,
+            "filtered": True,
+            "filtered_reasons": drop_reasons,
+        }
+    gate_reason = await _gate_self_managed_chart_files(deliverable, report)
+    if gate_reason:
+        return {
+            "error": gate_reason,
+            "gate_refused": True,
+            "filtered_reasons": drop_reasons,
+        }
+    outcome = await deliver_with_verification(
+        mechanism=MECHANISM_SOURCE_REPO_PR, files=deliverable, report=report,
+        app_name=app_name, store=store, assessment_id=assessment_id,
+        actor=actor, dry_run=dry_run, record_skill_approval=False,
+    )
+    if drop_reasons:
+        outcome = {
+            **outcome,
+            "filtered_reasons": drop_reasons,
+            "filtered_count": len(drop_reasons),
+        }
+    return outcome
 
 
 # Human-facing mechanism descriptions surfaced at the confirmation step a
@@ -450,6 +571,11 @@ def classify_file(entry: dict) -> str:
     if category in ("dependency", "cost") and path in _NARRATIVE_REPORT_FILENAMES:
         return CATEGORY_NARRATIVE_REPORT
 
+    # Skill-catalog markdown improvements land under skills/** on AgentIT.git
+    # (image-baked). Prefer a real source-repo PR over `.agentit/` at-rest.
+    if suffix == ".md" and str(path).startswith("skills/"):
+        return CATEGORY_SOURCE_PATCH
+
     if suffix not in (".yaml", ".yml"):
         return CATEGORY_MANIFEST_AT_REST
 
@@ -676,6 +802,7 @@ async def deliver_with_verification(
     dry_run: bool,
     path_prefix: str | None = None,
     branch_name: str | None = None,
+    record_skill_approval: bool = True,
 ) -> dict:
     """Structurally parallel to ``cluster_apply.apply_with_verification()``,
     for the commit-and-PR delivery mechanisms
@@ -684,6 +811,11 @@ async def deliver_with_verification(
     ``record_skill_outcomes()`` after a successful commit/PR (not just a
     successful apply -- a merged PR is exactly as strong a "this fix was
     accepted" signal, per the design doc).
+
+    ``record_skill_approval``: when ``False`` (self-managed AgentIT), do
+    **not** record skill outcome ``approved`` merely because a PR opened —
+    opening is not acceptance (aligns with #119 honesty). Fleet apps keep
+    the historical approve-on-PR-open behavior.
 
     ``path_prefix``/``branch_name`` only apply to ``MECHANISM_INFRA_REPO_
     COMMIT`` -- see ``_CICD_SHARED_NAMESPACE_PATH_PREFIX``'s own comment for
@@ -742,7 +874,7 @@ async def deliver_with_verification(
                   **{k: v for k, v in result.items() if k != "error"}},
     )
 
-    if outcome == "success":
+    if outcome == "success" and record_skill_approval:
         await record_skill_outcomes(
             store, app_name, files, {f["path"] for f in files}, "approved",
             f"delivered via {mechanism}",
@@ -1132,20 +1264,13 @@ async def route_and_deliver(
                     infra_repo_url=infra_repo_url,
                 )
             elif mech == MECHANISM_SOURCE_REPO_PR and report is not None:
-                # Self-managed AgentIT: PR against AgentIT.git under
-                # chart/templates/ or skills/ — never apps/agentit/.
+                # Self-managed AgentIT: filter fleet junk, then PR against
+                # AgentIT.git under chart/templates/ or skills/ — never apps/agentit/.
                 remapped = remap_self_managed_cluster_files(cluster_files)
-                gate_reason = await _gate_self_managed_chart_files(remapped, report)
-                if gate_reason:
-                    outcomes[CATEGORY_CLUSTER_CONFIG] = {
-                        "error": gate_reason, "gate_refused": True,
-                    }
-                else:
-                    outcomes[CATEGORY_CLUSTER_CONFIG] = await deliver_with_verification(
-                        mechanism=MECHANISM_SOURCE_REPO_PR, files=remapped, report=report,
-                        app_name=app_name, store=store, assessment_id=assessment_id,
-                        actor=actor, dry_run=dry_run,
-                    )
+                outcomes[CATEGORY_CLUSTER_CONFIG] = await _deliver_self_managed_source_pr(
+                    remapped=remapped, report=report, app_name=app_name, store=store,
+                    assessment_id=assessment_id, actor=actor, dry_run=dry_run,
+                )
             else:
                 # MECHANISM_NONE: no infra_repo_url is known for this
                 # assessment at all -- this refuses rather than mutating
@@ -1183,20 +1308,13 @@ async def route_and_deliver(
                     note=_cicd_shared_namespace_note(cicd_files),
                 )
             elif mech == MECHANISM_SOURCE_REPO_PR and report is not None:
-                # Self-managed AgentIT: PR against AgentIT.git under live
-                # chart/ / argocd/ paths — never apps/agentit/.
+                # Self-managed AgentIT: filter fleet junk, then PR against
+                # AgentIT.git under live chart/ paths — never apps/agentit/.
                 remapped = remap_self_managed_cicd_files(cicd_files)
-                gate_reason = await _gate_self_managed_chart_files(remapped, report)
-                if gate_reason:
-                    outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = {
-                        "error": gate_reason, "gate_refused": True,
-                    }
-                else:
-                    outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = await deliver_with_verification(
-                        mechanism=MECHANISM_SOURCE_REPO_PR, files=remapped, report=report,
-                        app_name=app_name, store=store, assessment_id=assessment_id,
-                        actor=actor, dry_run=dry_run,
-                    )
+                outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = await _deliver_self_managed_source_pr(
+                    remapped=remapped, report=report, app_name=app_name, store=store,
+                    assessment_id=assessment_id, actor=actor, dry_run=dry_run,
+                )
             else:
                 outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = {
                     "error": (
@@ -1208,12 +1326,16 @@ async def route_and_deliver(
                     ),
                 }
 
+        # Self-managed: never mark skill outcomes approved merely because a
+        # PR opened (#119 honesty). Fleet apps keep approve-on-open.
+        _approve_skills = not self_managed
+
         if source_files:
             if report is not None:
                 outcomes[CATEGORY_SOURCE_PATCH] = await deliver_with_verification(
                     mechanism=MECHANISM_SOURCE_REPO_PR, files=source_files, report=report,
                     app_name=app_name, store=store, assessment_id=assessment_id,
-                    actor=actor, dry_run=dry_run,
+                    actor=actor, dry_run=dry_run, record_skill_approval=_approve_skills,
                 )
             else:
                 outcomes[CATEGORY_SOURCE_PATCH] = {"error": "no assessment report available -- cannot open a source-repo PR"}
@@ -1223,7 +1345,7 @@ async def route_and_deliver(
                 outcomes[CATEGORY_MANIFEST_AT_REST] = await deliver_with_verification(
                     mechanism=MECHANISM_APP_REPO_PR, files=at_rest_files, report=report,
                     app_name=app_name, store=store, assessment_id=assessment_id,
-                    actor=actor, dry_run=dry_run,
+                    actor=actor, dry_run=dry_run, record_skill_approval=_approve_skills,
                 )
             else:
                 outcomes[CATEGORY_MANIFEST_AT_REST] = {"error": "no assessment report available"}

@@ -329,7 +329,12 @@ class TestAutoValidateAndDeliver:
             )
 
         assert result["status"] == "needs_attention"
-        assert "Helm-shaped" in result["reason"] or "forbidden" in result["reason"]
+        assert (
+            "Helm-shaped" in result["reason"]
+            or "fleet-style" in result["reason"]
+            or "filter dropped" in result["reason"]
+            or "forbidden" in result["reason"]
+        )
         mock_source.assert_not_called()
         mock_commit.assert_not_called()
         assert "pr_urls" not in result

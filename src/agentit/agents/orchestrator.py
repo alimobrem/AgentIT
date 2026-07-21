@@ -295,7 +295,15 @@ class FleetOrchestrator:
                 except Exception as exc:
                     logger.debug("LLM init failed for skills generation (continuing without): %s", exc)
 
-            engine = SkillEngine(skills_dir, platform=platform)
+            # App name agentit (AppSet-excluded) is always self-managed —
+            # Application agentit syncs Helm chart/ from AgentIT.git. Pass
+            # that into SkillEngine so generation skips fleet-only kinds and
+            # emits Helm-shaped chart patches (or nothing), not raw K8s dumps.
+            from agentit.portal.delivery import is_appset_excluded_app
+            self_managed = is_appset_excluded_app(self.report.repo_name)
+            engine = SkillEngine(
+                skills_dir, platform=platform, self_managed=self_managed,
+            )
             # run_all() is a synchronous, potentially slow call (it may make
             # several sequential LLM requests, one per matched skill) --
             # narrowly wrapped in to_thread so it doesn't block the event

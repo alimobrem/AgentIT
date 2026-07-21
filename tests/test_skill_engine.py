@@ -709,6 +709,76 @@ class TestDetectModeNeverRemediates:
         assert engine.match(report) == []
 
 
+class TestSelfManagedGenerationConstraints:
+    """P1: self-managed AgentIT skips fleet-only kinds and non-Helm templates."""
+
+    def test_skips_forbidden_output_kinds(self, tmp_path: Path) -> None:
+        skill = _make_skill("tekton-run", outputs=["PipelineRun"], mode="template")
+        engine = SkillEngine(tmp_path, platform=None, self_managed=True)
+        report = make_report(repo_name="agentit")
+        assert engine.generate(skill, report, llm_client=None) == []
+
+    def test_skips_non_helm_template_fallback(self, tmp_path: Path) -> None:
+        skill = Skill(
+            name="netpol",
+            domain="security",
+            version=1,
+            triggers=["network"],
+            outputs=["NetworkPolicy"],
+            property_description="netpol property",
+            body=_NETPOL_TEMPLATE_BODY,
+            file_path="skills/security/netpol.md",
+            mode="template",
+        )
+        engine = SkillEngine(tmp_path, platform=None, self_managed=True)
+        report = make_report(repo_name="agentit")
+        # Template has {{app_name}} AgentIT placeholders, not Helm {{ .Release }}
+        assert engine.generate(skill, report, llm_client=None) == []
+
+    def test_fleet_mode_still_emits_template(self, tmp_path: Path) -> None:
+        skill = Skill(
+            name="netpol",
+            domain="security",
+            version=1,
+            triggers=["network"],
+            outputs=["NetworkPolicy"],
+            property_description="netpol property",
+            body=_NETPOL_TEMPLATE_BODY,
+            file_path="skills/security/netpol.md",
+            mode="template",
+        )
+        engine = SkillEngine(tmp_path, platform=None, self_managed=False)
+        report = make_report(repo_name="pinky")
+        files = engine.generate(skill, report, llm_client=None)
+        assert len(files) == 1
+        assert "NetworkPolicy" in files[0].content
+
+    def test_llm_prompt_includes_self_managed_constraints(self, tmp_path: Path) -> None:
+        skill = _make_skill("netpol", outputs=["NetworkPolicy"], mode="llm")
+        engine = SkillEngine(tmp_path, platform=None, self_managed=True)
+        report = make_report(repo_name="agentit")
+        captured: dict[str, str] = {}
+
+        class _FakeLLM:
+            def _chat(self, system, user, max_tokens=None):
+                captured["system"] = system
+                captured["user"] = user
+                return (
+                    "apiVersion: networking.k8s.io/v1\n"
+                    "kind: NetworkPolicy\n"
+                    "metadata:\n"
+                    "  name: \"{{ .Release.Name }}-netpol\"\n"
+                    "  namespace: \"{{ .Release.Namespace }}\"\n"
+                    "spec:\n"
+                    "  podSelector: {}\n"
+                )
+
+        files = engine.generate(skill, report, llm_client=_FakeLLM())
+        assert len(files) == 1
+        assert "SELF-MANAGED AGENTIT" in captured["user"]
+        assert "{{ .Release.Namespace }}" in files[0].content
+
+
 class TestSkillToCheckDefinition:
     """_skill_to_check_definition()/detect_check_definitions() -- the bridge
     that runs a mode: detect skill's rule through check_engine's own

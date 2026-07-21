@@ -22,6 +22,7 @@ from agentit.portal.delivery import (
     DeliveryInProgressError,
     classify_file,
     confirmation_text,
+    filter_self_managed_delivery_files,
     has_unresolved_placeholders,
     is_appset_excluded_app,
     is_gitops_registered,
@@ -529,6 +530,143 @@ class TestSelfManagedChartDeliveryGate:
         assert validate_self_managed_chart_delivery(files, path_exists={}) is None
 
 
+class TestSelfManagedP1GenerationQuality:
+    """P1: filter fleet junk before #119 gate; keep Helm + skills markdown."""
+
+    def test_filter_drops_raw_fleet_yaml(self):
+        remapped = remap_self_managed_cluster_files(_pr116_shaped_files()[:1])
+        kept, reasons = filter_self_managed_delivery_files(remapped)
+        assert kept == []
+        assert reasons
+        assert "fleet-style" in reasons[0] or "not Helm-shaped" in reasons[0]
+
+    def test_filter_allows_helm_shaped_chart_patch(self):
+        remapped = remap_self_managed_cluster_files([_helm_cluster_config_file()])
+        kept, reasons = filter_self_managed_delivery_files(remapped)
+        assert len(kept) == 1
+        assert reasons == []
+        assert kept[0]["target_path"].startswith("chart/templates/")
+
+    def test_filter_keeps_skills_markdown(self):
+        remapped = remap_self_managed_cluster_files([{
+            "category": "security",
+            "path": "skills/security/pdb.md",
+            "content": "# improve pdb skill\n",
+            "description": "skill markdown",
+        }])
+        kept, reasons = filter_self_managed_delivery_files(remapped)
+        assert len(kept) == 1
+        assert kept[0]["target_path"].startswith("skills/")
+        assert reasons == []
+
+    def test_filter_drops_hardcoded_agentit_namespace(self):
+        remapped = remap_self_managed_cluster_files([{
+            "category": "skills",
+            "path": "agentit-extra-netpol.yaml",
+            "content": (
+                "apiVersion: networking.k8s.io/v1\n"
+                "kind: NetworkPolicy\n"
+                "metadata:\n"
+                "  name: \"{{ .Release.Name }}-extra\"\n"
+                "  namespace: agentit\n"
+                "spec:\n"
+                "  podSelector: {}\n"
+            ),
+            "description": "helm but hardcoded ns",
+        }])
+        kept, reasons = filter_self_managed_delivery_files(remapped)
+        assert kept == []
+        assert any("hardcoded namespace" in r for r in reasons)
+
+    async def test_mixed_helm_and_raw_opens_pr_with_helm_only(self):
+        """Fleet junk filtered out; Helm-shaped patch still opens a PR."""
+        store, raw = await make_async_store()
+        report = make_report(repo_name="agentit", repo_url="https://github.com/alimobrem/AgentIT")
+        report.infra_repo_url = "https://github.com/alimobrem/agentit-gitops"
+        aid = await raw.save(report)
+        files = [_helm_cluster_config_file(), _pr116_shaped_files()[0]]
+        with patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.create_source_patch_pr") as mock_source, \
+             patch("agentit.portal.github_pr.path_exists_on_default_branch", return_value=False), \
+             patch("agentit.skill_engine.record_skill_outcomes") as mock_outcomes:
+            mock_source.return_value = {
+                "pr_url": "https://github.com/alimobrem/AgentIT/pull/201",
+                "branch": "agentit/codechange",
+                "files_committed": 1,
+            }
+            result = await route_and_deliver(
+                files, app_name="agentit", namespace="agentit",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=False,
+            )
+        mock_commit.assert_not_called()
+        mock_source.assert_called_once()
+        called_files = mock_source.call_args[0][2]
+        assert len(called_files) == 1
+        assert called_files[0]["target_path"] == (
+            "chart/templates/agentit-extra-network-policy.yaml"
+        )
+        outcome = result["outcomes"]["cluster_config"]
+        assert outcome["pr_url"].endswith("/201")
+        assert outcome.get("filtered_count", 0) >= 1
+        # Self-managed: no approve-on-PR-open
+        mock_outcomes.assert_not_called()
+
+    async def test_skills_md_still_routes_when_yaml_filtered(self):
+        """skills/**.md → source-repo PR; raw fleet YAML filtered (no chart PR)."""
+        store, raw = await make_async_store()
+        report = make_report(repo_name="agentit", repo_url="https://github.com/alimobrem/AgentIT")
+        report.infra_repo_url = "https://github.com/alimobrem/agentit-gitops"
+        aid = await raw.save(report)
+        files = [
+            {
+                "category": "security",
+                "path": "skills/security/network-policy.md",
+                "content": "# tighten network-policy skill\n",
+                "description": "skill improvement",
+            },
+            _pr116_shaped_files()[0],
+        ]
+        with patch("agentit.portal.github_pr.create_source_patch_pr") as mock_source, \
+             patch("agentit.portal.github_pr.path_exists_on_default_branch", return_value=False):
+            mock_source.return_value = {
+                "pr_url": "https://github.com/alimobrem/AgentIT/pull/202",
+                "branch": "agentit/codechange",
+                "files_committed": 1,
+            }
+            result = await route_and_deliver(
+                files, app_name="agentit", namespace="agentit",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=False,
+            )
+        # skills md via source_patch; cluster_config raw YAML filtered → no 2nd PR
+        mock_source.assert_called_once()
+        called_files = mock_source.call_args[0][2]
+        assert len(called_files) == 1
+        assert called_files[0]["path"].startswith("skills/")
+        assert result["outcomes"]["source_patch"]["pr_url"].endswith("/202")
+        assert result["outcomes"]["cluster_config"].get("gate_refused") is True
+        assert result["outcomes"]["cluster_config"].get("filtered") is True
+
+    async def test_gate_still_fails_closed_on_collision(self):
+        """#119 collision check still refuses after P1 filter keeps Helm file."""
+        store, raw = await make_async_store()
+        report = make_report(repo_name="agentit", repo_url="https://github.com/alimobrem/AgentIT")
+        report.infra_repo_url = "https://github.com/alimobrem/agentit-gitops"
+        aid = await raw.save(report)
+        with patch("agentit.portal.github_pr.create_source_patch_pr") as mock_source, \
+             patch("agentit.portal.github_pr.path_exists_on_default_branch", return_value=True):
+            result = await route_and_deliver(
+                [_helm_cluster_config_file()], app_name="agentit", namespace="agentit",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=False,
+            )
+        mock_source.assert_not_called()
+        outcome = result["outcomes"]["cluster_config"]
+        assert outcome.get("gate_refused") is True
+        assert "collision" in outcome["error"]
+
+
 class TestRouteAndDeliverSelfManagedAgentIT:
     """Regression: onboard must never open dead-letter PRs under
     apps/agentit/ in agentit-gitops (AppSet excludes that path).
@@ -607,8 +745,8 @@ class TestRouteAndDeliverSelfManagedAgentIT:
         assert "error" not in result["outcomes"][CATEGORY_CICD_SHARED_NAMESPACE]
 
     async def test_pr116_shaped_self_managed_delivery_refuses_no_pr(self):
-        """#116-shaped raw skill dumps: gate refuses, create_source_patch_pr
-        never called, outcome is gate_refused (not a green PR)."""
+        """#116-shaped raw skill dumps: P1 filter drops fleet junk, no PR,
+        outcome is gate_refused (not a green PR). Gate (#119) still fails closed."""
         store, raw = await make_async_store()
         report = make_report(repo_name="agentit", repo_url="https://github.com/alimobrem/AgentIT")
         report.infra_repo_url = "https://github.com/alimobrem/agentit-gitops"
@@ -623,11 +761,22 @@ class TestRouteAndDeliverSelfManagedAgentIT:
             )
         mock_commit.assert_not_called()
         mock_source.assert_not_called()
-        outcome = result["outcomes"]["cluster_config"]
-        assert outcome.get("gate_refused") is True
-        assert "error" in outcome
-        assert "not Helm-shaped" in outcome["error"] or "forbidden kind" in outcome["error"]
-        assert "pr_url" not in outcome
+        # PipelineRun lands in cicd; PDB/ClusterRole in cluster_config —
+        # both self-managed lanes must refuse without opening a PR.
+        refused = [
+            o for o in result["outcomes"].values()
+            if isinstance(o, dict) and o.get("gate_refused")
+        ]
+        assert refused, result["outcomes"]
+        for outcome in refused:
+            assert "error" in outcome
+            assert (
+                "fleet-style" in outcome["error"]
+                or "forbidden" in outcome["error"]
+                or "filter dropped" in outcome["error"]
+                or "not Helm-shaped" in outcome["error"]
+            )
+            assert "pr_url" not in outcome
 
     async def test_fleet_app_still_uses_infra_repo_commit(self):
         store, raw = await make_async_store()

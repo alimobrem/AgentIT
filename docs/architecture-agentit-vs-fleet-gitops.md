@@ -76,7 +76,18 @@ Destination routing (#114) is necessary but not sufficient. Before any self-mana
 2. `target_path` **already exists** on the default branch (collision / overwrite).
 3. Manifest includes a **forbidden kind**: `PipelineRun`, `ClusterRole`, `ClusterRoleBinding`, `ClusterTask`, `Application`.
 
-`skills/` markdown is not gated by this check. Improving skill generation so it emits real Helm templates is a separate P1; this gate only blocks bad chart PRs.
+`skills/` markdown is not gated by this check.
+
+### P1 generation quality (produce good PRs, not only refuse bad ones)
+
+The #119 gate alone left Auto-Scan generating fleet-style YAML that was always refused. Self-managed now **filters and constrains generation** so high-quality PRs can still open:
+
+1. **`filter_self_managed_delivery_files()`** (after remap, before #119 gate): drop raw fleet YAML / forbidden kinds / hardcoded `namespace: agentit` with explicit reasons; **keep** `skills/**` markdown and Helm-shaped chart patches. Partial batches still open a PR for the good files; notes go on the delivery outcome (`filtered_reasons`).
+2. **SkillEngine `self_managed=True`** (orchestrator when app name is `agentit`): LLM prompt requires Helm (`{{ .Release.Namespace }}` / `.Values`), skips skills whose outputs are fleet-only forbidden kinds, and skips non-Helm template fallback (empty > junk).
+3. **Honest skill outcomes:** self-managed deliveries do **not** record skill outcome `approved` on PR open — opening is not acceptance.
+4. **`skills/**/*.md`** classifies as `source_patch` (AgentIT.git skill catalog PR), not `.agentit/` at-rest.
+
+Findings that cannot become safe Helm remain Ledger / `needs_attention` with why — never a fake chart PR. The #119 gate stays as belt-and-suspenders (collisions, direct `create_source_patch_pr` callers).
 
 | Artifact class | Destination in AgentIT.git | How it reaches cluster |
 | -------------- | -------------------------- | ---------------------- |
@@ -94,10 +105,11 @@ High level — implementation can follow in a focused PR.
 
 1. **Delivery router:** when the assessment is AgentIT (self-managed / source repo matches Application `agentit`), do **not** use `MECHANISM_INFRA_REPO_COMMIT` for cluster-config **or** CI/CD shared-namespace. Route both to AgentIT.git under `chart/templates/` / `skills/`. Drop onboard `kind: Application` files. Never land under `apps/agentit/`.
 2. **Chart content gate (done):** refuse non-Helm / colliding / forbidden-kind payloads before `create_source_patch_pr` — see “Fail-closed chart delivery gate” above.
-3. **UX copy:** Onboard Results / confirmation text for AgentIT must say “PR to AgentIT.git → CI → Application `agentit`”, never “commit to agentit-gitops” / never fail-close cicd with an apps/agentit error.
-4. **Hygiene:** archive or delete dead `apps/agentit/` content in agentit-gitops (or leave a README that the path is excluded and unused).
-5. **Keep:** AppSet exclude of `apps/agentit`; Application `agentit` + notify-argocd image pin; `is_self_managed_application()` for Fleet badge; scout/activate PR-to-AgentIT.git; never auto-merge.
-6. **Docs:** this file is normative; [deployment.md](./deployment.md) already states the exclude reason — link here from README / lessons when touching delivery.
+3. **P1 generation quality (done):** filter fleet junk before the gate; self-managed SkillEngine constraints; no approve-on-PR-open — see “P1 generation quality” above.
+4. **UX copy:** Onboard Results / confirmation text for AgentIT must say “PR to AgentIT.git → CI → Application `agentit`”, never “commit to agentit-gitops” / never fail-close cicd with an apps/agentit error.
+5. **Hygiene:** archive or delete dead `apps/agentit/` content in agentit-gitops (or leave a README that the path is excluded and unused).
+6. **Keep:** AppSet exclude of `apps/agentit`; Application `agentit` + notify-argocd image pin; `is_self_managed_application()` for Fleet badge; scout/activate PR-to-AgentIT.git; never auto-merge.
+7. **Docs:** this file is normative; [deployment.md](./deployment.md) already states the exclude reason — link here from README / lessons when touching delivery.
 
 ---
 
@@ -110,6 +122,7 @@ High level — implementation can follow in a focused PR.
 | Self-managed = literal Application sourcing app’s own repo (not `managed-{app}`) | `is_self_managed_application()` / `is_gitops_registered()` in [`src/agentit/portal/delivery.py`](../src/agentit/portal/delivery.py) (~328–384) |
 | Fleet deliver = `apps/{app}/{category}/…` via `commit_to_infra_repo` | [`src/agentit/portal/github_pr.py`](../src/agentit/portal/github_pr.py) (~854–892); `route_and_deliver()` in [`delivery.py`](../src/agentit/portal/delivery.py) |
 | Self-managed chart fail-closed gate (Helm / collision / forbidden kinds) | `validate_self_managed_chart_delivery()` in [`delivery.py`](../src/agentit/portal/delivery.py); belt-and-suspenders in `create_source_patch_pr` |
+| Self-managed P1 filter + generation constraints | `filter_self_managed_delivery_files()` / `_deliver_self_managed_source_pr()` in [`delivery.py`](../src/agentit/portal/delivery.py); `SkillEngine(self_managed=…)` in [`skill_engine.py`](../src/agentit/skill_engine.py) |
 | Exclude reason (image.tag fight) | [`docs/deployment.md`](./deployment.md) (~140–147) |
 | Deploy topology diagram | [`docs/architecture.md`](./architecture.md) “Deployment topology” |
 | Skills baked into image; activate → AgentIT.git PR | [`tests/test_portal.py`](../tests/test_portal.py) (~3174–3217); skill-learner / activate routes |
