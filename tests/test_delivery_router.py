@@ -1103,7 +1103,7 @@ class TestRouteAndDeliverClusterConfig:
         report.infra_repo_url = "https://github.com/org/infra-gitops"
         aid = await raw.save(report)
         clean = {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": [],
-                 "warnings": [], "conflicts": [], "missing_operators": {}, "repo_files": []}
+                 "conflicts": [], "missing_operators": {}, "repo_files": []}
         with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
              patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
              patch("agentit.portal.cluster_apply.dry_run_manifests_against_cluster", return_value=clean) as mock_dry:
@@ -1119,16 +1119,15 @@ class TestRouteAndDeliverClusterConfig:
         assert "error" not in result["outcomes"]["cluster_config"]
 
     async def test_dry_run_api_failure_fail_closed_with_error(self):
-        """Hard apiserver dry-run rejection (Bad Request / admission) must
-        surface as outcome error (needs_attention), never as a clean preview."""
+        """A real apiserver dry-run rejection must surface as outcome error
+        (needs_attention), never as a clean preview that unlocks Deliver."""
         store, raw = await make_async_store()
         report = make_report()
         report.infra_repo_url = "https://github.com/org/infra-gitops"
         aid = await raw.save(report)
         failed = {
             "applied": [], "skipped": [],
-            "errors": ["app-network-policy.yaml: NetworkPolicy/app-np: Bad Request"],
-            "warnings": [],
+            "errors": ["app-network-policy.yaml: NetworkPolicy (networking.k8s.io/v1) not found on cluster"],
             "conflicts": [], "missing_operators": {}, "repo_files": [],
         }
         with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
@@ -1144,42 +1143,6 @@ class TestRouteAndDeliverClusterConfig:
         assert outcome["dry_run"] is True
         assert "error" in outcome
         assert "dryRun=All" in outcome["error"] or "dry-run" in outcome["error"].lower()
-
-    async def test_dry_run_soft_forbidden_and_missing_crd_do_not_block(self):
-        """Forbidden (SA rights) and missing optional CRD are soft — warn,
-        do not set outcome error so Scan can still open a fleet PR."""
-        store, raw = await make_async_store()
-        report = make_report()
-        report.infra_repo_url = "https://github.com/org/infra-gitops"
-        aid = await raw.save(report)
-        soft_only = {
-            "applied": [], "skipped": [],
-            "errors": [],
-            "warnings": [
-                "role.yaml: Role/reader: Forbidden",
-                "policy.yaml: Policy (kyverno.io/v1) not found on cluster: no matches for kind",
-            ],
-            "conflicts": [],
-            "missing_operators": {
-                "Policy": {"name": "Kyverno (community)", "package": None},
-            },
-            "repo_files": [],
-        }
-        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
-             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
-             patch("agentit.portal.cluster_apply.dry_run_manifests_against_cluster", return_value=soft_only):
-            result = await route_and_deliver(
-                [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
-                report=report, store=store, assessment_id=aid,
-                actor="tester", dry_run=True,
-            )
-        mock_commit.assert_not_called()
-        outcome = result["outcomes"]["cluster_config"]
-        assert outcome["dry_run"] is True
-        assert "error" not in outcome
-        assert outcome.get("dry_run_warnings")
-        assert "dry_run_note" in outcome
-        assert "Kyverno" in outcome["dry_run_note"]
 
 
 class TestRouteAndDeliverCicdLane:
