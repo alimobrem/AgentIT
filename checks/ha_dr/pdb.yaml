@@ -1,8 +1,0 @@
-name: pdb-exists
-dimension: ha_dr
-severity: medium
-category: availability
-type: yaml_kind_exists
-pattern: PodDisruptionBudget
-description: No PodDisruptionBudget defined
-recommendation: Add PDB to prevent all pods being evicted during maintenance

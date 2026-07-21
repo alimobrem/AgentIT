@@ -229,3 +229,24 @@ class TestHpaExistsParity:
         _passes(self.SKILL_PATH, create_mock_repo, {
             "deploy/hpa.yaml": "apiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\n",
         })
+
+
+class TestPdbExistsParity:
+    """Ported from `checks/ha_dr/pdb.yaml` (deleted in this commit) to
+    `skills/ha_dr/pdb-exists.md`."""
+
+    SKILL_PATH = SKILLS_DIR / "ha_dr" / "pdb-exists.md"
+
+    def test_fires_when_no_pdb_manifest(self, create_mock_repo) -> None:
+        finding = _fires(self.SKILL_PATH, create_mock_repo, {
+            "deploy/deployment.yaml": "apiVersion: apps/v1\nkind: Deployment\n",
+        })
+        assert finding.category == "availability"
+        assert finding.severity == Severity.medium
+        assert finding.description == "No PodDisruptionBudget defined"
+        assert finding.recommendation == "Add PDB to prevent all pods being evicted during maintenance"
+
+    def test_passes_when_pdb_manifest_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {
+            "deploy/pdb.yaml": "apiVersion: policy/v1\nkind: PodDisruptionBudget\n",
+        })
