@@ -169,11 +169,19 @@ async def _run_onboarding_job(
         from agentit.portal.auto_delivery import auto_validate_and_deliver
 
         namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
-        result = await auto_validate_and_deliver(
-            store=s, report=report, app_name=report.repo_name, namespace=namespace,
-            assessment_id=assessment_id, actor="auto-delivery", files=files,
-            orchestration=orch_summary, target_findings=sorted(current_finding_keys(report)),
-            job_id=job_id,
+        # Generation is already bounded by with_timeout above; auto-delivery
+        # LLM validate/fix/review had no ceiling and could leave the progress
+        # page spinning for hours after a pod kept the row "running".
+        # (with_timeout is imported at module scope — do not re-import here;
+        # a local import makes the name unbound for the earlier call above.)
+        result = await with_timeout(
+            auto_validate_and_deliver(
+                store=s, report=report, app_name=report.repo_name, namespace=namespace,
+                assessment_id=assessment_id, actor="auto-delivery", files=files,
+                orchestration=orch_summary, target_findings=sorted(current_finding_keys(report)),
+                job_id=job_id,
+            ),
+            timeout=600,
         )
 
         if result["status"] == "delivered":
@@ -202,13 +210,24 @@ async def _run_onboarding_job(
         log.exception("Onboarding failed for %s", assessment_id)
         from agentit.portal.metrics import onboardings_total as _ot
         _ot.labels(status="error").inc()
-        detail = getattr(exc, "detail", None) or str(exc)
-        await s.update_remediation_job(
-            job_id, "failed",
-            f"Onboarding failed: {str(detail)[:180]}",
-            error=f"Onboarding failed: {str(detail)[:180]} — no manifests were generated. "
-                  f"Check the repository is reachable and agents/skills ran cleanly, then retry Onboard.",
-        )
+        detail = str(getattr(exc, "detail", None) or exc)
+        # Timeouts during auto-delivery usually mean manifests already exist
+        # (generation finished earlier) -- send humans to Onboard Results.
+        timed_out = "timed out" in detail.lower()
+        saved = await s.get_onboarding(assessment_id) if timed_out else None
+        if timed_out and saved:
+            await s.update_remediation_job(
+                job_id, "needs_attention",
+                "Onboarding timed out during automatic validation/delivery -- review manifests.",
+                error=detail[:280],
+            )
+        else:
+            await s.update_remediation_job(
+                job_id, "failed",
+                f"Onboarding failed: {detail[:180]}",
+                error=f"Onboarding failed: {detail[:180]} — no manifests were generated. "
+                      f"Check the repository is reachable and agents/skills ran cleanly, then retry Onboard.",
+            )
 
 
 async def _run_manual_validation_job(job_id: str, assessment_id: str) -> None:

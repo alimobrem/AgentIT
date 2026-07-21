@@ -201,7 +201,8 @@ class JobsMixin:
             SET status = 'failed',
                 error = 'Interrupted by a service restart before it finished. Please retry.',
                 updated_at = $1
-            WHERE status NOT IN ('completed', 'failed') AND created_at < $2
+            WHERE status NOT IN ('completed', 'failed', 'needs_attention')
+              AND created_at < $2
             RETURNING id, assessment_id, current_step
             """,
             _now(), cutoff,

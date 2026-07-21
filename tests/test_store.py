@@ -592,6 +592,26 @@ class TestReapOrphanedJobs:
         job = await store.get_remediation_job(job_id)
         assert job["status"] == "completed"
 
+    async def test_leaves_needs_attention_alone_even_if_old(self, store):
+        """needs_attention is a real terminal HITL state (manifests saved;
+        human finishes on Onboard Results) -- must not be flipped to failed."""
+        aid = await store.save(_make_report("needs-attention-old-app"))
+        job_id = await store.create_remediation_job(aid)
+        await store.update_remediation_job(
+            job_id, "needs_attention", "Needs review",
+            error="Automatic validation needs your attention",
+        )
+        await store._pool.execute(
+            "UPDATE remediation_jobs SET created_at = $1 WHERE id = $2",
+            datetime.now(timezone.utc) - timedelta(hours=1), job_id,
+        )
+
+        reaped = await store.reap_orphaned_jobs(max_age_seconds=900)
+
+        assert reaped == []
+        job = await store.get_remediation_job(job_id)
+        assert job["status"] == "needs_attention"
+
 
 class TestUpdateRemediationJobConcurrentSteps:
     """Regression guard for the `steps_completed` lost-update race found

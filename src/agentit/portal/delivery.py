@@ -280,14 +280,14 @@ def remap_self_managed_cluster_files(files: list[dict]) -> list[dict]:
 def remap_self_managed_cicd_files(files: list[dict]) -> list[dict]:
     """Rewrite CI/CD shared-namespace file dicts onto live AgentIT.git paths.
 
-    Application ``agentit`` syncs ``chart/``; Tekton CI's ``notify-argocd``
-    applies only ``argocd/application.yaml``. Never ``apps/agentit/``.
+    Application ``agentit`` syncs Helm ``chart/``. Never ``apps/agentit/``.
 
-    - ``kind: Application`` named ``agentit`` → ``argocd/application.yaml``
-      (the sole file ``notify-argocd`` ``oc apply``s)
-    - Tekton API group → ``chart/templates/tekton/{name}`` (existing chart
-      subfolder; chart already holds cross-ns Role in openshift-gitops)
+    - Tekton API group → ``chart/templates/tekton/{name}``
     - Everything else YAML → ``chart/templates/{name}``
+    - ``kind: Application`` is **dropped** — never rewrite
+      ``argocd/application.yaml``. That file is the live Argo Application
+      (Helm source + ``notify-argocd`` image.tag pin). Onboard-generated
+      Application CRs were clobbering it (PR #109).
     """
     remapped: list[dict] = []
     for f in files:
@@ -298,14 +298,11 @@ def remap_self_managed_cicd_files(files: list[dict]) -> list[dict]:
         api_groups = {
             (doc.get("apiVersion") or "").split("/", 1)[0] for doc in docs
         }
-        app_names = {
-            (doc.get("metadata") or {}).get("name", "")
-            for doc in docs
-            if (doc.get("kind") or "") == "Application"
-        }
-        if "Application" in kinds and "agentit" in app_names:
-            new_f["target_path"] = "argocd/application.yaml"
-        elif "tekton.dev" in api_groups:
+        if "Application" in kinds:
+            # Refuse to open a source PR that replaces argocd/application.yaml
+            # or drops a second Application CR into the chart.
+            continue
+        if "tekton.dev" in api_groups:
             new_f["target_path"] = f"chart/templates/tekton/{name}"
         else:
             new_f["target_path"] = f"chart/templates/{name}"
