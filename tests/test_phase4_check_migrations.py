@@ -70,3 +70,20 @@ class TestCiPipelineExistsParity:
 
     def test_passes_when_gitlab_ci_file_present(self, create_mock_repo) -> None:
         _passes(self.SKILL_PATH, create_mock_repo, {".gitlab-ci.yml": "stages: [build]\n"})
+
+
+class TestDockerfileExistsParity:
+    """Ported from `checks/cicd/dockerfile.yaml` (deleted in this commit)
+    to `skills/cicd/dockerfile-exists.md`."""
+
+    SKILL_PATH = SKILLS_DIR / "cicd" / "dockerfile-exists.md"
+
+    def test_fires_when_no_dockerfile(self, create_mock_repo) -> None:
+        finding = _fires(self.SKILL_PATH, create_mock_repo, {"main.py": "print('hi')\n"})
+        assert finding.category == "container"
+        assert finding.severity == Severity.high
+        assert finding.description == "No Dockerfile found for container builds"
+        assert finding.recommendation == "Create multi-stage Dockerfile with UBI base image"
+
+    def test_passes_when_dockerfile_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {"Dockerfile": "FROM ubi9\n"})
