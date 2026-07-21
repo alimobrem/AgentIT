@@ -175,8 +175,10 @@ class TestSyncPrOutcomesEditedBeforeMerge:
         assert stored["outcome"] == "edited_before_merge"
         assert stored["edit_diff"][0]["sha"] == "abcd"
 
-    async def test_merged_pr_with_no_extra_commits_records_nothing(self):
-        """Shipped exactly as proposed -- not an outcome worth recording."""
+    async def test_merged_pr_with_no_extra_commits_records_merged(self):
+        """Phase E: clean merge still records provisional ``merged`` so
+        learning can distinguish opened-from-accepted (approval waits for
+        finding-clear evidence via correlate_delivery_finding)."""
         store = await make_store()
         aid = await store.save(make_report(repo_name="clean-merge-app"))
         record = {
@@ -188,8 +190,11 @@ class TestSyncPrOutcomesEditedBeforeMerge:
             store, [record], get_status=lambda url: {},
             get_extra_commits=lambda url: [], get_comments=lambda url: [],
         )
-        assert newly == []
-        assert await store.get_pr_outcome(record["pr_url"]) is None
+        assert len(newly) == 1
+        assert newly[0]["outcome"] == pr_outcomes.OUTCOME_MERGED
+        saved = await store.get_pr_outcome(record["pr_url"])
+        assert saved is not None
+        assert saved["outcome"] == "merged"
 
 
 class TestAttachPrOutcomes:

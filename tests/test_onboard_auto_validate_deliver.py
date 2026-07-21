@@ -42,6 +42,9 @@ def _cluster_config_file(path: str = "netpol.yaml") -> dict:
         "path": path,
         "content": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: test\n",
         "description": "network policy",
+        # Phase A: must map to make_report's default finding category "test".
+        "finding_addressed": "test",
+        "skill_name": "test",
     }
 
 
