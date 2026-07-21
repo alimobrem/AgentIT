@@ -65,3 +65,62 @@ class TestImageSmokeTestJob:
         build_idx = next(i for i, s in enumerate(run_steps) if "docker build" in s)
         smoke_idx = next(i for i, s in enumerate(run_steps) if "docker run" in s)
         assert build_idx < smoke_idx
+
+
+class TestContainerfileSmokeToolingDrift:
+    """Fail GHA if tip smoke checks and Containerfile tooling diverge.
+
+    2026-07-21 incident: #125 removed ``gh`` from the Containerfile while the
+    *live* Tekton Pipeline still ran ``gh --version`` in smoke-test-image.
+    Tip chart (no gh check) never reached the cluster because smoke failed
+    before notify-argocd — portal stuck on the last good image. Tip GHA/Tekton
+    smoke must stay aligned and must not require gh; Containerfile still
+    installs gh as break-glass/bootstrap for lagging live Pipelines.
+    """
+
+    _ROOT = Path(__file__).resolve().parent.parent
+
+    def _containerfile(self) -> str:
+        return (self._ROOT / "Containerfile").read_text(encoding="utf-8")
+
+    def _gha_smoke_script(self) -> str:
+        doc = _load("tests.yml")
+        steps = doc["jobs"]["image-smoke-test"]["steps"]
+        return next(s["run"] for s in steps if "docker run" in s.get("run", ""))
+
+    def _tekton_smoke_script(self) -> str:
+        # Text slice is enough for drift asserts; full Helm render lives in
+        # test_helm_templates.TestTektonPipeline.
+        raw = (self._ROOT / "chart/templates/tekton/pipeline.yaml").read_text()
+        start = raw.index("name: smoke-test-image")
+        end = raw.index("name: notify-argocd", start)
+        return raw[start:end]
+
+    def test_tip_smokes_do_not_require_gh(self):
+        assert "gh --version" not in self._gha_smoke_script()
+        assert "gh --version" not in self._tekton_smoke_script()
+
+    def test_if_any_tip_smoke_requires_gh_containerfile_installs_it(self):
+        """Generic drift: tip ``gh --version`` smoke implies Containerfile installs gh."""
+        scripts = self._gha_smoke_script() + "\n" + self._tekton_smoke_script()
+        cf = self._containerfile()
+        if "gh --version" in scripts:
+            assert "dnf install -y gh" in cf or "install -y gh" in cf, (
+                "Tip smoke requires gh --version but Containerfile does not "
+                "install gh — smoke-test-image will fail before notify-argocd"
+            )
+
+    def test_containerfile_keeps_gh_for_live_pipeline_bootstrap(self):
+        """Break-glass/bootstrap pin until live Pipelines match tip smoke.
+
+        Tip smoke must not require gh (see test_tip_smokes_do_not_require_gh),
+        but a lagging live Pipeline that still runs ``gh --version`` needs the
+        binary in the image or promotion never lands the tip Pipeline.
+        """
+        cf = self._containerfile()
+        assert "dnf install -y gh" in cf or "install -y gh" in cf, (
+            "Containerfile must install gh as break-glass/bootstrap for live "
+            "Tekton smoke lag (chicken-and-egg after #125). See README "
+            "'Image promotion / Tekton CI'."
+        )
+        assert "gh-cli.repo" in cf

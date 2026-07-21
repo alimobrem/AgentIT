@@ -32,6 +32,22 @@ Self-managed delivery gates (#119/#121), watchers, and Scan→GitOps delivery ar
 
 **Quality PRs that help the app — Phases A–F (2026-07-21).** Scan no longer opens catalog-dump PRs. `auto_validate_and_deliver` refuses when there are no open findings / score delta (Phase A), drops files not tied to those findings, opens **one PR per finding cluster** with a file cap (Phase B), re-validates each cluster with SSA dry-run + property checks before open (Phase C), and writes PR bodies as finding → change → expected outcome + “Argo deploys after merge; AgentIT does not auto-merge” (Phase D). Skills are **never** `approved` on PR open for fleet or self-managed (Phase E); approval waits for merge + `correlate_delivery_finding` = resolved. Fleet/pinky infra PRs under `apps/{app}/` share the same bar (Phase F). Module: `portal/quality_prs.py`. Plan: [`docs/plan-quality-helpful-prs.md`](docs/plan-quality-helpful-prs.md). Tests: `tests/test_quality_prs.py`.
 
+---
+
+### Image promotion / Tekton CI (how the portal gets a new image)
+
+Merge to `main` is **not** enough for the live portal to move. Path:
+
+1. GitHub push webhook → Tekton `agentit-ci` PipelineRun (`chart/templates/tekton/`).
+2. Tasks: `run-tests` → `build-image` → **`smoke-test-image`** → **`notify-argocd`** (pins Argo Application `agentit` `image.tag` to the commit SHA) → Rollout canary.
+3. GitHub commit status context **`agentit-ci/tekton`** reports success/failure (GHA `Tests` / `image-smoke-test` are PR gates only — they do **not** promote the cluster image).
+
+**“Failed before image build” / portal stuck on old image** usually means `run-tests` failed, **or** (more subtle) `build-image` succeeded but **`smoke-test-image` failed**, so `notify-argocd` never ran. GitHub shows `agentit-ci/tekton` = failure; the portal keeps the last promoted tag.
+
+**Chicken-and-egg (2026-07-21, #125):** Tip chart smoke no longer requires the `gh` CLI (runtime uses REST), but removing `gh` from the **Containerfile** while the *live* Pipeline still ran `gh --version` made every new image fail smoke → tip Pipeline never deployed → stuck on ~`9bddaa1`. Fix: keep `gh` in the Containerfile as break-glass/bootstrap; tip GHA + tip Pipeline smoke stay gh-free. Drift tests: `tests/test_ci_workflows.py::TestContainerfileSmokeToolingDrift`.
+
+**Re-run:** push an empty commit / merge a fix to `main`, or start a PipelineRun for `agentit-ci` with `revision=<sha>` in ns `agentit`. Confirm `agentit-ci/tekton` → success and Argo `image.tag` matches the tip SHA.
+
 
 Point AgentIT at a Git repository and it will:
 
