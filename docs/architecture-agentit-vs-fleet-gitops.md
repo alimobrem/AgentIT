@@ -12,7 +12,7 @@
 
 | Concern | Fleet app (e.g. pinky) | AgentIT itself |
 | ------- | ---------------------- | -------------- |
-| Desired state repo | `agentit-gitops` `apps/{app}/` | **AgentIT.git** (`chart/`, `skills/`, `src/`, `argocd/application.yaml`) |
+| Desired state repo | `agentit-gitops` `apps/{app}/` | **AgentIT.git** (`chart/`, `skills/`, `src/`) — **never** overwrite `argocd/application.yaml` from onboard |
 | Argo object | `managed-{app}` from AppSet | Hand-crafted Application **`agentit`** |
 | Image promotion | App’s own CI / image digest in gitops (as designed per app) | Tekton `notify-argocd` pins live `image.tag` on Application `agentit` |
 | Human gate | Merge PR on agentit-gitops | Merge PR on AgentIT.git (never auto-merge) |
@@ -59,20 +59,21 @@ Registration: `ensure_applicationset(infra_repo_url)` once; first merge bootstra
 
 ```text
 Scan or Activate / capability-scout → PR on AgentIT.git
-  (skills/* | src/* | chart/* | argocd/application.yaml — as appropriate)
+  (skills/* | src/* | chart/templates/* — as appropriate)
   → human merge
-  → Tekton CI (build → smoke → notify-argocd pins image.tag + applies Application spec)
+  → Tekton CI (build → smoke → notify-argocd pins image.tag)
   → Application agentit syncs Helm chart/ → agentit namespace
 ```
 
-**Do not** open cluster-config / skills PRs under `apps/agentit/` in agentit-gitops for this path.
+**Do not** open cluster-config / skills PRs under `apps/agentit/` in agentit-gitops for this path.  
+**Do not** let onboard rewrite `argocd/application.yaml` (live Application CR + image.tag pin) — drop generated `kind: Application` manifests from self-managed cicd remap (PR #109 regression).
 
 | Artifact class | Destination in AgentIT.git | How it reaches cluster |
 | -------------- | -------------------------- | ---------------------- |
 | Skill markdown | `skills/**` | Merge → image rebuild → Argo rolls pods |
 | Platform code | `src/agentit/**`, `tests/**` | Same |
 | Runtime K8s shape | `chart/templates/**`, `chart/values.yaml` | Merge → Argo Helm sync (image tag via notify-argocd) |
-| Live Helm params / feature flags | `argocd/application.yaml` | Merge → next CI `notify-argocd` `oc apply` (Application CR is not AppSet-managed) |
+| Live Helm params / feature flags | `argocd/application.yaml` | **Human / CI only** — not onboard auto-PR |
 | Fleet scoreboard only | N/A (webhook Assess) | `register-self-in-fleet` — no gitops trees |
 
 ---
@@ -81,7 +82,7 @@ Scan or Activate / capability-scout → PR on AgentIT.git
 
 High level — implementation can follow in a focused PR.
 
-1. **Delivery router:** when the assessment is AgentIT (self-managed / source repo matches Application `agentit`), do **not** use `MECHANISM_INFRA_REPO_COMMIT` for cluster-config **or** CI/CD shared-namespace. Route both to AgentIT.git under live paths (`chart/templates/`, `chart/templates/tekton/`, `argocd/application.yaml`, `skills/`). Never land under `apps/agentit/`.
+1. **Delivery router:** when the assessment is AgentIT (self-managed / source repo matches Application `agentit`), do **not** use `MECHANISM_INFRA_REPO_COMMIT` for cluster-config **or** CI/CD shared-namespace. Route both to AgentIT.git under `chart/templates/` / `skills/`. Drop onboard `kind: Application` files. Never land under `apps/agentit/`.
 2. **UX copy:** Onboard Results / confirmation text for AgentIT must say “PR to AgentIT.git → CI → Application `agentit`”, never “commit to agentit-gitops” / never fail-close cicd with an apps/agentit error.
 3. **Hygiene:** archive or delete dead `apps/agentit/` content in agentit-gitops (or leave a README that the path is excluded and unused).
 4. **Keep:** AppSet exclude of `apps/agentit`; Application `agentit` + notify-argocd image pin; `is_self_managed_application()` for Fleet badge; scout/activate PR-to-AgentIT.git; never auto-merge.

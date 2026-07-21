@@ -325,7 +325,9 @@ class TestSelfManagedDeliveryTarget:
         remapped = remap_self_managed_cicd_files([_cicd_file()])
         assert remapped[0]["target_path"] == "chart/templates/tekton/pipeline.yaml"
 
-    def test_remap_cicd_agentit_application_to_argocd(self):
+    def test_remap_cicd_drops_application_crs(self):
+        """Never open a PR that replaces live argocd/application.yaml
+        (PR #109 regression: onboard Application CR clobbered Helm source)."""
         entry = {
             "category": "skills",
             "path": "argocd-application.yaml",
@@ -338,8 +340,9 @@ class TestSelfManagedDeliveryTarget:
             ),
             "description": "Argo CD Application",
         }
-        remapped = remap_self_managed_cicd_files([entry])
-        assert remapped[0]["target_path"] == "argocd/application.yaml"
+        remapped = remap_self_managed_cicd_files([entry, _cicd_file()])
+        assert all("application.yaml" not in (f.get("target_path") or "") for f in remapped)
+        assert remapped[0]["target_path"] == "chart/templates/tekton/pipeline.yaml"
 
     def test_confirmation_text_names_agentit_git_not_gitops(self):
         text = confirmation_text(

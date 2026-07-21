@@ -31,15 +31,30 @@
        stalled: false,
        init() {
          const stallMs = 20000;
+         const resultsUrl = '/assessments/{{ assessment_id }}/onboard-results';
          let lastEvent = Date.now();
+         let hardEscaped = false;
          this.$el.addEventListener('htmx:sseMessage', () => { lastEvent = Date.now(); this.stalled = false; });
          setInterval(async () => {
-           if (Date.now() - lastEvent < stallMs) return;
+           if (hardEscaped || Date.now() - lastEvent < stallMs) return;
            this.stalled = true;
            try {
-             const resp = await fetch(window.location.pathname, { redirect: 'follow' });
+             const resp = await fetch(window.location.pathname, {
+               redirect: 'follow',
+               credentials: 'same-origin',
+               headers: { 'Accept': 'text/html' },
+             });
              if (resp.redirected && resp.url !== window.location.href) {
-               window.location.href = resp.url;
+               hardEscaped = true;
+               window.location.replace(resp.url);
+               return;
+             }
+             // Job still non-terminal (or oauth-proxy ate the 303). After a
+             // second stall window, leave the spinner — progress pages must
+             // never trap a human when the background task is orphaned.
+             if (Date.now() - lastEvent > stallMs * 3) {
+               hardEscaped = true;
+               window.location.replace(resultsUrl);
              }
            } catch (e) { /* network hiccup -- next tick retries */ }
          }, 5000);
