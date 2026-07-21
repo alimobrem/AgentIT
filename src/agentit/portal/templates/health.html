@@ -15,9 +15,12 @@
   <div class="stat-card stat-card-disabled" {% if platform_link and platform_link.reason %}title="{{ platform_link.reason }}"{% endif %}>
   {% endif %}
     <div class="stat-label">Platform</div>
-    <div class="stat-value {% if truly_healthy %}text-success{% elif pods_failed > 0 %}text-danger{% else %}text-warning{% endif %}">
+    <div class="stat-value {% if truly_healthy %}text-success{% elif pods_failed > 0 %}text-danger{% else %}text-warning{% endif %}" {% if platform_status_reasons %}title="{{ platform_status_reasons | join(' | ') }}"{% endif %}>
       {% if truly_healthy %}Healthy{% elif pods_failed > 0 %}Degraded{% else %}Partial{% endif %}
     </div>
+    {% if platform_status_reasons %}
+    <div class="text-muted text-xs mt-1">{{ platform_status_reasons | join(" · ") }}</div>
+    {% endif %}
   {% if platform_link and platform_link.href %}</a>{% else %}</div>{% endif %}
 
   {% set rollout_link = links.get('rollout') %}

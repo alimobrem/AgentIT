@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import tempfile
 import zipfile
 from datetime import datetime, timezone
@@ -2635,6 +2636,174 @@ async def test_failed_non_taskrun_pod_only_excluded_when_owned_by_taskrun(client
 
     data = resp.json()
     assert data["pods_failed"] == 0
+
+
+_PLATFORM_CARD_RE = re.compile(
+    r'<div class="stat-label">Platform</div>\s*'
+    r'<div class="stat-value[^"]*"[^>]*>(?P<value>.*?)</div>\s*'
+    r'(?:<div class="text-muted text-xs mt-1">(?P<reasons>.*?)</div>\s*)?',
+    re.DOTALL,
+)
+
+
+def _platform_card(html_text: str) -> tuple[str, str | None]:
+    """Pull the Platform stat card's rendered value ("Healthy"/"Partial"/
+    "Degraded") and its explanatory subtext (if any) out of a real rendered
+    `/health` response, tolerating the template's own whitespace/newlines --
+    a plain ``">Partial<" in resp.text`` substring check is too brittle
+    against Jinja whitespace and would also false-match "Healthy"/"Partial"
+    text appearing elsewhere on the page (e.g. the Argo CD table)."""
+    match = _PLATFORM_CARD_RE.search(html_text)
+    assert match, "Platform stat card not found in rendered /health page"
+    reasons = match.group("reasons")
+    return match.group("value").strip(), (reasons.strip() if reasons else None)
+
+
+def _custom_resources_side_effect(applications=None, kafkas=None):
+    """Route ``kube.list_custom_resources`` to per-resource-type fixtures by
+    ``plural``, mirroring how ``_get_cluster_health`` actually calls it (one
+    call for Argo CD Applications, a separate one for Kafka CRs, ...) --
+    everything else (PipelineRuns, Rollouts) defaults to ``[]``, same as the
+    existing ``mock_list_crs.return_value = []`` tests above."""
+    def _side_effect(group, version, plural, namespace="", timeout=10):
+        if plural == "applications":
+            return applications or []
+        if plural == "kafkas":
+            return kafkas or []
+        return []
+    return _side_effect
+
+
+async def test_platform_healthy_shows_no_explanatory_reasons(client):
+    """When argo_synced/pods_failed/kafka_ready are all genuinely healthy,
+    the Platform card reads "Healthy" and carries no explanatory subtext --
+    `platform_status_reasons` (health.py::_explain_platform_status) must be
+    empty, not a list of stale/irrelevant caveats."""
+    applications = [{
+        "metadata": {"name": "agentit"},
+        "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}},
+        "spec": {"source": {"repoURL": "https://github.com/alimobrem/AgentIT", "helm": {"parameters": []}}},
+    }]
+    kafkas = [{
+        "metadata": {"name": "agentit-kafka"},
+        "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+    }]
+    with patch("agentit.kube.list_pods", return_value=[]), \
+            patch("agentit.kube.list_custom_resources",
+                  side_effect=_custom_resources_side_effect(applications=applications, kafkas=kafkas)):
+        resp = await client.get("/health")
+
+    assert resp.status_code == 200
+    value, reasons = _platform_card(resp.text)
+    assert value == "Healthy"
+    assert reasons is None
+
+
+async def test_platform_partial_explains_which_fleet_app_is_out_of_sync(client, _override_store):
+    """Regression test for the real, live "Platform: Partial" state a
+    product-owner screenshot surfaced (2026-07-20): pods/pipeline/rollout/the
+    `agentit` app's own Argo sync can all read healthy while the Platform
+    card still shows Partial, because `argo_synced` is computed across every
+    Argo CD Application matched to this instance -- not just AgentIT's own.
+    With one managed app OutOfSync and Kafka genuinely Ready, the card must
+    name that specific app rather than leaving "Partial" unexplained.
+
+    Uses the real store (not a mock) for fleet data: onboards a real
+    "some-fleet-app" assessment so `get_fleet_data()`'s `ever_onboarded` flag
+    -- and therefore `_get_cluster_health`'s `managed_names` set -- reflects
+    genuine store state, exactly like `portal_client`'s fixture setup.
+    """
+    store = _override_store
+    report = _make_report("some-fleet-app")
+    assessment_id = await store.save(report)
+    await store.save_onboarding(assessment_id, [
+        {"category": "security", "path": "test.yaml", "content": "apiVersion: v1\nkind: ConfigMap", "description": "test"},
+    ])
+
+    applications = [
+        {
+            "metadata": {"name": "agentit"},
+            "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}},
+            "spec": {"source": {"repoURL": "https://github.com/alimobrem/AgentIT", "helm": {"parameters": []}}},
+        },
+        {
+            "metadata": {"name": "managed-some-fleet-app"},
+            "status": {"sync": {"status": "OutOfSync"}, "health": {"status": "Progressing"}},
+        },
+    ]
+    kafkas = [{
+        "metadata": {"name": "agentit-kafka"},
+        "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+    }]
+    with patch("agentit.kube.list_pods", return_value=[]), \
+            patch("agentit.kube.list_custom_resources",
+                  side_effect=_custom_resources_side_effect(applications=applications, kafkas=kafkas)):
+        resp = await client.get("/health")
+
+    assert resp.status_code == 200
+    value, reasons = _platform_card(resp.text)
+    assert value == "Partial"
+    assert reasons == "Argo CD: 1 of 2 managed Application(s) not Synced: managed-some-fleet-app"
+
+
+async def test_platform_partial_explains_kafka_not_ready(client):
+    """Kafka CR present but its Ready condition isn't True -- Partial must
+    name Kafka specifically, distinct from an Argo CD sync problem."""
+    applications = [{
+        "metadata": {"name": "agentit"},
+        "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}},
+        "spec": {"source": {"repoURL": "https://github.com/alimobrem/AgentIT", "helm": {"parameters": []}}},
+    }]
+    kafkas = [{
+        "metadata": {"name": "agentit-kafka"},
+        "status": {"conditions": [{"type": "Ready", "status": "False"}]},
+    }]
+    with patch("agentit.kube.list_pods", return_value=[]), \
+            patch("agentit.kube.list_custom_resources",
+                  side_effect=_custom_resources_side_effect(applications=applications, kafkas=kafkas)):
+        resp = await client.get("/health")
+
+    assert resp.status_code == 200
+    value, reasons = _platform_card(resp.text)
+    assert value == "Partial"
+    assert reasons == "Kafka: broker &#39;agentit-kafka&#39; found but not reporting Ready"
+
+
+async def test_platform_partial_explains_no_kafka_resource_found(client):
+    """No Kafka CR at all (unreachable, or kafka.enabled=false) -- the
+    "not deployed" phrasing must be distinct from "found but not Ready"."""
+    applications = [{
+        "metadata": {"name": "agentit"},
+        "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}},
+        "spec": {"source": {"repoURL": "https://github.com/alimobrem/AgentIT", "helm": {"parameters": []}}},
+    }]
+    with patch("agentit.kube.list_pods", return_value=[]), \
+            patch("agentit.kube.list_custom_resources",
+                  side_effect=_custom_resources_side_effect(applications=applications, kafkas=[])):
+        resp = await client.get("/health")
+
+    assert resp.status_code == 200
+    value, reasons = _platform_card(resp.text)
+    assert value == "Partial"
+    assert reasons == "Kafka: no Kafka broker resource found (unreachable, or not deployed in this namespace)"
+
+
+async def test_platform_degraded_still_lists_pod_names(client):
+    """Degraded (a real crashing pod) gets the same treatment as Partial --
+    the explanatory line names the failed pod, it isn't dropped just
+    because Degraded is a worse state than Partial."""
+    real_failure_pod = {
+        "name": "agentit-worker-abc123", "status": "Failed",
+        "restarts": 3, "age": "2026-07-15T17", "owner_kind": "ReplicaSet",
+    }
+    with patch("agentit.kube.list_pods", return_value=[real_failure_pod]), \
+            patch("agentit.kube.list_custom_resources", return_value=[]):
+        resp = await client.get("/health")
+
+    assert resp.status_code == 200
+    value, reasons = _platform_card(resp.text)
+    assert value == "Degraded"
+    assert reasons.startswith("1 pod(s) failed: agentit-worker-abc123")
 
 
 async def test_pod_detail_404(client):

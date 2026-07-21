@@ -470,6 +470,58 @@ def _get_deploy_status(include_commit_info: bool = False) -> dict:
     return status
 
 
+def _explain_platform_status(result: dict) -> list[str]:
+    """Exactly which real, already-computed sub-condition(s) are keeping the
+    Health page's "Platform" card (``health.html``'s `truly_healthy`, mirrored
+    here as ``argo_synced and pods_failed == 0 and kafka_ready``) out of
+    "Healthy" right now -- a bare "Partial"/"Degraded" word on its own gives a
+    reader no way to tell "some other fleet app's GitOps drifted" apart from
+    "Kafka is down" apart from "a real pod crashed", three very differently
+    actionable situations. Returns ``[]`` when every sub-condition is already
+    healthy. Sourced entirely from ``result``'s own already-computed fields
+    (never re-derived/guessed), same convention as `get_credential_states()`/
+    `get_self_health_check_states()`.
+    """
+    reasons: list[str] = []
+
+    if result["pods_failed"] > 0:
+        failed_names = [
+            p["name"] for p in result["pods"]
+            if p["status"] in ("Failed", "Error", "CrashLoopBackOff")
+        ]
+        reasons.append(
+            f"{result['pods_failed']} pod(s) failed: {', '.join(failed_names)}"
+            if failed_names else f"{result['pods_failed']} pod(s) failed"
+        )
+
+    # `argo_synced` is computed across *every* Argo CD Application matched to
+    # this AgentIT instance -- its own platform Application plus every
+    # fleet app it has onboarded via GitOps (see the "Argo CD apps" block
+    # below) -- not just AgentIT's own infrastructure, so a Partial/Degraded
+    # verdict here can legitimately be caused by a managed customer app
+    # drifting, unrelated to AgentIT itself. Naming exactly which app(s) is
+    # the only way a reader can tell those two situations apart.
+    if result["argo_synced"] is False:
+        out_of_sync = [a["name"] for a in result["argo_apps"] if a["sync"] != "Synced"]
+        reasons.append(
+            f"Argo CD: {len(out_of_sync)} of {len(result['argo_apps'])} managed "
+            f"Application(s) not Synced: {', '.join(out_of_sync)}"
+        )
+    elif result["argo_synced"] is None:
+        reasons.append(
+            "Argo CD: could not confirm any managed Application's sync state "
+            "(none found under management, or the Argo CD API was unreachable)"
+        )
+
+    if not result["kafka_ready"]:
+        if result.get("kafka_name"):
+            reasons.append(f"Kafka: broker '{result['kafka_name']}' found but not reporting Ready")
+        else:
+            reasons.append("Kafka: no Kafka broker resource found (unreachable, or not deployed in this namespace)")
+
+    return reasons
+
+
 def _get_cluster_health(store=None, loop=None) -> dict:
     """Runs off the event loop via ``asyncio.to_thread`` at every call site,
     so ``store``'s coroutine methods need bridging back onto ``loop`` (the
@@ -687,6 +739,8 @@ def _get_cluster_health(store=None, loop=None) -> dict:
     except Exception:
         log.debug("Failed to collect webhook delivery health", exc_info=True)
         result["webhook_deliveries"] = []
+
+    result["platform_status_reasons"] = _explain_platform_status(result)
 
     # Deep-links for Health cards / tables — real console/GitHub URLs only.
     console_url = resolve_console_url()
