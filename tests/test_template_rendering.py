@@ -255,51 +255,26 @@ class TestDeliverButtonClickAttributeIntact:
     _ClickAttrCapture), which reproduces the exact browser behavior that
     silently broke these buttons before `| forceescape` was added."""
 
-    async def test_onboard_results_deliver_click_attr_is_unbroken(self, portal_client):
+    async def test_onboard_results_has_no_manual_deliver_click(self, portal_client):
+        """Scan-only Onboard Results (#123): no Commit & Open PR confirm
+        @click — Scan opens PRs; this page only shows them / retry."""
         client, store, aid = portal_client
-        # A known infra_repo_url -- Direct Apply has been removed as a
-        # concept entirely, so Deliver's real @click confirm only ever
-        # exists once GitOps registration is known (otherwise Deliver is
-        # blocked outright with no @click at all -- see the "no infra repo"
-        # coverage elsewhere, e.g. test_customer_trust_ux.py). The primary
-        # Deliver button is also soft-gated on a successful Dry Run (the
-        # Override bypass has been removed too), so run one first.
         await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
         with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}):
-            await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "true"}, follow_redirects=False)
-
-        resp = await client.get(f"/assessments/{aid}/onboard-results")
+            resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert resp.status_code == 200
+        assert "Commit & Open PR" not in resp.text
+        assert "Commit &amp; Open PR" not in resp.text
+        assert 'data-action="apply"' not in resp.text
 
         parser = _ClickAttrCapture()
         parser.feed(resp.text)
-        # Note: Jinja tojson emits the em dash as \\u2014, so match on
-        # "Confirm Commit" + mechanism label rather than a literal "—".
         deliver_clicks = [
             c for c in parser.clicks
             if "Confirm Commit" in c and "Open PR" in c
         ]
-        assert deliver_clicks, "no @click attribute found for the primary Deliver button"
-
-        click = deliver_clicks[0]
-        assert "AgentIT will:" in click, (
-            f"Deliver button's @click attribute was truncated before the "
-            f"delivery_confirmation text -- likely a bare `| tojson` "
-            f"(without `| forceescape`) broke out of the HTML attribute "
-            f"early:\n{click!r}"
-        )
-        assert (
-            "does not mutate the cluster" in click
-            or "cluster is not mutated" in click
-        ), (
-            f"Deliver button's @click attribute was truncated -- it never "
-            f"reaches the honest GitOps-commit consequence tail:\n{click!r}"
-        )
-        assert "cannot be undone" not in click
-        assert "modifies production" not in click
-        assert click.rstrip().endswith("})"), (
-            f"Deliver button's @click attribute doesn't end with a "
-            f"complete function call -- looks truncated:\n{click!r}"
+        assert not deliver_clicks, (
+            "Onboard Results must not offer a manual Commit & Open PR confirm"
         )
 
     async def test_pr_action_card_click_attr_is_unbroken(self, portal_client):

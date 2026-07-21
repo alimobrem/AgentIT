@@ -13,7 +13,7 @@
 
 ---
 
-**Dry Run is Kubernetes apiserver server-side-apply `dryRun=All` (via `kube.apply_yaml(..., dry_run=True)`), not `kubectl`/`oc` CLI.** Portal and auto_delivery preflight validate post-filter/remap manifests against the live API, fail closed into `needs_attention` / clear UI errors (including missing CRDs), and never leave resources applied. Real apply remains GitOps only (PR merge + Argo). Runtime GitHub PR create/list/comments/status use REST (`portal/github_pr.py`); local `git` remains only for capability-scout's working-tree branch/push. Tekton `notify-argocd` also uses `kube.apply_yaml` (no `oc apply`). The hermetic pytest suite (`AGENTIT_OFFLINE=1`) mocks `dry_run_manifests_against_cluster` success via `tests/conftest.py`; real helper behavior is covered in `tests/test_cluster_dry_run.py`.
+**Dry Run is Kubernetes apiserver server-side-apply `dryRun=All` (via `kube.apply_yaml(..., dry_run=True)`), not `kubectl`/`oc` CLI.** Portal and auto_delivery preflight validate post-filter/remap manifests against the live API, fail closed into `needs_attention` / clear UI errors (including missing CRDs), and never leave resources applied. Real apply remains GitOps only (PR merge + Argo). Runtime GitHub PR create/list/comments/status use REST (`portal/github_pr.py`); local `git` remains only for capability-scout's working-tree branch/push. Tekton `notify-argocd` also uses `kube.apply_yaml` (no `oc apply`). The hermetic pytest suite (`AGENTIT_OFFLINE=1`) mocks `dry_run_manifests_against_cluster` success via `tests/conftest.py`; real helper behavior is covered in `tests/test_cluster_dry_run.py`. Onboard Results is Scan-results-only (no manual Commit / Per-Agent CTAs).
 
 ---
 
