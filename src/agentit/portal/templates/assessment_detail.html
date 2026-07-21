@@ -22,7 +22,9 @@
   <span class="badge badge-{{ report.criticality }}"
     title="How much oversight this app needs -- set at Assess time, not inferred. High/critical apps can never auto-deliver (a human must click Deliver, or approve a gate, before any PR opens) and get stricter default SLO targets.">{{ report.criticality }}</span>
   &nbsp;
-  {% if gitops_registered %}
+  {% if self_managed %}
+  <span class="badge badge-info" title="Self-managed: Scan opens PRs on this app&rsquo;s source repo (AgentIT.git) — merge there; not delivered under apps/agentit on a separate gitops repo">Self-managed</span>
+  {% elif gitops_registered %}
   <span class="badge badge-info" title="Changes to this app go through PR review + Argo CD sync">GitOps</span>
   {% elif infra_repo_url %}
   {# Direct Apply has been removed as a concept entirely -- an app with a
@@ -75,11 +77,13 @@
 </div>
 {% endif %}
 
-{% if not gitops_registered and not infra_repo_url %}
+{% if not self_managed and not gitops_registered and not infra_repo_url %}
 {# Parent x-data owns dismissed + busy; form only has x-ref (same pattern as
    Findings Fix) so $refs.registerGitopsForm resolves in the button scope.
    Optional infra_repo_url covers third-party app owners where auto-create
-   under the app's GitHub org/user is not allowed for our token. #}
+   under the app's GitHub org/user is not allowed for our token.
+   Self-managed AgentIT skips this nudge — PRs go to AgentIT.git, not
+   apps/agentit on a separate gitops repo. #}
 <div x-data="{ dismissed: false, busy: false }" x-show="!dismissed" x-cloak class="alert alert-info mb-2">
   <span class="text-sm">Not GitOps-registered -- this app cannot be delivered until it is (Direct Apply has been removed; see docs/unified-apply-flow.md). This predates GitOps registration becoming mandatory for new assessments.</span>
   <form method="post" action="/assessments/{{ assessment_id }}/register-gitops" class="inline-form register-gitops-form"
@@ -104,17 +108,15 @@
   </form>
   <button type="button" class="btn btn-sm btn-outline" @click="dismissed = true">Dismiss</button>
 </div>
-{% elif not gitops_registered and infra_repo_url %}
+{% elif not self_managed and not gitops_registered and infra_repo_url %}
 {# infra_repo_url is set (registration was submitted, and the infra repo +
    ApplicationSet exist) but no live Argo CD Application targets this app
    yet -- that only appears once a delivery actually commits manifests under
    apps/{{ report.repo_name }}/ in the infra repo and the resulting PR is
-   merged (see delivery.is_gitops_registered()'s docstring). Without this
-   branch, the page looked identical before and after a successful
-   registration click -- the same nudge/button reappeared with no visible
-   change, making the action look like it "did nothing". #}
+   merged (see delivery.is_gitops_registered()'s docstring). Self-managed
+   AgentIT is excluded — it never uses apps/agentit on gitops. #}
 <div x-data="{ dismissed: false }" x-show="!dismissed" x-cloak class="alert alert-info mb-2">
-  <span class="text-sm">GitOps infra repo configured (<a href="{{ infra_repo_url | safe_url }}" target="_blank" hx-boost="false">{{ infra_repo_url }}</a>). This app will show as GitOps-registered once your next Fix/Onboard delivery is committed and merged there.</span>
+  <span class="text-sm">GitOps infra repo configured (<a href="{{ infra_repo_url | safe_url }}" target="_blank" hx-boost="false">{{ infra_repo_url }}</a>). This app will show as GitOps-registered once your next Scan delivery PR is merged there.</span>
   <button type="button" class="btn btn-sm btn-outline" @click="dismissed = true">Dismiss</button>
 </div>
 {% endif %}
@@ -140,7 +142,9 @@
 {% endif %}
 
 <div class="lifecycle-stepper">
-  {% set stages = [("assessed", "Assessed"), ("onboarded", "Onboarded"), ("applied", "Applied"), ("monitored", "Monitored")] %}
+  {# PR-only HITL: human step after Onboarded is merge on GitHub ("Merged"),
+     not a fake "Applied" without merge. #}
+  {% set stages = [("assessed", "Assessed"), ("onboarded", "Onboarded"), ("applied", "Merged"), ("monitored", "Monitored")] %}
   {% for key, label in stages %}
   {% set is_active = lifecycle_stage == key %}
   {% set is_done = (key == "assessed") or (key == "onboarded" and lifecycle_stage in ("onboarded", "applied", "monitored")) or (key == "applied" and lifecycle_stage in ("applied", "monitored")) or (key == "monitored" and lifecycle_stage == "monitored") %}
@@ -152,28 +156,18 @@
   {% endfor %}
 </div>
 
-{# Next-step hint: ties the stepper above directly to the one action that
-   actually moves this app forward. While lifecycle is still "assessed",
-   this hint is always the primary path — leftover Ledger actions (often
-   from an earlier delivery / SLO tick on a prior assessment of the same
-   app) must not compete with it. After onboard, pending actions win
-   because they are the human delivery / rollback decisions.
-
-   2026-07-20 (single-button collapse): "assessed" with no error is now a
-   genuinely transient state -- every Assess/Scan (manual UI, cadence tick,
-   webhook push) chains straight into onboarding server-side the moment
-   the assessment is saved (assess_submit()'s background thread /
-   webhook_assess() / webhook_github_push(), see README's Unified apply
-   flow entry), never dependent on a human polling any progress page. The
-   separate "Onboard This App" button this hint used to point at has been
-   removed -- Scan below is now the one action, and it already chains
-   automatically every time. active_onboard_job/failed_onboard_job (route-
-   computed from the real remediation_jobs row for this assessment) tell
-   this hint whether the chain is already running or genuinely needs a
-   retry, instead of ever implying a human still needs to click something
-   that's already happening. #}
-<div class="next-step-hint {% if lifecycle_stage == 'assessed' %}next-step-hint-primary{% elif pending_actions and next_action.state == 'none' %}next-step-hint-attention{% endif %}">
-  {% if lifecycle_stage == "assessed" %}
+{# Single next-action banner (founder: quiet dual banners). Priority:
+   1) open PRs → merge on GitHub
+   2) assessed → Scan / live onboard progress
+   3) escalated / retrying / pending_verification
+   4) other lifecycle copy #}
+{% if next_action.state == "open_prs" %}
+<div class="next-step-hint next-step-hint-attention" role="status">
+  <span class="next-step-icon" aria-hidden="true">&#9679;</span>
+  <strong>Next action:</strong> {{ next_action.message }}
+</div>
+{% elif lifecycle_stage == "assessed" %}
+<div class="next-step-hint next-step-hint-primary">
   <span class="next-step-icon" aria-hidden="true">&#9679;</span>
   <span>
     {% if active_onboard_job %}
@@ -185,110 +179,73 @@
     This score hasn't been onboarded yet — click <strong>Scan</strong> below to onboard it now.
     {% else %}
     Next step: click <strong>Scan</strong> below.
-    Scan assesses and onboards in one step, generating remediations for all findings automatically — do not fix them one-by-one on the Findings tab first.
+    Scan assesses, onboards, and opens pull request(s) in one step — do not fix findings one-by-one on the Findings tab first.
     {% endif %}
-    {% if pending_actions %}
+    {% if non_pr_pending_actions %}
     <span class="text-muted">
-      ({{ pending_actions|length }} leftover action{{ 's' if pending_actions|length != 1 }} from earlier deliveries can wait —
+      ({{ non_pr_pending_actions|length }} leftover Ledger item{{ 's' if non_pr_pending_actions|length != 1 }} from earlier deliveries can wait —
       <a href="/assessments/{{ assessment_id }}?tab=ledger">Ledger</a>.)
     </span>
     {% endif %}
   </span>
-  {# next_action.state != "none" gets its own, more specific "Next action:"
-     alert right below this hint (escalated/retrying/pending_verification) --
-     showing this generic count too would just say "go check Ledger" twice
-     in a row. Only shown here when nothing more specific applies. #}
-  {% elif pending_actions and next_action.state == "none" %}
+</div>
+{% elif next_action.state == "escalated" %}
+<div class="alert alert-error mb-2" role="status">
+  <strong>Next action:</strong> {{ next_action.message }}
+  &nbsp;<a href="/assessments/{{ assessment_id }}?tab=ledger">See how to fix on the Ledger tab</a>
+</div>
+{% elif next_action.state == "retrying" %}
+<div class="alert alert-warn mb-2" role="status">
+  <strong>Next action:</strong> {{ next_action.message }}
+</div>
+{% elif next_action.state == "pending_verification" %}
+<div class="alert alert-info mb-2" role="status">
+  <strong>Next action:</strong> {{ next_action.message }}
+</div>
+{% elif non_pr_pending_actions %}
+<div class="next-step-hint next-step-hint-attention">
   <span class="next-step-icon" aria-hidden="true">&#9679;</span>
-  <strong>{{ pending_actions|length }}</strong> pending action{{ 's' if pending_actions|length != 1 }} need{{ '' if pending_actions|length != 1 else 's' }} your review —
-  {# Real ?tab=ledger href — this hint sits outside the tab strip's
-     x-data, so an Alpine @click="tab = 'ledger'" would be a dead handler
-     (see base.html's dead-button detector). Fleet's pending badge already
-     uses the same query-param convention. #}
+  <strong>{{ non_pr_pending_actions|length }}</strong> pending action{{ 's' if non_pr_pending_actions|length != 1 }} need{{ '' if non_pr_pending_actions|length != 1 else 's' }} your review —
   <a href="/assessments/{{ assessment_id }}?tab=ledger">see the Ledger tab below</a>.
-  {% elif lifecycle_stage == "onboarded" %}
+</div>
+{% elif lifecycle_stage == "onboarded" %}
+<div class="next-step-hint next-step-hint-attention">
   <span class="next-step-icon" aria-hidden="true">&#9679;</span>
-  Onboarding complete — automatic validation is running (or has finished); see
-  <a href="/assessments/{{ assessment_id }}/onboard-results">Onboard Results</a> for progress and any pull request(s).
-  {% elif lifecycle_stage == "applied" %}
-  <span class="next-step-icon next-step-icon-done" aria-hidden="true">&#10003;</span>
-  Applied to the cluster — add SLOs (via Scan, which also regenerates manifests) to reach the Monitored stage.
-  {% elif lifecycle_stage == "monitored" %}
-  <span class="next-step-icon next-step-icon-done" aria-hidden="true">&#10003;</span>
-  Fully onboarded and monitored — no action needed right now.
+  Onboarding complete — when pull request(s) appear below, review and merge them on GitHub.
+  {% if show_onboard_results_link %}
+  Automatic validation needs attention —
+  <a href="/assessments/{{ assessment_id }}/onboard-results">Onboard Results</a>.
   {% endif %}
 </div>
-
-{# A real "what happens next" fact for a delivery already made against this
-   app (docs/onboarding-loop-vision-gap-analysis.md's Step 8 discussion /
-   Phase 5) -- distinct from, and more specific than, the lifecycle hint
-   above: that one is about the onboarding pipeline itself (Onboard/Deliver/
-   pending gates); this one is about whether a fix that already shipped
-   actually resolved the finding it targeted. The "nothing pending" state
-   says plainly that nothing re-checks this app until the next push or a
-   manual re-Assess, rather than implying a re-check cadence that isn't
-   real -- but only worth stating once this app has ever been onboarded
-   (prior_onboarded/past "assessed"); a brand-new, never-onboarded app
-   already has an obvious next step above and "nothing pending" there would
-   just be noise restating the obvious. #}
-{% set _next_action_relevant = next_action.state != "none" or lifecycle_stage != "assessed" or prior_onboarded %}
-{% if _next_action_relevant %}
-  {% if next_action.state == "escalated" %}
-  <div class="alert alert-error mb-2" role="status">
-    <strong>Next action:</strong> {{ next_action.message }}
-    &nbsp;<a href="/assessments/{{ assessment_id }}?tab=ledger">Review on the Ledger tab</a>
-  </div>
-  {% elif next_action.state == "retrying" %}
-  <div class="alert alert-warn mb-2" role="status">
-    <strong>Next action:</strong> {{ next_action.message }}
-  </div>
-  {% elif next_action.state == "pending_verification" %}
-  <div class="alert alert-info mb-2" role="status">
-    <strong>Next action:</strong> {{ next_action.message }}
-  </div>
-  {% else %}
-  <p class="text-muted text-sm mb-2">{{ next_action.message }}</p>
-  {% endif %}
+{% elif lifecycle_stage == "applied" %}
+<div class="next-step-hint">
+  <span class="next-step-icon next-step-icon-done" aria-hidden="true">&#10003;</span>
+  Delivery PR(s) merged — add SLOs (via Scan) to reach the Monitored stage.
+</div>
+{% elif lifecycle_stage == "monitored" %}
+<div class="next-step-hint">
+  <span class="next-step-icon next-step-icon-done" aria-hidden="true">&#10003;</span>
+  Fully onboarded and monitored — no action needed right now.
+</div>
+{% elif next_action.state == "none" and (lifecycle_stage != "assessed" or prior_onboarded) %}
+<p class="text-muted text-sm mb-2">{{ next_action.message }}</p>
 {% endif %}
 
-{# Primary CTA follows lifecycle. "Onboard This App" (a separate, permanently-
-   visible button next to Scan) has been removed entirely (2026-07-20,
-   single-button collapse per product directive: "one button only,
-   have it do the full chain automatically"). Scan below now
-   deterministically, server-side chains straight through onboard -> automatic
-   validation -> Deliver for every trigger (manual click, cadence tick, push
-   webhook) -- see assess_submit()/webhook_assess()/webhook_github_push() --
-   so a second "just onboard this score" button would only ever duplicate
-   what Scan already does. The one narrow exception -- a genuinely failed
-   onboard step needing a retry without repaying the re-score cost -- lives
-   in the error banner above (failed_onboard_job), not here. #}
+{# Scan is the primary CTA. Review &amp; Deliver demoted: only a secondary
+   "Onboard Results" link for needs_attention edge cases with saved manifests.
+   Scan chains assess → onboard → deliver/PRs for every trigger. #}
 <div class="action-bar mt-2 mb-2">
-  {% if lifecycle_stage == "onboarded" %}
-  <a href="/assessments/{{ assessment_id }}/onboard-results" class="btn btn-action btn-lg" title="Review the generated manifests/PRs, then deliver them">Review &amp; Deliver</a>
-  {% endif %}
-  {# Manual Scan trigger for this exact app -- same underlying POST /assess
-     Fleet's own row action already uses (repo_url + criticality, re-scored
-     from scratch), just reachable from the app's own detail page too
-     instead of only from the Fleet table. Re-clones and re-scores the app,
-     then auto-chains into onboard (same default every Assess/Scan entry
-     point in the app already has), so this alone covers both "the code
-     changed" and "just want fresh manifests for the score I already have"
-     -- one button, not two. A confirm dialog only guards the more
-     consequential case (an app that's already been onboarded once, where
-     re-scoring regenerates and re-delivers real manifests); a never-
-     onboarded app's plain Scan skips it, mirroring Fleet's own
-     ever_onboarded split. #}
   {% set ever_onboarded = lifecycle_stage != "assessed" or prior_onboarded %}
   <form method="post" action="/assess" class="inline-form"
         x-data x-ref="reassessForm">
     <input type="hidden" name="repo_url" value="{{ report.repo_url }}">
     <input type="hidden" name="criticality" value="{{ report.criticality }}">
     {% if ever_onboarded %}
-    <button type="button" class="btn btn-outline btn-sm"
-      title="Re-clone and re-score the repo from scratch, then regenerate and re-deliver manifests for the new score."
+    <button type="button" class="btn btn-action btn-lg"
+      title="Re-clone and re-score the repo from scratch, then regenerate and open pull request(s) for the new score."
       @click="$dispatch('show-confirm', {
         title: 'Scan',
-        message: 'Scan ' + {{ report.repo_name | tojson | forceescape }} + ' and regenerate onboard manifests in one step. You will land on Onboard Results while automatic validation and delivery run.',
+        message: 'Scan ' + {{ report.repo_name | tojson | forceescape }} + ' — assess, onboard, and open pull request(s) in one step. Merge any open PRs on GitHub when they appear.',
         form: $refs.reassessForm,
         opts: { confirmText: 'Scan' }
       })">
@@ -296,12 +253,15 @@
       <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Scanning&hellip;</span>
     </button>
     {% else %}
-    <button type="submit" class="btn btn-outline btn-sm">
+    <button type="submit" class="btn btn-action btn-lg">
       <span class="btn-label">Scan</span>
       <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Scanning&hellip;</span>
     </button>
     {% endif %}
   </form>
+  {% if show_onboard_results_link %}
+  <a href="/assessments/{{ assessment_id }}/onboard-results" class="btn btn-sm btn-outline" title="Edge case: manifests saved but automatic validation/delivery needs attention">Onboard Results</a>
+  {% endif %}
   <form method="post" action="/assessments/{{ assessment_id }}/delete" class="inline-form danger-zone"
         x-data x-ref="deleteAssessment">
     <button type="button" class="btn btn-sm btn-danger-outline"
@@ -377,23 +337,28 @@
 ]) }}
 
 <div x-show="tab === 'overview'">
-  {# Open PRs -- currently-open PRs only (code repo + GitOps infra repo);
-     see the Ledger tab below for every PR ever opened and its final
-     outcome. Omitted entirely when there are none, same "don't show an
-     empty fact" convention as next_action above. #}
+  {# Open PRs -- always visible (empty state nudges Scan). Mental model:
+     Scan → see list of PRs → review/merge on GitHub. Self-managed AgentIT
+     delivers to AgentIT.git (code), never apps/agentit on a gitops repo. #}
+  <h2 class="section-title mt-0" id="open-prs">Open PRs{% if open_prs %} ({{ open_prs|length }}){% endif %}</h2>
   {% if open_prs %}
-  <h2 class="section-title mt-0">Open PRs ({{ open_prs|length }})</h2>
   <ul class="finding-list mb-2">
     {% for pr in open_prs %}
     <li class="finding-item">
+      {% if self_managed %}
+      <span class="badge badge-info" title="Pull request on this app&rsquo;s source repo (AgentIT.git for self-managed AgentIT)">Source</span>
+      {% else %}
       <span class="badge badge-info" title="{{ 'The GitOps infra repo for this app' if pr.repo_kind == 'gitops' else 'The code repo for this app' }}">{{ 'GitOps' if pr.repo_kind == 'gitops' else 'Code' }}</span>
-      <a href="{{ pr.html_url | safe_url }}" target="_blank" hx-boost="false">{{ pr.title or pr.pr_url }}</a>
+      {% endif %}
+      <a href="{{ pr.html_url | safe_url }}" target="_blank" hx-boost="false" rel="noopener">{{ pr.title or pr.pr_url }}</a>
       {% if pr.lifecycle == 'needs_approval' %}
-      <span class="text-muted text-sm">&middot; waiting for your approval &mdash; review and merge it on GitHub, or see the <a href="/assessments/{{ assessment_id }}?tab=ledger">Ledger tab</a></span>
+      <span class="text-muted text-sm">&middot; waiting for your approval &mdash; review and merge on GitHub</span>
       {% endif %}
     </li>
     {% endfor %}
   </ul>
+  {% else %}
+  <p class="text-muted text-sm mb-2" role="status">No open PRs — run Scan.</p>
   {% endif %}
   {% for s in scores_sorted %}
   <div class="dimension-row">
@@ -648,26 +613,21 @@
   {% elif recently_resolved_actions_count %}
   <p class="text-muted text-sm mb-1">No pending actions. {{ recently_resolved_actions_count }} resolved in the last 24 hours for this app.</p>
   {% else %}
-  <p class="text-muted text-sm mb-1">No pending actions for this app. After Onboard, automatic validation runs and opens pull request(s) -- anything needing your review will show up below.</p>
+  <p class="text-muted text-sm mb-1">No pending actions for this app. After Scan, automatic validation opens pull request(s) — merge them on GitHub; anything else needing review shows up here.</p>
   {% endif %}
 
   <h2 class="section-title mt-2">PR history ({{ pr_history|length }})</h2>
-  {# Every PR AgentIT has ever opened for this app (code repo + GitOps infra
-     repo), newest first, with its real lifecycle (see pr_tracking.py's
-     annotate_lifecycle()). A `gitops-pr-pending` gate's own status is a
-     reliable, already-known outcome (no live check); a source-repo-pr/
-     app-repo-pr/onboarding PR has no stored outcome at all today, so its
-     Outcome column reflects a live GitHub check made for this page load --
-     "Unknown" (rather than a fabricated status) when that check itself
-     couldn't determine one (e.g. no GITHUB_TOKEN configured). #}
+  {# Every PR AgentIT has ever opened for this app, newest first, with its
+     real lifecycle (pr_tracking.annotate_lifecycle()). Self-managed AgentIT
+     PRs land on AgentIT.git; fleet apps use code + GitOps infra repos. #}
   {% if pr_history %}
   <table>
     <thead><tr><th>Category</th><th>PR</th><th>Opened</th><th>Status</th><th>Outcome</th></tr></thead>
     <tbody>
       {% for pr in pr_history %}
       <tr>
-        <td><span class="badge badge-muted" title="{{ 'The GitOps infra repo for this app' if pr.repo_kind == 'gitops' else 'The code repo for this app' }}">{{ pr.category | dimension_label }}</span></td>
-        <td><a href="{{ pr.html_url | safe_url }}" target="_blank" hx-boost="false">{{ pr.title or pr.pr_url }}</a></td>
+        <td><span class="badge badge-muted" title="{% if self_managed %}Source repo (AgentIT.git for self-managed AgentIT){% elif pr.repo_kind == 'gitops' %}The GitOps infra repo for this app{% else %}The code repo for this app{% endif %}">{{ pr.category | dimension_label }}</span></td>
+        <td><a href="{{ pr.html_url | safe_url }}" target="_blank" hx-boost="false" rel="noopener">{{ pr.title or pr.pr_url }}</a></td>
         <td class="text-sm"><span data-timestamp="{{ pr.created_at }}">{{ (pr.created_at or '')[:10] }}</span></td>
         <td>
           {% if pr.lifecycle == 'needs_approval' %}
@@ -703,7 +663,7 @@
   </table>
   {% else %}
   <div class="empty-state">
-    <p>No PRs opened for this app yet. AgentIT opens a PR against the code repo or GitOps infra repo whenever a fix or onboarding manifest is delivered.</p>
+    <p>{% if self_managed %}No PRs opened yet. Scan opens pull request(s) on AgentIT.git — merge there to apply.{% else %}No PRs opened for this app yet. Scan opens a PR against the code repo or GitOps infra repo whenever a fix or onboarding manifest is delivered — merge on GitHub to apply.{% endif %}</p>
   </div>
   {% endif %}
 </div>

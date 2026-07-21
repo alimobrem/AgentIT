@@ -168,25 +168,55 @@ class TestAssessmentDetailNextActionIndicator:
         # Former Actions + Ledger tabs merged into one -- a single link now,
         # not two separate ones pointing at the same underlying gate.
         assert f"/assessments/{aid}?tab=ledger" in text
+        assert "See how to fix on the Ledger tab" in text
+        assert "Review on the Ledger tab" not in text
         # Confirm the escalation event this message points to is the real one, and unresolved.
         unresolved = await store.list_unresolved_events(
             "finding-escalated", ["finding-escalation-acknowledged"], target_app="ad-esc-app",
         )
         assert any(e["id"] == event_id for e in unresolved)
 
+    async def test_open_prs_win_over_escalated_next_action(self, next_action_client):
+        """When open PRs exist, merge on GitHub is the next action — not Ledger."""
+        client, store = next_action_client
+        aid = await store.save(make_report(repo_name="ad-pr-over-esc", repo_url="https://github.com/org/ad-pr-over-esc"))
+        await store.save_onboarding(aid, [{"category": "security", "path": "x.yaml", "content": "a: b", "description": "d"}])
+        await escalate_unresolved_finding(
+            store, aid, "ad-pr-over-esc", _NETWORK_TARGET, FINDING_ESCALATION_THRESHOLD,
+        )
+        pr_url = "https://github.com/org/ad-pr-over-esc/pull/9"
+        await store.create_delivery(
+            aid, "ad-pr-over-esc", {"cluster_config": 1},
+            mechanism="cluster_config:infra-repo-commit", status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": pr_url}}},
+        )
+
+        with patch("agentit.portal.github_pr.get_pr_status",
+                    return_value={"state": "open", "html_url": pr_url, "title": "onboard", "merged_at": ""}):
+            text = (await client.get(f"/assessments/{aid}")).text
+
+        hint = text.split('class="next-step-hint', 1)[1].split("</div>", 1)[0]
+        assert "open PR" in hint
+        assert "merge on GitHub" in hint
+        assert "Review on the Ledger tab" not in hint
+        # Escalated next-action copy must not compete when PRs are waiting.
+        assert "automated fixes exhausted" not in hint
+        assert pr_url in text
+
     async def test_honest_no_schedule_message_for_a_previously_onboarded_clean_app(self, next_action_client):
-        """A previously-onboarded app with nothing currently pending or
-        failing gets the honest "no scheduled re-check" fact, not silence
-        and not a fabricated cadence."""
+        """A previously-onboarded clean app points at Open PRs / Scan, not a
+        fabricated re-check cadence — single next-step banner."""
         client, store = next_action_client
         aid = await store.save(make_report(repo_name="ad-clean-onboarded-app"))
         await store.save_onboarding(aid, [{"category": "security", "path": "x.yaml", "content": "a: b", "description": "d"}])
 
         text = (await client.get(f"/assessments/{aid}")).text
 
-        assert "Next action:" not in text  # only the "something's happening" states use this label
-        assert "no periodic re-check on a schedule" in text
-        assert "next push" in text
+        assert "review and merge them on GitHub" in text
+        assert "No open PRs — run Scan." in text
+        # No competing "Next action:" escalation/retry banner on a clean app.
+        assert "automated fixes exhausted" not in text
+        assert "Awaiting verification" not in text
 
     async def test_no_next_action_noise_for_a_brand_new_never_onboarded_app(self, next_action_client):
         """A fresh, never-onboarded app's only real next step is Scan (the
