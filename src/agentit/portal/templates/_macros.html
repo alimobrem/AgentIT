@@ -66,18 +66,32 @@
    generic gate-resolution machinery is gone (see routes/recommendations.py).
    `event.kind` is set by routes/assessments.py to "rollback" or
    "escalation" -- everything else on `event` is the plain events row
-   itself (id/target_app/summary/timestamp/severity). #}
+   itself (id/target_app/summary/timestamp/severity). Escalations are
+   enriched by portal/escalation_guidance.py with finding_title /
+   dimension / attempt_count / why_failed / how_to_fix_manually. #}
 <div class="card mb-1">
   <div class="card-header">
     <div>
       <span class="badge badge-{{ event.severity | default('info') }}">
         {{ 'Rollback recommendation' if event.kind == 'rollback' else 'Escalated finding' }}
       </span>
+      {% if event.kind == "escalation" and event.dimension %}
+      <span class="badge badge-muted">{{ event.dimension | dimension_label }}</span>
+      {% endif %}
+      {% if event.kind == "escalation" and event.attempt_count %}
+      <span class="badge badge-muted" title="Automated fix attempts before escalation">{{ event.attempt_count }} attempt{{ 's' if event.attempt_count != 1 }}</span>
+      {% endif %}
       <span class="text-muted text-sm" data-timestamp="{{ event.timestamp }}">{{ event.timestamp[:16] }}</span>
     </div>
   </div>
 
+  {% if event.kind == "escalation" %}
+  <p class="my-4"><strong>{{ event.finding_title or event.summary }}</strong></p>
+  <p class="text-sm mb-1"><strong>Why we couldn&rsquo;t fix:</strong> {{ event.why_failed }}</p>
+  <p class="text-sm mb-1"><strong>How to fix manually:</strong> {{ event.how_to_fix_manually }}</p>
+  {% else %}
   <p class="my-4">{{ event.summary }}</p>
+  {% endif %}
 
   <div class="action-bar">
     {% if event.kind == "rollback" %}
@@ -98,7 +112,7 @@
     {% else %}
     <form method="POST" action="/findings/{{ event.id }}/acknowledge">
       <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
-      <button type="submit" class="btn btn-outline">Acknowledge</button>
+      <button type="submit" class="btn btn-outline btn-sm">Acknowledge</button>
     </form>
     {% endif %}
   </div>

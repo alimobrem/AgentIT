@@ -236,7 +236,12 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     # unresolved rollback recommendation, or an unresolved escalated
     # finding (both plain events -- see routes/recommendations.py and
     # portal/pending_actions.py).
-    from agentit.portal.delivery import get_next_action_state, is_gitops_registered
+    from agentit.portal.delivery import (
+        get_next_action_state,
+        is_gitops_registered,
+        is_self_managed_delivery_target,
+    )
+    from agentit.portal.escalation_guidance import enrich_escalations
     from agentit.portal.pending_actions import list_unresolved_recommendations
     from agentit.portal.pr_tracking import get_app_pr_history
 
@@ -244,6 +249,7 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     open_prs = [pr for pr in pr_history if pr["state"] == "open"]
     for pr in open_prs:
         pr["kind"] = "pr"
+    merged_prs = [pr for pr in pr_history if pr.get("state") == "merged" or pr.get("lifecycle") == "merged"]
 
     unresolved_rollbacks, unresolved_escalations = await list_unresolved_recommendations(
         s, target_app=report.repo_name,
@@ -252,6 +258,8 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
         e["kind"] = "rollback"
     for e in unresolved_escalations:
         e["kind"] = "escalation"
+    # Ledger escalations: real why/how guidance (never invent failure detail).
+    await enrich_escalations(s, unresolved_escalations, report)
 
     pending_actions = open_prs + unresolved_rollbacks + unresolved_escalations
 
@@ -271,10 +279,24 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     # analysis.md's Step 8 discussion / Phase 5) -- reuses
     # `unresolved_escalations` (already fetched above, already scoped to
     # this app) instead of a second query.
+    # Founder mental model: when open PRs exist, merge on GitHub is the
+    # primary next action — not escalated findings / Ledger review.
     next_action = await get_next_action_state(
         s, report.repo_name, repo_url=report.repo_url, assessment_id=assessment_id,
         unresolved_escalations=unresolved_escalations,
     )
+    if open_prs:
+        n = len(open_prs)
+        next_action = {
+            "state": "open_prs",
+            "label": "Open PRs waiting",
+            "message": (
+                f"{n} open PR{'s' if n != 1 else ''} waiting — review and merge on GitHub "
+                f"(see Open PRs below)."
+            ),
+            "open_pr_count": n,
+            "assessment_id": assessment_id,
+        }
 
     # Real, specific empty-state copy for the Ledger tab's approval section
     # (docs/ux-design-requirements.md checklist #10) -- how many of THIS
@@ -320,11 +342,16 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
 
     app_name = report.repo_name
     schedules_exist = await s.has_schedules_for_app(app_name) if hasattr(s, 'has_schedules_for_app') else False
-    if apply_results and apply_results.get("applied") and (slos or schedules_exist):
+    # PR-only HITL: "applied" means a human merged a delivery PR — never
+    # invent Applied from empty apply_results (Direct Apply is gone).
+    has_merged_delivery = bool(merged_prs) or bool(
+        apply_results and apply_results.get("applied")
+    )
+    if has_merged_delivery and (slos or schedules_exist):
         lifecycle_stage = "monitored"
-    elif apply_results and apply_results.get("applied"):
+    elif has_merged_delivery:
         lifecycle_stage = "applied"
-    elif onboardings:
+    elif onboardings or open_prs:
         lifecycle_stage = "onboarded"
     else:
         lifecycle_stage = "assessed"
@@ -344,16 +371,24 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     # that duplicates what Scan already does automatically.
     active_onboard_job = None
     failed_onboard_job = None
-    if lifecycle_stage == "assessed":
-        if hasattr(s, "repo_has_onboarding"):
-            prior_onboarded = await s.repo_has_onboarding(report.repo_url)
-        onboard_jobs = await s.list_remediation_jobs(assessment_id)
-        if onboard_jobs:
-            latest_onboard_job = onboard_jobs[0]
-            if latest_onboard_job["status"] == "failed":
-                failed_onboard_job = latest_onboard_job
-            elif latest_onboard_job["status"] not in _ONBOARD_JOB_TERMINAL_STATUSES:
-                active_onboard_job = latest_onboard_job
+    needs_attention_onboard_job = None
+    onboard_jobs = await s.list_remediation_jobs(assessment_id) if hasattr(s, "list_remediation_jobs") else []
+    if onboard_jobs:
+        latest_onboard_job = onboard_jobs[0]
+        if latest_onboard_job["status"] == "needs_attention":
+            needs_attention_onboard_job = latest_onboard_job
+        elif latest_onboard_job["status"] == "failed":
+            failed_onboard_job = latest_onboard_job
+        elif latest_onboard_job["status"] not in _ONBOARD_JOB_TERMINAL_STATUSES:
+            active_onboard_job = latest_onboard_job
+    if lifecycle_stage == "assessed" and hasattr(s, "repo_has_onboarding"):
+        prior_onboarded = await s.repo_has_onboarding(report.repo_url)
+
+    # Edge case only: needs_attention left saved manifests without a clean
+    # PR — bury Onboard Results as a secondary link, never compete with Scan.
+    show_onboard_results_link = needs_attention_onboard_job is not None and bool(onboardings)
+
+    self_managed = await is_self_managed_delivery_target(report.repo_name, report)
 
     suppressions = await s.get_suppressions(report.repo_name)
 
@@ -401,6 +436,9 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "prior_onboarded": prior_onboarded,
             "active_onboard_job": active_onboard_job,
             "failed_onboard_job": failed_onboard_job,
+            "needs_attention_onboard_job": needs_attention_onboard_job,
+            "show_onboard_results_link": show_onboard_results_link,
+            "self_managed": self_managed,
             "suppressions": suppressions,
             "celebrate_first_perfect_score": celebrate_first_perfect_score,
             "recently_resolved_actions_count": recently_resolved_actions_count,
@@ -464,7 +502,7 @@ async def register_gitops(request: Request, assessment_id: str):
     return RedirectResponse(
         url=(
             f"/assessments/{assessment_id}?success="
-            f"{quote('GitOps infra repo configured via ' + infra_repo_url + '. This app will show as GitOps-registered once your next Fix/Onboard delivery is committed and merged there.')}"
+            f"{quote('GitOps infra repo configured via ' + infra_repo_url + '. This app will show as GitOps-registered once your next Scan delivery PR is committed and merged there.')}"
         ),
         status_code=303,
     )

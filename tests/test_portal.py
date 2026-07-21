@@ -665,7 +665,7 @@ async def test_assessment_detail_single_scan_button_no_separate_onboard_button(c
 
 
 async def test_assessment_detail_lifecycle_primary_cta_after_onboard(client, _override_store):
-    """Once onboarded, Review & Deliver is primary — not a giant Onboard."""
+    """Once onboarded, Scan stays primary — Review & Deliver is demoted."""
     store = _override_store
     report = _make_report()
     aid = await store.save(report)
@@ -678,12 +678,19 @@ async def test_assessment_detail_lifecycle_primary_cta_after_onboard(client, _ov
 
     resp = await client.get(f"/assessments/{aid}")
     assert resp.status_code == 200
-    assert "Review &amp; Deliver" in resp.text or "Review & Deliver" in resp.text
-    assert f'href="/assessments/{aid}/onboard-results"' in resp.text
+    # Scan is the primary CTA (btn-action); Review & Deliver is gone.
+    assert "Review &amp; Deliver" not in resp.text and "Review & Deliver" not in resp.text
+    assert 'class="btn btn-action btn-lg"' in resp.text
+    assert "btn-label\">Scan</span>" in resp.text
+    # Onboard Results only for needs_attention edge cases — not happy path.
+    assert "Onboard Results" not in resp.text
     # Re-onboard was removed as a separate button (2026-07-20) -- Scan alone
     # (re-clone + re-score + regenerate manifests) now covers what it did.
     assert "Re-onboard" not in resp.text
     assert "Onboard This App" not in resp.text
+    assert "No open PRs — run Scan." in resp.text
+    # Stepper uses Merged (not Applied) for the PR-merge human step.
+    assert ">Merged<" in resp.text or "Merged" in resp.text
 
 
 async def test_fleet_h1_not_enterprise_readiness(client, _override_store):
@@ -980,7 +987,7 @@ async def test_next_step_hint_onboard_wins_over_leftover_actions_when_assessed(c
     hint = _next_step_hint_html(resp.text)
     assert "Next step: click" in hint
     assert "Scan" in hint
-    assert "do not fix them one-by-one" in hint
+    assert "do not fix findings one-by-one" in hint or "do not fix them one-by-one" in hint
     assert "1</strong> pending action" not in hint
     assert f'href="/assessments/{aid}?tab=ledger"' in hint
     # Ledger tab count badge is demoted while assessed (no "Ledger (1)").
@@ -1745,11 +1752,7 @@ async def test_fleet_uses_design_system_classes(client, _override_store):
 
 
 async def test_assessment_detail_uses_design_system_classes(client, _override_store):
-    """`.btn-action` (the "Review & Deliver" CTA) only renders once
-    lifecycle_stage is "onboarded" -- seed onboarding so this test
-    genuinely exercises the markup (see test_fleet_uses_design_system_
-    classes's docstring above for why this fixture gap was previously
-    masked)."""
+    """`.btn-action` is the Scan primary CTA (always), not Review & Deliver."""
     store = _override_store
     report = _make_report()
     aid = await store.save(report)
@@ -1766,6 +1769,7 @@ async def test_assessment_detail_uses_design_system_classes(client, _override_st
     assert "dimension-value" in resp.text
     assert "finding-list" in resp.text
     assert "btn-action" in resp.text
+    assert "btn-label\">Scan</span>" in resp.text
 
 
 async def test_assess_form_uses_design_system_classes(client):

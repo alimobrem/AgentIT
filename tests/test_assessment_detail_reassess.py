@@ -48,4 +48,4 @@ class TestAssessmentDetailReassessButton:
         # Onboarded -> the more consequential re-assess+auto-onboard path
         # gets a confirm dialog first, same "Scan" label either way.
         assert "title: 'Scan'" in resp.text
-        assert "regenerate onboard manifests" in resp.text
+        assert "open pull request(s) in one step" in resp.text
