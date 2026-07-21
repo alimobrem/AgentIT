@@ -288,3 +288,22 @@ class TestHelmChartExistsParity:
 
     def test_passes_when_chart_yaml_present(self, create_mock_repo) -> None:
         _passes(self.SKILL_PATH, create_mock_repo, {"Chart.yaml": "apiVersion: v2\nname: myapp\n"})
+
+
+class TestK8sDeploymentExistsParity:
+    """Ported from `checks/infrastructure/k8s-manifests.yaml` (deleted in
+    this commit) to `skills/infrastructure/k8s-deployment-exists.md`."""
+
+    SKILL_PATH = SKILLS_DIR / "infrastructure" / "k8s-deployment-exists.md"
+
+    def test_fires_when_no_deployment_manifest(self, create_mock_repo) -> None:
+        finding = _fires(self.SKILL_PATH, create_mock_repo, {"main.py": "print('hi')\n"})
+        assert finding.category == "manifests"
+        assert finding.severity == Severity.high
+        assert finding.description == "No Kubernetes Deployment manifests found"
+        assert finding.recommendation == "Create deployment, service, and ingress manifests"
+
+    def test_passes_when_deployment_manifest_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {
+            "deploy/deployment.yaml": "apiVersion: apps/v1\nkind: Deployment\n",
+        })
