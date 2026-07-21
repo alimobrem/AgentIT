@@ -214,10 +214,9 @@ async def ledger_page(
     # exists to make impossible to miss (the exact undercount fixed
     # 2026-07-19: a source-repo-pr/app-repo-pr/onboarding PR that's
     # genuinely open on GitHub used to fall through to the read-only
-    # history table below instead of here). The `gates` table/generic
-    # gate-resolution machinery has been removed entirely (2026-07-19) --
-    # every record here is a real PR, rendered with the same Merge/Close
-    # `pr_action_card` regardless of which delivery path produced it.
+    # history table below instead of here). Every record here is a real
+    # PR, rendered with the same Merge/Close `pr_action_card` regardless of
+    # which delivery path produced it (see docs/unified-apply-flow.md).
     needs_approval = fleet_prs_waiting_for_approval(records)
 
     history = [r for r in records if r["state"] != "open"]

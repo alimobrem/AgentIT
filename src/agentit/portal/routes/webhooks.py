@@ -276,13 +276,10 @@ async def webhook_github_push(request: Request, background_tasks: BackgroundTask
                 # re-assessment automatically checks whether any prior
                 # delivery on this app that recorded a target finding
                 # actually cleared it -- pure correlation + a visible
-                # signal, not itself an automated delivery. AutoMode has
-                # been removed, so Phase 4's reaction to a confirmed
-                # still-present finding is no longer a bounded auto-retry
-                # (that retry's own terminal action was an unreviewed
-                # auto-delivery) -- it now always escalates straight to a
-                # human-review gate, same as the diff.auto_fixable
-                # dispatch loop below.
+                # signal, not itself an automated delivery. See
+                # check_pending_delivery_verifications()'s own docstring
+                # for Phase 4's current bounded-retry-then-escalate
+                # reaction to a confirmed still-present finding.
                 from agentit.portal.delivery import check_pending_delivery_verifications
                 await check_pending_delivery_verifications(s, managed["repo_name"], report, assessment_id)
 
@@ -315,15 +312,13 @@ async def webhook_github_push(request: Request, background_tasks: BackgroundTask
                             "dispatcher", "fix-generated", managed["repo_name"], "info",
                             f"Generated {len(dispatch_result['files'])} fix(es) for '{finding.category}' via {dispatch_result['agent']}",
                         )
-                        # AutoMode has been removed: nothing auto-delivers
-                        # without an explicit human action anymore -- this
+                        # Nothing auto-delivers without an explicit human
+                        # action (see docs/unified-apply-flow.md) -- this
                         # dispatched fix is never itself persisted (see
                         # RemediationDispatcher.dispatch()'s docstring), so
                         # the real next step is re-running Onboard for this
-                        # app (which regenerates and saves the same fix,
-                        # deliverable from Onboard Results) rather than a
-                        # gate implying a specific "approve" action this
-                        # in-memory result can't actually back.
+                        # app, which regenerates and saves the same fix,
+                        # deliverable from Onboard Results.
                         await s.log_event(
                             "dispatcher", "fix-not-delivered", managed["repo_name"], "info",
                             f"Fix for '{finding.category}' generated but not delivered -- "
@@ -455,12 +450,10 @@ async def webhook_finding(request: Request):
         await s.log_event("dispatcher", "no-fix-available", app_name, "warning", result["error"])
         return JSONResponse({"status": "accepted", "action": "alert-only", "reason": result["error"]})
 
-    # AutoMode has been removed: nothing auto-delivers without an explicit
-    # human action anymore. This dispatched fix is never itself persisted
-    # (see RemediationDispatcher.dispatch()'s docstring) -- no gate is
-    # created (the `gates` table has been removed entirely); the real next
-    # step is re-running Onboard for this app, which regenerates and saves
-    # the same fix, deliverable from Onboard Results.
+    # Same reasoning as webhook_github_push's auto-fixable dispatch loop
+    # above: nothing auto-delivers without an explicit human action (see
+    # docs/unified-apply-flow.md), so this dispatched fix is never itself
+    # persisted -- the real next step is re-running Onboard for this app.
     if result["files"]:
         await s.log_event(
             "dispatcher", "fix-not-delivered", app_name, "info",

@@ -143,12 +143,11 @@ async def _attach_pending_actions(fleet: list[dict], s: object) -> None:
     """"Needs action" badge per app (docs/ui-redesign-proposal.md §2) --
     every open, unmerged PR (Merge/Close on the Actions tab -- see
     routes/pr_actions.py) plus any unresolved rollback/escalation
-    recommendation (routes/recommendations.py). The ``gates`` table/generic
-    gate-resolution machinery has been removed entirely (2026-07-19) --
-    nothing here reads from it anymore. Mutates each fleet row in place
-    with ``pending_actions_count``. Requires ``_attach_pr_counts()`` to
-    have already run (reads each row's own ``open_prs``) so this doesn't
-    duplicate that function's fleet-wide GitHub-status batch.
+    recommendation (routes/recommendations.py, portal/pending_actions.py).
+    Mutates each fleet row in place with ``pending_actions_count``.
+    Requires ``_attach_pr_counts()`` to have already run (reads each row's
+    own ``open_prs``) so this doesn't duplicate that function's fleet-wide
+    GitHub-status batch.
     """
     for app_item in fleet:
         app_item["pending_actions_count"] = app_item.get("open_prs", 0)

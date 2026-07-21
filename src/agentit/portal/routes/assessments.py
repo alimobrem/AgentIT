@@ -485,9 +485,8 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     # an open, unmerged PR (Merge/Close, routes/pr_actions.py -- the real
     # GitHub PR review IS the approval step now, no gate involved), an
     # unresolved rollback recommendation, or an unresolved escalated
-    # finding (both plain events, see routes/recommendations.py). The
-    # `gates` table/generic gate-resolution machinery has been removed
-    # entirely (2026-07-19) -- nothing here reads from it anymore.
+    # finding (both plain events -- see routes/recommendations.py and
+    # portal/pending_actions.py).
     from agentit.portal.delivery import get_next_action_state, is_gitops_registered
     from agentit.portal.pending_actions import list_unresolved_recommendations
     from agentit.portal.pr_tracking import get_app_pr_history
@@ -507,19 +506,15 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
 
     pending_actions = open_prs + unresolved_rollbacks + unresolved_escalations
 
-    # The `gates` table/concept is being eliminated system-wide (a separate,
-    # dedicated effort) -- a gate type that already resolves to a real PR
-    # (``gitops-pr-pending``/the CI/CD-shared-namespace variant) is fully
-    # covered by the PR list below (``pr_history``, lifecycle="needs_approval")
-    # now, so it no longer gets its own gate_card here; that would just be
-    # the same "Approve & Deliver" duplicated a second time on this same
-    # page. The remaining gate types (``rollback-review``,
-    # ``finding-unresolved-escalation``, and any stale/unrecognized one) have
-    # no PR of their own to point at -- a human acknowledgment with nothing
-    # to review on GitHub -- so they get recommendation_card, not a PR row.
-    # `pending_actions` is built entirely from open_prs (kind="pr") plus the
-    # two recommendation-event kinds above -- no gate_type left to filter on
-    # now that the gates table is gone, so filtering on `kind` is the real
+    # Every PR-shaped delivery (including the CI/CD-shared-namespace
+    # variant) is already covered by the PR list above (``pr_history``,
+    # lifecycle="needs_approval") -- rendering it again here would just
+    # duplicate the same "Approve & Deliver" a second time on this page.
+    # The two recommendation types (``rollback-review``,
+    # ``finding-unresolved-escalation``) have no PR of their own to point
+    # at -- a human acknowledgment with nothing to review on GitHub -- so
+    # they get recommendation_card instead. There's no ``gate_type`` left
+    # to filter on (see docs/unified-apply-flow.md), so `kind` is the real
     # (and only) distinction.
     non_pr_pending_actions = [g for g in pending_actions if g.get("kind") != "pr"]
 
