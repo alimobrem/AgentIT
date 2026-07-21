@@ -405,3 +405,23 @@ class TestNetworkPolicyExistsParity:
         _passes(self.SKILL_PATH, create_mock_repo, {
             "deploy/netpol.yaml": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\n",
         })
+
+
+class TestSecretsScanningInCiParity:
+    """Ported from `checks/security/secrets-scanning.yaml` (deleted in
+    this commit, the last remaining `checks/*.yaml` file) to
+    `skills/security/secrets-scanning-in-ci.md`."""
+
+    SKILL_PATH = SKILLS_DIR / "security" / "secrets-scanning-in-ci.md"
+
+    def test_fires_when_no_trivy_reference(self, create_mock_repo) -> None:
+        finding = _fires(self.SKILL_PATH, create_mock_repo, {".gitlab-ci.yml": "stages: [build]\n"})
+        assert finding.category == "scanning"
+        assert finding.severity == Severity.high
+        assert finding.description == "No container or dependency vulnerability scanning detected in CI"
+        assert finding.recommendation == "Add Trivy or ACS (StackRox) scanning to the CI pipeline"
+
+    def test_passes_when_trivy_reference_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {
+            ".gitlab-ci.yml": "stages: [build, scan]\nscan:\n  image: aquasec/trivy\n",
+        })
