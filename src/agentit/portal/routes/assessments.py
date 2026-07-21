@@ -1398,12 +1398,21 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
         CATEGORY_SOURCE_PATCH,
         confirmation_text,
         is_gitops_registered,
+        is_self_managed_delivery_target,
         preview_delivery_groups,
         resolve_cluster_config_mechanism,
     )
     gitops_registered, infra_repo_url = await is_gitops_registered(report.repo_name, report)
-    delivery_mechanism = resolve_cluster_config_mechanism(infra_repo_url)
-    delivery_confirmation = confirmation_text(delivery_mechanism, infra_repo_url=infra_repo_url)
+    self_managed = await is_self_managed_delivery_target(report.repo_name, report)
+    delivery_mechanism = resolve_cluster_config_mechanism(
+        infra_repo_url, self_managed=self_managed, category=CATEGORY_CLUSTER_CONFIG,
+    )
+    delivery_confirmation = confirmation_text(
+        delivery_mechanism,
+        infra_repo_url=infra_repo_url,
+        self_managed=self_managed,
+        app_repo_url=report.repo_url,
+    )
     deliveries = await s.list_deliveries(assessment_id) if hasattr(s, "list_deliveries") else []
 
     # ── PR-centric framing (replaces raw manifest/category plumbing) ──────
@@ -1413,7 +1422,12 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
     # preview_delivery_groups()'s own docstring) -- merged with every real,
     # already-known PR for this assessment (pr_tracking.py; single source
     # of truth, same primitives Ledger/Assessment Detail's PR displays use).
-    preview_groups = preview_delivery_groups(files, infra_repo_url=infra_repo_url)
+    preview_groups = preview_delivery_groups(
+        files,
+        infra_repo_url=infra_repo_url,
+        self_managed=self_managed,
+        app_repo_url=report.repo_url,
+    )
 
     from agentit.portal.pr_tracking import (
         annotate_lifecycle,

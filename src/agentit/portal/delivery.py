@@ -140,40 +140,78 @@ def repo_kind_for_mechanism(mechanism: str) -> str:
     return _MECHANISM_REPO_KIND.get(mechanism, "")
 
 
-def resolve_cluster_config_mechanism(infra_repo_url: str | None) -> str:
-    """The cluster/app-config category's delivery mechanism, shared by every
-    caller that predicts or acts on it (``route_and_deliver()`` and the
-    dry-run preview on Onboard Results) so they can never disagree about
-    what a given ``infra_repo_url`` resolves to.
+# Error when self-managed AgentIT would otherwise open a dead-letter PR under
+# apps/agentit/cicd-shared-namespace/ (AppSet excludes apps/agentit; nothing syncs).
+_SELF_MANAGED_CICD_ERROR = (
+    "self-managed AgentIT cannot deliver CI/CD shared-namespace manifests via "
+    "apps/agentit/ (ApplicationSet excludes that path; nothing syncs it). "
+    "Open a PR against AgentIT.git under chart/ or argocd/ instead — see "
+    "docs/architecture-agentit-vs-fleet-gitops.md"
+)
+
+
+def is_appset_excluded_app(app_name: str) -> bool:
+    """True when ``apps/{app}/`` is excluded from ApplicationSet
+    ``agentit-managed-apps`` — today only ``agentit`` (see
+    ``github_pr.ensure_applicationset()``). Infra commits there are dead
+    letters: Application ``agentit`` syncs Helm ``chart/`` from AgentIT.git.
+    """
+    return _sanitize_app_name(app_name) == "agentit"
+
+
+def resolve_cluster_config_mechanism(
+    infra_repo_url: str | None,
+    *,
+    self_managed: bool = False,
+    category: str = CATEGORY_CLUSTER_CONFIG,
+) -> str:
+    """The cluster/app-config (and CI/CD-shared-namespace) delivery mechanism,
+    shared by every caller that predicts or acts on it (``route_and_deliver()``
+    and the dry-run preview on Onboard Results) so they can never disagree
+    about what a given ``infra_repo_url`` + self-managed flag resolves to.
 
     Direct Apply has been removed as a concept entirely (product directive:
     all apps must use GitOps; GitHub-PR-merge is the only sanctioned gate) --
     this can no longer select ``MECHANISM_DIRECT_APPLY`` as a live outcome,
-    for any caller, ever. Knowing an infra repo URL is the only thing that
-    matters now: whether a live Argo CD ``Application`` already exists
-    (``registered``, formerly a parameter here) is irrelevant to *whether* to
-    commit -- only *whether this is the first commit that bootstraps
-    ``apps/{app}/`` for Argo's ``ApplicationSet`` to discover* (see
-    docs/onboarding-loop-vision-gap-analysis.md §1), which
-    ``deliver_with_verification()``'s ``MECHANISM_INFRA_REPO_COMMIT`` branch
-    already handles identically either way.
+    for any caller, ever.
+
+    Self-managed AgentIT (Application ``agentit`` → AgentIT.git ``chart/``;
+    AppSet excludes ``apps/agentit``) must never use
+    ``MECHANISM_INFRA_REPO_COMMIT`` — those PRs are dead letters. Cluster-
+    config routes to a source-repo PR under ``chart/templates/`` / ``skills/``;
+    CI/CD shared-namespace fails closed (no safe automatic path into the
+    Helm chart for operator-namespace manifests). See
+    docs/architecture-agentit-vs-fleet-gitops.md.
+
+    For fleet apps, knowing an infra repo URL is the only thing that matters:
+    whether a live Argo CD ``Application`` already exists is irrelevant to
+    *whether* to commit -- only *whether this is the first commit that
+    bootstraps ``apps/{app}/`` for Argo's ``ApplicationSet`` to discover*
+    (see docs/onboarding-loop-vision-gap-analysis.md §1).
 
     GitOps registration is mandatory for every new assessment
     (``routes/assessments.py``'s ``_resolve_mandatory_infra_repo_url()``
-    hard-stops Assess otherwise -- see the README's "GitOps registration is
-    now mandatory" entry), so ``infra_repo_url`` should always be known in
-    practice. The ``None`` case below is only reachable for an assessment
-    saved before that directive landed (no infra repo was ever recorded) --
-    this refuses to guess rather than falling back to a direct apply; a
-    human must register this app for GitOps (e.g. via "Register for GitOps")
-    before it can be delivered at all.
+    hard-stops Assess otherwise), so ``infra_repo_url`` should always be
+    known for fleet apps. The ``None`` case below is only reachable for an
+    assessment saved before that directive landed -- this refuses to guess
+    rather than falling back to a direct apply.
     """
+    if self_managed:
+        if category == CATEGORY_CICD_SHARED_NAMESPACE:
+            return MECHANISM_NONE
+        return MECHANISM_SOURCE_REPO_PR
     if infra_repo_url is not None:
         return MECHANISM_INFRA_REPO_COMMIT
     return MECHANISM_NONE
 
 
-def confirmation_text(mechanism: str, *, infra_repo_url: str | None = None) -> str:
+def confirmation_text(
+    mechanism: str,
+    *,
+    infra_repo_url: str | None = None,
+    self_managed: bool = False,
+    app_repo_url: str | None = None,
+) -> str:
     """The exact statement a human must see -- and actively acknowledge --
     immediately before ``route_and_deliver()`` actually fires for the
     cluster/app-config category, via the portal's unified "Deliver" action.
@@ -196,10 +234,46 @@ def confirmation_text(mechanism: str, *, infra_repo_url: str | None = None) -> s
     sensible fallback via the generic path below if this is ever somehow
     reached with that mechanism string.
     """
+    if self_managed and mechanism == MECHANISM_SOURCE_REPO_PR:
+        repo = app_repo_url or "AgentIT.git"
+        return (
+            f"AgentIT will: open a PR against `{repo}` under chart/templates/ or "
+            "skills/ — Application `agentit` syncs Helm chart/ from this repo "
+            "(AppSet excludes apps/agentit/; never commit AgentIT there). "
+            "A human must merge; AgentIT will never auto-merge."
+        )
+    if self_managed and mechanism == MECHANISM_NONE:
+        return f"AgentIT will: {_SELF_MANAGED_CICD_ERROR}"
     base = MECHANISM_DESCRIPTIONS.get(mechanism, mechanism)
     if mechanism == MECHANISM_INFRA_REPO_COMMIT and infra_repo_url:
         return f"AgentIT will: commit to `{infra_repo_url}` and open a PR -- this app is GitOps-registered via a live Argo CD Application. A human must merge; AgentIT will never auto-merge."
     return f"AgentIT will: {base}"
+
+
+def remap_self_managed_cluster_files(files: list[dict]) -> list[dict]:
+    """Rewrite onboard file dicts so ``create_source_patch_pr`` lands them
+    under paths Application ``agentit`` / the image bake actually consume
+    (``chart/templates/``, ``skills/``) — never ``apps/agentit/``.
+    """
+    remapped: list[dict] = []
+    for f in files:
+        name = Path(f["path"]).name
+        suffix = Path(f["path"]).suffix.lower()
+        category = f.get("category", "")
+        new_f = dict(f)
+        if suffix == ".md":
+            if str(f["path"]).startswith("skills/"):
+                new_f["target_path"] = f["path"]
+            elif category and category not in ("skills", "misc", ""):
+                new_f["target_path"] = f"skills/{category}/{name}"
+            else:
+                new_f["target_path"] = f"skills/{name}"
+        else:
+            # YAML/YML cluster-config (and anything else in this lane) → Helm
+            # templates Application agentit syncs from AgentIT.git.
+            new_f["target_path"] = f"chart/templates/{name}"
+        remapped.append(new_f)
+    return remapped
 
 
 def classify_file(entry: dict) -> str:
@@ -249,7 +323,11 @@ def classify_file(entry: dict) -> str:
 
 
 def preview_delivery_groups(
-    files: list[dict], *, infra_repo_url: str | None,
+    files: list[dict],
+    *,
+    infra_repo_url: str | None,
+    self_managed: bool = False,
+    app_repo_url: str | None = None,
 ) -> dict[str, dict]:
     """Read-only preview of how ``route_and_deliver()`` would group and
     route ``files`` right now -- no commits, no PRs, no store writes. Runs
@@ -281,7 +359,9 @@ def preview_delivery_groups(
         if not keep:
             continue
         if category in (CATEGORY_CLUSTER_CONFIG, CATEGORY_CICD_SHARED_NAMESPACE):
-            mechanism = resolve_cluster_config_mechanism(infra_repo_url)
+            mechanism = resolve_cluster_config_mechanism(
+                infra_repo_url, self_managed=self_managed, category=category,
+            )
         elif category == CATEGORY_SOURCE_PATCH:
             mechanism = MECHANISM_SOURCE_REPO_PR
         elif category == CATEGORY_MANIFEST_AT_REST:
@@ -292,7 +372,14 @@ def preview_delivery_groups(
             "files": keep,
             "mechanism": mechanism,
             "repo_kind": repo_kind_for_mechanism(mechanism),
-            "confirmation": confirmation_text(mechanism, infra_repo_url=infra_repo_url),
+            "confirmation": confirmation_text(
+                mechanism,
+                infra_repo_url=infra_repo_url,
+                self_managed=self_managed and category in (
+                    CATEGORY_CLUSTER_CONFIG, CATEGORY_CICD_SHARED_NAMESPACE,
+                ),
+                app_repo_url=app_repo_url,
+            ),
         }
     return result
 
@@ -351,6 +438,37 @@ def is_self_managed_application(candidate_repo_url: str | None, app_repo_url: st
         return False
     from agentit.portal.store import normalize_repo_url
     return normalize_repo_url(candidate_repo_url) == normalize_repo_url(app_repo_url)
+
+
+async def is_self_managed_delivery_target(
+    app_name: str, report: AssessmentReport | None,
+) -> bool:
+    """True when infra-repo delivery under ``apps/{app}/`` would be a dead
+    letter — never use ``MECHANISM_INFRA_REPO_COMMIT`` for these targets.
+
+    Always true for the AppSet-excluded app name ``agentit`` (normative:
+    docs/architecture-agentit-vs-fleet-gitops.md). Also true when a live
+    literal-named Application sources from this app's own repo (same
+    ``is_self_managed_application()`` check ``is_gitops_registered()`` uses).
+    """
+    if is_appset_excluded_app(app_name):
+        return True
+    if report is None or not report.repo_url:
+        return False
+    try:
+        literal = await asyncio.to_thread(
+            kube.get_custom_resource,
+            "argoproj.io", "v1alpha1", "applications", _sanitize_app_name(app_name),
+            namespace="openshift-gitops",
+        )
+    except Exception:
+        return False
+    return bool(
+        literal is not None
+        and is_self_managed_application(
+            application_source_repo_url(literal), report.repo_url,
+        )
+    )
 
 
 async def is_gitops_registered(
@@ -752,6 +870,8 @@ async def route_and_deliver(
             groups.pop(cat, None)
 
     registered, infra_repo_url = await is_gitops_registered(app_name, report)
+    self_managed = await is_self_managed_delivery_target(app_name, report)
+    app_repo_url = report.repo_url if report is not None else None
 
     categories_summary: dict[str, int] = {cat: len(fs) for cat, fs in groups.items()}
     if blocked:
@@ -767,12 +887,15 @@ async def route_and_deliver(
     # Direct Apply has been removed as a concept entirely -- every
     # cluster/app-config delivery either commits to a known infra repo
     # (bootstrapping apps/{app}/ on the very first delivery, see
-    # resolve_cluster_config_mechanism()'s docstring) or refuses outright
+    # resolve_cluster_config_mechanism()'s docstring), routes self-managed
+    # AgentIT to AgentIT.git (never apps/agentit/), or refuses outright
     # when no infra repo is known at all (only possible for an assessment
     # saved before GitOps registration became mandatory).
     cluster_files = groups.pop(CATEGORY_CLUSTER_CONFIG, [])
     if cluster_files:
-        mechanisms[CATEGORY_CLUSTER_CONFIG] = resolve_cluster_config_mechanism(infra_repo_url)
+        mechanisms[CATEGORY_CLUSTER_CONFIG] = resolve_cluster_config_mechanism(
+            infra_repo_url, self_managed=self_managed, category=CATEGORY_CLUSTER_CONFIG,
+        )
 
     # CI/CD manifests destined for a shared operator namespace (2026-07-18):
     # no longer a cluster-admin-review direct-apply gate (removed entirely --
@@ -780,11 +903,14 @@ async def route_and_deliver(
     # ArgoCD's own reconciler service account already holds the elevated
     # RBAC AgentIT's lacks for these namespaces (verified live against this
     # cluster's openshift-gitops-argocd-application-controller SA -- see the
-    # README), so this resolves through the exact same GitOps-commit
-    # decision as the cluster-config category above.
+    # README), so fleet apps resolve through the exact same GitOps-commit
+    # decision as cluster-config. Self-managed AgentIT fails closed (AppSet
+    # excludes apps/agentit — see docs/architecture-agentit-vs-fleet-gitops.md).
     cicd_files = groups.pop(CATEGORY_CICD_SHARED_NAMESPACE, [])
     if cicd_files:
-        mechanisms[CATEGORY_CICD_SHARED_NAMESPACE] = resolve_cluster_config_mechanism(infra_repo_url)
+        mechanisms[CATEGORY_CICD_SHARED_NAMESPACE] = resolve_cluster_config_mechanism(
+            infra_repo_url, self_managed=self_managed, category=CATEGORY_CICD_SHARED_NAMESPACE,
+        )
 
     source_files = groups.pop(CATEGORY_SOURCE_PATCH, [])
     if source_files:
@@ -817,9 +943,18 @@ async def route_and_deliver(
         status="in_progress",
         details={
             "registered": registered, "infra_repo_url": infra_repo_url, "dry_run": dry_run,
+            "self_managed": self_managed,
             "edited_files": edited_files,
             "confirmation_text": {
-                cat: confirmation_text(m, infra_repo_url=infra_repo_url) for cat, m in mechanisms.items()
+                cat: confirmation_text(
+                    m,
+                    infra_repo_url=infra_repo_url,
+                    self_managed=self_managed and cat in (
+                        CATEGORY_CLUSTER_CONFIG, CATEGORY_CICD_SHARED_NAMESPACE,
+                    ),
+                    app_repo_url=app_repo_url,
+                )
+                for cat, m in mechanisms.items()
             },
         },
         target_findings=target_findings,
@@ -835,14 +970,24 @@ async def route_and_deliver(
     # never "failed").
     try:
         if cluster_files:
-            if mechanisms[CATEGORY_CLUSTER_CONFIG] == MECHANISM_INFRA_REPO_COMMIT and report is not None:
-                # Opens the PR; a human merges (or closes) it directly from
-                # the Actions tab (routes/pr_actions.py) -- the real GitHub
-                # PR review IS the approval step now, no gate involved.
+            mech = mechanisms[CATEGORY_CLUSTER_CONFIG]
+            if mech == MECHANISM_INFRA_REPO_COMMIT and report is not None:
+                # Fleet apps: opens the PR; a human merges (or closes) it
+                # from the Actions tab -- the real GitHub PR review IS the
+                # approval step now, no gate involved.
                 outcomes[CATEGORY_CLUSTER_CONFIG] = await _deliver_via_gitops_pr(
                     files=cluster_files, report=report, app_name=app_name, store=store,
                     assessment_id=assessment_id, actor=actor, dry_run=dry_run,
                     infra_repo_url=infra_repo_url,
+                )
+            elif mech == MECHANISM_SOURCE_REPO_PR and report is not None:
+                # Self-managed AgentIT: PR against AgentIT.git under
+                # chart/templates/ or skills/ — never apps/agentit/.
+                remapped = remap_self_managed_cluster_files(cluster_files)
+                outcomes[CATEGORY_CLUSTER_CONFIG] = await deliver_with_verification(
+                    mechanism=MECHANISM_SOURCE_REPO_PR, files=remapped, report=report,
+                    app_name=app_name, store=store, assessment_id=assessment_id,
+                    actor=actor, dry_run=dry_run,
                 )
             else:
                 # MECHANISM_NONE: no infra_repo_url is known for this
@@ -873,7 +1018,8 @@ async def route_and_deliver(
             # category's own, even within this same call -- see
             # _CICD_SHARED_NAMESPACE_PATH_PREFIX) and opens its own PR,
             # merged/closed the same way as cluster-config's.
-            if mechanisms[CATEGORY_CICD_SHARED_NAMESPACE] == MECHANISM_INFRA_REPO_COMMIT and report is not None:
+            mech = mechanisms[CATEGORY_CICD_SHARED_NAMESPACE]
+            if mech == MECHANISM_INFRA_REPO_COMMIT and report is not None:
                 outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = await _deliver_via_gitops_pr(
                     files=cicd_files, report=report, app_name=app_name, store=store,
                     assessment_id=assessment_id, actor=actor, dry_run=dry_run,
@@ -882,6 +1028,8 @@ async def route_and_deliver(
                     branch_name=f"agentit/{_sanitize_app_name(app_name)}-cicd-shared-namespace",
                     note=_cicd_shared_namespace_note(cicd_files),
                 )
+            elif self_managed:
+                outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = {"error": _SELF_MANAGED_CICD_ERROR}
             else:
                 outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = {
                     "error": (
@@ -938,6 +1086,7 @@ async def route_and_deliver(
         "delivery_id": delivery_id,
         "registered": registered,
         "infra_repo_url": infra_repo_url,
+        "self_managed": self_managed,
         "mechanisms": mechanisms,
         "outcomes": outcomes,
         "blocked": [f["path"] for f in blocked],
