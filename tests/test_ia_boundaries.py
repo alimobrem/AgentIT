@@ -95,7 +95,7 @@ async def test_nav_needs_you_badge_on_ledger_reflects_prs_only(ui_client):
         status="delivered", details={"outcomes": {"cluster_config": {"pr_url": pr_url}}},
     )
     with patch(
-        "agentit.portal.helpers._nav_gate_badges_cache",
+        "agentit.portal.helpers._nav_pending_actions_cache",
         {"pending_actions": 0, "ts": 0.0},
     ), patch(
         "agentit.portal.github_pr.get_pr_status",
@@ -128,7 +128,7 @@ async def test_fleet_quiet_pointer_to_ledger_counts_prs_only(ui_client):
         status="delivered", details={"outcomes": {"cluster_config": {"pr_url": pr_url}}},
     )
     with patch(
-        "agentit.portal.helpers._nav_gate_badges_cache",
+        "agentit.portal.helpers._nav_pending_actions_cache",
         {"pending_actions": 0, "ts": 0.0},
     ), patch(
         "agentit.portal.github_pr.get_pr_status",
@@ -161,7 +161,7 @@ async def test_fleet_pointer_and_nav_badge_also_count_gateless_open_prs(ui_clien
         details={"outcomes": {"source_patch": {"pr_url": pr_url}}},
     )
     with patch(
-        "agentit.portal.helpers._nav_gate_badges_cache",
+        "agentit.portal.helpers._nav_pending_actions_cache",
         {"pending_actions": 0, "ts": 0.0},
     ), patch(
         "agentit.portal.github_pr.get_pr_status",
@@ -185,7 +185,7 @@ async def test_admin_review_nav_and_page_are_gone(ui_client):
     client, store = ui_client
     aid = await store.save(make_report(repo_name="admin-nav-app"))
     with patch(
-        "agentit.portal.helpers._nav_gate_badges_cache",
+        "agentit.portal.helpers._nav_pending_actions_cache",
         {"pending_actions": 0, "ts": 0.0},
     ):
         resp = await client.get("/ledger")

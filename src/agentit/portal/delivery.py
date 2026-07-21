@@ -19,6 +19,7 @@ from agentit import kube
 from agentit.audit import audit_log
 from agentit.models import AssessmentReport
 from agentit.portal.cluster_apply import _OPERATOR_NAMESPACES, _parse_manifest
+from agentit.portal.pending_actions import list_unresolved_escalations
 from agentit.skill_engine import record_skill_outcomes
 
 logger = logging.getLogger(__name__)
@@ -160,10 +161,10 @@ def resolve_cluster_config_mechanism(
     and the dry-run preview on Onboard Results) so they can never disagree
     about what a given ``infra_repo_url`` + self-managed flag resolves to.
 
-    Direct Apply has been removed as a concept entirely (product directive:
-    all apps must use GitOps; GitHub-PR-merge is the only sanctioned gate) --
-    this can no longer select ``MECHANISM_DIRECT_APPLY`` as a live outcome,
-    for any caller, ever.
+    Direct Apply is not a supported mechanism (product directive: all apps
+    must use GitOps; GitHub-PR-merge is the only sanctioned gate -- see
+    docs/unified-apply-flow.md) -- this can never select
+    ``MECHANISM_DIRECT_APPLY`` as a live outcome, for any caller, ever.
 
     Self-managed AgentIT (Application ``agentit`` → AgentIT.git ``chart/``;
     AppSet excludes ``apps/agentit``) must never use
@@ -213,17 +214,15 @@ def confirmation_text(
     confirmation dialog, so the two can never say different things about
     the same decision.
 
-    A dedicated ``MECHANISM_DIRECT_APPLY`` branch (naming the target
-    cluster identity alongside the action) used to live here, but every
-    real caller of this function always passes a freshly-computed
-    mechanism from ``resolve_cluster_config_mechanism()`` or a hardcoded
-    non-direct-apply constant (verified 2026-07-20 -- confirmation_text()
-    is never called with a value read back from a stored ``deliveries``
-    row's ``mechanism`` column anywhere in this codebase), and that
-    function can never select ``MECHANISM_DIRECT_APPLY`` as a live outcome
-    -- so the branch was dead code, not defensive coverage for a real
-    caller shape. Removed; ``MECHANISM_DESCRIPTIONS[MECHANISM_DIRECT_APPLY]``
-    (still present, for the same historical-record-rendering reason
+    No dedicated ``MECHANISM_DIRECT_APPLY`` branch exists here: every real
+    caller always passes a freshly-computed mechanism from
+    ``resolve_cluster_config_mechanism()`` (which can never select
+    ``MECHANISM_DIRECT_APPLY`` -- see docs/unified-apply-flow.md) or a
+    hardcoded non-direct-apply constant (verified 2026-07-20 --
+    ``confirmation_text()`` is never called with a value read back from a
+    stored ``deliveries`` row's ``mechanism`` column anywhere in this
+    codebase). ``MECHANISM_DESCRIPTIONS[MECHANISM_DIRECT_APPLY]`` (still
+    present, for the same historical-record-rendering reason
     ``MECHANISM_CLUSTER_ADMIN_REVIEW_GATE`` is kept) still provides a
     sensible fallback via the generic path below if this is ever somehow
     reached with that mechanism string.
@@ -682,16 +681,15 @@ async def _deliver_via_gitops_pr(
     Shared here so ``route_and_deliver()``'s two call sites below can never
     drift apart on this sequence.
 
-    No gate is created for the opened PR (the ``gates`` table/generic
-    gate-resolution machinery has been removed entirely, 2026-07-19): the
-    real GitHub PR merge review IS the approval step now, for every
-    delivery category equally -- ``pr_tracking.py`` derives "waiting for
-    your approval"/merged/rejected purely from the PR's own live GitHub
-    state (plus ``pr_outcomes.py``'s durable reject-reason/pre-merge-edit
-    capture), and ``routes/pr_actions.py`` provides the real Merge/Close
-    actions. This function's only remaining job is committing the files and
-    opening the PR; the event logged below (``gitops-pr-opened``) is purely
-    an observability record, not anything a human resolves.
+    No gate is created for the opened PR: the real GitHub PR merge review
+    IS the approval step now, for every delivery category equally --
+    ``pr_tracking.py`` derives "waiting for your approval"/merged/rejected
+    purely from the PR's own live GitHub state (plus ``pr_outcomes.py``'s
+    durable reject-reason/pre-merge-edit capture), and
+    ``routes/pr_actions.py`` provides the real Merge/Close actions. This
+    function's only remaining job is committing the files and opening the
+    PR; the event logged below (``gitops-pr-opened``) is purely an
+    observability record, not anything a human resolves.
 
     ``path_prefix``/``branch_name`` (see ``_CICD_SHARED_NAMESPACE_PATH_
     PREFIX``) let a caller land this commit in a distinctly-named subfolder/
@@ -840,10 +838,9 @@ async def route_and_deliver(
     signature) because every side effect here -- SLOs, audit resources, the
     ``deliveries`` row itself -- is keyed by it.
 
-    No longer takes a ``force_dry_run_first`` parameter -- that was
-    AutoMode's own safety knob for the cluster-config direct-apply branch's
-    forced dry-run-then-real-apply sequence, removed along with Direct
-    Apply/AutoMode's direct-apply branch as a concept entirely (see
+    Does not take a ``force_dry_run_first`` parameter (unlike the design
+    doc's illustrative signature): that was AutoMode's own safety knob for
+    a direct-apply branch that no longer exists (see
     ``resolve_cluster_config_mechanism()``/``automode.py``'s simplified
     ``execute()``).
 
@@ -923,8 +920,8 @@ async def route_and_deliver(
     mechanisms: dict[str, str] = {}
     outcomes: dict[str, object] = {}
 
-    # Direct Apply has been removed as a concept entirely -- every
-    # cluster/app-config delivery either commits to a known infra repo
+    # Every cluster/app-config delivery goes through GitOps now (see
+    # docs/unified-apply-flow.md): commits to a known infra repo
     # (bootstrapping apps/{app}/ on the very first delivery, see
     # resolve_cluster_config_mechanism()'s docstring), routes self-managed
     # AgentIT to AgentIT.git (never apps/agentit/), or refuses outright
@@ -936,12 +933,12 @@ async def route_and_deliver(
             infra_repo_url, self_managed=self_managed, category=CATEGORY_CLUSTER_CONFIG,
         )
 
-    # CI/CD manifests destined for a shared operator namespace (2026-07-18):
-    # no longer a cluster-admin-review direct-apply gate (removed entirely --
-    # AgentIT never applies directly to a cluster for any category now).
-    # ArgoCD's own reconciler service account already holds the elevated
-    # RBAC AgentIT's lacks for these namespaces (verified live against this
-    # cluster's openshift-gitops-argocd-application-controller SA -- see the
+    # CI/CD manifests destined for a shared operator namespace: AgentIT
+    # never applies directly to a cluster for any category (see
+    # docs/unified-apply-flow.md) -- ArgoCD's own reconciler service
+    # account already holds the elevated RBAC AgentIT lacks for these
+    # namespaces (verified live against this cluster's
+    # openshift-gitops-argocd-application-controller SA -- see the
     # README), so fleet apps resolve through the exact same GitOps-commit
     # decision as cluster-config. Self-managed AgentIT remaps to AgentIT.git
     # (chart/templates/ / tekton/ / argocd/application.yaml) — AppSet excludes
@@ -1032,10 +1029,10 @@ async def route_and_deliver(
                 )
             else:
                 # MECHANISM_NONE: no infra_repo_url is known for this
-                # assessment at all -- Direct Apply is no longer a fallback
-                # (removed as a concept entirely), so this refuses rather
-                # than mutating the cluster or guessing which repo to commit
-                # to. Only reachable for an assessment saved before GitOps
+                # assessment at all -- this refuses rather than mutating
+                # the cluster or guessing which repo to commit to (no
+                # direct-apply fallback, see docs/unified-apply-flow.md).
+                # Only reachable for an assessment saved before GitOps
                 # registration became mandatory; a human must register this
                 # app for GitOps (e.g. "Register for GitOps" on Assessment
                 # Detail) before it can be delivered at all.
@@ -1048,17 +1045,14 @@ async def route_and_deliver(
                 }
 
         if cicd_files:
-            # Retired (2026-07-18): this used to open a cluster-admin-review
-            # gate whose approval performed a real, elevated-RBAC direct
-            # apply -- AgentIT's own service account structurally lacked
-            # RBAC for these namespaces (still true), but that's no longer
-            # the point: AgentIT never applies directly to a cluster for ANY
-            # category now. ArgoCD's reconciler SA already holds the RBAC
-            # AgentIT lacks (verified live, see the README), so this commits
-            # to a distinctly-named path/branch (never the cluster-config
-            # category's own, even within this same call -- see
-            # _CICD_SHARED_NAMESPACE_PATH_PREFIX) and opens its own PR,
-            # merged/closed the same way as cluster-config's.
+            # AgentIT's own service account structurally lacks RBAC for a
+            # shared operator namespace; ArgoCD's reconciler SA already has
+            # it (verified live, see the README) -- see
+            # docs/unified-apply-flow.md for why this never becomes a
+            # direct-apply gate. Commits to a distinctly-named path/branch
+            # (never the cluster-config category's own, even within this
+            # same call -- see _CICD_SHARED_NAMESPACE_PATH_PREFIX) and opens
+            # its own PR, merged/closed the same way as cluster-config's.
             mech = mechanisms[CATEGORY_CICD_SHARED_NAMESPACE]
             if mech == MECHANISM_INFRA_REPO_COMMIT and report is not None:
                 outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = await _deliver_via_gitops_pr(
@@ -1253,9 +1247,7 @@ async def escalate_unresolved_finding(
     """
     category, desc_key = finding[0], finding[1]
 
-    existing = await store.list_unresolved_events(
-        "finding-escalated", ["finding-escalation-acknowledged"], target_app=app_name,
-    )
+    existing = await list_unresolved_escalations(store, target_app=app_name)
     for event in existing:
         if _escalation_event_category(event.get("summary", "")) == category:
             return event["id"]
@@ -1274,13 +1266,11 @@ async def redispatch_finding_fix(
     """Phase 4's below-threshold branch: re-dispatch a fresh fix attempt for
     this exact finding through the same mechanism the original fix went
     through -- ``RemediationDispatcher.dispatch()`` to generate, then
-    ``route_and_deliver()`` directly to deliver (AutoMode has been removed;
-    it never did anything beyond an extra LLM safety classification on top
-    of this exact call for the cluster-config category -- see its own
-    former module docstring) -- reusing the auto-chain machinery this same
-    effort already wired end-to-end (``webhook_github_push``'s
-    auto-fixable loop, Phase 0's 9ccfa21) rather than re-implementing
-    delivery logic here.
+    ``route_and_deliver()`` directly to deliver (see docs/unified-apply-
+    flow.md for why there's no separate AutoMode layer in between) --
+    reusing the auto-chain machinery this same effort already wired
+    end-to-end (``webhook_github_push``'s auto-fixable loop, Phase 0's
+    9ccfa21) rather than re-implementing delivery logic here.
 
     A category's skill/template renders deterministically (no LLM in the
     generation step itself, see ``RemediationDispatcher``'s module comment)
@@ -1487,9 +1477,7 @@ async def get_next_action_state(
     """
     if unresolved_escalations is None:
         try:
-            unresolved_escalations = await store.list_unresolved_events(
-                "finding-escalated", ["finding-escalation-acknowledged"], target_app=app_name,
-            )
+            unresolved_escalations = await list_unresolved_escalations(store, target_app=app_name)
         except Exception:
             logger.debug("Failed to fetch unresolved escalations for %s's next-action state", app_name, exc_info=True)
             unresolved_escalations = []

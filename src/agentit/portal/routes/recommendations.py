@@ -16,7 +16,10 @@ gates system collapsed into:
 Neither is tracked by a separately-maintained ``gates`` row: both are a
 plain ``events`` row (``slo-tracker``/``delivery.py`` already logs the
 recommendation itself) with no later correlated resolving event -- see
-``store.list_unresolved_events()``.
+``store.list_unresolved_events()``, wrapped consistently for every caller
+by ``portal/pending_actions.py`` (this module's four action-name constants
+below are re-exported from there, the single source of truth every other
+unresolved-recommendation query now shares).
 """
 from __future__ import annotations
 
@@ -27,14 +30,14 @@ from fastapi.responses import RedirectResponse
 
 from agentit.audit import audit_log
 from agentit.portal.helpers import get_current_user, get_store
+from agentit.portal.pending_actions import (
+    FINDING_ESCALATED_ACTION,
+    FINDING_ESCALATION_RESOLVED_ACTIONS,
+    ROLLBACK_RECOMMENDED_ACTION,
+    ROLLBACK_RESOLVED_ACTIONS,
+)
 
 router = APIRouter()
-
-ROLLBACK_RECOMMENDED_ACTION = "rollback-recommended"
-ROLLBACK_RESOLVED_ACTIONS = ["rollback-executed", "rollback-dismissed"]
-
-FINDING_ESCALATED_ACTION = "finding-escalated"
-FINDING_ESCALATION_RESOLVED_ACTIONS = ["finding-escalation-acknowledged"]
 
 
 def _redirect_target(assessment_id: str | None) -> str:

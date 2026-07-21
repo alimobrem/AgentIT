@@ -770,7 +770,7 @@ class TestNavUpdate:
         await store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "recommendation 1")
         await store.log_event("slo-tracker", "rollback-recommended", report.repo_name, "warning", "recommendation 2")
 
-        with patch("agentit.portal.helpers._nav_gate_badges_cache", {"pending_actions": 0, "ts": 0.0}):
+        with patch("agentit.portal.helpers._nav_pending_actions_cache", {"pending_actions": 0, "ts": 0.0}):
             resp = await client.get("/fleet")
         assert resp.status_code == 200
         assert not re.search(r'Ledger\s*<span class="nav-badge">', resp.text)

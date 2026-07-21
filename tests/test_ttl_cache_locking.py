@@ -1,8 +1,9 @@
 """Regression guards for Priority 1d: four module-level TTL-cache dicts
 that used to have zero locking around their read-check-write critical
-section -- ``fleet.py::_argo_cache``, ``health.py::_deploy_status_cache``,
+section -- ``fleet.py::_argo_cache``, ``deploy_status.py::
+_deploy_status_cache`` (extracted from ``health.py``),
 ``capabilities.py::_skills_cache``/``_checks_cache``, and
-``helpers.py::_nav_gate_badges_cache``.
+``helpers.py::_nav_pending_actions_cache``.
 
 Rather than trying to catch a probabilistic race directly (inherently
 flaky), each test swaps the module's real lock for an instrumented one
@@ -22,10 +23,9 @@ import time as _time
 
 from unittest.mock import patch
 
-from agentit.portal import helpers
+from agentit.portal import deploy_status, helpers
 from agentit.portal.routes import capabilities as capabilities_routes
 from agentit.portal.routes import fleet as fleet_routes
-from agentit.portal.routes import health as health_routes
 
 
 class _TrackingLock:
@@ -55,7 +55,7 @@ class _TrackingLock:
 
 class _TrackingAsyncLock:
     """Async counterpart of ``_TrackingLock``, for the one cache
-    (``helpers._nav_gate_badges_cache``) guarded by an ``asyncio.Lock``."""
+    (``helpers._nav_pending_actions_cache``) guarded by an ``asyncio.Lock``."""
 
     def __init__(self):
         self._lock = asyncio.Lock()
@@ -102,20 +102,20 @@ class TestFleetArgoCacheLock:
 class TestHealthDeployStatusCacheLock:
     def test_deploy_status_cache_lock_provides_mutual_exclusion(self, monkeypatch):
         tracking = _TrackingLock()
-        monkeypatch.setattr(health_routes, "_deploy_status_cache_lock", tracking)
-        health_routes._deploy_status_cache["data"] = None
-        health_routes._deploy_status_cache["ts"] = 0.0
+        monkeypatch.setattr(deploy_status, "_deploy_status_cache_lock", tracking)
+        deploy_status._deploy_status_cache["data"] = None
+        deploy_status._deploy_status_cache["ts"] = 0.0
 
         def worker():
-            health_routes._store_deploy_status_cache({"state": "idle", "errors": []})
-            health_routes._get_fresh_cached_deploy_status()
-            health_routes._get_last_good_deploy_status()
+            deploy_status._store_deploy_status_cache({"state": "idle", "errors": []})
+            deploy_status._get_fresh_cached_deploy_status()
+            deploy_status._get_last_good_deploy_status()
 
         _run_threads(worker)
 
         assert tracking.max_concurrent == 1
-        health_routes._deploy_status_cache["data"] = None
-        health_routes._deploy_status_cache["ts"] = 0.0
+        deploy_status._deploy_status_cache["data"] = None
+        deploy_status._deploy_status_cache["ts"] = 0.0
 
 
 class TestCapabilitiesSkillsChecksCacheLock:
@@ -204,14 +204,14 @@ class TestCapabilitiesSkillsChecksCacheLock:
         capabilities_routes._skills_cache["ts"] = 0
 
 
-class TestNavGateBadgesCacheLock:
-    async def test_nav_gate_badges_lock_provides_mutual_exclusion(self, monkeypatch):
+class TestNavPendingActionsCacheLock:
+    async def test_nav_pending_actions_lock_provides_mutual_exclusion(self, monkeypatch):
         tracking = _TrackingAsyncLock()
-        monkeypatch.setattr(helpers, "_nav_gate_badges_lock", tracking)
-        helpers._nav_gate_badges_cache["ts"] = 0.0
+        monkeypatch.setattr(helpers, "_nav_pending_actions_lock", tracking)
+        helpers._nav_pending_actions_cache["ts"] = 0.0
 
         class _SlowStore:
-            # get_nav_gate_badge_counts() now goes through pr_tracking.py's
+            # get_nav_pending_action_counts() now goes through pr_tracking.py's
             # count_fleet_prs_waiting_for_approval()/collect_fleet_pr_records()
             # (2026-07-19, PR-status-derived Ledger fix) -- get_fleet_data()
             # is its first, unguarded call, so slowing it down is enough to
@@ -222,7 +222,7 @@ class TestNavGateBadgesCacheLock:
                 return []
 
         store = _SlowStore()
-        await asyncio.gather(*(helpers.get_nav_gate_badge_counts(store) for _ in range(20)))
+        await asyncio.gather(*(helpers.get_nav_pending_action_counts(store) for _ in range(20)))
 
         assert tracking.max_concurrent == 1
-        helpers._nav_gate_badges_cache["ts"] = 0.0
+        helpers._nav_pending_actions_cache["ts"] = 0.0

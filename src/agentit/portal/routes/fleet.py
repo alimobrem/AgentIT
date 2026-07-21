@@ -9,6 +9,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from agentit.portal.helpers import get_store, get_templates
+from agentit.portal.pending_actions import list_unresolved_escalations, list_unresolved_recommendations
 
 log = logging.getLogger(__name__)
 
@@ -142,24 +143,18 @@ async def _attach_pending_actions(fleet: list[dict], s: object) -> None:
     """"Needs action" badge per app (docs/ui-redesign-proposal.md §2) --
     every open, unmerged PR (Merge/Close on the Actions tab -- see
     routes/pr_actions.py) plus any unresolved rollback/escalation
-    recommendation (routes/recommendations.py). The ``gates`` table/generic
-    gate-resolution machinery has been removed entirely (2026-07-19) --
-    nothing here reads from it anymore. Mutates each fleet row in place
-    with ``pending_actions_count``. Requires ``_attach_pr_counts()`` to
-    have already run (reads each row's own ``open_prs``) so this doesn't
-    duplicate that function's fleet-wide GitHub-status batch.
+    recommendation (routes/recommendations.py, portal/pending_actions.py).
+    Mutates each fleet row in place with ``pending_actions_count``.
+    Requires ``_attach_pr_counts()`` to have already run (reads each row's
+    own ``open_prs``) so this doesn't duplicate that function's fleet-wide
+    GitHub-status batch.
     """
     for app_item in fleet:
         app_item["pending_actions_count"] = app_item.get("open_prs", 0)
 
     repo_url_by_app_name = {app_item["repo_name"]: app_item["repo_url"] for app_item in fleet}
     try:
-        unresolved_rollbacks = await s.list_unresolved_events(
-            "rollback-recommended", ["rollback-executed", "rollback-dismissed"],
-        )
-        unresolved_escalations = await s.list_unresolved_events(
-            "finding-escalated", ["finding-escalation-acknowledged"],
-        )
+        unresolved_rollbacks, unresolved_escalations = await list_unresolved_recommendations(s)
     except Exception:
         log.debug("Failed to fetch unresolved recommendations for fleet 'needs action' badges", exc_info=True)
         unresolved_rollbacks, unresolved_escalations = [], []
@@ -191,9 +186,7 @@ async def _attach_next_action_state(fleet: list[dict], s: object) -> None:
     """
     from agentit.portal.delivery import NEXT_ACTION_NONE, get_next_action_state
     try:
-        unresolved_escalations = await s.list_unresolved_events(
-            "finding-escalated", ["finding-escalation-acknowledged"],
-        )
+        unresolved_escalations = await list_unresolved_escalations(s)
     except Exception:
         log.debug("Failed to fetch unresolved escalations for fleet next-action state", exc_info=True)
         unresolved_escalations = []
