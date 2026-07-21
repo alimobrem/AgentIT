@@ -114,23 +114,35 @@ def _merge_fix_files(current_files: list[dict], new_files: list[dict]) -> list[d
 async def _dry_run_check(
     files: list[dict], *, app_name: str, namespace: str, report: AssessmentReport | None,
     store: object, assessment_id: str, actor: str,
-) -> tuple[list[str], set[str]]:
+) -> tuple[list[str], list[str], set[str]]:
     """Runs ``route_and_deliver(dry_run=True)`` and returns
-    (error-messages, placeholder-blocked-paths). Never persists a
-    ``deliveries`` row differently than any other dry run already does --
-    this is the exact same call ``deliver()``'s manual "Dry Run" button
-    makes today, just invoked automatically."""
+    (hard-errors, soft-warnings, placeholder-blocked-paths).
+
+    Hard errors (schema/admission/unreachable) block convergence / PR open.
+    Soft warnings (Forbidden / missing optional CRD) are surfaced in PR
+    body notes but do not block when hard errors are empty.
+
+    Never persists a ``deliveries`` row differently than any other dry run
+    already does -- this is the exact same call ``deliver()``'s manual
+    "Dry Run" button makes today, just invoked automatically.
+    """
     from agentit.portal.delivery import route_and_deliver
 
     result = await route_and_deliver(
         files, app_name=app_name, namespace=namespace, report=report,
         store=store, assessment_id=assessment_id, actor=actor, dry_run=True,
     )
-    errors = [
+    hard = [
         f"{cat}: {o['error']}" for cat, o in result["outcomes"].items()
         if isinstance(o, dict) and o.get("error")
     ]
-    return errors, set(result.get("placeholder_blocked") or [])
+    soft: list[str] = []
+    for cat, o in result["outcomes"].items():
+        if not isinstance(o, dict):
+            continue
+        for warning in o.get("dry_run_warnings") or []:
+            soft.append(f"{cat}: {warning}")
+    return hard, soft, set(result.get("placeholder_blocked") or [])
 
 
 def _check_properties(files: list[dict]) -> list:
@@ -187,7 +199,7 @@ async def validate_and_fix_manifests(
                 job_id, "validating", f"Validating generated manifests (attempt {i} of {max_iterations})...",
             )
 
-        dry_errors, placeholder_blocked = await _dry_run_check(
+        dry_errors, dry_warnings, placeholder_blocked = await _dry_run_check(
             current_files, app_name=app_name, namespace=namespace, report=report,
             store=store, assessment_id=assessment_id, actor=actor,
         )
@@ -211,13 +223,21 @@ async def validate_and_fix_manifests(
         iteration_record = {
             "iteration": i,
             "dry_run_errors": dry_errors,
+            "dry_run_warnings": dry_warnings,
             "failed_properties": [r.property_name for r in relevant_failed],
             "fixed_categories": [],
         }
 
+        # Soft-only dry-run (Forbidden / missing optional CRD) is clean for
+        # PR purposes — hard schema/admission failures still block.
         if not dry_errors and not relevant_failed:
             iterations.append(iteration_record)
-            return {"files": current_files, "clean": True, "iterations": iterations}
+            return {
+                "files": current_files,
+                "clean": True,
+                "iterations": iterations,
+                "warnings": dry_warnings,
+            }
 
         fixed_categories: list[str] = []
 
@@ -246,11 +266,15 @@ async def validate_and_fix_manifests(
             # iterations for no reason.
             break
 
+    last = iterations[-1] if iterations else {}
     return {
         "files": current_files,
         "clean": False,
         "iterations": iterations,
-        "remaining_issues": iterations[-1]["dry_run_errors"] + iterations[-1]["failed_properties"],
+        "warnings": list(last.get("dry_run_warnings") or []),
+        "remaining_issues": list(last.get("dry_run_errors") or []) + list(
+            last.get("failed_properties") or []
+        ),
     }
 
 
@@ -361,12 +385,15 @@ async def auto_validate_and_deliver(
         }},
     )
 
+    soft_warnings = list(validation.get("warnings") or [])
+
     if validation["clean"]:
         try:
             await store.save_apply_results(
                 assessment_id,
                 {
                     "applied": [], "skipped": [], "errors": [],
+                    "warnings": soft_warnings,
                     "repo_files": [
                         {"path": f["path"], "purpose": "validated by automatic validation loop"}
                         for f in final_files
@@ -383,6 +410,11 @@ async def auto_validate_and_deliver(
             f"{MAX_VALIDATION_ITERATIONS} attempt(s): "
             + "; ".join(validation.get("remaining_issues") or ["unknown issue"])
         )
+        if soft_warnings:
+            reason += (
+                " | dry-run notes (non-blocking): "
+                + "; ".join(soft_warnings[:5])
+            )
         logger.warning("Auto-validation did not converge for %s: %s", app_name, reason)
         try:
             await store.log_event(
@@ -447,7 +479,7 @@ async def auto_validate_and_deliver(
 
     for cluster in clusters:
         # Phase C: per-cluster validation before open.
-        dry_errors, _ = await _dry_run_check(
+        dry_errors, dry_warnings, _ = await _dry_run_check(
             cluster.files, app_name=app_name, namespace=namespace, report=report,
             store=store, assessment_id=assessment_id, actor=actor,
         )
@@ -469,15 +501,24 @@ async def auto_validate_and_deliver(
             )
             continue
 
+        cluster_warnings = dry_warnings or soft_warnings
+        validation_summary = (
+            "SSA dry-run (concrete YAML), property checks for targeted "
+            "findings, and self-managed chart gate (#119) passed for this cluster."
+        )
+        if cluster_warnings:
+            validation_summary += (
+                "\n\nDry-run notes (non-blocking — AgentIT SA Forbidden or "
+                "optional CRD missing; not treated as invalid manifests):\n"
+                + "\n".join(f"- {w}" for w in cluster_warnings[:10])
+            )
+
         pr_context = {
             "body": build_helpful_pr_body(
                 title_line=f"AgentIT Scan: {cluster.key} for {app_name}",
                 target_findings=cluster.target_findings,
                 files=cluster.files,
-                validation_summary=(
-                    "SSA dry-run (concrete YAML), property checks for targeted "
-                    "findings, and self-managed chart gate (#119) passed for this cluster."
-                ),
+                validation_summary=validation_summary,
                 drop_reasons=drop_reasons,
                 score_dimensions=score_dims,
             ),

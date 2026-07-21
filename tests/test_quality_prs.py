@@ -19,7 +19,7 @@ from conftest import make_report, make_store
 
 _CLEAN_DRY_RUN = {
     "applied": ["rbac.yaml"], "skipped": [], "errors": [],
-    "conflicts": [], "missing_operators": {}, "repo_files": [],
+    "warnings": [], "conflicts": [], "missing_operators": {}, "repo_files": [],
 }
 
 
@@ -248,7 +248,7 @@ class TestAutoDeliveryQualityGate:
              patch("agentit.portal.auto_delivery.validate_and_fix_manifests",
                    return_value={"files": files, "clean": True, "iterations": []}), \
              patch("agentit.portal.auto_delivery._dry_run_check",
-                   return_value=([], set())), \
+                   return_value=([], [], set())), \
              patch("agentit.portal.auto_delivery._check_properties", return_value=[]), \
              patch("agentit.portal.github_pr.commit_to_infra_repo", side_effect=_fake_commit), \
              patch("agentit.portal.github_pr.ensure_applicationset"):
@@ -280,7 +280,7 @@ class TestAutoDeliveryQualityGate:
              patch("agentit.portal.auto_delivery.validate_and_fix_manifests",
                    return_value={"files": files, "clean": True, "iterations": []}), \
              patch("agentit.portal.auto_delivery._dry_run_check",
-                   return_value=([], set())), \
+                   return_value=([], [], set())), \
              patch("agentit.portal.auto_delivery._check_properties", return_value=[]), \
              patch("agentit.portal.github_pr.commit_to_infra_repo",
                    return_value={"pr_url": "https://github.com/org/pinky-gitops/pull/1",
