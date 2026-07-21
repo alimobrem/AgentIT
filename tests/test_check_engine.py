@@ -105,10 +105,18 @@ class TestLoadChecks:
         assert load_checks(tmp_path / "nonexistent") == []
 
     def test_loads_real_checks_dir(self) -> None:
+        """No lower-bound count assertion here on purpose: Phase 4 of
+        docs/extension-model-unification-plan-2026-07-18.md is steadily
+        porting checks/*.yaml files to mode: detect skills one at a time
+        (see tests/test_phase4_check_migrations.py), so the real count
+        only ever shrinks over time, down to zero once every check is
+        migrated -- this test just proves load_checks() doesn't error out
+        against whatever's actually on disk right now, and that every
+        loaded entry is a real, well-formed CheckDefinition."""
         checks_dir = Path(__file__).resolve().parent.parent / "checks"
         if checks_dir.is_dir():
             checks = load_checks(checks_dir)
-            assert len(checks) >= 15  # we created ~20
+            assert all(isinstance(c, CheckDefinition) for c in checks)
 
 
 # ---------------------------------------------------------------------------
@@ -457,59 +465,6 @@ class TestRunnerIntegration:
 # ---------------------------------------------------------------------------
 # Sample-app fixture tests
 # ---------------------------------------------------------------------------
-
-
-class TestAdmissionPoliciesCheck:
-    """Regression coverage for the checks/compliance/admission-policies.yaml
-    kind mismatch: it used to require `kind: ClusterPolicy`, but
-    skills/compliance/kyverno-policies.md (and image-registry-policy.md)
-    only ever generate namespaced `kind: Policy` -- and yaml_kind_exists
-    scans the *app's own repo* (check_engine.py's iter_yaml_files), never
-    the live cluster, so a ClusterPolicy-only pattern could never match
-    what's actually produced for an app being assessed. This check always
-    false-negatived as a result."""
-
-    ADMISSION_POLICIES_CHECK = (
-        Path(__file__).resolve().parent.parent / "checks" / "compliance" / "admission-policies.yaml"
-    )
-
-    def test_pattern_is_namespaced_policy_not_clusterpolicy(self) -> None:
-        defn = _parse_check_file(self.ADMISSION_POLICIES_CHECK)
-        assert defn is not None
-        assert defn.pattern == "Policy"
-
-    def test_passes_against_a_namespaced_kyverno_policy(self, create_mock_repo) -> None:
-        """This is exactly what skills/compliance/kyverno-policies.md's
-        template block generates for an onboarded app."""
-        repo = create_mock_repo({
-            "kyverno-require-labels.yaml": (
-                "apiVersion: kyverno.io/v1\n"
-                "kind: Policy\n"
-                "metadata:\n"
-                "  name: myapp-require-labels\n"
-            ),
-        })
-        defn = _parse_check_file(self.ADMISSION_POLICIES_CHECK)
-        findings = run_checks([defn], repo)
-        assert findings == []
-
-    def test_fails_when_no_policy_manifest_present(self, create_mock_repo) -> None:
-        repo = create_mock_repo({"deployment.yaml": "apiVersion: apps/v1\nkind: Deployment\n"})
-        defn = _parse_check_file(self.ADMISSION_POLICIES_CHECK)
-        findings = run_checks([defn], repo)
-        assert len(findings) == 1
-        assert findings[0].category == "policy"
-
-    def test_a_clusterpolicy_only_repo_still_fails(self, create_mock_repo) -> None:
-        """A cluster-scoped-only manifest in an app's own repo is not the
-        artifact this check (or the skill) is looking for -- confirms the
-        fix didn't just make the check pass unconditionally."""
-        repo = create_mock_repo({
-            "cluster-wide.yaml": "apiVersion: kyverno.io/v1\nkind: ClusterPolicy\nmetadata: {}\n",
-        })
-        defn = _parse_check_file(self.ADMISSION_POLICIES_CHECK)
-        findings = run_checks([defn], repo)
-        assert len(findings) == 1
 
 
 class TestSampleAppFixture:
