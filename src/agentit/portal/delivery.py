@@ -20,6 +20,11 @@ from agentit.audit import audit_log
 from agentit.models import AssessmentReport
 from agentit.portal.cluster_apply import _OPERATOR_NAMESPACES, _parse_manifest
 from agentit.portal.pending_actions import list_unresolved_escalations
+from agentit.portal.self_managed_hpa import (
+    SelfManagedChartHints,
+    inspect_self_managed_chart,
+    self_managed_hpa_correctness_reason,
+)
 from agentit.skill_engine import record_skill_outcomes
 
 logger = logging.getLogger(__name__)
@@ -122,7 +127,11 @@ def is_helm_shaped(content: str | None) -> bool:
     return any(marker in text for marker in _HELM_TEMPLATE_MARKERS)
 
 
-def self_managed_chart_drop_reason(file_entry: dict) -> str | None:
+def self_managed_chart_drop_reason(
+    file_entry: dict,
+    *,
+    chart_hints: SelfManagedChartHints | None = None,
+) -> str | None:
     """Why a remapped self-managed file must not land under ``chart/``.
 
     Returns ``None`` when the file is deliverable (skills markdown, or
@@ -156,11 +165,16 @@ def self_managed_chart_drop_reason(file_entry: dict) -> str | None:
             f"{target}: hardcoded namespace: agentit — "
             "use {{{{ .Release.Namespace }}}} for Application agentit sync"
         )
+    hpa_reason = self_managed_hpa_correctness_reason(content, hints=chart_hints)
+    if hpa_reason:
+        return f"{target}: {hpa_reason}"
     return None
 
 
 def filter_self_managed_delivery_files(
     files: list[dict],
+    *,
+    chart_hints: SelfManagedChartHints | None = None,
 ) -> tuple[list[dict], list[str]]:
     """Keep self-managed deliverables; drop fleet-style chart junk with reasons.
 
@@ -171,10 +185,11 @@ def filter_self_managed_delivery_files(
     Returns ``(deliverable_files, drop_reasons)``. Dropped files must not
     open a fake PR — callers surface reasons via Ledger / ``needs_attention``.
     """
+    hints = chart_hints if chart_hints is not None else inspect_self_managed_chart()
     kept: list[dict] = []
     reasons: list[str] = []
     for f in files:
-        reason = self_managed_chart_drop_reason(f)
+        reason = self_managed_chart_drop_reason(f, chart_hints=hints)
         if reason is None:
             kept.append(f)
         else:
@@ -190,6 +205,7 @@ def validate_self_managed_chart_delivery(
     files: list[dict],
     *,
     path_exists: dict[str, bool | None] | None = None,
+    chart_hints: SelfManagedChartHints | None = None,
 ) -> str | None:
     """Fail-closed checks before opening a self-managed PR into ``chart/``.
 
@@ -203,6 +219,7 @@ def validate_self_managed_chart_delivery(
     content/kind rules only). Production callers always supply a complete
     map from ``_lookup_chart_path_existence``.
     """
+    hints = chart_hints if chart_hints is not None else inspect_self_managed_chart()
     reasons: list[str] = []
     for f in files:
         target = f.get("target_path") or f.get("path") or ""
@@ -219,6 +236,9 @@ def validate_self_managed_chart_delivery(
             reasons.append(
                 f"{target}: not Helm-shaped (need {{{{ .Values / {{{{ .Release / {{{{-)"
             )
+        hpa_reason = self_managed_hpa_correctness_reason(content, hints=hints)
+        if hpa_reason:
+            reasons.append(f"{target}: {hpa_reason}")
         if path_exists is not None:
             exists = path_exists.get(target)
             if exists is True:

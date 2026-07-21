@@ -34,7 +34,52 @@ from agentit.portal.delivery import (
     route_and_deliver,
     validate_self_managed_chart_delivery,
 )
+from agentit.portal.self_managed_hpa import (
+    SelfManagedChartHints,
+    inspect_self_managed_chart,
+    self_managed_hpa_correctness_reason,
+)
 from conftest import make_async_store, make_report
+
+
+def _helm_hpa_content(
+    *,
+    kind: str = "Rollout",
+    api_version: str = "argoproj.io/v1alpha1",
+    name: str = '"{{ .Release.Name }}"',
+    max_replicas: int = 1,
+) -> str:
+    """Helm-shaped HPA for self-managed chart tests (quoted templates)."""
+    return (
+        "apiVersion: autoscaling/v2\n"
+        "kind: HorizontalPodAutoscaler\n"
+        "metadata:\n"
+        "  name: \"{{ .Release.Name }}\"\n"
+        "  namespace: \"{{ .Release.Namespace }}\"\n"
+        "spec:\n"
+        "  scaleTargetRef:\n"
+        f"    apiVersion: {api_version}\n"
+        f"    kind: {kind}\n"
+        f"    name: {name}\n"
+        "  minReplicas: 1\n"
+        f"  maxReplicas: {max_replicas}\n"
+        "  metrics:\n"
+        "    - type: Resource\n"
+        "      resource:\n"
+        "        name: cpu\n"
+        "        target:\n"
+        "          type: Utilization\n"
+        "          averageUtilization: 80\n"
+    )
+
+
+def _helm_hpa_file(**kwargs) -> dict:
+    return {
+        "category": "skills",
+        "path": "agentit-hpa.yaml",
+        "content": _helm_hpa_content(**kwargs),
+        "description": "helm hpa",
+    }
 
 
 def _cluster_config_file() -> dict:
@@ -530,6 +575,73 @@ class TestSelfManagedChartDeliveryGate:
         assert validate_self_managed_chart_delivery(files, path_exists={}) is None
 
 
+class TestSelfManagedHpaCorrectness:
+    """App-correct HPA beyond Helm-shaped: Rollout target + RWO maxReplicas."""
+
+    def test_repo_chart_hints_detect_rollout_and_rwo(self):
+        hints = inspect_self_managed_chart()
+        assert hints.uses_rollout is True
+        assert hints.has_rwo_workload_pvc is True
+
+    def test_refuses_deployment_hpa_when_chart_has_rollout(self):
+        hints = SelfManagedChartHints(uses_rollout=True, has_rwo_workload_pvc=True)
+        bad = _helm_hpa_file(
+            kind="Deployment",
+            api_version="apps/v1",
+            name='"{{ .Release.Name }}-agentit"',
+            max_replicas=10,
+        )
+        remapped = remap_self_managed_cluster_files([bad])
+        reason = validate_self_managed_chart_delivery(
+            remapped,
+            path_exists={remapped[0]["target_path"]: False},
+            chart_hints=hints,
+        )
+        assert reason is not None
+        assert "Rollout" in reason
+        assert "No PR opened" in reason
+        kept, drop_reasons = filter_self_managed_delivery_files(
+            remapped, chart_hints=hints,
+        )
+        assert kept == []
+        assert any("Rollout" in r for r in drop_reasons)
+
+    def test_accepts_correctly_wired_rollout_hpa(self):
+        hints = SelfManagedChartHints(uses_rollout=True, has_rwo_workload_pvc=True)
+        good = _helm_hpa_file(
+            kind="Rollout",
+            api_version="argoproj.io/v1alpha1",
+            name='"{{ .Release.Name }}"',
+            max_replicas=1,
+        )
+        remapped = remap_self_managed_cluster_files([good])
+        assert validate_self_managed_chart_delivery(
+            remapped,
+            path_exists={remapped[0]["target_path"]: False},
+            chart_hints=hints,
+        ) is None
+        kept, reasons = filter_self_managed_delivery_files(
+            remapped, chart_hints=hints,
+        )
+        assert len(kept) == 1
+        assert reasons == []
+
+    def test_refuses_rwo_max_replicas_above_one(self):
+        hints = SelfManagedChartHints(uses_rollout=True, has_rwo_workload_pvc=True)
+        content = _helm_hpa_content(max_replicas=10)
+        why = self_managed_hpa_correctness_reason(content, hints=hints)
+        assert why is not None
+        assert "ReadWriteOnce" in why or "RWO" in why
+        remapped = remap_self_managed_cluster_files([_helm_hpa_file(max_replicas=10)])
+        reason = validate_self_managed_chart_delivery(
+            remapped,
+            path_exists={remapped[0]["target_path"]: False},
+            chart_hints=hints,
+        )
+        assert reason is not None
+        assert "ReadWriteOnce" in reason or "maxReplicas" in reason
+
+
 class TestSelfManagedP1GenerationQuality:
     """P1: filter fleet junk before #119 gate; keep Helm + skills markdown."""
 
@@ -919,7 +1031,7 @@ class TestRouteAndDeliverClusterConfig:
         assert await raw.claim_delivery_lock(f"delivery:{report.repo_name}") is True
 
         clean = {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": [],
-                 "conflicts": [], "missing_operators": {}, "repo_files": []}
+                 "warnings": [], "conflicts": [], "missing_operators": {}, "repo_files": []}
         with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
              patch("agentit.portal.cluster_apply.dry_run_manifests_against_cluster", return_value=clean):
             result = await route_and_deliver(
@@ -991,7 +1103,7 @@ class TestRouteAndDeliverClusterConfig:
         report.infra_repo_url = "https://github.com/org/infra-gitops"
         aid = await raw.save(report)
         clean = {"applied": ["app-network-policy.yaml"], "skipped": [], "errors": [],
-                 "conflicts": [], "missing_operators": {}, "repo_files": []}
+                 "warnings": [], "conflicts": [], "missing_operators": {}, "repo_files": []}
         with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
              patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
              patch("agentit.portal.cluster_apply.dry_run_manifests_against_cluster", return_value=clean) as mock_dry:
@@ -1007,15 +1119,16 @@ class TestRouteAndDeliverClusterConfig:
         assert "error" not in result["outcomes"]["cluster_config"]
 
     async def test_dry_run_api_failure_fail_closed_with_error(self):
-        """A real apiserver dry-run rejection must surface as outcome error
-        (needs_attention), never as a clean preview that unlocks Deliver."""
+        """Hard apiserver dry-run rejection (Bad Request / admission) must
+        surface as outcome error (needs_attention), never as a clean preview."""
         store, raw = await make_async_store()
         report = make_report()
         report.infra_repo_url = "https://github.com/org/infra-gitops"
         aid = await raw.save(report)
         failed = {
             "applied": [], "skipped": [],
-            "errors": ["app-network-policy.yaml: NetworkPolicy (networking.k8s.io/v1) not found on cluster"],
+            "errors": ["app-network-policy.yaml: NetworkPolicy/app-np: Bad Request"],
+            "warnings": [],
             "conflicts": [], "missing_operators": {}, "repo_files": [],
         }
         with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
@@ -1031,6 +1144,42 @@ class TestRouteAndDeliverClusterConfig:
         assert outcome["dry_run"] is True
         assert "error" in outcome
         assert "dryRun=All" in outcome["error"] or "dry-run" in outcome["error"].lower()
+
+    async def test_dry_run_soft_forbidden_and_missing_crd_do_not_block(self):
+        """Forbidden (SA rights) and missing optional CRD are soft — warn,
+        do not set outcome error so Scan can still open a fleet PR."""
+        store, raw = await make_async_store()
+        report = make_report()
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
+        aid = await raw.save(report)
+        soft_only = {
+            "applied": [], "skipped": [],
+            "errors": [],
+            "warnings": [
+                "role.yaml: Role/reader: Forbidden",
+                "policy.yaml: Policy (kyverno.io/v1) not found on cluster: no matches for kind",
+            ],
+            "conflicts": [],
+            "missing_operators": {
+                "Policy": {"name": "Kyverno (community)", "package": None},
+            },
+            "repo_files": [],
+        }
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.cluster_apply.dry_run_manifests_against_cluster", return_value=soft_only):
+            result = await route_and_deliver(
+                [_cluster_config_file()], app_name=report.repo_name, namespace="ns",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=True,
+            )
+        mock_commit.assert_not_called()
+        outcome = result["outcomes"]["cluster_config"]
+        assert outcome["dry_run"] is True
+        assert "error" not in outcome
+        assert outcome.get("dry_run_warnings")
+        assert "dry_run_note" in outcome
+        assert "Kyverno" in outcome["dry_run_note"]
 
 
 class TestRouteAndDeliverCicdLane:
@@ -1116,7 +1265,7 @@ class TestRouteAndDeliverCicdLane:
         report.infra_repo_url = "https://github.com/org/infra-gitops"
         aid = await raw.save(report)
         clean = {"applied": ["pipeline.yaml"], "skipped": [], "errors": [],
-                 "conflicts": [], "missing_operators": {}, "repo_files": []}
+                 "warnings": [], "conflicts": [], "missing_operators": {}, "repo_files": []}
         with patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
              patch("agentit.portal.cluster_apply.dry_run_manifests_against_cluster", return_value=clean):
             result = await route_and_deliver(
