@@ -1,33 +1,10 @@
-{# Real, step-by-step onboarding progress -- rendered both on first paint
-   (onboard_progress.html includes this directly) and on every SSE tick
-   (onboard_progress_stream() renders this same template server-side and
-   pushes it as the "progress" event's data). Never a fabricated percentage:
-   the stepper reflects the job's own real `status`/`current_step`
-   (docs/ux-design-requirements.md checklist #6), and the agent list below
-   is sourced from the real per-agent events FleetOrchestrator already logs
-   live, not invented here.
+{# Real Scan progress fragment -- first paint (onboard_progress.html) and
+   every SSE tick. Stepper reflects the job's real status (never a fake
+   percentage); agent list comes from FleetOrchestrator events.
 
-   `redirect_url` (only passed by onboard_progress_stream(), never on the
-   plain first-paint include -- see onboard_progress()'s own direct
-   RedirectResponse for that case) is the single source of truth for where
-   a terminal job sends the browser, computed once by
-   `_onboard_terminal_redirect_url()` so the GET route's redirect and this
-   SSE-driven client-side one can never disagree.
-
-   Onboarding no longer stops once manifests are saved -- it automatically
-   runs auto_delivery.py's validate/fix loop, a final LLM review, and (once
-   clean) the real Deliver, so this stepper now has stages for each of
-   those (docs/onboarding-loop-vision-gap-analysis.md's Part 3, finally
-   wired up).
-
-   The stepper itself is the ONE shared `pipeline_stepper()` macro
-   (_macros.html) assess_progress.html also renders -- indices 0-2
-   (Cloning/Analyzing/Saving Score) always pre-marked done here, since an
-   onboard job only ever exists for an assessment that already completed
-   (2026-07-20, "why are we showing two workflow pages" fix). `current_index`/
-   `failed` are computed server-side by routes/assessments.py's
-   `_onboard_pipeline_position()` from the job's own real `status` --
-   never a fabricated in-between progress amount. #}
+   Shared `pipeline_stepper()`: Assess → Generate → Open PR / waiting for
+   merge. Assess is always pre-marked done here (onboard jobs only exist
+   after Assess). `current_index`/`failed` from `_onboard_pipeline_position()`. #}
 {% from "_macros.html" import pipeline_stepper %}
 <div class="card" id="onboard-progress-card">
   {{ pipeline_stepper(current_index, failed) }}

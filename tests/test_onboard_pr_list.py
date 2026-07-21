@@ -474,6 +474,31 @@ class TestDeEmphasizedRawPlumbing:
         assert "Generated Files" in resp.text
         assert "<details" in resp.text
 
+    async def test_failed_agent_error_shown_under_fail_badge(self, ui_client):
+        """orchestration.agents[].error must surface under FAIL so humans can
+        explain dependency/cost/codechange failures without digging in JSON."""
+        client, store = ui_client
+        report = make_report(repo_name="agent-fail-error-app")
+        aid = await store.save(report)
+        await store.save_onboarding(
+            aid, [_cluster_config_file()],
+            orchestration={
+                "agents": [
+                    {"name": "dependency", "category": "dependency", "success": False,
+                     "files_count": 0, "error": "LLM timeout while resolving BOM"},
+                    {"name": "cost", "category": "cost", "success": True,
+                     "files_count": 2, "error": None},
+                ],
+                "conflicts": [], "recommendation": "REVIEW REQUIRED", "auto_approve": False, "gates": [],
+            },
+        )
+
+        resp = await client.get(f"/assessments/{aid}/onboard-results")
+        assert resp.status_code == 200
+        assert 'badge-critical">FAIL' in resp.text
+        assert "LLM timeout while resolving BOM" in resp.text
+        assert 'badge-low">OK' in resp.text
+
     async def test_no_inline_styles_in_pull_requests_section(self, ui_client):
         client, store = ui_client
         report = make_report(repo_name="no-inline-style-app")

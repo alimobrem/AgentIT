@@ -793,7 +793,7 @@ async def test_masthead_nav_structure(client, _override_store):
 
 
 async def test_assess_progress_keeps_portal_chrome(client, _override_store):
-    """The unified Onboarding progress page must keep masthead chrome (EDL §1).
+    """The unified Scan progress page must keep masthead chrome (EDL §1).
 
     Regression: hx-target="body" + hx-select=".container" swapped the
     content container into <body>, wiping nav / Cmd+K / Events / Menu after
@@ -805,11 +805,9 @@ async def test_assess_progress_keeps_portal_chrome(client, _override_store):
     resp = await client.get(f"/assess/progress/{job_id}")
     assert resp.status_code == 200
     html = resp.text
-    # 2026-07-20: "Running Assessment" was renamed to the single, consistent
-    # "Onboarding" header shared with the onboard-phase page it hands off to
-    # (see _macros.html's pipeline_stepper()) -- see README's "Unified apply
-    # flow" entry for why.
-    assert "<h1>Onboarding</h1>" in html
+    # Scan header shared with the Generate/Open-PR phase page it hands off to
+    # (see _macros.html's pipeline_stepper()).
+    assert "<h1>Scan</h1>" in html
     assert "Analyzing repository..." in html
     # Standard shell present on first paint (extends base.html).
     assert 'id="nav-primary"' in html

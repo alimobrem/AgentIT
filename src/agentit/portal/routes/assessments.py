@@ -100,42 +100,32 @@ async def assess_submit(
     return RedirectResponse(url=f"/assess/progress/{job_id}", status_code=303)
 
 
-# ── Unified progress stepper (2026-07-20) ───────────────────────────────
-# One 9-stage roadmap spanning the whole assess -> onboard -> deliver
-# pipeline, rendered by _macros.html's `pipeline_stepper()` on BOTH
-# assess_progress.html and _onboard_progress_fragment.html. This does NOT
-# merge the two underlying jobs/routes/redirect (still two real
-# `remediation_jobs` rows, still a real 303 from assess_progress() to
-# onboard_progress() once an onboard job exists -- see that redirect's own
-# docstring below): investigation for this fix found that hand-off is
-# already an in-place htmx AJAX swap of #main-content, never a real
-# browser navigation or <title> change, so it was never the "hard
-# redirect" the two-workflow-pages complaint assumed. What actually read
-# as "two pages" was purely visual -- a 3-step stepper under "Running
-# Assessment" getting swapped for an unrelated 6-step stepper under
-# "Onboarding". These two helpers are the single source of truth mapping
-# each job's own real status to its position on the ONE shared roadmap,
-# so both templates always agree on where "step N of 9" actually is.
-_PIPELINE_STAGE_COUNT = 9
+# ── Unified Scan progress stepper ─────────────────────────────────────
+# Three human stages on ONE shared roadmap: Assess → Generate → Open PR /
+# waiting for merge. Rendered by _macros.html's `pipeline_stepper()` on
+# BOTH assess_progress.html and _onboard_progress_fragment.html. Does NOT
+# merge the two underlying jobs/routes/redirect (still two remediation_jobs
+# rows + a real 303 hand-off). These helpers map each job's real status
+# onto that 3-stage roadmap so both templates agree on position.
+_PIPELINE_STAGE_COUNT = 3
 
-_ASSESS_STAGE_INDEX = {"cloning": 0, "assessing": 1, "saving": 2, "completed": 3}
+# All assess-phase statuses light Assess (0). "completed" advances to
+# Generate so a chained poll never looks stuck on Assess before the 303.
+_ASSESS_STAGE_INDEX = {"cloning": 0, "assessing": 0, "saving": 0, "completed": 1}
 
 _ONBOARD_STAGE_INDEX = {
-    "pending": 3, "running": 3, "saving": 4, "validating": 5,
-    "reviewing": 6, "delivering": 7, "needs_attention": 7,
+    "pending": 1, "running": 1, "saving": 1,
+    "validating": 2, "reviewing": 2, "delivering": 2, "needs_attention": 2,
     "completed": _PIPELINE_STAGE_COUNT,
 }
 
 
 def _assess_pipeline_position(job: dict) -> tuple[int, bool]:
-    """Where this assess job sits on the unified 9-stage roadmap, and
+    """Where this assess job sits on the unified 3-stage Scan roadmap, and
     whether it represents a failure. A failed assess job's
-    ``current_step`` holds a free-form, human-written error message (see
-    ``assess_submit()``'s ``except`` blocks), not a stage keyword -- there
-    is no reliable way to know which of the 3 assess stages actually
-    failed, so this never fabricates one; it just flags the failure at
-    stage 0 and leaves the real explanation to the error alert already
-    shown alongside the stepper.
+    ``current_step`` holds a free-form error message (see
+    ``assess_submit()``'s ``except`` blocks), not a stage keyword -- flag
+    failure on Assess and leave the explanation to the error alert.
     """
     if job["status"] == "failed":
         return 0, True
@@ -143,11 +133,11 @@ def _assess_pipeline_position(job: dict) -> tuple[int, bool]:
 
 
 def _onboard_pipeline_position(job: dict) -> tuple[int, bool]:
-    """Where this onboard job sits on the same unified 9-stage roadmap
-    (indices 3-8) -- mirrors ``_assess_pipeline_position()`` above."""
+    """Where this onboard job sits on the same 3-stage Scan roadmap
+    (Generate / Open PR) -- mirrors ``_assess_pipeline_position()``."""
     if job["status"] == "failed":
-        return 3, True
-    return _ONBOARD_STAGE_INDEX.get(job["status"], 3), False
+        return 1, True
+    return _ONBOARD_STAGE_INDEX.get(job["status"], 1), False
 
 
 @router.get("/assess/progress/{job_id}", response_class=HTMLResponse)
@@ -198,7 +188,8 @@ async def assess_progress(request: Request, job_id: str):
     return get_templates().TemplateResponse(request, "assess_progress.html", {
         "job": job, "job_id": job_id,
         "current_index": current_index, "failed": failed,
-        "stage_count": _PIPELINE_STAGE_COUNT if chained else 3,
+        # Opt-out of chaining: only Assess will run for this job.
+        "stage_count": _PIPELINE_STAGE_COUNT if chained else 1,
     })
 
 

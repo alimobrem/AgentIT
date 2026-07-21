@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Onboarding... - AgentIT{% endblock %}
+{% block title %}Scan... - AgentIT{% endblock %}
 {% block content %}
 {% from "_macros.html" import pipeline_stepper %}
 {# Poll refreshes #main-content only — never hx-target="body". Targeting
@@ -7,16 +7,11 @@
    Cmd+K, Events, Menu) with the content container after the first tick,
    leaving a full-viewport progress view with no portal chrome (EDL §1).
 
-   This div's own hx-get self-poll is what already carries a human
-   through the real 303 redirect assess_progress() issues once onboarding
-   starts (see that route's docstring) as an in-place AJAX swap -- htmx's
-   underlying XHR follows the redirect transparently, so #main-content is
-   replaced by onboard_progress.html's own markup with no full browser
-   navigation and no <title> flash. The one, unified `pipeline_stepper()`
-   macro below (shared with _onboard_progress_fragment.html) is what
-   makes that swap actually read as one page's steps lighting up in
-   sequence, instead of an unrelated stepper design replacing this one
-   (2026-07-20, "why are we showing two workflow pages" fix). #}
+   This div's own hx-get self-poll carries a human through the real 303
+   redirect assess_progress() issues once Generate starts (see that
+   route's docstring) as an in-place AJAX swap. The shared
+   `pipeline_stepper()` (Assess → Generate → Open PR / waiting for merge)
+   makes that swap read as one Scan page's stages lighting up. #}
 <div id="assess-progress"
      hx-get="/assess/progress/{{ job_id }}"
      hx-trigger="every 2s"
@@ -25,7 +20,7 @@
      hx-swap="outerHTML"
      hx-push-url="true">
 
-<h1>Onboarding</h1>
+<h1>Scan</h1>
 
 <div class="card">
   {{ pipeline_stepper(current_index, failed, stage_count) }}
@@ -33,7 +28,7 @@
   <p class="text-muted text-center">{{ job.current_step or "Starting..." }}</p>
 
   {% if "continue_onboard" in (job.steps_completed or []) %}
-  <p class="text-muted text-center text-sm">After scoring, onboarding will start automatically — right here on this same page, with no new page to load.</p>
+  <p class="text-muted text-center text-sm">After Assess, Generate and Open PR continue automatically — right here on this same page, with no new page to load.</p>
   {% endif %}
 
   {% if job.status == "failed" %}
