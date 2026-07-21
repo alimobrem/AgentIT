@@ -194,6 +194,7 @@ def test_latest_delivery_302_reports_failing():
     assert result["ok"] is False
     assert result["status"] == "failing"
     assert "302" in result["detail"]
+    assert "skip-auth-regex" in result["detail"]
 
 
 @patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test123"})
@@ -211,6 +212,46 @@ def test_only_the_most_recent_delivery_determines_status():
 
 
 @patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test123"})
+def test_canary_503_with_recent_successes_is_transient_not_critical():
+    """Live 2026-07-21 canary of 7347003: latest delivery was HTTP 503
+    while 2+ of the prior deliveries in the same window were 200. Must not
+    report ok=False (Self-Health Critical) with oauth-proxy advice."""
+    hooks_resp = _hooks_response()
+    deliveries_resp = _deliveries_response([
+        {"status_code": 503, "status": "Invalid HTTP Response: 503", "delivered_at": "2026-07-21T19:57:53Z"},
+        {"status_code": 504, "status": "timed out", "delivered_at": "2026-07-21T19:50:07Z"},
+        {"status_code": 200, "status": "OK", "delivered_at": "2026-07-21T19:49:58Z"},
+        {"status_code": 200, "status": "OK", "delivered_at": "2026-07-21T19:48:36Z"},
+        {"status_code": 200, "status": "OK", "delivered_at": "2026-07-21T19:47:58Z"},
+    ])
+    with patch("agentit.portal.github_pr.requests.get", side_effect=[hooks_resp, deliveries_resp]):
+        result = github_pr.check_webhook_delivery_health("https://github.com/t/r")
+    assert result["ok"] is None
+    assert result["status"] == "transient"
+    assert "503" in result["detail"]
+    assert "canary" in result["detail"].lower() or "rollout" in result["detail"].lower()
+    assert "skip-auth-regex" not in result["detail"]
+
+
+@patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test123"})
+def test_persistent_503_with_no_recent_success_still_failing():
+    """A 503 with no successful deliveries in the recent window is still a
+    real reachability failure -- not a canary blip."""
+    hooks_resp = _hooks_response()
+    deliveries_resp = _deliveries_response([
+        {"status_code": 503, "status": "Invalid HTTP Response: 503", "delivered_at": "2026-07-21T19:57:53Z"},
+        {"status_code": 503, "status": "Invalid HTTP Response: 503", "delivered_at": "2026-07-21T19:50:07Z"},
+        {"status_code": 504, "status": "timed out", "delivered_at": "2026-07-21T19:49:58Z"},
+    ])
+    with patch("agentit.portal.github_pr.requests.get", side_effect=[hooks_resp, deliveries_resp]):
+        result = github_pr.check_webhook_delivery_health("https://github.com/t/r")
+    assert result["ok"] is False
+    assert result["status"] == "failing"
+    assert "503" in result["detail"]
+    assert "pods Ready" in result["detail"] or "canary" in result["detail"].lower()
+
+
+@patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test123"})
 def test_tls_failure_status_code_reports_failing():
     """The second, independently-broken hook from the live incident: a TLS
     verification failure against a self-signed ingress cert never gets a
@@ -223,6 +264,7 @@ def test_tls_failure_status_code_reports_failing():
         result = github_pr.check_webhook_delivery_health("https://github.com/t/r")
     assert result["ok"] is False
     assert result["status"] == "failing"
+    assert "insecure_ssl" in result["detail"]
 
 
 @patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test123"})

@@ -234,6 +234,17 @@ predicted it would need) — verified via `gh api .../hooks/652423282/pings` (20
 "Awaiting verification" entry in the README's Unified apply flow section for the full user-facing
 investigation this came from.
 
+**Follow-up (2026-07-21): a Critical Self-Health row after canary is usually not oauth-proxy.** Tip
+promote of `7347003` produced one GitHub delivery HTTP 503 (and a nearby 504) while portal pods
+rolled; `skip-auth-regex` and `insecure_ssl: "1"` on hook `652423282` were already correct, and
+`POST` to `/api/webhook/github-push` returned `{"status":"pong"}` through oauth-proxy once Ready.
+Self-Health stayed Critical only because `check_webhook_delivery_health()` keyed off the *latest*
+delivery. Ops clear: `gh api -X POST repos/<owner>/<repo>/hooks/<id>/pings` (or wait for the next
+successful push). Product: that check now reports `transient` (not Critical) when a 502/503/504
+sits atop ≥2 recent 2xx deliveries. Founder hook checklist for this cluster: URL
+`https://agentit-agentit.apps…/api/webhook/github-push`, `content_type=json`, `insecure_ssl=1`,
+secret matching `github-webhook-secret`.
+
 **Found and fixed** (originally logged here as "found but explicitly not fixed"):
 `chart/templates/argo-events/sensor-onboard.yaml` and `sensor-auto-apply.yaml` both set
 `retryStrategy.factor` as `{value: 2.0}` (a nested object), which Argo Events fails to parse as a

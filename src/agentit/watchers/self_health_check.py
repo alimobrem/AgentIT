@@ -248,10 +248,12 @@ class SelfHealthCheck:
                 ok=False, action=_WEBHOOK_CHECK_ACTION, severity="critical", summary=detail,
                 guidance=(
                     "See this Health page's own 'Webhook Deliveries' section for live "
-                    "per-app detail. Check: oauth-proxy's --skip-auth-regex still covers "
-                    "^/api/webhook/ (chart/templates/deployment.yaml), and the hook's "
-                    "insecure_ssl/secret config on GitHub still matches this cluster's "
-                    "ingress cert -- see docs/deployment.md's webhook section."
+                    "per-app detail. For redirects (3xx): oauth-proxy --skip-auth-regex "
+                    "must cover ^/api/webhook/ (chart/templates/deployment.yaml). For "
+                    "TLS (status_code 0): hook insecure_ssl/secret vs ingress cert "
+                    "(docs/deployment.md). For 502/503/504 with no recent successes: "
+                    "confirm portal pods Ready after canary/rollout, then redeliver "
+                    "or ping the hook."
                 ),
                 details=health,
             )
