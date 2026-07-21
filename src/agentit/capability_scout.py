@@ -1139,6 +1139,37 @@ def check_has_test_plan(proposal: dict) -> tuple[bool, str]:
     return True, f"test plan present: {test_plan[:100]}"
 
 
+# Dogfood / product-failure signals — proposals that never cite a real
+# failure class have near-zero merge rate (quality-review §5).
+_USEFULNESS_EVIDENCE_RE = re.compile(
+    r"(?i)(#\d+|dogfood|finding|still.?present|scaleTarget|hpa|"
+    r"needs_attention|scan\s+pr|merge.?wrong|dead.?letter|"
+    r"forbidden|readwriteonce|rollout)",
+)
+
+
+def check_evidence_usefulness(proposal: dict) -> tuple[bool, str]:
+    """Fail closed when evidence does not cite a concrete product failure.
+
+    Scout historically opened well-gated but low-value docs PRs. Require
+    evidence (or gap_description) to mention a dogfood/PR/finding signal
+    so proposals stay tied to live product pain (#134-class, Scan refuses, …).
+    """
+    blob = " ".join(
+        str(proposal.get(k) or "")
+        for k in ("evidence", "gap_description", "change_summary", "title")
+    )
+    if len(blob.strip()) < 40:
+        return False, "evidence/gap too thin — cite a concrete dogfood failure or finding"
+    if not _USEFULNESS_EVIDENCE_RE.search(blob):
+        return False, (
+            "evidence must cite a concrete failure signal "
+            "(PR #, finding, dogfood, Scan/HPA/Rollout/Forbidden class) — "
+            "refusing speculative proposals with weak merge yield"
+        )
+    return True, "evidence cites a concrete product-failure signal"
+
+
 def check_syntax(diff: dict[str, str]) -> tuple[bool, str]:
     """`python -m py_compile` on every touched `.py` file — the bare-minimum
     structural validator the design doc's "genuinely new engineering"
@@ -1309,6 +1340,7 @@ def run_safety_gates(proposal: dict, diff: dict[str, str], repo_dir: Path, max_o
         ("scope-allowlist", lambda: check_scope_allowlist(diff)),
         ("no-secrets", lambda: check_no_secrets(diff)),
         ("test-plan-required", lambda: check_has_test_plan(proposal)),
+        ("evidence-usefulness", lambda: check_evidence_usefulness(proposal)),
         ("syntax", lambda: check_syntax(diff)),
         ("no-open-pr", lambda: check_no_open_self_improve_pr(max_open_prs)),
         ("tests-pass", lambda: run_test_suite(repo_dir)),

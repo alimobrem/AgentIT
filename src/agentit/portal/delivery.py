@@ -371,7 +371,10 @@ MECHANISM_DESCRIPTIONS: dict[str, str] = {
     # comment above; kept only for historical-record rendering.
     MECHANISM_CLUSTER_ADMIN_REVIEW_GATE: "Held for cluster-admin review -- these manifests targeted a shared operator namespace this service account could not apply to without elevated RBAC. (Retired: this category now delivers via a GitOps PR instead.)",
     MECHANISM_SOURCE_REPO_PR: "Open a PR against this app's code repo with a real patch to the named file(s).",
-    MECHANISM_APP_REPO_PR: "Open an informational PR against this app's code repo with these files under `.agentit/`.",
+    MECHANISM_APP_REPO_PR: (
+        "Refused — `.agentit/` informational dumps do not deploy and do not clear "
+        "findings (Ledger-only). Use Scan → source-repo / GitOps delivery instead."
+    ),
     MECHANISM_NONE: "Nothing to deliver.",
 }
 
@@ -976,9 +979,20 @@ async def deliver_with_verification(
                 source_branch, pr_context,
             )
         elif mechanism == MECHANISM_APP_REPO_PR:
-            from agentit.portal.github_pr import create_onboarding_pr
-
-            result = await asyncio.to_thread(create_onboarding_pr, report.repo_url, app_name, files)
+            # Quarantine: `.agentit/` dumps never deploy, never clear findings,
+            # and confuse reviewers (docs/agentit-pr-types-quality-review.md §6).
+            # create_onboarding_pr remains in github_pr.py for historical tests
+            # only — Scan / route_and_deliver must not open these PRs.
+            result = {
+                "error": (
+                    "MECHANISM_APP_REPO_PR (.agentit/ dump) is refused — "
+                    "informational files do not deploy via Argo and do not clear "
+                    "findings. Drop narrative leftovers or convert to a real "
+                    "source-repo / GitOps deliverable. No PR opened."
+                ),
+                "refused_mechanism": MECHANISM_APP_REPO_PR,
+                "files": [f.get("path") for f in files],
+            }
         else:
             raise ValueError(f"Unknown delivery mechanism: {mechanism}")
     except Exception as exc:
@@ -1066,12 +1080,33 @@ async def _deliver_via_gitops_pr(
     to the logged event's summary as an extra callout (e.g. naming the exact
     shared namespace this PR touches).
     """
+    # Shared-NS / cicd blast-radius callout must appear in the GitHub PR body
+    # (not only the Ledger event) so reviewers see cluster-wide impact.
+    effective_context = pr_context
+    if note and pr_context and pr_context.get("body"):
+        effective_context = {
+            **pr_context,
+            "body": (
+                f"### Shared-namespace blast radius\n{note}\n\n"
+                + str(pr_context["body"])
+            ),
+        }
+    elif note and not (pr_context and pr_context.get("body")):
+        effective_context = {
+            **(pr_context or {}),
+            "body": (
+                f"## AgentIT GitOps delivery for {app_name}\n\n"
+                f"### Shared-namespace blast radius\n{note}\n\n"
+                "Argo deploys after merge; AgentIT does **not** auto-merge.\n"
+            ),
+        }
+
     outcome = await deliver_with_verification(
         mechanism=MECHANISM_INFRA_REPO_COMMIT, files=files, report=report,
         app_name=app_name, store=store, assessment_id=assessment_id,
         actor=actor, dry_run=dry_run, path_prefix=path_prefix, branch_name=branch_name,
         namespace=namespace or getattr(report, "namespace", None) or app_name,
-        record_skill_approval=False, pr_context=pr_context,
+        record_skill_approval=False, pr_context=effective_context,
     )
     pr_url = outcome.get("pr_url") if isinstance(outcome, dict) and not dry_run else None
     if pr_url and "error" not in outcome:
@@ -1083,6 +1118,16 @@ async def _deliver_via_gitops_pr(
             await store.log_event("delivery", "gitops-pr-opened", app_name, "info", summary)
         except Exception:
             logger.warning("Failed to log gitops-pr-opened event for %s", app_name, exc_info=True)
+        # Finding-clear proof: re-Assess after merge must clear target_findings
+        # or skills stay unapproved (Phase E). Surface explicitly for fleet/pinky.
+        try:
+            await store.log_event(
+                "delivery", "finding-clear-pending", app_name, "info",
+                f"PR {pr_url} opened — post-merge re-Assess will correlate "
+                f"target_findings for delivery; skills approve only on resolved.",
+            )
+        except Exception:
+            logger.warning("Failed to log finding-clear-pending for %s", app_name, exc_info=True)
     return outcome
 
 
@@ -1474,15 +1519,16 @@ async def route_and_deliver(
                 outcomes[CATEGORY_SOURCE_PATCH] = {"error": "no assessment report available -- cannot open a source-repo PR"}
 
         if at_rest_files:
-            if report is not None:
-                outcomes[CATEGORY_MANIFEST_AT_REST] = await deliver_with_verification(
-                    mechanism=MECHANISM_APP_REPO_PR, files=at_rest_files, report=report,
-                    app_name=app_name, store=store, assessment_id=assessment_id,
-                    actor=actor, dry_run=dry_run, record_skill_approval=False,
-                    namespace=namespace, pr_context=pr_context,
-                )
-            else:
-                outcomes[CATEGORY_MANIFEST_AT_REST] = {"error": "no assessment report available"}
+            # Always refuse — even dry_run — so Scan never previews a dump PR.
+            outcomes[CATEGORY_MANIFEST_AT_REST] = {
+                "error": (
+                    "MECHANISM_APP_REPO_PR (.agentit/ dump) is refused — "
+                    "informational files do not deploy via Argo and do not clear "
+                    "findings. No PR opened."
+                ),
+                "refused_mechanism": MECHANISM_APP_REPO_PR,
+                "files": [f.get("path") for f in at_rest_files],
+            }
 
         any_error = any(isinstance(o, dict) and "error" in o for o in outcomes.values())
         overall_status = "delivered" if not any_error else "partial"
@@ -1491,11 +1537,14 @@ async def route_and_deliver(
             details={"outcomes": {k: v for k, v in outcomes.items()}},
         )
 
-        if cluster_files:
-            mechanism_used = mechanisms[CATEGORY_CLUSTER_CONFIG]
-            await _maybe_schedule_verification(
-                store, delivery_id, assessment_id, app_name, namespace, mechanism_used, dry_run,
-            )
+        # SLO watch for any infra-repo delivery (cluster-config + shared-NS cicd).
+        for cat in (CATEGORY_CLUSTER_CONFIG, CATEGORY_CICD_SHARED_NAMESPACE):
+            if cat in mechanisms and mechanisms[cat] == MECHANISM_INFRA_REPO_COMMIT:
+                await _maybe_schedule_verification(
+                    store, delivery_id, assessment_id, app_name, namespace,
+                    MECHANISM_INFRA_REPO_COMMIT, dry_run,
+                )
+                break
     except Exception as exc:
         await store.update_delivery(
             delivery_id, status="failed", details={"error": str(exc)[:500]},

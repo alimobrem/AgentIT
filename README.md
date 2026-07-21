@@ -38,6 +38,10 @@ Self-managed delivery gates (#119/#121), watchers, and Scan→GitOps delivery ar
 
 ---
 
+**PR-types quality follow-ups (2026-07-21).** Inventory: [`docs/agentit-pr-types-quality-review.md`](docs/agentit-pr-types-quality-review.md). P0 HPA app-correctness (#136) + SSA soft dry-run (#137). P1/P2: refuse `.agentit/` dump PRs; source-repo patch titles by mechanism; finding-clear proof section + Ledger `finding-clear-pending`; shared-NS blast-radius in GitOps PR bodies; scout `evidence-usefulness` gate (cite dogfood/finding/PR failure). Activate already stages one skill file.
+
+---
+
 ### Image promotion / Tekton CI (how the portal gets a new image)
 
 Merge to `main` is **not** enough for the live portal to move. Path:
