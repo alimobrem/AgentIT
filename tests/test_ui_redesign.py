@@ -627,7 +627,7 @@ class TestGitOpsVisibility:
         from urllib.parse import unquote
         location = unquote(resp.headers["location"])
         assert "Registered for GitOps delivery via" not in location
-        assert "next Fix/Onboard delivery" in location
+        assert "next Scan delivery PR" in location
         mock_ensure.assert_called_once_with("https://github.com/org/gitops-infra")
         report = await store.get(aid)
         assert report.infra_repo_url == "https://github.com/org/gitops-infra"
@@ -674,7 +674,7 @@ class TestGitOpsVisibility:
         # And the page explains the real, current state instead of silently
         # looking identical or falsely claiming full registration.
         assert "GitOps infra repo configured" in resp.text
-        assert "next Fix/Onboard delivery" in resp.text
+        assert "next Scan delivery PR" in resp.text
         assert ">GitOps<" not in resp.text  # not fully registered yet either
 
 

@@ -502,7 +502,7 @@ async def register_gitops(request: Request, assessment_id: str):
     return RedirectResponse(
         url=(
             f"/assessments/{assessment_id}?success="
-            f"{quote('GitOps infra repo configured via ' + infra_repo_url + '. This app will show as GitOps-registered once your next Fix/Onboard delivery is committed and merged there.')}"
+            f"{quote('GitOps infra repo configured via ' + infra_repo_url + '. This app will show as GitOps-registered once your next Scan delivery PR is committed and merged there.')}"
         ),
         status_code=303,
     )
