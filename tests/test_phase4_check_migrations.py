@@ -136,3 +136,20 @@ class TestAdmissionPoliciesExistParity:
             "policies/require-labels.yaml": "apiVersion: kyverno.io/v1\nkind: ClusterPolicy\n",
         })
         assert finding.category == "policy"
+
+
+class TestLicenseFileExistsParity:
+    """Ported from `checks/compliance/license.yaml` (deleted in this
+    commit) to `skills/compliance/license-file-exists.md`."""
+
+    SKILL_PATH = SKILLS_DIR / "compliance" / "license-file-exists.md"
+
+    def test_fires_when_no_license_file(self, create_mock_repo) -> None:
+        finding = _fires(self.SKILL_PATH, create_mock_repo, {"main.py": "print('hi')\n"})
+        assert finding.category == "license"
+        assert finding.severity == Severity.high
+        assert finding.description == "No LICENSE file found"
+        assert finding.recommendation == "Add a LICENSE file (Apache 2.0 recommended for enterprise open source)"
+
+    def test_passes_when_license_file_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {"LICENSE": "Apache License 2.0\n"})
