@@ -349,3 +349,21 @@ class TestPrometheusMetricsExistsParity:
         _passes(self.SKILL_PATH, create_mock_repo, {
             "deploy/servicemonitor.yaml": "apiVersion: monitoring.coreos.com/v1\nkind: ServiceMonitor\n",
         })
+
+
+class TestStructuredLoggingDetectedParity:
+    """Ported from `checks/observability/structured-logging.yaml`
+    (deleted in this commit) to
+    `skills/observability/structured-logging-detected.md`."""
+
+    SKILL_PATH = SKILLS_DIR / "observability" / "structured-logging-detected.md"
+
+    def test_fires_when_no_structlog_reference(self, create_mock_repo) -> None:
+        finding = _fires(self.SKILL_PATH, create_mock_repo, {"main.py": "print('hi')\n"})
+        assert finding.category == "logging"
+        assert finding.severity == Severity.medium
+        assert finding.description == "No structured logging library detected"
+        assert finding.recommendation == "Add structured JSON logging (e.g., structlog for Python, zap for Go)"
+
+    def test_passes_when_structlog_reference_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {"requirements.txt": "structlog==24.1.0\n"})
