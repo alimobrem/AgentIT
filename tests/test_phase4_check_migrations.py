@@ -106,3 +106,33 @@ class TestArgocdApplicationExistsParity:
         _passes(self.SKILL_PATH, create_mock_repo, {
             "argocd/application.yaml": "apiVersion: argoproj.io/v1alpha1\nkind: Application\n",
         })
+
+
+class TestAdmissionPoliciesExistParity:
+    """Ported from `checks/compliance/admission-policies.yaml` (deleted in
+    this commit) to `skills/compliance/admission-policies-exist.md`."""
+
+    SKILL_PATH = SKILLS_DIR / "compliance" / "admission-policies-exist.md"
+
+    def test_fires_when_no_policy_manifest(self, create_mock_repo) -> None:
+        finding = _fires(self.SKILL_PATH, create_mock_repo, {
+            "deploy/deployment.yaml": "apiVersion: apps/v1\nkind: Deployment\n",
+        })
+        assert finding.category == "policy"
+        assert finding.severity == Severity.medium
+        assert finding.description == "No admission policies (Kyverno/OPA/Gatekeeper) found"
+        assert finding.recommendation == "Create Kyverno policies for resource limits, labels, approved base images"
+
+    def test_passes_when_namespaced_policy_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {
+            "policies/require-labels.yaml": "apiVersion: kyverno.io/v1\nkind: Policy\n",
+        })
+
+    def test_does_not_match_clusterpolicy_only(self, create_mock_repo) -> None:
+        """Deliberately narrow, per this file's own docstring -- a
+        cluster-scoped ClusterPolicy alone must not satisfy the rule,
+        matching the deleted YAML's exact (not broadened) scope."""
+        finding = _fires(self.SKILL_PATH, create_mock_repo, {
+            "policies/require-labels.yaml": "apiVersion: kyverno.io/v1\nkind: ClusterPolicy\n",
+        })
+        assert finding.category == "policy"
