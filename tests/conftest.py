@@ -158,6 +158,46 @@ def _hermetic_kube_env(request: pytest.FixtureRequest, monkeypatch: pytest.Monke
     monkeypatch.setenv("AGENTIT_OFFLINE", "1")
 
 
+# Successful SSA dry-run shape used when the suite is hermetic-offline.
+# ``deliver_with_verification(dry_run=True)`` / auto_delivery call
+# ``dry_run_manifests_against_cluster`` → ``kube.apply_yaml``; under
+# ``AGENTIT_OFFLINE`` that raises and fail-closes into needs_attention.
+# Dedicated unit coverage of the real helper is in test_cluster_dry_run.py
+# (opted out below).
+_HERMETIC_API_DRY_RUN_OK = {
+    "applied": [],
+    "skipped": [],
+    "errors": [],
+    "conflicts": [],
+    "missing_operators": {},
+    "repo_files": [],
+}
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_api_dry_run(request: pytest.FixtureRequest):
+    """Mock apiserver SSA dry-run success for the hermetic suite.
+
+    Without this, every auto_validate / Dry Run path fails closed with
+    ``AGENTIT_OFFLINE is set`` (see ``_hermetic_kube_env``), cascading
+    onboarding jobs into ``needs_attention``. Opt out: ``--live-cluster``,
+    or tests in ``test_cluster_dry_run.py`` (they patch ``kube.apply_yaml``
+    themselves).
+    """
+    if request.config.getoption("--live-cluster"):
+        yield
+        return
+    path = getattr(request.node, "path", None) or getattr(request.node, "fspath", None)
+    if path is not None and Path(str(path)).name == "test_cluster_dry_run.py":
+        yield
+        return
+    with patch(
+        "agentit.portal.cluster_apply.dry_run_manifests_against_cluster",
+        return_value=dict(_HERMETIC_API_DRY_RUN_OK),
+    ):
+        yield
+
+
 @pytest.fixture(autouse=True)
 def _reset_kube_breaker() -> None:
     """Reset the shared, process-global ``kube_breaker`` (portal/helpers.py)
