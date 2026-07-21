@@ -367,3 +367,20 @@ class TestStructuredLoggingDetectedParity:
 
     def test_passes_when_structlog_reference_present(self, create_mock_repo) -> None:
         _passes(self.SKILL_PATH, create_mock_repo, {"requirements.txt": "structlog==24.1.0\n"})
+
+
+class TestContainerfileExistsParity:
+    """Ported from `checks/security/containerfile.yaml` (deleted in this
+    commit) to `skills/security/containerfile-exists.md`."""
+
+    SKILL_PATH = SKILLS_DIR / "security" / "containerfile-exists.md"
+
+    def test_fires_when_no_containerfile(self, create_mock_repo) -> None:
+        finding = _fires(self.SKILL_PATH, create_mock_repo, {"main.py": "print('hi')\n"})
+        assert finding.category == "container"
+        assert finding.severity == Severity.medium
+        assert finding.description == "No Containerfile found for container builds"
+        assert finding.recommendation == "Create a multi-stage Containerfile using UBI base image"
+
+    def test_passes_when_containerfile_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {"Containerfile": "FROM registry.access.redhat.com/ubi9\n"})
