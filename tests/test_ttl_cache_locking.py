@@ -2,7 +2,7 @@
 that used to have zero locking around their read-check-write critical
 section -- ``fleet.py::_argo_cache``, ``health.py::_deploy_status_cache``,
 ``capabilities.py::_skills_cache``/``_checks_cache``, and
-``helpers.py::_nav_gate_badges_cache``.
+``helpers.py::_nav_pending_actions_cache``.
 
 Rather than trying to catch a probabilistic race directly (inherently
 flaky), each test swaps the module's real lock for an instrumented one
@@ -55,7 +55,7 @@ class _TrackingLock:
 
 class _TrackingAsyncLock:
     """Async counterpart of ``_TrackingLock``, for the one cache
-    (``helpers._nav_gate_badges_cache``) guarded by an ``asyncio.Lock``."""
+    (``helpers._nav_pending_actions_cache``) guarded by an ``asyncio.Lock``."""
 
     def __init__(self):
         self._lock = asyncio.Lock()
@@ -204,14 +204,14 @@ class TestCapabilitiesSkillsChecksCacheLock:
         capabilities_routes._skills_cache["ts"] = 0
 
 
-class TestNavGateBadgesCacheLock:
-    async def test_nav_gate_badges_lock_provides_mutual_exclusion(self, monkeypatch):
+class TestNavPendingActionsCacheLock:
+    async def test_nav_pending_actions_lock_provides_mutual_exclusion(self, monkeypatch):
         tracking = _TrackingAsyncLock()
-        monkeypatch.setattr(helpers, "_nav_gate_badges_lock", tracking)
-        helpers._nav_gate_badges_cache["ts"] = 0.0
+        monkeypatch.setattr(helpers, "_nav_pending_actions_lock", tracking)
+        helpers._nav_pending_actions_cache["ts"] = 0.0
 
         class _SlowStore:
-            # get_nav_gate_badge_counts() now goes through pr_tracking.py's
+            # get_nav_pending_action_counts() now goes through pr_tracking.py's
             # count_fleet_prs_waiting_for_approval()/collect_fleet_pr_records()
             # (2026-07-19, PR-status-derived Ledger fix) -- get_fleet_data()
             # is its first, unguarded call, so slowing it down is enough to
@@ -222,7 +222,7 @@ class TestNavGateBadgesCacheLock:
                 return []
 
         store = _SlowStore()
-        await asyncio.gather(*(helpers.get_nav_gate_badge_counts(store) for _ in range(20)))
+        await asyncio.gather(*(helpers.get_nav_pending_action_counts(store) for _ in range(20)))
 
         assert tracking.max_concurrent == 1
-        helpers._nav_gate_badges_cache["ts"] = 0.0
+        helpers._nav_pending_actions_cache["ts"] = 0.0

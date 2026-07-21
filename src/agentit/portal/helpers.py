@@ -269,7 +269,7 @@ async def get_store():
     return _store
 
 
-# ── Nav gate badges ───────────────────────────────────────────────────
+# ── Nav pending-action badge ─────────────────────────────────────────
 #
 # approval on Ledger's link -- the same PR-status-derived count Ledger's
 # own "Waiting for your approval" stat shows (pr_tracking.py's
@@ -277,11 +277,19 @@ async def get_store():
 # any PR that's still open and unmerged on GitHub. Every other app-owner
 # recommendation (`rollback-review`, `finding-unresolved-escalation`, ...)
 # stays visible via Fleet's per-app "needs action"/escalation badges and
-# Assessment Detail's own Ledger tab, not this nav badge. Cached briefly
-# since nav renders on every page.
+# Assessment Detail's own Ledger tab, not this nav badge -- deliberately
+# not the same "how many pending actions" definition
+# `pending_actions.py`'s helpers cover (see that module's own docstring).
+# Cached briefly since nav renders on every page.
+#
+# Named `_nav_gate_*`/`get_nav_gate_badge_counts` until this rename: pure
+# naming leftover from when the now-removed `gates` table backed this
+# count -- it has been PR-status-derived, not gate-derived, since
+# 2026-07-19 (see git history), so the name no longer matched what this
+# actually computes.
 
-_nav_gate_badges_cache: dict = {"pending_actions": 0, "ts": 0.0}
-_NAV_GATE_BADGES_CACHE_TTL = 20  # seconds
+_nav_pending_actions_cache: dict = {"pending_actions": 0, "ts": 0.0}
+_NAV_PENDING_ACTIONS_CACHE_TTL = 20  # seconds
 # Double-checked locking, mirroring get_store() above: the `await
 # count_fleet_prs_waiting_for_approval(...)` below is a genuine yield
 # point, so without a lock, multiple concurrent requests can all see a
@@ -289,26 +297,26 @@ _NAV_GATE_BADGES_CACHE_TTL = 20  # seconds
 # for a third caller. This is async-only (never invoked via
 # asyncio.to_thread), so an `asyncio.Lock` -- not a `threading.Lock` -- is
 # the correct primitive here.
-_nav_gate_badges_lock = asyncio.Lock()
+_nav_pending_actions_lock = asyncio.Lock()
 
 
-async def get_nav_gate_badge_counts(store: object) -> dict[str, int]:
+async def get_nav_pending_action_counts(store: object) -> dict[str, int]:
     now = _time.monotonic()
-    if now - _nav_gate_badges_cache["ts"] < _NAV_GATE_BADGES_CACHE_TTL:
-        return {"pending_actions": _nav_gate_badges_cache["pending_actions"]}
-    async with _nav_gate_badges_lock:
+    if now - _nav_pending_actions_cache["ts"] < _NAV_PENDING_ACTIONS_CACHE_TTL:
+        return {"pending_actions": _nav_pending_actions_cache["pending_actions"]}
+    async with _nav_pending_actions_lock:
         now = _time.monotonic()
-        if now - _nav_gate_badges_cache["ts"] < _NAV_GATE_BADGES_CACHE_TTL:
-            return {"pending_actions": _nav_gate_badges_cache["pending_actions"]}
+        if now - _nav_pending_actions_cache["ts"] < _NAV_PENDING_ACTIONS_CACHE_TTL:
+            return {"pending_actions": _nav_pending_actions_cache["pending_actions"]}
         try:
             from agentit.portal.pr_tracking import count_fleet_prs_waiting_for_approval
             pending_actions = await count_fleet_prs_waiting_for_approval(store)
         except Exception:
-            log.debug("Failed to refresh nav gate badge counts", exc_info=True)
+            log.debug("Failed to refresh nav pending-action badge counts", exc_info=True)
             pending_actions = 0
 
-        _nav_gate_badges_cache["pending_actions"] = pending_actions
-        _nav_gate_badges_cache["ts"] = now
+        _nav_pending_actions_cache["pending_actions"] = pending_actions
+        _nav_pending_actions_cache["ts"] = now
         return {"pending_actions": pending_actions}
 
 

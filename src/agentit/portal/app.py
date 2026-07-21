@@ -24,7 +24,7 @@ from agentit.portal.helpers import (
     get_store,
     get_retention_days,
     get_current_user,
-    get_nav_gate_badge_counts,
+    get_nav_pending_action_counts,
     is_authenticated,
     OAUTH_PROXY_SIGN_OUT_PATH,
     safe_url as _safe_url,
@@ -89,12 +89,12 @@ def _auth_context_processor(request: Request) -> dict:
 
 
 def _nav_badges_context_processor(request: Request) -> dict:
-    """Exposes the gate-count nav badge to every template -- computed by
-    `nav_badges_middleware` below and stashed on `request.state`, since
-    Jinja2Templates' context_processors run synchronously and can't
-    themselves `await` the store. See `helpers.get_nav_gate_badge_counts`
-    for what this count means and why this exists (docs/ui-redesign-
-    proposal.md §2/§5's nav-badge fix)."""
+    """Exposes the pending-action-count nav badge to every template --
+    computed by `nav_badges_middleware` below and stashed on
+    `request.state`, since Jinja2Templates' context_processors run
+    synchronously and can't themselves `await` the store. See
+    `helpers.get_nav_pending_action_counts` for what this count means and
+    why this exists (docs/ui-redesign-proposal.md §2/§5's nav-badge fix)."""
     return {
         "nav_pending_actions": getattr(request.state, "nav_pending_actions", 0),
     }
@@ -167,9 +167,9 @@ _NAV_BADGE_SKIP_PREFIXES = ("/api/", "/healthz", "/metrics", "/oauth")
 
 @app.middleware("http")
 async def nav_badges_middleware(request: Request, call_next):
-    """Precomputes the two gate-count nav badges (see
-    `helpers.get_nav_gate_badge_counts`, itself cached briefly) so the
-    synchronous Jinja2 context processor above can read them off
+    """Precomputes the pending-action-count nav badge (see
+    `helpers.get_nav_pending_action_counts`, itself cached briefly) so the
+    synchronous Jinja2 context processor above can read it off
     `request.state` -- the DB read has to happen here, in an actual
     coroutine, not in the context processor itself. Skipped for API/health/
     metrics/oauth paths, which never render `base.html`'s nav and don't
@@ -178,10 +178,10 @@ async def nav_badges_middleware(request: Request, call_next):
     if not request.url.path.startswith(_NAV_BADGE_SKIP_PREFIXES):
         try:
             s = await get_store()
-            counts = await get_nav_gate_badge_counts(s)
+            counts = await get_nav_pending_action_counts(s)
             request.state.nav_pending_actions = counts["pending_actions"]
         except Exception:
-            log.debug("Failed to compute nav gate badge counts", exc_info=True)
+            log.debug("Failed to compute nav pending-action badge counts", exc_info=True)
     return await call_next(request)
 
 
