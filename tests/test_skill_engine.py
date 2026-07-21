@@ -778,6 +778,99 @@ class TestSelfManagedGenerationConstraints:
         assert "SELF-MANAGED AGENTIT" in captured["user"]
         assert "{{ .Release.Namespace }}" in files[0].content
 
+    def test_self_managed_hpa_skips_template_without_llm(self, tmp_path: Path) -> None:
+        """Deployment-shaped HPA template must not ship for AgentIT chart."""
+        skill = Skill(
+            name="hpa",
+            domain="infrastructure",
+            version=1,
+            triggers=["scaling"],
+            outputs=["HorizontalPodAutoscaler"],
+            property_description="scales",
+            body=(
+                "# HPA\n\n```yaml\n"
+                "apiVersion: autoscaling/v2\n"
+                "kind: HorizontalPodAutoscaler\n"
+                "metadata:\n  name: {{app_name}}\n"
+                "spec:\n"
+                "  scaleTargetRef:\n"
+                "    apiVersion: apps/v1\n"
+                "    kind: Deployment\n"
+                "    name: {{app_name}}\n"
+                "  minReplicas: 2\n  maxReplicas: 10\n"
+                "```\n"
+            ),
+            file_path="skills/infrastructure/hpa.md",
+            mode="template",
+        )
+        engine = SkillEngine(tmp_path, platform=None, self_managed=True)
+        assert engine.generate(skill, make_report(repo_name="agentit"), llm_client=None) == []
+
+    def test_self_managed_llm_rejects_wrong_hpa_accepts_rollout(self, tmp_path: Path) -> None:
+        skill = _make_skill(
+            "hpa", outputs=["HorizontalPodAutoscaler"], mode="llm", triggers=["scaling"],
+        )
+        engine = SkillEngine(tmp_path, platform=None, self_managed=True)
+        report = make_report(repo_name="agentit")
+        captured: dict[str, str] = {}
+        calls = {"n": 0}
+
+        class _FakeLLM:
+            def _chat(self, system, user, max_tokens=None):
+                captured["user"] = user
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    # #134-shaped junk
+                    return (
+                        "apiVersion: autoscaling/v2\n"
+                        "kind: HorizontalPodAutoscaler\n"
+                        "metadata:\n"
+                        "  name: \"{{ .Release.Name }}-agentit\"\n"
+                        "  namespace: \"{{ .Release.Namespace }}\"\n"
+                        "spec:\n"
+                        "  scaleTargetRef:\n"
+                        "    apiVersion: apps/v1\n"
+                        "    kind: Deployment\n"
+                        "    name: \"{{ .Release.Name }}-agentit\"\n"
+                        "  minReplicas: 2\n"
+                        "  maxReplicas: 10\n"
+                        "  metrics:\n"
+                        "    - type: Resource\n"
+                        "      resource:\n"
+                        "        name: cpu\n"
+                        "        target:\n"
+                        "          type: Utilization\n"
+                        "          averageUtilization: 80\n"
+                    )
+                return (
+                    "apiVersion: autoscaling/v2\n"
+                    "kind: HorizontalPodAutoscaler\n"
+                    "metadata:\n"
+                    "  name: \"{{ .Release.Name }}\"\n"
+                    "  namespace: \"{{ .Release.Namespace }}\"\n"
+                    "spec:\n"
+                    "  scaleTargetRef:\n"
+                    "    apiVersion: argoproj.io/v1alpha1\n"
+                    "    kind: Rollout\n"
+                    "    name: \"{{ .Release.Name }}\"\n"
+                    "  minReplicas: 1\n"
+                    "  maxReplicas: 1\n"
+                    "  metrics:\n"
+                    "    - type: Resource\n"
+                    "      resource:\n"
+                    "        name: cpu\n"
+                    "        target:\n"
+                    "          type: Utilization\n"
+                    "          averageUtilization: 80\n"
+                )
+
+        files = engine.generate(skill, report, llm_client=_FakeLLM())
+        assert "HORIZONTALPODAUTOSCALER" in captured["user"]
+        assert len(files) == 1
+        assert "kind: Rollout" in files[0].content
+        assert "maxReplicas: 1" in files[0].content
+        assert calls["n"] == 2
+
 
 class TestSkillToCheckDefinition:
     """_skill_to_check_definition()/detect_check_definitions() -- the bridge

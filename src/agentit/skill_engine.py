@@ -370,6 +370,21 @@ _SELF_MANAGED_GENERATION_CONSTRAINTS = (
     "nothing (empty) — a skills/** markdown PR is preferred over raw K8s dumps.\n"
 )
 
+# Extra constraints when generating HorizontalPodAutoscaler for AgentIT.git.
+# The chart workload is Rollout named {{ .Release.Name }}; data PVC is RWO.
+_SELF_MANAGED_HPA_CONSTRAINTS = (
+    "HORIZONTALPODAUTOSCALER / AGENTIT CHART (fail closed if unsure — return empty):\n"
+    "- scaleTargetRef.name MUST be exactly {{ .Release.Name }} (quoted OK). "
+    "Never {{ .Release.Name }}-agentit or {{app_name}}-suffix guesses.\n"
+    "- When the chart uses Argo Rollouts (rollout.enabled default true): "
+    "scaleTargetRef.apiVersion=argoproj.io/v1alpha1, kind=Rollout — "
+    "NOT apps/v1 Deployment.\n"
+    "- The chart mounts a ReadWriteOnce data PVC: maxReplicas MUST be 1 "
+    "(or output nothing). Never maxReplicas: 10 against RWO.\n"
+    "- Prefer empty output over an HPA that would not attach or would "
+    "Multi-Attach — delivery will refuse bad HPAs into needs_attention.\n"
+)
+
 
 class SkillEngine:
     """Loads skills from a directory and applies them to assessment reports."""
@@ -441,6 +456,22 @@ class SkillEngine:
             )
             return []
 
+        # Self-managed HPA template fallback is Deployment-shaped and wrong for
+        # the AgentIT Rollout chart — only accept LLM output that passes the
+        # HPA correctness gate (or skip entirely).
+        if (
+            self.self_managed
+            and "HorizontalPodAutoscaler" in skill.outputs
+            and not (llm_client and hasattr(llm_client, "_chat"))
+        ):
+            logger.info(
+                "Skipping skill %s template fallback in self-managed mode — "
+                "HPA must be LLM-tailored for Rollout/{{ .Release.Name }}/RWO "
+                "(or skipped into needs_attention)",
+                skill.name,
+            )
+            return []
+
         app_name = _sanitize_name(report.repo_name)
 
         # Check if the output kind is available on the platform
@@ -496,15 +527,21 @@ class SkillEngine:
         """True when content is acceptable for AgentIT.git chart/ delivery.
 
         Mirrors ``delivery.is_helm_shaped`` + forbidden kinds without importing
-        ``portal.delivery`` (avoids a skill_engine ↔ delivery cycle).
+        ``portal.delivery`` (avoids a skill_engine ↔ delivery cycle). Also
+        refuse HPAs that fail Rollout/name/RWO correctness (``self_managed_hpa``).
         """
         from agentit.portal.cluster_apply import _parse_manifest
+        from agentit.portal.self_managed_hpa import self_managed_hpa_correctness_reason
 
         if not any(m in (content or "") for m in ("{{ .Values", "{{ .Release", "{{-")):
             return False
         docs = _parse_manifest(content)
         kinds = {(doc.get("kind") or "") for doc in docs}
-        return not (kinds & _SELF_MANAGED_FORBIDDEN_OUTPUTS)
+        if kinds & _SELF_MANAGED_FORBIDDEN_OUTPUTS:
+            return False
+        if self_managed_hpa_correctness_reason(content) is not None:
+            return False
+        return True
 
     def _generate_with_llm(self, skill: Skill, report: AssessmentReport,
                            app_name: str, llm_client: object,
@@ -545,6 +582,8 @@ class SkillEngine:
         )
         if self.self_managed:
             user += _SELF_MANAGED_GENERATION_CONSTRAINTS + "\n"
+            if "HorizontalPodAutoscaler" in skill.outputs:
+                user += _SELF_MANAGED_HPA_CONSTRAINTS + "\n"
         user += (
             f"Skill instructions:\n{skill.body}\n\n"
             f"Generate the appropriate {', '.join(skill.outputs)} for this application."
@@ -573,14 +612,23 @@ class SkillEngine:
             if self.self_managed and not self._is_self_managed_safe_content(content):
                 logger.debug(
                     "LLM output for %s rejected in self-managed mode "
-                    "(not Helm-shaped or forbidden kinds); attempt %d",
+                    "(not Helm-shaped, forbidden kinds, or bad HPA); attempt %d",
                     skill.name, attempt + 1,
                 )
-                user += (
-                    "\n\nYour previous output was rejected for self-managed AgentIT: "
-                    "it must be Helm-shaped ({{ .Values / {{ .Release / {{-) and must "
+                from agentit.portal.self_managed_hpa import (
+                    self_managed_hpa_correctness_reason,
+                )
+                hpa_why = self_managed_hpa_correctness_reason(content)
+                extra = (
+                    f" HPA correctness: {hpa_why}."
+                    if hpa_why else
+                    " It must be Helm-shaped ({{ .Values / {{ .Release / {{-) and must "
                     "not include PipelineRun/ClusterRole/ClusterRoleBinding/ClusterTask/"
-                    "Application. Fix or return empty."
+                    "Application."
+                )
+                user += (
+                    "\n\nYour previous output was rejected for self-managed AgentIT."
+                    f"{extra} Fix or return empty."
                 )
                 continue
 

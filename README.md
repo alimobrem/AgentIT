@@ -34,6 +34,10 @@ Self-managed delivery gates (#119/#121), watchers, and Scan→GitOps delivery ar
 
 ---
 
+**Self-managed HPA correctness (2026-07-21).** Closed dogfood #134 (wrong `scaleTargetRef`: Deployment / `{{ .Release.Name }}-agentit`, unsafe `maxReplicas` on RWO). Scan now refuses or rewrites AgentIT chart HPAs via `portal/self_managed_hpa.py` + SkillEngine prompts: target Argo `Rollout` named `{{ .Release.Name }}` when the chart uses rollouts; cap or skip HPA when the data PVC is ReadWriteOnce; fail closed into `needs_attention` rather than open a PR that clears `hpa-exists` without attaching. Skill: `skills/infrastructure/hpa.md`. Tests: `TestSelfManagedHpaCorrectness`, skill-engine HPA self-managed cases.
+
+---
+
 ### Image promotion / Tekton CI (how the portal gets a new image)
 
 Merge to `main` is **not** enough for the live portal to move. Path:

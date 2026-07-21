@@ -66,6 +66,12 @@ Acceptance is measurable and differs by path. “Helm-shaped” is necessary for
 
 **Anti-definition (not a good PR even if green):** Helm-shaped fluff that adds unused templates; skill pack dumps; “onboard everything” batches with no finding link; PRs that exist only because Auto-Scan always generates.
 
+### App-correctness beyond Helm-shaped (post-#134)
+
+`validate_self_managed_chart_delivery()` / Helm markers prove a file *looks* like a chart patch. They do **not** prove it *attaches* to the live workload. Dogfood #134 cleared the structural bar with an HPA that targeted `Deployment` / `{{ .Release.Name }}-agentit` while the chart uses an Argo Rollout named `{{ .Release.Name }}`, and set `maxReplicas: 10` against a ReadWriteOnce data PVC.
+
+**Bar addendum for self-managed chart PRs:** scale targets (name + kind/apiVersion) must match chart workload facts (`portal/self_managed_hpa.py`); RWO-backed apps must not get multi-replica HPA lies. Prefer `needs_attention` + why over opening a PR that would clear `hpa-exists` without working.
+
 ---
 
 ## 2. Current gaps (why #124-class PRs still aren’t “help the app”)
@@ -295,6 +301,7 @@ Prioritize dogfood AgentIT.git; keep simplify unblocked.
 | ------- | ----- |
 | Scan pre-PR pipeline | `src/agentit/portal/auto_delivery.py` |
 | Route + deliver + filter + chart gate | `src/agentit/portal/delivery.py` (`filter_self_managed_delivery_files`, `validate_self_managed_chart_delivery`, `route_and_deliver`, `correlate_delivery_finding`) |
+| Self-managed HPA app-correctness | `src/agentit/portal/self_managed_hpa.py` (Rollout name/kind + RWO maxReplicas; wired into filter/gate + SkillEngine) |
 | SSA dry-run | `src/agentit/portal/cluster_apply.py` (`dry_run_manifests_against_cluster`) |
 | Source / infra PRs | `src/agentit/portal/github_pr.py` (`create_source_patch_pr`, `commit_to_infra_repo`) |
 | Generation constraints | `src/agentit/skill_engine.py` (`SkillEngine(self_managed=…)`, `generate_for_finding`, `record_skill_outcomes`) |

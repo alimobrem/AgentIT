@@ -34,7 +34,52 @@ from agentit.portal.delivery import (
     route_and_deliver,
     validate_self_managed_chart_delivery,
 )
+from agentit.portal.self_managed_hpa import (
+    SelfManagedChartHints,
+    inspect_self_managed_chart,
+    self_managed_hpa_correctness_reason,
+)
 from conftest import make_async_store, make_report
+
+
+def _helm_hpa_content(
+    *,
+    kind: str = "Rollout",
+    api_version: str = "argoproj.io/v1alpha1",
+    name: str = '"{{ .Release.Name }}"',
+    max_replicas: int = 1,
+) -> str:
+    """Helm-shaped HPA for self-managed chart tests (quoted templates)."""
+    return (
+        "apiVersion: autoscaling/v2\n"
+        "kind: HorizontalPodAutoscaler\n"
+        "metadata:\n"
+        "  name: \"{{ .Release.Name }}\"\n"
+        "  namespace: \"{{ .Release.Namespace }}\"\n"
+        "spec:\n"
+        "  scaleTargetRef:\n"
+        f"    apiVersion: {api_version}\n"
+        f"    kind: {kind}\n"
+        f"    name: {name}\n"
+        "  minReplicas: 1\n"
+        f"  maxReplicas: {max_replicas}\n"
+        "  metrics:\n"
+        "    - type: Resource\n"
+        "      resource:\n"
+        "        name: cpu\n"
+        "        target:\n"
+        "          type: Utilization\n"
+        "          averageUtilization: 80\n"
+    )
+
+
+def _helm_hpa_file(**kwargs) -> dict:
+    return {
+        "category": "skills",
+        "path": "agentit-hpa.yaml",
+        "content": _helm_hpa_content(**kwargs),
+        "description": "helm hpa",
+    }
 
 
 def _cluster_config_file() -> dict:
@@ -528,6 +573,73 @@ class TestSelfManagedChartDeliveryGate:
             "content": "# not helm\n",
         }]
         assert validate_self_managed_chart_delivery(files, path_exists={}) is None
+
+
+class TestSelfManagedHpaCorrectness:
+    """App-correct HPA beyond Helm-shaped: Rollout target + RWO maxReplicas."""
+
+    def test_repo_chart_hints_detect_rollout_and_rwo(self):
+        hints = inspect_self_managed_chart()
+        assert hints.uses_rollout is True
+        assert hints.has_rwo_workload_pvc is True
+
+    def test_refuses_deployment_hpa_when_chart_has_rollout(self):
+        hints = SelfManagedChartHints(uses_rollout=True, has_rwo_workload_pvc=True)
+        bad = _helm_hpa_file(
+            kind="Deployment",
+            api_version="apps/v1",
+            name='"{{ .Release.Name }}-agentit"',
+            max_replicas=10,
+        )
+        remapped = remap_self_managed_cluster_files([bad])
+        reason = validate_self_managed_chart_delivery(
+            remapped,
+            path_exists={remapped[0]["target_path"]: False},
+            chart_hints=hints,
+        )
+        assert reason is not None
+        assert "Rollout" in reason
+        assert "No PR opened" in reason
+        kept, drop_reasons = filter_self_managed_delivery_files(
+            remapped, chart_hints=hints,
+        )
+        assert kept == []
+        assert any("Rollout" in r for r in drop_reasons)
+
+    def test_accepts_correctly_wired_rollout_hpa(self):
+        hints = SelfManagedChartHints(uses_rollout=True, has_rwo_workload_pvc=True)
+        good = _helm_hpa_file(
+            kind="Rollout",
+            api_version="argoproj.io/v1alpha1",
+            name='"{{ .Release.Name }}"',
+            max_replicas=1,
+        )
+        remapped = remap_self_managed_cluster_files([good])
+        assert validate_self_managed_chart_delivery(
+            remapped,
+            path_exists={remapped[0]["target_path"]: False},
+            chart_hints=hints,
+        ) is None
+        kept, reasons = filter_self_managed_delivery_files(
+            remapped, chart_hints=hints,
+        )
+        assert len(kept) == 1
+        assert reasons == []
+
+    def test_refuses_rwo_max_replicas_above_one(self):
+        hints = SelfManagedChartHints(uses_rollout=True, has_rwo_workload_pvc=True)
+        content = _helm_hpa_content(max_replicas=10)
+        why = self_managed_hpa_correctness_reason(content, hints=hints)
+        assert why is not None
+        assert "ReadWriteOnce" in why or "RWO" in why
+        remapped = remap_self_managed_cluster_files([_helm_hpa_file(max_replicas=10)])
+        reason = validate_self_managed_chart_delivery(
+            remapped,
+            path_exists={remapped[0]["target_path"]: False},
+            chart_hints=hints,
+        )
+        assert reason is not None
+        assert "ReadWriteOnce" in reason or "maxReplicas" in reason
 
 
 class TestSelfManagedP1GenerationQuality:
