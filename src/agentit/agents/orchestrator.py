@@ -90,39 +90,17 @@ AGENT_MODE = _read_agent_mode()
 # resolved -- it is not itself a conflict trigger. Two agents both
 # succeeding is normal and expected, not a conflict.
 #
-# security/observability/cicd/compliance/infrastructure/release (and
-# incident/retirement/chaos) are now skill-only domains -- their Python
-# agents were removed (see docs/agent-removal-readiness.md), so no
-# AgentResult is ever produced with those categories anymore; every entry
-# this dict used to have referenced at least one of them and could never
-# fire again. `cost`, `dependency`, and `codechange` are the only
-# surviving Python agent categories, plus the aggregate `skills` category
-# (Step 1 of run(), one AgentResult covering every matched skill's
-# output). The only genuine remaining collision -- cost's VPA vs. the
-# skill-generated HPA -- is a resource-kind conflict, not a generic
-# priority one, and is registered below in KNOWN_KIND_CONFLICTS instead.
-# `codechange`/`dependency` output (source patches, dependency configs)
-# has no plausible overlap with `cost` or `skills` output, so there's no
-# other real pairing to add here today.
-PRIORITY_MATRIX = {
-    # HPA (skill-generated, availability-oriented replica scaling) wins
-    # over an actively-resizing VPA (cost agent, "Auto" mode) -- see
-    # KNOWN_KIND_CONFLICTS below and agents/cost.py's `_generate_vpa()`.
-    ("skills", "cost"): "skills",
-}
+# Cost/dependency Python agents are gone — skills own those remediations
+# (VPA/HPA/Renovate/etc.). The only remaining Python onboarding agent is
+# `codechange` (optional source-repo patches), plus the aggregate
+# `skills` AgentResult from Step 1. No cross-agent kind collision remains
+# that needs a priority matrix entry today (HPA and VPA both come from
+# skills under one AgentResult).
+PRIORITY_MATRIX: dict[tuple[str, str], str] = {}
 
-# Known agent-pair / resource-kind combinations that genuinely conflict
-# when both are actually present for the same workload -- e.g. a VPA in
-# "Auto" mode fights an HPA for control over replica/resource sizing.
-# `infrastructure` (the former Python agent that generated the HPA) was
-# removed -- `hpa` is now a skill (skills/infrastructure/hpa.md,
-# domain=infrastructure) generated in Step 1 of run() under the
-# aggregate `skills` AgentResult, so this pairing is keyed on `skills`,
-# not `infrastructure`, to actually match a real AgentResult.agent_name.
-# See the TODO(orchestrator) marker in agents/cost.py.
-KNOWN_KIND_CONFLICTS: dict[tuple[str, str], tuple[str, str]] = {
-    ("cost", "skills"): ("VerticalPodAutoscaler", "HorizontalPodAutoscaler"),
-}
+# Reserved for future kind-pair collisions across distinct AgentResults.
+# Empty after cost/dependency agent removal (skills emit VPA+HPA together).
+KNOWN_KIND_CONFLICTS: dict[tuple[str, str], tuple[str, str]] = {}
 
 
 @dataclass
@@ -331,24 +309,12 @@ class FleetOrchestrator:
         except Exception as exc:
             logger.debug("Skill engine failed (non-fatal): %s", exc)
 
-        # --- Step 2: Determine which agents to skip (covered by skills) ---
-        # cost/dependency are the two exceptions kept per
-        # docs/agent-removal-readiness.md specifically for their narrative
-        # report generation (cost-report.md/dependency-report.md), which
-        # depends on runtime-computed data (detected ecosystems/CVEs,
-        # computed cost tier) that no skill template has access to. Their
-        # *manifest* outputs (vpa/cost-labels/cost-cronjob,
-        # renovate/dependabot/dependency-cronjob) are also covered by
-        # skills, so this domain-level skip would otherwise skip the whole
-        # agent -- narrative report included -- the moment any one of
-        # those manifest skills matches, making "kept in place" a no-op in
-        # practice. Never skip these two specifically for that reason.
-        _NEVER_SKIP = {"cost", "dependency"}
+        # --- Step 2: Skip Python agents whose domain skills already covered ---
+        # Only `codechange` remains as a Python onboarding agent (source
+        # patches, not K8s manifests). Skills own cost/dependency/etc.
         skip_agents: set[str] = set()
         if skill_covered_domains:
             for agent_name in plan.agents_to_run:
-                if agent_name in _NEVER_SKIP:
-                    continue
                 agent_category = agent_map.get(agent_name, (agent_name,))[0]
                 if agent_category in skill_covered_domains:
                     skip_agents.add(agent_name)
@@ -679,9 +645,9 @@ class FleetOrchestrator:
         else:
             agents = []
 
+        # Skills own cluster remediations. Optionally run codechange for
+        # source-repo patches when the app is high-criticality or low-score.
         if self._profile in ("standard", "full") or profile_agents is None:
-            if self.report.criticality in ("high", "critical"):
-                agents.extend(["dependency", "cost"])
             if self.report.criticality in ("high", "critical") or self.report.overall_score < 50:
                 agents.append("codechange")
 
@@ -722,12 +688,12 @@ class FleetOrchestrator:
         structurally possible since the security/observability/cicd/
         compliance/infrastructure/incident/release/retirement/chaos Python
         agents were removed once skills covered their domains (see
-        ``AGENT_CLASSES`` in ``agents/capabilities.py`` -- only ``cost``/
-        ``dependency``/``codechange`` remain, plus a synthetic ``"skills"``
-        result). Removed 2026-07-20 as dead code, along with the
-        now-equally-dead ``"BLOCKED: ..."`` branch of
-        ``_generate_recommendation()`` below, since this was the only
-        producer of a ``"type": "blocker"`` conflict anywhere.
+        ``AGENT_CLASSES`` in ``agents/capabilities.py`` -- only
+        ``codechange`` remains, plus a synthetic ``"skills"`` result).
+        Removed 2026-07-20 as dead code, along with the now-equally-dead
+        ``"BLOCKED: ..."`` branch of ``_generate_recommendation()`` below,
+        since this was the only producer of a ``"type": "blocker"``
+        conflict anywhere.
         """
         conflicts: list[dict] = []
 
@@ -826,23 +792,26 @@ class FleetOrchestrator:
         # blocker, so `warnings` below is simply every conflict.
         warnings = conflicts
 
-        if fail_count > 0:
-            return f"PARTIAL: {success_count}/{success_count + fail_count} agents succeeded, {total_files} files generated. Review failures before deploying."
+        skill_ok = any(r.agent_name == "skills" and r.success for r in results)
+        codechange = next((r for r in results if r.agent_name == "codechange"), None)
 
-        # An "AUTO-APPROVED: ..." branch used to fire here on
-        # `plan.auto_approve` (computed from score/criticality alone) --
-        # removed 2026-07-20 alongside `plan.auto_approve` itself, since
-        # its one real consumer (AutoMode) is fully removed and every
-        # delivery always requires an explicit human Deliver click
-        # regardless of criticality/score (see the README's "AutoMode
-        # removed entirely" entry). `onboard_results.html`/
-        # `onboarding_history.html` still special-case "AUTO-APPROVED"/
-        # "BLOCKED" text for historical rows already persisted with those
-        # strings -- deliberately left alone so old records keep rendering
-        # correctly; no new onboarding will ever produce either string
-        # again.
+        if fail_count > 0:
+            failed = ", ".join(r.agent_name for r in results if not r.success)
+            return (
+                f"GENERATION INCOMPLETE: {total_files} file(s) produced; "
+                f"failed: {failed}. Review before Scan delivery."
+            )
+
+        # Skills-primary summary — codechange is an optional source-patch
+        # path, not a peer "domain agent" in a 3-agent fleet.
+        parts = [f"{total_files} remediation file(s)"]
+        if skill_ok:
+            skill_n = next(len(r.files_generated) for r in results if r.agent_name == "skills")
+            parts.append(f"skills generated {skill_n}")
+        if codechange and codechange.success and codechange.files_generated:
+            parts.append(f"codechange proposed {len(codechange.files_generated)} source patch(es)")
         warn_suffix = f" ({len(warnings)} conflict(s) — review before proceeding)" if warnings else ""
-        return f"READY FOR REVIEW: All {success_count} agents succeeded, {total_files} files generated. Awaiting human approval.{warn_suffix}"
+        return f"READY FOR REVIEW: {'; '.join(parts)}. Scan opens PRs; merge on GitHub.{warn_suffix}"
 
     _SLO_DEFAULTS = {
         "critical": [

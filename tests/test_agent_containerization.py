@@ -38,37 +38,18 @@ class TestRunAgentCLI:
         Path(path).write_text(report.model_dump_json(), encoding="utf-8")
         return path
 
-    def test_run_cost_agent(self, tmp_path: Path):
-        # security is now a skill-only domain (see
-        # docs/agent-removal-readiness.md); "cost" is one of the three
-        # Python agents still registered.
+    def test_run_codechange_agent(self, tmp_path: Path):
+        """Optional source-patch agent remains CLI-runnable."""
         report = make_report()
         path = self._write_report(report)
         try:
             runner = CliRunner()
-            result = runner.invoke(main, ["run-agent", "cost", "--report", path])
+            result = runner.invoke(main, ["run-agent", "codechange", "--report", path])
             assert result.exit_code == 0, f"exit {result.exit_code}: {result.output}"
             payload = _extract_result(result.output)
             files = json.loads(payload)
             assert isinstance(files, list)
-            assert len(files) > 0
             assert all("path" in f and "content" in f for f in files)
-        finally:
-            Path(path).unlink(missing_ok=True)
-
-    def test_run_dependency_agent(self):
-        # observability is now a skill-only domain (see
-        # docs/agent-removal-readiness.md); "dependency" is one of the
-        # three Python agents still registered.
-        report = make_report()
-        path = self._write_report(report)
-        try:
-            runner = CliRunner()
-            result = runner.invoke(main, ["run-agent", "dependency", "--report", path])
-            assert result.exit_code == 0, f"exit {result.exit_code}: {result.output}"
-            payload = _extract_result(result.output)
-            files = json.loads(payload)
-            assert len(files) > 0
         finally:
             Path(path).unlink(missing_ok=True)
 
@@ -116,10 +97,7 @@ class TestOrchestratorK8sMode:
         """Default mode is local (in-process) — no K8s Jobs created."""
         from agentit.agents.orchestrator import FleetOrchestrator
 
-        # criticality="high" so dependency/cost/codechange are planned --
-        # security/observability/etc. are now skill-only domains and no
-        # longer show up in plan.agents_to_run at all (see
-        # docs/agent-removal-readiness.md).
+        # criticality=high plans optional codechange; skills run first.
         report = make_report(criticality="high")
         with tempfile.TemporaryDirectory() as tmpdir:
             orch = FleetOrchestrator(report=report, output_dir=Path(tmpdir))

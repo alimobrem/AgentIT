@@ -797,7 +797,7 @@ class TestAgentRegistry:
         assert remaining == {"cost"}
 
     async def test_prune_stale_agents_preserves_known_names(self, store):
-        known = {"cost", "dependency", "codechange", "vuln-watcher"}
+        known = {"codechange", "vuln-watcher"}
         for name in known:
             await store.register_agent(name, "test")
 
@@ -1178,13 +1178,13 @@ class TestBackgroundMaintenanceAsyncHelpers:
         from agentit.agent_registry_cleanup import prune_stale_agents_and_log
 
         await store.register_agent("chaos", "chaos")
-        await store.register_agent("cost", "cost")
+        await store.register_agent("codechange", "codechange")
 
         pruned = await prune_stale_agents_and_log(store)
 
         assert pruned == ["chaos"]
         remaining = {a["agent_name"] for a in await store.list_agents()}
-        assert remaining == {"cost"}
+        assert remaining == {"codechange"}
 
     async def test_diff_and_log_inventory_changes(self, store, tmp_path):
         from agentit.skill_inventory import diff_and_log_inventory_changes

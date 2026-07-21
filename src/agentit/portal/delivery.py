@@ -567,9 +567,8 @@ def classify_file(entry: dict) -> str:
             return CATEGORY_NARRATIVE_REPORT
         return CATEGORY_SOURCE_PATCH
 
-    # DependencyAgent/CostOptimizationAgent's narrative reports -- real
-    # computed data, not a template, and never a delivery candidate (see
-    # taxonomy row "Narrative reports").
+    # Legacy cost/dependency narrative reports (agents removed) — still
+    # excluded from delivery if present in older onboarding_results rows.
     if category in ("dependency", "cost") and path in _NARRATIVE_REPORT_FILENAMES:
         return CATEGORY_NARRATIVE_REPORT
 

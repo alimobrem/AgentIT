@@ -229,11 +229,9 @@ async def agent_detail(request: Request, agent_name: str) -> HTMLResponse:
                 "last_heartbeat": "—",
             }
         elif agent_name in AGENT_CAPABILITIES:
-            # An onboarding agent (cost/dependency/codechange) that's never
-            # actually run in this deployment yet -- Catalog's "Onboarding
-            # Agents" reference table links here unconditionally (see
-            # capabilities.html), so this must render an honest "never run"
-            # page rather than 404 on a link the page itself put there.
+            # Optional source-patch agent (codechange) that's never run in
+            # this deployment yet -- Catalog links here for registered
+            # onboarding agents, so render an honest "never run" page.
             agent = {
                 "agent_name": agent_name,
                 "category": agent_name,

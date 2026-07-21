@@ -190,7 +190,10 @@ class SecurityAnalyzer:
             category="scanning",
             severity=Severity.high,
             description="No container or dependency vulnerability scanning detected in CI",
-            recommendation="Add ACS (StackRox) or Trivy scanning to the CI pipeline",
+            recommendation=(
+                "Add ACS (StackRox) or Trivy scanning to the CI pipeline; "
+                "enable automated dependency updates (Renovate/Dependabot) via skills"
+            ),
             source="analyzer:security",
         )]
 

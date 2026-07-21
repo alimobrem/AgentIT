@@ -13,7 +13,20 @@
 
 ---
 
-**Dry Run is Kubernetes apiserver server-side-apply `dryRun=All` (via `kube.apply_yaml(..., dry_run=True)`), not `kubectl`/`oc` CLI.** Portal and auto_delivery preflight validate post-filter/remap manifests against the live API, fail closed into `needs_attention` / clear UI errors (including missing CRDs), and never leave resources applied. Real apply remains GitOps only (PR merge + Argo). Runtime GitHub PR create/list/comments/status use REST (`portal/github_pr.py`); local `git` remains only for capability-scout's working-tree branch/push. Tekton `notify-argocd` also uses `kube.apply_yaml` (no `oc apply`). The hermetic pytest suite (`AGENTIT_OFFLINE=1`) mocks `dry_run_manifests_against_cluster` success via `tests/conftest.py`; real helper behavior is covered in `tests/test_cluster_dry_run.py`. Onboard Results is Scan-results-only (no manual Commit / Per-Agent CTAs).
+**Dry Run is Kubernetes apiserver server-side-apply `dryRun=All` (via `kube.apply_yaml(..., dry_run=True)`), not `kubectl`/`oc` CLI.** Portal and auto_delivery preflight validate post-filter/remap manifests against the live API, fail closed into `needs_attention` / clear UI errors (including missing CRDs), and never leave resources applied. Real apply remains GitOps only (PR merge + Argo). Runtime GitHub PR create/list/comments/status use REST (`portal/github_pr.py`); local `git` remains only for capability-scout's working-tree branch/push. Tekton `notify-argocd` also uses `kube.apply_yaml` (no `oc apply`). The hermetic pytest suite (`AGENTIT_OFFLINE=1`) mocks `dry_run_manifests_against_cluster` success via `tests/conftest.py`; real helper behavior is covered in `tests/test_cluster_dry_run.py`. **Skills are the primary remediation path; Scan is the sole PR creator** (no Per-Agent / Commit product paths).
+
+---
+
+**Skills-primary simplification (2026-07-21).** Founder-approved sequence landed as one cohesive change:
+
+1. **Per-Agent PRs deleted** — `create_agent_prs` / `POST …/create-agent-prs` and their tests removed. GitHub REST PR creation remains for Scan/`auto_delivery` (and source-patch / infra-repo helpers).
+2. **Dual emit stopped** — cost/dependency Python agents no longer emit cluster manifests that overlap skills (`skills/cost/*`, `skills/dependency/*`).
+3. **Reports → findings (or drop)** — narrative `cost-report.md` / `dependency-report.md` dropped with those agents; guidance folded into analyzer findings (resources / dependency scanning recommendations) that already trigger skills. Cost/dependency removed from onboard generation agents.
+4. **Onboard Results UX** — no PARTIAL 3-agent fleet table; **Generation Summary** is skills-primary with optional codechange as source patches.
+5. **Codechange KEEP** — optional standalone source-patch path (`agents/codechange.md`), not a peer domain agent to skills.
+6. **Hygiene** — agent registry prune, Capabilities catalog, architecture/README updated for the skills-primary model.
+
+Self-managed delivery gates (#119/#121), watchers, and Scan→GitOps delivery are unchanged. No Direct Apply.
 
 ---
 
@@ -130,15 +143,13 @@ The `infrastructure` dimension's analyzer now flags base images and language run
 
 ## The agent fleet
 
-**3 one-shot onboarding agents and 6 long-lived watchers (below; `capability-scout` is a 7th, covered separately in "Self-improvement of AgentIT itself").** Skills run **first**, unconditionally, as the primary generation path for every domain; the 3 remaining Python agents supplement for capabilities skills can't (or don't yet fully) replace. This is a smaller fleet than earlier versions of this doc described — `security`, `observability`, `cicd`, `compliance`, `infrastructure`, `incident`, `release`, `retirement`, and `chaos` used to each have a dedicated hardcoded Python agent; all nine were removed once skills (`skills/**/*.md`, template-fallback verified with no LLM required) reached full parity for every artifact those agents used to generate. See [`docs/agent-removal-readiness.md`](docs/agent-removal-readiness.md) for the domain-by-domain readiness audit this removal was executed against.
+**Skills own remediations; one optional Python source-patch agent; watchers stay.** Skills run **first**, unconditionally, for every domain (including cost/dependency — VPA, Renovate, etc.). Cost/dependency Python agents and Per-Agent PRs are gone. The only remaining one-shot Python onboarding agent is optional **CodeChangeAgent** (source patches to the app repo — not a peer "domain agent" to skills). Long-lived watchers are unchanged (below; `capability-scout` covered separately). See [`docs/agent-removal-readiness.md`](docs/agent-removal-readiness.md).
 
-| Agent | Category | Always runs? | Generates | Why it's still a Python agent |
+| Agent | Category | When it runs | Generates | Role |
 |---|---|---|---|---|
-| **DependencyAgent** | `dependency` | high/critical | Renovate/Dependabot config, CVE-scan CronWorkflow, **plus** a narrative `dependency-report.md` | Its *manifest* outputs are also skill-covered, but `dependency-report.md` needs real runtime-computed data (detected ecosystems, CVE package matches against `report.architecture.external_dependencies`) that a static skill template has no access to — faking it would violate this project's "no mock data" rule. `FleetOrchestrator` never skips this agent for skill coverage of its manifest outputs, specifically so the report keeps generating. |
-| **CostOptimizationAgent** | `cost` | high/critical | VPA, cost labels, cost CronWorkflow, **plus** a narrative `cost-report.md` | Same reasoning as `dependency` — `cost-report.md` needs a computed deployment tier (`_tier()`, from service/language count) and cost-lookup-table result a template can't produce. |
-| **CodeChangeAgent** | `codechange` | high/critical or score < 50 | `.gitignore`, health endpoints, OTel/structured-logging instrumentation — as source patches to the **app's own repo** | Fundamentally not skill-shaped: skills generate K8s manifests to apply to a cluster; they have no concept of "the application's source tree" and no PR/patch-application machinery. |
+| **CodeChangeAgent** | `codechange` | high/critical or score < 50 | `.gitignore`, health endpoints, OTel/structured-logging / Dockerfile patches to the **app's own repo** | Optional **source-patch** path — skills don't model app source trees. Not a domain peer to skills. |
 
-Conflict detection only flags *real* collisions between agent outputs — a known-conflicting resource-kind pair actually being generated for the same workload (e.g. an actively-resizing VPA alongside an HPA), or two agents writing a file at the same output path — not merely "both agents succeeded". `plan.auto_approve` (computed from score/criticality at plan time) is downgraded to `False` if a real conflict is found during the actual run, so it can be trusted end-to-end.
+Conflict detection only flags *real* collisions across distinct AgentResults (same output path). VPA+HPA both come from the skills result today, so the old cost-vs-skills kind matrix is empty.
 
 **Registration metadata for both tables above now lives in `agents/*.md`/`watchers/*.md`, not a Python dict literal** (Unification Phases 2-3, 2026-07-20 — see "Data-driven checks" below for the full writeup). Each table's actual content (what an agent generates, why it's still Python, a watcher's role) is unchanged by this — it's still real prose in this README, not generated from the `.md` files' frontmatter — this only changed *where `agents/capabilities.py`'s `AGENT_CLASSES`/`WATCHER_AGENTS` registries get their data from* (a file diff instead of a Python edit), not what either table says.
 

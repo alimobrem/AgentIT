@@ -18,9 +18,9 @@ from conftest import make_store
 class TestGetKnownAgentNames:
     def test_includes_surviving_python_agents(self) -> None:
         known = get_known_agent_names()
-        assert "cost" in known
-        assert "dependency" in known
         assert "codechange" in known
+        assert "cost" not in known
+        assert "dependency" not in known
 
     def test_includes_long_lived_watchers(self) -> None:
         known = get_known_agent_names()
@@ -37,6 +37,7 @@ class TestGetKnownAgentNames:
         removed = {
             "chaos", "cicd", "compliance", "hardening", "incident",
             "infrastructure", "observability", "release", "retirement",
+            "cost", "dependency",
         }
         assert known.isdisjoint(removed)
 
@@ -52,13 +53,13 @@ class TestPruneStaleAgentsAndLog:
         store = await make_store()
         for name in ("chaos", "cicd", "security"):
             await store.register_agent(name, name)
-        await store.register_agent("cost", "cost")
+        await store.register_agent("codechange", "codechange")
 
         pruned = await prune_stale_agents_and_log(store)
 
         assert sorted(pruned) == ["chaos", "cicd", "security"]
         remaining = {a["agent_name"] for a in await store.list_agents()}
-        assert remaining == {"cost"}
+        assert remaining == {"codechange"}
 
         events = await store.list_events_by_agent("agent-registry")
         assert len(events) == 1
@@ -67,11 +68,8 @@ class TestPruneStaleAgentsAndLog:
         assert "chaos" in events[0]["summary"]
 
     async def test_preserves_legitimate_agents_and_watchers(self) -> None:
-        """The 3 surviving Python agents plus the 4 watchers must never be
-        pruned, even if they're the only rows in the registry."""
+        """Optional codechange plus watchers must never be pruned."""
         store = await make_store()
-        await store.register_agent("cost", "cost")
-        await store.register_agent("dependency", "dependency")
         await store.register_agent("codechange", "codechange")
         await store.agent_heartbeat("vuln-watcher")
         await store.agent_heartbeat("slo-tracker")
@@ -84,13 +82,13 @@ class TestPruneStaleAgentsAndLog:
         assert await store.list_events_by_agent("agent-registry") == []
         remaining = {a["agent_name"] for a in await store.list_agents()}
         assert remaining == {
-            "cost", "dependency", "codechange",
+            "codechange",
             "vuln-watcher", "slo-tracker", "drift-detector", "skill-learner",
         }
 
     async def test_no_stale_rows_logs_no_event(self) -> None:
         store = await make_store()
-        await store.register_agent("cost", "cost")
+        await store.register_agent("codechange", "codechange")
 
         pruned = await prune_stale_agents_and_log(store)
 
@@ -98,16 +96,14 @@ class TestPruneStaleAgentsAndLog:
         assert await store.list_events_by_agent("agent-registry") == []
 
     async def test_mixed_stale_and_legitimate_prunes_only_stale(self) -> None:
-        """Regression check for the exact real-world scenario this was
-        built for: 9 removed Python agents mixed in the registry alongside
-        the 3 surviving agents and the 4 watchers."""
+        """Removed Python agents (incl. former cost/dependency) prune away;
+        only codechange + watchers remain."""
         store = await make_store()
         removed = ["chaos", "cicd", "compliance", "hardening", "incident",
-                   "infrastructure", "observability", "release", "retirement"]
+                   "infrastructure", "observability", "release", "retirement",
+                   "cost", "dependency"]
         for name in removed:
             await store.register_agent(name, name)
-        await store.register_agent("cost", "cost")
-        await store.register_agent("dependency", "dependency")
         await store.register_agent("codechange", "codechange")
         await store.agent_heartbeat("vuln-watcher")
         await store.agent_heartbeat("slo-tracker")
@@ -119,7 +115,7 @@ class TestPruneStaleAgentsAndLog:
         assert sorted(pruned) == sorted(removed)
         remaining = {a["agent_name"] for a in await store.list_agents()}
         assert remaining == {
-            "cost", "dependency", "codechange",
+            "codechange",
             "vuln-watcher", "slo-tracker", "drift-detector", "skill-learner",
         }
 

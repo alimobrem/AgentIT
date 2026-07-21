@@ -1024,19 +1024,13 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
             "older_records": older,
         })
 
-    # Per-Agent PRs (the alternative "one PR per agent" delivery path) --
-    # opened directly against the code repo, not through route_and_deliver()
-    # at all, so it has no taxonomy category/mechanism of its own to preview
-    # -- only ever shown here once real (see onboarding_pr_records() in
-    # pr_tracking.py; onboarding_results.pr_url is the one place these
-    # land).
-    per_agent_pr_records = records_by_category.get("onboarding", [])
+    # Historical "onboarding" category rows (legacy Per-Agent PRs) are no
+    # longer a product surface — Scan/auto_delivery owns PR creation.
     pr_opened_count = sum(1 for c in pr_cards if c["record"])
     pr_pending_count = len(pr_cards) - pr_opened_count
 
     # dry_run_done is still computed for API/tests that inspect apply_results
-    # flash state; Onboard Results no longer gates a manual Commit/Per-Agent
-    # CTA on it — Scan (auto_delivery) is the only PR-creating path in the UI.
+    # flash state; Scan (auto_delivery) is the only PR-creating path.
     apply_dry_ok = bool(
         apply_results
         and apply_results.get("dry_run")
@@ -1077,7 +1071,6 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
             "deliveries": deliveries,
             "dry_run_done": dry_run_done,
             "pr_cards": pr_cards,
-            "per_agent_pr_records": per_agent_pr_records,
             "pr_opened_count": pr_opened_count,
             "pr_pending_count": pr_pending_count,
             "show_retry_scan_delivery": show_retry_scan_delivery,
@@ -1339,174 +1332,6 @@ async def unsuppress_check_endpoint(request: Request):
     if assessment_id:
         return RedirectResponse(f"/assessments/{assessment_id}", status_code=303)
     return {"status": "unsuppressed", "app_name": app_name, "check_source": check_source}
-
-
-@router.post("/assessments/{assessment_id}/create-agent-prs", response_model=None)
-async def create_agent_prs_route(assessment_id: str):
-    """Create per-agent branches and PRs.
-
-    Until 2026-07-20, this bypassed ``route_and_deliver()`` entirely --
-    an architecture-review audit found it skipped the secret-block/
-    placeholder-block checks and the GitOps-registration lookup every
-    other delivery path gets, and never created a ``deliveries`` tracking
-    row (only ``onboarding_results.pr_url``). It still doesn't route
-    *through* ``route_and_deliver()``: "N PRs, one per generating agent,
-    each committed to the app's own code repo under ``.agentit/
-    {category}/``" is a structurally different shape than
-    ``route_and_deliver()``'s "one outcome per delivery-taxonomy
-    category" (``classify_file()``'s categories describe *what a file
-    is*; an agent's ``category`` here describes *who generated it* --
-    orthogonal groupings), and reshaping ``route_and_deliver()`` to
-    support both is a larger refactor than is safe as a quick fix. This
-    now applies the same individual checks instead: ``classify_file()``'s
-    secret-block rule and ``has_unresolved_placeholders()`` (identical to
-    ``route_and_deliver()``'s own filtering, just applied per-file before
-    grouping into per-agent batches rather than per-taxonomy-category),
-    the same ``is_gitops_registered()`` lookup recorded for observability
-    parity with every other delivery, the same per-app
-    ``claim_delivery_lock()``/``release_delivery_lock()`` mutex
-    ``route_and_deliver()`` uses (``create_agent_prs()`` has the identical
-    fixed-branch-name + force-push-on-conflict shape that makes two
-    overlapping deliveries for the same app unsafe), and a real
-    ``deliveries`` row for tracking (``pr_tracking.py``'s existing
-    dedup-by-``pr_url`` already collapses it against the same PRs'
-    ``onboarding_results.pr_url`` entry, so this doesn't double-count on
-    Fleet/Ledger).
-    """
-    from agentit.portal.delivery import (
-        CATEGORY_SECRET_BLOCKED,
-        classify_file,
-        has_unresolved_placeholders,
-        is_gitops_registered,
-    )
-    from agentit.portal.github_pr import create_agent_prs
-
-    s = await get_store()
-    report = await s.get(assessment_id)
-    files = await s.get_onboarding(assessment_id)
-    if report is None or files is None:
-        raise HTTPException(status_code=404, detail="Assessment or onboarding not found")
-
-    app_name = report.repo_name
-
-    blocked: list[dict] = []
-    placeholder_blocked: list[dict] = []
-    deliverable: list[dict] = []
-    for f in files:
-        if classify_file(f) == CATEGORY_SECRET_BLOCKED:
-            blocked.append(f)
-        elif has_unresolved_placeholders(f.get("content")):
-            placeholder_blocked.append(f)
-        else:
-            deliverable.append(f)
-    for f in blocked:
-        log.error(
-            "Per-Agent PRs blocked: %s classified as kind=Secret -- never routed to any "
-            "delivery mechanism (see docs/unified-apply-flow.md's permanent deny-rule)",
-            f.get("path"),
-        )
-    for f in placeholder_blocked:
-        log.error(
-            "Per-Agent PRs blocked: %s still contains unresolved placeholder "
-            "(e.g. REPLACE_WITH_AGENTIT_IMAGE) -- refusing to route",
-            f.get("path"),
-        )
-
-    registered, infra_repo_url = await is_gitops_registered(app_name, report)
-
-    grouped: dict[str, list[dict]] = {}
-    for f in deliverable:
-        grouped.setdefault(f["category"], []).append(f)
-
-    agent_results = [
-        {"agent_name": cat, "category": cat, "files": cat_files}
-        for cat, cat_files in grouped.items()
-    ]
-
-    lock_key = f"delivery:{app_name}"
-    if not await s.claim_delivery_lock(lock_key):
-        return RedirectResponse(
-            url=(
-                f"/assessments/{assessment_id}/onboard-results?error="
-                f"{quote(f'A delivery is already in progress for {app_name} -- try again shortly.')}"
-            ),
-            status_code=303,
-        )
-
-    delivery_id = await s.create_delivery(
-        assessment_id, app_name, {cat: len(fs) for cat, fs in grouped.items()},
-        mechanism=",".join(f"{cat}:app-repo-pr-per-agent" for cat in grouped) or "none",
-        status="in_progress",
-        details={
-            "registered": registered, "infra_repo_url": infra_repo_url,
-            "blocked": [f["path"] for f in blocked],
-            "placeholder_blocked": [f["path"] for f in placeholder_blocked],
-        },
-    )
-
-    try:
-        results = await asyncio.to_thread(
-            create_agent_prs, report.repo_url, report.repo_name, agent_results,
-        )
-    except Exception as exc:
-        await s.update_delivery(delivery_id, status="failed", details={"error": str(exc)[:500]})
-        raise
-    finally:
-        await s.release_delivery_lock(lock_key)
-
-    successful = [r for r in results if "pr_url" in r]
-    errors = [r for r in results if "error" in r]
-    skipped = [r for r in results if r.get("skipped")]
-
-    overall_status = "delivered" if successful and not errors else ("partial" if successful or skipped else "failed")
-    await s.update_delivery(
-        delivery_id, status=overall_status,
-        details={"outcomes": {r["agent_name"]: r for r in results}},
-    )
-
-    if successful:
-        pr_list = ", ".join(f"{r['agent_name']}" for r in successful)
-        all_pr_urls = " | ".join(r["pr_url"] for r in successful)
-        await s.update_pr_url(assessment_id, all_pr_urls)
-        await s.log_event("orchestrator", "agent-prs-created", report.repo_name,
-                           "info", f"Created {len(successful)} per-agent PRs: {pr_list}")
-
-    if skipped:
-        # Content already matched the target repo's default branch --
-        # nothing to commit, so no PR was opened for these agents (see
-        # github_pr.py::_agent_content_unchanged).
-        skip_list = ", ".join(f"{r['agent_name']}" for r in skipped)
-        await s.log_event("orchestrator", "agent-prs-skipped", report.repo_name,
-                           "info", f"Skipped {len(skipped)} agent(s) — no changes vs. default branch: {skip_list}")
-
-    if blocked or placeholder_blocked:
-        blocked_paths = [f["path"] for f in blocked] + [f["path"] for f in placeholder_blocked]
-        await s.log_event(
-            "orchestrator", "agent-prs-blocked", report.repo_name, "warning",
-            f"{len(blocked_paths)} file(s) blocked from Per-Agent PRs (secret or unresolved "
-            f"placeholder): {', '.join(blocked_paths)}",
-        )
-
-    if errors and not successful:
-        return RedirectResponse(
-            url=f"/assessments/{assessment_id}/onboard-results?error={quote(errors[0].get('error', 'Unknown')[:200])}",
-            status_code=303,
-        )
-
-    if not successful and not skipped and (blocked or placeholder_blocked):
-        return RedirectResponse(
-            url=(
-                f"/assessments/{assessment_id}/onboard-results?error="
-                f"{quote('Every file was blocked (secret or unresolved placeholder) -- nothing was delivered.')}"
-            ),
-            status_code=303,
-        )
-
-    pr_urls = "|".join(f"{r['agent_name']}={r['pr_url']}" for r in successful)
-    return RedirectResponse(
-        url=f"/assessments/{assessment_id}/onboard-results?agent_prs={quote(pr_urls)}",
-        status_code=303,
-    )
 
 
 @router.get("/api/assessments/{assessment_id}/verify")

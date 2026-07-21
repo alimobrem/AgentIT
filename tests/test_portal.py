@@ -3832,11 +3832,9 @@ async def test_capabilities_page_hides_needs_review_when_no_drafts(client, tmp_p
 async def test_capabilities_page_links_onboarding_agents_to_registry_detail(client):
     resp = await client.get("/capabilities")
     assert resp.status_code == 200
-    # get_onboarding_agents() returns {"cost", "dependency", "codechange"} as
-    # the real agent-registry key (category) -- the reference table must
-    # link to it, not to the display name.
-    assert 'href="/agents/cost"' in resp.text
-    assert 'href="/agents/dependency"' in resp.text
+    # Skills-primary: only optional codechange remains as an onboarding agent.
+    assert 'href="/agents/cost"' not in resp.text
+    assert 'href="/agents/dependency"' not in resp.text
     assert 'href="/agents/codechange"' in resp.text
 
 
@@ -3914,13 +3912,10 @@ async def test_skill_detail_page_surfaces_detect_rule_content(client):
 
 
 async def test_agent_detail_renders_for_never_run_onboarding_agent(client, _override_store):
-    """Catalog's reference table now links every onboarding agent to its
-    Agent Activity detail page unconditionally -- an agent that's never
-    actually run in this deployment must render an honest page, not 404 on
-    a link the app itself put there."""
-    resp = await client.get("/agents/cost")
+    """Optional codechange agent that's never run must render honestly."""
+    resp = await client.get("/agents/codechange")
     assert resp.status_code == 200
-    assert "cost" in resp.text
+    assert "codechange" in resp.text
     assert "never ticked" in resp.text.lower()
 
 
@@ -4257,7 +4252,7 @@ async def test_background_agent_registry_prune_surfaces_on_events_page(client, _
     # generation, plus the legitimate agents/watchers that must survive.
     await store.register_agent("security", "security")
     await store.register_agent("observability", "observability")
-    await store.register_agent("cost", "cost")
+    await store.register_agent("codechange", "codechange")
     await store.agent_heartbeat("vuln-watcher")
 
     pruned = await prune_stale_agents_and_log(store)
@@ -4266,7 +4261,7 @@ async def test_background_agent_registry_prune_surfaces_on_events_page(client, _
     api_resp = await client.get("/api/agents")
     assert api_resp.status_code == 200
     names = {a["agent_name"] for a in api_resp.json()}
-    assert names == {"cost", "vuln-watcher"}
+    assert names == {"codechange", "vuln-watcher"}
 
     events_resp = await client.get("/events")
     assert events_resp.status_code == 200
@@ -4285,15 +4280,14 @@ async def test_background_agent_registry_prune_is_noop_when_nothing_stale(client
     from agentit.agent_registry_cleanup import prune_stale_agents_and_log
 
     store = _override_store
-    await store.register_agent("cost", "cost")
-    await store.register_agent("dependency", "dependency")
+    await store.register_agent("codechange", "codechange")
 
     pruned = await prune_stale_agents_and_log(store)
 
     assert pruned == []
     assert await store.list_events_by_agent("agent-registry") == []
     names = {a["agent_name"] for a in await store.list_agents()}
-    assert names == {"cost", "dependency"}
+    assert names == {"codechange"}
 
 
 # ── Loop health meta-metric ──────────────────────────────────────────────

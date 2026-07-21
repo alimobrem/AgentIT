@@ -9,8 +9,8 @@
 </p>
 <h1>Onboarding: {{ report.repo_name }}</h1>
 
-{# Scan (assess → generate → auto_delivery) is the only UI path that opens
-   PRs. Manual Commit & Open PR / Per-Agent PRs are not offered here. #}
+{# Scan (assess → skills → auto_delivery) is the only UI path that opens
+   PRs. Per-Agent PRs and manual Commit are removed as product paths. #}
 {# One primary status region: error XOR dry-run/delivery flash. #}
 {% if request.query_params.get('error') %}
 <div class="alert alert-error" role="status">{{ request.query_params.get('error') }}</div>
@@ -44,19 +44,6 @@
 <div class="alert alert-success" role="status">
   Saved edit to <strong>{{ request.query_params.get('edited') }}</strong> — this edited version is what the next Scan delivery will use.
 </div>
-{% elif request.query_params.get('agent_prs') %}
-{# create_agent_prs() (github_pr.py) always commits against report.repo_url
-   -- the app's own code repo -- never the GitOps infra repo, so this label
-   is a fact about the mechanism, not a guess. #}
-<div class="alert alert-success" role="status">
-  Per-agent PRs opened against the code repo:
-  <ul class="mb-0">
-    {% for pair in request.query_params.get('agent_prs').split('|') %}
-    {% set parts = pair.split('=', 1) %}
-    <li><strong>{{ parts[0] }}</strong>: <a href="{{ parts[1] | safe_url }}" target="_blank" hx-boost="false">{{ parts[1] }}</a></li>
-    {% endfor %}
-  </ul>
-</div>
 {% elif request.query_params.get('warning') %}
 {% for w in request.query_params.get('warning').split('|') %}
 <div class="alert alert-warn" role="status">{{ w }}</div>
@@ -78,29 +65,6 @@
     <span class="text-sm">Checking status automatically — re-run Scan once ready.</span>
     <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
   {% endif %}
-</div>
-{% endif %}
-
-{% if pr_status %}
-{# onboardings[*].pr_url is only ever written by create_agent_prs() (Per-
-   Agent PRs), which always targets report.repo_url -- the app's own code
-   repo, never the GitOps infra repo -- so "code-repo" here is a fact, not
-   a guess. #}
-<div class="alert {% if pr_status.state == 'merged' %}alert-success{% elif pr_status.state == 'open' %}alert-warn{% else %}alert-info{% endif %}">
-  {% if pr_status.state == 'merged' %}
-    <span class="badge badge-low">MERGED</span>
-    Code-repo PR merged{% if pr_status.merged_at %} <span data-timestamp="{{ pr_status.merged_at }}">{{ pr_status.merged_at[:10] }}</span>{% endif %} —
-  {% elif pr_status.state == 'open' %}
-    <span class="badge badge-medium">OPEN</span>
-    Code-repo PR awaiting review —
-  {% elif pr_status.state == 'closed' %}
-    <span class="badge badge-critical">CLOSED</span>
-    Code-repo PR closed without merging —
-  {% else %}
-    <span class="badge badge-info">PR</span>
-    Code-repo PR created —
-  {% endif %}
-  <a href="{{ pr_status.html_url | safe_url }}" target="_blank" hx-boost="false">{{ pr_status.html_url }}</a>
 </div>
 {% endif %}
 
@@ -188,25 +152,10 @@
   {% endif %}
 </div>
 {% endfor %}
-{% elif not per_agent_pr_records %}
+{% else %}
 <div class="empty-state">
-  <p>Nothing here can become a pull request. Every generated file was either a narrative report (informational only, e.g. a cost/dependency summary) or blocked from delivery entirely (e.g. it contains a Secret).</p>
+  <p>Nothing here can become a pull request yet. Skills generate remediations from findings; Scan opens the GitOps/source PRs. If every file was blocked (e.g. Secret content), fix that and re-Scan.</p>
 </div>
-{% endif %}
-{% if per_agent_pr_records %}
-<h3 class="text-sm mb-1">Earlier per-agent PRs ({{ per_agent_pr_records|length }})</h3>
-<p class="text-sm text-muted mb-1">Historical per-agent PRs against the code repo (from an older delivery path). Merge them on GitHub if still open.</p>
-<ul class="finding-list mb-1">
-  {% for r in per_agent_pr_records %}
-  <li class="finding-item">
-    <a href="{{ r.html_url | safe_url }}" target="_blank" hx-boost="false">{{ r.title or r.pr_url }}</a>
-    {% if r.state == 'merged' %}<span class="badge badge-success">Merged</span>
-    {% elif r.state == 'open' %}<span class="badge badge-info">Open</span>
-    {% elif r.state == 'closed' %}<span class="badge badge-muted">Closed</span>
-    {% else %}<span class="badge badge-muted" title="No live GitHub status could be determined for this PR">Unknown</span>{% endif %}
-  </li>
-  {% endfor %}
-</ul>
 {% endif %}
 
 {# ── Actions: Scan opens PRs; this page shows them + optional retry ── #}
@@ -375,33 +324,45 @@
 {% endif %}
 {% endif %}
 
-{# ── Agent run details (collapsed by default) -- generation-step
-   diagnostics (which agent/skill ran, success/failure, file counts), kept
-   for troubleshooting a failed/partial generation but never the page's
-   primary framing -- see the Pull Requests section above for that. #}
+{# ── Generation summary (skills-primary; optional codechange) — collapsed
+   diagnostics, never a parallel 3-agent fleet table. #}
 {% if orchestration and orchestration.agents %}
+{% set _skills = orchestration.agents | selectattr('name', 'equalto', 'skills') | list %}
+{% set _codechange = orchestration.agents | selectattr('name', 'equalto', 'codechange') | list %}
+{% set _other = orchestration.agents | rejectattr('name', 'in', ['skills', 'codechange']) | list %}
 <div x-data="{ open: false }">
   <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
-    Agent Run Details ({{ orchestration.agents|length }} agents)
+    Generation Summary
   </h2>
   <div class="collapse-body" x-show="open" x-transition>
-    <div class="alert {% if orchestration.recommendation and 'BLOCKED' in orchestration.recommendation %}alert-error{% elif orchestration.recommendation and 'AUTO-APPROVED' in orchestration.recommendation %}alert-success{% else %}alert-warn{% endif %} mb-1">
+    <div class="alert {% if orchestration.recommendation and 'INCOMPLETE' in orchestration.recommendation %}alert-error{% elif orchestration.recommendation and 'READY' in orchestration.recommendation %}alert-success{% else %}alert-warn{% endif %} mb-1">
       {{ orchestration.recommendation or "Pending" }}
     </div>
     <table class="mb-1">
-      <thead><tr><th>Agent</th><th>Status</th><th>Files</th></tr></thead>
+      <thead><tr><th>Source</th><th>Role</th><th>Status</th><th>Files</th></tr></thead>
       <tbody>
-        {% for a in orchestration.agents %}
+        {% for a in _skills %}
+        <tr class="{% if a.success %}row-border-green{% else %}row-border-red{% endif %}">
+          <td>skills</td>
+          <td class="text-sm text-muted">Primary remediations</td>
+          <td>{% if a.success %}<span class="badge badge-low">OK</span>{% else %}<span class="badge badge-critical">FAIL</span>{% endif %}{% if a.error %}<div class="text-danger text-sm mt-1">{{ a.error }}</div>{% endif %}</td>
+          <td>{{ a.files_count }}</td>
+        </tr>
+        {% endfor %}
+        {% for a in _codechange %}
+        <tr class="{% if a.success %}row-border-green{% else %}row-border-red{% endif %}">
+          <td>codechange</td>
+          <td class="text-sm text-muted">Optional source patches</td>
+          <td>{% if a.success %}<span class="badge badge-low">OK</span>{% else %}<span class="badge badge-critical">FAIL</span>{% endif %}{% if a.error %}<div class="text-danger text-sm mt-1">{{ a.error }}</div>{% endif %}</td>
+          <td>{{ a.files_count }}</td>
+        </tr>
+        {% endfor %}
+        {% for a in _other %}
+        {# Legacy rows from older onboardings that still listed cost/dependency #}
         <tr class="{% if a.success %}row-border-green{% else %}row-border-red{% endif %}">
           <td>{{ a.name }}</td>
-          <td>
-            {% if a.success %}
-            <span class="badge badge-low">OK</span>
-            {% else %}
-            <span class="badge badge-critical">FAIL</span>
-            {% if a.error %}<div class="text-danger text-sm mt-1">{{ a.error }}</div>{% endif %}
-            {% endif %}
-          </td>
+          <td class="text-sm text-muted">Legacy</td>
+          <td>{% if a.success %}<span class="badge badge-low">OK</span>{% else %}<span class="badge badge-critical">FAIL</span>{% endif %}{% if a.error %}<div class="text-danger text-sm mt-1">{{ a.error }}</div>{% endif %}</td>
           <td>{{ a.files_count }}</td>
         </tr>
         {% endfor %}
