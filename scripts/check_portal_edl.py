@@ -350,36 +350,39 @@ def check_file(path: Path) -> list[Violation]:
             ))
 
     if path.name == "onboard_results.html":
-        if not re.search(
-            r"btn-label\">Run Automatic Validation<|\"Run Automatic Validation\"|>Run Automatic Validation<",
-            text,
+        # Scan is the only PR-creating UI path — manual Commit / Per-Agent
+        # deliver choice must not reappear as competing CTAs (ignore HTML
+        # comments; match live controls / copy only).
+        live = re.sub(r"\{#.*?#\}", "", text, flags=re.S)
+        live = re.sub(r"<!--.*?-->", "", live, flags=re.S)
+        if re.search(
+            r'btn-label\">Commit &amp; Open PR<|btn-label\">Commit & Open PR<|'
+            r'btn-label\">Per-Agent PRs<|'
+            r'data-action=["\']apply["\']|data-action=["\']prs["\']|'
+            r'aria-label=["\']Deliver choice["\']|'
+            r'One PR for everything, or a PR per agent',
+            live,
         ):
             vios.append(Violation(
                 "EDL-ONBOARD-ORDER", "MUST", rel, 1,
-                "Run Automatic Validation control missing from onboard results action bar "
-                "(step 1 of the delivery flow -- auto_delivery.py's validate/fix/review pipeline, "
-                "manually re-triggerable; no more bare, un-auto-fixed \"Dry Run\" button)",
+                "Onboard Results must not offer Commit & Open PR / Per-Agent PRs "
+                "(Scan auto-delivery is the only PR-creating path; Retry Scan "
+                "delivery is allowed only for needs_attention)",
             ))
-        # Labels may be inline ("Apply to Cluster") or via Jinja
-        # `{% set _deliver_label = "Open PR" if … else "Apply" %}`.
         if not re.search(
-            r'Apply to Cluster|Commit & Open PR|'
-            r'_deliver_label\s*=\s*["\']Open PR["\']|'
-            r'_deliver_label\s*=\s*["\']Apply["\']|'
-            r'>Apply<|>Open PR<|'
-            r'btn-label\">\{\{\s*_deliver_label',
-            text,
+            r'Retry Scan delivery|Opened by Scan|merge on GitHub',
+            live,
         ):
             vios.append(Violation(
                 "EDL-ONBOARD-ORDER", "MUST", rel, 1,
-                "Apply step label missing (Apply / Open PR / Apply to Cluster / Commit & Open PR)",
+                "Onboard Results must frame open PRs as Scan delivery + merge on "
+                "GitHub (and/or Retry Scan delivery for needs_attention)",
             ))
-        for line_no, _attrs, inner in _iter_buttons(text):
-            if "No validation yet" in inner:
-                vios.append(Violation(
-                    "EDL-ONBOARD-ORDER", "MUST", rel, line_no,
-                    "validation status must be outside the Apply button",
-                ))
+        if not re.search(r">Download<|>Download</a>", live):
+            vios.append(Violation(
+                "EDL-ONBOARD-ORDER", "MUST", rel, 1,
+                "Download secondary action missing from onboard results",
+            ))
 
     # Compact filter toolbar on list/log pages (EDL §6 Filters).
     if path.name in {"decisions.html", "events.html", "ledger.html"}:

@@ -9,28 +9,20 @@
 </p>
 <h1>Onboarding: {{ report.repo_name }}</h1>
 
-{# Direct Apply has been removed as a concept entirely -- Deliver always
-   resolves to the GitOps commit+PR mechanism now that GitOps registration
-   is mandatory (see resolve_cluster_config_mechanism()). The one remaining
-   non-"infra-repo-commit" outcome, "none", is a legacy edge case (an
-   assessment saved before GitOps registration became mandatory, with no
-   infra repo known at all) -- Deliver is blocked entirely for it, not
-   relabeled, since there is no mechanism left to fall back to. #}
-{% set _delivery_blocked = delivery_mechanism == "none" %}
-{% set _deliver_label = "Commit & Open PR" %}
+{# Scan (assess → generate → auto_delivery) is the only UI path that opens
+   PRs. Manual Commit & Open PR / Per-Agent PRs are not offered here. #}
 {# One primary status region: error XOR dry-run/delivery flash. #}
 {% if request.query_params.get('error') %}
 <div class="alert alert-error" role="status">{{ request.query_params.get('error') }}</div>
 {% elif request.query_params.get('auto_delivered') %}
 <div class="alert alert-success" role="status">
-  <strong>Automatic validation complete.</strong> AgentIT ran the validation/fix loop, a final
-  quality review, and opened the pull request(s) below — waiting for your approval.
+  <strong>Scan opened the pull request(s) below.</strong>
+  Review and merge them on GitHub — there is no second deliver step in AgentIT.
 </div>
 {% elif request.query_params.get('dry_run_summary') %}
 <div class="alert alert-info" role="status">
   <strong>Dry run complete — nothing was delivered.</strong>
   Would deliver via: {{ request.query_params.get('dry_run_summary') }}.
-  Next: choose how to deliver.
 </div>
 {% elif request.query_params.get('pr_url') %}
 {# pr_url_repo ("code"/"gitops") is set by the route that produced this PR
@@ -41,14 +33,16 @@
 {% set _pr_repo_label = "code repo" if _pr_repo_kind == "code" else ("GitOps repo" if _pr_repo_kind == "gitops" else "repo") %}
 <div class="alert alert-success" role="status">
   PR opened against the {{ _pr_repo_label }}: <a href="{{ request.query_params.get('pr_url') | safe_url }}" target="_blank" hx-boost="false">{{ request.query_params.get('pr_url') }}</a>
+  — review and merge on GitHub.
 </div>
 {% elif request.query_params.get('fix_generated') %}
 <div class="alert alert-success" role="status">
-  Generated {{ request.query_params.get('fix_generated') }} fix(es) via {{ request.query_params.get('agent', 'dispatcher') }} agent. Review below, then {{ _deliver_label }}.
+  Generated {{ request.query_params.get('fix_generated') }} fix(es) via {{ request.query_params.get('agent', 'dispatcher') }} agent.
+  Review the files below. Re-run <strong>Scan</strong> from Assessment Detail to open pull requests.
 </div>
 {% elif request.query_params.get('edited') %}
 <div class="alert alert-success" role="status">
-  Saved edit to <strong>{{ request.query_params.get('edited') }}</strong> — this edited version is what "{{ _deliver_label }}" will use.
+  Saved edit to <strong>{{ request.query_params.get('edited') }}</strong> — this edited version is what the next Scan delivery will use.
 </div>
 {% elif request.query_params.get('agent_prs') %}
 {# create_agent_prs() (github_pr.py) always commits against report.repo_url
@@ -81,7 +75,7 @@
     {% endif %}
   {% else %}
     <strong>{{ request.query_params.get('operator_installed') }}</strong> installation started.
-    <span class="text-sm">Checking status automatically — re-run Dry Run once ready.</span>
+    <span class="text-sm">Checking status automatically — re-run Scan once ready.</span>
     <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
   {% endif %}
 </div>
@@ -134,11 +128,11 @@
 {% if pr_cards %}
 <p class="text-sm text-muted mb-1">
   {% if pr_opened_count and pr_pending_count %}
-  {{ pr_opened_count }} pull request{{ 's' if pr_opened_count != 1 }} opened so far — {{ pr_pending_count }} more will open once you deliver the rest below.
+  {{ pr_opened_count }} pull request{{ 's' if pr_opened_count != 1 }} opened so far — {{ pr_pending_count }} more may open on a later Scan.
   {% elif pr_opened_count %}
-  {{ pr_opened_count }} pull request{{ 's' if pr_opened_count != 1 }} opened for this onboarding.
+  {{ pr_opened_count }} pull request{{ 's' if pr_opened_count != 1 }} opened for this onboarding — review and merge on GitHub.
   {% else %}
-  AgentIT will open {{ pr_cards|length }} pull request{{ 's' if pr_cards|length != 1 }} once you deliver — previewed below, nothing opened yet.
+  AgentIT will open {{ pr_cards|length }} pull request{{ 's' if pr_cards|length != 1 }} when Scan finishes delivery — previewed below, nothing opened yet.
   {% endif %}
 </p>
 {% for card in pr_cards %}
@@ -158,7 +152,7 @@
       <span class="badge badge-muted" title="No live GitHub status could be determined for this PR (e.g. GITHUB_TOKEN not configured, or the API call failed)">Unknown</span>
       {% endif %}
     {% else %}
-    <span class="badge badge-info" title="Nothing has been committed yet -- this previews what Commit & Open PR (below) will do.">Not opened yet</span>
+    <span class="badge badge-info" title="Nothing has been committed yet -- Scan opens the PR(s) automatically.">Not opened yet</span>
     {% endif %}
   </div>
   <p class="manifest-title mb-0">{{ card.category | dimension_label }}</p>
@@ -200,8 +194,8 @@
 </div>
 {% endif %}
 {% if per_agent_pr_records %}
-<h3 class="text-sm mb-1">Per-agent PRs ({{ per_agent_pr_records|length }})</h3>
-<p class="text-sm text-muted mb-1">Opened via "Per-Agent PRs" — one PR per agent against the code repo, an alternative to the combined PR(s) above.</p>
+<h3 class="text-sm mb-1">Earlier per-agent PRs ({{ per_agent_pr_records|length }})</h3>
+<p class="text-sm text-muted mb-1">Historical per-agent PRs against the code repo (from an older delivery path). Merge them on GitHub if still open.</p>
 <ul class="finding-list mb-1">
   {% for r in per_agent_pr_records %}
   <li class="finding-item">
@@ -215,145 +209,34 @@
 </ul>
 {% endif %}
 
-{# ── Primary Actions ─────────────────────────────────────────────── #}
+{# ── Actions: Scan opens PRs; this page shows them + optional retry ── #}
 {% set total = namespace(count=0) %}
 {% for cat, files in grouped.items() %}{% set total.count = total.count + files|length %}{% endfor %}
-{# Confirm tail is mechanism-honest: GitOps only opens a PR, the cluster is
-   never mutated until a human merges it -- never claim "cannot be undone /
-   modifies production" on this path. Direct Apply has been removed as a
-   concept entirely, so there is no longer a second, cluster-mutating
-   variant of this text. #}
-{% set _confirm_tail = 'This opens a pull request in the infra repo. It does not mutate the cluster until a human merges the PR.' %}
+{% set _has_open_prs = pr_opened_count|default(0) > 0 %}
+{% set _show_retry = show_retry_scan_delivery|default(false) %}
 
-{% if apply_results and not apply_results.get('dry_run') and not apply_results.get('errors') %}
-{# Moment of joy (docs/ux-design-requirements.md checklist #9): reserved
-   for a genuinely clean MULTI-manifest delivery (>= 3 applied, zero
-   errors) -- not every routine single-file delivery. #}
-{% set _multi_clean = apply_results.applied and apply_results.applied|length >= 3 %}
-{% if _multi_clean %}
-<div class="step-guide celebrate">
-  <span class="step-guide-icon">&#127881;</span>
-  <span class="step-guide-text"><strong>Delivered successfully -- all {{ apply_results.applied|length }} manifests applied clean.</strong></span>
-</div>
-{% endif %}
-{% endif %}
-
-{# EDL §7 (updated for the automatic validation pipeline, auto_delivery.py):
-   step 1 no longer runs a bare Dry Run -- it runs the same validate -> fix
-   -> re-validate -> final review pipeline onboarding already triggers
-   automatically once manifests are generated. This button is the manual
-   re-trigger for it (after an edit, or to retry a prior "needs
-   attention" outcome) -- both deliver options below stay soft-gated on
-   the SAME dry_run_done signal as before (now also set once this
-   pipeline's own validation converges, not only by a bare manual dry
-   run -- see auto_delivery.py::auto_validate_and_deliver()). #}
-{% set _dry_done = dry_run_done|default(false) %}
-{# auto_delivery.py deliberately never marks apply_results as a real (non-
-   dry-run) delivery -- pr_cards/pr_opened_count are the sole source of
-   truth for "was anything actually delivered" (see its own docstring on
-   save_apply_results()). Every PR that was going to be opened is open
-   (pr_opened_count, no pr_pending_count left) counts as delivered too, or
-   Step 2 would keep offering "Commit & Open PR" for PRs that already
-   exist right above it. #}
-{% set _delivered = (apply_results and not apply_results.get('dry_run') and not apply_results.get('errors')) or (pr_opened_count and not pr_pending_count) %}
-{% set _dry_failed = apply_results and apply_results.get('dry_run') and apply_results.get('errors') %}
-{% set _deliver_disabled = not _dry_done or _delivery_blocked %}
-<div class="delivery-actions" x-data="{ busy: '', dryDone: {{ 'true' if _dry_done else 'false' }} }"
-     data-dry-done="{{ 'true' if _dry_done else 'false' }}">
-  <div class="delivery-primary" role="group" aria-label="Delivery steps">
-    <div class="delivery-step">
-      <div class="delivery-step-row">
-        <span class="delivery-step-num {% if _dry_done or _delivered %}is-done{% elif not apply_results %}is-active{% endif %}" aria-hidden="true">1</span>
-        <form method="post" action="/assessments/{{ assessment_id }}/onboard-results/run-validation" class="inline-form"
-              @submit="busy = 'dry-run'">
-          <button type="submit" class="btn btn-outline" data-action="dry-run"
-                  :disabled="busy !== ''" :aria-busy="busy === 'dry-run'"
-                  :class="{ 'btn-loading': busy === 'dry-run', 'submitting': busy === 'dry-run' }">
-            <span class="btn-label">Run Automatic Validation</span>
-            <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Working&hellip;</span>
-          </button>
-        </form>
-      </div>
-      {% if pr_opened_count %}
-      <div class="delivery-step-status">
-        <span class="badge badge-low">Delivered automatically</span>
-        <span>{{ pr_opened_count }} pull request{{ 's' if pr_opened_count != 1 }} already opened above.</span>
-      </div>
-      {% elif _dry_done and not _delivered %}
-      <div class="delivery-step-status">
-        <span class="badge badge-low">Validation passed</span>
-      </div>
-      {% elif _dry_failed %}
-      <div class="delivery-step-status">
-        <span class="badge badge-critical">Validation failed</span>
-        <span>Fix errors in the Apply Report below, then retry.</span>
-      </div>
-      {% endif %}
-    </div>
-
-    <div class="delivery-connector {% if _dry_done or _delivered %}is-done{% endif %}" aria-hidden="true"></div>
-
-    <div class="delivery-step">
-      <div class="delivery-step-row">
-        <span class="delivery-step-num {% if _delivered %}is-done{% elif _dry_done %}is-active{% endif %}" aria-hidden="true">2</span>
-        {% if not _delivered %}
-        <div class="delivery-choice" role="group" aria-label="Deliver choice">
-          <form method="post" action="/assessments/{{ assessment_id }}/deliver" class="inline-form"
-                x-ref="deliverForm" @submit="busy = 'apply'">
-            <button type="button" class="btn btn-green" data-action="apply"
-                    {% if _deliver_disabled %}disabled aria-disabled="true"{% endif %}
-                    :disabled="busy !== '' || !dryDone"
-                    :aria-disabled="!dryDone"
-                    :aria-busy="busy === 'apply'"
-                    :class="{ 'btn-loading': busy === 'apply', 'submitting': busy === 'apply' }"
-              {% if _dry_done and not _delivery_blocked %}
-              @click="$dispatch('show-confirm', {
-                title: {{ ('Confirm ' ~ _deliver_label) | tojson | forceescape }},
-                message: {{ delivery_confirmation | tojson | forceescape }} + ' ({{ total.count }} manifest(s).) ' + {{ _confirm_tail | tojson | forceescape }},
-                form: $refs.deliverForm,
-                opts: { confirmText: {{ _deliver_label | tojson | forceescape }}, danger: false }
-              })"
-              {% endif %}>
-              <span class="btn-label">{{ _deliver_label }}</span>
-              <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Working&hellip;</span>
-            </button>
-          </form>
-          <form method="post" action="/assessments/{{ assessment_id }}/create-agent-prs" class="inline-form"
-                @submit="busy = 'prs'">
-            <button type="submit" class="btn btn-green" data-action="prs"
-                    {% if not _dry_done %}disabled aria-disabled="true"{% endif %}
-                    :disabled="busy !== '' || !dryDone"
-                    :aria-disabled="!dryDone"
-                    :aria-busy="busy === 'prs'"
-                    :class="{ 'btn-loading': busy === 'prs', 'submitting': busy === 'prs' }">
-              <span class="btn-label">Per-Agent PRs</span>
-              <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Working&hellip;</span>
-            </button>
-          </form>
-        </div>
-        {% endif %}
-      </div>
-      {% if not _delivered %}
-      <p class="delivery-choice-hint">One PR for everything, or a PR per agent.</p>
-      {% endif %}
-      <div class="delivery-step-status">
-        {% if _delivery_blocked %}
-        <span class="badge badge-critical" title="No GitOps infra repo is known for this assessment -- Direct Apply has been removed, so this app must be registered for GitOps before it can be delivered.">Not GitOps-registered</span>
-        <span>Register this app for GitOps (see Assessment Detail) before delivering.</span>
-        {% elif not _dry_done and not _delivered %}
-        <span class="badge badge-warning" title="No successful validation yet — run automatic validation first.">No validation yet</span>
-        <span>Run automatic validation before delivering.</span>
-        {% elif _delivered %}
-        <span class="badge badge-low">Delivered</span>
-        {% if pr_opened_count %}
-        <span>{{ pr_opened_count }} pull request{{ 's' if pr_opened_count != 1 }} already opened above -- nothing left to deliver.</span>
-        {% endif %}
-        {% elif _dry_done %}
-        <span>Ready — choose a deliver option.</span>
-        {% endif %}
-      </div>
+<div class="delivery-actions" x-data="{ busy: '' }">
+  {% if _has_open_prs %}
+  <div class="delivery-primary" role="status" aria-label="Scan delivery status">
+    <div class="delivery-step-status">
+      <span class="badge badge-low">Opened by Scan</span>
+      <span>{{ pr_opened_count }} pull request{{ 's' if pr_opened_count != 1 }} above — review and merge on GitHub.</span>
     </div>
   </div>
+  {% elif _show_retry %}
+  <div class="delivery-primary" role="group" aria-label="Retry Scan delivery">
+    <form method="post" action="/assessments/{{ assessment_id }}/onboard-results/run-validation" class="inline-form"
+          @submit="busy = 'retry'">
+      <button type="submit" class="btn btn-outline" data-action="retry-scan-delivery"
+              :disabled="busy !== ''" :aria-busy="busy === 'retry'"
+              :class="{ 'btn-loading': busy === 'retry', 'submitting': busy === 'retry' }">
+        <span class="btn-label">Retry Scan delivery</span>
+        <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Working&hellip;</span>
+      </button>
+    </form>
+    <p class="delivery-choice-hint">Re-runs the same validate → deliver path Scan uses — not a separate Commit step.</p>
+  </div>
+  {% endif %}
 
   <div class="delivery-secondary" role="group" aria-label="Secondary actions">
     <a href="/api/assessments/{{ assessment_id }}/manifests/download" class="btn btn-outline" hx-boost="false"

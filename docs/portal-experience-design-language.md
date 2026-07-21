@@ -232,46 +232,34 @@ controls; desktop always shows the horizontal wrap row.
 
 ---
 
-## 7. Onboarding / deliver step flow
+## 7. Onboarding / Scan delivery results
 
-Ordered primary path on `/assessments/{id}/onboard-results`:
+`/assessments/{id}/onboard-results` is a **results** page, not a second
+deliver product. **Scan** (assess → generate → `auto_delivery`) is the only
+UI path that opens pull requests.
 
-1. **Run Automatic Validation** (secondary, `.btn-outline`) — the manual
-   re-trigger for `auto_delivery.py`'s validate → fix → re-validate → final-
-   review pipeline (`POST .../onboard-results/run-validation`). Onboarding
-   itself already runs this pipeline automatically the moment manifests are
-   generated (no human click required for the common case) — this button
-   exists for re-running it after an edit, or to retry a prior
-   `needs_attention` outcome. It is a strict superset of the old bare "Dry
-   Run" (a plain, un-auto-fixed dry run is still its first, always-run
-   step) — nothing a "Dry Run" click used to do is lost, only upgraded.
-2. **Deliver choice** — two equal primary options (both `.btn-green`), both
-   soft-gated until a successful validation pass (persisted the same way a
-   bare dry run used to, whether that pass came from the automatic pipeline
-   or this manual button):
-   - **Commit & Open PR** / **Apply to Cluster** — single combined delivery
-     (mechanism via `{% set _deliver_label = … %}`).
-   - **Per-Agent PRs** — separate PR per agent/issue.
-   One short hint line explains the choice (“One PR for everything, or a PR
-   per agent”). Status chips stay outside the buttons.
+Primary framing:
 
-**MUST [check]** Run Automatic Validation appear as its own control (not
-only inside Apply).
+1. **Pull Requests** — cards/links for every PR Scan opened (or will open).
+   Copy steers the human to **review and merge on GitHub**.
+2. **Opened by Scan** status when `pr_opened_count > 0` — no competing
+   Commit / Per-Agent CTAs.
+3. **Retry Scan delivery** (`.btn-outline`, `data-action="retry-scan-delivery"`)
+   — only when the latest onboard job is `needs_attention` **and** no PR is
+   open yet. Posts to the same `.../onboard-results/run-validation` pipeline
+   Scan already uses; must not read as a separate "Commit" product.
+4. **Download** — secondary only.
 
-**MUST [check]** deliver labels stay short; validation / warning status
-**MUST** live *outside* the deliver buttons (chip or step-guide), never
-nested inside.
+**MUST [check]** Onboard Results **MUST NOT** render **Commit & Open PR**,
+**Per-Agent PRs**, or a deliver-choice step (“One PR for everything…”).
 
-**MUST** restate `delivery.confirmation_text()` in the confirm modal before
-the combined deliver fires.
+**MUST [check]** When PRs are open, status copy mentions merge on GitHub
+(not “choose a deliver option”).
 
-**SHOULD** keep **Download** as the only secondary action (visually quieter
-than the Run Automatic Validation → deliver-choice stack). Do not demote
-Per-Agent PRs beside Download — it is a peer of Commit & Open PR.
+**SHOULD** keep **Download** as the only always-present secondary action.
 
-> Concurrent redesigns of this action bar should keep Run Automatic
-> Validation → deliver-choice ordering and “no status inside buttons”;
-> rebase onto this EDL rather than inventing a parallel primary.
+> Concurrent redesigns must not reintroduce a manual Commit/Per-Agent stack
+> beside Scan auto-delivery.
 
 ---
 
@@ -324,7 +312,7 @@ ancestor (same template scope). Dead handlers are bugs.
 | EDL-BADGE-MIN | MUST | `.badge { font-size: … }` ≥ 12px / `var(--font-xs)` |
 | EDL-TOKEN-HEX | SHOULD | No `style="…#hex…"` on `.btn` / links in templates |
 | EDL-NAV-EVENTS | MUST | Events bell + drawer present in `base.html` |
-| EDL-ONBOARD-ORDER | MUST | Onboard results: Run Automatic Validation + deliver choice labels; status outside CTAs |
+| EDL-ONBOARD-ORDER | MUST | Onboard results: no Commit/Per-Agent CTAs; Retry Scan delivery only for needs_attention; Download secondary |
 | EDL-DANGER-CLASS | MUST | `.btn-danger` defined when confirm modal uses it |
 | EDL-TOASTS | MUST | `#toasts` present in `base.html` |
 | EDL-FILTER-BAR | MUST | Decisions / Events / Ledger GET filters use `.filter-bar` (not `.action-bar`) |

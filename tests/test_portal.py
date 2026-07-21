@@ -378,34 +378,21 @@ async def test_onboard_results_page(client, _override_store):
     # under the shared "skills" category instead of one per domain.
     assert "skills" in resp.text
     assert "Download" in resp.text
-    # The unified apply flow (docs/unified-apply-flow.md) collapsed the
-    # independent "Apply to Cluster" / "Create PR" buttons into one Deliver
-    # action. Direct Apply has been removed as a concept entirely -- Deliver
-    # always reads "Commit & Open PR" now, never "Apply to Cluster".
+    # Scan is the only PR-creating UI path — no competing Commit / Per-Agent
+    # deliver choice on Onboard Results (routes may remain for API/tests).
     assert "Apply to Cluster" not in resp.text
-    assert "Commit &amp; Open PR" in resp.text or "Commit & Open PR" in resp.text
+    assert "Commit & Open PR" not in resp.text
+    assert "Commit &amp; Open PR" not in resp.text
     assert "Deliver Now" not in resp.text
-    assert "Per-Agent PRs" in resp.text
-    assert "Run Automatic Validation" in resp.text
+    assert "Per-Agent PRs" not in resp.text
+    assert "Run Automatic Validation" not in resp.text
+    assert "One PR for everything, or a PR per agent." not in resp.text
+    assert 'data-action="apply"' not in resp.text
+    assert 'data-action="prs"' not in resp.text
     assert "delivery-actions" in resp.text
-    assert "delivery-primary" in resp.text
-    assert "delivery-choice" in resp.text
     assert "delivery-secondary" in resp.text
-    assert "delivery-connector" in resp.text
-    assert "One PR for everything, or a PR per agent." in resp.text
-    # Per-Agent is a peer of Apply (step 2), not demoted beside Download.
-    assert 'data-action="prs"' in resp.text
     secondary = resp.text.split('aria-label="Secondary actions"', 1)[-1][:800]
     assert "Download" in secondary
-    assert "Per-Agent" not in secondary
-    # Status chip lives outside the Apply CTA (not packed into the button).
-    # This report has no infra_repo_url at all (the legacy, pre-mandatory-
-    # GitOps case) -- Deliver is blocked entirely with a clear message, not
-    # just soft-gated behind Dry Run, and there is no Override escape hatch.
-    assert "Not GitOps-registered" in resp.text
-    assert "NO DRY RUN YET" not in resp.text
-    assert 'data-action="apply"' in resp.text
-    assert "disabled" in resp.text
     assert 'data-action="apply-override"' not in resp.text
     assert ">Override<" not in resp.text and "Override</button>" not in resp.text
 
