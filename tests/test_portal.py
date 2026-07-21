@@ -24,7 +24,7 @@ from agentit.models import (
 )
 from agentit.platform_context import PlatformContext
 from agentit.portal.app import app, get_store
-from agentit.portal.routes.assessments import _get_trusted_base_url
+from agentit.portal.helpers import _get_trusted_base_url
 
 # Empty PlatformContext is FleetOrchestrator.run()'s "discovery never
 # actually connected" signal, which skips the has_api() gate entirely
@@ -479,7 +479,7 @@ async def test_trusted_base_url_ignores_forged_host_header(client, _override_sto
         {"metadata": {"labels": {"app.kubernetes.io/name": "agentit"}},
          "spec": {"host": "agentit.apps.cluster.example.com"}},
     ]
-    with patch("agentit.portal.routes.assessments._run_onboarding", return_value=([], {})), \
+    with patch("agentit.portal.services.onboard_pipeline._run_onboarding", return_value=([], {})), \
          patch("agentit.portal.github_pr.ensure_webhook") as mock_ensure_webhook, \
          patch("agentit.kube.list_custom_resources", return_value=fake_routes), \
          patch.dict(os.environ, {"KUBERNETES_SERVICE_HOST": "10.0.0.1"}):

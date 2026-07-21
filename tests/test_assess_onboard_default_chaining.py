@@ -20,7 +20,7 @@ from agentit.models import (
     ArchitectureInfo, AssessmentReport, DimensionScore, Finding,
     Language, Severity, StackInfo,
 )
-from agentit.portal.routes import assessments
+from agentit.portal.services import assess_pipeline
 
 
 def _make_report(repo_name: str = "fresh-assess-chain-app") -> AssessmentReport:
@@ -45,9 +45,9 @@ async def _post_assess_and_wait_for_job(client, store, report) -> dict:
     every real caller that isn't Fleet's "Refresh Onboard" button already
     sends -- so FastAPI's own Form-default binding is what's under test,
     not a Python-level default a direct coroutine call could paper over."""
-    with patch.object(assessments, "clone_repo", return_value=Path("/tmp/fake-fresh-assess-repo")), \
-         patch.object(assessments, "run_assessment", return_value=report), \
-         patch.object(assessments, "_auto_create_infra_repo",
+    with patch.object(assess_pipeline, "clone_repo", return_value=Path("/tmp/fake-fresh-assess-repo")), \
+         patch.object(assess_pipeline, "run_assessment", return_value=report), \
+         patch.object(assess_pipeline, "_auto_create_infra_repo",
                       return_value="https://github.com/org/fresh-assess-chain-app-gitops"):
         resp = await client.post(
             "/assess",
@@ -89,9 +89,9 @@ class TestFreshAssessChainsByDefault:
         client, store, _seed_aid = portal_client
         report = _make_report(repo_name="fresh-assess-signal-app")
 
-        with patch.object(assessments, "clone_repo", return_value=Path("/tmp/fake-fresh-signal-repo")), \
-             patch.object(assessments, "run_assessment", return_value=report), \
-             patch.object(assessments, "_auto_create_infra_repo",
+        with patch.object(assess_pipeline, "clone_repo", return_value=Path("/tmp/fake-fresh-signal-repo")), \
+             patch.object(assess_pipeline, "run_assessment", return_value=report), \
+             patch.object(assess_pipeline, "_auto_create_infra_repo",
                           return_value="https://github.com/org/fresh-assess-signal-app-gitops"):
             resp = await client.post(
                 "/assess",
@@ -126,9 +126,9 @@ class TestFreshAssessChainsByDefault:
         client, store, _seed_aid = portal_client
         report = _make_report(repo_name="fresh-assess-opt-out-app")
 
-        with patch.object(assessments, "clone_repo", return_value=Path("/tmp/fake-opt-out-repo")), \
-             patch.object(assessments, "run_assessment", return_value=report), \
-             patch.object(assessments, "_auto_create_infra_repo",
+        with patch.object(assess_pipeline, "clone_repo", return_value=Path("/tmp/fake-opt-out-repo")), \
+             patch.object(assess_pipeline, "run_assessment", return_value=report), \
+             patch.object(assess_pipeline, "_auto_create_infra_repo",
                           return_value="https://github.com/org/fresh-assess-opt-out-app-gitops"):
             resp = await client.post(
                 "/assess",

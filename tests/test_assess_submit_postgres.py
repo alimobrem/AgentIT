@@ -28,6 +28,7 @@ from agentit.models import (
     Language, Severity, StackInfo,
 )
 from agentit.portal.routes import assessments
+from agentit.portal.services import assess_pipeline
 from conftest import make_store
 
 
@@ -61,9 +62,9 @@ async def test_assess_submit_completes_against_real_postgres():
     # polling loop that waits for it to finish has to live inside this
     # `with` block too.
     with patch.object(assessments, "get_store", return_value=pg_store), \
-         patch.object(assessments, "clone_repo", return_value=Path("/tmp/fake-pg-assess-repo")), \
-         patch.object(assessments, "run_assessment", return_value=report), \
-         patch.object(assessments, "_auto_create_infra_repo",
+         patch.object(assess_pipeline, "clone_repo", return_value=Path("/tmp/fake-pg-assess-repo")), \
+         patch.object(assess_pipeline, "run_assessment", return_value=report), \
+         patch.object(assess_pipeline, "_auto_create_infra_repo",
                       return_value="https://github.com/org/pg-assess-app-gitops"):
         response = await assessments.assess_submit(
             request=None, repo_url=report.repo_url, criticality="medium",
