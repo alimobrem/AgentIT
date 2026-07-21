@@ -160,19 +160,12 @@ class TestWriteFileMetadataManifest:
 
 
 class TestRunOnboardingCarriesRealDescriptions:
-    async def test_narrative_report_description_is_real_not_bare_path(self):
-        """dependency-report.md/cost-report.md are always generated
-        (agents/orchestrator.py's _NEVER_SKIP) with a real, static/repo-
-        derived description -- confirms the file-metadata sidecar survives
-        the local-agent -> portal boundary intact, never falling back to
-        the bare filename it used to."""
+    async def test_skill_file_description_is_real_not_bare_path(self):
+        """Skills-primary onboarding must persist real descriptions (not bare
+        filenames) via the file-metadata sidecar."""
         from agentit.portal.helpers import run_onboarding
 
         async_store, store = await make_async_store()
-        # dependency/cost Python agents only run for high/critical
-        # criticality (agents/orchestrator.py::_select_agents()) -- their
-        # narrative reports are the reliable, deterministic anchor for this
-        # assertion.
         report = make_report(criticality="critical")
         aid = await store.save(report)
 
@@ -180,14 +173,12 @@ class TestRunOnboardingCarriesRealDescriptions:
              patch("agentit.portal.helpers._store", async_store):
             files, _ = await run_onboarding(report, assessment_id=aid)
 
-        dependency_report = next(f for f in files if f["path"] == "dependency-report.md")
-        cost_report = next(f for f in files if f["path"] == "cost-report.md")
-        assert dependency_report["description"] != dependency_report["path"]
-        assert dependency_report["description"] == (
-            "Dependency risk report with ecosystem detection and known CVE checks."
-        )
-        assert cost_report["description"] != cost_report["path"]
-        assert "Cost optimization report for" in cost_report["description"]
+        assert files, "expected skills (or codechange) to generate files"
+        skill_files = [f for f in files if f.get("category") == "skills"]
+        assert skill_files, "skills should own remediations"
+        for f in skill_files:
+            assert f["description"], f"missing description for {f['path']}"
+            assert f["description"] != f["path"], f"bare-path fallback for {f['path']}"
 
 
 # ── Route-level: the redesigned Onboard Results page ──────────────────────
@@ -455,7 +446,9 @@ class TestPullRequestsSectionPostDelivery:
         assert "Opened by Scan" in resp.text
         assert "merge on GitHub" in resp.text
 
-    async def test_per_agent_prs_shown_separately_from_combined_prs(self, ui_client):
+    async def test_legacy_per_agent_prs_no_longer_surfaced(self, ui_client):
+        """Per-Agent product path removed — onboarding_results.pr_url alone
+        must not resurrect a parallel PR list on Onboard Results."""
         client, store = ui_client
         report = make_report(repo_name="per-agent-app")
         aid = await store.save(report)
@@ -470,8 +463,8 @@ class TestPullRequestsSectionPostDelivery:
             resp = await client.get(f"/assessments/{aid}/onboard-results")
 
         assert resp.status_code == 200
-        assert "Earlier per-agent PRs (1)" in resp.text
-        assert pr_url in resp.text
+        assert "Earlier per-agent PRs" not in resp.text
+        assert "Per-Agent" not in resp.text
 
     async def test_older_prs_for_a_re_delivered_category_are_noted_not_dropped(self, ui_client):
         client, store = ui_client
@@ -518,14 +511,15 @@ class TestDeEmphasizedRawPlumbing:
 
         resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert "Orchestration (" not in resp.text
-        assert "Agent Run Details (1 agents)" in resp.text
+        assert "Generation Summary" in resp.text
+        assert "Agent Run Details" not in resp.text
         assert "34 manifests across" not in resp.text
         assert "Generated Files" in resp.text
         assert "<details" in resp.text
 
     async def test_failed_agent_error_shown_under_fail_badge(self, ui_client):
-        """orchestration.agents[].error must surface under FAIL so humans can
-        explain dependency/cost/codechange failures without digging in JSON."""
+        """orchestration.agents[].error must surface under FAIL for skills /
+        optional codechange without digging in JSON."""
         client, store = ui_client
         report = make_report(repo_name="agent-fail-error-app")
         aid = await store.save(report)
@@ -533,12 +527,12 @@ class TestDeEmphasizedRawPlumbing:
             aid, [_cluster_config_file()],
             orchestration={
                 "agents": [
-                    {"name": "dependency", "category": "dependency", "success": False,
+                    {"name": "skills", "category": "skills", "success": False,
                      "files_count": 0, "error": "LLM timeout while resolving BOM"},
-                    {"name": "cost", "category": "cost", "success": True,
+                    {"name": "codechange", "category": "codechange", "success": True,
                      "files_count": 2, "error": None},
                 ],
-                "conflicts": [], "recommendation": "REVIEW REQUIRED", "auto_approve": False, "gates": [],
+                "conflicts": [], "recommendation": "GENERATION INCOMPLETE", "auto_approve": False, "gates": [],
             },
         )
 
@@ -547,6 +541,8 @@ class TestDeEmphasizedRawPlumbing:
         assert 'badge-critical">FAIL' in resp.text
         assert "LLM timeout while resolving BOM" in resp.text
         assert 'badge-low">OK' in resp.text
+        assert "Primary remediations" in resp.text
+        assert "Optional source patches" in resp.text
 
     async def test_no_inline_styles_in_pull_requests_section(self, ui_client):
         client, store = ui_client

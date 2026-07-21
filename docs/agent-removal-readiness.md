@@ -148,40 +148,15 @@ dispatcher as already disagreeing with each other (dockerfile/container/
 health fixes are unreachable dead code today) — so this agent's *current*
 value, independent of the removal question, is already in doubt.
 
-### `DependencyAgent`'s `dependency-report.md` and `CostOptimizationAgent`'s `cost-report.md`
+### `DependencyAgent` / `CostOptimizationAgent` — **removed (2026-07-21)**
 
-Both agents already have real skill coverage for their *manifest* outputs:
-- `dependency` domain: `skills/dependency/renovate-config.md`,
-  `dependabot-config.md`, `dependency-cronjob.md` — all pre-existing,
-  `mode: template`, unaffected by this audit.
-- `cost` domain: `skills/cost/vpa.md`, `cost-labels.md`, `cost-cronjob.md` —
-  same.
-
-What's missing is specifically the **narrative report** each agent also
-produces (`dependency-report.md`: detected ecosystems, known-CVE package
-matches, recommendations; `cost-report.md`: tier estimate, resource
-right-sizing table, cost estimate table). Unlike the 4 narrative skills
-fixed in section 1, these reports are **not findings-driven text with a
-generic deterministic baseline** — they depend on values a template
-substitution has no access to:
-- `dependency-report.md` needs the actual detected package ecosystems
-  (`_detect_ecosystems()`) and actual CVE package matches against
-  `report.architecture.external_dependencies` — there's no static baseline
-  that's meaningfully "the dependency report" without that data.
-- `cost-report.md` needs a computed deployment tier
-  (`_tier()`, based on `service_count` and language count) and a
-  cost-lookup-table result driven by that tier — same problem.
-
-A template-only baseline for these would either be so generic it adds no
-value over "go run `npm audit`" (worse than not generating it), or would
-have to fake numbers, which violates this project's own "never use mock
-data or fabricated values" rule. **Recommendation: leave these two as
-documented gaps.** If the narrative-report capability is wanted post-agent-
-removal, it belongs in the check engine's findings themselves (e.g. a check
-that emits a Finding *listing* the detected ecosystems/CVEs as
-`description` text) rather than as a fabricated skill template — the check
-engine already has real data at check-evaluation time that a template
-substituted only with `{{app_name}}` does not.
+Manifest outputs were already skill-covered (`skills/dependency/*`,
+`skills/cost/*`). Narrative reports were dropped (low delivery value —
+never PR candidates). Guidance lives in analyzer findings that trigger
+those skills (e.g. infrastructure `resources` / security dependency
+scanning recommendations). Python agents and Per-Agent PRs are gone;
+Scan/`auto_delivery` remains the sole GitOps PR path. Optional
+`codechange` stays as a source-patch path only.
 
 ## 4. Blocked on other workstreams (do not attempt — tracked here for visibility)
 

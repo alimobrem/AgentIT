@@ -13,24 +13,15 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-# security, observability, cicd, compliance, infrastructure, incident,
-# release, retirement, and chaos are now skill-only domains -- their
-# Python agents (agents/hardening.py, cicd.py, compliance.py,
-# infrastructure.py, incident.py, release.py, retirement.py,
-# observability.py, chaos.py) were removed once skills gained full
-# template-fallback parity for every artifact they used to generate. See
-# docs/agent-removal-readiness.md for the domain-by-domain readiness
-# audit. `dependency` and `cost` keep their Python agents specifically for
-# the narrative dependency-report.md/cost-report.md outputs, which depend
-# on runtime-computed data (detected ecosystems/CVEs, computed cost tier)
-# that a static skill template has no access to -- see that same doc's
-# recommendation and this repo's "no mock data" rule. `codechange` is kept
-# because it patches the application's own source repo, not a K8s
-# manifest -- a fundamentally different capability skills don't model.
+# Cluster remediations (security, observability, cicd, compliance,
+# infrastructure, cost, dependency, incident, release, retirement, chaos)
+# are skill-only — their Python agents were removed once skills had full
+# template-fallback parity. See docs/agent-removal-readiness.md.
+# `codechange` is the sole remaining one-shot Python onboarding agent: it
+# patches the application's own source repo (not K8s manifests) — optional
+# source-patch path, not a peer "domain agent" to skills.
 AGENT_CAPABILITIES: dict[str, str] = {
-    "cost": "VPA, cost labels, cost report",
-    "dependency": "Dependency report, Renovate/Dependabot config",
-    "codechange": ".gitignore, OTel instrumentation, structured logging",
+    "codechange": "Optional source patches: .gitignore, OTel, structured logging, Dockerfile/health",
     # Long-lived watcher agents
     "vuln-watcher": "Monitors fleet for CVEs, raises an alert for every critical/high finding",
     "slo-tracker": "Checks SLO status, publishes breach alerts, recommends rollbacks",
@@ -138,9 +129,7 @@ AGENT_CLASSES: dict[str, tuple[str, str, str, str]] = load_agent_classes()
 
 
 AGENT_DISPLAY_NAMES: dict[str, str] = {
-    "cost": "Cost Optimization",
-    "dependency": "Dependency",
-    "codechange": "Code Change",
+    "codechange": "Code Change (source patches)",
 }
 
 def _watchers_dir() -> Path:

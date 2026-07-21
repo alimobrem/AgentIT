@@ -481,9 +481,7 @@ async def auto_validate_and_deliver(
         # No pull request AND no error: every category either had nothing
         # to deliver or its generated content was byte-identical to what's
         # already on the target repo's default branch (github_pr.py's
-        # `_infra_repo_content_unchanged()` dedup, closing the gap
-        # `create_agent_prs()`'s own `_agent_content_unchanged()` dedup
-        # never covered for this delivery path). This is the expected,
+        # `_infra_repo_content_unchanged()` dedup). This is the expected,
         # benign steady-state outcome now that every Assess/Scan chains
         # into onboarding automatically (2026-07-20) -- a cadence/webhook-
         # triggered re-scan of an app that's already onboarded and

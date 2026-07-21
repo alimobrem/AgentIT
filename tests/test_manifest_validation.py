@@ -72,19 +72,12 @@ def _validate_agent_yaml(agent_cls: type, report: AssessmentReport, tmp_path: Pa
 
 
 class TestAgentYamlValidity:
-    # security/observability/cicd/compliance/chaos/incident/retirement/
-    # release agents were removed once skills covered their domains (see
-    # docs/agent-removal-readiness.md) -- equivalent YAML-validity coverage
-    # for their skill replacements lives in tests/test_skill_agent_parity.py.
-    # cost/dependency keep their Python agents (narrative report gap, see
-    # that same doc) and are still validated here.
+    # Cost/dependency Python agents removed (skills own remediations).
+    # Skill YAML validity: tests/test_skill_agent_parity.py.
+    # Optional codechange may emit non-YAML source patches — covered by
+    # tests/test_codechange_agent.py (if present) / orchestrator runs.
 
-    def test_cost_agent(self, tmp_path: Path) -> None:
-        from agentit.agents.cost import CostOptimizationAgent
-        errors = _validate_agent_yaml(CostOptimizationAgent, _make_full_report(), tmp_path)
-        assert errors == [], f"Cost agent produced invalid YAML: {errors}"
-
-    def test_dependency_agent(self, tmp_path: Path) -> None:
-        from agentit.agents.dependency import DependencyAgent
-        errors = _validate_agent_yaml(DependencyAgent, _make_full_report(), tmp_path)
-        assert errors == [], f"Dependency agent produced invalid YAML: {errors}"
+    def test_codechange_agent_yaml_outputs_valid_when_present(self, tmp_path: Path) -> None:
+        from agentit.agents.codechange import CodeChangeAgent
+        errors = _validate_agent_yaml(CodeChangeAgent, _make_full_report(), tmp_path)
+        assert errors == [], f"CodeChange agent produced invalid YAML: {errors}"

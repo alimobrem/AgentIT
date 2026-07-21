@@ -29,9 +29,8 @@ REQUIRED_FIELDS = {"name", "category", "code_ref", "resource_tier", "description
 # section. `load_agent_classes()` must reproduce this exactly from
 # `agents/*.md` -- a pure format migration, zero behavior change, the same
 # discipline Phase 1 proved for `checks/observability/health-check.yaml`.
+# Post skills-primary simplification: only optional codechange remains.
 _PRE_PHASE2_AGENT_CLASSES: dict[str, tuple[str, str, str, str]] = {
-    "cost": ("cost", "agentit.agents.cost", "CostOptimizationAgent", "small"),
-    "dependency": ("dependency", "agentit.agents.dependency", "DependencyAgent", "small"),
     "codechange": ("codechange", "agentit.agents.codechange", "CodeChangeAgent", "large"),
 }
 
@@ -116,7 +115,7 @@ class TestLoadAgentClasses:
     def test_skips_malformed_file_without_crashing(self, tmp_path: Path) -> None:
         (tmp_path / "good.md").write_text(
             "---\nmode: agent\nname: good\ncategory: good\n"
-            "code_ref: agentit.agents.cost:CostOptimizationAgent\n"
+            "code_ref: agentit.agents.codechange:CodeChangeAgent\n"
             "resource_tier: small\ndescription: ok\n---\n\nbody\n",
         )
         (tmp_path / "bad.md").write_text("no frontmatter here at all\n")
@@ -127,7 +126,7 @@ class TestLoadAgentClasses:
         )
         result = load_agent_classes(tmp_path)
         assert result == {
-            "good": ("good", "agentit.agents.cost", "CostOptimizationAgent", "small"),
+            "good": ("good", "agentit.agents.codechange", "CodeChangeAgent", "small"),
         }
 
     def test_get_agent_class_resolves_every_loaded_agent(self) -> None:

@@ -4,17 +4,18 @@ name: codechange
 category: codechange
 code_ref: agentit.agents.codechange:CodeChangeAgent
 resource_tier: large
-description: .gitignore, OTel instrumentation, structured logging
+description: Optional source patches — .gitignore, OTel, logging, Dockerfile/health
 ---
 
-# Code Change Agent
+# Code Change Agent (optional source-patch path)
 
 ## What This Agent Does
-Patches the onboarded application's *own source repository* (a
-`.gitignore`, OpenTelemetry instrumentation, structured logging) rather
-than generating a Kubernetes manifest — a fundamentally different
-capability skills don't model, which is why this stays a real Python
-agent rather than becoming a `mode: detect`/`template` skill — see
+**Not a peer domain agent to skills.** Skills own cluster remediations
+(VPA, NetworkPolicy, Tekton, Renovate configs, …). This agent only
+proposes patches to the onboarded application's *own source repository*
+(`.gitignore`, OpenTelemetry instrumentation, structured logging,
+Dockerfile/health) — a capability skills don't model. It runs optionally
+when criticality is high/critical or overall score is low. See
 `docs/agent-removal-readiness.md`.
 
 ## Code Reference
@@ -28,8 +29,8 @@ other agent already goes through — this registration file only supplies
 ## Resource Tier
 `large` — see `RESOURCE_TIERS` in `agents/capabilities.py` for the actual
 CPU/memory request/limit values this tier maps to when run as a
-Kubernetes Job (`AGENTIT_AGENT_MODE=kubernetes`). Larger than `cost`/
-`dependency` because source-repo patch generation is more compute-intensive.
+Kubernetes Job (`AGENTIT_AGENT_MODE=kubernetes`). Source-repo patch
+generation is more compute-intensive than template skill rendering.
 
 ## Verification
 `agentit run-agent codechange --report <assessment.json>` produces at

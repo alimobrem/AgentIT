@@ -143,36 +143,29 @@ async def client():
 
 
 async def test_onboard_agent_crash_returns_partial(client, _override_store):
-    """When one agent (CostOptimizationAgent) raises, others still produce files.
-
-    HardeningAgent (and security/observability/cicd/compliance generally)
-    were removed once skills covered their domains (see
-    docs/agent-removal-readiness.md) -- "cost" is one of the three Python
-    agents left, so it's the one this regression guard crashes now.
-    """
+    """When codechange raises, skills still produce remediation files."""
     store = _override_store
     report = _make_report_with_findings()
+    # Force codechange into the plan (high criticality).
+    report.criticality = "critical"
     aid = await store.save(report)
 
     with patch(
-        "agentit.agents.cost.CostOptimizationAgent.run",
+        "agentit.agents.codechange.CodeChangeAgent.run",
         side_effect=RuntimeError("simulated crash"),
     ):
         resp = await client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
 
     assert resp.status_code == 303
-    # Onboard now runs as a background job with a real-time progress page
-    # (docs/ux-design-requirements.md checklist #6/#8).
     assert f"/assessments/{aid}/onboard/progress/" in resp.headers["location"]
 
     files = await store.get_onboarding(aid)
     assert files is not None
-    assert len(files) > 0, "Other agents/skills should still produce files despite cost agent crash"
+    assert len(files) > 0, "Skills should still produce files despite codechange crash"
 
     categories = {f["category"] for f in files}
-    assert "cost" not in categories, "Crashed agent should not produce output"
-    # At least one other source (skills, or a surviving Python agent) succeeded
-    assert categories & {"skills", "dependency", "codechange"}
+    assert "codechange" not in categories, "Crashed agent should not produce output"
+    assert "skills" in categories
 
 
 # ------------------------------------------------------------------

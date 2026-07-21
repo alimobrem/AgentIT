@@ -144,7 +144,7 @@ def get_pr_status(pr_url: str) -> dict:
                 "labels": [lbl.get("name", "") for lbl in (data.get("labels") or [])],
                 "created_at": data.get("created_at", ""),
                 # Number of commits on the PR -- every AgentIT PR-opening
-                # function (create_onboarding_pr/create_agent_prs/
+                # function (create_onboarding_pr/
                 # create_source_patch_pr/commit_to_infra_repo) makes exactly
                 # one commit before opening the PR, so >1 here means a human
                 # pushed additional commits before it was merged/closed --
@@ -200,7 +200,7 @@ def get_pr_extra_commits(pr_url: str, max_commits: int = 5) -> list[dict]:
     landed exactly as proposed).
 
     Every AgentIT PR-opening function (``create_onboarding_pr``/
-    ``create_agent_prs``/``create_source_patch_pr``/``commit_to_infra_repo``)
+    ``create_source_patch_pr``/``commit_to_infra_repo``)
     makes exactly one commit before opening the PR -- so the first commit
     returned by ``GET /pulls/{n}/commits`` is always AgentIT's own, and
     anything after it was pushed by someone else. Returns each such commit
@@ -554,24 +554,11 @@ def get_commits_behind(repo_url: str, base_sha: str, head_ref: str = "main") -> 
 
 # ── Shared PR-opening primitives ────────────────────────────────────────
 #
-# create_onboarding_pr(), create_agent_prs()'s per-agent loop,
-# create_source_patch_pr(), and commit_to_infra_repo() each independently
-# repeated the same 8-step sequence (fetch default branch -> fetch base
-# SHA -> build tree_items -> POST /git/trees -> POST /git/commits ->
-# POST /git/refs with a 422-force-push fallback -> build a PR body ->
-# POST /pulls with a 422-already-exists fallback), including the
-# `requests.HTTPError`/`Response.__bool__` gotcha (`exc.response` is falsy
-# for every real error response, since `Response.__bool__` returns
-# `self.ok` -- checking `exc.response is not None` instead of a bare
-# truthiness check is what actually surfaces GitHub's real error body)
-# explained identically in 3 separate `except requests.HTTPError` blocks
-# below. Consolidated 2026-07-20 (architecture-review follow-up) into the
-# 4 helpers below so a future fix to any one step only needs to land once
-# -- each of the 4 callers now only builds its own `tree_items`/PR title
-# and body text, then calls these in sequence. Pure refactor: every
-# function's external behavior/return shape is unchanged -- verified
-# against the existing test_portal_pr.py/test_delivery_router.py/
-# test_create_agent_prs_route.py suites, all passing unchanged.
+# create_onboarding_pr(), create_source_patch_pr(), and
+# commit_to_infra_repo() share the same 8-step GitHub sequence (fetch
+# default branch -> base SHA -> tree -> commit -> ref -> PR). Per-Agent
+# PRs (`create_agent_prs`) were removed as a product path; Scan/
+# auto_delivery remains the sole GitOps/chart PR creator.
 
 
 def _get_default_branch_and_base_sha(base_url: str, hdrs: dict) -> tuple[str, str]:
@@ -780,32 +767,6 @@ def path_exists_on_default_branch(repo_url: str, path: str) -> bool | None:
     return None
 
 
-def _agent_content_unchanged(
-    base_url: str, hdrs: dict, category: str, files: list[dict], default_branch: str,
-) -> bool:
-    """True only if every one of ``files`` is byte-identical to what's
-    already at its destination path on the freshly-fetched ``default_branch``.
-
-    This is the missing dedup check identified in the root-cause
-    investigation of the recurring redundant-PR pattern (PRs #85/#89/#90/#91):
-    self-improvement agents (codechange/cost/dependency) regenerate
-    deterministic advisory content on every run and this function's caller
-    used to unconditionally branch/commit/push/open-PR even when that exact
-    content had already merged to `main` via an earlier run -- wasting
-    review attention on a genuinely empty diff. Checked against a freshly
-    fetched `default_branch` HEAD (not a stale local/cached ref), so this
-    reflects the real current state of the target repo, not a snapshot from
-    whenever this branch was first created.
-    """
-    for f in files:
-        filename = Path(f["path"]).name
-        target_path = f".agentit/{category}/{filename}"
-        existing = _get_file_content_at_ref(base_url, hdrs, target_path, default_branch)
-        if existing != f["content"]:
-            return False
-    return True
-
-
 def _infra_repo_content_unchanged(
     base_url: str, hdrs: dict, app_name: str, files: list[dict], default_branch: str,
 ) -> bool:
@@ -835,109 +796,6 @@ def _infra_repo_content_unchanged(
         if existing != f["content"]:
             return False
     return True
-
-
-def create_agent_prs(
-    repo_url: str,
-    repo_name: str,
-    agent_results: list[dict],
-) -> list[dict]:
-    """Create per-agent branches and PRs via the GitHub API.
-
-    Each agent gets its own branch (agentit/{agent_name}) and PR with
-    only that agent's generated files. Before committing anything, each
-    agent's generated files are diffed against what's already at their
-    destination path on the repo's current default branch (fetched fresh
-    for this call, never a stale/cached ref) -- if every file is
-    byte-identical, nothing is committed and no PR is opened for that agent
-    (see `_agent_content_unchanged`'s docstring for why this check exists).
-
-    agent_results: [{agent_name, category, files: [{path, content, description}]}]
-    Returns: [{agent_name, pr_url, branch, error}] with {agent_name, skipped,
-    reason} entries for agents whose content was already up to date.
-    """
-    try:
-        token = _get_token()
-        hdrs = _headers(token)
-        owner, repo = _parse_owner_repo(repo_url)
-        base_url = f"{_API}/repos/{owner}/{repo}"
-
-        default_branch, base_sha = _get_default_branch_and_base_sha(base_url, hdrs)
-    except Exception as exc:
-        logger.exception("Failed to get repo info for per-agent PRs")
-        return [{"agent_name": "setup", "error": str(exc)}]
-
-    results: list[dict] = []
-
-    for agent in agent_results:
-        agent_name = agent["agent_name"]
-        category = agent["category"]
-        files = agent.get("files", [])
-        if not files:
-            continue
-
-        if _agent_content_unchanged(base_url, hdrs, category, files, default_branch):
-            logger.info(
-                "agentit: %s manifests unchanged from %s -- skipping PR, nothing to commit",
-                agent_name, default_branch,
-            )
-            results.append({
-                "agent_name": agent_name,
-                "skipped": True,
-                "reason": f"content already matches {default_branch} -- no PR needed",
-            })
-            continue
-
-        branch_name = f"agentit/{agent_name}"
-
-        try:
-            tree_items = []
-            for f in files:
-                filename = Path(f["path"]).name
-                tree_items.append({
-                    "path": f".agentit/{category}/{filename}",
-                    "mode": "100644",
-                    "type": "blob",
-                    "content": f["content"],
-                })
-
-            commit_sha = _commit_tree(
-                base_url, hdrs, base_sha, tree_items,
-                f"feat(agentit): {agent_name} — {len(files)} manifests for {repo_name}",
-            )
-            _create_or_update_branch_ref(base_url, hdrs, branch_name, commit_sha)
-
-            file_list = "\n".join(
-                f"- `.agentit/{category}/{Path(f['path']).name}`"
-                for f in files
-            )
-            pr_body = (
-                f"## AgentIT: {agent_name}\n\n"
-                f"Manifests generated by the **{agent_name}** agent.\n\n"
-                f"### Files\n{file_list}\n\n"
-                f"> Generated by [AgentIT](https://github.com/alimobrem/AgentIT)"
-            )
-
-            pr_url = _open_pr_with_fallback(
-                base_url, hdrs, owner, branch_name, default_branch,
-                f"[AgentIT] {agent_name}: {len(files)} manifests for {repo_name}", pr_body, repo_url,
-            )
-
-            results.append({
-                "agent_name": agent_name,
-                "branch": branch_name,
-                "pr_url": pr_url,
-                "files_count": len(files),
-            })
-
-        except Exception as exc:
-            logger.warning("Failed to create PR for agent %s: %s", agent_name, exc)
-            results.append({
-                "agent_name": agent_name,
-                "error": str(exc),
-            })
-
-    return results
 
 
 def merge_pr(pr_url: str) -> dict:

@@ -40,14 +40,11 @@ class TestAssessOnboardFlow:
         assert len(await raw.list_slos(aid)) > 0
 
     async def test_orchestrator_registers_agents(self, tmp_path):
-        """security/observability/cicd/compliance/infrastructure/incident/
-        release/retirement/chaos were removed once skills covered their
-        domains (see docs/agent-removal-readiness.md) -- only 3 Python
-        agents are left to register."""
+        """Only optional codechange remains as a Python onboarding agent."""
         from agentit.agents.orchestrator import FleetOrchestrator
 
         store, raw = await make_async_store()
-        report = make_report()
+        report = make_report(criticality="high")
         aid = await raw.save(report)
 
         orch = FleetOrchestrator(report=report, output_dir=tmp_path / "out",
@@ -55,7 +52,9 @@ class TestAssessOnboardFlow:
         await orch.run()
 
         agents = await raw.list_agents()
-        assert len(agents) >= 3
+        names = {a["agent_name"] for a in agents}
+        assert "codechange" in names
+        assert names.isdisjoint({"cost", "dependency"})
 
 
 class TestInfraRepoFlow:

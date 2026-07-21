@@ -339,7 +339,7 @@ class TestPruneStaleAgents:
 
     async def test_preserves_all_known_names(self):
         store = await make_store()
-        known = {"cost", "dependency", "codechange", "vuln-watcher",
+        known = {"codechange", "vuln-watcher",
                   "slo-tracker", "drift-detector", "skill-learner"}
         for name in known:
             await store.register_agent(name, "test")
@@ -360,15 +360,15 @@ class TestPruneStaleAgents:
         for name in ("chaos", "cicd", "compliance", "hardening", "incident",
                      "infrastructure", "observability", "release", "retirement"):
             await store.register_agent(name, name)
-        await store.register_agent("cost", "cost")
+        await store.register_agent("codechange", "codechange")
 
-        known = {"cost", "dependency", "codechange", "vuln-watcher",
+        known = {"codechange", "vuln-watcher",
                   "slo-tracker", "drift-detector", "skill-learner"}
         pruned = await store.prune_stale_agents(known_names=known)
 
         assert len(pruned) == 9
         remaining = {a["agent_name"] for a in await store.list_agents()}
-        assert remaining == {"cost"}
+        assert remaining == {"codechange"}
 
     async def test_heartbeat_only_watcher_also_pruned_if_unknown(self):
         """Rows created via agent_heartbeat() (never register_agent()) are
@@ -575,14 +575,12 @@ class TestOrchestratorStoreWiring:
             result = await orch.run()
 
         agent_names_with_files = {r.agent_name for r in result.agent_results if r.files_generated}
-        assert agent_names_with_files & {"cost", "dependency", "codechange"}
+        assert agent_names_with_files & {"skills", "codechange"}
 
     async def test_agents_registered_on_run(self):
         """Orchestrator registers available Python agents in the store.
 
-        security/observability/cicd/compliance were removed once skills
-        covered their domains (see docs/agent-removal-readiness.md) --
-        cost/dependency/codechange are the ones left to register.
+        Only codechange remains as a registered Python onboarding agent.
         """
         from agentit.agents.orchestrator import FleetOrchestrator
         import tempfile
@@ -590,7 +588,7 @@ class TestOrchestratorStoreWiring:
 
         store = await make_store()
         async_store = store
-        report = make_report()
+        report = make_report(criticality="high")
         aid = await store.save(report)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -602,8 +600,7 @@ class TestOrchestratorStoreWiring:
 
         agents = await store.list_agents()
         agent_names = {a["agent_name"] for a in agents}
-        for core in ("cost", "dependency", "codechange"):
-            assert core in agent_names, f"{core} not registered"
+        assert "codechange" in agent_names, "codechange not registered"
 
     async def test_run_succeeds_without_assessment_id(self):
         """Orchestrator still runs (and generates files) when assessment_id

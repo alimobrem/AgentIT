@@ -58,8 +58,14 @@ class InfrastructureAnalyzer:
             findings.append(Finding(
                 category="resources",
                 severity=Severity.medium,
-                description="No resource limits/requests defined in manifests",
-                recommendation="Add CPU and memory requests/limits to all containers",
+                description=(
+                    "No resource limits/requests defined in manifests — "
+                    "workloads may be over- or under-provisioned (cost/rightsize risk)"
+                ),
+                recommendation=(
+                    "Add CPU and memory requests/limits to all containers; "
+                    "enable VPA and cost labels via skills for ongoing right-sizing"
+                ),
                 source="analyzer:infrastructure",
             ))
         if has_k8s_manifests and not has_quota:

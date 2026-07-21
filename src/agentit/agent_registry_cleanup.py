@@ -14,10 +14,11 @@ ever insert or refresh a row, never remove one -- so its last-registered row
 sits in `agent_registry` forever, reported as `status: active` with a
 `last_heartbeat` frozen at whenever it last ran.
 
-The known-agent-names source of truth is `agents/capabilities.py`: the 3
-surviving Python onboarding agents (`AGENT_CLASSES`) plus the 4 long-lived
+The known-agent-names source of truth is `agents/capabilities.py`: the
+optional `codechange` source-patch agent (`AGENT_CLASSES`) plus long-lived
 watchers (`WATCHER_AGENTS`) that heartbeat directly, bypassing
-`register_agent()` entirely.
+`register_agent()` entirely. Cost/dependency Python agents were removed
+(skills own those remediations).
 """
 from __future__ import annotations
 
