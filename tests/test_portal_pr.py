@@ -195,7 +195,7 @@ def test_commit_to_infra_repo_already_open_returns_the_real_pr_url_not_a_compare
         elif "git/ref/heads/main" in url:
             resp.json.return_value = {"object": {"sha": "abc123"}}
         elif url.endswith("/pulls"):
-            assert kwargs["params"]["head"] == "org:agentit/agentit"
+            assert kwargs["params"]["head"] == "org:agentit/pinky"
             resp.json.return_value = [{"html_url": "https://github.com/org/agentit-gitops/pull/22"}]
         return resp
 
@@ -203,7 +203,7 @@ def test_commit_to_infra_repo_already_open_returns_the_real_pr_url_not_a_compare
         resp = MagicMock()
         if url.endswith("/pulls"):
             resp.status_code = 422
-            resp.text = "A pull request already exists for org:agentit/agentit."
+            resp.text = "A pull request already exists for org:agentit/pinky."
             return resp
         resp.status_code = 201
         if "git/trees" in url:
@@ -223,13 +223,37 @@ def test_commit_to_infra_repo_already_open_returns_the_real_pr_url_not_a_compare
 
     result = commit_to_infra_repo(
         infra_repo_url="https://github.com/org/agentit-gitops",
-        app_name="agentit",
+        app_name="pinky",
         files=SAMPLE_FILES,
-        branch_name="agentit/agentit",
+        branch_name="agentit/pinky",
     )
 
     assert result["pr_url"] == "https://github.com/org/agentit-gitops/pull/22"
     assert "compare" not in result["pr_url"]
+
+
+def test_commit_to_infra_repo_refuses_apps_agentit_dead_letter():
+    """Belt-and-suspenders: never open orphan PRs under apps/agentit/
+    (AppSet excludes that path; Application agentit syncs AgentIT.git chart/).
+    See docs/architecture-agentit-vs-fleet-gitops.md."""
+    result = commit_to_infra_repo(
+        infra_repo_url="https://github.com/org/agentit-gitops",
+        app_name="agentit",
+        files=SAMPLE_FILES,
+    )
+    assert "error" in result
+    assert "apps/agentit" in result["error"]
+    assert "AgentIT.git" in result["error"] or "chart/" in result["error"]
+
+
+def test_commit_to_infra_repo_refuses_empty_files_list():
+    result = commit_to_infra_repo(
+        infra_repo_url="https://github.com/org/agentit-gitops",
+        app_name="pinky",
+        files=[],
+    )
+    assert result.get("skipped") is True
+    assert "no files" in result["reason"]
 
 
 @patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"})

@@ -853,9 +853,25 @@ def commit_to_infra_repo(
     Creates a branch and PR if branch_name is set, otherwise commits to main.
 
     Returns {"commit_url", "pr_url", "files_committed"} or {"error"}.
+    Refuses ``apps/agentit/`` outright (AppSet excludes that path; Application
+    ``agentit`` syncs Helm ``chart/`` from AgentIT.git — see
+    docs/architecture-agentit-vs-fleet-gitops.md). Also refuses an empty
+    ``files`` list so we never open a zero-file PR.
     """
     app_name = app_name.lower().replace("_", "-").replace(".", "-")
     branch_name = branch_name or f"agentit/{app_name}"
+
+    if app_name == "agentit":
+        return {
+            "error": (
+                "refusing to commit under apps/agentit/ — Application `agentit` syncs "
+                "Helm chart/ from AgentIT.git, and ApplicationSet excludes apps/agentit "
+                "(dead letter). Route self-managed AgentIT via route_and_deliver() to "
+                "AgentIT.git instead — see docs/architecture-agentit-vs-fleet-gitops.md"
+            ),
+        }
+    if not files:
+        return {"skipped": True, "reason": "no files to commit -- refusing empty PR"}
 
     try:
         token = _get_token()

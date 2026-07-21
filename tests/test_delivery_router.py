@@ -23,7 +23,10 @@ from agentit.portal.delivery import (
     classify_file,
     confirmation_text,
     has_unresolved_placeholders,
+    is_appset_excluded_app,
     is_gitops_registered,
+    is_self_managed_delivery_target,
+    remap_self_managed_cluster_files,
     resolve_cluster_config_mechanism,
     route_and_deliver,
 )
@@ -253,7 +256,8 @@ class TestResolveClusterConfigMechanism:
     only thing that ever matters for whether to commit there (see
     docs/onboarding-loop-vision-gap-analysis.md §1's bootstrap-circularity
     fix -- the very first delivery for a known infra repo still commits,
-    live-registered or not)."""
+    live-registered or not) -- except self-managed AgentIT, which must
+    never use MECHANISM_INFRA_REPO_COMMIT (apps/agentit/ is a dead letter)."""
 
     def test_no_infra_repo_refuses_with_no_direct_apply_fallback(self):
         """Only reachable for an assessment saved before GitOps
@@ -275,6 +279,139 @@ class TestResolveClusterConfigMechanism:
             resolve_cluster_config_mechanism("https://github.com/org/infra-gitops")
             == MECHANISM_INFRA_REPO_COMMIT
         )
+
+    def test_self_managed_cluster_config_routes_to_source_repo_pr(self):
+        assert (
+            resolve_cluster_config_mechanism(
+                "https://github.com/org/infra-gitops", self_managed=True,
+            )
+            == MECHANISM_SOURCE_REPO_PR
+        )
+
+    def test_self_managed_cicd_fails_closed(self):
+        assert (
+            resolve_cluster_config_mechanism(
+                "https://github.com/org/infra-gitops",
+                self_managed=True,
+                category=CATEGORY_CICD_SHARED_NAMESPACE,
+            )
+            == MECHANISM_NONE
+        )
+
+
+class TestSelfManagedDeliveryTarget:
+    def test_appset_excluded_agentit_is_always_self_managed(self):
+        assert is_appset_excluded_app("agentit") is True
+        assert is_appset_excluded_app("AgentIT") is True
+        assert is_appset_excluded_app("pinky") is False
+
+    async def test_agentit_name_is_self_managed_even_without_kube(self):
+        report = make_report(repo_name="agentit", repo_url="https://github.com/org/AgentIT")
+        with patch("agentit.portal.delivery.kube.get_custom_resource") as mock_get:
+            assert await is_self_managed_delivery_target("agentit", report) is True
+        mock_get.assert_not_called()
+
+    async def test_fleet_app_not_self_managed_when_no_literal_app(self):
+        report = make_report(repo_name="pinky", repo_url="https://github.com/org/pinky")
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None):
+            assert await is_self_managed_delivery_target("pinky", report) is False
+
+    def test_remap_puts_yaml_under_chart_templates(self):
+        remapped = remap_self_managed_cluster_files([_cluster_config_file()])
+        assert remapped[0]["target_path"] == "chart/templates/app-network-policy.yaml"
+
+    def test_confirmation_text_names_agentit_git_not_gitops(self):
+        text = confirmation_text(
+            MECHANISM_SOURCE_REPO_PR,
+            self_managed=True,
+            app_repo_url="https://github.com/org/AgentIT",
+        )
+        assert "AgentIT" in text or "chart/templates" in text
+        assert "apps/agentit" in text
+        assert "infra-gitops" not in text
+        assert "never auto-merge" in text
+
+
+class TestRouteAndDeliverSelfManagedAgentIT:
+    """Regression: onboard must never open dead-letter PRs under
+    apps/agentit/ in agentit-gitops (AppSet excludes that path).
+    See docs/architecture-agentit-vs-fleet-gitops.md."""
+
+    async def test_self_managed_agentit_never_calls_commit_to_infra_repo(self):
+        store, raw = await make_async_store()
+        report = make_report(repo_name="agentit", repo_url="https://github.com/alimobrem/AgentIT")
+        report.infra_repo_url = "https://github.com/alimobrem/agentit-gitops"
+        aid = await raw.save(report)
+        with patch("agentit.portal.delivery.kube.get_custom_resource") as mock_get, \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.create_source_patch_pr") as mock_source, \
+             patch("agentit.portal.github_pr.ensure_applicationset") as mock_ensure:
+            # Literal Application agentit sourcing AgentIT.git (self-managed).
+            mock_get.side_effect = [
+                None,  # managed-agentit
+                {"spec": {"source": {"repoURL": "https://github.com/alimobrem/AgentIT.git"}}},
+            ]
+            mock_source.return_value = {
+                "pr_url": "https://github.com/alimobrem/AgentIT/pull/99",
+                "branch": "agentit/codechange",
+                "files_committed": 1,
+            }
+            result = await route_and_deliver(
+                [_cluster_config_file()], app_name="agentit", namespace="agentit",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=False,
+            )
+        assert result["self_managed"] is True
+        assert result["mechanisms"]["cluster_config"] == MECHANISM_SOURCE_REPO_PR
+        mock_commit.assert_not_called()
+        mock_ensure.assert_not_called()
+        mock_source.assert_called_once()
+        called_files = mock_source.call_args[0][2]
+        assert called_files[0]["target_path"] == "chart/templates/app-network-policy.yaml"
+        assert result["outcomes"]["cluster_config"]["pr_url"] == (
+            "https://github.com/alimobrem/AgentIT/pull/99"
+        )
+
+    async def test_self_managed_agentit_cicd_fails_closed_no_infra_pr(self):
+        store, raw = await make_async_store()
+        report = make_report(repo_name="agentit", repo_url="https://github.com/alimobrem/AgentIT")
+        report.infra_repo_url = "https://github.com/alimobrem/agentit-gitops"
+        aid = await raw.save(report)
+        with patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit:
+            result = await route_and_deliver(
+                [_cicd_file()], app_name="agentit", namespace="agentit",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=False,
+            )
+        assert result["self_managed"] is True
+        assert result["mechanisms"][CATEGORY_CICD_SHARED_NAMESPACE] == MECHANISM_NONE
+        mock_commit.assert_not_called()
+        assert "apps/agentit" in result["outcomes"][CATEGORY_CICD_SHARED_NAMESPACE]["error"]
+
+    async def test_fleet_app_still_uses_infra_repo_commit(self):
+        store, raw = await make_async_store()
+        report = make_report(repo_name="pinky", repo_url="https://github.com/org/pinky")
+        report.infra_repo_url = "https://github.com/org/infra-gitops"
+        aid = await raw.save(report)
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset") as mock_ensure, \
+             patch("agentit.portal.github_pr.create_source_patch_pr") as mock_source:
+            mock_commit.return_value = {
+                "pr_url": "https://github.com/org/infra-gitops/pull/1",
+                "commit_url": "https://github.com/org/infra-gitops/commit/abc123",
+                "files_committed": 1,
+            }
+            result = await route_and_deliver(
+                [_cluster_config_file()], app_name="pinky", namespace="pinky",
+                report=report, store=store, assessment_id=aid,
+                actor="tester", dry_run=False,
+            )
+        assert result["self_managed"] is False
+        assert result["mechanisms"]["cluster_config"] == MECHANISM_INFRA_REPO_COMMIT
+        mock_commit.assert_called_once()
+        mock_ensure.assert_called_once()
+        mock_source.assert_not_called()
 
 
 class TestRouteAndDeliverClusterConfig:
