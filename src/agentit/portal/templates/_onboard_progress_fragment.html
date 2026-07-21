@@ -18,34 +18,19 @@
    runs auto_delivery.py's validate/fix loop, a final LLM review, and (once
    clean) the real Deliver, so this stepper now has stages for each of
    those (docs/onboarding-loop-vision-gap-analysis.md's Part 3, finally
-   wired up). Still never a fabricated percentage: `_stage_order` below
-   only encodes DISPLAY ORDER for the job's own real `status` values, never
-   an invented in-between progress amount. #}
+   wired up).
+
+   The stepper itself is the ONE shared `pipeline_stepper()` macro
+   (_macros.html) assess_progress.html also renders -- indices 0-2
+   (Cloning/Analyzing/Saving Score) always pre-marked done here, since an
+   onboard job only ever exists for an assessment that already completed
+   (2026-07-20, "why are we showing two workflow pages" fix). `current_index`/
+   `failed` are computed server-side by routes/assessments.py's
+   `_onboard_pipeline_position()` from the job's own real `status` --
+   never a fabricated in-between progress amount. #}
+{% from "_macros.html" import pipeline_stepper %}
 <div class="card" id="onboard-progress-card">
-  <div class="lifecycle-stepper">
-    {% set stages = [
-      ("running", "Running Agents"),
-      ("saving", "Saving Manifests"),
-      ("validating", "Validating"),
-      ("reviewing", "Final Review"),
-      ("delivering", "Creating PR(s)"),
-      ("completed", "Done"),
-    ] %}
-    {% set _stage_order = {
-      "pending": -1, "running": 0, "saving": 1, "validating": 2, "reviewing": 3,
-      "delivering": 4, "completed": 5, "needs_attention": 4, "failed": 0,
-    } %}
-    {% set _current_idx = _stage_order.get(job.status, -1) %}
-    {% for key, label in stages %}
-    {% set is_active = loop.index0 == _current_idx %}
-    {% set is_done = loop.index0 < _current_idx or job.status == "completed" %}
-    <div class="lifecycle-step {% if is_active %}step-active{% elif is_done %}step-done{% else %}step-pending{% endif %}">
-      <div class="step-marker">{% if is_done and not is_active %}&#10003;{% else %}{{ loop.index }}{% endif %}</div>
-      <div class="step-label">{{ label }}</div>
-    </div>
-    {% if not loop.last %}<div class="step-connector {% if is_done %}connector-done{% endif %}"></div>{% endif %}
-    {% endfor %}
-  </div>
+  {{ pipeline_stepper(current_index, failed) }}
 
   <p class="text-muted text-center mb-1">{{ job.current_step or "Starting…" }}</p>
 
