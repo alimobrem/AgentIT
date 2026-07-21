@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: "{{ .Release.Name }}-compliance-rescan"
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/instance: "{{ .Release.Name }}"
+spec:
+  schedule: "0 2 1 * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: agentit
+            app.kubernetes.io/instance: "{{ .Release.Name }}"
+            app.kubernetes.io/component: compliance-rescan
+        spec:
+          serviceAccountName: "{{ .Release.Name }}-compliance-sa"
+          restartPolicy: OnFailure
+          containers:
+            - name: assess
+              image: "{{ .Values.complianceRescan.image | default \"agentit:latest\" }}"
+              command:
+                - agentit
+                - assess
+              args:
+                - "--namespace"
+                - "{{ .Release.Namespace }}"
+                - "--output"
+                - "/results/report.json"
+              volumeMounts:
+                - name: results
+                  mountPath: /results
+          volumes:
+            - name: results
+              emptyDir: {}

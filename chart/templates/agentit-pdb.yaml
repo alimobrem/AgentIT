@@ -1,0 +1,13 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: "{{ .Release.Name }}-agentit"
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/instance: "{{ .Release.Name }}"
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: agentit

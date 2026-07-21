@@ -1,0 +1,16 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: "{{ .Release.Name }}-monitor"
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/instance: "{{ .Release.Name }}"
+spec:
+  selector:
+    matchLabels:
+      app: agentit
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s

@@ -1,0 +1,55 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: "{{ .Release.Name }}-alertmanager-config"
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/component: alerting
+data:
+  alertmanager.yaml: |
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: default-email
+      group_by:
+        - alertname
+        - namespace
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        - match:
+            severity: critical
+          receiver: pagerduty-critical
+          group_wait: 10s
+          repeat_interval: 1h
+          continue: false
+        - match:
+            severity: warning
+          receiver: slack-warnings
+          repeat_interval: 4h
+          continue: false
+        - match:
+            severity: info
+          receiver: default-email
+          repeat_interval: 12h
+    receivers:
+      - name: pagerduty-critical
+        pagerduty_configs:
+          - service_key_file: /etc/alertmanager/secrets/pagerduty-key
+            description: "{{ `{{ .GroupLabels.alertname }}` }} in {{ `{{ .GroupLabels.namespace }}` }}"
+            severity: "{{ `{{ .CommonLabels.severity }}` }}"
+      - name: slack-warnings
+        slack_configs:
+          - api_url_file: /etc/alertmanager/secrets/slack-webhook-url
+            channel: "#agentit-alerts"
+            title: "[{{ `{{ .Status | toUpper }}` }}] {{ `{{ .GroupLabels.alertname }}` }}"
+            text: "{{ `{{ range .Alerts }}{{ .Annotations.summary }}\n{{ end }}` }}"
+            send_resolved: true
+      - name: default-email
+        email_configs:
+          - to: "agentit-team@example.com"
+            from: "alertmanager@example.com"
+            smarthost: "smtp.example.com:587"
+            send_resolved: true
