@@ -98,6 +98,7 @@ from ._shared import (
 
 from .agents import AgentsMixin
 from .assessments import AssessmentsMixin
+from .checks import ChecksMixin
 from .deliveries import DeliveriesMixin
 from .events import EventsMixin
 from .feedback import FeedbackMixin
@@ -592,7 +593,7 @@ ASSESSMENT_CADENCES = (*ASSESSMENT_CADENCE_INTERVALS, "manual")
 
 class AssessmentStore(
     AssessmentsMixin, EventsMixin, FleetMixin, DeliveriesMixin, AgentsMixin, SLOsMixin, JobsMixin,
-    SchedulesMixin, FeedbackMixin,
+    SchedulesMixin, FeedbackMixin, ChecksMixin,
 ):
     """The one and only ``AssessmentStore``. Postgres-backed, fully async.
 
@@ -693,54 +694,6 @@ class AssessmentStore(
     async def list_settings(self) -> list[dict]:
         rows = await self._pool.fetch("SELECT * FROM settings ORDER BY key")
         return _rows_to_dicts(rows)
-
-    # ── Check Result Snapshots ───────────────────────────────────────────
-
-    async def save_check_results(self, assessment_id: str, results: list[dict]) -> None:
-        """Persist per-check pass/fail rows for one assessment.
-
-        `results` is a list of ``{"check_name": ..., "dimension": ..., "passed": bool}``
-        dicts, as produced by ``check_engine.run_checks_with_status``.
-        """
-        if not results:
-            return
-        now = _now()
-        await self._pool.executemany(
-            """
-            INSERT INTO check_results (assessment_id, check_name, dimension, passed, created_at)
-            VALUES ($1, $2, $3, $4, $5)
-            """,
-            [
-                (assessment_id, r["check_name"], r["dimension"], bool(r["passed"]), now)
-                for r in results
-            ],
-        )
-
-    async def get_check_compliance(self) -> list[dict]:
-        """Fleet-wide check compliance: pass rate per check, across every
-        recorded assessment snapshot."""
-        rows = await self._pool.fetch(
-            """
-            SELECT check_name, dimension,
-                   SUM(CASE WHEN passed THEN 1 ELSE 0 END) as passes,
-                   COUNT(*) as total
-            FROM check_results
-            GROUP BY check_name, dimension
-            ORDER BY dimension, check_name
-            """
-        )
-        result = []
-        for r in rows:
-            total = r["total"] or 0
-            pass_rate = (r["passes"] / total * 100) if total > 0 else 0
-            result.append({
-                "check_name": r["check_name"],
-                "dimension": r["dimension"],
-                "passes": r["passes"],
-                "total": total,
-                "pass_rate": round(pass_rate, 1),
-            })
-        return result
 
     # ── Skill Effectiveness ──────────────────────────────────────────
 
@@ -860,30 +813,6 @@ class AssessmentStore(
             "outcomes": _rows_to_dicts(outcomes),
             "events": _rows_to_dicts(events),
         }
-
-    # ── Check Suppression ───────────────────────────────────────────
-
-    async def suppress_check(self, app_name: str, check_source: str, reason: str = "") -> None:
-        await self._pool.execute(
-            "INSERT INTO suppressed_checks (id, app_name, check_source, reason, created_at) "
-            "VALUES ($1, $2, $3, $4, $5) "
-            "ON CONFLICT (app_name, check_source) DO UPDATE SET reason = EXCLUDED.reason, created_at = EXCLUDED.created_at",
-            f"{app_name}:{check_source}", app_name, check_source, reason, _now(),
-        )
-
-    async def unsuppress_check(self, app_name: str, check_source: str) -> None:
-        await self._pool.execute(
-            "DELETE FROM suppressed_checks WHERE app_name = $1 AND check_source = $2",
-            app_name, check_source,
-        )
-
-    async def get_suppressions(self, app_name: str) -> list[dict]:
-        rows = await self._pool.fetch(
-            "SELECT check_source, reason, suppressed_by, created_at "
-            "FROM suppressed_checks WHERE app_name = $1 ORDER BY created_at DESC",
-            app_name,
-        )
-        return _rows_to_dicts(rows)
 
     async def export_all(self) -> dict:
         """Export all tables as JSON for disaster recovery (and as the seed
