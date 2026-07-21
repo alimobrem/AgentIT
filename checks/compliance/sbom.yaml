@@ -1,8 +1,0 @@
-name: sbom-exists
-dimension: compliance
-severity: high
-category: sbom
-type: file_exists
-pattern: "*sbom*"
-description: No SBOM (Software Bill of Materials) found
-recommendation: Generate SBOM using Syft, store in ODF

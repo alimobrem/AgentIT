@@ -3815,6 +3815,72 @@ async def test_capabilities_page_links_watchers_to_registry_detail(client):
     assert 'href="/agents/capability-scout"' in resp.text
 
 
+# ── Capabilities: Phase 5 (extension-model-unification-plan-2026-07-18) ─
+# UI polish -- mode badge on the skill table, detect-mode skills folded
+# into a unified "Detections" section, rule content on the skill detail
+# page. Exercised against the real, on-disk skills/ catalog (no tmp_path
+# override) since these prove the actual production Phase 4 ports render
+# correctly, not just a synthetic fixture.
+
+
+async def test_capabilities_page_shows_total_detections_stat(client):
+    """Detections = every mode: detect skill (checks/*.yaml is now fully
+    empty after Phase 4) -- the stat card must reflect a real, non-zero
+    count, not the old "Total Checks" label/key that would now always
+    read 0 now that every legacy check has a skill replacement."""
+    from agentit.portal.routes import capabilities as capabilities_routes
+    capabilities_routes._skills_cache["data"] = None
+    capabilities_routes._checks_cache["data"] = None
+
+    resp = await client.get("/capabilities")
+    assert resp.status_code == 200
+    assert "Total Detections" in resp.text
+    assert "Total Checks" not in resp.text
+
+
+async def test_capabilities_page_detections_section_shows_ported_skill_as_skill_source(client):
+    """A Phase 4-ported check (ci-pipeline-exists) must render in the
+    Detections section, linked to its skill detail page and tagged with
+    the "skill" source badge, not "legacy YAML" (its YAML file is gone)."""
+    from agentit.portal.routes import capabilities as capabilities_routes
+    capabilities_routes._skills_cache["data"] = None
+    capabilities_routes._checks_cache["data"] = None
+
+    resp = await client.get("/capabilities")
+    assert resp.status_code == 200
+    assert "Detections" in resp.text
+    assert 'href="/capabilities/skills/ci-pipeline-exists/history"' in resp.text
+    assert ">skill<" in resp.text
+    assert "legacy YAML" not in resp.text, "checks/ is fully empty after Phase 4 -- no row should say legacy YAML"
+
+
+async def test_capabilities_page_skill_table_shows_detect_mode_badge(client):
+    """The Skills by Domain table must visually distinguish a mode:
+    detect skill from a template/llm one via a mode badge (Phase 5 item
+    (a))."""
+    from agentit.portal.routes import capabilities as capabilities_routes
+    capabilities_routes._skills_cache["data"] = None
+    capabilities_routes._checks_cache["data"] = None
+
+    resp = await client.get("/capabilities")
+    assert resp.status_code == 200
+    assert '<span class="badge badge-info" title="Detection rule' in resp.text
+
+
+async def test_skill_detail_page_surfaces_detect_rule_content(client):
+    """Phase 5 item (c): a mode: detect skill's rule/pattern must be
+    inspectable on its own detail page, the way a legacy check's YAML was."""
+    from agentit.portal.routes import capabilities as capabilities_routes
+    capabilities_routes._skills_cache["data"] = None
+
+    resp = await client.get("/capabilities/skills/ci-pipeline-exists/history")
+    assert resp.status_code == 200
+    assert "Rule Type" in resp.text
+    assert "file_exists" in resp.text
+    assert ".gitlab-ci.yml" in resp.text
+    assert "No GitLab CI pipeline configuration found" in resp.text
+
+
 async def test_agent_detail_renders_for_never_run_onboarding_agent(client, _override_store):
     """Catalog's reference table now links every onboarding agent to its
     Agent Activity detail page unconditionally -- an agent that's never

@@ -1,8 +1,0 @@
-name: argocd-application-exists
-dimension: cicd
-severity: medium
-category: gitops
-type: file_contains
-pattern: argoproj.io
-description: No GitOps configuration (Argo CD) detected
-recommendation: Create Argo CD Application for GitOps delivery

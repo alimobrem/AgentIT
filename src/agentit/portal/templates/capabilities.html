@@ -55,8 +55,8 @@
     <div class="stat-value text-warning">{{ deprecated_skills }}</div>
   </div>
   <div class="stat-card">
-    <div class="stat-label">Total Checks</div>
-    <div class="stat-value">{{ total_checks }}</div>
+    <div class="stat-label">Total Detections</div>
+    <div class="stat-value">{{ total_detections }}</div>
   </div>
 </div>
 
@@ -186,6 +186,7 @@
   <thead>
     <tr>
       <th>Skill</th>
+      <th>Mode</th>
       <th>Status</th>
       <th>Property</th>
       <th>Outputs</th>
@@ -196,6 +197,15 @@
     {% for skill in domain_skills %}
     <tr>
       <td class="text-bold"><a href="/capabilities/skills/{{ skill.name }}/history">{{ skill.name }}</a></td>
+      <td>
+        {% if skill.mode == "detect" %}
+          <span class="badge badge-info" title="Detection rule -- produces a Finding, never a manifest">detect</span>
+        {% elif skill.mode == "llm" %}
+          <span class="badge badge-muted" title="LLM-generated remediation, template fallback">llm</span>
+        {% else %}
+          <span class="badge badge-muted" title="Template-rendered remediation">template</span>
+        {% endif %}
+      </td>
       <td>
         {% if skill.status == "active" %}
           <span class="badge badge-success">active</span>
@@ -233,8 +243,20 @@
           <span class="badge badge-muted">{{ skill.status }}</span>
         {% endif %}
       </td>
-      <td class="text-sm text-muted">{{ skill.property_description or '—' }}</td>
-      <td class="text-sm">{{ skill.outputs|join(', ') }}</td>
+      <td class="text-sm text-muted">
+        {% if skill.mode == "detect" %}
+          {{ skill.description or '—' }}
+        {% else %}
+          {{ skill.property_description or '—' }}
+        {% endif %}
+      </td>
+      <td class="text-sm">
+        {% if skill.mode == "detect" %}
+          <span class="badge badge-{{ skill.severity or 'muted' }}">{{ skill.severity or '—' }}</span>
+        {% else %}
+          {{ skill.outputs|join(', ') }}
+        {% endif %}
+      </td>
       <td>
         {% set eff = effectiveness.get(skill.name) %}
         {% if eff %}
@@ -261,30 +283,46 @@
 
 <div x-data="{ open: false }">
 <button type="button" class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
-  Assessment Checks ({{ total_checks }})
+  Detections ({{ total_detections }})
 </button>
 <div class="collapse-body" x-show="open" x-transition>
+<p class="text-muted mb-1">Every declarative detection rule that can produce a Finding during an assessment -- <code>mode: detect</code> skills (the current, unified format -- see <a href="https://github.com/alimobrem/AgentIT/blob/main/docs/extension-model-unification-plan-2026-07-18.md" target="_blank" rel="noopener">the unification plan</a>) plus any legacy <code>checks/*.yaml</code> file not yet ported to one. Source column shows which.</p>
 
-{% for dimension, dim_checks in checks_by_dimension.items()|sort %}
+{% for dimension, dim_detections in detections_by_dimension.items()|sort %}
 <h3 class="section-title">{{ dimension }}</h3>
 <table>
   <thead>
     <tr>
-      <th>Check</th>
+      <th>Detection</th>
+      <th>Source</th>
       <th>Type</th>
       <th>Severity</th>
       <th>Description</th>
     </tr>
   </thead>
   <tbody>
-    {% for check in dim_checks %}
+    {% for d in dim_detections|sort(attribute='name') %}
     <tr>
-      <td class="text-bold">{{ check.name }}</td>
-      <td class="text-sm">{{ check.check_type }}</td>
-      <td>
-        <span class="badge badge-{{ check.severity.value }}">{{ check.severity.value }}</span>
+      <td class="text-bold">
+        {% if d.source == "skill" %}
+          <a href="/capabilities/skills/{{ d.skill_name }}/history">{{ d.name }}</a>
+        {% else %}
+          {{ d.name }}
+        {% endif %}
       </td>
-      <td class="text-sm text-muted">{{ check.description }}</td>
+      <td class="text-sm">
+        {% if d.source == "skill" %}
+          <span class="badge badge-success" title="mode: detect skill -- git-trackable, has a full draft/active/deprecated/retired lifecycle">skill</span>
+          {% if d.status and d.status != "active" %}<span class="badge badge-warning">{{ d.status }}</span>{% endif %}
+        {% else %}
+          <span class="badge badge-muted" title="Legacy checks/*.yaml file -- no lifecycle, not yet ported to a mode: detect skill">legacy YAML</span>
+        {% endif %}
+      </td>
+      <td class="text-sm">{{ d.check_type }}</td>
+      <td>
+        <span class="badge badge-{{ d.severity }}">{{ d.severity }}</span>
+      </td>
+      <td class="text-sm text-muted">{{ d.description }}</td>
     </tr>
     {% endfor %}
   </tbody>

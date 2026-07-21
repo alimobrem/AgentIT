@@ -72,24 +72,26 @@ The real system has more moving parts — an event-driven path via Kafka + Argo 
 
 AgentIT uses two complementary systems for assessment and remediation:
 
-### Property-based skills (46 skills across 12 domains)
+### Property-based skills (65 skills across 14 domains)
 
-Skills are Markdown files with YAML frontmatter that define **what must be true** (properties), not how to generate manifests. The skill engine matches skills to assessment findings; the LLM generates tailored fixes using the skill's constraints and the app's platform context. `FleetOrchestrator` builds and passes an LLM client into the skill engine on every run (CLI, portal, and webhook onboarding alike) whenever `ANTHROPIC_API_KEY`/`ANTHROPIC_VERTEX_PROJECT_ID` is configured, so LLM-only skills (no template block — e.g. `network-policy`, `containerfile`, `tekton-pipeline`) actually produce tailored output in production, not just template substitution. One of the 46 (`observability/health-probes-check.md`) is `mode: detect` — a declarative detection rule, not a remediation template — see "Data-driven checks" below.
+Skills are Markdown files with YAML frontmatter that define **what must be true** (properties), not how to generate manifests. The skill engine matches skills to assessment findings; the LLM generates tailored fixes using the skill's constraints and the app's platform context. `FleetOrchestrator` builds and passes an LLM client into the skill engine on every run (CLI, portal, and webhook onboarding alike) whenever `ANTHROPIC_API_KEY`/`ANTHROPIC_VERTEX_PROJECT_ID` is configured, so LLM-only skills (no template block — e.g. `network-policy`, `containerfile`, `tekton-pipeline`) actually produce tailored output in production, not just template substitution. 20 of the 65 are `mode: detect` — declarative detection rules, not remediation templates, one per former `checks/*.yaml` file (see "Data-driven checks" below, which now lives entirely in this catalog).
 
 ```
 skills/
-├── security/       # network-policy, rbac, containerfile, security-context, resource-limits, image-scan-task
-├── observability/   # service-monitor, grafana-dashboard, alerting-rules, otel-collector
-├── cicd/            # tekton-pipeline, argocd-application, argo-rollout
-├── compliance/      # kyverno-policies, audit-policy, sbom-task, compliance-evidence, image-registry-policy, compliance-cronjob
-├── infrastructure/  # hpa, pdb, resourcequota, limitrange, namespace
-├── cost/            # vpa, cost-labels, cost-cronjob
-├── dependency/      # renovate-config, dependabot-config, dependency-cronjob
-├── incident/        # runbook, pagerduty-config, alertmanager-config
-├── release/         # analysis-template, rollout-patch, rollback-policy, release-runbook
-├── retirement/      # decommission-plan, cleanup-task, data-archive-job
-├── chaos/           # pod-delete, network-latency (LitmusChaos, template-only, no LLM needed)
-└── custom/          # learning-agent-generated skills (created on first draft; not present until then)
+├── security/         # network-policy, rbac, containerfile, security-context, resource-limits, image-scan-task, + 3 mode: detect (containerfile-exists, network-policy-exists, secrets-scanning-in-ci)
+├── observability/     # service-monitor, grafana-dashboard, alerting-rules, otel-collector, + 3 mode: detect (health-probes-check, prometheus-metrics-exists, structured-logging-detected)
+├── cicd/              # tekton-pipeline, argocd-application, argo-rollout, + 3 mode: detect (ci-pipeline-exists, dockerfile-exists, argocd-application-exists)
+├── compliance/        # kyverno-policies, audit-policy, sbom-task, compliance-evidence, image-registry-policy, compliance-cronjob, + 3 mode: detect (admission-policies-exist, license-file-exists, sbom-exists)
+├── infrastructure/    # hpa, pdb, resourcequota, limitrange, namespace, + 3 mode: detect (helm-chart-exists, k8s-deployment-exists, resource-quota-exists)
+├── ha_dr/             # 3 mode: detect (hpa-exists, pdb-exists, multi-replica-deployment) -- detection-only domain, no remediation skills of its own (HPA/PDB remediation lives under infrastructure/)
+├── data_governance/   # 2 mode: detect (backup-config-exists, retention-policy-exists) -- detection-only domain
+├── cost/              # vpa, cost-labels, cost-cronjob
+├── dependency/        # renovate-config, dependabot-config, dependency-cronjob
+├── incident/          # runbook, pagerduty-config, alertmanager-config
+├── release/           # analysis-template, rollout-patch, rollback-policy, release-runbook
+├── retirement/        # decommission-plan, cleanup-task, data-archive-job
+├── chaos/             # pod-delete, network-latency (LitmusChaos, template-only, no LLM needed)
+└── custom/            # learning-agent-generated skills (created on first draft; not present until then)
 ```
 
 Skills have lifecycle management: `draft` → `active` → `deprecated` → `retired`. The API drift detector auto-deprecates skills when their target APIs are removed from the cluster. Low-effectiveness skills (< 30% human approval rate) are flagged for review.
@@ -100,22 +102,19 @@ Skills have lifecycle management: `draft` → `active` → `deprecated` → `ret
 
 **`audit-policy` no longer fabricates a never-applyable resource.** `apiVersion: audit.k8s.io/v1, kind: Policy` is not a real Kubernetes REST API resource on any cluster — it's a static file schema consumed only by kube-apiserver's own `--audit-policy-file` startup flag, never something `kubectl apply` accepts. Applying it always failed, and `cluster_apply.py`'s missing-operator heuristic misattributed that failure to a missing Kyverno install (Kyverno's own CRD happens to also be named `Policy`, in a completely unrelated API group) — a wrong, misleading fix suggestion. The skill now delivers the same real audit policy rules as advisory reference documentation in a ConfigMap (the same pattern `incident/runbook.md`/`retirement/decommission-plan.md`/`compliance/compliance-evidence.md` already use), with instructions for how a cluster-admin actually wires it in on vanilla Kubernetes vs. OpenShift — never silently treated as "already enforced," and never reaching `cluster_apply.py`'s CRD-missing/missing-operator path at all.
 
-### Data-driven checks (19 checks across 7 dimensions) + `mode: detect` skills
+### Data-driven checks — now fully unified into `mode: detect` skills
 
-YAML check files in `checks/` define declarative rules that supplement the Python analyzers. Check types: `file_exists`, `file_contains`, `file_missing`, `yaml_kind_exists`, `yaml_kind_missing`, each now also accepting a `pattern:` list (OR semantics) and an optional `case_insensitive: true`, not just a single scalar string. The learning agent can create new checks without touching Python code.
-
-```
-checks/
-├── security/         # containerfile, network-policy, secrets-scanning
-├── observability/    # metrics-endpoint, structured-logging
-├── cicd/             # ci-pipeline, dockerfile, gitops
-├── compliance/       # admission-policies, license, sbom
-├── infrastructure/   # helm-chart, k8s-manifests, resource-quota
-├── ha_dr/            # hpa, pdb, replicas
-└── data_governance/  # backup-config, retention-policy
-```
+`checks/` (YAML declarative rules that supplement the Python analyzers) is, as of Phase 4 below, **completely empty** — every check that used to live there is now a `mode: detect` skill in `skills/**/*.md` (see the skills tree above; 20 of the 65 skills are `mode: detect`, one per former check plus Phase 1's pilot). Check types — `file_exists`, `file_contains`, `file_missing`, `yaml_kind_exists`, `yaml_kind_missing`, each accepting a `pattern:` list (OR semantics) and an optional `case_insensitive: true` — are unchanged; a `mode: detect` skill's `rule:` block uses the exact same 5 types, run through `check_engine`'s own unchanged runners (`_RUNNERS`/`run_checks*`). `check_engine.py`'s YAML-*loading* half (`load_checks`/`_parse_check_file`) is deliberately still in the codebase — `skill_engine.detect_check_definitions()` depends directly on the rule-*running* half those loading functions share a module with, and per the migration plan's own explicit instruction, the loader stays until every check is gone (now true) plus one release cycle of confidence before actually deleting the dead loading code, to leave a clean revert path if a production issue surfaces. The learning agent can still create new detection rules without touching Python code — as a `.md` file instead of a `.yaml` one.
 
 **Unification, Phase 1 (2026-07-18): checks are becoming a peer of skills, sharing skills' exact Markdown format and lifecycle.** A skill's `mode:` frontmatter field now accepts `detect` in addition to `template`/`llm` — a `mode: detect` skill defines a declarative `rule:` (the same 5 types above) instead of a remediation template, and `skill_engine.detect_check_definitions()` runs it through `check_engine`'s own runners, merging its findings into `runner.run_assessment()` exactly like a legacy `checks/*.yaml` file would. This means a detection rule gets the same lifecycle (`draft`/`active`/`deprecated`/`retired`), the same Activate/Deprecate/Reactivate UI, and the same git-PR-backed persistence the Capabilities page already built for remediation skills — with zero changes to that UI's own code. `skills/observability/health-probes-check.md` is the first one, ported from (and replacing) the former `checks/observability/health-check.yaml`, proven equivalent by a parity test before the YAML file was deleted. See [`docs/extension-model-unification-plan-2026-07-18.md`](docs/extension-model-unification-plan-2026-07-18.md) for the full design, the reconciliation with the original design spec's "keep skills and checks separate" recommendation (narrower than it sounds — see that doc), and the backlog for unifying the remaining `checks/*.yaml` files and the 3 Python agents + 6 watchers the same way.
+
+**Unification, Phases 2-5 (2026-07-20): the remaining backlog — agents, watchers, all 19 remaining checks, and Capabilities UI — finished.** Picks up exactly where Phase 1 left off, per `docs/extension-model-unification-plan-2026-07-18.md`'s own "Backlog (not built in Phase 1)" section, in its stated priority order.
+- **Phase 2 — `mode: agent` registration metadata.** `agents/{cost,dependency,codechange}.md` (new top-level `agents/` dir, sibling to `checks/`/`skills/` — not `src/agentit/agents/`, the Python package) replace `agents/capabilities.py`'s hardcoded `AGENT_CLASSES` dict literal. `load_agent_classes()` (`src/agentit/agents/capabilities.py:105`) parses each file's frontmatter (`name`/`category`/`code_ref`/`resource_tier`/`description`) into the exact same `{name: (category, module_path, class_name, resource_tier)}` shape the literal had; `AGENT_CLASSES` is now this loader's output, computed once at import time. `code_ref` (a `module:ClassName` string) is only ever *recorded* — `get_agent_class()` still does the real lazy import at its one existing call site, so `CostOptimizationAgent`/`DependencyAgent`/`CodeChangeAgent`'s own `.run()` implementations are byte-for-byte untouched. `tests/test_agent_registration.py` proves zero behavior change (the loader's output is asserted equal to the pre-Phase-2 hardcoded dict) plus per-file schema validation (required fields, an importable `code_ref`, a known `resource_tier`).
+- **Phase 3 — watcher registration metadata.** Same idea, for the long-lived watchers: `watchers/*.md` (new top-level dir, sibling to `agents/`/`checks/`/`skills/` — not `src/agentit/watchers/`) replace `WATCHER_AGENTS`'s hardcoded list literal via `load_watcher_agents()` (`src/agentit/agents/capabilities.py`). Re-verified the real, current list against `agents/capabilities.py` before porting rather than trusting the plan doc's own table (written before `self-health-check` was added) — **7 watchers**, not 6: `vuln-watcher`, `slo-tracker`, `drift-detector`, `skill-learner`, `capability-scout`, `reassess-scheduler`, `self-health-check`. `watchers/__init__.py`'s registration/heartbeat wiring (`record_tick`, `sleep_with_heartbeat`) is completely unchanged — every watcher is still keyed on its own name string at its real call sites, never on this list; only the *listing* of which watchers exist moved from Python to Markdown. `tests/test_watcher_registration.py` mirrors Phase 2's parity + schema discipline.
+- **Phase 4 — all 19 remaining `checks/*.yaml` files ported to `mode: detect` skills, one file at a time.** Re-verified the real, current list first (19, matching the plan doc's own estimate exactly) rather than assuming. Followed Phase 1's own proven method for every single one, no exceptions: port the file, write a parity test proving the new skill fires/passes identically to the deleted YAML under both conditions (rule triggers a Finding / rule is satisfied, matching category/severity/description/recommendation exactly), verify that test passes, delete the YAML, commit — 19 separate commits, each individually revertible, none bulk-converted. All 39 parity tests (2 per check: fires + passes) live in `tests/test_phase4_check_migrations.py`. Per the plan's own explicit warning about the "mixed analyzer" dimensions (`cicd`/`compliance`/`data_governance`/`ha_dr`), every port preserved the original check's exact scope rather than silently widening it to match its analyzer counterpart — e.g. `admission-policies-exist.md` keeps the original's namespaced-`Policy`-only match (never `ClusterPolicy`, unlike `analyzers/compliance.py`'s own broader, separate scoring), proven by a dedicated `test_does_not_match_clusterpolicy_only` case. New skill names were chosen to avoid colliding with pre-existing remediation skills of the same short name in the same domain (e.g. `hpa-exists`/`pdb-exists` under `ha_dr`, not `hpa`/`pdb`, which are `infrastructure`'s own template-mode remediation skills) — each such collision is called out in the ported skill's own "Constraints" section. This work also caught and fixed two latent test-isolation gaps the ports exposed (both fixed in the same commits that surfaced them): `tests/test_check_engine.py::TestSampleAppFixture`'s `real_checks` fixture only ever read the legacy YAML directory (now merges checks + detect-mode skills, exactly like `runner.run_assessment()` does in production); and `TestRunnerIntegration::test_duplicate_findings_not_doubled` implicitly depended on the real skills catalog never containing a NetworkPolicy detection (now isolated with an explicit empty `skills_dir`, matching the isolation its `checks_dir` already had).
+- **Phase 5 — Capabilities UI reflects the unified model.** All three items from the plan's Phase 5 section: (a) a mode badge (`detect`/`llm`/`template`) on the "Skills by Domain" table, so a detection rule no longer looks identical to a remediation skill; (b) the old checks-only "Assessment Checks" section — which Phase 4 would otherwise have left permanently showing "0 checks" — replaced with a merged "Detections" section (`_build_detections_by_dimension()`, `src/agentit/portal/routes/capabilities.py`) combining legacy `checks/*.yaml` (still supported, currently none) and `mode: detect` skills into one dimension-grouped view, each row tagged with its real source and, for a skill, a link to its lifecycle page; (c) the skill detail page (`skill_detail.html`) now surfaces a detect-mode skill's actual rule (type, pattern(s), severity, category, recommendation) instead of the meaningless (always-empty) triggers/outputs table template/llm-mode skills use. Fixed a real, previously-invisible bug while rebuilding the severity-badge column: the old checks table's `badge-{{ check.severity.value }}` rendered the `Severity` `IntEnum`'s *int* value (e.g. `badge-1`), which never matched any real `badge-critical`/`badge-high`/etc. CSS class — both sources now consistently use `.name`.
+
+Full test suite after all four phases: **2926 passed, 370 skipped, 0 failed** (`pytest tests/ --ignore=test_browser.py --ignore=test_browser_critical.py`).
 
 ### Catalog change tracking
 
@@ -136,6 +135,8 @@ The `infrastructure` dimension's analyzer now flags base images and language run
 | **CodeChangeAgent** | `codechange` | high/critical or score < 50 | `.gitignore`, health endpoints, OTel/structured-logging instrumentation — as source patches to the **app's own repo** | Fundamentally not skill-shaped: skills generate K8s manifests to apply to a cluster; they have no concept of "the application's source tree" and no PR/patch-application machinery. |
 
 Conflict detection only flags *real* collisions between agent outputs — a known-conflicting resource-kind pair actually being generated for the same workload (e.g. an actively-resizing VPA alongside an HPA), or two agents writing a file at the same output path — not merely "both agents succeeded". `plan.auto_approve` (computed from score/criticality at plan time) is downgraded to `False` if a real conflict is found during the actual run, so it can be trusted end-to-end.
+
+**Registration metadata for both tables above now lives in `agents/*.md`/`watchers/*.md`, not a Python dict literal** (Unification Phases 2-3, 2026-07-20 — see "Data-driven checks" below for the full writeup). Each table's actual content (what an agent generates, why it's still Python, a watcher's role) is unchanged by this — it's still real prose in this README, not generated from the `.md` files' frontmatter — this only changed *where `agents/capabilities.py`'s `AGENT_CLASSES`/`WATCHER_AGENTS` registries get their data from* (a file diff instead of a Python edit), not what either table says.
 
 Long-lived watchers (deployed as separate pods):
 
@@ -849,9 +850,20 @@ AgentIT/
 │       ├── delivery.py             # Unified apply flow: classify + route_and_deliver()
 │       ├── github_pr.py            # GitHub REST API integration
 │       └── templates/              # 31 Jinja2 templates (htmx + Alpine.js)
-├── skills/                         # 45 property-based skill definitions (12 domains, incl. chaos + a
-│                                   #   dynamically-created custom/ the learning agent writes drafts into)
-├── checks/                         # 20 data-driven YAML check files (7 dimensions)
+├── skills/                         # 65 property-based skill definitions (14 domains, incl. chaos + a
+│                                   #   dynamically-created custom/ the learning agent writes drafts into;
+│                                   #   20 of the 65 are mode: detect -- see checks/ below)
+├── checks/                         # Empty as of Unification Phase 4 (2026-07-20) -- every check that
+│                                   #   used to live here is now a mode: detect skill in skills/**/*.md.
+│                                   #   check_engine.py's rule-running half stays; only the YAML files
+│                                   #   (and, pending one release of confidence, its now-dead YAML-
+│                                   #   loading functions) are gone.
+├── agents/                         # 3 mode: agent registration files (name/category/code_ref/
+│                                   #   resource_tier/description) -- backs agents/capabilities.py's
+│                                   #   AGENT_CLASSES. Not src/agentit/agents/, the Python package.
+├── watchers/                       # 7 watcher registration files (name/mode/interval/description/
+│                                   #   code_ref) -- backs agents/capabilities.py's WATCHER_AGENTS.
+│                                   #   Not src/agentit/watchers/, the Python package.
 ├── chart/                          # Helm chart (30+ templates: Rollout, Services, Route, RBAC,
 │                                   #   NetworkPolicy, ResourceQuota, LimitRange, PDB, Tekton,
 │                                   #   Kafka, Argo Events, watcher agents, backup CronJob,

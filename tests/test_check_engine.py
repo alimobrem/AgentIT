@@ -105,10 +105,18 @@ class TestLoadChecks:
         assert load_checks(tmp_path / "nonexistent") == []
 
     def test_loads_real_checks_dir(self) -> None:
+        """No lower-bound count assertion here on purpose: Phase 4 of
+        docs/extension-model-unification-plan-2026-07-18.md is steadily
+        porting checks/*.yaml files to mode: detect skills one at a time
+        (see tests/test_phase4_check_migrations.py), so the real count
+        only ever shrinks over time, down to zero once every check is
+        migrated -- this test just proves load_checks() doesn't error out
+        against whatever's actually on disk right now, and that every
+        loaded entry is a real, well-formed CheckDefinition."""
         checks_dir = Path(__file__).resolve().parent.parent / "checks"
         if checks_dir.is_dir():
             checks = load_checks(checks_dir)
-            assert len(checks) >= 15  # we created ~20
+            assert all(isinstance(c, CheckDefinition) for c in checks)
 
 
 # ---------------------------------------------------------------------------
@@ -426,11 +434,20 @@ class TestRunnerIntegration:
             "description: No NetworkPolicy manifests found\n"
             "recommendation: Add deny-all default NetworkPolicy with explicit allow rules\n"
         )
+        # Isolated from the real skills/ catalog on purpose -- without this,
+        # run_assessment()'s skills_dir default picks up the real, live
+        # skills/security/network-policy-exists.md (Phase 4 of
+        # docs/extension-model-unification-plan-2026-07-18.md), which
+        # produces the exact same (category, description) finding this test
+        # is specifically trying to prove gets deduped against the analyzer
+        # -- a real third source that isn't what this test is about.
+        empty_skills_dir = tmp_path / "empty_skills_for_dedup_test"
+        empty_skills_dir.mkdir()
 
         from agentit.runner import run_assessment
         report = run_assessment(
             repo, repo_url="https://github.com/test/app",
-            checks_dir=checks_dir,
+            checks_dir=checks_dir, skills_dir=empty_skills_dir,
         )
         sec_score = next(s for s in report.scores if s.dimension == "security")
         # The analyzer already finds "No NetworkPolicy manifests found".
@@ -459,68 +476,33 @@ class TestRunnerIntegration:
 # ---------------------------------------------------------------------------
 
 
-class TestAdmissionPoliciesCheck:
-    """Regression coverage for the checks/compliance/admission-policies.yaml
-    kind mismatch: it used to require `kind: ClusterPolicy`, but
-    skills/compliance/kyverno-policies.md (and image-registry-policy.md)
-    only ever generate namespaced `kind: Policy` -- and yaml_kind_exists
-    scans the *app's own repo* (check_engine.py's iter_yaml_files), never
-    the live cluster, so a ClusterPolicy-only pattern could never match
-    what's actually produced for an app being assessed. This check always
-    false-negatived as a result."""
-
-    ADMISSION_POLICIES_CHECK = (
-        Path(__file__).resolve().parent.parent / "checks" / "compliance" / "admission-policies.yaml"
-    )
-
-    def test_pattern_is_namespaced_policy_not_clusterpolicy(self) -> None:
-        defn = _parse_check_file(self.ADMISSION_POLICIES_CHECK)
-        assert defn is not None
-        assert defn.pattern == "Policy"
-
-    def test_passes_against_a_namespaced_kyverno_policy(self, create_mock_repo) -> None:
-        """This is exactly what skills/compliance/kyverno-policies.md's
-        template block generates for an onboarded app."""
-        repo = create_mock_repo({
-            "kyverno-require-labels.yaml": (
-                "apiVersion: kyverno.io/v1\n"
-                "kind: Policy\n"
-                "metadata:\n"
-                "  name: myapp-require-labels\n"
-            ),
-        })
-        defn = _parse_check_file(self.ADMISSION_POLICIES_CHECK)
-        findings = run_checks([defn], repo)
-        assert findings == []
-
-    def test_fails_when_no_policy_manifest_present(self, create_mock_repo) -> None:
-        repo = create_mock_repo({"deployment.yaml": "apiVersion: apps/v1\nkind: Deployment\n"})
-        defn = _parse_check_file(self.ADMISSION_POLICIES_CHECK)
-        findings = run_checks([defn], repo)
-        assert len(findings) == 1
-        assert findings[0].category == "policy"
-
-    def test_a_clusterpolicy_only_repo_still_fails(self, create_mock_repo) -> None:
-        """A cluster-scoped-only manifest in an app's own repo is not the
-        artifact this check (or the skill) is looking for -- confirms the
-        fix didn't just make the check pass unconditionally."""
-        repo = create_mock_repo({
-            "cluster-wide.yaml": "apiVersion: kyverno.io/v1\nkind: ClusterPolicy\nmetadata: {}\n",
-        })
-        defn = _parse_check_file(self.ADMISSION_POLICIES_CHECK)
-        findings = run_checks([defn], repo)
-        assert len(findings) == 1
-
-
 class TestSampleAppFixture:
-    """Run real checks against the sample-app fixture to verify end-to-end behavior."""
+    """Run real checks against the sample-app fixture to verify end-to-end behavior.
+
+    ``real_checks`` deliberately merges legacy ``checks/*.yaml`` files
+    with ``mode: detect`` skills (``skills/*/*.md``), exactly like
+    ``runner.run_assessment()`` does in production
+    (docs/extension-model-unification-plan-2026-07-18.md, Phase 1) --
+    Phase 4 is steadily porting individual checks from the former to the
+    latter (see tests/test_phase4_check_migrations.py), so a fixture that
+    only read the legacy YAML directory would silently lose coverage for
+    a specific check (e.g. dockerfile/network-policy) the moment it's
+    ported, even though the exact same rule keeps running in production
+    via the skill. Reading both sources the way production does makes
+    these tests robust to *where* a given rule currently lives.
+    """
+
+    REAL_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 
     @pytest.fixture()
     def real_checks(self) -> list[CheckDefinition]:
         if not REAL_CHECKS_DIR.is_dir():
             pytest.skip("checks/ dir not found")
+        from agentit.skill_engine import detect_check_definitions, load_all_skills
+
         checks = load_checks(REAL_CHECKS_DIR)
-        assert len(checks) >= 15
+        checks += detect_check_definitions(load_all_skills(self.REAL_SKILLS_DIR))
+        assert checks, "no legacy checks or detect-mode skills found on disk"
         return checks
 
     def test_dockerfile_check_passes(self, real_checks: list[CheckDefinition]) -> None:
