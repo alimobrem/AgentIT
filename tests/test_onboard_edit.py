@@ -261,23 +261,19 @@ class TestEditInvalidatesStaleDryRun:
         assert resp.status_code == 303
         assert await store.get_apply_results(aid) is None
 
-    async def test_onboard_results_page_reverts_to_dry_run_needed_after_edit(self, edit_client):
-        """End-to-end: the page itself must stop claiming dryDone/
-        "Validation passed" once a file is edited after a successful
-        validation."""
+    async def test_onboard_results_edit_clears_apply_results_and_keeps_no_commit_cta(self, edit_client):
+        """Editing a file after a successful validation must clear
+        apply_results (stale dry-run). UI must not offer Commit CTAs —
+        Scan is the only PR-creating path."""
         client, store, aid = edit_client
-        # A known infra_repo_url so the "No validation yet" nudge (rather
-        # than the separate, unrelated "Not GitOps-registered" block) is
-        # what actually renders -- this test is about edit-invalidates-
-        # validation, not about GitOps registration state.
         await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
         await store.save_apply_results(
             aid, {"applied": [], "skipped": [], "errors": [], "repo_files": [{"path": "app-config.yaml", "purpose": "dry-run"}]},
             "test-app", dry_run=True,
         )
         before = await client.get(f"/assessments/{aid}/onboard-results")
-        assert 'data-dry-done="true"' in before.text
-        assert "Validation passed" in before.text
+        assert 'data-action="apply"' not in before.text
+        assert await store.get_apply_results(aid) is not None
 
         await client.post(
             f"/assessments/{aid}/onboard-results/edit-file",
@@ -288,10 +284,11 @@ class TestEditInvalidatesStaleDryRun:
             follow_redirects=False,
         )
 
+        assert await store.get_apply_results(aid) is None
         after = await client.get(f"/assessments/{aid}/onboard-results")
-        assert 'data-dry-done="false"' in after.text
-        assert "Validation passed" not in after.text
-        assert "No validation yet" in after.text
+        assert 'data-action="apply"' not in after.text
+        assert "Commit & Open PR" not in after.text
+        assert "Commit &amp; Open PR" not in after.text
 
     async def test_edit_after_real_delivery_also_clears_apply_results(self, edit_client, _mock_kube):
         """A real (non-dry-run) delivery-outcome row also describes content

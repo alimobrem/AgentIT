@@ -251,7 +251,7 @@ class TestPullRequestsSectionPreDelivery:
         await store.save_onboarding(aid, [_source_patch_file()])
 
         resp = await client.get(f"/assessments/{aid}/onboard-results")
-        assert "AgentIT will open 1 pull request once you deliver" in resp.text
+        assert "AgentIT will open 1 pull request when Scan finishes delivery" in resp.text
 
     async def test_nothing_deliverable_shows_honest_empty_state(self, ui_client):
         client, store = ui_client
@@ -264,18 +264,21 @@ class TestPullRequestsSectionPreDelivery:
         assert "Nothing here can become a pull request" in resp.text
         assert "Not opened yet" not in resp.text
 
-    async def test_dry_run_and_deliver_buttons_are_preserved(self, ui_client):
-        """The redesign must not remove the Dry Run safety mechanic."""
+    async def test_manual_deliver_ctas_are_not_offered(self, ui_client):
+        """Scan opens PRs; Onboard Results must not offer Commit / Per-Agent."""
         client, store = ui_client
         report = make_report(repo_name="keep-dry-run-app")
         aid = await store.save(report)
         await store.save_onboarding(aid, [_cluster_config_file()])
 
         resp = await client.get(f"/assessments/{aid}/onboard-results")
-        assert 'data-action="dry-run"' in resp.text
-        assert 'data-action="apply"' in resp.text
-        assert 'data-action="prs"' in resp.text
-        assert "Commit &amp; Open PR" in resp.text or "Commit & Open PR" in resp.text
+        assert 'data-action="apply"' not in resp.text
+        assert 'data-action="prs"' not in resp.text
+        assert 'data-action="dry-run"' not in resp.text
+        assert "Commit & Open PR" not in resp.text
+        assert "Commit &amp; Open PR" not in resp.text
+        assert "Per-Agent PRs" not in resp.text
+        assert "Download" in resp.text
 
 
 class TestPullRequestsSectionPostDelivery:
@@ -367,15 +370,9 @@ class TestPullRequestsSectionPostDelivery:
         assert "fix: pin base image" in resp.text
         assert pr_url in resp.text
 
-    async def test_fully_auto_delivered_hides_the_manual_deliver_buttons(self, ui_client):
-        """auto_delivery.py deliberately never marks apply_results as a real
-        (non-dry-run) delivery once its validate/fix loop converges (see its
-        own save_apply_results() call, dry_run=True) -- pr_cards/
-        pr_opened_count are the sole source of truth for "was this actually
-        delivered". Before this fix, Step 2 still offered "Commit & Open PR"/
-        "Per-Agent PRs" with a "Ready -- choose a deliver option" hint even
-        though every PR this onboarding needed was already open above --
-        confusing, and a real risk of a redundant second delivery attempt."""
+    async def test_fully_auto_delivered_shows_merge_on_github_not_deliver_ctas(self, ui_client):
+        """After Scan auto-delivery opens PRs, Onboard Results must frame
+        merge-on-GitHub — never a second Commit / Per-Agent deliver step."""
         client, store = ui_client
         report = make_report(repo_name="fully-auto-delivered-app")
         report.infra_repo_url = "https://github.com/org/fully-auto-delivered-infra"
@@ -402,9 +399,61 @@ class TestPullRequestsSectionPostDelivery:
         assert resp.status_code == 200
         assert 'data-action="apply"' not in resp.text
         assert 'data-action="prs"' not in resp.text
+        assert 'data-action="retry-scan-delivery"' not in resp.text
         assert "Ready — choose a deliver option." not in resp.text
         assert "One PR for everything, or a PR per agent." not in resp.text
-        assert "1 pull request already opened above -- nothing left to deliver." in resp.text
+        assert "Opened by Scan" in resp.text
+        assert "merge on GitHub" in resp.text
+        assert "1 pull request above — review and merge on GitHub." in resp.text
+
+    async def test_needs_attention_without_open_pr_shows_retry_scan_delivery(self, ui_client):
+        """Retry Scan delivery is the only PR-creating CTA left — and only
+        when the latest onboard job needs attention and nothing is open yet."""
+        client, store = ui_client
+        report = make_report(repo_name="needs-attention-retry-app")
+        report.infra_repo_url = "https://github.com/org/needs-attention-infra"
+        aid = await store.save(report)
+        await store.save_onboarding(aid, [_source_patch_file()])
+        job_id = await store.create_remediation_job(aid)
+        await store.update_remediation_job(
+            job_id, "needs_attention", current_step="deliver",
+            error="validation could not converge",
+        )
+
+        resp = await client.get(f"/assessments/{aid}/onboard-results")
+        assert resp.status_code == 200
+        assert 'data-action="retry-scan-delivery"' in resp.text
+        assert "Retry Scan delivery" in resp.text
+        assert 'data-action="apply"' not in resp.text
+        assert 'data-action="prs"' not in resp.text
+        assert "Commit & Open PR" not in resp.text
+
+    async def test_needs_attention_with_open_pr_hides_retry_scan_delivery(self, ui_client):
+        client, store = ui_client
+        report = make_report(repo_name="needs-attention-already-open-app")
+        report.infra_repo_url = "https://github.com/org/needs-attention-already-open-infra"
+        aid = await store.save(report)
+        await store.save_onboarding(aid, [_source_patch_file()])
+        job_id = await store.create_remediation_job(aid)
+        await store.update_remediation_job(
+            job_id, "needs_attention", current_step="deliver",
+            error="partial",
+        )
+        pr_url = "https://github.com/org/needs-attention-already-open-app/pull/12"
+        await store.create_delivery(
+            aid, report.repo_name, {"source_patch": 1}, mechanism="source_patch:source-repo-pr",
+            status="delivered", details={"outcomes": {"source_patch": {"pr_url": pr_url}}},
+        )
+
+        with patch(
+            "agentit.portal.github_pr.get_pr_status",
+            return_value={"state": "open", "html_url": pr_url, "title": "fix", "merged_at": ""},
+        ):
+            resp = await client.get(f"/assessments/{aid}/onboard-results")
+
+        assert 'data-action="retry-scan-delivery"' not in resp.text
+        assert "Opened by Scan" in resp.text
+        assert "merge on GitHub" in resp.text
 
     async def test_per_agent_prs_shown_separately_from_combined_prs(self, ui_client):
         client, store = ui_client
@@ -421,7 +470,7 @@ class TestPullRequestsSectionPostDelivery:
             resp = await client.get(f"/assessments/{aid}/onboard-results")
 
         assert resp.status_code == 200
-        assert "Per-agent PRs (1)" in resp.text
+        assert "Earlier per-agent PRs (1)" in resp.text
         assert pr_url in resp.text
 
     async def test_older_prs_for_a_re_delivered_category_are_noted_not_dropped(self, ui_client):

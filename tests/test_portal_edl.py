@@ -196,17 +196,12 @@ async def test_criticality_field_has_help_text_on_both_assess_entry_points(edl_c
     assert "gate approval" not in help_text
 
 
-async def test_onboard_results_dry_run_apply_status_outside_button(edl_client):
-    """EDL §7: Run Automatic Validation → deliver choice; 'No validation
-    yet' is a sibling chip."""
+async def test_onboard_results_scan_only_no_manual_deliver_ctas(edl_client):
+    """EDL §7: Scan opens PRs; Onboard Results must not offer Commit /
+    Per-Agent / Run Automatic Validation as competing deliver CTAs."""
     client, store = edl_client
     report = make_report()
     aid = await store.save(report)
-    # A known infra_repo_url -- Direct Apply has been removed as a concept
-    # entirely, so an app with none at all is blocked from delivering
-    # outright (a separate "Not GitOps-registered" state, not "No
-    # validation yet"); this test is about the validation/deliver-choice
-    # chip layout, not GitOps registration state.
     await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
     await store.save_onboarding(aid, [
         {
@@ -219,23 +214,14 @@ async def test_onboard_results_dry_run_apply_status_outside_button(edl_client):
     resp = await client.get(f"/assessments/{aid}/onboard-results")
     assert resp.status_code == 200
     html = resp.text
-    assert "Run Automatic Validation" in html
-    assert (
-        "Apply to Cluster" in html
-        # Jinja autoescape turns "&" into "&amp;" in rendered HTML text.
-        or "Commit & Open PR" in html
-        or "Commit &amp; Open PR" in html
-        or re.search(r">\s*Apply\s*<", html)
-        or re.search(r">\s*Open PR\s*<", html)
-        or "_deliver_label" in html
-    )
-    assert "Per-Agent PRs" in html
-    assert "delivery-choice" in html
-    assert "One PR for everything, or a PR per agent." in html
-    assert "No validation yet" in html
-    # No button may contain the status chip.
-    for m in re.finditer(r"<button\b[^>]*>[\s\S]*?</button>", html, re.I):
-        assert "No validation yet" not in m.group(0), "status chip nested inside a button"
+    assert "Run Automatic Validation" not in html
+    assert "Commit & Open PR" not in html
+    assert "Commit &amp; Open PR" not in html
+    assert "Per-Agent PRs" not in html
+    assert "One PR for everything, or a PR per agent." not in html
+    assert 'data-action="apply"' not in html
+    assert 'data-action="prs"' not in html
+    assert "Download" in html
 
 
 async def test_async_feedback_surfaces_present_on_key_pages(edl_client):

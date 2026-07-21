@@ -170,52 +170,23 @@ async def page(critical_portal):
             await browser.close()
 
 
-class TestDryRunUnlocksDeliver:
-    """A successful automatic validation run must enable Commit & Open PR /
-    Apply — never leave a contradictory 'NO VALIDATION YET' / 'No
-    validation yet' chip. The "Run Automatic Validation" button (formerly a
-    bare "Dry Run") now redirects through the same real-time progress page
-    onboarding itself uses (auto_delivery.py's validate/fix/review
-    pipeline) before landing back on Onboard Results -- hence the longer
-    wait_for_url timeout below."""
+class TestOnboardResultsScanOnlyDelivery:
+    """Onboard Results must not offer Commit & Open PR / Per-Agent /
+    Run Automatic Validation as competing deliver CTAs — Scan opens PRs."""
 
-    async def test_gitops_dry_run_enables_commit_and_open_pr(self, page, critical_portal):
+    async def test_onboard_results_has_no_manual_deliver_ctas(self, page, critical_portal):
         url, aid, store, _kube = critical_portal
         await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
 
-        with patch(
-            "agentit.portal.delivery.kube.get_custom_resource",
-            return_value={"metadata": {}},
-        ):
-            await page.goto(f"{url}/assessments/{aid}/onboard-results")
-            await expect(page.locator("h1")).to_contain_text("Onboarding")
-            apply_btn = page.locator("button[data-action='apply']")
-            await expect(apply_btn).to_contain_text("Commit & Open PR")
-            await expect(apply_btn).to_be_disabled()
-            await expect(
-                page.locator(".delivery-step-status", has_text="No validation yet"),
-            ).to_be_visible()
-
-            await page.locator("button[data-action='dry-run']").click()
-            # Goes through /onboard/progress/{job_id} (auto_delivery.py's
-            # pipeline running in the background) before redirecting back
-            # here once terminal -- longer timeout than a single synchronous
-            # dry-run POST used to need.
-            await page.wait_for_url(re.compile(r".*/onboard-results.*"), timeout=30000)
-            # hx-boost settle: deliver CTA unlocked, status chip gone.
-            await expect(page.locator("button[data-action='apply']")).to_be_enabled(
-                timeout=10000,
-            )
-            await expect(page.locator("button[data-action='apply']")).to_contain_text(
-                "Commit & Open PR",
-            )
-            body = await page.content()
-            assert "NO VALIDATION YET" not in body
-            assert "No validation yet" not in body
-            await expect(
-                page.locator(".delivery-step-status", has_text="Validation passed"),
-            ).to_be_visible()
-            await expect(page.locator("[data-dry-done='true']")).to_be_attached()
+        await page.goto(f"{url}/assessments/{aid}/onboard-results")
+        await expect(page.locator("h1")).to_contain_text("Onboarding")
+        await expect(page.locator("button[data-action='apply']")).to_have_count(0)
+        await expect(page.locator("button[data-action='prs']")).to_have_count(0)
+        await expect(page.locator("button[data-action='dry-run']")).to_have_count(0)
+        await expect(page.get_by_text("Commit & Open PR")).to_have_count(0)
+        await expect(page.get_by_text("Per-Agent PRs")).to_have_count(0)
+        await expect(page.get_by_text("Run Automatic Validation")).to_have_count(0)
+        await expect(page.locator(".delivery-secondary a", has_text="Download")).to_be_visible()
 
 
 class TestBackToAssessmentAfterBoost:

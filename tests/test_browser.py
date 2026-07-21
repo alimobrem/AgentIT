@@ -244,27 +244,17 @@ class TestEveryPageLoads:
         url, aid, _ = app_url
         page.goto(f"{url}/assessments/{aid}/onboard-results")
         expect(page.locator("h1")).to_contain_text("Onboarding")
-        # Vertical Dry Run → deliver choice; status outside CTAs; Download secondary.
+        # Scan opens PRs; page keeps Download + PR cards, not Commit/Per-Agent.
         expect(page.locator(".delivery-actions")).to_be_visible()
-        expect(page.locator(".delivery-primary")).to_be_visible()
-        expect(page.locator(".delivery-connector")).to_be_attached()
-        expect(page.locator(".delivery-choice")).to_be_visible()
         expect(page.locator(".delivery-secondary")).to_be_visible()
-        dry_run = page.locator(".delivery-primary button", has_text="Run Automatic Validation")
-        apply_btn = page.locator(".delivery-choice button[data-action='apply']")
-        prs_btn = page.locator(".delivery-choice button[data-action='prs']")
-        expect(dry_run).to_be_visible()
-        expect(apply_btn).to_be_visible()
-        expect(apply_btn).to_contain_text("Apply to Cluster")
-        expect(apply_btn).to_be_disabled()
-        expect(prs_btn).to_be_visible()
-        expect(prs_btn).to_be_disabled()
-        expect(apply_btn).not_to_contain_text("No validation yet")
-        expect(page.locator(".delivery-step-status", has_text="No validation yet")).to_be_visible()
-        expect(page.locator(".delivery-choice-hint")).to_contain_text("One PR for everything")
-        expect(page.locator("button[data-action='apply-override']")).to_be_visible()
+        expect(page.locator("button[data-action='apply']")).to_have_count(0)
+        expect(page.locator("button[data-action='prs']")).to_have_count(0)
+        expect(page.locator("button[data-action='dry-run']")).to_have_count(0)
+        expect(page.get_by_text("Commit & Open PR")).to_have_count(0)
+        expect(page.get_by_text("Per-Agent PRs")).to_have_count(0)
+        expect(page.get_by_text("Run Automatic Validation")).to_have_count(0)
+        expect(page.locator("button[data-action='apply-override']")).to_have_count(0)
         expect(page.locator(".delivery-secondary a", has_text="Download")).to_be_visible()
-        expect(page.locator(".delivery-secondary button", has_text="Per-Agent PRs")).to_have_count(0)
 
     def test_slos_page(self, page: Page, app_url):
         url, aid, _ = app_url
