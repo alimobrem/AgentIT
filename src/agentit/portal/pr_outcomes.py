@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 
 OUTCOME_REJECTED = "rejected"
 OUTCOME_EDITED_BEFORE_MERGE = "edited_before_merge"
+OUTCOME_MERGED = "merged"
 
 
 async def _attribution(store: object, record: dict) -> tuple[str, list[str]]:
@@ -100,10 +101,13 @@ async def _compute_outcome(
     state = record.get("state")
 
     if state == "merged":
+        # Phase E: always record a provisional merged outcome so learning can
+        # distinguish "opened" from "human accepted". Extra commits still
+        # upgrade the durable row to edited_before_merge when present.
         extra_commits = await asyncio.to_thread(get_extra_commits, pr_url)
-        if not extra_commits:
-            return None
-        return {"outcome": OUTCOME_EDITED_BEFORE_MERGE, "edit_diff": extra_commits}
+        if extra_commits:
+            return {"outcome": OUTCOME_EDITED_BEFORE_MERGE, "edit_diff": extra_commits}
+        return {"outcome": OUTCOME_MERGED, "edit_diff": []}
 
     if state == "closed":
         status = await asyncio.to_thread(get_status, pr_url)
