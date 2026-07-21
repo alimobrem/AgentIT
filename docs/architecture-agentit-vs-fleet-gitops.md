@@ -81,8 +81,8 @@ Scan or Activate / capability-scout → PR on AgentIT.git
 
 High level — implementation can follow in a focused PR.
 
-1. **Delivery router:** when the assessment is AgentIT (self-managed / source repo matches Application `agentit`), do **not** use `MECHANISM_INFRA_REPO_COMMIT` for cluster-config. Route to AgentIT.git (source/app-repo PR helpers or a dedicated “self chart/skills” path). Refuse or redirect if a commit would land under `apps/agentit/`.
-2. **UX copy:** Onboard Results / confirmation text for AgentIT must say “PR to AgentIT.git → CI → Application `agentit`”, never “commit to agentit-gitops”.
+1. **Delivery router:** when the assessment is AgentIT (self-managed / source repo matches Application `agentit`), do **not** use `MECHANISM_INFRA_REPO_COMMIT` for cluster-config **or** CI/CD shared-namespace. Route both to AgentIT.git under live paths (`chart/templates/`, `chart/templates/tekton/`, `argocd/application.yaml`, `skills/`). Never land under `apps/agentit/`.
+2. **UX copy:** Onboard Results / confirmation text for AgentIT must say “PR to AgentIT.git → CI → Application `agentit`”, never “commit to agentit-gitops” / never fail-close cicd with an apps/agentit error.
 3. **Hygiene:** archive or delete dead `apps/agentit/` content in agentit-gitops (or leave a README that the path is excluded and unused).
 4. **Keep:** AppSet exclude of `apps/agentit`; Application `agentit` + notify-argocd image pin; `is_self_managed_application()` for Fleet badge; scout/activate PR-to-AgentIT.git; never auto-merge.
 5. **Docs:** this file is normative; [deployment.md](./deployment.md) already states the exclude reason — link here from README / lessons when touching delivery.

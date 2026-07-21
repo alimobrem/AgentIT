@@ -140,16 +140,6 @@ def repo_kind_for_mechanism(mechanism: str) -> str:
     return _MECHANISM_REPO_KIND.get(mechanism, "")
 
 
-# Error when self-managed AgentIT would otherwise open a dead-letter PR under
-# apps/agentit/cicd-shared-namespace/ (AppSet excludes apps/agentit; nothing syncs).
-_SELF_MANAGED_CICD_ERROR = (
-    "self-managed AgentIT cannot deliver CI/CD shared-namespace manifests via "
-    "apps/agentit/ (ApplicationSet excludes that path; nothing syncs it). "
-    "Open a PR against AgentIT.git under chart/ or argocd/ instead — see "
-    "docs/architecture-agentit-vs-fleet-gitops.md"
-)
-
-
 def is_appset_excluded_app(app_name: str) -> bool:
     """True when ``apps/{app}/`` is excluded from ApplicationSet
     ``agentit-managed-apps`` — today only ``agentit`` (see
@@ -177,10 +167,11 @@ def resolve_cluster_config_mechanism(
 
     Self-managed AgentIT (Application ``agentit`` → AgentIT.git ``chart/``;
     AppSet excludes ``apps/agentit``) must never use
-    ``MECHANISM_INFRA_REPO_COMMIT`` — those PRs are dead letters. Cluster-
-    config routes to a source-repo PR under ``chart/templates/`` / ``skills/``;
-    CI/CD shared-namespace fails closed (no safe automatic path into the
-    Helm chart for operator-namespace manifests). See
+    ``MECHANISM_INFRA_REPO_COMMIT`` — those PRs are dead letters. Both
+    cluster-config and CI/CD shared-namespace route to a source-repo PR
+    under paths Application ``agentit`` / CI actually consume
+    (``chart/templates/``, ``chart/templates/tekton/``, ``argocd/`` for the
+    live Application CR, ``skills/`` for markdown). See
     docs/architecture-agentit-vs-fleet-gitops.md.
 
     For fleet apps, knowing an infra repo URL is the only thing that matters:
@@ -197,8 +188,10 @@ def resolve_cluster_config_mechanism(
     rather than falling back to a direct apply.
     """
     if self_managed:
-        if category == CATEGORY_CICD_SHARED_NAMESPACE:
-            return MECHANISM_NONE
+        # ``category`` retained so callers (preview / route_and_deliver) can
+        # pass cluster_config vs cicd_shared_namespace without branching —
+        # both self-managed categories resolve to the same mechanism.
+        _ = category
         return MECHANISM_SOURCE_REPO_PR
     if infra_repo_url is not None:
         return MECHANISM_INFRA_REPO_COMMIT
@@ -211,6 +204,7 @@ def confirmation_text(
     infra_repo_url: str | None = None,
     self_managed: bool = False,
     app_repo_url: str | None = None,
+    category: str | None = None,
 ) -> str:
     """The exact statement a human must see -- and actively acknowledge --
     immediately before ``route_and_deliver()`` actually fires for the
@@ -236,14 +230,22 @@ def confirmation_text(
     """
     if self_managed and mechanism == MECHANISM_SOURCE_REPO_PR:
         repo = app_repo_url or "AgentIT.git"
+        if category == CATEGORY_CICD_SHARED_NAMESPACE:
+            return (
+                f"AgentIT will: open a PR against `{repo}` under chart/templates/ "
+                "(or chart/templates/tekton/ / argocd/application.yaml when that is "
+                "the live destination) — Application `agentit` syncs Helm chart/ "
+                "from this repo (AppSet excludes apps/agentit/; never commit AgentIT "
+                "there). These manifests target a shared operator namespace; elevated "
+                "review needed before merging. A human must merge; AgentIT will never "
+                "auto-merge."
+            )
         return (
             f"AgentIT will: open a PR against `{repo}` under chart/templates/ or "
             "skills/ — Application `agentit` syncs Helm chart/ from this repo "
             "(AppSet excludes apps/agentit/; never commit AgentIT there). "
             "A human must merge; AgentIT will never auto-merge."
         )
-    if self_managed and mechanism == MECHANISM_NONE:
-        return f"AgentIT will: {_SELF_MANAGED_CICD_ERROR}"
     base = MECHANISM_DESCRIPTIONS.get(mechanism, mechanism)
     if mechanism == MECHANISM_INFRA_REPO_COMMIT and infra_repo_url:
         return f"AgentIT will: commit to `{infra_repo_url}` and open a PR -- this app is GitOps-registered via a live Argo CD Application. A human must merge; AgentIT will never auto-merge."
@@ -271,6 +273,42 @@ def remap_self_managed_cluster_files(files: list[dict]) -> list[dict]:
         else:
             # YAML/YML cluster-config (and anything else in this lane) → Helm
             # templates Application agentit syncs from AgentIT.git.
+            new_f["target_path"] = f"chart/templates/{name}"
+        remapped.append(new_f)
+    return remapped
+
+
+def remap_self_managed_cicd_files(files: list[dict]) -> list[dict]:
+    """Rewrite CI/CD shared-namespace file dicts onto live AgentIT.git paths.
+
+    Application ``agentit`` syncs ``chart/``; Tekton CI's ``notify-argocd``
+    applies only ``argocd/application.yaml``. Never ``apps/agentit/``.
+
+    - ``kind: Application`` named ``agentit`` → ``argocd/application.yaml``
+      (the sole file ``notify-argocd`` ``oc apply``s)
+    - Tekton API group → ``chart/templates/tekton/{name}`` (existing chart
+      subfolder; chart already holds cross-ns Role in openshift-gitops)
+    - Everything else YAML → ``chart/templates/{name}``
+    """
+    remapped: list[dict] = []
+    for f in files:
+        name = Path(f["path"]).name
+        new_f = dict(f)
+        docs = _parse_manifest(f.get("content", ""))
+        kinds = {(doc.get("kind") or "") for doc in docs}
+        api_groups = {
+            (doc.get("apiVersion") or "").split("/", 1)[0] for doc in docs
+        }
+        app_names = {
+            (doc.get("metadata") or {}).get("name", "")
+            for doc in docs
+            if (doc.get("kind") or "") == "Application"
+        }
+        if "Application" in kinds and "agentit" in app_names:
+            new_f["target_path"] = "argocd/application.yaml"
+        elif "tekton.dev" in api_groups:
+            new_f["target_path"] = f"chart/templates/tekton/{name}"
+        else:
             new_f["target_path"] = f"chart/templates/{name}"
         remapped.append(new_f)
     return remapped
@@ -379,6 +417,7 @@ def preview_delivery_groups(
                     CATEGORY_CLUSTER_CONFIG, CATEGORY_CICD_SHARED_NAMESPACE,
                 ),
                 app_repo_url=app_repo_url,
+                category=category,
             ),
         }
     return result
@@ -904,8 +943,9 @@ async def route_and_deliver(
     # RBAC AgentIT's lacks for these namespaces (verified live against this
     # cluster's openshift-gitops-argocd-application-controller SA -- see the
     # README), so fleet apps resolve through the exact same GitOps-commit
-    # decision as cluster-config. Self-managed AgentIT fails closed (AppSet
-    # excludes apps/agentit — see docs/architecture-agentit-vs-fleet-gitops.md).
+    # decision as cluster-config. Self-managed AgentIT remaps to AgentIT.git
+    # (chart/templates/ / tekton/ / argocd/application.yaml) — AppSet excludes
+    # apps/agentit (see docs/architecture-agentit-vs-fleet-gitops.md).
     cicd_files = groups.pop(CATEGORY_CICD_SHARED_NAMESPACE, [])
     if cicd_files:
         mechanisms[CATEGORY_CICD_SHARED_NAMESPACE] = resolve_cluster_config_mechanism(
@@ -953,6 +993,7 @@ async def route_and_deliver(
                         CATEGORY_CLUSTER_CONFIG, CATEGORY_CICD_SHARED_NAMESPACE,
                     ),
                     app_repo_url=app_repo_url,
+                    category=cat,
                 )
                 for cat, m in mechanisms.items()
             },
@@ -1028,8 +1069,15 @@ async def route_and_deliver(
                     branch_name=f"agentit/{_sanitize_app_name(app_name)}-cicd-shared-namespace",
                     note=_cicd_shared_namespace_note(cicd_files),
                 )
-            elif self_managed:
-                outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = {"error": _SELF_MANAGED_CICD_ERROR}
+            elif mech == MECHANISM_SOURCE_REPO_PR and report is not None:
+                # Self-managed AgentIT: PR against AgentIT.git under live
+                # chart/ / argocd/ paths — never apps/agentit/.
+                remapped = remap_self_managed_cicd_files(cicd_files)
+                outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = await deliver_with_verification(
+                    mechanism=MECHANISM_SOURCE_REPO_PR, files=remapped, report=report,
+                    app_name=app_name, store=store, assessment_id=assessment_id,
+                    actor=actor, dry_run=dry_run,
+                )
             else:
                 outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = {
                     "error": (
