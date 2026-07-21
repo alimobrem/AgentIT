@@ -19,6 +19,7 @@ from agentit import kube
 from agentit.audit import audit_log
 from agentit.models import AssessmentReport
 from agentit.portal.cluster_apply import _OPERATOR_NAMESPACES, _parse_manifest
+from agentit.portal.pending_actions import list_unresolved_escalations
 from agentit.skill_engine import record_skill_outcomes
 
 logger = logging.getLogger(__name__)
@@ -1253,9 +1254,7 @@ async def escalate_unresolved_finding(
     """
     category, desc_key = finding[0], finding[1]
 
-    existing = await store.list_unresolved_events(
-        "finding-escalated", ["finding-escalation-acknowledged"], target_app=app_name,
-    )
+    existing = await list_unresolved_escalations(store, target_app=app_name)
     for event in existing:
         if _escalation_event_category(event.get("summary", "")) == category:
             return event["id"]
@@ -1487,9 +1486,7 @@ async def get_next_action_state(
     """
     if unresolved_escalations is None:
         try:
-            unresolved_escalations = await store.list_unresolved_events(
-                "finding-escalated", ["finding-escalation-acknowledged"], target_app=app_name,
-            )
+            unresolved_escalations = await list_unresolved_escalations(store, target_app=app_name)
         except Exception:
             logger.debug("Failed to fetch unresolved escalations for %s's next-action state", app_name, exc_info=True)
             unresolved_escalations = []

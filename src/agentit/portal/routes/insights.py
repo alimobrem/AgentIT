@@ -30,14 +30,10 @@ async def insights_page(request: Request) -> HTMLResponse:
     # unmerged PR (count_fleet_prs_waiting_for_approval -- the same
     # definition the Ledger/nav badge use) plus every unresolved rollback/
     # escalation recommendation (routes/recommendations.py).
+    from agentit.portal.pending_actions import list_unresolved_recommendations
     from agentit.portal.pr_tracking import count_fleet_prs_waiting_for_approval
     waiting_for_approval = await count_fleet_prs_waiting_for_approval(s)
-    unresolved_rollbacks = await s.list_unresolved_events(
-        "rollback-recommended", ["rollback-executed", "rollback-dismissed"],
-    )
-    unresolved_escalations = await s.list_unresolved_events(
-        "finding-escalated", ["finding-escalation-acknowledged"],
-    )
+    unresolved_rollbacks, unresolved_escalations = await list_unresolved_recommendations(s)
     fleet_insights["needs_attention"] = (
         waiting_for_approval + len(unresolved_rollbacks) + len(unresolved_escalations)
     )

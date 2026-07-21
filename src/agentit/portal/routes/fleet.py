@@ -9,6 +9,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from agentit.portal.helpers import get_store, get_templates
+from agentit.portal.pending_actions import list_unresolved_escalations, list_unresolved_recommendations
 
 log = logging.getLogger(__name__)
 
@@ -154,12 +155,7 @@ async def _attach_pending_actions(fleet: list[dict], s: object) -> None:
 
     repo_url_by_app_name = {app_item["repo_name"]: app_item["repo_url"] for app_item in fleet}
     try:
-        unresolved_rollbacks = await s.list_unresolved_events(
-            "rollback-recommended", ["rollback-executed", "rollback-dismissed"],
-        )
-        unresolved_escalations = await s.list_unresolved_events(
-            "finding-escalated", ["finding-escalation-acknowledged"],
-        )
+        unresolved_rollbacks, unresolved_escalations = await list_unresolved_recommendations(s)
     except Exception:
         log.debug("Failed to fetch unresolved recommendations for fleet 'needs action' badges", exc_info=True)
         unresolved_rollbacks, unresolved_escalations = [], []
@@ -191,9 +187,7 @@ async def _attach_next_action_state(fleet: list[dict], s: object) -> None:
     """
     from agentit.portal.delivery import NEXT_ACTION_NONE, get_next_action_state
     try:
-        unresolved_escalations = await s.list_unresolved_events(
-            "finding-escalated", ["finding-escalation-acknowledged"],
-        )
+        unresolved_escalations = await list_unresolved_escalations(s)
     except Exception:
         log.debug("Failed to fetch unresolved escalations for fleet next-action state", exc_info=True)
         unresolved_escalations = []

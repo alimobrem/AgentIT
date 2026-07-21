@@ -489,6 +489,7 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     # `gates` table/generic gate-resolution machinery has been removed
     # entirely (2026-07-19) -- nothing here reads from it anymore.
     from agentit.portal.delivery import get_next_action_state, is_gitops_registered
+    from agentit.portal.pending_actions import list_unresolved_recommendations
     from agentit.portal.pr_tracking import get_app_pr_history
 
     pr_history = await get_app_pr_history(s, assessment_id, report.repo_url, report.repo_name)
@@ -496,14 +497,11 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     for pr in open_prs:
         pr["kind"] = "pr"
 
-    unresolved_rollbacks = await s.list_unresolved_events(
-        "rollback-recommended", ["rollback-executed", "rollback-dismissed"], target_app=report.repo_name,
+    unresolved_rollbacks, unresolved_escalations = await list_unresolved_recommendations(
+        s, target_app=report.repo_name,
     )
     for e in unresolved_rollbacks:
         e["kind"] = "rollback"
-    unresolved_escalations = await s.list_unresolved_events(
-        "finding-escalated", ["finding-escalation-acknowledged"], target_app=report.repo_name,
-    )
     for e in unresolved_escalations:
         e["kind"] = "escalation"
 
