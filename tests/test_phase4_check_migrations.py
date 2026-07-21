@@ -271,3 +271,20 @@ class TestMultiReplicaDeploymentParity:
         _passes(self.SKILL_PATH, create_mock_repo, {
             "deploy/deployment.yaml": "apiVersion: apps/v1\nkind: Deployment\nspec:\n  replicas: 2\n",
         })
+
+
+class TestHelmChartExistsParity:
+    """Ported from `checks/infrastructure/helm-chart.yaml` (deleted in
+    this commit) to `skills/infrastructure/helm-chart-exists.md`."""
+
+    SKILL_PATH = SKILLS_DIR / "infrastructure" / "helm-chart-exists.md"
+
+    def test_fires_when_no_chart_yaml(self, create_mock_repo) -> None:
+        finding = _fires(self.SKILL_PATH, create_mock_repo, {"main.py": "print('hi')\n"})
+        assert finding.category == "iac"
+        assert finding.severity == Severity.high
+        assert finding.description == "No Helm chart detected"
+        assert finding.recommendation == "Generate Helm chart with values.yaml and environment overlays"
+
+    def test_passes_when_chart_yaml_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {"Chart.yaml": "apiVersion: v2\nname: myapp\n"})

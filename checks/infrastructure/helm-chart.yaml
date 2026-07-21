@@ -1,8 +1,0 @@
-name: helm-chart-exists
-dimension: infrastructure
-severity: high
-category: iac
-type: file_exists
-pattern: Chart.yaml
-description: No Helm chart detected
-recommendation: Generate Helm chart with values.yaml and environment overlays
