@@ -327,38 +327,27 @@ async def auto_validate_and_deliver(
     orchestration: dict,
     target_findings: list[tuple[str, str]] | None = None,
     job_id: str | None = None,
+    score_delta_claimed: float | None = None,
 ) -> dict:
-    """The top-level pipeline: validate/fix loop -> save -> final LLM
-    review -> real deliver -> notify. This is the one function
-    ``_run_onboarding_job()`` (automatic path) and the manual re-trigger
-    route on Onboard Results (``routes/assessments.py``) both call, so they
-    can never drift apart on what "run the automatic validation" means.
+    """The top-level pipeline: validate/fix -> finding gate -> cluster PRs
+    -> LLM review -> real deliver -> notify.
 
-    Returns a dict describing the outcome:
-    - ``{"status": "needs_attention", "reason": str, "iterations": [...]}``
-      when the validate/fix loop could not converge within
-      ``MAX_VALIDATION_ITERATIONS`` -- manifests are still saved (whatever
-      partial progress the loop made), nothing is delivered, and this is
-      surfaced honestly rather than faking success.
-    - ``{"status": "delivered", "delivery": {...}, "pr_urls": [...],
-      "review": {...} | None}`` once a real PR (or more than one) has been
-      opened.
-    - ``{"status": "unchanged", "delivery": {...}, "review": {...} | None}``
-      when validation converged and delivery produced no error, but also no
-      PR, because every category's generated content already matched what's
-      deployed (github_pr.py's content-unchanged dedup) -- a benign no-op,
-      not a failure.
-    - ``{"status": "delivery_failed", "reason": str}`` when validation
-      converged but the real ``route_and_deliver()`` call itself produced
-      no successful outcome at all (every category errored) -- also
-      surfaced honestly, never silently swallowed.
-    - ``{"status": "needs_attention", "reason": str}`` also when the
-      self-managed chart delivery gate refuses (non-Helm / collision /
-      forbidden kinds) — no PR, never a green success path. See
-      ``delivery.validate_self_managed_chart_delivery``.
+    Quality bar (docs/plan-quality-helpful-prs.md Phases A–D/F): refuse PRs
+    with no open findings / score delta; drop files not tied to those
+    findings; open ≤ one PR per finding cluster after per-cluster
+    validation; PR bodies explain finding → change → expected outcome.
     """
     from agentit.portal.delivery import route_and_deliver
     from agentit.portal.helpers import get_llm_client
+    from agentit.portal.quality_prs import (
+        build_helpful_pr_body,
+        cluster_validation_ok,
+        filter_files_to_open_findings,
+        finding_gate_allows_pr,
+        finding_gate_refuse_reason,
+        partition_by_finding_cluster,
+        resolve_target_findings,
+    )
 
     validation = await validate_and_fix_manifests(
         files, app_name=app_name, namespace=namespace, report=report,
@@ -373,15 +362,6 @@ async def auto_validate_and_deliver(
     )
 
     if validation["clean"]:
-        # Mirrors the exact shape the manual "Dry Run" button's own
-        # save_apply_results() call already persists (routes/
-        # assessments.py::deliver()) -- so Onboard Results' existing
-        # dry_run_done gating (unlocking the manual Commit & Open PR / Per-
-        # Agent PRs fallback buttons) reflects reality after THIS loop
-        # converges too, not only after a human clicks the old button by
-        # hand. Never marks a real delivery here -- only that validation
-        # passed -- the PR cards/pr_tracking.py remain the sole source of
-        # truth for whether anything was actually delivered.
         try:
             await store.save_apply_results(
                 assessment_id,
@@ -407,96 +387,202 @@ async def auto_validate_and_deliver(
         try:
             await store.log_event(
                 "auto-delivery", "auto-validation-needs-attention", app_name, "warning",
-                f"{reason} -- manifests were saved; review and deliver manually on Onboard Results.",
+                f"{reason} -- manifests were saved; review on Ledger / Scan Results.",
                 correlation_id=assessment_id,
             )
         except Exception:
             logger.warning("Failed to log auto-validation-needs-attention event for %s", app_name, exc_info=True)
         return {"status": "needs_attention", "reason": reason, "iterations": validation["iterations"]}
 
+    # Phase A: finding / score-delta gate — no catalog dumps with empty need.
+    resolved_findings = resolve_target_findings(report, target_findings)
+    if not finding_gate_allows_pr(resolved_findings, score_delta_claimed=score_delta_claimed):
+        reason = finding_gate_refuse_reason(resolved_findings)
+        logger.warning("Auto-delivery finding gate refused for %s: %s", app_name, reason)
+        try:
+            await store.log_event(
+                "auto-delivery", "auto-delivery-finding-gate", app_name, "warning",
+                reason, correlation_id=assessment_id,
+            )
+        except Exception:
+            logger.warning("Failed to log finding-gate event for %s", app_name, exc_info=True)
+        return {"status": "needs_attention", "reason": reason}
+
+    kept_files, drop_reasons = filter_files_to_open_findings(final_files, resolved_findings)
+    if not kept_files:
+        reason = (
+            "No generated files map to open findings — refusing PR. "
+            + ("; ".join(drop_reasons[:5]) if drop_reasons else "empty after finding filter")
+        )
+        logger.warning("Auto-delivery finding filter emptied batch for %s: %s", app_name, reason)
+        try:
+            await store.log_event(
+                "auto-delivery", "auto-delivery-finding-gate", app_name, "warning",
+                reason, correlation_id=assessment_id,
+            )
+        except Exception:
+            logger.warning("Failed to log finding-filter event for %s", app_name, exc_info=True)
+        return {"status": "needs_attention", "reason": reason, "drop_reasons": drop_reasons}
+
     if job_id:
         await store.update_remediation_job(job_id, "reviewing", "Running final quality review...")
     llm_client = get_llm_client()
-    review = await review_final_manifests(llm_client, final_files, report)
+    review = await review_final_manifests(llm_client, kept_files, report)
     if review is not None and not review.get("approved", True):
         logger.info("Final LLM review flagged concerns for %s: %s", app_name, review.get("reason"))
 
+    # Phase B: one PR per finding cluster (fleet + self-managed parity — Phase F).
+    clusters = partition_by_finding_cluster(kept_files, resolved_findings)
     if job_id:
-        await store.update_remediation_job(job_id, "delivering", "Creating pull request(s)...")
-    delivery = await route_and_deliver(
-        final_files, app_name=app_name, namespace=namespace, report=report,
-        store=store, assessment_id=assessment_id, actor=actor, dry_run=False,
-        target_findings=target_findings,
-    )
+        await store.update_remediation_job(
+            job_id, "delivering",
+            f"Creating pull request(s) for {len(clusters)} finding cluster(s)...",
+        )
 
-    if review is not None and not review.get("approved", True):
-        try:
-            await store.update_delivery(delivery["delivery_id"], details={"llm_review": review})
-        except Exception:
-            logger.warning("Failed to attach llm_review to delivery %s", delivery.get("delivery_id"), exc_info=True)
+    score_dims = [s.dimension for s in report.scores if s.findings]
+    all_pr_urls: list[str] = []
+    cluster_refusals: list[str] = []
+    last_delivery: dict | None = None
+    unchanged_any = False
 
-    pr_urls = await notify_pr_ready(store, app_name, assessment_id, delivery, review)
-
-    if not pr_urls:
-        delivery_errors = [
-            o["error"] for o in delivery["outcomes"].values()
-            if isinstance(o, dict) and o.get("error")
+    for cluster in clusters:
+        # Phase C: per-cluster validation before open.
+        dry_errors, _ = await _dry_run_check(
+            cluster.files, app_name=app_name, namespace=namespace, report=report,
+            store=store, assessment_id=assessment_id, actor=actor,
+        )
+        relevant_failed = [
+            r for r in _check_properties(cluster.files)
+            if not r.passed and _assessment_has_finding_category(
+                report, _PROPERTY_TO_FIX_CATEGORY.get(r.property_name, ""),
+            )
         ]
-        if delivery_errors:
-            reason = "; ".join(delivery_errors)
-            gate_refused = any(
-                isinstance(o, dict) and o.get("gate_refused")
-                for o in delivery["outcomes"].values()
+        ok, refuse_reason = cluster_validation_ok(
+            dry_run_errors=dry_errors,
+            failed_properties=[r.property_name for r in relevant_failed],
+        )
+        if not ok:
+            cluster_refusals.append(f"{cluster.key}: {refuse_reason}")
+            logger.warning(
+                "Auto-delivery cluster %s for %s failed validation: %s",
+                cluster.key, app_name, refuse_reason,
             )
-            filtered = any(
-                isinstance(o, dict) and o.get("filtered")
-                for o in delivery["outcomes"].values()
-            )
-            logger.warning("Auto-delivery produced no PR for %s: %s", app_name, reason)
-            try:
-                if gate_refused:
-                    attention_msg = (
-                        f"Self-managed delivery filter/gate refused: {reason}"
-                        if filtered
-                        else f"Self-managed chart delivery gate refused: {reason}"
-                    )
-                else:
-                    attention_msg = (
-                        f"Automatic delivery did not open a pull request: {reason} -- "
-                        "manifests were saved; review and deliver manually on Onboard Results."
-                    )
-                await store.log_event(
-                    "auto-delivery",
-                    "auto-delivery-gate-refused" if gate_refused else "auto-delivery-failed",
-                    app_name, "warning",
-                    attention_msg,
-                    correlation_id=assessment_id,
-                )
-            except Exception:
-                logger.warning("Failed to log auto-delivery outcome event for %s", app_name, exc_info=True)
-            if gate_refused:
-                return {"status": "needs_attention", "reason": reason}
-            return {"status": "delivery_failed", "reason": reason}
+            continue
 
-        # No pull request AND no error: every category either had nothing
-        # to deliver or its generated content was byte-identical to what's
-        # already on the target repo's default branch (github_pr.py's
-        # `_infra_repo_content_unchanged()` dedup). This is the expected,
-        # benign steady-state outcome now that every Assess/Scan chains
-        # into onboarding automatically (2026-07-20) -- a cadence/webhook-
-        # triggered re-scan of an app that's already onboarded and
-        # unchanged must not be treated as a failure needing a human's
-        # attention.
-        logger.info("Auto-delivery for %s: nothing to deliver -- manifests already match what's deployed", app_name)
+        pr_context = {
+            "body": build_helpful_pr_body(
+                title_line=f"AgentIT Scan: {cluster.key} for {app_name}",
+                target_findings=cluster.target_findings,
+                files=cluster.files,
+                validation_summary=(
+                    "SSA dry-run (concrete YAML), property checks for targeted "
+                    "findings, and self-managed chart gate (#119) passed for this cluster."
+                ),
+                drop_reasons=drop_reasons,
+                score_dimensions=score_dims,
+            ),
+            "branch_suffix": cluster.branch_suffix,
+            "cluster_key": cluster.key,
+        }
+        delivery = await route_and_deliver(
+            cluster.files, app_name=app_name, namespace=namespace, report=report,
+            store=store, assessment_id=assessment_id, actor=actor, dry_run=False,
+            target_findings=cluster.target_findings,
+            pr_context=pr_context,
+        )
+        last_delivery = delivery
+        if review is not None and not review.get("approved", True):
+            try:
+                await store.update_delivery(delivery["delivery_id"], details={"llm_review": review})
+            except Exception:
+                logger.warning(
+                    "Failed to attach llm_review to delivery %s",
+                    delivery.get("delivery_id"), exc_info=True,
+                )
+
+        cluster_prs = [
+            o["pr_url"] for o in delivery["outcomes"].values()
+            if isinstance(o, dict) and o.get("pr_url")
+        ]
+        if cluster_prs:
+            all_pr_urls.extend(cluster_prs)
+        else:
+            delivery_errors = [
+                o["error"] for o in delivery["outcomes"].values()
+                if isinstance(o, dict) and o.get("error")
+            ]
+            if delivery_errors:
+                gate_refused = any(
+                    isinstance(o, dict) and o.get("gate_refused")
+                    for o in delivery["outcomes"].values()
+                )
+                reason = "; ".join(delivery_errors)
+                cluster_refusals.append(f"{cluster.key}: {reason}")
+                if gate_refused:
+                    try:
+                        await store.log_event(
+                            "auto-delivery", "auto-delivery-gate-refused", app_name, "warning",
+                            f"Cluster {cluster.key} refused: {reason}",
+                            correlation_id=assessment_id,
+                        )
+                    except Exception:
+                        logger.warning("Failed to log gate-refused for %s", app_name, exc_info=True)
+            else:
+                unchanged_any = True
+
+    if all_pr_urls and last_delivery is not None:
+        notify_delivery = {
+            "delivery_id": last_delivery.get("delivery_id"),
+            "outcomes": {f"cluster_{i}": {"pr_url": u} for i, u in enumerate(all_pr_urls)},
+        }
+        await notify_pr_ready(store, app_name, assessment_id, notify_delivery, review)
+        return {
+            "status": "delivered",
+            "delivery": last_delivery,
+            "pr_urls": all_pr_urls,
+            "review": review,
+            "clusters": len(clusters),
+            "drop_reasons": drop_reasons,
+        }
+
+    if cluster_refusals and not unchanged_any:
+        reason = "; ".join(cluster_refusals)
+        gate_refused = any(
+            "gate" in r.lower() or "Helm-shaped" in r or "filter dropped" in r
+            for r in cluster_refusals
+        )
+        logger.warning("Auto-delivery produced no PR for %s: %s", app_name, reason)
         try:
             await store.log_event(
-                "auto-delivery", "auto-delivery-unchanged", app_name, "info",
-                "Automatic validation complete -- generated manifests already match what's deployed; "
-                "no new pull request needed.",
+                "auto-delivery",
+                "auto-delivery-gate-refused" if gate_refused else "auto-delivery-failed",
+                app_name, "warning",
+                f"Automatic delivery did not open a pull request: {reason}",
                 correlation_id=assessment_id,
             )
         except Exception:
-            logger.warning("Failed to log auto-delivery-unchanged event for %s", app_name, exc_info=True)
-        return {"status": "unchanged", "delivery": delivery, "review": review}
+            logger.warning("Failed to log auto-delivery outcome event for %s", app_name, exc_info=True)
+        if gate_refused or any(
+            "SSA" in r or "Property check" in r or "finding" in r for r in cluster_refusals
+        ):
+            return {"status": "needs_attention", "reason": reason, "drop_reasons": drop_reasons}
+        return {"status": "delivery_failed", "reason": reason, "drop_reasons": drop_reasons}
 
-    return {"status": "delivered", "delivery": delivery, "pr_urls": pr_urls, "review": review}
+    # Content-unchanged dedup across clusters (benign for cadence re-scans).
+    logger.info("Auto-delivery for %s: nothing to deliver -- manifests already match what's deployed", app_name)
+    try:
+        await store.log_event(
+            "auto-delivery", "auto-delivery-unchanged", app_name, "info",
+            "Automatic validation complete -- generated manifests already match what's deployed; "
+            "no new pull request needed.",
+            correlation_id=assessment_id,
+        )
+    except Exception:
+        logger.warning("Failed to log auto-delivery-unchanged event for %s", app_name, exc_info=True)
+    return {
+        "status": "unchanged",
+        "delivery": last_delivery or {},
+        "review": review,
+        "drop_reasons": drop_reasons,
+    }
+

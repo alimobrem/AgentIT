@@ -30,6 +30,9 @@ Self-managed delivery gates (#119/#121), watchers, and Scan→GitOps delivery ar
 
 ---
 
+**Quality PRs that help the app — Phases A–F (2026-07-21).** Scan no longer opens catalog-dump PRs. `auto_validate_and_deliver` refuses when there are no open findings / score delta (Phase A), drops files not tied to those findings, opens **one PR per finding cluster** with a file cap (Phase B), re-validates each cluster with SSA dry-run + property checks before open (Phase C), and writes PR bodies as finding → change → expected outcome + “Argo deploys after merge; AgentIT does not auto-merge” (Phase D). Skills are **never** `approved` on PR open for fleet or self-managed (Phase E); approval waits for merge + `correlate_delivery_finding` = resolved. Fleet/pinky infra PRs under `apps/{app}/` share the same bar (Phase F). Module: `portal/quality_prs.py`. Plan: [`docs/plan-quality-helpful-prs.md`](docs/plan-quality-helpful-prs.md). Tests: `tests/test_quality_prs.py`.
+
+
 Point AgentIT at a Git repository and it will:
 
 1. **Assess** the repo across 7 enterprise-readiness dimensions and produce a scored report.

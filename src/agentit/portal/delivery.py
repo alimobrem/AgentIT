@@ -293,6 +293,7 @@ async def _deliver_self_managed_source_pr(
     actor: str,
     dry_run: bool,
     namespace: str | None = None,
+    pr_context: dict | None = None,
 ) -> dict:
     """Filter fleet junk → fail-closed gate → AgentIT.git source PR.
 
@@ -326,7 +327,7 @@ async def _deliver_self_managed_source_pr(
         mechanism=MECHANISM_SOURCE_REPO_PR, files=deliverable, report=report,
         app_name=app_name, store=store, assessment_id=assessment_id,
         actor=actor, dry_run=dry_run, record_skill_approval=False,
-        namespace=namespace or app_name,
+        namespace=namespace or app_name, pr_context=pr_context,
     )
     if drop_reasons:
         outcome = {
@@ -803,21 +804,24 @@ async def deliver_with_verification(
     dry_run: bool,
     path_prefix: str | None = None,
     branch_name: str | None = None,
-    record_skill_approval: bool = True,
+    record_skill_approval: bool = False,
     namespace: str | None = None,
+    pr_context: dict | None = None,
 ) -> dict:
     """Structurally parallel to ``cluster_apply.apply_with_verification()``,
     for the commit-and-PR delivery mechanisms
     (``infra-repo-commit``/``source-repo-pr``/``app-repo-pr``): one
-    ``audit_log()`` call covering every exit path, and
-    ``record_skill_outcomes()`` after a successful commit/PR (not just a
-    successful apply -- a merged PR is exactly as strong a "this fix was
-    accepted" signal, per the design doc).
+    ``audit_log()`` call covering every exit path, and optional
+    ``record_skill_outcomes()`` only when ``record_skill_approval`` is
+    explicitly True (never the Scan default — opening a PR is not
+    acceptance; see docs/plan-quality-helpful-prs.md Phase E).
 
-    ``record_skill_approval``: when ``False`` (self-managed AgentIT), do
-    **not** record skill outcome ``approved`` merely because a PR opened —
-    opening is not acceptance (aligns with #119 honesty). Fleet apps keep
-    the historical approve-on-PR-open behavior.
+    ``record_skill_approval``: default ``False`` for fleet and self-managed.
+    Skills become ``approved`` only after merge + finding-clear evidence
+    (``check_pending_delivery_verifications``), never on PR open.
+
+    ``pr_context``: optional Phase D body / Phase B branch suffix from
+    ``auto_delivery`` (finding → change → expected outcome).
 
     ``path_prefix``/``branch_name`` only apply to ``MECHANISM_INFRA_REPO_
     COMMIT`` -- see ``_CICD_SHARED_NAMESPACE_PATH_PREFIX``'s own comment for
@@ -899,10 +903,17 @@ async def deliver_with_verification(
     try:
         if mechanism == MECHANISM_INFRA_REPO_COMMIT:
             from agentit.portal.github_pr import commit_to_infra_repo, ensure_applicationset
+            from agentit.portal.quality_prs import branch_name_for_cluster
 
             commit_files = [{**f, "category": path_prefix} for f in files] if path_prefix else files
+            infra_branch = branch_name
+            if pr_context and pr_context.get("branch_suffix") and not branch_name:
+                infra_branch = branch_name_for_cluster(
+                    app_name, str(pr_context["branch_suffix"]), source_patch=False,
+                )
             result = await asyncio.to_thread(
-                commit_to_infra_repo, report.infra_repo_url, app_name, commit_files, branch_name,
+                commit_to_infra_repo, report.infra_repo_url, app_name, commit_files,
+                infra_branch, pr_context,
             )
             if "error" not in result:
                 await asyncio.to_thread(ensure_applicationset, report.infra_repo_url)
@@ -911,8 +922,17 @@ async def deliver_with_verification(
                     result["commit_sha"] = commit_url.rsplit("/", 1)[-1]
         elif mechanism == MECHANISM_SOURCE_REPO_PR:
             from agentit.portal.github_pr import create_source_patch_pr
+            from agentit.portal.quality_prs import branch_name_for_cluster
 
-            result = await asyncio.to_thread(create_source_patch_pr, report.repo_url, app_name, files)
+            source_branch = "agentit/codechange"
+            if pr_context and pr_context.get("branch_suffix"):
+                source_branch = branch_name_for_cluster(
+                    app_name, str(pr_context["branch_suffix"]), source_patch=True,
+                )
+            result = await asyncio.to_thread(
+                create_source_patch_pr, report.repo_url, app_name, files,
+                source_branch, pr_context,
+            )
         elif mechanism == MECHANISM_APP_REPO_PR:
             from agentit.portal.github_pr import create_onboarding_pr
 
@@ -978,6 +998,7 @@ async def _deliver_via_gitops_pr(
     branch_name: str | None = None,
     note: str = "",
     namespace: str | None = None,
+    pr_context: dict | None = None,
 ) -> dict:
     """Commit ``files`` to the GitOps infra repo and open a real PR -- the
     exact sequence the cluster/app-config category has always used, and
@@ -1008,6 +1029,7 @@ async def _deliver_via_gitops_pr(
         app_name=app_name, store=store, assessment_id=assessment_id,
         actor=actor, dry_run=dry_run, path_prefix=path_prefix, branch_name=branch_name,
         namespace=namespace or getattr(report, "namespace", None) or app_name,
+        record_skill_approval=False, pr_context=pr_context,
     )
     pr_url = outcome.get("pr_url") if isinstance(outcome, dict) and not dry_run else None
     if pr_url and "error" not in outcome:
@@ -1130,6 +1152,7 @@ async def route_and_deliver(
     actor: str,
     dry_run: bool,
     target_findings: list[tuple[str, str]] | None = None,
+    pr_context: dict | None = None,
 ) -> dict:
     """The one decision surface for "does this change reach a cluster/repo
     now" -- classify, look up GitOps registration, and route each
@@ -1163,6 +1186,10 @@ async def route_and_deliver(
     a dry-run-only call, or a batch spanning many findings at once where no
     single one is "the" target) -- ``list_deliveries_pending_finding_check()``
     simply never returns those rows, so nothing downstream breaks.
+
+    ``pr_context`` (docs/plan-quality-helpful-prs.md Phases B/D): optional
+    helpful PR body + per-cluster branch suffix from ``auto_delivery``.
+    Skills are never approved on PR open (Phase E); fleet matches self-managed.
     """
     groups: dict[str, list[dict]] = {}
     for f in files:
@@ -1323,6 +1350,7 @@ async def route_and_deliver(
                     files=cluster_files, report=report, app_name=app_name, store=store,
                     assessment_id=assessment_id, actor=actor, dry_run=dry_run,
                     infra_repo_url=infra_repo_url, namespace=namespace,
+                    pr_context=pr_context,
                 )
             elif mech == MECHANISM_SOURCE_REPO_PR and report is not None:
                 # Self-managed AgentIT: filter fleet junk, then PR against
@@ -1331,7 +1359,7 @@ async def route_and_deliver(
                 outcomes[CATEGORY_CLUSTER_CONFIG] = await _deliver_self_managed_source_pr(
                     remapped=remapped, report=report, app_name=app_name, store=store,
                     assessment_id=assessment_id, actor=actor, dry_run=dry_run,
-                    namespace=namespace,
+                    namespace=namespace, pr_context=pr_context,
                 )
             else:
                 # MECHANISM_NONE: no infra_repo_url is known for this
@@ -1369,6 +1397,7 @@ async def route_and_deliver(
                     branch_name=f"agentit/{_sanitize_app_name(app_name)}-cicd-shared-namespace",
                     note=_cicd_shared_namespace_note(cicd_files),
                     namespace=namespace,
+                    pr_context=pr_context,
                 )
             elif mech == MECHANISM_SOURCE_REPO_PR and report is not None:
                 # Self-managed AgentIT: filter fleet junk, then PR against
@@ -1377,7 +1406,7 @@ async def route_and_deliver(
                 outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = await _deliver_self_managed_source_pr(
                     remapped=remapped, report=report, app_name=app_name, store=store,
                     assessment_id=assessment_id, actor=actor, dry_run=dry_run,
-                    namespace=namespace,
+                    namespace=namespace, pr_context=pr_context,
                 )
             else:
                 outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = {
@@ -1390,17 +1419,14 @@ async def route_and_deliver(
                     ),
                 }
 
-        # Self-managed: never mark skill outcomes approved merely because a
-        # PR opened (#119 honesty). Fleet apps keep approve-on-open.
-        _approve_skills = not self_managed
-
+        # Phase E: never approve skills on PR open (fleet + self-managed).
         if source_files:
             if report is not None:
                 outcomes[CATEGORY_SOURCE_PATCH] = await deliver_with_verification(
                     mechanism=MECHANISM_SOURCE_REPO_PR, files=source_files, report=report,
                     app_name=app_name, store=store, assessment_id=assessment_id,
-                    actor=actor, dry_run=dry_run, record_skill_approval=_approve_skills,
-                    namespace=namespace,
+                    actor=actor, dry_run=dry_run, record_skill_approval=False,
+                    namespace=namespace, pr_context=pr_context,
                 )
             else:
                 outcomes[CATEGORY_SOURCE_PATCH] = {"error": "no assessment report available -- cannot open a source-repo PR"}
@@ -1410,8 +1436,8 @@ async def route_and_deliver(
                 outcomes[CATEGORY_MANIFEST_AT_REST] = await deliver_with_verification(
                     mechanism=MECHANISM_APP_REPO_PR, files=at_rest_files, report=report,
                     app_name=app_name, store=store, assessment_id=assessment_id,
-                    actor=actor, dry_run=dry_run, record_skill_approval=_approve_skills,
-                    namespace=namespace,
+                    actor=actor, dry_run=dry_run, record_skill_approval=False,
+                    namespace=namespace, pr_context=pr_context,
                 )
             else:
                 outcomes[CATEGORY_MANIFEST_AT_REST] = {"error": "no assessment report available"}
@@ -1694,6 +1720,21 @@ async def check_pending_delivery_verifications(
                 store, app_name, "delivery-finding-resolved", "info",
                 f"Delivery {d['id']} confirmed resolved: {resolved_desc} no longer present on re-assessment",
             )
+            # Phase E: approve skills only after merge + evidence the finding cleared.
+            try:
+                from agentit.skill_engine import record_skill_outcomes
+
+                onboarding = await store.get_onboarding(d.get("assessment_id") or "")
+                if onboarding:
+                    await record_skill_outcomes(
+                        store, app_name, onboarding, None, "approved",
+                        f"finding cleared after merge (delivery {d['id']})",
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to record skill approved after finding resolve for delivery %s",
+                    d.get("id"), exc_info=True,
+                )
             results.append({"delivery_id": d["id"], **outcome})
             continue
 
@@ -1705,6 +1746,21 @@ async def check_pending_delivery_verifications(
             store, app_name, "delivery-finding-still-present", "warning",
             f"Delivery {d['id']} did NOT resolve: {still_present_desc} still present on re-assessment{resolved_note}",
         )
+        # Phase E: merged but ineffective — do not treat as approved.
+        try:
+            from agentit.skill_engine import record_skill_outcomes
+
+            onboarding = await store.get_onboarding(d.get("assessment_id") or "")
+            if onboarding:
+                await record_skill_outcomes(
+                    store, app_name, onboarding, None, "rejected",
+                    f"finding still present after merge (delivery {d['id']})",
+                )
+        except Exception:
+            logger.warning(
+                "Failed to record skill ineffective after still-present for delivery %s",
+                d.get("id"), exc_info=True,
+            )
 
         escalations = []
         for key in outcome["still_present_findings"]:
