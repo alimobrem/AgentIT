@@ -250,3 +250,24 @@ class TestPdbExistsParity:
         _passes(self.SKILL_PATH, create_mock_repo, {
             "deploy/pdb.yaml": "apiVersion: policy/v1\nkind: PodDisruptionBudget\n",
         })
+
+
+class TestMultiReplicaDeploymentParity:
+    """Ported from `checks/ha_dr/replicas.yaml` (deleted in this commit)
+    to `skills/ha_dr/multi-replica-deployment.md`."""
+
+    SKILL_PATH = SKILLS_DIR / "ha_dr" / "multi-replica-deployment.md"
+
+    def test_fires_when_single_replica(self, create_mock_repo) -> None:
+        finding = _fires(self.SKILL_PATH, create_mock_repo, {
+            "deploy/deployment.yaml": "apiVersion: apps/v1\nkind: Deployment\nspec:\n  replicas: 1\n",
+        })
+        assert finding.category == "availability"
+        assert finding.severity == Severity.high
+        assert finding.description == "No multi-replica deployment found -- no redundancy"
+        assert finding.recommendation == "Set replicas >= 2 for high availability"
+
+    def test_passes_when_replicas_2_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {
+            "deploy/deployment.yaml": "apiVersion: apps/v1\nkind: Deployment\nspec:\n  replicas: 2\n",
+        })
