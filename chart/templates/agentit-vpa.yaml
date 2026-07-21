@@ -1,0 +1,27 @@
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: agentit-vpa
+  namespace: agentit
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/part-of: agentit
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: agentit
+  updatePolicy:
+    updateMode: "Off"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        minAllowed:
+          cpu: 50m
+          memory: 64Mi
+        maxAllowed:
+          cpu: "2"
+          memory: 2Gi
+        controlledResources:
+          - cpu
+          - memory

@@ -1,0 +1,13 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: agentit
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/part-of: agentit
+    app.kubernetes.io/managed-by: kubernetes
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: agentit

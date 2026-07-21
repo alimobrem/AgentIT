@@ -1,0 +1,125 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agentit-data-archive
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/component: data-archive
+    app.kubernetes.io/part-of: agentit
+    app.kubernetes.io/managed-by: kubernetes
+    criticality: high
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentit
+        app.kubernetes.io/component: data-archive
+        app.kubernetes.io/part-of: agentit
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: archive
+          image: registry.access.redhat.com/rhel9/postgresql-15:latest
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+          env:
+            - name: PGHOST
+              valueFrom:
+                secretKeyRef:
+                  name: agentit-db-credentials
+                  key: host
+            - name: PGPORT
+              valueFrom:
+                secretKeyRef:
+                  name: agentit-db-credentials
+                  key: port
+                  optional: true
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: agentit-db-credentials
+                  key: database
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: agentit-db-credentials
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: agentit-db-credentials
+                  key: password
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+              ARCHIVE_DIR="/archive/agentit"
+              mkdir -p "$ARCHIVE_DIR"
+
+              echo "=== Data Archive for agentit ==="
+              echo "Started: $(date -u)"
+              echo "Stack: python, javascript"
+              echo "Criticality: high"
+
+              if command -v pg_dump &>/dev/null && [ -n "${PGHOST:-}" ]; then
+                echo "PostgreSQL detected — running pg_dump"
+                pg_dump \
+                  --format=custom \
+                  --compress=9 \
+                  --verbose \
+                  --file="$ARCHIVE_DIR/agentit-${TIMESTAMP}.dump"
+                echo "Database archived: $ARCHIVE_DIR/agentit-${TIMESTAMP}.dump"
+
+                pg_dump \
+                  --schema-only \
+                  --file="$ARCHIVE_DIR/agentit-schema-${TIMESTAMP}.sql"
+                echo "Schema archived: $ARCHIVE_DIR/agentit-schema-${TIMESTAMP}.sql"
+
+                gzip -9 "$ARCHIVE_DIR/agentit-schema-${TIMESTAMP}.sql"
+                echo "Schema compressed: $ARCHIVE_DIR/agentit-schema-${TIMESTAMP}.sql.gz"
+              else
+                echo "No PostgreSQL detected — running generic export"
+                echo "Archiving PVC data for python/javascript application"
+                tar czf "$ARCHIVE_DIR/agentit-data-${TIMESTAMP}.tar.gz" \
+                  /data/ 2>/dev/null || echo "No /data directory found, skipping"
+              fi
+
+              echo "=== Archive manifest ==="
+              ls -lah "$ARCHIVE_DIR/"
+              echo "Total archive size: $(du -sh $ARCHIVE_DIR/ | cut -f1)"
+              echo "Completed: $(date -u)"
+          volumeMounts:
+            - name: archive-storage
+              mountPath: /archive
+            - name: app-data
+              mountPath: /data
+              readOnly: true
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: archive-storage
+          persistentVolumeClaim:
+            claimName: agentit-archive-pvc
+        - name: app-data
+          persistentVolumeClaim:
+            claimName: agentit-data
+            readOnly: true

@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentit-audit-policy
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/component: audit-policy
+data:
+  audit-policy.yaml: |
+    apiVersion: audit.k8s.io/v1
+    kind: Policy
+    metadata:
+      name: agentit-audit-policy
+    rules:
+      # Log secret reads at Metadata level (avoid leaking secret data)
+      - level: Metadata
+        resources:
+          - group: ""
+            resources: ["secrets"]
+        verbs: ["get", "list", "watch"]
+
+      # Log all mutating operations on security-sensitive resources
+      - level: RequestResponse
+        resources:
+          - group: ""
+            resources: ["pods", "services", "secrets"]
+          - group: "apps"
+            resources: ["deployments"]
+          - group: "rbac.authorization.k8s.io"
+            resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+        verbs: ["create", "update", "patch", "delete"]
+
+      # Default: log metadata for everything else
+      - level: Metadata
+        omitStages:
+          - RequestReceived
+  README.md: |
+    # Enabling this audit policy — agentit
+
+    This ConfigMap holds a real, ready-to-use Kubernetes audit policy
+    (`audit-policy.yaml`) -- it is **not** applied automatically, because
+    audit logging is configured on the API server itself, not via a
+    resource this service account can `kubectl apply`.
+
+    ## Vanilla Kubernetes (kube-apiserver)
+    1. Copy `audit-policy.yaml`'s contents to a file the API server's
+       host/pod can read, e.g. `/etc/kubernetes/audit-policy.yaml`.
+    2. Add `--audit-policy-file=/etc/kubernetes/audit-policy.yaml` and
+       `--audit-log-path=<log destination>` to the kube-apiserver startup
+       flags, mounting the file into the apiserver's static pod/container.
+    3. Restart the API server for the flags to take effect.
+
+    ## OpenShift
+    OpenShift does not accept a custom `audit-policy.yaml` file directly --
+    cluster-admins instead set an audit profile (or, on supported
+    versions, custom per-group rules) on the cluster-scoped
+    `config.openshift.io/v1 APIServer` singleton (`metadata.name: cluster`),
+    e.g. (run as a cluster-admin, not by AgentIT):
+
+      oc patch apiserver cluster --type=merge -p '{"spec":{"audit":{"profile":"WriteRequestBodies"}}}'
+
+    This requires cluster-admin RBAC AgentIT's service account does not
+    have. `audit-policy.yaml` in this ConfigMap remains useful as the
+    fine-grained rule reference this profile-based approach approximates.
+
+    ## Verification
+    - `kubectl get configmap agentit-audit-policy -o jsonpath='{.data}'` — the reference policy and README are present
+    - After a cluster-admin wires the policy in (see above): the audit log file contains entries for pod create/delete operations
+    - Secret read events appear with Metadata level (no request/response body)
+    - RBAC changes are logged with full RequestResponse detail
+
+    ## Notes for agentit (python, javascript — criticality: high, score: 94/100)
+    Given the high criticality rating of this application, it is strongly
+    recommended that a cluster-admin applies the most comprehensive audit
+    profile available and reviews audit logs regularly. On OpenShift,
+    consider the `WriteRequestBodies` or `AllRequestBodies` profile.
+    Ensure audit log retention and alerting are configured in accordance
+    with your organisation's compliance requirements for high-criticality
+    workloads.

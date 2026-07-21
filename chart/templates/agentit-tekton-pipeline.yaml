@@ -1,0 +1,247 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: agentit-pipeline
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/part-of: agentit
+    app.kubernetes.io/managed-by: tekton
+spec:
+  params:
+    - name: repo-url
+      type: string
+      description: Source repository URL
+    - name: revision
+      type: string
+      description: Git revision to build
+      default: main
+    - name: image-ref
+      type: string
+      description: Target container image reference
+  workspaces:
+    - name: shared-workspace
+      description: Shared workspace for source and build artifacts
+    - name: docker-credentials
+      description: Docker config secret for image push
+  tasks:
+    - name: git-clone
+      taskRef:
+        name: git-clone
+        kind: ClusterTask
+      params:
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.revision)
+        - name: deleteExisting
+          value: "true"
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+
+    - name: build-python
+      runAfter:
+        - git-clone
+      taskSpec:
+        workspaces:
+          - name: source
+        steps:
+          - name: pip-install
+            image: python:3.12-slim
+            workingDir: $(workspaces.source.path)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              echo "==> Installing Python dependencies"
+              pip install --upgrade pip
+              if [ -f requirements.txt ]; then
+                pip install -r requirements.txt
+              elif [ -f pyproject.toml ]; then
+                pip install .
+              else
+                echo "No requirements.txt or pyproject.toml found — skipping install"
+              fi
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+
+    - name: build-javascript
+      runAfter:
+        - git-clone
+      taskSpec:
+        workspaces:
+          - name: source
+        steps:
+          - name: npm-ci
+            image: node:20-slim
+            workingDir: $(workspaces.source.path)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              echo "==> Installing JavaScript dependencies"
+              if [ -f package-lock.json ]; then
+                npm ci
+              elif [ -f package.json ]; then
+                npm install
+              else
+                echo "No package.json found — skipping npm install"
+              fi
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+
+    - name: test-python
+      runAfter:
+        - build-python
+      taskSpec:
+        workspaces:
+          - name: source
+        steps:
+          - name: pytest
+            image: python:3.12-slim
+            workingDir: $(workspaces.source.path)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              echo "==> Running Python tests with pytest"
+              pip install --upgrade pip pytest pytest-cov 2>/dev/null
+              if [ -f requirements.txt ]; then
+                pip install -r requirements.txt
+              fi
+              pytest --tb=short --junitxml=test-results-python.xml -v
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+
+    - name: test-javascript
+      runAfter:
+        - build-javascript
+      taskSpec:
+        workspaces:
+          - name: source
+        steps:
+          - name: npm-test
+            image: node:20-slim
+            workingDir: $(workspaces.source.path)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              echo "==> Running JavaScript tests with npm test"
+              if [ -f package.json ]; then
+                npm test -- --ci --reporters=default --reporters=jest-junit 2>/dev/null || npm test
+              else
+                echo "No package.json found — skipping npm test"
+              fi
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+
+    - name: image-build
+      taskRef:
+        name: buildah
+        kind: ClusterTask
+      runAfter:
+        - test-python
+        - test-javascript
+      params:
+        - name: IMAGE
+          value: $(params.image-ref)
+        - name: DOCKERFILE
+          value: ./Containerfile
+        - name: CONTEXT
+          value: .
+        - name: FORMAT
+          value: oci
+        - name: BUILD_EXTRA_ARGS
+          value: "--label=org.opencontainers.image.source=$(params.repo-url) --label=org.opencontainers.image.revision=$(params.revision)"
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+
+    - name: image-push
+      taskRef:
+        name: buildah
+        kind: ClusterTask
+      runAfter:
+        - image-build
+      params:
+        - name: IMAGE
+          value: $(params.image-ref)
+        - name: DOCKERFILE
+          value: ./Containerfile
+        - name: CONTEXT
+          value: .
+        - name: PUSH_EXTRA_ARGS
+          value: "--digestfile=/workspace/source/image-digest.txt"
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+
+    - name: image-scan
+      taskRef:
+        name: image-scan
+        kind: Task
+      runAfter:
+        - image-push
+      params:
+        - name: IMAGE
+          value: $(params.image-ref)
+
+    - name: sbom-generate
+      taskRef:
+        name: agentit-sbom
+        kind: Task
+      runAfter:
+        - image-push
+      params:
+        - name: IMAGE
+          value: $(params.image-ref)
+
+    - name: deploy
+      taskRef:
+        name: kubernetes-actions
+        kind: ClusterTask
+      runAfter:
+        - image-scan
+        - sbom-generate
+      params:
+        - name: script
+          value: |
+            set -euo pipefail
+            echo "==> Deploying agentit"
+            kubectl rollout restart deployment/agentit
+            kubectl rollout status deployment/agentit --timeout=300s
+            echo "==> Deployment complete"
+---
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: agentit-pipeline-run-
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/part-of: agentit
+    app.kubernetes.io/managed-by: tekton
+  annotations:
+    tekton.dev/description: "CI/CD pipeline run for agentit (python, javascript) — criticality: high"
+spec:
+  pipelineRef:
+    name: agentit-pipeline
+  params:
+    - name: repo-url
+      value: "https://github.com/your-org/agentit"
+    - name: revision
+      value: "main"
+    - name: image-ref
+      value: "registry.your-org.com/agentit/agentit:latest"
+  workspaces:
+    - name: shared-workspace
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 2Gi
+    - name: docker-credentials
+      secret:
+        secretName: agentit-registry-credentials

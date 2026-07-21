@@ -1,0 +1,61 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: image-scan
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/part-of: agentit
+    app.kubernetes.io/component: security-scan
+    app.kubernetes.io/managed-by: openshift-pipelines
+spec:
+  params:
+    - name: IMAGE
+      type: string
+      description: Full image reference to scan
+    - name: WEBHOOK_URL
+      type: string
+      description: AgentIT webhook URL for findings
+      default: "http://agentit.agentit.svc:8080/api/scan-results"
+    - name: SEVERITY
+      type: string
+      default: "HIGH,CRITICAL"
+      description: Minimum severity to report
+  steps:
+    - name: scan
+      image: aquasec/trivy:latest
+      script: |
+        #!/usr/bin/env sh
+        set -e
+        trivy image \
+          --severity $(params.SEVERITY) \
+          --format json \
+          --output /tmp/scan-results.json \
+          $(params.IMAGE)
+        trivy image \
+          --severity $(params.SEVERITY) \
+          --exit-code 1 \
+          $(params.IMAGE) || SCAN_FAILED=true
+        echo "Scan complete for $(params.IMAGE)"
+        if [ "$SCAN_FAILED" = "true" ]; then
+          echo "CRITICAL vulnerabilities found"
+        fi
+    - name: report
+      image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+      script: |
+        #!/usr/bin/env sh
+        set -e
+        if [ -f /tmp/scan-results.json ]; then
+          curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -d @/tmp/scan-results.json \
+            $(params.WEBHOOK_URL)
+          echo "Findings posted to webhook"
+        fi
+    - name: gate
+      image: aquasec/trivy:latest
+      script: |
+        #!/usr/bin/env sh
+        trivy image \
+          --severity CRITICAL \
+          --exit-code 1 \
+          $(params.IMAGE)
