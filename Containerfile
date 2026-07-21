@@ -7,20 +7,23 @@ USER 0
 RUN curl -sfL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz \
     | tar -xz -C /usr/local/bin oc kubectl && chmod +x /usr/local/bin/oc /usr/local/bin/kubectl
 
-# gh CLI — break-glass + live-Pipeline bootstrap (not a runtime dependency).
-# Portal/scout use portal/github_pr REST for PR create/list/status; tip Tekton
-# smoke-test-image and GHA image-smoke-test do NOT require `gh`. Keep gh in
-# the image anyway so a lagging live Pipeline that still runs `gh --version`
-# (pre-#125 smoke) can pass smoke-test-image and reach notify-argocd — that
-# is how the tip Pipeline (no gh check) eventually deploys. Removing this
-# RUN while the live Pipeline still checks `gh --version` leaves the portal
-# stuck on the last good image (chicken-and-egg; see README "Image promotion").
-# Official RPM install for DNF4-based RHEL/UBI:
-# https://github.com/cli/cli/blob/trunk/docs/install_linux.md#dnf4
-RUN dnf install -y 'dnf-command(config-manager)' && \
-    dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo && \
-    dnf install -y gh && \
-    dnf clean all
+# gh --version shim for live-Pipeline bootstrap (not a runtime dependency).
+# Portal/scout use portal/github_pr REST; tip Tekton/GHA smoke do NOT require
+# the real gh CLI. A lagging live Pipeline may still run `gh --version` in
+# smoke-test-image (pre-#125). Prefer a tiny shim over `dnf install gh` so
+# OpenShift buildah does not depend on egress to cli.github.com (GHA runners
+# can reach it; cluster builds may not — #130 restored the RPM and tip Tekton
+# still failed). Removing any `gh --version` provider while live smoke checks
+# it sticks the portal on the last good image (see README "Image promotion").
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      'if [ "$1" = "--version" ]; then' \
+      '  echo "gh version 2.0.0+agentit-shim (REST-only image; use portal/github_pr)"' \
+      '  exit 0' \
+      'fi' \
+      'echo "gh CLI not installed in this image; use agentit.portal.github_pr (REST)" >&2' \
+      'exit 127' \
+      > /usr/local/bin/gh && chmod +x /usr/local/bin/gh
 USER 1001
 
 RUN git config --global user.email "agentit@agentit.local" && \
