@@ -1,12 +1,19 @@
 """Tests for the ambient deploy-status indicator (nav badge + Health page
 detail): `portal/metrics.py::get_build_info()`/`set_build_info()`,
 `portal/github_pr.py::get_commit_info()`, and
-`portal/routes/health.py::_get_deploy_status()` plus its two routes.
+`portal/deploy_status.py::_get_deploy_status()` (extracted from
+`routes/health.py`, which now only imports and calls into it) plus its two
+routes.
 
 Mirrors the mocking convention already used for `/health` and friends in
-test_portal.py: `patch("agentit.portal.routes.health.kube")` so no test
+test_portal.py: `patch("agentit.portal.deploy_status.kube")` so no test
 makes a real cluster round trip, and `prime_csrf`/an `httpx.AsyncClient`
-(ASGI transport) for the route-level tests.
+(ASGI transport) for the route-level tests. Route-level tests that patch a
+name the `deploy_status_badge`/`health_page` route handlers themselves
+reference (e.g. `_get_deploy_status_bounded`, `_DEPLOY_STATUS_DEADLINE`)
+still patch those on `agentit.portal.routes.health` -- that's where
+`routes/health.py`'s own `from agentit.portal.deploy_status import ...`
+binds them, and where the route bodies actually look them up.
 """
 from __future__ import annotations
 
@@ -16,11 +23,12 @@ from unittest.mock import patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from agentit.portal import deploy_status
 from agentit.portal import github_pr
 from agentit.portal.app import app
+from agentit.portal.deploy_status import _get_deploy_status
 from agentit.portal.metrics import get_build_info, set_build_info
 from agentit.portal.routes import health as health_routes
-from agentit.portal.routes.health import _get_deploy_status
 
 from conftest import prime_csrf
 
@@ -28,11 +36,11 @@ from conftest import prime_csrf
 @pytest.fixture(autouse=True)
 def _clear_deploy_status_cache():
     """Isolate last-good / TTL cache across tests."""
-    health_routes._deploy_status_cache["data"] = None
-    health_routes._deploy_status_cache["ts"] = 0.0
+    deploy_status._deploy_status_cache["data"] = None
+    deploy_status._deploy_status_cache["ts"] = 0.0
     yield
-    health_routes._deploy_status_cache["data"] = None
-    health_routes._deploy_status_cache["ts"] = 0.0
+    deploy_status._deploy_status_cache["data"] = None
+    deploy_status._deploy_status_cache["ts"] = 0.0
 
 
 @pytest.fixture
@@ -221,7 +229,7 @@ def _argo_app(sync: str, health: str, image_tag: str = "deadbeef" * 5, health_me
 
 
 def test_deploy_status_idle_when_nothing_running_or_pending():
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
@@ -234,7 +242,7 @@ def test_deploy_status_idle_when_nothing_running_or_pending():
 
 def test_deploy_status_deploying_reports_current_pipeline_task():
     running_pr = _pipelinerun("Running", "Unknown", task_names=["git-clone", "run-tests"])
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [running_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
@@ -253,7 +261,7 @@ def test_deploy_status_stage_pending_task_not_yet_started():
     """A task with no TaskRun object yet (hasn't started) reports 'Pending',
     not a fabricated 'Unknown'/'Succeeded'."""
     running_pr = _pipelinerun("Running", "Unknown", task_names=["git-clone", "run-tests", "build-image"])
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [running_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
@@ -271,7 +279,7 @@ def test_deploy_status_pipeline_failure_is_reported_not_hidden():
     """Regression guard: a real PipelineRun failure must surface as
     state=='failed' with a reason, never silently look like 'idle'."""
     failed_pr = _pipelinerun("Failed", "False")
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [failed_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
@@ -283,7 +291,7 @@ def test_deploy_status_pipeline_failure_is_reported_not_hidden():
 
 def test_deploy_status_argo_out_of_sync_is_deploying_syncing():
     succeeded_pr = _pipelinerun("Succeeded", "True")
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [succeeded_pr] if "tekton" in group else [_argo_app("OutOfSync", "Healthy")]
         )
@@ -295,7 +303,7 @@ def test_deploy_status_argo_out_of_sync_is_deploying_syncing():
 
 def test_deploy_status_argo_progressing_is_deploying_rolling_out():
     succeeded_pr = _pipelinerun("Succeeded", "True")
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [succeeded_pr] if "tekton" in group else [_argo_app("Synced", "Progressing")]
         )
@@ -310,7 +318,7 @@ def test_deploy_status_argo_degraded_is_failed_with_message():
     failed' rule: a Degraded Argo Application must surface, with its real
     health message when available."""
     succeeded_pr = _pipelinerun("Succeeded", "True")
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [succeeded_pr] if "tekton" in group
             else [_argo_app("Synced", "Degraded", health_message="Rollout has degraded")]
@@ -326,7 +334,7 @@ def test_deploy_status_resolved_healthy_when_running_commit_matches_target():
     succeeded_pr = _pipelinerun("Succeeded", "True", revision=revision)
     set_build_info("1.0.0", revision, revision)
     try:
-        with patch("agentit.portal.routes.health.kube") as mock_kube:
+        with patch("agentit.portal.deploy_status.kube") as mock_kube:
             mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
                 [succeeded_pr] if "tekton" in group else [_argo_app("Synced", "Healthy", image_tag=revision)]
             )
@@ -344,7 +352,7 @@ def test_deploy_status_resolved_rolled_back_when_running_commit_differs():
     succeeded_pr = _pipelinerun("Succeeded", "True", revision=target_revision)
     set_build_info("1.0.0", running_commit, running_commit)
     try:
-        with patch("agentit.portal.routes.health.kube") as mock_kube:
+        with patch("agentit.portal.deploy_status.kube") as mock_kube:
             mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
                 [succeeded_pr] if "tekton" in group
                 else [_argo_app("Synced", "Healthy", image_tag=target_revision)]
@@ -360,7 +368,7 @@ def test_deploy_status_resolved_rolled_back_when_running_commit_differs():
 
 
 def test_deploy_status_reports_unreachable_apis_via_errors_not_silence():
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = Exception("cluster unreachable")
         status = _get_deploy_status()
 
@@ -371,8 +379,8 @@ def test_deploy_status_reports_unreachable_apis_via_errors_not_silence():
 def test_deploy_status_include_commit_info_calls_github_pr(monkeypatch):
     revision = "c" * 40
     running_pr = _pipelinerun("Running", "Unknown", revision=revision)
-    with patch("agentit.portal.routes.health.kube") as mock_kube, \
-         patch("agentit.portal.routes.health.github_pr.get_commit_info") as mock_commit_info:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube, \
+         patch("agentit.portal.deploy_status.github_pr.get_commit_info") as mock_commit_info:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [running_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
@@ -385,8 +393,8 @@ def test_deploy_status_include_commit_info_calls_github_pr(monkeypatch):
 
 def test_deploy_status_excludes_commit_info_by_default():
     running_pr = _pipelinerun("Running", "Unknown")
-    with patch("agentit.portal.routes.health.kube") as mock_kube, \
-         patch("agentit.portal.routes.health.github_pr.get_commit_info") as mock_commit_info:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube, \
+         patch("agentit.portal.deploy_status.github_pr.get_commit_info") as mock_commit_info:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [running_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
@@ -400,7 +408,7 @@ def test_deploy_status_excludes_commit_info_by_default():
 
 
 async def test_deploy_status_badge_route_idle(client):
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.return_value = []
         resp = await client.get("/api/deploy-status")
 
@@ -411,7 +419,7 @@ async def test_deploy_status_badge_route_idle(client):
 
 async def test_deploy_status_badge_route_deploying(client):
     running_pr = _pipelinerun("Running", "Unknown", task_names=["build-image"])
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [running_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
@@ -428,8 +436,8 @@ async def test_deploy_status_badge_never_calls_github(client):
     """The ambient/frequently-polled badge must stay cheap -- no GitHub API
     call on every 15s poll."""
     running_pr = _pipelinerun("Running", "Unknown")
-    with patch("agentit.portal.routes.health.kube") as mock_kube, \
-         patch("agentit.portal.routes.health.github_pr.get_commit_info") as mock_commit_info:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube, \
+         patch("agentit.portal.deploy_status.github_pr.get_commit_info") as mock_commit_info:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [running_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
@@ -511,8 +519,8 @@ async def test_deploy_status_badge_timeout_serves_last_good(client, monkeypatch)
         "resolved": None,
         "errors": [],
     }
-    health_routes._deploy_status_cache["data"] = good
-    health_routes._deploy_status_cache["ts"] = 0.0  # stale — force refresh path
+    deploy_status._deploy_status_cache["data"] = good
+    deploy_status._deploy_status_cache["ts"] = 0.0  # stale — force refresh path
     released = threading.Event()
 
     def _hang(*_a, **_kw):
@@ -533,12 +541,12 @@ async def test_deploy_status_badge_timeout_serves_last_good(client, monkeypatch)
 
 def test_deploy_status_bounded_uses_cache_within_ttl():
     """htmx polling must not hammer the apiserver every 15s when cache is warm."""
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
-        first = health_routes._get_deploy_status_bounded()
-        second = health_routes._get_deploy_status_bounded()
+        first = deploy_status._get_deploy_status_bounded()
+        second = deploy_status._get_deploy_status_bounded()
 
     assert first["state"] == "idle"
     assert second is first
@@ -546,7 +554,7 @@ def test_deploy_status_bounded_uses_cache_within_ttl():
 
 
 async def test_health_page_shows_deployment_status_section(client):
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.return_value = []
         resp = await client.get("/health")
 
@@ -556,8 +564,8 @@ async def test_health_page_shows_deployment_status_section(client):
 
 async def test_health_page_deployment_status_shows_pipeline_stepper(client):
     running_pr = _pipelinerun("Running", "Unknown", task_names=["git-clone", "run-tests"])
-    with patch("agentit.portal.routes.health.kube") as mock_kube, \
-         patch("agentit.portal.routes.health.github_pr.get_commit_info") as mock_commit_info:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube, \
+         patch("agentit.portal.deploy_status.github_pr.get_commit_info") as mock_commit_info:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [running_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
@@ -578,7 +586,7 @@ async def test_deploy_status_badge_route_task_resolution_failure_not_deploy_fail
     commit -- never render "Deploy failed" in that case."""
     revision = "9bdf90509e51d4179f87ae0b05a2c64b349c089f"
     failed_pr = _pipelinerun("CouldntGetTask", "False", revision=revision)
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [failed_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
@@ -596,7 +604,7 @@ async def test_health_page_deployment_status_reports_pipeline_failure():
     c = AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True)
     await prime_csrf(c)
     failed_pr = _pipelinerun("Failed", "False")
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [failed_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
@@ -616,7 +624,7 @@ async def test_health_page_shows_unreleased_ci_failure_note_not_deploy_failed():
     await prime_csrf(c)
     revision = "9bdf90509e51d4179f87ae0b05a2c64b349c089f"
     failed_pr = _pipelinerun("CouldntGetTask", "False", revision=revision)
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [failed_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
@@ -638,7 +646,7 @@ async def test_nav_badge_present_on_every_page(client):
 
 def test_deploy_status_cancelled_pipeline_is_not_failed():
     """Cancelled CI (capacity / concurrency) must not pin the Health badge to Failed."""
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [_pipelinerun("Cancelled", "False")] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
@@ -656,7 +664,7 @@ def test_deploy_status_task_resolution_failure_is_not_deploy_failed():
     built or pushed for that commit, so it can't be a live regression."""
     revision = "9bdf90509e51d4179f87ae0b05a2c64b349c089f"
     failed_pr = _pipelinerun("CouldntGetTask", "False", revision=revision)
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [failed_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
@@ -676,7 +684,7 @@ def test_deploy_status_task_resolution_failure_reason_with_tasks_still_reported_
     downgrade" without the same evidence (empty childReferences) that makes
     the real incident provably safe."""
     failed_pr = _pipelinerun("CouldntGetTask", "False", task_names=["git-clone"])
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [failed_pr] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
@@ -693,7 +701,7 @@ def test_deploy_status_unreleased_ci_failure_cleared_when_argo_actually_degraded
     real failure must be the one message shown -- don't also carry the
     softer unreleased-CI-build note alongside a real live failure."""
     failed_pr = _pipelinerun("CouldntGetTask", "False")
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [failed_pr] if "tekton" in group
             else [_argo_app("Synced", "Degraded", health_message="Rollout has degraded")]
@@ -712,7 +720,7 @@ def test_deploy_status_picks_newest_pipelinerun_by_creation_timestamp():
     newer = _pipelinerun("Succeeded", "True", revision="newrev" + "0" * 34)
     newer["metadata"]["name"] = "agentit-ci-newer"
     newer["metadata"]["creationTimestamp"] = "2026-07-16T12:00:00Z"
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [newer, older] if "tekton" in group else [_argo_app("Synced", "Healthy")]
         )
@@ -724,7 +732,7 @@ def test_deploy_status_picks_newest_pipelinerun_by_creation_timestamp():
 def test_deploy_status_argo_operation_running_is_deploying_not_failed():
     app = _argo_app("Synced", "Degraded", health_message="hook waiting")
     app["status"]["operationState"] = {"phase": "Running", "message": "waiting for hook"}
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [] if "tekton" in group else [app]
         )
@@ -749,7 +757,7 @@ def test_deploy_status_task_timeout_on_confirmed_unreleased_commit_is_not_deploy
     )
     set_build_info("1.0.0", running_revision, running_revision)
     try:
-        with patch("agentit.portal.routes.health.kube") as mock_kube:
+        with patch("agentit.portal.deploy_status.kube") as mock_kube:
             mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
                 [failed_pr] if "tekton" in group
                 else [_argo_app("Synced", "Healthy", image_tag=running_revision)]
@@ -775,7 +783,7 @@ def test_deploy_status_generic_failure_on_currently_running_commit_still_reporte
     failed_pr = _pipelinerun("Failed", "False", revision=revision, task_names=["git-clone", "run-tests"])
     set_build_info("1.0.0", revision, revision)
     try:
-        with patch("agentit.portal.routes.health.kube") as mock_kube:
+        with patch("agentit.portal.deploy_status.kube") as mock_kube:
             mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
                 [failed_pr] if "tekton" in group else [_argo_app("Synced", "Healthy", image_tag=revision)]
             )
@@ -792,7 +800,7 @@ def test_deploy_status_generic_failure_on_currently_running_commit_still_reporte
 
 
 def test_deploy_status_argo_suspended_is_deploying_canary_pause():
-    with patch("agentit.portal.routes.health.kube") as mock_kube:
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [] if "tekton" in group else [_argo_app("Synced", "Suspended")]
         )

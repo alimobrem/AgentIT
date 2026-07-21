@@ -1,6 +1,7 @@
 """Regression guards for Priority 1d: four module-level TTL-cache dicts
 that used to have zero locking around their read-check-write critical
-section -- ``fleet.py::_argo_cache``, ``health.py::_deploy_status_cache``,
+section -- ``fleet.py::_argo_cache``, ``deploy_status.py::
+_deploy_status_cache`` (extracted from ``health.py``),
 ``capabilities.py::_skills_cache``/``_checks_cache``, and
 ``helpers.py::_nav_pending_actions_cache``.
 
@@ -22,10 +23,9 @@ import time as _time
 
 from unittest.mock import patch
 
-from agentit.portal import helpers
+from agentit.portal import deploy_status, helpers
 from agentit.portal.routes import capabilities as capabilities_routes
 from agentit.portal.routes import fleet as fleet_routes
-from agentit.portal.routes import health as health_routes
 
 
 class _TrackingLock:
@@ -102,20 +102,20 @@ class TestFleetArgoCacheLock:
 class TestHealthDeployStatusCacheLock:
     def test_deploy_status_cache_lock_provides_mutual_exclusion(self, monkeypatch):
         tracking = _TrackingLock()
-        monkeypatch.setattr(health_routes, "_deploy_status_cache_lock", tracking)
-        health_routes._deploy_status_cache["data"] = None
-        health_routes._deploy_status_cache["ts"] = 0.0
+        monkeypatch.setattr(deploy_status, "_deploy_status_cache_lock", tracking)
+        deploy_status._deploy_status_cache["data"] = None
+        deploy_status._deploy_status_cache["ts"] = 0.0
 
         def worker():
-            health_routes._store_deploy_status_cache({"state": "idle", "errors": []})
-            health_routes._get_fresh_cached_deploy_status()
-            health_routes._get_last_good_deploy_status()
+            deploy_status._store_deploy_status_cache({"state": "idle", "errors": []})
+            deploy_status._get_fresh_cached_deploy_status()
+            deploy_status._get_last_good_deploy_status()
 
         _run_threads(worker)
 
         assert tracking.max_concurrent == 1
-        health_routes._deploy_status_cache["data"] = None
-        health_routes._deploy_status_cache["ts"] = 0.0
+        deploy_status._deploy_status_cache["data"] = None
+        deploy_status._deploy_status_cache["ts"] = 0.0
 
 
 class TestCapabilitiesSkillsChecksCacheLock:
