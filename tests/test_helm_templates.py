@@ -218,15 +218,15 @@ class TestTektonPipeline:
         script = steps["sync-application-spec"]["script"]
         assert "image.tag" in script
         assert "REVISION" in script
-        assert "kube.apply_yaml" in script
-        assert "oc apply" not in script
+        assert "oc apply" in script
 
     def test_notify_argocd_pins_tag_before_applying_application_spec(self):
         """Regression: applying argocd/application.yaml with bootstrap
         image.tag=latest then patching afterward raced Argo selfHeal onto the
         stale :latest digest (scout CrashLoopBackOff). Rewrite REVISION into
-        the manifest, then apply once via kube.apply_yaml — no separate
-        update-image-tag step and no oc CLI."""
+        the manifest, then apply once via oc apply — no separate
+        update-image-tag step. (kube.apply_yaml notify was reverted after
+        tip chart sync + promote stall; see pipeline.yaml notify comments.)"""
         doc = _load(self.TEMPLATE)
         tasks = {t["name"]: t for t in doc["spec"]["tasks"]}
         task = tasks["notify-argocd"]
@@ -238,8 +238,8 @@ class TestTektonPipeline:
         )
         steps = {s["name"]: s for s in task["taskSpec"]["steps"]}
         script = steps["sync-application-spec"]["script"]
-        assert "kube.apply_yaml" in script
-        assert "oc apply" not in script
+        assert "oc apply" in script
+        assert "kube.apply_yaml" not in script
         assert any(
             e.get("name") == "REVISION" for e in steps["sync-application-spec"].get("env", [])
         ), "sync-application-spec needs REVISION to pin image.tag before apply"
@@ -247,8 +247,17 @@ class TestTektonPipeline:
         assert "source" in ws_names
         task_ws_names = {w["name"] for w in task["workspaces"]}
         assert "source" in task_ws_names
-        # Uses the just-built AgentIT image (Python client), not openshift/cli.
-        assert "$(params.image)" in steps["sync-application-spec"]["image"]
+        # Proven path: openshift/cli + oc apply (agentit-ci-argocd-patch RBAC).
+        assert "openshift/cli" in steps["sync-application-spec"]["image"]
+
+    def test_run_tests_is_hermetic_like_gha(self):
+        """Tekton run-tests must set AGENTIT_OFFLINE + KUBECONFIG like GHA."""
+        doc = _load(self.TEMPLATE)
+        tasks = {t["name"]: t for t in doc["spec"]["tasks"]}
+        step = tasks["run-tests"]["taskSpec"]["steps"][0]
+        env = {e["name"]: e["value"] for e in step.get("env", [])}
+        assert env.get("AGENTIT_OFFLINE") == "1"
+        assert env.get("KUBECONFIG") == "/tmp/nonexistent-path"
 
     def test_pipeline_has_timeouts(self):
         doc = _load(self.TEMPLATE)

@@ -66,10 +66,12 @@ metadata:
   name: agentit-ci-argocd-patch
   namespace: openshift-gitops
 rules:
+  # oc apply and future kube.apply_yaml SSA both need patch; update/create
+  # cover apply-create and conflict resolution on Application/agentit.
   - apiGroups: ["argoproj.io"]
     resources: ["applications"]
     resourceNames: ["agentit"]
-    verbs: ["get", "patch"]
+    verbs: ["get", "patch", "update", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

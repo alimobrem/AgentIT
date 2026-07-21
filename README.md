@@ -44,9 +44,9 @@ Merge to `main` is **not** enough for the live portal to move. Path:
 
 **“Failed before image build” / portal stuck on old image** usually means `run-tests` failed, **or** (more subtle) `build-image` succeeded but **`smoke-test-image` failed**, so `notify-argocd` never ran. GitHub shows `agentit-ci/tekton` = failure; the portal keeps the last promoted tag.
 
-**Chicken-and-egg (2026-07-21, #125):** Tip chart smoke no longer requires the `gh` CLI (runtime uses REST), but removing `gh` from the **Containerfile** while the *live* Pipeline still ran `gh --version` made every new image fail smoke → tip Pipeline never deployed → stuck on ~`9bddaa1`. Fix: keep `gh` in the Containerfile as break-glass/bootstrap; tip GHA + tip Pipeline smoke stay gh-free. Drift tests: `tests/test_ci_workflows.py::TestContainerfileSmokeToolingDrift`.
+**Chicken-and-egg (2026-07-21, #125 / #130):** Tip chart smoke no longer requires the `gh` CLI (runtime uses REST), but a lagging live Pipeline may still run `gh --version`. Removing `gh` from the Containerfile made smoke fail before `notify-argocd`. Also: Argo syncs `chart/` from `main` *independently* of `image.tag`, so tip `notify-argocd` (briefly `kube.apply_yaml`) could go live while promote still failed — #130’s RPM `gh` restore alone was not enough. Current hardenings: Containerfile ships a `gh --version` **shim** (no `cli.github.com` egress in buildah); tip GHA/Tekton smoke stay gh-free; `notify-argocd` uses proven `oc apply` + `openshift/cli`; Tekton `run-tests` sets `AGENTIT_OFFLINE=1` like GHA. Drift tests: `tests/test_ci_workflows.py::TestContainerfileSmokeToolingDrift`.
 
-**Re-run:** push an empty commit / merge a fix to `main`, or start a PipelineRun for `agentit-ci` with `revision=<sha>` in ns `agentit`. Confirm `agentit-ci/tekton` → success and Argo `image.tag` matches the tip SHA.
+**Re-run:** merge a fix to `main` (Argo will sync Pipeline/RBAC from tip chart), or redeliver the Tekton webhook (`agentit-ci-webhook` hook), or `oc` create a PipelineRun for `agentit-ci` with `revision=<sha>`. Confirm `agentit-ci/tekton` → success and Argo `image.tag` matches the tip SHA.
 
 
 Point AgentIT at a Git repository and it will:

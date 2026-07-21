@@ -160,6 +160,13 @@ spec:
             env:
               - name: AGENTIT_TEST_PG_DSN
                 value: postgresql://agentit_test:agentit_test@localhost:5432/agentit_test
+              # Match GHA Tests: hermetic suite must not use in-cluster SA
+              # discovery (hangs / flakes). conftest also forces OFFLINE=1;
+              # set both explicitly so a missing autouse never reaches the API.
+              - name: AGENTIT_OFFLINE
+                value: "1"
+              - name: KUBECONFIG
+                value: /tmp/nonexistent-path
             computeResources:
               requests:
                 memory: 256Mi
@@ -284,58 +291,40 @@ spec:
         params:
           - name: revision
             type: string
-          - name: image
-            type: string
         workspaces:
           - name: source
         steps:
           # Re-apply the committed Application manifest FIRST so any new/changed Helm
-          # parameter in argocd/application.yaml (e.g. a new agents.*.enabled flag) lands
-          # on the live object as part of the normal deploy flow. Uses
-          # agentit.kube.apply_yaml (Kubernetes Python client SSA) — not `oc apply`.
-          # Rewrite image.tag to this build's REVISION before apply so Argo never
-          # briefly sees the bootstrap `latest` tag.
+          # parameter in argocd/application.yaml lands on the live object as part of
+          # the normal deploy flow. Uses openshift/cli `oc apply` (proven with the
+          # agentit-ci-argocd-patch Role: get+patch on Application/agentit).
+          # #125 switched this to kube.apply_yaml on the just-built image; Argo
+          # syncs chart/ from main independently of image.tag, so that tip
+          # notify could go live while SSA/RBAC/field-manager issues blocked
+          # promote — portal stuck. Keep oc apply until SSA notify is proven
+          # live with expanded RBAC. Rewrite image.tag before apply so Argo
+          # never briefly sees bootstrap `latest`.
           - name: sync-application-spec
-            image: $(params.image)
+            image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
             workingDir: $(workspaces.source.path)
             env:
               - name: REVISION
                 value: $(params.revision)
             computeResources:
               requests:
-                memory: 128Mi
+                memory: 64Mi
                 cpu: 50m
             script: |
               set -euo pipefail
-              python - <<'PY'
-              import os, re
-              from pathlib import Path
-              from agentit import kube
-
-              path = Path("argocd/application.yaml")
-              text = path.read_text()
-              revision = os.environ["REVISION"]
               # Replace only the image.tag Helm parameter value (bootstrap is "latest").
-              text, n = re.subn(
-                  r"(name:\s*image\.tag\n\s*value:\s*).*",
-                  rf"\g<1>{revision}",
-                  text,
-                  count=1,
-              )
-              if n != 1:
-                  raise SystemExit(f"expected to rewrite image.tag once, got {n}")
-              path.write_text(text)
-              print(path.read_text())
-              result = kube.apply_yaml(path.read_text(), "openshift-gitops")
-              if not result.get("applied"):
-                  raise SystemExit(f"kube.apply_yaml failed: {result.get('error')}")
-              print(f"Synced argocd/application.yaml with image.tag={revision}")
-              PY
+              sed -i -E '/name: image\.tag/{n;s/^([[:space:]]*value: ).*/\1'"${REVISION}"'/;}' \
+                argocd/application.yaml
+              grep -A1 'name: image.tag' argocd/application.yaml
+              oc apply -f argocd/application.yaml
+              echo "Synced argocd/application.yaml with image.tag=${REVISION}"
       params:
         - name: revision
           value: $(params.revision)
-        - name: image
-          value: $(params.image-ref):$(params.revision)
       workspaces:
         - name: source
           workspace: source

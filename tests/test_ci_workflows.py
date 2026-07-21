@@ -111,16 +111,18 @@ class TestContainerfileSmokeToolingDrift:
             )
 
     def test_containerfile_keeps_gh_for_live_pipeline_bootstrap(self):
-        """Break-glass/bootstrap pin until live Pipelines match tip smoke.
+        """Bootstrap pin: image must satisfy live ``gh --version`` smoke.
 
         Tip smoke must not require gh (see test_tip_smokes_do_not_require_gh),
-        but a lagging live Pipeline that still runs ``gh --version`` needs the
-        binary in the image or promotion never lands the tip Pipeline.
+        but a lagging live Pipeline that still runs ``gh --version`` needs
+        something at /usr/local/bin/gh (real CLI or shim) or promotion never
+        lands. Prefer the shim (no cli.github.com egress during buildah).
         """
         cf = self._containerfile()
-        assert "dnf install -y gh" in cf or "install -y gh" in cf, (
-            "Containerfile must install gh as break-glass/bootstrap for live "
+        has_shim = "agentit-shim" in cf and "/usr/local/bin/gh" in cf
+        has_rpm = "dnf install -y gh" in cf or "install -y gh" in cf
+        assert has_shim or has_rpm, (
+            "Containerfile must ship gh --version (shim or RPM) for live "
             "Tekton smoke lag (chicken-and-egg after #125). See README "
             "'Image promotion / Tekton CI'."
         )
-        assert "gh-cli.repo" in cf
