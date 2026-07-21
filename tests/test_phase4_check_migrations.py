@@ -307,3 +307,24 @@ class TestK8sDeploymentExistsParity:
         _passes(self.SKILL_PATH, create_mock_repo, {
             "deploy/deployment.yaml": "apiVersion: apps/v1\nkind: Deployment\n",
         })
+
+
+class TestResourceQuotaExistsParity:
+    """Ported from `checks/infrastructure/resource-quota.yaml` (deleted
+    in this commit) to `skills/infrastructure/resource-quota-exists.md`."""
+
+    SKILL_PATH = SKILLS_DIR / "infrastructure" / "resource-quota-exists.md"
+
+    def test_fires_when_no_resourcequota_manifest(self, create_mock_repo) -> None:
+        finding = _fires(self.SKILL_PATH, create_mock_repo, {
+            "deploy/deployment.yaml": "apiVersion: apps/v1\nkind: Deployment\n",
+        })
+        assert finding.category == "quota"
+        assert finding.severity == Severity.low
+        assert finding.description == "No ResourceQuota defined for namespace governance"
+        assert finding.recommendation == "Add ResourceQuota and LimitRange for namespace governance"
+
+    def test_passes_when_resourcequota_manifest_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {
+            "deploy/quota.yaml": "apiVersion: v1\nkind: ResourceQuota\n",
+        })
