@@ -87,3 +87,22 @@ class TestDockerfileExistsParity:
 
     def test_passes_when_dockerfile_present(self, create_mock_repo) -> None:
         _passes(self.SKILL_PATH, create_mock_repo, {"Dockerfile": "FROM ubi9\n"})
+
+
+class TestArgocdApplicationExistsParity:
+    """Ported from `checks/cicd/gitops.yaml` (deleted in this commit) to
+    `skills/cicd/argocd-application-exists.md`."""
+
+    SKILL_PATH = SKILLS_DIR / "cicd" / "argocd-application-exists.md"
+
+    def test_fires_when_no_argoproj_reference(self, create_mock_repo) -> None:
+        finding = _fires(self.SKILL_PATH, create_mock_repo, {"main.py": "print('hi')\n"})
+        assert finding.category == "gitops"
+        assert finding.severity == Severity.medium
+        assert finding.description == "No GitOps configuration (Argo CD) detected"
+        assert finding.recommendation == "Create Argo CD Application for GitOps delivery"
+
+    def test_passes_when_argoproj_reference_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {
+            "argocd/application.yaml": "apiVersion: argoproj.io/v1alpha1\nkind: Application\n",
+        })
