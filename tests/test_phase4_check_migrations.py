@@ -189,3 +189,22 @@ class TestBackupConfigExistsParity:
         _passes(self.SKILL_PATH, create_mock_repo, {
             "backup-cronjob.yaml": "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: backup\n",
         })
+
+
+class TestRetentionPolicyExistsParity:
+    """Ported from `checks/data_governance/retention-policy.yaml` (deleted
+    in this commit) to `skills/data_governance/retention-policy-exists.md`."""
+
+    SKILL_PATH = SKILLS_DIR / "data_governance" / "retention-policy-exists.md"
+
+    def test_fires_when_no_retention_reference(self, create_mock_repo) -> None:
+        finding = _fires(self.SKILL_PATH, create_mock_repo, {"main.py": "print('hi')\n"})
+        assert finding.category == "retention"
+        assert finding.severity == Severity.medium
+        assert finding.description == "No data retention policy detected"
+        assert finding.recommendation == "Define data retention policies for compliance (GDPR, SOC 2)"
+
+    def test_passes_when_retention_reference_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {
+            "docs/data-retention.md": "# Data Retention Policy\n\nretention period: 90 days.\n",
+        })
