@@ -579,6 +579,37 @@ def _get_file_content_at_ref(base_url: str, hdrs: dict, path: str, ref: str) -> 
         return None
 
 
+def path_exists_on_default_branch(repo_url: str, path: str) -> bool | None:
+    """Whether ``path`` exists on the repo's default branch.
+
+    Returns ``True`` (exists), ``False`` (404 / absent), or ``None`` when
+    the lookup cannot be completed (missing token, network/API error). The
+    self-managed chart delivery gate treats ``None`` as fail-closed refuse.
+    """
+    try:
+        token = _get_token()
+        hdrs = _headers(token)
+        owner, repo = _parse_owner_repo(repo_url)
+        base_url = f"{_API}/repos/{owner}/{repo}"
+        default_branch, _ = _get_default_branch_and_base_sha(base_url, hdrs)
+        resp = requests.get(
+            f"{base_url}/contents/{path}",
+            headers=hdrs, timeout=10, params={"ref": default_branch},
+        )
+    except Exception:
+        logger.warning("path_exists_on_default_branch lookup failed for %s", path, exc_info=True)
+        return None
+    if resp.status_code == 200:
+        return True
+    if resp.status_code == 404:
+        return False
+    logger.warning(
+        "path_exists_on_default_branch unexpected status %s for %s",
+        resp.status_code, path,
+    )
+    return None
+
+
 def _agent_content_unchanged(
     base_url: str, hdrs: dict, category: str, files: list[dict], default_branch: str,
 ) -> bool:
@@ -790,7 +821,29 @@ def create_source_patch_pr(
     manifest) -- entries missing one fall back to their own ``path``
     unchanged, matching ``create_onboarding_pr``'s behavior for non-codechange
     callers.
+
+    Belt-and-suspenders: any ``chart/``-targeted file must pass
+    ``delivery.validate_self_managed_chart_delivery`` (Helm-shaped, no
+    forbidden kinds, no collision on default branch) before a PR opens —
+    ``route_and_deliver`` already gates this; this refuses direct callers.
     """
+    chart_files = [
+        f for f in files
+        if str(f.get("target_path") or f.get("path") or "").startswith("chart/")
+    ]
+    if chart_files:
+        from agentit.portal.delivery import validate_self_managed_chart_delivery
+
+        path_exists: dict[str, bool | None] = {}
+        for f in chart_files:
+            target = f.get("target_path") or f["path"]
+            path_exists[target] = path_exists_on_default_branch(repo_url, target)
+        gate_reason = validate_self_managed_chart_delivery(
+            chart_files, path_exists=path_exists,
+        )
+        if gate_reason:
+            return {"error": gate_reason, "gate_refused": True}
+
     try:
         token = _get_token()
         hdrs = _headers(token)
