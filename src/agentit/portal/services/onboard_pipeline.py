@@ -167,12 +167,13 @@ async def _run_onboarding_job(
 
         from agentit.assessment_diff import current_finding_keys
         from agentit.portal.auto_delivery import auto_validate_and_deliver
-        from agentit.portal.helpers import with_timeout
 
         namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
         # Generation is already bounded by with_timeout above; auto-delivery
         # LLM validate/fix/review had no ceiling and could leave the progress
         # page spinning for hours after a pod kept the row "running".
+        # (with_timeout is imported at module scope — do not re-import here;
+        # a local import makes the name unbound for the earlier call above.)
         result = await with_timeout(
             auto_validate_and_deliver(
                 store=s, report=report, app_name=report.repo_name, namespace=namespace,
