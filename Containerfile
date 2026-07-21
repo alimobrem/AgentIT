@@ -6,6 +6,21 @@ USER 0
 # agentit.kube (Python client SSA); GitHub PRs use portal/github_pr REST.
 RUN curl -sfL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz \
     | tar -xz -C /usr/local/bin oc kubectl && chmod +x /usr/local/bin/oc /usr/local/bin/kubectl
+
+# gh CLI — break-glass + live-Pipeline bootstrap (not a runtime dependency).
+# Portal/scout use portal/github_pr REST for PR create/list/status; tip Tekton
+# smoke-test-image and GHA image-smoke-test do NOT require `gh`. Keep gh in
+# the image anyway so a lagging live Pipeline that still runs `gh --version`
+# (pre-#125 smoke) can pass smoke-test-image and reach notify-argocd — that
+# is how the tip Pipeline (no gh check) eventually deploys. Removing this
+# RUN while the live Pipeline still checks `gh --version` leaves the portal
+# stuck on the last good image (chicken-and-egg; see README "Image promotion").
+# Official RPM install for DNF4-based RHEL/UBI:
+# https://github.com/cli/cli/blob/trunk/docs/install_linux.md#dnf4
+RUN dnf install -y 'dnf-command(config-manager)' && \
+    dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo && \
+    dnf install -y gh && \
+    dnf clean all
 USER 1001
 
 RUN git config --global user.email "agentit@agentit.local" && \

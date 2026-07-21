@@ -457,25 +457,32 @@ spec:
 
               if [ "$STATUS" = "Succeeded" ]; then
                 GH_STATE="success"
-                DESC="CI passed (tests + build)"
+                DESC="CI passed (tests + build + notify-argocd)"
               else
                 GH_STATE="failure"
-                DESC="CI failed: $STATUS"
+                # Keep under GitHub's ~140-char description limit. Point humans
+                # at OpenShift PipelineRuns — status API has no TaskRun logs.
+                DESC="CI failed: ${STATUS}. Check agentit-ci PipelineRun (ns agentit); smoke/gh drift = stuck image"
               fi
 
               echo "Pipeline $GH_STATE for $REVISION"
 
               if [ -z "${GITHUB_TOKEN:-}" ]; then
-                echo "GITHUB_TOKEN not set — skipping commit status"
+                # Non-fatal: a missing token must not undo a successful
+                # notify-argocd promote. Log loudly so ops notices drift.
+                echo "ERROR: GITHUB_TOKEN unset — cannot post agentit-ci/tekton status for ${REVISION}" >&2
                 exit 0
               fi
 
               OWNER_REPO=$(echo "$REPO_URL" | sed 's|https://github.com/||;s|\.git$||')
+              # Console deep-link (best-effort; cluster may differ). Empty
+              # target_url was worse than a predictable PipelineRun list URL.
+              TARGET_URL="https://console-openshift-console.apps.aws-jb-acsacm-1.dev05.red-chesterfield.com/k8s/ns/agentit/tekton.dev~v1~PipelineRun"
               curl -sfL -X POST \
                 -H "Authorization: Bearer $GITHUB_TOKEN" \
                 -H "Accept: application/vnd.github+json" \
                 "https://api.github.com/repos/${OWNER_REPO}/statuses/${REVISION}" \
-                -d "{\"state\":\"${GH_STATE}\",\"description\":\"${DESC}\",\"context\":\"agentit-ci/tekton\"}" \
+                -d "{\"state\":\"${GH_STATE}\",\"description\":\"${DESC}\",\"context\":\"agentit-ci/tekton\",\"target_url\":\"${TARGET_URL}\"}" \
                 && echo "Commit status posted" \
-                || echo "Failed to post commit status (non-fatal)"
+                || echo "ERROR: Failed to post commit status for ${REVISION} (non-fatal)" >&2
 {{- end }}
