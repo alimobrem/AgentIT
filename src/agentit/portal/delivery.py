@@ -91,11 +91,127 @@ _NARRATIVE_REPORT_FILENAMES = frozenset({"dependency-report.md", "cost-report.md
 # cluster or GitOps PR (agents/base.py defaults CronJob images to this).
 _UNRESOLVED_PLACEHOLDERS = ("REPLACE_WITH_AGENTIT_IMAGE",)
 
+# Fail-closed gate for self-managed AgentIT deliveries into chart/ (P0 after
+# PR #116: raw skill dumps into chart/templates/). Content must look like
+# Helm templates; forbidden kinds never land; colliding paths on the default
+# branch never overwrite. See docs/architecture-agentit-vs-fleet-gitops.md.
+_HELM_TEMPLATE_MARKERS = ("{{ .Values", "{{ .Release", "{{-")
+_FORBIDDEN_CHART_KINDS = frozenset({
+    "PipelineRun",
+    "ClusterRole",
+    "ClusterRoleBinding",
+    "ClusterTask",
+    "Application",
+})
+
 
 def has_unresolved_placeholders(content: str | None) -> bool:
     """True when generated file content still contains bootstrap placeholders."""
     text = content or ""
     return any(marker in text for marker in _UNRESOLVED_PLACEHOLDERS)
+
+
+def is_helm_shaped(content: str | None) -> bool:
+    """True when content looks like a Helm template (not a raw skill dump)."""
+    text = content or ""
+    return any(marker in text for marker in _HELM_TEMPLATE_MARKERS)
+
+
+def validate_self_managed_chart_delivery(
+    files: list[dict],
+    *,
+    path_exists: dict[str, bool | None] | None = None,
+) -> str | None:
+    """Fail-closed checks before opening a self-managed PR into ``chart/``.
+
+    Returns a human-readable refusal reason, or ``None`` when every
+    ``chart/``-targeted file passes. Files aimed at ``skills/`` (or any
+    non-``chart/`` path) are ignored — this gate is chart-only.
+
+    ``path_exists`` maps ``target_path`` → ``True`` (exists on default
+    branch), ``False`` (absent), or ``None`` (lookup failed / unknown).
+    ``None`` for the whole argument skips collision checks (unit tests of
+    content/kind rules only). Production callers always supply a complete
+    map from ``_lookup_chart_path_existence``.
+    """
+    reasons: list[str] = []
+    for f in files:
+        target = f.get("target_path") or f.get("path") or ""
+        if not str(target).startswith("chart/"):
+            continue
+        content = f.get("content") or ""
+        docs = _parse_manifest(content)
+        bad_kinds = sorted(
+            {(doc.get("kind") or "") for doc in docs} & _FORBIDDEN_CHART_KINDS
+        )
+        if bad_kinds:
+            reasons.append(f"{target}: forbidden kind(s) {', '.join(bad_kinds)}")
+        if not is_helm_shaped(content):
+            reasons.append(
+                f"{target}: not Helm-shaped (need {{{{ .Values / {{{{ .Release / {{{{-)"
+            )
+        if path_exists is not None:
+            exists = path_exists.get(target)
+            if exists is True:
+                reasons.append(f"{target}: already exists on default branch (collision)")
+            elif exists is not False:
+                # Missing key or explicit None → unknown → refuse.
+                reasons.append(
+                    f"{target}: could not verify absence on default branch (fail-closed)"
+                )
+    if not reasons:
+        return None
+    return (
+        "Self-managed chart delivery refused — "
+        + "; ".join(reasons)
+        + ". See docs/architecture-agentit-vs-fleet-gitops.md "
+        "(fail-closed chart gate). No PR opened."
+    )
+
+
+async def _lookup_chart_path_existence(
+    repo_url: str, files: list[dict],
+) -> dict[str, bool | None]:
+    """Resolve whether each ``chart/`` target_path exists on the default branch.
+
+    Fail-closed: API/auth errors yield ``None`` (unknown), which the gate
+    treats as refuse. Pure 404 → ``False``.
+    """
+    from agentit.portal.github_pr import path_exists_on_default_branch
+
+    targets = sorted({
+        (f.get("target_path") or f.get("path") or "")
+        for f in files
+        if str(f.get("target_path") or f.get("path") or "").startswith("chart/")
+    })
+    result: dict[str, bool | None] = {}
+    for target in targets:
+        result[target] = await asyncio.to_thread(
+            path_exists_on_default_branch, repo_url, target,
+        )
+    return result
+
+
+async def _gate_self_managed_chart_files(
+    files: list[dict], report: AssessmentReport | None,
+) -> str | None:
+    """Run the fail-closed chart gate; return refusal reason or ``None``."""
+    chart_files = [
+        f for f in files
+        if str(f.get("target_path") or f.get("path") or "").startswith("chart/")
+    ]
+    if not chart_files:
+        return None
+    path_exists: dict[str, bool | None] = {}
+    if report is not None and report.repo_url:
+        path_exists = await _lookup_chart_path_existence(report.repo_url, chart_files)
+    else:
+        # No repo to check against — fail closed on collision dimension.
+        path_exists = {
+            (f.get("target_path") or f.get("path") or ""): None
+            for f in chart_files
+        }
+    return validate_self_managed_chart_delivery(chart_files, path_exists=path_exists)
 
 
 # Human-facing mechanism descriptions surfaced at the confirmation step a
@@ -1019,11 +1135,17 @@ async def route_and_deliver(
                 # Self-managed AgentIT: PR against AgentIT.git under
                 # chart/templates/ or skills/ — never apps/agentit/.
                 remapped = remap_self_managed_cluster_files(cluster_files)
-                outcomes[CATEGORY_CLUSTER_CONFIG] = await deliver_with_verification(
-                    mechanism=MECHANISM_SOURCE_REPO_PR, files=remapped, report=report,
-                    app_name=app_name, store=store, assessment_id=assessment_id,
-                    actor=actor, dry_run=dry_run,
-                )
+                gate_reason = await _gate_self_managed_chart_files(remapped, report)
+                if gate_reason:
+                    outcomes[CATEGORY_CLUSTER_CONFIG] = {
+                        "error": gate_reason, "gate_refused": True,
+                    }
+                else:
+                    outcomes[CATEGORY_CLUSTER_CONFIG] = await deliver_with_verification(
+                        mechanism=MECHANISM_SOURCE_REPO_PR, files=remapped, report=report,
+                        app_name=app_name, store=store, assessment_id=assessment_id,
+                        actor=actor, dry_run=dry_run,
+                    )
             else:
                 # MECHANISM_NONE: no infra_repo_url is known for this
                 # assessment at all -- this refuses rather than mutating
@@ -1064,11 +1186,17 @@ async def route_and_deliver(
                 # Self-managed AgentIT: PR against AgentIT.git under live
                 # chart/ / argocd/ paths — never apps/agentit/.
                 remapped = remap_self_managed_cicd_files(cicd_files)
-                outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = await deliver_with_verification(
-                    mechanism=MECHANISM_SOURCE_REPO_PR, files=remapped, report=report,
-                    app_name=app_name, store=store, assessment_id=assessment_id,
-                    actor=actor, dry_run=dry_run,
-                )
+                gate_reason = await _gate_self_managed_chart_files(remapped, report)
+                if gate_reason:
+                    outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = {
+                        "error": gate_reason, "gate_refused": True,
+                    }
+                else:
+                    outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = await deliver_with_verification(
+                        mechanism=MECHANISM_SOURCE_REPO_PR, files=remapped, report=report,
+                        app_name=app_name, store=store, assessment_id=assessment_id,
+                        actor=actor, dry_run=dry_run,
+                    )
             else:
                 outcomes[CATEGORY_CICD_SHARED_NAMESPACE] = {
                     "error": (

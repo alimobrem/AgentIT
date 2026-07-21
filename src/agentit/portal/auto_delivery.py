@@ -352,6 +352,10 @@ async def auto_validate_and_deliver(
       converged but the real ``route_and_deliver()`` call itself produced
       no successful outcome at all (every category errored) -- also
       surfaced honestly, never silently swallowed.
+    - ``{"status": "needs_attention", "reason": str}`` also when the
+      self-managed chart delivery gate refuses (non-Helm / collision /
+      forbidden kinds) — no PR, never a green success path. See
+      ``delivery.validate_self_managed_chart_delivery``.
     """
     from agentit.portal.delivery import route_and_deliver
     from agentit.portal.helpers import get_llm_client
@@ -440,16 +444,30 @@ async def auto_validate_and_deliver(
         ]
         if delivery_errors:
             reason = "; ".join(delivery_errors)
+            gate_refused = any(
+                isinstance(o, dict) and o.get("gate_refused")
+                for o in delivery["outcomes"].values()
+            )
             logger.warning("Auto-delivery produced no PR for %s: %s", app_name, reason)
             try:
                 await store.log_event(
-                    "auto-delivery", "auto-delivery-failed", app_name, "warning",
-                    f"Automatic delivery did not open a pull request: {reason} -- "
-                    "manifests were saved; review and deliver manually on Onboard Results.",
+                    "auto-delivery",
+                    "auto-delivery-gate-refused" if gate_refused else "auto-delivery-failed",
+                    app_name, "warning",
+                    (
+                        f"Self-managed chart delivery gate refused: {reason}"
+                        if gate_refused
+                        else (
+                            f"Automatic delivery did not open a pull request: {reason} -- "
+                            "manifests were saved; review and deliver manually on Onboard Results."
+                        )
+                    ),
                     correlation_id=assessment_id,
                 )
             except Exception:
-                logger.warning("Failed to log auto-delivery-failed event for %s", app_name, exc_info=True)
+                logger.warning("Failed to log auto-delivery outcome event for %s", app_name, exc_info=True)
+            if gate_refused:
+                return {"status": "needs_attention", "reason": reason}
             return {"status": "delivery_failed", "reason": reason}
 
         # No pull request AND no error: every category either had nothing
