@@ -1,6 +1,8 @@
 # Founder plan: quality PRs that help the app
 
 **Status:** implemented (2026-07-21) — Phases A–F landed in `feat/quality-helpful-prs`  
+**Follow-up (2026-07-22):** Solution contracts — every FIX_REGISTRY finding declares `delivery` + `clear_evidence` + `refuse_companions`; Scan refuses wrong-layer companion PRs (pinky gitops #22/#23 class). See README "Solution-complete Scan PRs".
+
 ## Phase completion matrix
 
 | Phase | Status | Where |

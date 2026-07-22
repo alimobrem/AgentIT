@@ -382,6 +382,7 @@ async def auto_validate_and_deliver(
         finding_gate_refuse_reason,
         partition_by_finding_cluster,
         resolve_target_findings,
+        strip_wrong_layer_companions,
     )
 
     validation = await validate_and_fix_manifests(
@@ -452,6 +453,11 @@ async def auto_validate_and_deliver(
         return {"status": "needs_attention", "reason": reason}
 
     kept_files, drop_reasons = filter_files_to_open_findings(final_files, resolved_findings)
+    # Solution-complete: drop wrong-layer companions (gitops Kyverno for a
+    # Dockerfile :latest finding, apiserver audit-policy for app audit, …).
+    kept_files, layer_drops = strip_wrong_layer_companions(kept_files, resolved_findings)
+    if layer_drops:
+        drop_reasons = list(drop_reasons or []) + layer_drops
     if not kept_files:
         reason = (
             "No generated files map to open findings — refusing PR. "
@@ -495,6 +501,24 @@ async def auto_validate_and_deliver(
         from agentit.portal.delivery import is_self_managed_delivery_target
 
         cluster_files = list(cluster.files)
+        # Per-cluster wrong-layer strip (source-only findings → no gitops YAML).
+        cluster_files, cluster_layer_drops = strip_wrong_layer_companions(
+            cluster_files, cluster.target_findings,
+        )
+        if cluster_layer_drops:
+            drop_reasons = list(drop_reasons or []) + cluster_layer_drops
+        if not cluster_files:
+            reason = (
+                "Solution contract emptied cluster (wrong-layer companions stripped) — "
+                + "; ".join(cluster_layer_drops[:3])
+            )
+            cluster_refusals.append(f"{cluster.key}: {reason}")
+            logger.warning(
+                "Auto-delivery cluster %s for %s refused by solution contract: %s",
+                cluster.key, app_name, reason,
+            )
+            continue
+
         self_managed = await is_self_managed_delivery_target(app_name, report)
         if not self_managed:
             from agentit.portal.fleet_hpa import (

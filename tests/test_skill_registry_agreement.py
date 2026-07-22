@@ -24,11 +24,58 @@ from pathlib import Path
 
 import pytest
 
-from agentit.remediation.registry import FIX_REGISTRY
+from agentit.remediation.registry import (
+    FIX_REGISTRY,
+    SOLUTION_CONTRACTS,
+    clears_via_source,
+    contract_for,
+    lookup,
+)
 from agentit.skill_engine import SkillEngine
 from conftest import make_report
 
 _SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
+
+
+class TestSolutionContracts:
+    def test_fix_registry_derived_from_contracts(self) -> None:
+        assert set(FIX_REGISTRY) == set(SOLUTION_CONTRACTS)
+        for key, (domain, skill) in FIX_REGISTRY.items():
+            c = SOLUTION_CONTRACTS[key]
+            assert (c.domain, c.skill_name) == (domain, skill)
+
+    def test_source_findings_clear_via_source(self) -> None:
+        for cat in ("container", "dockerfile", "audit", "eol", "migration", "iac", "manifests"):
+            assert clears_via_source(cat), cat
+            assert contract_for(cat).delivery == "source"
+
+    def test_audit_refuses_apiserver_policy_companion(self) -> None:
+        c = contract_for("audit")
+        assert c is not None
+        assert c.skill_name == "app-audit-logging"
+        assert "audit-policy" in c.refuse_companions
+
+    def test_container_refuses_kyverno_companions(self) -> None:
+        c = contract_for("container")
+        assert c is not None
+        assert "image-registry-policy" in c.refuse_companions
+        assert "limitrange" in c.refuse_companions
+
+    def test_lookup_agrees_with_contract(self) -> None:
+        assert lookup("scaling") == ("infrastructure", "hpa")
+        assert contract_for("scaling").skill_name == "hpa"
+
+    def test_resources_plural_aliases_resource_limits(self) -> None:
+        assert lookup("resources") == ("security", "resource-limits")
+        assert contract_for("resources").skill_name == "resource-limits"
+
+    def test_contract_for_is_exact_key_not_substring(self) -> None:
+        """Multi-word / unrelated categories must not steal a contract via
+        substring (``cost … resources`` must not become ``resource``)."""
+        assert contract_for("cost rightsize resources") is None
+        assert contract_for("availability resilience") is None
+        assert contract_for("network security") is None
+        assert contract_for("network") is not None
 
 
 @pytest.fixture(scope="module")

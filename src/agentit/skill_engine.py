@@ -432,51 +432,71 @@ class SkillEngine:
     def match(self, report: AssessmentReport) -> list[Skill]:
         """Return skills to generate for this report.
 
-        When the assessment has open findings, match against *finding text
-        only* (dimension/category/description/recommendation) — never the
-        free-form ``summary``. Live AgentIT self-managed Onboards at score
-        ~96 timed out because ``Skill.matches`` haystack includes the long
-        stack summary ("Python", "Kubernetes", …), pulling in 10+ catalog
-        skills; each sequential LLM call (× self-managed reject/retry)
-        burned the generation ceiling before auto_delivery's finding gate
-        could drop the junk. FIX_REGISTRY skills for each open finding
-        category are always included via ``skill_for_category``.
+        When open findings have a ``SOLUTION_CONTRACT`` (exact analyzer
+        category), resolve **exactly that clearing skill** via
+        ``skill_for_category`` / FIX_REGISTRY — never trigger-keyword
+        companions. Pinky gitops #22/#23 attached ``audit-policy`` to
+        ``audit`` and ``image-registry-policy`` / ``limitrange`` to
+        ``container`` because finding prose shared trigger words; those
+        companions never clear the finding.
 
-        Greenfield reports with no open findings still use full-report
-        trigger matching (including summary) so Onboard Results can
-        populate a catalog.
+        Findings **without** a contract (parity fixtures, tmp-test
+        categories like ``test``, cost/release/chaos domains not yet in
+        the registry) still trigger-match against *those findings' text
+        only* (not summary, not contracted finding prose) so catalog/
+        parity coverage keeps working and ``engine.skills = […]`` unit
+        fixtures are not silently emptied.
+
+        Greenfield reports with no open findings use full-report trigger
+        matching (including summary) so Onboard Results can populate a
+        catalog.
 
         Retired/draft skills are excluded. Conflicts resolve active-over-
         deprecated via ``_resolve_conflicts``.
         """
+        from agentit.remediation.registry import contract_for
+
         by_name: dict[str, Skill] = {}
+        refused: set[str] = set()
+        uncontracted_parts: list[str] = []
         has_open_findings = False
         for score in report.scores:
             for finding in score.findings:
                 has_open_findings = True
-                skill = self.skill_for_category(finding.category)
-                if skill is None or skill.name in by_name:
+                contract = contract_for(finding.category)
+                if contract is not None:
+                    refused |= set(contract.refuse_companions)
+                    skill = self.skill_for_category(finding.category)
+                    if skill is None or skill.name in by_name:
+                        continue
+                    if skill.mode == "detect" or skill.status in ("retired", "draft"):
+                        continue
+                    by_name[skill.name] = skill
                     continue
-                if skill.mode == "detect" or skill.status in ("retired", "draft"):
-                    continue
-                by_name[skill.name] = skill
+                uncontracted_parts.extend([
+                    score.dimension,
+                    finding.category,
+                    finding.description,
+                    finding.recommendation,
+                ])
 
-        if has_open_findings:
-            haystack = _findings_text(report).lower()
+        if not has_open_findings:
+            matched = [s for s in self.skills if s.matches(report)]
+            return self._resolve_conflicts(matched)
+
+        # Uncontracted findings only — never re-scan contracted prose
+        # (that is how pinky companions and Onboard summary timeouts return).
+        if uncontracted_parts:
+            haystack = " ".join(uncontracted_parts).lower()
             for skill in self.skills:
-                if skill.name in by_name:
+                if skill.name in by_name or skill.name in refused:
                     continue
                 if skill.mode == "detect" or skill.status in ("retired", "draft"):
                     continue
                 if any(t.lower() in haystack for t in skill.triggers):
-                    if skill.status == "deprecated":
-                        # Mirror Skill.matches warning path for consistency.
-                        logger.warning("Skill '%s' is deprecated", skill.name)
                     by_name[skill.name] = skill
-            return self._resolve_conflicts(list(by_name.values()))
 
-        matched = [s for s in self.skills if s.matches(report)]
-        return self._resolve_conflicts(matched)
+        return self._resolve_conflicts(list(by_name.values()))
 
     @staticmethod
     def _resolve_conflicts(skills: list[Skill]) -> list[Skill]:
