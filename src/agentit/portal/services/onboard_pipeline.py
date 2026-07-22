@@ -28,7 +28,13 @@ import logging
 from fastapi import BackgroundTasks
 
 from agentit.models import AssessmentReport
-from agentit.portal.helpers import _get_trusted_base_url, get_store, publish_event, with_timeout
+from agentit.portal.helpers import (
+    ONBOARD_GENERATION_TIMEOUT,
+    _get_trusted_base_url,
+    get_store,
+    publish_event,
+    with_timeout,
+)
 
 log = logging.getLogger(__name__)
 
@@ -119,7 +125,10 @@ async def _run_onboarding_job(
             await s.update_remediation_job(job_id, "failed", "Assessment not found", error="Assessment not found")
             return
         await s.update_remediation_job(job_id, "running", "Running onboarding agents...")
-        files, orch_summary = await with_timeout(_run_onboarding(report, assessment_id, s))
+        files, orch_summary = await with_timeout(
+            _run_onboarding(report, assessment_id, s),
+            timeout=ONBOARD_GENERATION_TIMEOUT,
+        )
 
         from agentit.portal.metrics import onboardings_total as _ot
         _ot.labels(status="success").inc()
@@ -220,6 +229,20 @@ async def _run_onboarding_job(
                 job_id, "needs_attention",
                 "Onboarding timed out during automatic validation/delivery -- review manifests.",
                 error=detail[:280],
+            )
+        elif timed_out:
+            # Generation never saved a row — do not blame "repo unreachable".
+            # Common cause: skill LLM work exceeded the generation ceiling
+            # (self-managed AgentIT with many trigger-matched skills). Scan
+            # is the right retry when only a few open findings remain.
+            await s.update_remediation_job(
+                job_id, "failed",
+                f"Onboarding failed: {detail[:180]}",
+                error=(
+                    f"Onboarding failed: {detail[:180]} — generation timed out before "
+                    f"any manifests were saved. Retry Onboard, or use Scan when only a "
+                    f"few open findings need remediating (finding-gated PRs)."
+                ),
             )
         else:
             await s.update_remediation_job(

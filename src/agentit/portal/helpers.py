@@ -462,6 +462,12 @@ def get_templates():
 # ── Async timeout wrapper ────────────────────────────────────────────
 
 OPERATION_TIMEOUT = 300
+# Onboard generation (orchestrator + parallel skill LLM calls, up to 5
+# workers). Needs more headroom than assess/webhook clone work. Kept
+# separate so a slow self-managed Scan does not inherit the shorter
+# assess ceiling. Pair with reap_orphaned_jobs default (1800s) so
+# gen (600) + auto-delivery (600) never false-fails as "Interrupted".
+ONBOARD_GENERATION_TIMEOUT = 600
 
 
 async def with_timeout(coro, timeout: int = OPERATION_TIMEOUT):

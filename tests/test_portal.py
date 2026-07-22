@@ -1262,6 +1262,34 @@ async def test_webhook_onboard_triggers_onboarding(client, _override_store):
     assert "security" in data["categories"]
 
 
+async def test_webhook_onboard_uses_onboard_generation_timeout(client, _override_store):
+    """Webhook onboard must use the same 600s generation ceiling as the
+    portal BackgroundTasks path — not the shorter OPERATION_TIMEOUT (300)."""
+    from unittest.mock import AsyncMock
+
+    from agentit.portal.helpers import ONBOARD_GENERATION_TIMEOUT, with_timeout as real_with_timeout
+
+    store = _override_store
+    report = _make_report_with_findings()
+    aid = await store.save(report)
+    fake_files = [{"category": "security", "path": "netpol.yaml", "content": "kind: NetworkPolicy", "description": "netpol"}]
+    fake_summary = {"agents": [], "conflicts": [], "recommendation": "READY", "auto_approve": False, "gates": []}
+    captured: dict = {}
+
+    async def _track(coro, timeout=300):
+        captured["timeout"] = timeout
+        return await real_with_timeout(coro, timeout=timeout)
+
+    with patch("agentit.portal.routes.webhooks.with_timeout", side_effect=_track), \
+         patch(
+             "agentit.portal.routes.webhooks.run_onboarding",
+             new=AsyncMock(return_value=(fake_files, fake_summary)),
+         ):
+        resp = await client.post("/api/webhook/onboard", json={"correlationId": aid})
+    assert resp.status_code == 200, resp.text
+    assert captured.get("timeout") == ONBOARD_GENERATION_TIMEOUT
+
+
 async def test_webhook_onboard_missing_assessment_id(client):
     resp = await client.post("/api/webhook/onboard", json={"eventId": "evt-123"})
     assert resp.status_code == 400
