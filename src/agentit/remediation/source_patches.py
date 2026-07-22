@@ -157,6 +157,12 @@ def _eol_upgrade_patch(skill: "Skill", report: AssessmentReport) -> list[Generat
 
 
 def _app_audit_logging_patch(skill: "Skill", report: AssessmentReport) -> list[GeneratedFile]:
+    """Emit a language-matched audit helper.
+
+    Delivery (``create_source_patch_pr``) relocates root modules into the
+    detected FastAPI/Express package and wires middleware — required for
+    the compliance analyzer's module+usage evidence check.
+    """
     lang = _primary_language(report)
     if lang in ("javascript", "typescript", "node"):
         target = "audit.ts"

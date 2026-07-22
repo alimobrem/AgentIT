@@ -18,8 +18,8 @@ mode: template
 
 ## Property
 The application implements audit logging for privileged actions and data
-access — a real source module the compliance analyzer detects
-(`audit.py` / `audit.ts` / `audit.go`).
+access — a real source module **imported and called** from the API
+entrypoint (compliance requires module + usage evidence).
 
 ## Why not cluster audit-policy
 `audit-policy` delivers an apiserver Policy as an advisory ConfigMap. That
@@ -28,12 +28,14 @@ is cluster-admin configuration and **does not** clear the analyzer finding
 
 ## Constraints
 - Emit structured JSON audit events (action, actor, resource, outcome)
-- Language-matched module at repo root (`audit.py`, `audit.ts`, or `audit.go`)
+- Language-matched module in the app package (not an orphan at repo root)
+- Wire into FastAPI/Express middleware (mutating methods) so a call site exists
 - No secrets in audit payloads
 
 ## Delivery
-Source-repo PR. After merge, re-Assess clears the `audit` finding.
+Source-repo PR. Delivery relocates the module next to `app.py` / Express
+entry and patches that entrypoint. After merge, re-Assess clears `audit`.
 
 ## Verification
-- File `audit.py` / `audit.ts` / `audit.go` exists in the app repo
-- Module exports a callable audit log helper
+- Audit module exists under the app package (e.g. `apps/api/src/<pkg>/audit.py`)
+- Entrypoint imports and calls the helper (middleware is sufficient)

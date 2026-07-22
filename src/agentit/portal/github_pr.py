@@ -736,6 +736,57 @@ def _get_file_content_at_ref(base_url: str, hdrs: dict, path: str, ref: str) -> 
         return None
 
 
+def _list_tree_paths(base_url: str, hdrs: dict, tree_sha: str) -> list[str]:
+    """Recursive git tree paths (blobs only). Empty list on failure."""
+    try:
+        resp = requests.get(
+            f"{base_url}/git/trees/{tree_sha}",
+            headers=hdrs, timeout=30,
+            params={"recursive": "1"},
+        )
+        resp.raise_for_status()
+        return [
+            item["path"]
+            for item in resp.json().get("tree", [])
+            if item.get("type") == "blob" and item.get("path")
+        ]
+    except Exception:
+        logger.warning("Failed to list git tree for audit enrichment", exc_info=True)
+        return []
+
+
+def _enrich_audit_patches_for_repo(
+    base_url: str,
+    hdrs: dict,
+    default_branch: str,
+    base_sha: str,
+    files: list[dict],
+) -> list[dict]:
+    """Relocate orphan root audit modules and wire FastAPI/Express entrypoints.
+
+    Compliance requires module + import/usage evidence. A root-only
+    ``audit.py`` (pinky#8 class of PR) never clears the finding.
+    """
+    from agentit.remediation.audit_wire import enrich_audit_files_from_paths
+
+    tree_paths = _list_tree_paths(base_url, hdrs, base_sha)
+    if not tree_paths:
+        return files
+
+    def read_file(path: str) -> str | None:
+        return _get_file_content_at_ref(base_url, hdrs, path, default_branch)
+
+    enriched = enrich_audit_files_from_paths(
+        files, tree_paths=tree_paths, read_file=read_file,
+    )
+    if len(enriched) != len(files):
+        logger.info(
+            "Enriched audit source patch: %d → %d file(s) (wired entrypoint)",
+            len(files), len(enriched),
+        )
+    return enriched
+
+
 def path_exists_on_default_branch(repo_url: str, path: str) -> bool | None:
     """Whether ``path`` exists on the repo's default branch.
 
@@ -880,6 +931,12 @@ def create_source_patch_pr(
         base_url = f"{_API}/repos/{owner}/{repo}"
 
         default_branch, base_sha = _get_default_branch_and_base_sha(base_url, hdrs)
+
+        # Orphan root audit.py/ts does not clear the compliance finding —
+        # relocate into the app package and wire middleware when possible.
+        files = _enrich_audit_patches_for_repo(
+            base_url, hdrs, default_branch, base_sha, files,
+        )
 
         tree_items = []
         for f in files:

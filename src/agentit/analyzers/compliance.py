@@ -4,6 +4,11 @@ from pathlib import Path
 
 from agentit.analyzers.base import calculate_score, is_ignored, iter_yaml_files
 from agentit.models import DimensionScore, Finding, Severity
+from agentit.remediation.audit_wire import has_audit_usage
+
+_AUDIT_MODULE_NAMES = frozenset({
+    "audit.py", "audit.go", "audit.js", "audit.ts", "audit_log.py",
+})
 
 
 class ComplianceAnalyzer:
@@ -13,7 +18,8 @@ class ComplianceAnalyzer:
         findings: list[Finding] = []
         has_license = (repo_path / "LICENSE").exists() or (repo_path / "LICENSE.md").exists() or (repo_path / "LICENCE").exists()
         has_sbom = False
-        has_audit_log = False
+        has_audit_module = False
+        has_audit_callsite = False
         has_policy = False
 
         for fp in repo_path.rglob("*"):
@@ -22,14 +28,27 @@ class ComplianceAnalyzer:
             name = fp.name.lower()
             if "sbom" in name or "bom" in name:
                 has_sbom = True
-            if name in ("audit.py", "audit.go", "audit.js", "audit.ts", "audit_log.py"):
-                has_audit_log = True
+            if name in _AUDIT_MODULE_NAMES:
+                # Module alone is insufficient — import/call must appear elsewhere.
+                has_audit_module = True
+                continue
 
+            if fp.suffix.lower() in {".py", ".ts", ".js", ".go"}:
+                try:
+                    content = fp.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                if has_audit_usage(content):
+                    has_audit_callsite = True
+
+        # App audit logging ≠ apiserver Policy / advisory ConfigMap text.
+        # Do not clear on YAML "audit"+"log" substrings (that false-cleared
+        # via audit-policy ConfigMaps without any app wiring).
         for _, content in iter_yaml_files(repo_path):
             if "kind: Policy" in content or "kind: ClusterPolicy" in content or "kind: ConstraintTemplate" in content:
                 has_policy = True
-            if "audit" in content.lower() and "log" in content.lower():
-                has_audit_log = True
+
+        has_audit_log = has_audit_module and has_audit_callsite
 
         if not has_license:
             findings.append(Finding(
@@ -52,7 +71,10 @@ class ComplianceAnalyzer:
                 category="audit",
                 severity=Severity.high,
                 description="No audit logging implementation detected",
-                recommendation="Add audit logging for privileged actions and data access",
+                recommendation=(
+                    "Add an audit logging module in the app package and wire it "
+                    "into privileged/mutating request handlers (import + call site)"
+                ),
                 source="analyzer:compliance",
             ))
         if not has_policy:
