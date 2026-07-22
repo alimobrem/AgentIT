@@ -27,6 +27,7 @@ Product contract detail: [`docs/release-notes.md`](docs/release-notes.md).
 - Solution contracts so Scan PRs clear findings (`SOLUTION_CONTRACTS`, clear-evidence simulation; PRs [#154](https://github.com/alimobrem/AgentIT/pull/154), [#158](https://github.com/alimobrem/AgentIT/pull/158)).
 
 ### Fixed
+- Pin AgentIT `Containerfile` base to `ubi9/python-312@sha256:89ef0dda…` (immutable digest; closes theater `:latest`→`:1` Scan PR [#173](https://github.com/alimobrem/AgentIT/pull/173)).
 
 - Scan **container** remediation is **pin-only** on existing Dockerfile/Containerfile (FROM `:latest` → `:1` / digest); clear-evidence refuses destructive stub rewrites (#165 class; same bar as migration [#163](https://github.com/alimobrem/AgentIT/pull/163)).
 - Tekton `agentit-ci` `run-tests` timeout raised to **20m** (was 10m) so UBI pip+pytest under node pressure / one retry does not TaskRunTimeout before image pin (tip `b4ae400f` / `agentit-ci-bwb76`).
