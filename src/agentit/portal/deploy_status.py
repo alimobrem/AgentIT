@@ -324,7 +324,11 @@ def _get_deploy_status(include_commit_info: bool = False) -> dict:
             elif health_status == "Degraded":
                 status["state"] = "failed"
                 status["reason"] = status["argo"]["health_message"] or "Argo CD reports the agentit Application as Degraded"
-            elif sync_status != "Synced":
+            elif sync_status != "Synced" and health_status != "Healthy":
+                # Residual OutOfSync while Healthy (no Running op / Progressing
+                # above) is usually controller-owned drift — e.g. HPA vs chart
+                # `replicas`, or a patched `restartAt` — not an active deploy.
+                # Treat only non-Healthy OutOfSync as "syncing".
                 status["state"] = "deploying"
                 status["stage"] = "syncing"
 
