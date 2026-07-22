@@ -164,7 +164,7 @@ class TestFixHiddenDuringOnboarding:
         assert resp.status_code == 200
         assert "Scan" in resp.text
         assert f'action="/assessments/{aid}/fix"' not in resp.text
-        assert "via <strong>Scan</strong> below" in resp.text
+        assert "via <strong>Scan</strong>" in resp.text
         assert "btn-label\">Fix</span>" not in resp.text
 
     async def test_findings_fix_shown_after_onboard_with_confirm(self, ui_client):
@@ -181,7 +181,7 @@ class TestFixHiddenDuringOnboarding:
         assert f'action="/assessments/{aid}/fix"' in resp.text
         assert "Generate Fix" in resp.text
         assert "htmx-indicator" in resp.text
-        assert "via <strong>Scan</strong> below" not in resp.text
+        assert "via <strong>Scan</strong>" not in resp.text
 
 
 # ── 2. Remediation Plan table's Fix button uses the shared category set ──

@@ -2225,7 +2225,8 @@ async def test_schedules_page_links_watchers_to_agents(client, _override_store):
     """Long-Lived Agents table removed; Schedules deep-links watcher status to Agents."""
     resp = await client.get("/schedules")
     assert resp.status_code == 200
-    assert "Long-Lived Agents" not in resp.text
+    # Stat card may still say "Long-Lived Agents"; the full table heading is gone.
+    assert 'section-title">Long-Lived Agents' not in resp.text
     assert "Watcher / long-lived agent status" in resp.text
     assert 'href="/agents"' in resp.text
 
@@ -3220,14 +3221,15 @@ async def test_capabilities_page_shows_learning_run_history(client, _override_st
 async def test_capabilities_page_shows_skill_learner_never_ticked(client):
     resp = await client.get("/capabilities")
     assert resp.status_code == 200
-    assert "never ticked on this deployment" in resp.text
+    # Crisp IA: status lives on the Research Skills button title tooltip.
+    assert "never ticked here" in resp.text
 
 
 async def test_capabilities_page_shows_skill_learner_recent_heartbeat(client, _override_store):
     await _override_store.agent_heartbeat("skill-learner")
     resp = await client.get("/capabilities")
     assert resp.status_code == 200
-    assert "is running" in resp.text
+    assert "Skill-learner is running" in resp.text
 
 
 # ── Capabilities: watcher-submitted skill drafts (cross-pod visibility) ──
@@ -3844,19 +3846,22 @@ async def test_capabilities_page_hides_needs_review_when_no_drafts(client, tmp_p
 
 
 async def test_capabilities_page_links_onboarding_agents_to_registry_detail(client):
+    """Catalog points at Agent Activity; per-agent registry links live there."""
     resp = await client.get("/capabilities")
     assert resp.status_code == 200
-    # Skills-primary: only optional codechange remains as an onboarding agent.
+    assert 'href="/agents"' in resp.text
+    assert "Agent Activity" in resp.text
+    # Skills-primary: retired onboarding agents stay off Catalog.
     assert 'href="/agents/cost"' not in resp.text
     assert 'href="/agents/dependency"' not in resp.text
-    assert 'href="/agents/codechange"' in resp.text
 
 
 async def test_capabilities_page_links_watchers_to_registry_detail(client):
+    """Watcher run history is on Agent Activity, not duplicated on Catalog."""
     resp = await client.get("/capabilities")
     assert resp.status_code == 200
-    assert 'href="/agents/skill-learner"' in resp.text
-    assert 'href="/agents/capability-scout"' in resp.text
+    assert 'href="/agents"' in resp.text
+    assert "Agent Activity" in resp.text
 
 
 # ── Capabilities: Phase 5 (extension-model-unification-plan-2026-07-18) ─

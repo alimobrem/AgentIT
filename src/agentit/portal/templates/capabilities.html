@@ -16,7 +16,7 @@
 <div class="action-bar mb-2">
   <form method="post" action="/capabilities/learn" class="inline-form" x-data>
     <button type="submit" class="btn btn-sm btn-action"
-      title="{% if skill_learner_status.has_run and not skill_learner_status.stale %}Skill-learner last tick {{ skill_learner_status.last_heartbeat[:16] }}{% elif skill_learner_status.has_run %}Skill-learner stale — last {{ skill_learner_status.last_heartbeat[:16] }}{% else %}Skill-learner has never ticked here{% endif %}"
+      title="{% if skill_learner_status.has_run and not skill_learner_status.stale %}Skill-learner is running{% elif skill_learner_status.has_run %}Skill-learner may be stalled{% else %}Skill-learner has never ticked here{% endif %}"
       @click="showToast('Researching &amp; drafting skills\u2026 this can take up to 3 minutes \u2014 please don\u2019t close this tab.', 'info', 8000)">
       <span class="btn-label">Research Skills</span>
       <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Researching&hellip;</span>
