@@ -18,10 +18,6 @@ router = APIRouter()
 async def insights_page(request: Request) -> HTMLResponse:
     s = await get_store()
     fleet_insights = await s.get_fleet_insights()
-    agent_stats = await s.get_agent_stats()
-    feedback = await s.get_all_feedback(limit=10)
-    low_skills = await s.get_low_effectiveness_skills()
-    check_compliance = await s.get_check_compliance()
     loop_health = await s.get_loop_health()
 
     # get_fleet_insights()'s own `pending_gates` count is gone along with
@@ -38,16 +34,11 @@ async def insights_page(request: Request) -> HTMLResponse:
         waiting_for_approval + len(unresolved_rollbacks) + len(unresolved_escalations)
     )
 
-    from agentit.portal.check_catalog import annotate_compliance_rows, catalog_summary
-    check_compliance = annotate_compliance_rows(check_compliance)
+    from agentit.portal.check_catalog import catalog_summary
     check_catalog_summary = catalog_summary()
 
     return get_templates().TemplateResponse(request, "insights.html", {
         "insights": fleet_insights,
-        "agent_stats": agent_stats,
-        "recent_feedback": feedback,
-        "low_skills": low_skills,
-        "check_compliance": check_compliance,
         "check_catalog_summary": check_catalog_summary,
         "loop_health": loop_health,
     })

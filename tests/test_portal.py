@@ -1146,19 +1146,20 @@ async def test_dlq_retry_republishes_and_redirects(client, _override_store):
     assert await store.list_dlq_messages() == []
 
 
-async def test_insights_page_shows_fleet_wide_feedback(client, _override_store):
-    """Regression: insights_page used get_feedback_for_app(""), which filters
-    on app_name = '' and always returns nothing -- get_all_feedback fixes it."""
+async def test_insights_page_links_feedback_to_decisions(client, _override_store):
+    """Thinned Insights: learning/feedback table removed; count + link to Decisions."""
     store = _override_store
     await store.record_feedback("app-a", "security", "network-policy", "rejected", human_reason="not needed here")
     resp = await client.get("/insights")
     assert resp.status_code == 200
-    assert "not needed here" in resp.text
+    assert "feedback event" in resp.text
+    assert 'href="/decisions"' in resp.text
+    assert "not needed here" not in resp.text
 
 
-async def test_insights_stat_cards_and_rows_deep_link(client, _override_store):
-    """Crawl gap: Insights had zero in-page links — rollups and rows must
-    deep-link to Fleet / Ledger / Events / agent + skill history."""
+async def test_insights_stat_cards_and_deep_links(client, _override_store):
+    """Thinned Insights keeps rollup cards + Attention strip deep-links;
+    full tables live on Agents / Capabilities / Decisions / Ledger."""
     store = _override_store
     await store.register_agent("hardening", "security")
     await store.save_agent_run("hardening", "local", "success")
@@ -1169,22 +1170,19 @@ async def test_insights_stat_cards_and_rows_deep_link(client, _override_store):
     html = resp.text
     assert 'href="/fleet"' in html
     assert 'href="/events"' in html
-    assert 'href="/agents/hardening"' in html
-    assert 'href="/capabilities/skills/netpol-skill/history"' in html
-    assert "Skills Needing Review" in html
-    # The old "Remediations" stat card (a hand-maintained completion flag
-    # with no link to a real PR/gate) is gone -- "Total PRs" is the
-    # PR-based replacement, and "Pending Gates" now rolls up to Fleet
-    # (per-app badges) instead of the now strictly-PR-focused Ledger.
+    assert 'href="/agents"' in html
+    assert 'href="/capabilities"' in html
+    assert 'href="/ledger"' in html
+    assert 'href="/decisions"' in html
+    assert "Skills Needing Review" not in html
+    assert "Agent Performance" not in html
     assert "Total PRs" in html
-    # The old "Remediations" stat card (a hand-maintained completion flag
-    # with no link to a real PR/gate) is gone -- "Total PRs" is the
-    # PR-based replacement, and it links to Fleet (which already carries
-    # per-app Open PRs/Total PRs columns), not a retired fleet-wide page.
-    assert "Total PRs" in html
+    assert "Attention:" in html
 
 
-async def test_insights_page_shows_check_compliance(client, _override_store):
+async def test_insights_page_shows_check_contract_badges(client, _override_store):
+    """Thinned Insights keeps contract badge summary + Capabilities link,
+    not the full fleet-wide check compliance matrix."""
     store = _override_store
     aid = await store.save(_make_report())
     await store.save_check_results(aid, [
@@ -1192,15 +1190,14 @@ async def test_insights_page_shows_check_compliance(client, _override_store):
     ])
     resp = await client.get("/insights")
     assert resp.status_code == 200
-    assert "Fleet-Wide Check Compliance" in resp.text
-    assert "has-network-policy" in resp.text
+    assert "Solution contracts:" in resp.text
+    assert 'href="/capabilities#checks-resolutions"' in resp.text
+    assert "Fleet-Wide Check Compliance" not in resp.text
+    assert "has-network-policy" not in resp.text
 
 
-async def test_insights_agent_performance_zero_success_rate_is_colored_danger(client, _override_store):
-    """Regression: the success-rate bar's own color fill is invisible at
-    0% (CSS `width: var(--pct)` -> a literal 0px-wide colored bar) --
-    confirmed live: a 0%-success agent looked identical to a 100%-success
-    one. The percentage label itself must carry the severity color too."""
+async def test_insights_page_links_agent_performance_to_agents(client, _override_store):
+    """Agent Performance table removed from Insights; deep-link to Agents."""
     store = _override_store
     await store.register_agent("remediation-loop", "remediation")
     for _ in range(3):
@@ -1208,21 +1205,9 @@ async def test_insights_agent_performance_zero_success_rate_is_colored_danger(cl
 
     resp = await client.get("/insights")
     assert resp.status_code == 200
-    row = resp.text.split("remediation-loop", 1)[1].split("</tr>", 1)[0]
-    assert 'class="text-sm text-danger"' in row
-    assert "0.0%" in row or "0%" in row
-
-
-async def test_insights_agent_performance_full_success_rate_is_colored_success(client, _override_store):
-    store = _override_store
-    await store.register_agent("hardening", "security")
-    await store.save_agent_run("hardening", "local", "success")
-    await store.save_agent_run("hardening", "local", "success")
-
-    resp = await client.get("/insights")
-    assert resp.status_code == 200
-    row = resp.text.split("hardening", 1)[1].split("</tr>", 1)[0]
-    assert 'class="text-sm text-success"' in row
+    assert "Agent performance" in resp.text
+    assert 'href="/agents"' in resp.text
+    assert "remediation-loop" not in resp.text
 
 
 async def test_webhook_triggers_assessment(client, _override_store):
@@ -2236,12 +2221,13 @@ async def test_schedules_page_empty(client, _override_store):
     assert "Scheduled Operations" in resp.text
 
 
-async def test_schedules_page_shows_watchers(client, _override_store):
+async def test_schedules_page_links_watchers_to_agents(client, _override_store):
+    """Long-Lived Agents table removed; Schedules deep-links watcher status to Agents."""
     resp = await client.get("/schedules")
     assert resp.status_code == 200
-    assert "vuln-watcher" in resp.text
-    assert "slo-tracker" in resp.text
-    assert "drift-detector" in resp.text
+    assert "Long-Lived Agents" not in resp.text
+    assert "Watcher / long-lived agent status" in resp.text
+    assert 'href="/agents"' in resp.text
 
 
 async def test_schedules_app_name_links_to_assessment_for_manual_schedule(client, _override_store):

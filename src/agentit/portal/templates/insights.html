@@ -3,7 +3,7 @@
 {% block content %}
 <h1>Platform Insights</h1>
 <p class="text-muted text-sm mb-1">Fleet-wide aggregate analytics — not the morning inbox.</p>
-<p class="text-muted">How AgentIT is managing your fleet — total work done, agent performance, and system health.</p>
+<p class="text-muted">How AgentIT is managing your fleet — total work done and system health. Drill into <a href="/capabilities">Capabilities</a> for checks &amp; resolutions.</p>
 
 <div class="stat-grid">
   <div class="stat-card">
@@ -54,73 +54,6 @@
   {% endif %}
 </div>
 
-<h2>Agent Performance</h2>
-<p class="text-muted">Track record of each agent — how often they run, how often they succeed.</p>
-
-{% if agent_stats %}
-<table>
-  <thead>
-    <tr>
-      <th>Agent</th>
-      <th>Total Runs</th>
-      <th>Successes</th>
-      <th>Failures</th>
-      <th>Success Rate</th>
-      <th>Last Active</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for a in agent_stats %}
-    <tr>
-      <td><strong><a href="/agents/{{ a.agent }}">{{ a.agent }}</a></strong></td>
-      <td>{{ a.total_events }}</td>
-      <td class="text-success">{{ a.successes }}</td>
-      <td class="{% if a.failures > 0 %}text-danger{% else %}text-muted{% endif %}">{{ a.failures }}</td>
-      <td>
-        <div class="agent-rate-bar">
-          <div class="score-bar-bg">
-            <div class="score-bar-fill {% if a.success_rate >= 90 %}score-green{% elif a.success_rate >= 70 %}score-yellow{% else %}score-red{% endif %}" style="--pct: {{ a.success_rate }}%;"></div>
-          </div>
-          {# The bar fill's own severity color is invisible at very low
-             percentages (width: var(--pct) means a 0% row renders a
-             literal 0px-wide colored fill -- indistinguishable from any
-             other row at a glance, confirmed live: a 0%-success agent
-             looked identical to a 100%-success one). Color the label
-             text too so the worst performers are visible regardless of
-             bar width. #}
-          <span class="text-sm {% if a.success_rate >= 90 %}text-success{% elif a.success_rate >= 70 %}text-warning{% else %}text-danger{% endif %}">{{ a.success_rate }}%</span>
-        </div>
-      </td>
-      <td><span data-timestamp="{{ a.last_seen }}">{{ a.last_seen[:16] if a.last_seen else '—' }}</span></td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% else %}
-<div class="empty-state">
-  <p>No agent activity yet. Run an assessment to see agent performance.</p>
-</div>
-{% endif %}
-
-{% if low_skills %}
-<h2>Skills Needing Review</h2>
-<p class="text-muted">Skills with a recency-weighted approval rate below 30% after 5+ generations (recent outcomes count more than old ones, so a skill that's since improved can recover off this list). Consider updating or deprecating.</p>
-<table>
-  <thead><tr><th>Skill</th><th>Approval Rate (recency-weighted)</th><th>All-Time Rate</th><th>Total Runs</th></tr></thead>
-  <tbody>
-  {% for ls in low_skills %}
-  <tr>
-    <td><a href="/capabilities/skills/{{ ls.skill }}/history">{{ ls.skill }}</a></td>
-    <td class="text-danger">{{ (ls.approval_rate * 100)|round }}%</td>
-    <td class="text-muted">{{ (ls.raw_approval_rate * 100)|round }}%</td>
-    <td>{{ ls.total }}</td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
-<p class="text-muted text-sm"><a href="/capabilities">Open Capabilities</a> to activate drafts or run self-improvement.</p>
-{% endif %}
-
 {% if check_catalog_summary %}
 <p class="text-muted mb-1">
   Solution contracts:
@@ -133,56 +66,19 @@
 </p>
 {% endif %}
 
-{% if check_compliance %}
-<h2>Fleet-Wide Check Compliance</h2>
-<p class="text-muted">Pass rate for detection checks across assessment runs. Remediable checks can be cleared by Scan PRs; detect-only need human action. Full matrix on <a href="/capabilities#checks-resolutions">Capabilities</a>.</p>
-<table>
-  <thead><tr><th>Dimension</th><th>Check</th><th>Contract</th><th>Resolution</th><th>Pass Rate</th><th>Passes / Total</th></tr></thead>
-  <tbody>
-  {% for c in check_compliance %}
-  <tr>
-    <td>{{ c.dimension | dimension_label }}</td>
-    <td>{{ c.check_name }}</td>
-    <td>
-      {% if c.contract_badge == 'remediable' %}
-      <span class="badge badge-success">remediable</span>
-      {% elif c.contract_badge == 'detect_only' %}
-      <span class="badge badge-warning">detect-only</span>
-      {% else %}
-      <span class="badge badge-muted">{{ c.contract_badge or '—' }}</span>
-      {% endif %}
-    </td>
-    <td class="text-sm text-muted">{{ c.resolution or '—' }}</td>
-    <td class="{% if c.pass_rate >= 90 %}text-success{% elif c.pass_rate >= 70 %}text-warning{% else %}text-danger{% endif %}">
-      {{ c.pass_rate }}%
-    </td>
-    <td class="text-sm">{{ c.passes }} / {{ c.total }}</td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% endif %}
+<p class="text-muted text-sm mb-1">
+  Attention:
+  <a href="/ledger">Ledger</a>
+  &middot; <a href="/capabilities">Capabilities</a>
+  &middot; <a href="/agents">Agents</a>
+</p>
 
+<p class="text-muted text-sm mb-1">Agent performance and watcher status: <a href="/agents">Agents</a>.</p>
+<p class="text-muted text-sm mb-1">Skills needing review and check compliance matrix: <a href="/capabilities">Capabilities</a>.</p>
 {% if insights.total_feedback > 0 %}
-<h2>Learning from You</h2>
-<p class="text-muted">The system learns from your decisions. {{ insights.total_feedback }} feedback events recorded, {{ insights.total_rejections }} rejections.</p>
-
-{% if recent_feedback %}
-<table>
-  <thead><tr><th>App</th><th>Agent</th><th>Category</th><th>Decision</th><th>Reason</th></tr></thead>
-  <tbody>
-  {% for fb in recent_feedback %}
-  <tr>
-    <td>{{ fb.app_name }}</td>
-    <td>{{ fb.agent_name }}</td>
-    <td>{{ fb.finding_category }}</td>
-    <td><span class="badge badge-{{ 'success' if fb.action == 'approved' else 'danger' if fb.action == 'rejected' else 'info' }}">{{ fb.action }}</span></td>
-    <td class="text-muted text-sm">{{ fb.human_reason or '—' }}</td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% endif %}
+<p class="text-muted text-sm mb-1">{{ insights.total_feedback }} feedback event{{ 's' if insights.total_feedback != 1 }} recorded{% if insights.total_rejections %}, {{ insights.total_rejections }} rejection{{ 's' if insights.total_rejections != 1 }}{% endif %} — see the audit on <a href="/decisions">Decisions</a>.</p>
+{% else %}
+<p class="text-muted text-sm mb-1">Learning from your approve/reject decisions: <a href="/decisions">Decisions</a>.</p>
 {% endif %}
 
 {% endblock %}

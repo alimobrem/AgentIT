@@ -3,10 +3,25 @@
 {% block content %}
 {% set truly_healthy = argo_synced and pods_failed == 0 and kafka_ready %}
 {% set links = card_links | default({}) %}
+{% from "_macros.html" import client_tab_nav %}
+{# Initial tab honors ?tab=<key> — same query-param-driven Alpine init
+   convention assessment_detail.html uses. Whitelisted against real tab
+   keys rather than interpolating the raw query param. #}
+{% set _requested_tab = request.query_params.get('tab', 'overview') %}
+{% set _initial_tab = _requested_tab if _requested_tab in ('overview', 'workloads', 'messaging', 'access') else 'overview' %}
 <h1>System Health</h1>
 <p class="text-muted text-sm mb-1">Live infrastructure telemetry — pods, pipelines, Kafka, deploy status. App assessment checks and Scan resolutions live under <a href="/capabilities#checks-resolutions">Capabilities</a> and Assessment Detail — not here.</p>
 <p class="text-muted text-sm">Cluster: {{ cluster_url | default("in-cluster") }} &middot; Namespace: {{ namespace | default("agentit") }}</p>
 
+<div x-data="{ tab: '{{ _initial_tab }}' }">
+{{ client_tab_nav([
+  {"key": "overview", "label": "Overview"},
+  {"key": "workloads", "label": "Workloads"},
+  {"key": "messaging", "label": "Messaging"},
+  {"key": "access", "label": "Access"},
+]) }}
+
+<div x-show="tab === 'overview'">
 <div class="stat-grid" hx-get="/health" hx-trigger="every 30s" hx-select=".stat-grid" hx-target="this" hx-swap="outerHTML">
   {% set platform_link = links.get('platform') %}
   {% if platform_link and platform_link.href %}
@@ -161,7 +176,7 @@
 </div>
 
 <h2 class="section-title">AgentIT Self-Health</h2>
-<p class="text-muted text-sm mb-1">Periodic functional checks of AgentIT's own critical infrastructure -- not just "is the pod running" (self-health-check watcher, every 15 minutes by default). The webhook row below reuses the same live per-app delivery check rendered further down this page, run here in the background so a failure reaches the sitewide alert badge even if nobody opens this page. See <a href="https://github.com/alimobrem/AgentIT/blob/main/docs/self-health-check-backlog.md" target="_blank" rel="noopener" hx-boost="false">docs/self-health-check-backlog.md</a> for what else is on the roadmap.</p>
+<p class="text-muted text-sm mb-1">Periodic functional checks of AgentIT's own critical infrastructure -- not just "is the pod running" (self-health-check watcher, every 15 minutes by default). The webhook row reuses the same live per-app delivery check on the Access tab, run here in the background so a failure reaches the sitewide alert badge even if nobody opens this page. See <a href="https://github.com/alimobrem/AgentIT/blob/main/docs/self-health-check-backlog.md" target="_blank" rel="noopener" hx-boost="false">docs/self-health-check-backlog.md</a> for what else is on the roadmap.</p>
 <table>
   <thead><tr><th>Check</th><th>Status</th><th>Details</th></tr></thead>
   <tbody>
@@ -185,8 +200,10 @@
     {% endif %}
   </tbody>
 </table>
+</div>
 
-<h2 class="section-title">Argo CD</h2>
+<div x-show="tab === 'workloads'" x-cloak>
+<h2 class="section-title mt-0">Argo CD</h2>
 <table>
   <thead><tr><th>App</th><th>Sync</th><th>Health</th></tr></thead>
   <tbody>
@@ -248,8 +265,10 @@
   </tbody>
 </table>
 {% endif %}
+</div>
 
-<h2 class="section-title">Kafka</h2>
+<div x-show="tab === 'messaging'" x-cloak>
+<h2 class="section-title mt-0">Kafka</h2>
 <table>
   <thead><tr><th>Component</th><th>Status</th></tr></thead>
   <tbody>
@@ -270,67 +289,8 @@
   </tbody>
 </table>
 
-{% if circuit_breakers %}
-<h2 class="section-title">Circuit Breakers</h2>
-<table>
-  <thead><tr><th>Breaker</th><th>State</th><th>Recent Failures</th></tr></thead>
-  <tbody>
-    {% for name, state in circuit_breakers.items() %}
-    <tr class="{% if state.open %}row-border-red{% else %}row-border-green{% endif %}">
-      <td class="text-bold">
-        {% set metrics_link = links.get('platform') %}
-        {% if metrics_link and metrics_link.href %}
-        <a href="{{ metrics_link.href | safe_url }}" target="_blank" rel="noopener" hx-boost="false" title="Open Observe metrics">{{ name }}</a>
-        {% else %}
-        {{ name }}
-        {% endif %}
-      </td>
-      <td><span class="badge {% if state.open %}badge-critical{% else %}badge-low{% endif %}">{{ "OPEN" if state.open else "closed" }}</span></td>
-      <td>{{ state.failures }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% endif %}
-
-{% if credentials %}
-<h2 class="section-title">Credentials</h2>
-<div id="credentials-panel" hx-get="/health" hx-trigger="every 30s" hx-select="#credentials-panel" hx-target="this" hx-swap="outerHTML">
-<table>
-  <thead><tr><th>Credential</th><th>Status</th><th>Detail</th></tr></thead>
-  <tbody>
-    {% for name, state in credentials.items() %}
-    <tr class="{% if state.ok %}row-border-green{% else %}row-border-red{% endif %}">
-      <td class="text-bold">{{ name }}</td>
-      <td><span class="badge {% if state.ok %}badge-low{% else %}badge-critical{% endif %}">{{ state.status | capitalize }}</span></td>
-      <td class="text-sm text-muted">{{ state.detail }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-</div>
-{% endif %}
-
-{% if webhook_deliveries %}
-<h2 class="section-title">Webhook Deliveries</h2>
-<div id="webhook-deliveries-panel" hx-get="/health" hx-trigger="every 30s" hx-select="#webhook-deliveries-panel" hx-target="this" hx-swap="outerHTML">
-<table>
-  <thead><tr><th>App</th><th>Status</th><th>Detail</th></tr></thead>
-  <tbody>
-    {% for wh in webhook_deliveries %}
-    <tr class="{% if wh.ok %}row-border-green{% elif wh.ok is none %}row-border-yellow{% else %}row-border-red{% endif %}">
-      <td class="text-bold">{{ wh.repo_name }}</td>
-      <td><span class="badge {% if wh.ok %}badge-low{% elif wh.ok is none %}badge-medium{% else %}badge-critical{% endif %}">{{ wh.status | replace("_", " ") | capitalize }}</span></td>
-      <td class="text-sm text-muted">{{ wh.detail }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-</div>
-{% endif %}
-
 {% if kafka_stats and kafka_stats.available %}
-<h3 class="text-sm mt-1 mb-1">Topics</h3>
+<h2 class="section-title">Topics</h2>
 <table>
   <thead><tr><th>Topic</th><th>Partitions</th><th>Messages</th><th></th></tr></thead>
   <tbody>
@@ -349,7 +309,7 @@
 </table>
 
 {% if kafka_stats.consumer_groups %}
-<h3 class="text-sm mt-1 mb-1">Consumer Groups</h3>
+<h2 class="section-title">Consumer Groups</h2>
 <table>
   <thead><tr><th>Group</th><th>Committed</th><th>End Offset</th><th>Lag</th></tr></thead>
   <tbody>
@@ -373,4 +333,72 @@
 {% elif kafka_ready %}
 <p class="text-muted text-sm mt-1">Kafka broker is ready but topic stats unavailable (kafka-python may not be installed).</p>
 {% endif %}
+
+{% if circuit_breakers %}
+<h2 class="section-title">Circuit Breakers</h2>
+<table>
+  <thead><tr><th>Breaker</th><th>State</th><th>Recent Failures</th></tr></thead>
+  <tbody>
+    {% for name, state in circuit_breakers.items() %}
+    <tr class="{% if state.open %}row-border-red{% else %}row-border-green{% endif %}">
+      <td class="text-bold">
+        {% set metrics_link = links.get('platform') %}
+        {% if metrics_link and metrics_link.href %}
+        <a href="{{ metrics_link.href | safe_url }}" target="_blank" rel="noopener" hx-boost="false" title="Open Observe metrics">{{ name }}</a>
+        {% else %}
+        {{ name }}
+        {% endif %}
+      </td>
+      <td><span class="badge {% if state.open %}badge-critical{% else %}badge-low{% endif %}">{{ "OPEN" if state.open else "closed" }}</span></td>
+      <td>{{ state.failures }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+</div>
+
+<div x-show="tab === 'access'" x-cloak>
+{% if credentials %}
+<h2 class="section-title mt-0">Credentials</h2>
+<div id="credentials-panel" hx-get="/health" hx-trigger="every 30s" hx-select="#credentials-panel" hx-target="this" hx-swap="outerHTML">
+<table>
+  <thead><tr><th>Credential</th><th>Status</th><th>Detail</th></tr></thead>
+  <tbody>
+    {% for name, state in credentials.items() %}
+    <tr class="{% if state.ok %}row-border-green{% else %}row-border-red{% endif %}">
+      <td class="text-bold">{{ name }}</td>
+      <td><span class="badge {% if state.ok %}badge-low{% else %}badge-critical{% endif %}">{{ state.status | capitalize }}</span></td>
+      <td class="text-sm text-muted">{{ state.detail }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<p class="text-muted text-sm mt-0">No credential checks configured.</p>
+{% endif %}
+
+{% if webhook_deliveries %}
+<h2 class="section-title">Webhook Deliveries</h2>
+<div id="webhook-deliveries-panel" hx-get="/health" hx-trigger="every 30s" hx-select="#webhook-deliveries-panel" hx-target="this" hx-swap="outerHTML">
+<table>
+  <thead><tr><th>App</th><th>Status</th><th>Detail</th></tr></thead>
+  <tbody>
+    {% for wh in webhook_deliveries %}
+    <tr class="{% if wh.ok %}row-border-green{% elif wh.ok is none %}row-border-yellow{% else %}row-border-red{% endif %}">
+      <td class="text-bold">{{ wh.repo_name }}</td>
+      <td><span class="badge {% if wh.ok %}badge-low{% elif wh.ok is none %}badge-medium{% else %}badge-critical{% endif %}">{{ wh.status | replace("_", " ") | capitalize }}</span></td>
+      <td class="text-sm text-muted">{{ wh.detail }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<p class="text-muted text-sm">No webhook delivery checks yet.</p>
+{% endif %}
+</div>
+
+</div>
 {% endblock %}

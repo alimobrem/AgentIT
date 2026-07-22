@@ -2,19 +2,8 @@
 {% block title %}LLM Decisions - AgentIT{% endblock %}
 {% block content %}
 <h1>LLM Decisions</h1>
-<p class="text-muted text-sm mb-1">Audit log of LLM decide-points — Events owns the chronological stream.</p>
-<p class="text-muted mb-2">
-  Every place the LLM actually decides an outcome (approve/reject/gate) —
-  not just generates text — attributed by the agent or skill that triggered it.
-  Covers <strong>fix-review</strong> (self-fix's first-approver gate, attributed
-  by skill), <strong>secret-classify</strong> (the security
-  analyzer's per-match hardcoded-secret false-positive filter, attributed to the
-  generic <code>security-analyzer</code> component), and <strong>capability-proposal</strong>
-  (capability-scout's self-improvement cycle, attributed to the generic
-  <code>capability-scout</code> component).
-  For what Assess checks and what Scan will PR, see
-  <a href="/capabilities#checks-resolutions">Checks &amp; resolutions</a> — not this page.
-</p>
+<p class="text-muted text-sm mb-1">Audit log of LLM decide-points (approve/reject/gate) — Events owns the chronological stream.</p>
+<p class="text-muted text-sm mb-2">For what Assess checks and what Scan will PR, see <a href="/capabilities#checks-resolutions">Checks &amp; resolutions</a> — not this page.</p>
 
 {# Outcome vocabulary spans all four decision types (see llm_decisions.py's
    module docstring) -- classified once here instead of a two-case ternary,
@@ -40,50 +29,6 @@
     <div class="stat-value">{{ attributions|length }}</div>
   </div>
 </div>
-
-<h2 class="section-title">By Agent / Skill</h2>
-<p class="text-muted mb-1">How often the LLM approves vs. rejects/gates each agent's or skill's output.</p>
-
-{% if summary %}
-<table>
-  <thead>
-    <tr>
-      <th>Decision Type</th>
-      <th>Attribution</th>
-      <th>Kind</th>
-      <th>Total</th>
-      <th>Outcomes</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for g in summary %}
-    <tr>
-      <td class="text-sm">{{ g.decision_type }}</td>
-      <td class="text-bold">{{ g.attribution }}</td>
-      <td>
-        {% if g.attribution_kind == 'skill' %}
-          <span class="badge badge-info">skill</span>
-        {% elif g.attribution_kind == 'agent' %}
-          <span class="badge badge-success">agent</span>
-        {% else %}
-          <span class="badge badge-muted">component</span>
-        {% endif %}
-      </td>
-      <td>{{ g.total }}</td>
-      <td class="text-sm">
-        {% for outcome, count in g.outcomes.items() %}
-        <span class="badge badge-{{ 'success' if outcome in success_outcomes else 'warning' if outcome in warning_outcomes else 'danger' }}">{{ outcome }}: {{ count }}</span>
-        {% endfor %}
-      </td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% else %}
-<div class="empty-state">
-  <p>No LLM decisions logged yet. Run self-fix or Assess a repo (which runs the secret classifier) to see data here.</p>
-</div>
-{% endif %}
 
 <h2 class="section-title">Decision Log</h2>
 <details class="filter-panel" open>
@@ -147,4 +92,53 @@
   <p class="text-muted">Try clearing the filter above.</p>
 </div>
 {% endif %}
+
+<div x-data="{ open: false }" class="mt-2">
+  <button type="button" class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
+    By Agent / Skill
+  </button>
+  <div class="collapse-body" x-show="open" x-transition>
+    <p class="text-muted mb-1">How often the LLM approves vs. rejects/gates each agent's or skill's output.</p>
+    {% if summary %}
+    <table>
+      <thead>
+        <tr>
+          <th>Decision Type</th>
+          <th>Attribution</th>
+          <th>Kind</th>
+          <th>Total</th>
+          <th>Outcomes</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for g in summary %}
+        <tr>
+          <td class="text-sm">{{ g.decision_type }}</td>
+          <td class="text-bold">{{ g.attribution }}</td>
+          <td>
+            {% if g.attribution_kind == 'skill' %}
+              <span class="badge badge-info">skill</span>
+            {% elif g.attribution_kind == 'agent' %}
+              <span class="badge badge-success">agent</span>
+            {% else %}
+              <span class="badge badge-muted">component</span>
+            {% endif %}
+          </td>
+          <td>{{ g.total }}</td>
+          <td class="text-sm">
+            {% for outcome, count in g.outcomes.items() %}
+            <span class="badge badge-{{ 'success' if outcome in success_outcomes else 'warning' if outcome in warning_outcomes else 'danger' }}">{{ outcome }}: {{ count }}</span>
+            {% endfor %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+      <p>No LLM decisions logged yet. Run self-fix or Assess a repo (which runs the secret classifier) to see data here.</p>
+    </div>
+    {% endif %}
+  </div>
+</div>
 {% endblock %}

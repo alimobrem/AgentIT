@@ -95,7 +95,7 @@ flowchart LR
 
 **Live catalog:** Capabilities → **Checks & resolutions** (`/capabilities#checks-resolutions`) and `GET /api/check-catalog`. Built from `portal/check_catalog.py` so the UI cannot drift from `SOLUTION_CONTRACTS`.
 
-**Portal map:** Capabilities = definitions + contracts; Assessment Detail = per-finding badges + Fix only for remediable; Insights = check pass rates + contract annotation; Ledger/Fleet = PRs/scores; **Health** = platform self-health (not app checks); **Decisions** = LLM approve/reject audit (not the check catalog).
+**Portal map:** Capabilities = definitions + contracts; Assessment Detail = per-finding badges + Fix only for remediable; Insights = fleet rollup + contract badges (deep-links to Agents/Capabilities/Decisions/Ledger — not duplicate tables); Ledger/Fleet = PRs/scores (Fleet table omits Namespace/Trend); **Health** = tabbed platform telemetry (Overview / Workloads / Messaging / Access — not app checks); **Schedules** = CronWorkflows + reminders (watcher status via Agents); **Decisions** = LLM approve/reject audit leading with filter + log (not the check catalog).
 
 ### Image promotion (live portal)
 
@@ -270,7 +270,7 @@ The loop above (`skill-learner`) improves what AgentIT *generates for other apps
 - A **Self-Improvement** tab on the Capabilities page (`/capabilities/self-improvement`) — a "Self-Improvement Runs" table mirroring "Learning Agent Runs" (timestamp, trigger, evidence considered, distinct outcome badges for `proposed` / `already-implemented` / `gate-blocked` / `no-signal` / …, live PR status), plus a **Cited merges (L4)** panel from recent `capability-outcome` rows.
 - A per-run drill-through (`/capabilities/self-improvement/runs/{event_id}`) mirroring `/capabilities/skills/{name}/history`'s layout: evidence, `cited_merges` / proposal-outcome context, a per-gate pass/fail table, and the resulting PR's live status — polled via the same `github_pr.get_pr_status()` call `onboarding_history()` already uses, no `gh` needed inside the portal process itself.
 - A `capability-proposal` entry on the **Decisions** page (`llm_decisions.py`), filterable alongside every other real LLM decision, attributed to the `capability-scout` component.
-- A one-line addition to the **Schedules** page's watcher table (`WATCHER_AGENTS`) — real heartbeat-derived status, zero new route/template code, the same mechanism every other watcher already gets for free.
+- Watcher heartbeat status surfaces on **Agents** (Schedules links there for long-lived agents; CronWorkflows/reminders stay on Schedules).
 
 GitHub's own PR UI stays the surface for reviewing the actual code diff; the portal is where a human sees what the loop considered and why.
 

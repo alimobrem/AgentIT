@@ -68,30 +68,7 @@
   </div>
 </div>
 
-{% if watchers %}
-<h2 class="section-title">Long-Lived Agents</h2>
-<table>
-  <thead>
-    <tr><th>Agent</th><th>Mode</th><th>Interval</th><th>Status</th></tr>
-  </thead>
-  <tbody>
-    {% for w in watchers %}
-    <tr>
-      <td class="text-bold"><a href="/agents/{{ w.name }}">{{ w.name }}</a></td>
-      <td>{{ w.mode }}</td>
-      <td>{{ w.interval }}</td>
-      <td>
-        {% if w.status == "active" %}
-          <span class="badge badge-low">active</span>
-        {% else %}
-          <span class="badge badge-medium">{{ w.status }}</span>
-        {% endif %}
-      </td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% endif %}
+<p class="text-muted text-sm mb-1">Watcher / long-lived agent status: <a href="/agents">Agents</a>{% if watchers %} ({{ watchers | length }} active){% endif %}.</p>
 
 {% if schedules %}
 <h2 class="section-title">Scheduled CronWorkflows</h2>

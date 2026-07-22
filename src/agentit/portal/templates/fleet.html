@@ -51,9 +51,7 @@
     <tr>
       <th>Application</th>
       <th>Score</th>
-      <th>Trend</th>
       <th>Deployed</th>
-      <th>Namespace</th>
       <th title="How much oversight this app needs -- set at Assess time, not inferred. High/critical apps can never auto-deliver (a human must click Deliver, then merge the resulting PR) and get stricter default SLO targets.">Criticality</th>
       <th>Critical + High</th>
       <th title="PRs AgentIT has opened for this app against its code repo and/or GitOps infra repo">Open PRs / Total</th>
@@ -118,15 +116,6 @@
         {% else %} text-danger{% endif %}
       ">{{ "%.0f"|format(r.latest_score) }}</td>
       <td>
-        {% if r.delta is not none and r.delta != 0 %}
-          <span class="trend {% if r.delta > 0 %}trend-up{% else %}trend-down{% endif %}">
-            {% if r.delta > 0 %}&#9650;+{{ "%.0f"|format(r.delta) }}{% else %}&#9660;{{ "%.0f"|format(r.delta) }}{% endif %}
-          </span>
-        {% else %}
-          <span class="text-muted">&mdash;</span>
-        {% endif %}
-      </td>
-      <td>
         {% if r.deploy_status == "synced" %}
           <span class="badge badge-low">synced</span>
         {% elif r.deploy_status == "applied" %}
@@ -148,7 +137,6 @@
           <span class="badge badge-warning" title="No GitOps infra repo known for this app -- register it for GitOps before it can be delivered">Not GitOps-registered</span>
         {% endif %}
       </td>
-      <td class="text-sm text-muted">{{ r.deploy_namespace | default("—") }}</td>
       <td>
         <span class="badge badge-{{ r.criticality }}"
           title="How much oversight this app needs -- set at Assess time, not inferred. High/critical apps can never auto-deliver (a human must click Deliver before any PR opens) and get stricter default SLO targets.">{{ r.criticality }}</span>
