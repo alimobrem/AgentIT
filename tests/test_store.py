@@ -544,6 +544,20 @@ class TestReapOrphanedJobs:
     that fallback correctly re-checks the job's real status, but a job
     orphaned by a pod restart never *has* a terminal status to find."""
 
+    def test_default_max_age_above_gen_plus_delivery_ceiling(self):
+        """Default must stay above ONBOARD_GENERATION_TIMEOUT (600) +
+        auto-delivery (600) ≈ 1200s or slow live jobs false-fail as
+        'Interrupted by a service restart'."""
+        import inspect
+
+        from agentit.portal.helpers import ONBOARD_GENERATION_TIMEOUT
+        from agentit.portal.store.jobs import JobsMixin
+
+        default = inspect.signature(JobsMixin.reap_orphaned_jobs).parameters[
+            "max_age_seconds"
+        ].default
+        assert default >= ONBOARD_GENERATION_TIMEOUT + 600 + 300
+
     async def test_fails_a_job_stuck_past_max_age(self, store):
         aid = await store.save(_make_report("orphaned-onboard-app"))
         job_id = await store.create_remediation_job(aid)

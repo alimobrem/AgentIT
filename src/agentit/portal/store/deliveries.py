@@ -200,7 +200,7 @@ class DeliveriesMixin:
         )
         return row is not None
 
-    async def claim_delivery_lock(self, lock_key: str, stale_after_seconds: int = 900) -> bool:
+    async def claim_delivery_lock(self, lock_key: str, stale_after_seconds: int = 1800) -> bool:
         """Atomically claim a per-app mutex around the actual
         delivery-commit step (``portal/delivery.py::route_and_deliver()``).
 
@@ -221,12 +221,12 @@ class DeliveriesMixin:
         problem -- extended here with a staleness override (``ON CONFLICT
         ... DO UPDATE ... WHERE ...``, still one atomic statement) so a
         lock left behind by a process that crashed mid-delivery doesn't
-        block that app's deliveries forever: 900s mirrors
-        ``reap_orphaned_jobs()``'s existing staleness-recovery window
-        (comfortably above ``with_timeout``'s 300s operation ceiling), the
-        established precedent in this codebase for "how long can a
-        real in-progress operation take before assuming the process that
-        started it is gone."
+        block that app's deliveries forever: 1800s mirrors
+        ``reap_orphaned_jobs()``'s staleness-recovery window (above
+        onboard generation 600s + auto-delivery 600s ≈ 1200s worst case),
+        the established precedent for "how long can a real in-progress
+        operation take before assuming the process that started it is
+        gone."
 
         Callers must call ``release_delivery_lock()`` (in a ``finally``)
         once the delivery-commit step is done, win or lose -- see

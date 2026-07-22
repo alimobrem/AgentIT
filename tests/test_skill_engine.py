@@ -172,6 +172,84 @@ class TestLLMPassthrough:
         assert len(fake_llm.calls) == 1
         assert len(files) == 1
 
+    def test_run_all_generates_multiple_skills_concurrently(self, tmp_path: Path) -> None:
+        """Matched skills must overlap in wall-clock time (ThreadPoolExecutor),
+        not run strictly sequentially — live AgentIT onboard hit the old 300s
+        ceiling on sequential LLM calls for many skills."""
+        import threading
+        import time
+        from unittest.mock import patch
+
+        (tmp_path / "infrastructure").mkdir()
+        # Avoid HPA: fleet generate() skips it offline without a live target.
+        for name, kind in (("pdb", "PodDisruptionBudget"), ("resourcequota", "ResourceQuota")):
+            (tmp_path / "infrastructure" / f"{name}.md").write_text(
+                "---\n"
+                f"name: {name}\n"
+                "domain: infrastructure\n"
+                "version: 1\n"
+                "triggers:\n"
+                "  - zzznomatch\n"
+                "outputs:\n"
+                f"  - {kind}\n"
+                f"property: {name}\n"
+                "mode: template\n"
+                "---\n\n"
+                f"# {name}\n\n"
+                "```yaml\n"
+                "apiVersion: policy/v1\n"
+                f"kind: {kind}\n"
+                "metadata:\n"
+                "  name: {{app_name}}-" + name + "\n"
+                "```\n",
+                encoding="utf-8",
+            )
+        engine = SkillEngine(tmp_path, platform=None)
+        from agentit.models import DimensionScore, Finding, Severity
+
+        report = make_report()
+        report.scores = [
+            DimensionScore(
+                dimension="ha_dr", score=40, max_score=100,
+                findings=[
+                    Finding(
+                        category="availability", severity=Severity.medium,
+                        description="No PodDisruptionBudget", recommendation="Add PDB",
+                    ),
+                    Finding(
+                        category="quota", severity=Severity.medium,
+                        description="No ResourceQuota", recommendation="Add quota",
+                    ),
+                ],
+            ),
+        ]
+        assert {s.name for s in engine.match(report)} == {"pdb", "resourcequota"}
+
+        inflight = 0
+        max_inflight = 0
+        lock = threading.Lock()
+        orig = SkillEngine.generate
+
+        def _slow_generate(self, skill, report, **kwargs):
+            nonlocal inflight, max_inflight
+            with lock:
+                inflight += 1
+                max_inflight = max(max_inflight, inflight)
+            time.sleep(0.08)
+            try:
+                return orig(self, skill, report, **kwargs)
+            finally:
+                with lock:
+                    inflight -= 1
+
+        with patch.object(SkillEngine, "generate", _slow_generate):
+            files = engine.run_all(report, llm_client=None)
+
+        assert len(files) == 2
+        assert max_inflight >= 2, (
+            f"expected concurrent generate(); max_inflight={max_inflight}"
+        )
+
 
 _TWO_PLACEHOLDER_TEMPLATE_BODY = """# Two-placeholder template (regression fixture)
 
@@ -759,6 +837,88 @@ class TestDetectModeNeverRemediates:
             f"{f.category} {f.description} {f.recommendation}"
             for s in report.scores for f in s.findings
         )
+        matched = engine.match(report)
+        assert [s.name for s in matched] == ["hpa"]
+
+    def test_match_with_open_findings_skips_unrelated_trigger_skills(
+        self, tmp_path: Path,
+    ) -> None:
+        """Open findings must not pull in every trigger-matched catalog skill.
+
+        Live AgentIT self-managed Onboards at score ~96 timed out at the
+        generation ceiling after sequential LLM calls for 10+ unrelated
+        skills that auto_delivery's finding gate would have dropped anyway.
+        """
+        (tmp_path / "infrastructure").mkdir()
+        (tmp_path / "compliance").mkdir()
+        (tmp_path / "infrastructure" / "hpa.md").write_text(
+            "---\n"
+            "name: hpa\n"
+            "domain: infrastructure\n"
+            "version: 1\n"
+            "triggers:\n"
+            "  - zzznomatch-trigger\n"
+            "outputs:\n"
+            "  - HorizontalPodAutoscaler\n"
+            "property: scales\n"
+            "mode: template\n"
+            "---\n\n"
+            "# HPA\n\n"
+            "```yaml\n"
+            "apiVersion: autoscaling/v2\n"
+            "kind: HorizontalPodAutoscaler\n"
+            "metadata:\n"
+            "  name: {{app_name}}-hpa\n"
+            "```\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "compliance" / "kyverno-require-labels.md").write_text(
+            "---\n"
+            "name: kyverno-require-labels\n"
+            "domain: compliance\n"
+            "version: 1\n"
+            "triggers:\n"
+            "  - python\n"
+            "  - fastapi\n"
+            "  - kubernetes\n"
+            "outputs:\n"
+            "  - ClusterPolicy\n"
+            "property: labeled\n"
+            "mode: template\n"
+            "---\n\n"
+            "# Labels\n\n"
+            "```yaml\n"
+            "apiVersion: kyverno.io/v1\n"
+            "kind: ClusterPolicy\n"
+            "metadata:\n"
+            "  name: {{app_name}}-labels\n"
+            "```\n",
+            encoding="utf-8",
+        )
+        engine = SkillEngine(tmp_path, platform=None)
+        from agentit.models import DimensionScore, Finding, Severity
+
+        report = make_report()
+        # Summary would match kyverno's python/fastapi/kubernetes triggers —
+        # findings-only haystack must not.
+        report.summary = (
+            "This is a Python FastAPI application on Kubernetes with extensive docs."
+        )
+        report.scores = [
+            DimensionScore(
+                dimension="ha_dr",
+                score=50,
+                max_score=100,
+                findings=[
+                    Finding(
+                        category="scaling",
+                        severity=Severity.medium,
+                        description="No HorizontalPodAutoscaler defined",
+                        recommendation="Add HPA for automatic scaling under load",
+                    ),
+                ],
+            ),
+        ]
         matched = engine.match(report)
         assert [s.name for s in matched] == ["hpa"]
 

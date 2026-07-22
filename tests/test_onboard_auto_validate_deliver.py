@@ -176,8 +176,9 @@ class TestRunOnboardingJobAutomaticallyValidatesAndDelivers:
 
     async def test_timeout_without_manifests_still_fails(self, onboard_client):
         """A timeout before any onboarding row exists is a real generation
-        failure -- keep the honest ``failed`` / "no manifests" message so
-        humans retry Onboard rather than landing on an empty Results page."""
+        failure -- stay ``failed`` with a generation-timeout message (not
+        "repo unreachable") so humans retry Onboard/Scan rather than
+        landing on an empty Results page."""
         _client, store = onboard_client
         aid = await _seed_assessment(store, repo_name="onboard-timeout-empty-app")
         job_id = await store.create_remediation_job(aid)
@@ -192,8 +193,60 @@ class TestRunOnboardingJobAutomaticallyValidatesAndDelivers:
 
         job = await store.get_remediation_job(job_id)
         assert job["status"] == "failed", job
-        assert "no manifests were generated" in (job.get("error") or "")
+        err = job.get("error") or ""
+        assert "generation timed out" in err.lower()
+        assert "reachable" not in err.lower()
         assert await store.get_onboarding(aid) is None
+
+    async def test_generation_timeout_message_suggests_scan(self, onboard_client):
+        """Generation-ceiling timeout (no saved manifests) must not claim the
+        repo is unreachable — surface Scan as the remediation path."""
+        _client, store = onboard_client
+        aid = await _seed_assessment(store, repo_name="onboard-gen-timeout-app")
+        job_id = await store.create_remediation_job(aid)
+
+        with patch.object(
+            onboard_pipeline, "_run_onboarding",
+            side_effect=HTTPException(504, "Operation timed out after 600s"),
+        ):
+            await onboard_pipeline._run_onboarding_job(job_id, aid, "http://testserver")
+
+        job = await store.get_remediation_job(job_id)
+        assert job["status"] == "failed", job
+        err = job.get("error") or ""
+        assert "generation timed out" in err.lower()
+        assert "scan" in err.lower()
+        assert await store.get_onboarding(aid) is None
+
+    async def test_generation_uses_onboard_generation_timeout(self, onboard_client):
+        """Portal onboard BackgroundTasks path must pass ONBOARD_GENERATION_TIMEOUT
+        (600), not the default OPERATION_TIMEOUT (300)."""
+        from agentit.portal.helpers import ONBOARD_GENERATION_TIMEOUT
+
+        _client, store = onboard_client
+        aid = await _seed_assessment(store, repo_name="onboard-gen-ceiling-app")
+        job_id = await store.create_remediation_job(aid)
+        captured: dict = {"timeouts": []}
+
+        async def _track(coro, timeout=300):
+            captured["timeouts"].append(timeout)
+            return await coro
+
+        with patch.object(onboard_pipeline, "with_timeout", side_effect=_track), \
+             patch.object(
+                 onboard_pipeline, "_run_onboarding",
+                 return_value=([_cluster_config_file()], _ORCH_SUMMARY_AUTO_APPROVE),
+             ), \
+             patch("agentit.portal.github_pr.ensure_webhook", return_value={"created": False}), \
+             patch(
+                 "agentit.portal.auto_delivery.auto_validate_and_deliver",
+                 return_value={"status": "delivered", "pr_urls": ["https://example.com/pr/1"], "reason": ""},
+             ):
+            await onboard_pipeline._run_onboarding_job(job_id, aid, "http://testserver")
+
+        # First with_timeout call is generation; second is auto-delivery (600).
+        assert captured["timeouts"], "with_timeout was never called"
+        assert captured["timeouts"][0] == ONBOARD_GENERATION_TIMEOUT
 
 
 class TestAssessOnboardChainNeverAutoDelivers:

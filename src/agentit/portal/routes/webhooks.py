@@ -14,7 +14,12 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from agentit.portal.helpers import (
-    clone_assess_cleanup, get_store, publish_event, run_onboarding, with_timeout,
+    ONBOARD_GENERATION_TIMEOUT,
+    clone_assess_cleanup,
+    get_store,
+    publish_event,
+    run_onboarding,
+    with_timeout,
 )
 
 log = logging.getLogger(__name__)
@@ -378,7 +383,10 @@ async def webhook_onboard(request: Request):
     # async -- await it directly, no more .raw/to_thread bridge needed for
     # this call path.
     try:
-        files, orch_summary = await with_timeout(run_onboarding(report, assessment_id, s))
+        files, orch_summary = await with_timeout(
+            run_onboarding(report, assessment_id, s),
+            timeout=ONBOARD_GENERATION_TIMEOUT,
+        )
     except HTTPException:
         raise
     except Exception as exc:

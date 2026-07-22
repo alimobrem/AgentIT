@@ -173,7 +173,7 @@ class JobsMixin:
             result.append(d)
         return result
 
-    async def reap_orphaned_jobs(self, max_age_seconds: int = 900) -> list[dict]:
+    async def reap_orphaned_jobs(self, max_age_seconds: int = 1800) -> list[dict]:
         """Fails any assess/onboard job still non-terminal well past every
         real deadline that could keep it legitimately in progress.
 
@@ -187,12 +187,11 @@ class JobsMixin:
         anything polling it (the onboarding SSE stream/progress page,
         assess's progress page) waits on a status that will never change.
 
-        A job that's still genuinely in progress in a live process can
-        never be older than ``with_timeout``'s ``OPERATION_TIMEOUT``
-        (300s) for the core clone/assess/onboard work, plus a small buffer
-        for the fast save/image-build-trigger/webhook steps around it --
-        900s leaves a wide margin over that before treating a row as
-        orphaned rather than merely slow.
+        Worst-case live onboard: ``ONBOARD_GENERATION_TIMEOUT`` (600s) +
+        auto-delivery's 600s ceiling = ~1200s before a terminal status.
+        Default 1800s stays above that so a slow-but-alive job is never
+        false-failed as "Interrupted by a service restart". Assess/webhook
+        paths stay under ``OPERATION_TIMEOUT`` (300s) and are unaffected.
         """
         cutoff = _now() - timedelta(seconds=max_age_seconds)
         rows = await self._pool.fetch(

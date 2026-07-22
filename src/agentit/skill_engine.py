@@ -200,13 +200,19 @@ class Skill:
         return any(t.lower() in haystack for t in self.triggers)
 
 
-def _report_text(report: AssessmentReport) -> str:
-    """Flatten a report into a single searchable string."""
-    parts = [report.summary]
+def _findings_text(report: AssessmentReport) -> str:
+    """Flatten open findings (no summary) for remediation-scoped matching."""
+    parts: list[str] = []
     for score in report.scores:
         parts.append(score.dimension)
         for f in score.findings:
             parts.extend([f.category, f.description, f.recommendation])
+    return " ".join(parts)
+
+
+def _report_text(report: AssessmentReport) -> str:
+    """Flatten a report into a single searchable string."""
+    parts = [report.summary, _findings_text(report)]
     return " ".join(parts)
 
 
@@ -424,30 +430,53 @@ class SkillEngine:
         logger.info("Loaded %d skills from %s", len(self.skills), self.skills_dir)
 
     def match(self, report: AssessmentReport) -> list[Skill]:
-        """Return all skills whose triggers match the report.
+        """Return skills to generate for this report.
 
-        Retired/draft skills are excluded by Skill.matches().
-        Conflicts between active and deprecated skills are resolved (active wins).
+        When the assessment has open findings, match against *finding text
+        only* (dimension/category/description/recommendation) — never the
+        free-form ``summary``. Live AgentIT self-managed Onboards at score
+        ~96 timed out because ``Skill.matches`` haystack includes the long
+        stack summary ("Python", "Kubernetes", …), pulling in 10+ catalog
+        skills; each sequential LLM call (× self-managed reject/retry)
+        burned the generation ceiling before auto_delivery's finding gate
+        could drop the junk. FIX_REGISTRY skills for each open finding
+        category are always included via ``skill_for_category``.
 
-        Also includes the FIX_REGISTRY skill for every open finding category
-        (via ``skill_for_category``), even when that skill's trigger keywords
-        would not have matched the report prose. Pinky-class Scans with open
-        ``quota``/``scaling``/``audit`` findings must still attempt those
-        remediations; trigger-only matching previously depended on summary
-        text luck and left categories with a registry skill unattempted when
-        generation was filtered to open findings only.
+        Greenfield reports with no open findings still use full-report
+        trigger matching (including summary) so Onboard Results can
+        populate a catalog.
+
+        Retired/draft skills are excluded. Conflicts resolve active-over-
+        deprecated via ``_resolve_conflicts``.
         """
-        matched = [s for s in self.skills if s.matches(report)]
-        by_name = {s.name: s for s in matched}
+        by_name: dict[str, Skill] = {}
+        has_open_findings = False
         for score in report.scores:
             for finding in score.findings:
+                has_open_findings = True
                 skill = self.skill_for_category(finding.category)
                 if skill is None or skill.name in by_name:
                     continue
                 if skill.mode == "detect" or skill.status in ("retired", "draft"):
                     continue
                 by_name[skill.name] = skill
-        return self._resolve_conflicts(list(by_name.values()))
+
+        if has_open_findings:
+            haystack = _findings_text(report).lower()
+            for skill in self.skills:
+                if skill.name in by_name:
+                    continue
+                if skill.mode == "detect" or skill.status in ("retired", "draft"):
+                    continue
+                if any(t.lower() in haystack for t in skill.triggers):
+                    if skill.status == "deprecated":
+                        # Mirror Skill.matches warning path for consistency.
+                        logger.warning("Skill '%s' is deprecated", skill.name)
+                    by_name[skill.name] = skill
+            return self._resolve_conflicts(list(by_name.values()))
+
+        matched = [s for s in self.skills if s.matches(report)]
+        return self._resolve_conflicts(matched)
 
     @staticmethod
     def _resolve_conflicts(skills: list[Skill]) -> list[Skill]:
@@ -760,6 +789,12 @@ class SkillEngine:
 
         return []
 
+    # Cap concurrent skill LLM/_chat calls. Anthropic SDK + locked
+    # ``llm_breaker`` are safe under shared-client multi-thread use
+    # (see ``LLMClient``); five keeps Vertex/API rate limits sane while
+    # collapsing the old sequential N×latency wall-clock cost.
+    _RUN_ALL_MAX_WORKERS = 5
+
     def run_all(
         self,
         report: AssessmentReport,
@@ -787,22 +822,23 @@ class SkillEngine:
           passed to LLM generation as extra guidance (see
           ``_generate_with_llm``'s ``human_override`` param).
 
-        This method itself stays synchronous (it's invoked via
-        ``asyncio.to_thread`` from the one async production call site,
-        ``FleetOrchestrator.run()``) -- ``store``'s coroutine methods are
-        bridged back onto ``loop`` (the event loop that constructed the
-        store, captured by the caller before dispatching to a worker
-        thread) via ``asyncio.run_coroutine_threadsafe``, the same pattern
-        ``EventConsumer._persist_dead_letter`` uses for the identical
-        constraint.
+        Generation of matched skills runs concurrently (ThreadPoolExecutor,
+        up to ``_RUN_ALL_MAX_WORKERS``) sharing one ``llm_client``. Store
+        rejection/override lookups stay sequential on this thread before
+        the pool starts — those bridge onto ``loop`` via
+        ``asyncio.run_coroutine_threadsafe`` and must not race from pool
+        workers. This method itself stays synchronous (invoked via
+        ``asyncio.to_thread`` from ``FleetOrchestrator.run()``).
         """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         def _bridge(result):
             if not asyncio.iscoroutine(result):
                 return result
             return asyncio.run_coroutine_threadsafe(result, loop).result(timeout=30)
 
         matched = self.match(report)
-        all_files: list[GeneratedFile] = []
+        work: list[tuple[Skill, str | None]] = []
         for skill in matched:
             if store is not None:
                 try:
@@ -828,8 +864,40 @@ class SkillEngine:
                     logger.warning("get_human_override lookup failed for %s/%s",
                                    report.repo_name, skill.domain, exc_info=True)
 
-            files = self.generate(skill, report, llm_client=llm_client, human_override=human_override)
-            all_files.extend(files)
+            work.append((skill, human_override))
+
+        if not work:
+            return []
+        if len(work) == 1:
+            skill, human_override = work[0]
+            return self.generate(
+                skill, report, llm_client=llm_client, human_override=human_override,
+            )
+
+        all_files: list[GeneratedFile] = []
+        max_workers = min(self._RUN_ALL_MAX_WORKERS, len(work))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(
+                    self.generate, skill, report,
+                    llm_client=llm_client, human_override=human_override,
+                ): skill
+                for skill, human_override in work
+            }
+            # Preserve match order for stable downstream manifests / tests.
+            by_skill = {skill.name: [] for skill, _ in work}
+            for fut in as_completed(futures):
+                skill = futures[fut]
+                try:
+                    by_skill[skill.name] = fut.result()
+                except Exception:
+                    logger.warning(
+                        "Skill %s generation failed in run_all pool",
+                        skill.name, exc_info=True,
+                    )
+                    by_skill[skill.name] = []
+            for skill, _ in work:
+                all_files.extend(by_skill.get(skill.name, []))
         return all_files
 
     def covered_domains(self, files: list[GeneratedFile]) -> set[str]:

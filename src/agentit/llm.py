@@ -216,6 +216,13 @@ class LLMClient:
     Backend selection (same as pulse-agent):
     - ANTHROPIC_VERTEX_PROJECT_ID + CLOUD_ML_REGION → Vertex AI
     - ANTHROPIC_API_KEY → direct Anthropic API
+
+    Thread safety: one shared instance may call ``_chat`` from multiple
+    worker threads (``SkillEngine.run_all`` ThreadPoolExecutor). Each
+    ``messages.create`` is an independent HTTP request on the SDK client;
+    the shared ``llm_breaker`` is protected by a ``threading.Lock``. Do not
+    mutate ``self.model`` / ``self._client`` after construction from those
+    workers.
     """
 
     DEFAULT_MODEL = os.environ.get("AGENTIT_LLM_MODEL", "claude-sonnet-4-6")
