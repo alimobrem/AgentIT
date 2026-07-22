@@ -6,7 +6,8 @@
 
 | Doc | Role |
 | --- | --- |
-| [../README.md](../README.md) | Product contract, architecture at a glance, setup |
+| [../README.md](../README.md) | Product blurb, core loop, quick start |
+| [release-notes.md](./release-notes.md) | Product contract, solution contracts, portal IA, promotion |
 | [architecture.md](./architecture.md) | System diagrams, Scan pipeline, obsolete paths |
 | [architecture-agentit-vs-fleet-gitops.md](./architecture-agentit-vs-fleet-gitops.md) | **Normative** self-managed vs fleet delivery |
 | [deployment.md](./deployment.md) | OpenShift / Argo / Tekton ops runbook |
@@ -20,7 +21,7 @@
 - SSA dry-run preflight; humans merge; Argo deploys
 - Fleet: `apps/{app}/` + AppSet recurse; AgentIT: Helm `chart/` (never `apps/agentit/`)
 
-**Solution contracts + catalog:** Every analyzer category is contracted (remediable or detect-only). Live UI: Capabilities → [Checks & resolutions](../README.md#checks-vs-resolutions-layers) (`portal/check_catalog.py`, `/api/check-catalog`). See README **Solution contracts** and **Checks vs resolutions**.
+**Solution contracts + catalog:** Every analyzer category is contracted (remediable or detect-only). Live UI: Capabilities → Checks & resolutions (`portal/check_catalog.py`, `/api/check-catalog`). Detail: [release-notes.md](./release-notes.md#solution-contracts).
 
 ## Historical / planning (do not treat as live product)
 

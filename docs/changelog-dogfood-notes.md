@@ -1,13 +1,12 @@
 # Dogfood / session notes (historical)
 
+**Status: historical.** Product pitch: [README.md](../README.md). Product contract / release detail: [release-notes.md](./release-notes.md). Architecture: [architecture.md](./architecture.md). This file preserves dated dogfood/session writeups that used to dominate the README.
+
+**Crisp portal IA (2026-07-22).** [#160](https://github.com/alimobrem/AgentIT/pull/160) — fixed masthead + footer; Assessment/Capabilities/Health/Insights/Onboard/Fleet/Schedules/Decisions density cuts. Summary: [release-notes.md](./release-notes.md#portal-ia-crisp-chrome).
+
 **Solution-contract hardening (2026-07-22).** [#154](https://github.com/alimobrem/AgentIT/pull/154) landed `SOLUTION_CONTRACTS`. Follow-up hardens: every analyzer category contracted (`detect_only` / `auto_pr=False` for license/backup/retention/logging/instrumentation/secrets); machine `evidence_kind` + pre-open simulation gate (`remediation/clear_evidence.py` wired in `auto_delivery`); skill↔contract CI drift tests; fleet `apps/{app}/` vs self-managed `chart/` path hints in PR bodies; Assessment Detail PR cards show Clears-X-by-Y lines. Supersedes closed [#155](https://github.com/alimobrem/AgentIT/pull/155) (do not revive substring `contract_for`).
 
 **Checks & resolutions portal catalog (2026-07-22).** `portal/check_catalog.py` merges analyzers + detect skills + `SOLUTION_CONTRACTS` for Capabilities **Checks & resolutions** (`/capabilities#checks-resolutions`, `GET /api/check-catalog`). Assessment Detail badges findings remediable/detect-only; Fix CTA only when `allows_auto_pr`. Insights annotates check compliance + links to Capabilities. Health/Decisions stay orthogonal (footnotes only).
-
-**Status: historical.** Product-facing truth lives in [README.md](../README.md) and
-[architecture.md](./architecture.md). This file preserves dated dogfood/session
-writeups that used to dominate the README so they remain searchable without
-misleading a first-time reader.
 
 Last archived from tip of `main` during the post-dogfood docs rewrite (2026-07-22).
 
