@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 # improvement_cooldown_attempts).
 MAX_VALIDATION_ITERATIONS = 3
 
-# property_verifier.verify_all_properties()'s four checks are the one
+# property_verifier.verify_all_properties()'s checks are the one
 # genuinely structural "does the generated content actually satisfy this
 # property" signal that exists today (route_and_deliver(dry_run=True) only
 # ever reports delivery-mechanism-blocking errors -- missing GitOps
@@ -58,11 +58,21 @@ MAX_VALIDATION_ITERATIONS = 3
 # regenerate a fix for, so a failed property can actually be retried with
 # the SAME machinery a human's "Fix" button on Assessment Detail uses,
 # rather than a second, parallel fix mechanism.
+#
+# "Health Probes" (property_verifier._verify_health_probes, added alongside
+# skills/infrastructure/health-probes-policy.md) closes the 4-checks-only
+# scope gap flagged for this dict: "health" is the one category among
+# iac/manifests/health with a genuinely mechanically-checkable structural
+# property (a container either has both probes or it doesn't) -- unlike
+# iac/manifests (a whole Helm chart's *correctness* isn't reducible to a
+# single structural check beyond "is it valid YAML/schema", so no property
+# check was added for those; see skills/infrastructure/helm-chart.md).
 _PROPERTY_TO_FIX_CATEGORY: dict[str, str] = {
     "Network Isolation": "network",
     "RBAC": "rbac",
     "Autoscaling": "autoscaling",
     "Monitoring": "monitoring",
+    "Health Probes": "health",
 }
 
 

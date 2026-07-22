@@ -263,6 +263,282 @@ def _app_audit_logging_patch(skill: "Skill", report: AssessmentReport) -> list[G
     )]
 
 
+def _port_for_language(lang: str) -> int:
+    """Same convention already established in ``agents/codechange.py``'s
+    ``_fix_dockerfile`` -- reused (not reinvented) so this skill's port
+    default agrees with the rest of this codebase's own precedent."""
+    return 3000 if lang in ("node", "javascript", "typescript") else 8080
+
+
+_HELM_CHART_FILE_RE = re.compile(
+    r"===FILE:\s*(.+?)\s*===\n(.*?)(?=\n===FILE:|\n===END===|\Z)", re.DOTALL,
+)
+_HELM_CHART_MAX_FILES = 8
+_HELM_REQUIRED_FILE = "Chart.yaml"
+_HELM_YAML_TEMPLATE_DIR = "templates/"
+
+
+def _parse_llm_multi_file_response(raw: str) -> dict[str, str]:
+    """Parse skill body's ``===FILE: <path>===`` delimited multi-file
+    protocol. Returns ``{relative_path: content}``, capped at
+    ``_HELM_CHART_MAX_FILES`` entries (defense against a runaway response)."""
+    files: dict[str, str] = {}
+    for match in _HELM_CHART_FILE_RE.finditer(raw or ""):
+        path = match.group(1).strip().lstrip("/")
+        content = match.group(2)
+        if not path or not content.strip():
+            continue
+        files[path] = content if content.endswith("\n") else content + "\n"
+        if len(files) >= _HELM_CHART_MAX_FILES:
+            break
+    return files
+
+
+def _validate_helm_chart_files(files: dict[str, str]) -> list[str]:
+    """Real validation gate for a candidate Helm chart -- every failure
+    reason returned here is why this skill refuses the LLM's output and
+    falls back to the deterministic template instead of shipping something
+    "plausible-looking" but wrong (per the plan's "a wrong chart is worse
+    than no chart" principle).
+    """
+    import yaml
+
+    from agentit.agents.base import validate_manifest
+    from agentit.skill_engine import _PLACEHOLDER_RE
+
+    errors: list[str] = []
+    if _HELM_REQUIRED_FILE not in files:
+        errors.append(f"missing required {_HELM_REQUIRED_FILE}")
+        return errors
+
+    try:
+        chart_doc = yaml.safe_load(files[_HELM_REQUIRED_FILE])
+    except yaml.YAMLError as exc:
+        return [f"{_HELM_REQUIRED_FILE}: YAML parse error: {exc}"]
+    if not isinstance(chart_doc, dict) or not chart_doc.get("name") or not chart_doc.get("version"):
+        errors.append(f"{_HELM_REQUIRED_FILE}: missing 'name' or 'version'")
+
+    has_k8s_manifest = False
+    for path, content in files.items():
+        if not path.startswith(_HELM_YAML_TEMPLATE_DIR) or not path.endswith((".yaml", ".yml")):
+            continue
+        if "apiVersion:" in content and "kind:" in content:
+            has_k8s_manifest = True
+        manifest_errors = validate_manifest(content)
+        if manifest_errors:
+            errors.append(f"{path}: {'; '.join(manifest_errors)}")
+        unresolved = sorted(set(_PLACEHOLDER_RE.findall(content)))
+        if unresolved:
+            errors.append(f"{path}: unresolved placeholder(s): {', '.join(unresolved)}")
+
+    if not has_k8s_manifest:
+        errors.append(
+            "no templates/*.yaml file has literal 'apiVersion:'/'kind:' text "
+            "-- would not clear the 'manifests' finding"
+        )
+    return errors
+
+
+_HELM_CHART_SYSTEM_PROMPT = (
+    "You are a platform engineer scaffolding a real, minimal Helm chart for "
+    "an application that currently has none. Output ONLY the delimited "
+    "multi-file format described in the instructions -- no commentary, no "
+    "markdown fences around the whole response. Never invent a hostname, "
+    "Ingress/Route, or specific environment variable names/values -- omit "
+    "them rather than guess. Never use Helm control-flow directives "
+    "({{- if }}, {{- range }}, {{- with }}) in templates/*.yaml -- only "
+    "inline value substitutions ({{ .Values.x }}), so every file stays "
+    "parseable as plain YAML. ALWAYS quote a {{ .Values.x }}/{{ .Chart.x }} "
+    "substitution when it starts a YAML scalar value (e.g. "
+    "replicas: \"{{ .Values.replicaCount }}\", never "
+    "replicas: {{ .Values.replicaCount }}) -- unquoted, a leading {{ "
+    "parses as YAML flow-mapping syntax and fails to parse."
+)
+
+
+def _helm_chart_llm_user_prompt(
+    skill: "Skill", report: AssessmentReport, app_name: str, image_ref: str,
+) -> str:
+    stack = ", ".join(l.name for l in report.stack.languages) if report.stack.languages else "unknown"
+    frameworks = ", ".join(f.name for f in report.stack.frameworks) if report.stack.frameworks else "none detected"
+    return (
+        f"Application: {app_name}\n"
+        f"Stack: {stack}\n"
+        f"Frameworks: {frameworks}\n"
+        f"Architecture: {report.architecture.architecture_style}, "
+        f"has_api={report.architecture.has_api}, api_style={report.architecture.api_style}\n"
+        f"Criticality: {report.criticality}\n"
+        f"Real internal registry image reference to use in values.yaml: {image_ref}\n\n"
+        f"Skill instructions:\n{skill.body}\n\n"
+        "Generate Chart.yaml, values.yaml, templates/deployment.yaml, and "
+        "templates/service.yaml for this application, using the exact "
+        "===FILE: <path>=== / ===END=== delimited format from the "
+        "instructions."
+    )
+
+
+def _helm_chart_llm_attempt(
+    skill: "Skill", report: AssessmentReport, app_name: str, image_ref: str, llm_client: object,
+) -> dict[str, str] | None:
+    """Two-attempt LLM generation with validation-error feedback, mirroring
+    ``SkillEngine._generate_with_llm``'s own retry shape. Returns the parsed
+    ``{path: content}`` map on success, or ``None`` to fall back to the
+    deterministic template."""
+    from agentit.llm import _SKILL_GENERATION_MAX_TOKENS
+
+    user = _helm_chart_llm_user_prompt(skill, report, app_name, image_ref)
+    for attempt in range(2):
+        raw = llm_client._chat(_HELM_CHART_SYSTEM_PROMPT, user, max_tokens=_SKILL_GENERATION_MAX_TOKENS)
+        if raw is None:
+            return None
+        parsed = _parse_llm_multi_file_response(raw)
+        errors = _validate_helm_chart_files(parsed)
+        if not errors:
+            return parsed
+        logger.info(
+            "helm-chart LLM generation for %s rejected (attempt %d): %s",
+            app_name, attempt + 1, errors,
+        )
+        user += f"\n\nYour previous output had errors: {errors}. Fix them and resend the full format."
+    return None
+
+
+def _helm_chart_template_fallback(
+    skill: "Skill", report: AssessmentReport, app_name: str, image_ref: str,
+) -> dict[str, str]:
+    """Deterministic, literal-values-only chart -- no Helm ``.Values``/
+    ``.Release`` indirection at all, so there is zero risk of an
+    unresolved-placeholder or mismatched-values-vs-template bug. Every
+    value baked in here is one this skill already has real data for
+    (``app_name``, the real ``image_ref``, and the same language-based port
+    convention ``agents/codechange.py::_fix_dockerfile`` already uses) --
+    nothing fabricated, matching the "no mock data" rule.
+    """
+    lang = _primary_language(report)
+    port = _port_for_language(lang)
+    repo_ref, _, tag = image_ref.rpartition(":")
+    tag = tag or "latest"
+
+    chart_yaml = textwrap.dedent(f"""\
+        apiVersion: v2
+        name: {app_name}
+        description: Helm chart for {app_name}, generated by AgentIT to satisfy IaC/manifest baselines
+        type: application
+        version: 0.1.0
+        appVersion: "1.0.0"
+    """)
+    values_yaml = textwrap.dedent(f"""\
+        # Real values used to render templates/*.yaml. This chart intentionally
+        # uses literal values rather than Helm's `.Values`/`.Release` indirection
+        # -- see skills/infrastructure/helm-chart.md for why (deterministic
+        # fallback, no LLM available for app-specific tailoring).
+        replicaCount: 1
+        image:
+          repository: {repo_ref}
+          tag: "{tag}"
+        service:
+          port: {port}
+    """)
+    deployment_yaml = textwrap.dedent(f"""\
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: {app_name}
+          labels:
+            app.kubernetes.io/name: {app_name}
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app.kubernetes.io/name: {app_name}
+          template:
+            metadata:
+              labels:
+                app.kubernetes.io/name: {app_name}
+            spec:
+              containers:
+                - name: {app_name}
+                  image: "{image_ref}"
+                  ports:
+                    - name: http
+                      containerPort: {port}
+                  livenessProbe:
+                    tcpSocket:
+                      port: http
+                    initialDelaySeconds: 15
+                    periodSeconds: 20
+                    failureThreshold: 5
+                  readinessProbe:
+                    tcpSocket:
+                      port: http
+                    initialDelaySeconds: 10
+                    periodSeconds: 10
+                    failureThreshold: 3
+    """)
+    service_yaml = textwrap.dedent(f"""\
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: {app_name}
+          labels:
+            app.kubernetes.io/name: {app_name}
+        spec:
+          type: ClusterIP
+          selector:
+            app.kubernetes.io/name: {app_name}
+          ports:
+            - port: {port}
+              targetPort: http
+              protocol: TCP
+              name: http
+    """)
+    return {
+        "Chart.yaml": chart_yaml,
+        "values.yaml": values_yaml,
+        "templates/deployment.yaml": deployment_yaml,
+        "templates/service.yaml": service_yaml,
+    }
+
+
+def _helm_chart_patch(
+    skill: "Skill", report: AssessmentReport, app_name: str, llm_client: object | None = None,
+) -> list[GeneratedFile]:
+    """Real Helm chart (Chart.yaml + values.yaml + Deployment + Service)
+    clearing infrastructure.py's ``iac`` and ``manifests`` findings in one
+    PR -- see skills/infrastructure/helm-chart.md for the full design
+    rationale (why one skill, why LLM-mode, why no Ingress/env vars).
+    """
+    from agentit.image_builder import get_image_ref
+
+    image_ref = get_image_ref(app_name)
+    files_by_path: dict[str, str] | None = None
+
+    if llm_client is not None and hasattr(llm_client, "_chat"):
+        files_by_path = _helm_chart_llm_attempt(skill, report, app_name, image_ref, llm_client)
+        source_note = "LLM-tailored"
+
+    if not files_by_path:
+        files_by_path = _helm_chart_template_fallback(skill, report, app_name, image_ref)
+        source_note = "deterministic template (no LLM, or LLM output failed validation)"
+
+    findings = _open_findings(report, "iac") + _open_findings(report, "manifests")
+    addressed = "; ".join(f.description for f in findings) if findings else skill.property_description
+
+    prefix = "helm"
+    out: list[GeneratedFile] = []
+    for rel_path, content in files_by_path.items():
+        target = f"{prefix}/{rel_path}"
+        out.append(GeneratedFile(
+            path=f"patch-{target.replace('/', '-')}",
+            content=content,
+            description=f"Generated by skill {skill.name} — {source_note} Helm chart file",
+            finding_addressed=addressed,
+            skill_name=skill.name,
+            target_path=target,
+        ))
+    return out
+
+
 def _db_migration_tooling_patch(skill: "Skill", report: AssessmentReport) -> list[GeneratedFile]:
     lang = _primary_language(report)
     files: list[GeneratedFile] = []
@@ -407,8 +683,16 @@ def generate_source_patch_for_skill(
     app_name: str,
     llm_client: object | None = None,
 ) -> list[GeneratedFile]:
-    """Dispatch to the skill-specific source patch generator."""
-    del app_name, llm_client  # reserved for future LLM-tailored source patches
+    """Dispatch to the skill-specific source patch generator.
+
+    ``llm_client`` is only actually used by ``helm-chart`` (the one
+    ``delivery: source`` skill that needs LLM tailoring -- see
+    skills/infrastructure/helm-chart.md); every other generator here is
+    deterministic and ignores it, unchanged from before.
+    """
+    if skill.name == "helm-chart":
+        return _helm_chart_patch(skill, report, app_name, llm_client)
+
     generators = {
         "containerfile": _containerfile_patch,
         "eol-upgrade": _eol_upgrade_patch,
