@@ -22,8 +22,15 @@ class TestRegistryLookup:
     def test_exact_match(self):
         assert lookup("container") == ("security", "containerfile")
 
-    def test_substring_match(self):
-        assert lookup("container security") == ("security", "containerfile")
+    def test_multiword_category_does_not_substring_steal_contract(self):
+        """Solution contracts use exact keys only. Substring matching used to
+        map ``container security`` → containerfile, but also falsely mapped
+        ``cost … resources`` → resource-limits and swallowed chaos/parity
+        domains. Multi-word categories stay uncontracted so match() can
+        trigger-match them without pinky companions on exact analyzer keys."""
+        assert lookup("container security") is None
+        assert lookup("container") == ("security", "containerfile")
+        assert lookup("cost rightsize resources") is None
 
     def test_unknown_category_returns_none(self):
         assert lookup("banana") is None
