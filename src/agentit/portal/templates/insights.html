@@ -121,16 +121,38 @@
 <p class="text-muted text-sm"><a href="/capabilities">Open Capabilities</a> to activate drafts or run self-improvement.</p>
 {% endif %}
 
+{% if check_catalog_summary %}
+<p class="text-muted mb-1">
+  Solution contracts:
+  <span class="badge badge-success">{{ check_catalog_summary.remediable }} remediable</span>
+  <span class="badge badge-warning">{{ check_catalog_summary.detect_only }} detect-only</span>
+  {% if check_catalog_summary.uncontracted %}
+  <span class="badge badge-muted">{{ check_catalog_summary.uncontracted }} uncontracted</span>
+  {% endif %}
+  — <a href="/capabilities#checks-resolutions">See full Checks &amp; resolutions catalog</a>
+</p>
+{% endif %}
+
 {% if check_compliance %}
 <h2>Fleet-Wide Check Compliance</h2>
-<p class="text-muted">Pass rate for every data-driven check (checks/*.yaml), aggregated across every assessment run.</p>
+<p class="text-muted">Pass rate for detection checks across assessment runs. Remediable checks can be cleared by Scan PRs; detect-only need human action. Full matrix on <a href="/capabilities#checks-resolutions">Capabilities</a>.</p>
 <table>
-  <thead><tr><th>Dimension</th><th>Check</th><th>Pass Rate</th><th>Passes / Total</th></tr></thead>
+  <thead><tr><th>Dimension</th><th>Check</th><th>Contract</th><th>Resolution</th><th>Pass Rate</th><th>Passes / Total</th></tr></thead>
   <tbody>
   {% for c in check_compliance %}
   <tr>
     <td>{{ c.dimension | dimension_label }}</td>
     <td>{{ c.check_name }}</td>
+    <td>
+      {% if c.contract_badge == 'remediable' %}
+      <span class="badge badge-success">remediable</span>
+      {% elif c.contract_badge == 'detect_only' %}
+      <span class="badge badge-warning">detect-only</span>
+      {% else %}
+      <span class="badge badge-muted">{{ c.contract_badge or '—' }}</span>
+      {% endif %}
+    </td>
+    <td class="text-sm text-muted">{{ c.resolution or '—' }}</td>
     <td class="{% if c.pass_rate >= 90 %}text-success{% elif c.pass_rate >= 70 %}text-warning{% else %}text-danger{% endif %}">
       {{ c.pass_rate }}%
     </td>

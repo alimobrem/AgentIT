@@ -445,6 +445,16 @@
             x-data="{ suppressing: false, suppressed: false }" x-show="!suppressed"
             x-transition:leave="suppress-leave" x-transition:leave-end="suppress-leave-end">
           <span class="badge badge-{{ f.severity.name }} finding-badge">{{ f.severity.name }}</span>
+          {% if finding_badges is defined and f.category in finding_badges %}
+            {% set fb = finding_badges[f.category] %}
+            {% if fb == 'remediable' %}
+            <span class="badge badge-success" title="Scan can open a finding-clear PR">remediable</span>
+            {% elif fb == 'detect_only' %}
+            <span class="badge badge-warning" title="Detected only — Scan will not open a PR. Suppress if handled externally.">detect-only</span>
+            {% else %}
+            <span class="badge badge-muted" title="No solution contract yet">uncontracted</span>
+            {% endif %}
+          {% endif %}
           {{ f.description }}
           {% if f.source %}<span class="badge badge-muted finding-source">{{ f.source | clean_source }}</span>{% endif %}
           {% if f.file_path %}<span class="finding-file">{{ f.file_path }}</span>{% endif %}
@@ -467,6 +477,8 @@
               <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Generating&hellip;</span>
             </button>
           </form>
+          {% elif finding_badges is defined and finding_badges.get(f.category) == 'detect_only' %}
+          <span class="text-muted text-sm" role="status">No Scan PR — human-only / detect-only. <a href="/capabilities#checks-resolutions">Why?</a></span>
           {% endif %}
           {% if f.source %}
           <form action="/api/suppress" class="inline-form"
@@ -507,7 +519,15 @@
           <tr>
             <td>{{ item.priority }}</td>
             <td>{{ item.dimension | dimension_label }}</td>
-            <td>{{ item.description }}</td>
+            <td>
+              {% if finding_badges is defined and item.category in finding_badges %}
+                {% set pb = finding_badges[item.category] %}
+                {% if pb == 'remediable' %}<span class="badge badge-success">remediable</span>
+                {% elif pb == 'detect_only' %}<span class="badge badge-warning">detect-only</span>
+                {% else %}<span class="badge badge-muted">uncontracted</span>{% endif %}
+              {% endif %}
+              {{ item.description }}
+            </td>
             <td>{{ item.estimated_effort }}</td>
             <td>{{ item.agent_responsible }}</td>
             <td>

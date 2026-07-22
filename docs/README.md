@@ -20,7 +20,7 @@
 - SSA dry-run preflight; humans merge; Argo deploys
 - Fleet: `apps/{app}/` + AppSet recurse; AgentIT: Helm `chart/` (never `apps/agentit/`)
 
-**Solution contracts:** [#154](https://github.com/alimobrem/AgentIT/pull/154) landed on `main`. Hardening (detect_only coverage, clear-evidence simulation, skill↔contract CI, fleet/self-managed path hints, PR-card honesty) ships in the contract-hardening PR — see README **Solution contracts**.
+**Solution contracts + catalog:** Every analyzer category is contracted (remediable or detect-only). Live UI: Capabilities → [Checks & resolutions](../README.md#checks-vs-resolutions-layers) (`portal/check_catalog.py`, `/api/check-catalog`). See README **Solution contracts** and **Checks vs resolutions**.
 
 ## Historical / planning (do not treat as live product)
 

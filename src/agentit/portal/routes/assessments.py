@@ -211,15 +211,23 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     slos = await s.list_slos(assessment_id)
     onboardings = await s.list_onboardings(assessment_id)
 
-    from agentit.remediation.registry import lookup
+    from agentit.portal.check_catalog import badge_for_category
+    from agentit.remediation.registry import allows_auto_pr, lookup
     # Computed from every finding (not just urgent_findings' critical/high
     # subset) so the same set correctly covers the Remediation Plan table
     # below, which lists findings of every severity -- one source of truth
     # for "is this finding/plan-item fixable", shared by both loops in the
     # template instead of each re-deriving visibility independently
     # (docs/ui-redesign-proposal.md §0's second bug).
+    # Fix CTA only for remediable (auto_pr) contracts — detect_only never.
     all_findings = [f for sc in report.scores for f in sc.findings]
-    fixable_categories = {f.category for f in all_findings if lookup(f.category) is not None}
+    fixable_categories = {
+        f.category for f in all_findings
+        if lookup(f.category) is not None and allows_auto_pr(f.category)
+    }
+    finding_badges = {
+        f.category: badge_for_category(f.category) for f in all_findings if f.category
+    }
 
     # Actions tab: every real thing still waiting on a human for this app --
     # an open, unmerged PR (Merge/Close, routes/pr_actions.py -- the real
@@ -419,6 +427,7 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "slo_count": len(slos),
             "onboarding_count": len(onboardings),
             "fixable_categories": fixable_categories,
+            "finding_badges": finding_badges,
             "pending_actions": pending_actions,
             "non_pr_pending_actions": non_pr_pending_actions,
             "next_action": next_action,

@@ -138,7 +138,8 @@ Skills are Markdown + YAML frontmatter under `skills/` (`mode: template` | `llm`
 
 - **Remediation:** `SkillEngine.match(findings)` → generate → validate → quality filter → PR.
 - **Detection:** `mode: detect` skills use the same rule runners as the legacy `checks/` YAML engine; `checks/` is empty on disk (loader kept temporarily).
-- **Registry / contracts:** `remediation/registry.py` `SOLUTION_CONTRACTS` (landed [#154](https://github.com/alimobrem/AgentIT/pull/154)) maps each analyzer category → skill + `delivery` + `evidence_kind` + `auto_pr`. `FIX_REGISTRY` is derived from remediable (`auto_pr=True`) rows only. Pre-open simulation: `remediation/clear_evidence.py` (wired in `auto_delivery`). Fleet cluster delivery → `apps/{app}/`; self-managed → `chart/`; source → app repo.
+- **Registry / contracts:** `remediation/registry.py` `SOLUTION_CONTRACTS` maps each analyzer category → skill + `delivery` + `evidence_kind` + `auto_pr`. `FIX_REGISTRY` is derived from remediable (`auto_pr=True`) rows only. Pre-open simulation: `remediation/clear_evidence.py` (wired in `auto_delivery`). Fleet cluster delivery → `apps/{app}/`; self-managed → `chart/`; source → app repo.
+- **Portal catalog:** `portal/check_catalog.py` merges analyzer categories + detect skills + contracts into the Capabilities **Checks & resolutions** matrix (`/capabilities#checks-resolutions`, `GET /api/check-catalog`). Assessment Detail badges findings remediable / detect-only / uncontracted; Fix CTA only when `allows_auto_pr`. Insights annotates check compliance with the same badges. Health and Decisions stay orthogonal (platform self-health and LLM decision audit).
 
 Lifecycle: `draft` → `active` → `deprecated` → `retired`. Activate opens a durability PR so image rebuilds keep `status: active`.
 

@@ -593,7 +593,11 @@ async def capability_run_detail(request: Request, event_id: str) -> HTMLResponse
 
 @router.get("/capabilities", response_class=HTMLResponse)
 async def capabilities_page(request: Request) -> HTMLResponse:
-    from agentit.remediation.registry import FIX_REGISTRY
+    from agentit.portal.check_catalog import (
+        build_check_catalog,
+        catalog_by_dimension,
+        catalog_summary,
+    )
 
     skills = _cached_skills()
     checks = _cached_checks()
@@ -642,10 +646,9 @@ async def capabilities_page(request: Request) -> HTMLResponse:
     from agentit.agents.capabilities import get_onboarding_agents, WATCHER_AGENTS
     agents = get_onboarding_agents()
     watchers = WATCHER_AGENTS
-    fix_categories = [
-        {"category": cat, "agent": agent_name, "method": method.lstrip("_").replace("_", " ")}
-        for cat, (agent_name, method) in sorted(FIX_REGISTRY.items())
-    ]
+    check_rows = build_check_catalog(skills)
+    check_catalog_by_dimension = catalog_by_dimension(check_rows)
+    check_catalog_summary = catalog_summary(check_rows)
     retention_days = get_retention_days()
 
     return get_templates().TemplateResponse(request, "capabilities.html", {
@@ -661,12 +664,26 @@ async def capabilities_page(request: Request) -> HTMLResponse:
         "total_detections": total_detections,
         "agents": agents,
         "watchers": watchers,
-        "fix_categories": fix_categories,
+        "check_catalog_by_dimension": check_catalog_by_dimension,
+        "check_catalog_summary": check_catalog_summary,
         "retention_days": retention_days,
         "flagged_skills": flagged_skills,
         "learning_runs": learning_runs,
         "skill_learner_status": skill_learner_status,
         "llm_available": llm_available,
+    })
+
+
+@router.get("/api/check-catalog")
+async def api_check_catalog() -> JSONResponse:
+    """JSON matrix of checks & solution contracts (Capabilities source of truth)."""
+    from agentit.portal.check_catalog import build_check_catalog, catalog_summary
+
+    skills = _cached_skills()
+    rows = build_check_catalog(skills)
+    return JSONResponse({
+        "summary": catalog_summary(rows),
+        "rows": [r.to_dict() for r in rows],
     })
 
 

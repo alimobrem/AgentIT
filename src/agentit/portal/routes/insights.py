@@ -38,12 +38,17 @@ async def insights_page(request: Request) -> HTMLResponse:
         waiting_for_approval + len(unresolved_rollbacks) + len(unresolved_escalations)
     )
 
+    from agentit.portal.check_catalog import annotate_compliance_rows, catalog_summary
+    check_compliance = annotate_compliance_rows(check_compliance)
+    check_catalog_summary = catalog_summary()
+
     return get_templates().TemplateResponse(request, "insights.html", {
         "insights": fleet_insights,
         "agent_stats": agent_stats,
         "recent_feedback": feedback,
         "low_skills": low_skills,
         "check_compliance": check_compliance,
+        "check_catalog_summary": check_catalog_summary,
         "loop_health": loop_health,
     })
 

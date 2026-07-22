@@ -8,7 +8,7 @@
   {"href": "/capabilities/self-improvement", "label": "Self-Improvement", "prefix": "/capabilities/self-improvement"},
 ], request) }}
 <h1>Capabilities &amp; Workflows</h1>
-<p class="text-muted">Skills, checks, agents, and automation — everything AgentIT can do. For what's actually run, see the <a href="/agents">Agent Activity</a> tab.</p>
+<p class="text-muted">Skills, checks, agents, and automation — everything AgentIT can do. <strong>Checks &amp; resolutions</strong> below is the source of truth for what Assess detects vs what Scan will open a PR for. For what's actually run, see the <a href="/agents">Agent Activity</a> tab.</p>
 
 <div class="action-bar mb-1">
   <form method="post" action="/capabilities/learn" class="inline-form" x-data>
@@ -58,7 +58,97 @@
     <div class="stat-label">Total Detections</div>
     <div class="stat-value">{{ total_detections }}</div>
   </div>
+  {% if check_catalog_summary %}
+  <div class="stat-card">
+    <div class="stat-label">Scan remediable</div>
+    <div class="stat-value text-success">{{ check_catalog_summary.remediable }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Detect-only</div>
+    <div class="stat-value text-warning">{{ check_catalog_summary.detect_only }}</div>
+  </div>
+  {% endif %}
 </div>
+
+{% if check_catalog_by_dimension %}
+<h2 class="section-title" id="checks-resolutions">Checks &amp; resolutions</h2>
+<p class="text-muted mb-1">
+  Every Assess finding category: how it is detected, and whether Scan opens a finding-clear PR
+  (<span class="badge badge-success">remediable</span>),
+  human-only (<span class="badge badge-warning">detect-only</span>),
+  or missing a contract (<span class="badge badge-muted">uncontracted</span>).
+  Scan never opens PRs for detect-only or uncontracted categories.
+  JSON: <a href="/api/check-catalog"><code>/api/check-catalog</code></a>.
+</p>
+{% for dimension, rows in check_catalog_by_dimension.items() %}
+<div x-data="{ open: {{ 'true' if loop.index <= 2 else 'false' }} }" class="mb-2">
+  <div class="collapse-toggle-row">
+    <button type="button" class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
+      {{ dimension | dimension_label }}
+    </button>
+    <span class="badge badge-muted">{{ rows|length }}</span>
+  </div>
+  <div class="collapse-body" x-show="open" x-transition>
+    <table>
+      <thead>
+        <tr>
+          <th>Category</th>
+          <th>Status</th>
+          <th>Detection</th>
+          <th>Resolution</th>
+          <th>Delivery</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td class="text-bold">{{ row.category }}</td>
+          <td>
+            {% if row.badge == 'remediable' %}
+            <span class="badge badge-success">remediable</span>
+            {% elif row.badge == 'detect_only' %}
+            <span class="badge badge-warning">detect-only</span>
+            {% else %}
+            <span class="badge badge-muted">uncontracted</span>
+            {% endif %}
+          </td>
+          <td class="text-sm">
+            {% if row.detect_skill %}
+            <code>{{ row.detect_skill }}</code>
+            {% if row.detect_description %}<div class="text-muted">{{ row.detect_description[:120] }}{% if row.detect_description|length > 120 %}…{% endif %}</div>{% endif %}
+            {% else %}
+            <span class="text-muted">analyzer</span>
+            {% endif %}
+          </td>
+          <td class="text-sm">
+            {% if row.badge == 'remediable' %}
+            Skill <code>{{ row.skill_name }}</code> — {{ row.clear_evidence }}
+            {% elif row.badge == 'detect_only' %}
+            {{ row.clear_evidence }}
+            {% else %}
+            <span class="text-muted">{{ row.clear_evidence }}</span>
+            {% endif %}
+          </td>
+          <td class="text-sm">
+            {% if row.delivery == 'source' %}
+            <span class="badge badge-info">source</span> app repo
+            {% elif row.delivery == 'cluster' %}
+            <span class="badge badge-info">cluster</span>
+            <span class="text-muted">fleet {{ row.fleet_path }}; self-managed {{ row.self_managed_path }}</span>
+            {% elif row.delivery == 'none' %}
+            <span class="badge badge-muted">none</span>
+            {% else %}
+            —
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endfor %}
+{% endif %}
 
 {% if draft_skills %}
 <h2 class="section-title">Needs Review <span class="badge badge-accent">{{ draft_skills|length }}</span></h2>
@@ -455,24 +545,11 @@
 <p class="text-muted text-sm mb-1">Watcher names link to their real heartbeat/run history on the <a href="/agents">Agent Activity</a> tab.</p>
 {% endif %}
 
-{% if fix_categories %}
-<h3 class="section-title">Auto-Fix Capabilities ({{ fix_categories|length }})</h3>
-<p class="text-muted mb-1">Findings in these categories can be fixed automatically. After an app is onboarded, click "Fix" on a finding in the assessment detail Findings tab (pre-onboard, Scan already generates fixes for all of them automatically).</p>
-<table>
-  <thead>
-    <tr><th>Finding Category</th><th>Agent</th><th>Fix Method</th></tr>
-  </thead>
-  <tbody>
-    {% for fc in fix_categories %}
-    <tr>
-      <td class="text-bold">{{ fc.category }}</td>
-      <td>{{ fc.agent }}</td>
-      <td class="text-sm text-muted">{{ fc.method }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% endif %}
+<p class="text-muted text-sm mb-1">
+  Finding categories Scan can clear are listed in
+  <a href="#checks-resolutions">Checks &amp; resolutions</a> above
+  (solution contracts — not a separate agent catalog).
+</p>
 
 </div>
 </div>
