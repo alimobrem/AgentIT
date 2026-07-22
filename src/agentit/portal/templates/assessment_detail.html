@@ -82,8 +82,9 @@
 {% set _soft_success = request.query_params.get('success') %}
 {% set _soft_gitops_pending = (not self_managed and not gitops_registered and infra_repo_url) %}
 {# Ambient notices stay collapsed; action flash (success/warning query params)
-   opens by default so Register-for-GitOps and similar redirects stay visible. #}
-{% set _notices_auto_open = bool(_soft_warning or _soft_success) %}
+   opens by default so Register-for-GitOps and similar redirects stay visible.
+   Use Jinja truthiness (not Python bool()) — bool is not in the template globals. #}
+{% set _notices_auto_open = true if (_soft_warning or _soft_success) else false %}
 {% if _soft_warning or _soft_success or infra_repo_creation_failed or _soft_gitops_pending %}
 <div class="mb-2" x-data="{ open: {{ 'true' if _notices_auto_open else 'false' }} }">
   <button type="button" class="btn btn-sm btn-outline collapse-toggle" @click="open = !open" :aria-expanded="open">

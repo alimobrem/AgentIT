@@ -71,7 +71,7 @@ uv run agentit portal --port 8080
 
 Add `--llm` for Claude-backed reasoning (or set `ANTHROPIC_API_KEY` / Vertex env). Useful CLI: `orchestrate`, `watch`, `self-assess`, `self-fix`, `learn`, `test-skill`, `activate-skill`, `propose-watch`.
 
-**Portal:** Ledger (`/`) is ops home; Fleet is the scoreboard; Assessment Detail drives Assess → Scan; Capabilities holds Checks & resolutions / Skills / Activity. Fixed masthead + footer. EDL: [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md).
+**Portal:** Ledger (`/`) is ops home; Fleet is the scoreboard; Assessment Detail drives Assess → Scan; Capabilities holds Checks & resolutions / Skills / Activity. Fixed masthead + footer. Assessment Notices auto-open for `success`/`warning` query flashes (e.g. Register for GitOps). EDL: [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md).
 
 <details>
 <summary><b>Environment variables</b></summary>
