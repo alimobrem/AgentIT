@@ -82,9 +82,12 @@
 </p>
 {% for dimension, rows in check_catalog_by_dimension.items() %}
 <div x-data="{ open: {{ 'true' if loop.index <= 2 else 'false' }} }" class="mb-2">
-  <button type="button" class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
-    {{ dimension | dimension_label }} <span class="badge badge-muted">{{ rows|length }}</span>
-  </button>
+  <div class="collapse-toggle-row">
+    <button type="button" class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
+      {{ dimension | dimension_label }}
+    </button>
+    <span class="badge badge-muted">{{ rows|length }}</span>
+  </div>
   <div class="collapse-body" x-show="open" x-transition>
     <table>
       <thead>
