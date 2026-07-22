@@ -116,9 +116,10 @@ class TestAssessmentDetailRepoLinks:
 
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
-        assert ">Code repo:<" in resp.text
+        # Score-first status strip uses short labels (Code: / GitOps:).
+        assert ">Code:<" in resp.text
         assert f'href="{report.repo_url}"' in resp.text
-        assert ">GitOps repo:<" in resp.text
+        assert ">GitOps:<" in resp.text
         assert 'href="https://github.com/org/detail-both-repos-gitops"' in resp.text
 
     async def test_omits_gitops_repo_link_when_not_registered(self, ui_client):
@@ -128,6 +129,6 @@ class TestAssessmentDetailRepoLinks:
 
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
-        assert ">Code repo:<" in resp.text
+        assert ">Code:<" in resp.text
         assert f'href="{report.repo_url}"' in resp.text
-        assert ">GitOps repo:<" not in resp.text
+        assert ">GitOps:<" not in resp.text

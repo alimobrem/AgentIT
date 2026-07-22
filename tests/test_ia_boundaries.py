@@ -40,8 +40,17 @@ async def ui_client():
             yield client, store
 
 
-async def test_root_redirects_to_ledger(ui_client):
+async def test_root_redirects_to_fleet_when_empty(ui_client):
+    """First-run / empty fleet → guided Fleet empty state (PR #161)."""
     client, _store = ui_client
+    resp = await client.get("/", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/fleet"
+
+
+async def test_root_redirects_to_ledger_when_fleet_has_apps(ui_client):
+    client, store = ui_client
+    await store.save(make_report(repo_name="home-redirect-app"))
     resp = await client.get("/", follow_redirects=False)
     assert resp.status_code == 302
     assert resp.headers["location"] == "/ledger"

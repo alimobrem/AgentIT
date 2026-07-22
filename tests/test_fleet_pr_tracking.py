@@ -238,4 +238,5 @@ class TestCriticalityTooltip:
         client, _store, aid = portal_client
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
-        assert "can never auto-deliver" in resp.text
+        # Score-first Assessment Detail shortens the criticality tooltip (PR #161).
+        assert "require human merge before delivery" in resp.text

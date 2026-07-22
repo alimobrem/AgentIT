@@ -24,6 +24,10 @@ Product contract detail: [`docs/release-notes.md`](docs/release-notes.md).
 - Checks & resolutions catalog on Capabilities (`portal/check_catalog.py`, PR [#159](https://github.com/alimobrem/AgentIT/pull/159)).
 - Solution contracts so Scan PRs clear findings (`SOLUTION_CONTRACTS`, clear-evidence simulation; PRs [#154](https://github.com/alimobrem/AgentIT/pull/154), [#158](https://github.com/alimobrem/AgentIT/pull/158)).
 
+### Fixed
+
+- Align hermetic tests with PR [#161](https://github.com/alimobrem/AgentIT/pull/161): suite-wide `AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS=1`, score v2 expectations, first-run `/` → `/fleet`, Assessment Detail status-strip copy.
+
 ### Changed
 
 - Portal footer is an action-feedback status strip (no duplicated nav links); toasts mirror into it.
