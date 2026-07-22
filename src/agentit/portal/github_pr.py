@@ -1141,10 +1141,20 @@ def ensure_applicationset(infra_repo_url: str) -> bool:
                 },
                 "spec": {
                     "project": "default",
+                    # recurse + yaml-only: fleet apps land manifests under
+                    # apps/{app}/{category}/ and apps/{app}/skills/ — without
+                    # recurse Argo Directory mode sees zero top-level YAML
+                    # (Synced/Healthy with 0 resources; live HPA/quota never
+                    # update). include excludes grafana *.json / *.md / *.sh
+                    # that otherwise fail manifest unmarshal.
                     "source": {
                         "repoURL": infra_repo_url,
                         "targetRevision": "HEAD",
                         "path": "{{path}}",
+                        "directory": {
+                            "recurse": True,
+                            "include": "{*.yaml,*.yml}",
+                        },
                     },
                     "destination": {
                         "server": "https://kubernetes.default.svc",
