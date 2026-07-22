@@ -14,7 +14,9 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from agentit.portal.helpers import (
+    ALLOW_UNVERIFIED_WEBHOOKS_ENV,
     ONBOARD_GENERATION_TIMEOUT,
+    allow_unverified_webhooks,
     clone_assess_cleanup,
     get_store,
     publish_event,
@@ -71,10 +73,14 @@ def _get_delivery_id(request: Request, body: dict) -> str:
 
 
 def _verify_github_signature(request: Request, body_bytes: bytes) -> bool:
-    """Verify GitHub webhook HMAC-SHA256 signature. Skips if secret not set (dev mode)."""
+    """Verify GitHub webhook HMAC-SHA256 signature.
+
+    Fail closed when ``GITHUB_WEBHOOK_SECRET`` is unset unless
+    ``AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS=1``.
+    """
     secret = os.environ.get("GITHUB_WEBHOOK_SECRET")
     if not secret:
-        return True
+        return allow_unverified_webhooks()
     sig_header = request.headers.get("X-Hub-Signature-256", "")
     if not sig_header.startswith("sha256="):
         return False
@@ -95,16 +101,19 @@ def verify_internal_token(request: Request) -> None:
     HTTP triggers attach the same secret as a `secureHeaders` entry sourced
     from the `agentit-internal-webhook-token` Secret at trigger-fire time.
 
-    Skips the check (fails open) if AGENTIT_INTERNAL_WEBHOOK_TOKEN isn't set
-    in this process's env -- matching the existing _verify_github_signature
-    convention above -- so local dev/tests that never configure this secret
-    keep working. In a real deployment the Secret is always templated (see
-    chart/templates/internal-webhook-token-secret.yaml), so that fail-open
-    path should never actually be exercised in production.
+    Fail closed when ``AGENTIT_INTERNAL_WEBHOOK_TOKEN`` is unset unless
+    ``AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS=1`` (local dev/tests only). Chart
+    deployments always mount the Secret.
     """
     secret = os.environ.get("AGENTIT_INTERNAL_WEBHOOK_TOKEN")
     if not secret:
-        return
+        if allow_unverified_webhooks():
+            return
+        raise HTTPException(
+            401,
+            "AGENTIT_INTERNAL_WEBHOOK_TOKEN is not configured "
+            f"(set {ALLOW_UNVERIFIED_WEBHOOKS_ENV}=1 only for local dev)",
+        )
     token = request.headers.get(INTERNAL_TOKEN_HEADER, "")
     if not token or not hmac.compare_digest(token, secret):
         raise HTTPException(401, "Missing or invalid internal webhook token")

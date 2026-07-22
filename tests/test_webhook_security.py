@@ -95,9 +95,22 @@ class TestGitHubSignature:
             headers={"X-GitHub-Event": "push", "Content-Type": "application/json"})
         assert resp.status_code == 403
 
-    async def test_no_secret_skips_verification(self, portal_client):
+    async def test_no_secret_fails_closed(self, portal_client):
+        """Unset GITHUB_WEBHOOK_SECRET rejects unless the explicit
+        AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS opt-in is set (portal_client
+        enables that by default — clear it here)."""
         client, _, _ = portal_client
-        with patch.dict(os.environ, {}, clear=False):
+        with patch.dict(os.environ, {"AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS": ""}, clear=False):
+            os.environ.pop("GITHUB_WEBHOOK_SECRET", None)
+            os.environ.pop("AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS", None)
+            body = json.dumps({"ref": "refs/heads/main", "repository": {"html_url": "https://github.com/t/r", "default_branch": "main"}}).encode()
+            resp = await client.post("/api/webhook/github-push", content=body,
+                headers={"X-GitHub-Event": "push", "Content-Type": "application/json"})
+        assert resp.status_code == 403
+
+    async def test_no_secret_allowed_with_explicit_opt_in(self, portal_client):
+        client, _, _ = portal_client
+        with patch.dict(os.environ, {"AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS": "1"}, clear=False):
             os.environ.pop("GITHUB_WEBHOOK_SECRET", None)
             body = json.dumps({"ref": "refs/heads/main", "repository": {"html_url": "https://github.com/t/r", "default_branch": "main"}}).encode()
             resp = await client.post("/api/webhook/github-push", content=body,
@@ -138,14 +151,19 @@ class TestInternalWebhookToken:
         )
         assert resp.status_code == 400
 
-    async def test_no_token_configured_skips_verification(self, portal_client):
-        """Matches the existing GITHUB_WEBHOOK_SECRET convention: fails open
-        in local dev/tests where the secret was never configured. Every
-        deployment templates this Secret (see chart/templates/
-        internal-webhook-token-secret.yaml), so this path shouldn't be hit
-        in a real cluster."""
+    async def test_no_token_configured_fails_closed(self, portal_client):
+        """Unset AGENTIT_INTERNAL_WEBHOOK_TOKEN rejects unless
+        AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS=1."""
         client, _, _ = portal_client
         with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AGENTIT_INTERNAL_WEBHOOK_TOKEN", None)
+            os.environ.pop("AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS", None)
+            resp = await client.post("/api/webhook/finding", json={"app_name": "test"})
+        assert resp.status_code == 401
+
+    async def test_no_token_allowed_with_explicit_opt_in(self, portal_client):
+        client, _, _ = portal_client
+        with patch.dict(os.environ, {"AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS": "1"}, clear=False):
             os.environ.pop("AGENTIT_INTERNAL_WEBHOOK_TOKEN", None)
             resp = await client.post("/api/webhook/finding", json={"app_name": "test"})
         assert resp.status_code == 400

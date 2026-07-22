@@ -26,9 +26,8 @@ class TestInternalWebhookHeaders:
         assert internal_webhook_headers() == {INTERNAL_TOKEN_HEADER: "s3cr3t-token"}
 
     def test_empty_when_unset(self, monkeypatch):
-        """Fails open, mirroring `verify_internal_token`'s own fail-open
-        behavior on the receiving side (routes/webhooks.py) -- local dev/
-        tests that never configure the secret must keep working."""
+        """Client omits the header when unset; the server fails closed
+        unless AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS=1 (see webhooks.py)."""
         monkeypatch.delenv("AGENTIT_INTERNAL_WEBHOOK_TOKEN", raising=False)
         assert internal_webhook_headers() == {}
 

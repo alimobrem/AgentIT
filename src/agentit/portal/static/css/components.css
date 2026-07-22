@@ -132,6 +132,34 @@
     font-size: var(--font-xl);
     color: var(--color-muted);
   }
+  .score-letter {
+    display: inline-block;
+    margin-left: var(--space-3);
+    font-size: var(--font-2xl);
+    font-weight: 600;
+    vertical-align: middle;
+    opacity: 0.85;
+  }
+  .dim-bars { max-width: 36rem; }
+  .dim-bar-row {
+    display: grid;
+    grid-template-columns: 8rem 1fr 2.5rem;
+    gap: var(--space-2);
+    align-items: center;
+    margin-bottom: var(--space-1);
+    font-size: var(--font-sm);
+  }
+  .dim-bar-label { color: var(--color-muted); text-transform: capitalize; }
+  .dim-bar-score { text-align: right; font-weight: 600; }
+  .top-fixes-list { margin: 0; padding-left: 1.25rem; }
+  .top-fix-item {
+    margin-bottom: var(--space-2);
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    align-items: baseline;
+  }
+  .text-normal { font-weight: 400; }
 
   /* ── Dimension Row ─────────────────────────────────────────────── */
   .dimension-row {
@@ -1147,6 +1175,20 @@
   /* ── Selection ─────────────────────────────────────────────────── */
   ::selection { background: rgba(233, 69, 96, 0.3); color: #fff; }
 
+  .user-menu-section-label {
+    padding: var(--space-2) var(--space-4) var(--space-1);
+    font-size: var(--font-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-muted);
+  }
+  .decision-card {
+    border-left: 3px solid var(--color-border);
+    padding-left: var(--space-3);
+    display: grid;
+    gap: var(--space-1);
+  }
+
   /* ── Responsive ────────────────────────────────────────────────── */
   @media (max-width: 1100px) {
     nav { gap: var(--space-3); padding: 0 var(--space-5); }
@@ -1230,4 +1272,30 @@
     .delivery-choice { flex-direction: column; }
     .delivery-choice .btn,
     .delivery-step-row > .inline-form .btn { width: 100%; }
+    /* Primary spine tables → stacked cards on phone widths. */
+    table { display: block; width: 100%; }
+    thead { display: none; }
+    tbody, tr, td { display: block; width: 100%; }
+    tr {
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-sm);
+      margin-bottom: var(--space-3);
+      padding: var(--space-3);
+    }
+    td {
+      padding: var(--space-1) 0;
+      border: none;
+    }
+    td::before {
+      content: attr(data-label);
+      display: block;
+      font-size: var(--font-xs);
+      color: var(--color-muted);
+      margin-bottom: 2px;
+    }
+  }
+  @media (max-width: 375px) {
+    .dim-bar-row { grid-template-columns: 1fr; }
+    .score-hero { font-size: var(--font-3xl); }
+    .top-fix-item { flex-direction: column; align-items: flex-start; }
   }

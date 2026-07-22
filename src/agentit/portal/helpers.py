@@ -143,6 +143,16 @@ def _check_llm_backend() -> dict[str, object]:
     }
 
 
+ALLOW_UNVERIFIED_WEBHOOKS_ENV = "AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS"
+
+
+def allow_unverified_webhooks() -> bool:
+    """Dev/test opt-in: accept webhooks when secrets are unset."""
+    return os.environ.get(ALLOW_UNVERIFIED_WEBHOOKS_ENV, "").strip().lower() in (
+        "1", "true", "yes",
+    )
+
+
 def get_credential_states() -> dict[str, dict[str, object]]:
     """Live status for the GitHub token, GitHub webhook secret, and LLM
     backend credentials -- used by the Health page's Credentials table.
@@ -151,22 +161,68 @@ def get_credential_states() -> dict[str, dict[str, object]]:
 
     github_check = github_pr.check_github_token()
     webhook_secret_set = bool(os.environ.get("GITHUB_WEBHOOK_SECRET"))
+    internal_token_set = bool(os.environ.get("AGENTIT_INTERNAL_WEBHOOK_TOKEN"))
+    unverified_ok = allow_unverified_webhooks()
+
+    if webhook_secret_set:
+        webhook_detail = "GITHUB_WEBHOOK_SECRET is set"
+        webhook_blocking = False
+    elif unverified_ok:
+        webhook_detail = (
+            "GITHUB_WEBHOOK_SECRET is not set — webhooks are open because "
+            "AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS=1 (dev only)"
+        )
+        webhook_blocking = False
+    else:
+        webhook_detail = (
+            "GITHUB_WEBHOOK_SECRET is not set — /api/webhook/github-push rejects "
+            "all payloads (fail closed). Set the secret or, for local demos only, "
+            "AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS=1"
+        )
+        webhook_blocking = True
+
+    if internal_token_set:
+        internal_detail = "AGENTIT_INTERNAL_WEBHOOK_TOKEN is set"
+        internal_blocking = False
+        internal_ok = True
+        internal_status = "configured"
+    elif unverified_ok:
+        internal_detail = (
+            "AGENTIT_INTERNAL_WEBHOOK_TOKEN is not set — internal webhooks are "
+            "open because AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS=1 (dev only)"
+        )
+        internal_blocking = False
+        internal_ok = False
+        internal_status = "missing"
+    else:
+        internal_detail = (
+            "AGENTIT_INTERNAL_WEBHOOK_TOKEN is not set — /api/webhook/* "
+            "(except github-push) rejects all payloads (fail closed)"
+        )
+        internal_blocking = True
+        internal_ok = False
+        internal_status = "missing"
 
     return {
         "github-token": {
             "ok": github_check["status"] == "valid",
             "status": github_check["status"],
             "detail": github_check["detail"],
+            "blocking": False,
         },
         "github-webhook-secret": {
             "ok": webhook_secret_set,
             "status": "configured" if webhook_secret_set else "missing",
-            "detail": (
-                "GITHUB_WEBHOOK_SECRET is set" if webhook_secret_set
-                else "GITHUB_WEBHOOK_SECRET is not set -- inbound webhook signatures cannot be verified"
-            ),
+            "detail": webhook_detail,
+            "blocking": webhook_blocking,
         },
-        "llm-backend": _check_llm_backend(),
+        "internal-webhook-token": {
+            "ok": internal_ok,
+            "status": internal_status,
+            "detail": internal_detail,
+            "blocking": internal_blocking,
+        },
+        "llm-backend": {**_check_llm_backend(), "blocking": False},
     }
 
 

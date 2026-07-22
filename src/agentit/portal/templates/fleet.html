@@ -29,11 +29,7 @@
   </div>
   <div class="stat-card">
     <div class="stat-label">Avg Score</div>
-    <div class="stat-value
-      {% if avg_score > 70 %} text-success
-      {% elif avg_score >= 40 %} text-warning
-      {% else %} text-danger{% endif %}
-    ">{{ "%.0f"|format(avg_score) }}</div>
+    <div class="stat-value {{ score_text_class(avg_score) }}">{{ "%.0f"|format(avg_score) }}</div>
   </div>
   <div class="stat-card">
     <div class="stat-label">Critical + High Findings</div>
@@ -60,10 +56,7 @@
   </thead>
   <tbody>
     {% for r in fleet %}
-    <tr class="
-      {% if r.latest_score > 70 %}row-border-green
-      {% elif r.latest_score >= 40 %}row-border-yellow
-      {% else %}row-border-red{% endif %}">
+    <tr class="{{ score_row_border_class(r.latest_score) }}">
       <td>
         <a href="/assessments/{{ r.id }}">{{ r.repo_name }}</a>
         {# Every app has a code repo (report.repo_url); GitOps-registered
@@ -110,11 +103,7 @@
         </div>
         {% endif %}
       </td>
-      <td class="text-bold
-        {% if r.latest_score > 70 %} text-success
-        {% elif r.latest_score >= 40 %} text-warning
-        {% else %} text-danger{% endif %}
-      ">{{ "%.0f"|format(r.latest_score) }}</td>
+      <td class="text-bold {{ score_text_class(r.latest_score) }}">{{ "%.0f"|format(r.latest_score) }}</td>
       <td>
         {% if r.deploy_status == "synced" %}
           <span class="badge badge-low">synced</span>

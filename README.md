@@ -33,7 +33,7 @@ uv run agentit assess https://github.com/some-org/some-app --format terminal
 
 Clones the repo, runs seven analyzers (+ `mode: detect` skills), prints an overall score and findings. No OpenShift cluster, no Postgres, no LLM required (`--no-llm` forces heuristics; LLM is used only when credentials are present unless you pass `--llm` / `--no-llm`).
 
-How scoring works: [`docs/score-methodology.md`](docs/score-methodology.md).
+How scoring works: [`docs/score-methodology.md`](docs/score-methodology.md). Sample output (no install): [`examples/sample-assessment.md`](examples/sample-assessment.md). Shareable badge: `GET /badge/{app}.svg` (see methodology).
 
 ## Core loop
 
@@ -112,9 +112,9 @@ Useful commands: `self-assess`, `watch`, `learn`, `test-skill`, `activate-skill`
 
 ## Portal journey
 
-**Primary path:** Assess → Findings → Scan opens PRs → merge on GitHub → Argo deploys → Fleet/Ledger for day-2. Assessment Notices auto-open for `success`/`warning` flashes (e.g. Register for GitOps).
+**Primary spine:** Fleet → Assessment Detail → Ledger (assess → findings → merge PR → operate). Empty fleets land on Fleet’s guided empty state; once apps exist, `/` redirects to Ledger.
 
-**Operator / advanced:** Events, Decisions, DLQ, Ledger detail, Agents/Capabilities activity. See [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md).
+**Operate (Menu):** Health, Insights, Events, Decisions, DLQ, Schedules. The fixed footer is an action-status strip (not a second nav). See [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md).
 
 ## Deploy to OpenShift
 

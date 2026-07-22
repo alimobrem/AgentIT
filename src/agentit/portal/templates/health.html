@@ -362,13 +362,23 @@
 {% if credentials %}
 <h2 class="section-title mt-0">Credentials</h2>
 <div id="credentials-panel" hx-get="/health" hx-trigger="every 30s" hx-select="#credentials-panel" hx-target="this" hx-swap="outerHTML">
+{% set blocking_creds = credentials.values() | selectattr('blocking') | list %}
+{% if blocking_creds %}
+<div class="alert alert-error mb-4" role="alert">
+  <strong>Webhook auth is fail-closed and misconfigured.</strong>
+  Inbound webhook routes reject traffic until secrets are mounted.
+  {% for name, state in credentials.items() if state.blocking %}
+  <div class="text-sm mt-1"><code>{{ name }}</code>: {{ state.detail }}</div>
+  {% endfor %}
+</div>
+{% endif %}
 <table>
   <thead><tr><th>Credential</th><th>Status</th><th>Detail</th></tr></thead>
   <tbody>
     {% for name, state in credentials.items() %}
-    <tr class="{% if state.ok %}row-border-green{% else %}row-border-red{% endif %}">
-      <td class="text-bold">{{ name }}</td>
-      <td><span class="badge {% if state.ok %}badge-low{% else %}badge-critical{% endif %}">{{ state.status | capitalize }}</span></td>
+    <tr class="{% if state.ok %}row-border-green{% elif state.blocking %}row-border-red{% else %}row-border-yellow{% endif %}">
+      <td class="text-bold">{{ name }}{% if state.blocking %} <span class="badge badge-critical">blocking</span>{% endif %}</td>
+      <td><span class="badge {% if state.ok %}badge-low{% elif state.blocking %}badge-critical{% else %}badge-medium{% endif %}">{{ state.status | capitalize }}</span></td>
       <td class="text-sm text-muted">{{ state.detail }}</td>
     </tr>
     {% endfor %}

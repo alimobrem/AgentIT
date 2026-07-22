@@ -118,7 +118,10 @@ async def _override_store():
 
 
 @pytest.fixture
-async def client():
+async def client(monkeypatch):
+    # Webhook routes fail closed without secrets unless this opt-in is set
+    # (local/CI only — see docs/adr/0004-fail-closed-webhooks.md).
+    monkeypatch.setenv("AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS", "1")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True) as c:
         await prime_csrf(c)
         yield c
@@ -1323,11 +1326,10 @@ async def test_api_events_filter_target_app(client, _override_store):
 
 
 async def test_gates_page_is_gone(client):
-    """`/gates` (and the `gates` table/generic gate-resolution machinery
-    behind it) has been removed entirely (2026-07-19) -- it's a plain 404
-    now, not even a redirect to Ledger."""
+    """`/gates` retired — stale bookmarks redirect to Ledger."""
     resp = await client.get("/gates", follow_redirects=False)
-    assert resp.status_code == 404
+    assert resp.status_code == 301
+    assert resp.headers.get("location") == "/ledger"
 
 
 async def test_admin_review_page_is_gone(client):
@@ -1407,7 +1409,15 @@ async def test_fleet_empty(client):
     assert "Assess your first app" in resp.text
 
 
-async def test_home_redirects_to_ledger(client):
+async def test_home_redirects_to_fleet_when_empty(client):
+    """Empty store → guided first-run on Fleet."""
+    resp = await client.get("/", follow_redirects=False)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/fleet"
+
+
+async def test_home_redirects_to_ledger_when_fleet_nonempty(client, _override_store):
+    await _override_store.save(_make_report("home-app"))
     resp = await client.get("/", follow_redirects=False)
     assert resp.status_code == 302
     assert resp.headers["location"] == "/ledger"

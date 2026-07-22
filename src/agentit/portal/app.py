@@ -118,6 +118,20 @@ templates = Jinja2Templates(
     ],
 )
 
+# Centralized score bands (scoring.SCORE_GOOD / SCORE_OK) for all templates.
+from agentit.scoring import (  # noqa: E402
+    letter_grade,
+    score_bar_class,
+    score_row_border_class,
+    score_text_class,
+)
+templates.env.globals.update({
+    "letter_grade": letter_grade,
+    "score_text_class": score_text_class,
+    "score_bar_class": score_bar_class,
+    "score_row_border_class": score_row_border_class,
+})
+
 
 @app.middleware("http")
 async def csrf_middleware(request: Request, call_next):
@@ -420,6 +434,7 @@ from agentit.portal.routes.capabilities import router as capabilities_router  # 
 from agentit.portal.routes.settings import router as settings_router  # noqa: E402
 from agentit.portal.routes.insights import router as insights_router  # noqa: E402
 from agentit.portal.routes.slos import router as slos_router  # noqa: E402
+from agentit.portal.routes.badges import router as badges_router  # noqa: E402
 
 app.include_router(webhooks_router)
 app.include_router(health_router)
@@ -432,4 +447,5 @@ app.include_router(capabilities_router)
 app.include_router(settings_router)
 app.include_router(insights_router)
 app.include_router(slos_router)
+app.include_router(badges_router)
 

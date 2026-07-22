@@ -5,41 +5,55 @@
   <a href="/fleet">&larr; Fleet</a>
 </p>
 <h1>{{ report.repo_name }}</h1>
-<p class="mb-2">
-  {# Two distinct repos can be in play for one app: the app's own code repo
-     (report.repo_url) and, once GitOps-registered, the infra repo manifests
-     actually sync from (infra_repo_url, only real once gitops_registered is
-     true -- see delivery.is_gitops_registered()). Label both so "the repo"
-     is never ambiguous here. #}
-  <span class="text-muted text-sm">Code repo:</span>
-  <a href="{{ report.repo_url | safe_url }}" target="_blank" hx-boost="false">{{ report.repo_url }}</a>
-  {% if gitops_registered and infra_repo_url %}
-  &nbsp;&middot;&nbsp;
-  <span class="text-muted text-sm">GitOps repo:</span>
-  <a href="{{ infra_repo_url | safe_url }}" target="_blank" hx-boost="false">{{ infra_repo_url }}</a>
-  {% endif %}
-  &nbsp;
-  <span class="badge badge-{{ report.criticality }}"
-    title="How much oversight this app needs -- set at Assess time, not inferred. High/critical apps can never auto-deliver (a human must click Deliver, or approve a gate, before any PR opens) and get stricter default SLO targets.">{{ report.criticality }}</span>
-  &nbsp;
-  {% if self_managed %}
-  <span class="badge badge-info" title="Self-managed: Scan opens PRs on this app&rsquo;s source repo (AgentIT.git) — merge there; not delivered under apps/agentit on a separate gitops repo">Self-managed</span>
-  {% elif gitops_registered %}
-  <span class="badge badge-info" title="Changes to this app go through PR review + Argo CD sync">GitOps</span>
-  {% elif infra_repo_url %}
-  {# Direct Apply has been removed as a concept entirely -- an app with a
-     known infra repo but no live Argo CD Application yet is bootstrapping
-     (its first delivery commits apps/{app}/ for Argo to discover), not
-     falling back to a direct apply. #}
-  <span class="badge badge-info" title="GitOps infra repo known; awaiting the first delivery to bootstrap Argo CD registration">GitOps (pending)</span>
-  {% else %}
-  <span class="badge badge-warning" title="No GitOps infra repo known for this app -- register it for GitOps before it can be delivered">Not GitOps-registered</span>
-  {% endif %}
-</p>
 
-{# Critical path stays visible: error (+ Retry Onboard) and Register for
-   GitOps. Soft flash/info banners collapse into one Alpine summary so
-   above-fold stays identity + next action + Scan. #}
+{# Score-first hero: grade + dimensions + top fixes by estimated impact. #}
+<div class="score-hero-block mb-3">
+  <div class="score-hero {% if celebrate_first_perfect_score %}celebrate{% endif %} {{ score_text_class(report.overall_score) }}">
+    {{ "%.0f"|format(report.overall_score) }}<span class="score-unit">/100</span>
+    <span class="score-letter" title="Letter band for the current scoring model — see Docs → Score methodology">{{ score_letter }}</span>
+  </div>
+  {% if celebrate_first_perfect_score %}
+  <p class="text-success text-sm mb-1">First perfect score for {{ report.repo_name }}.</p>
+  {% endif %}
+  {% if trend and trend.delta is not none %}
+  <span class="trend {% if trend.delta > 0 %}trend-up{% elif trend.delta < 0 %}trend-down{% else %}trend-flat{% endif %}">
+    {% if trend.delta > 0 %}&#x25B2; +{{ "%.0f"|format(trend.delta) }}{% elif trend.delta < 0 %}&#x25BC; {{ "%.0f"|format(trend.delta) }}{% else %}&#x2500; 0{% endif %}
+    <span class="text-muted text-sm">vs previous</span>
+  </span>
+  {% endif %}
+  <div class="dim-bars mt-2" aria-label="Seven dimension scores">
+    {% for s in report.scores %}
+    <div class="dim-bar-row">
+      <span class="dim-bar-label">{{ s.dimension | replace('_', ' ') | title }}</span>
+      <div class="score-bar-bg" title="{{ s.score }}/100">
+        <div class="score-bar-fill {{ score_bar_class(s.score) }}" style="--pct: {{ s.score }}%;"></div>
+      </div>
+      <span class="dim-bar-score {{ score_text_class(s.score) }}">{{ s.score }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% if top_fixes %}
+  <div class="top-fixes mt-3" aria-label="Top fixes by estimated score impact">
+    <h2 class="section-title mt-0 mb-1">Top fixes <span class="text-muted text-sm text-normal">(estimated impact)</span></h2>
+    <ol class="top-fixes-list">
+      {% for fix in top_fixes %}
+      <li class="top-fix-item">
+        <span class="text-bold">Merge this → {{ fix.dimension_label }} +{{ "%.0f"|format(fix.estimated_delta) }}</span>
+        <span class="badge badge-{{ fix.severity }}">{{ fix.severity }}</span>
+        <span class="text-sm text-muted">{{ fix.description[:120] }}{% if fix.description|length > 120 %}…{% endif %}</span>
+        {% if fix.pr and fix.pr.html_url %}
+        <a class="btn btn-sm btn-primary" href="{{ fix.pr.html_url }}" target="_blank" hx-boost="false">Open PR</a>
+        {% else %}
+        <a class="btn btn-sm btn-outline" href="/assessments/{{ assessment_id }}?tab=findings#finding-{{ fix.category }}">Findings</a>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ol>
+    <p class="text-xs text-muted mb-0">Estimated from the current subtractive model — <a href="/capabilities#checks-resolutions">methodology</a>.</p>
+  </div>
+  {% endif %}
+</div>
+
 {% if request.query_params.get('error') %}
 <div class="alert alert-error mb-2" role="alert">
   <span class="text-sm">{{ request.query_params.get('error') }}</span>
@@ -49,88 +63,6 @@
   </form>
   {% endif %}
 </div>
-{% endif %}
-
-{% if not self_managed and not gitops_registered and not infra_repo_url %}
-<div x-data="{ dismissed: false, busy: false }" x-show="!dismissed" x-cloak class="alert alert-info mb-2">
-  <span class="text-sm">Not GitOps-registered — register before Scan can deliver.</span>
-  <form method="post" action="/assessments/{{ assessment_id }}/register-gitops" class="inline-form register-gitops-form"
-        x-ref="registerGitopsForm" @submit="busy = true">
-    <div class="form-group">
-      <label class="form-label" for="register-infra-repo-url">GitOps infra repo <span class="text-muted text-xs">(optional)</span></label>
-      <input type="url" id="register-infra-repo-url" name="infra_repo_url"
-             placeholder="https://github.com/org/agentit-gitops">
-    </div>
-    <button type="button" class="btn btn-sm btn-outline" data-action="register-gitops"
-      :disabled="busy" :aria-busy="busy"
-      :class="{ 'btn-loading': busy, 'submitting': busy }"
-      @click="$dispatch('show-confirm', {
-        title: 'Register for GitOps',
-        message: 'Register this app for GitOps delivery? Future Fix/Onboard deliveries will commit to an infra repo and open a PR -- required before this app can be delivered at all. Leave the infra repo blank to auto-create agentit-gitops under your GitHub account.',
-        form: $refs.registerGitopsForm,
-        opts: { confirmText: 'Register', danger: false }
-      })">
-      <span class="btn-label">Register for GitOps</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Working&hellip;</span>
-    </button>
-  </form>
-  <button type="button" class="btn btn-sm btn-outline" @click="dismissed = true">Dismiss</button>
-</div>
-{% endif %}
-
-{% set _soft_warning = request.query_params.get('warning') %}
-{% set _soft_success = request.query_params.get('success') %}
-{% set _soft_gitops_pending = (not self_managed and not gitops_registered and infra_repo_url) %}
-{# Ambient notices stay collapsed; action flash (success/warning query params)
-   opens by default so Register-for-GitOps and similar redirects stay visible.
-   Use Jinja truthiness (not Python bool()) — bool is not in the template globals. #}
-{% set _notices_auto_open = true if (_soft_warning or _soft_success) else false %}
-{% if _soft_warning or _soft_success or infra_repo_creation_failed or _soft_gitops_pending %}
-<div class="mb-2" x-data="{ open: {{ 'true' if _notices_auto_open else 'false' }} }">
-  <button type="button" class="btn btn-sm btn-outline collapse-toggle" @click="open = !open" :aria-expanded="open">
-    Notices
-  </button>
-  <div class="collapse-body mt-1" x-show="open" x-cloak x-transition>
-    {% if _soft_warning %}
-    {% for w in _soft_warning.split('|') %}
-    <div class="alert alert-warn mb-1" role="status">{{ w }}</div>
-    {% endfor %}
-    {% endif %}
-    {% if _soft_success %}
-    <div class="alert alert-success mb-1" role="status">{{ _soft_success }}</div>
-    {% endif %}
-    {% if infra_repo_creation_failed %}
-    <div class="alert alert-warn mb-1" role="status">
-      <span class="text-sm">Auto-create of a GitOps infra repo failed (often <code>GITHUB_TOKEN</code> permissions) — register manually via Register for GitOps if shown above.</span>
-    </div>
-    {% endif %}
-    {% if _soft_gitops_pending %}
-    <div class="alert alert-info mb-1" role="status">
-      <span class="text-sm">GitOps infra repo configured (<a href="{{ infra_repo_url | safe_url }}" target="_blank" hx-boost="false">{{ infra_repo_url }}</a>). Registered after the next Scan delivery PR is merged.</span>
-    </div>
-    {% endif %}
-  </div>
-</div>
-{% endif %}
-
-{# Moment of joy (docs/ux-design-requirements.md checklist #9): tied to a
-   real, first-time milestone only -- never applied to a routine assessment
-   that happens to already be at 100. Subtle, ~300ms, respects
-   prefers-reduced-motion via base.html's global media-query reset. #}
-<div class="score-hero {% if celebrate_first_perfect_score %}celebrate{% endif %}
-  {% if report.overall_score > 70 %} text-success
-  {% elif report.overall_score >= 40 %} text-warning
-  {% else %} text-danger{% endif %}
-">{{ "%.0f"|format(report.overall_score) }}<span class="score-unit">/100</span></div>
-{% if celebrate_first_perfect_score %}
-<p class="text-success text-sm mb-1">&#127881; First perfect score for {{ report.repo_name }}.</p>
-{% endif %}
-
-{% if trend and trend.delta is not none %}
-<span class="trend {% if trend.delta > 0 %}trend-up{% elif trend.delta < 0 %}trend-down{% else %}trend-flat{% endif %}">
-  {% if trend.delta > 0 %}&#x25B2; +{{ "%.0f"|format(trend.delta) }}{% elif trend.delta < 0 %}&#x25BC; {{ "%.0f"|format(trend.delta) }}{% else %}&#x2500; 0{% endif %}
-  <span class="text-muted text-sm">vs previous</span>
-</span>
 {% endif %}
 
 <div class="lifecycle-stepper">
@@ -266,6 +198,87 @@
   </form>
 </div>
 
+{# Status strip + GitOps registration below the score hero / next action. #}
+<p class="status-strip mb-2 text-sm">
+  <span class="text-muted">Code:</span>
+  <a href="{{ report.repo_url | safe_url }}" target="_blank" hx-boost="false">{{ report.repo_url }}</a>
+  {% if gitops_registered and infra_repo_url %}
+  &nbsp;&middot;&nbsp;
+  <span class="text-muted">GitOps:</span>
+  <a href="{{ infra_repo_url | safe_url }}" target="_blank" hx-boost="false">{{ infra_repo_url }}</a>
+  {% endif %}
+  &nbsp;
+  <span class="badge badge-{{ report.criticality }}" title="Set at Assess time. High/critical apps require human merge before delivery.">{{ report.criticality }}</span>
+  {% if self_managed %}
+  <span class="badge badge-info" title="Scan opens PRs on this app's source repo">Self-managed</span>
+  {% elif gitops_registered %}
+  <span class="badge badge-info">GitOps</span>
+  {% elif infra_repo_url %}
+  <span class="badge badge-info">GitOps (pending)</span>
+  {% else %}
+  <span class="badge badge-warning">Not GitOps-registered</span>
+  {% endif %}
+</p>
+
+{% if not self_managed and not gitops_registered and not infra_repo_url %}
+<div x-data="{ dismissed: false, busy: false }" x-show="!dismissed" x-cloak class="alert alert-info mb-2">
+  <span class="text-sm">Not GitOps-registered — register before Scan can deliver.</span>
+  <form method="post" action="/assessments/{{ assessment_id }}/register-gitops" class="inline-form register-gitops-form"
+        x-ref="registerGitopsForm" @submit="busy = true">
+    <div class="form-group">
+      <label class="form-label" for="register-infra-repo-url">GitOps infra repo <span class="text-muted text-xs">(optional)</span></label>
+      <input type="url" id="register-infra-repo-url" name="infra_repo_url"
+             placeholder="https://github.com/org/agentit-gitops">
+    </div>
+    <button type="button" class="btn btn-sm btn-outline" data-action="register-gitops"
+      :disabled="busy" :aria-busy="busy"
+      :class="{ 'btn-loading': busy, 'submitting': busy }"
+      @click="$dispatch('show-confirm', {
+        title: 'Register for GitOps',
+        message: 'Register this app for GitOps delivery? Future Fix/Onboard deliveries will commit to an infra repo and open a PR. Leave blank to auto-create agentit-gitops under your GitHub account.',
+        form: $refs.registerGitopsForm,
+        opts: { confirmText: 'Register', danger: false }
+      })">
+      <span class="btn-label">Register for GitOps</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Working&hellip;</span>
+    </button>
+  </form>
+  <button type="button" class="btn btn-sm btn-outline" @click="dismissed = true">Dismiss</button>
+</div>
+{% endif %}
+
+{% set _soft_warning = request.query_params.get('warning') %}
+{% set _soft_success = request.query_params.get('success') %}
+{% set _soft_gitops_pending = (not self_managed and not gitops_registered and infra_repo_url) %}
+{% set _notices_auto_open = true if (_soft_warning or _soft_success) else false %}
+{% if _soft_warning or _soft_success or infra_repo_creation_failed or _soft_gitops_pending %}
+<div class="mb-2" x-data="{ open: {{ 'true' if _notices_auto_open else 'false' }} }">
+  <button type="button" class="btn btn-sm btn-outline collapse-toggle" @click="open = !open" :aria-expanded="open">
+    Notices
+  </button>
+  <div class="collapse-body mt-1" x-show="open" x-cloak x-transition>
+    {% if _soft_warning %}
+    {% for w in _soft_warning.split('|') %}
+    <div class="alert alert-warn mb-1" role="status">{{ w }}</div>
+    {% endfor %}
+    {% endif %}
+    {% if _soft_success %}
+    <div class="alert alert-success mb-1" role="status">{{ _soft_success }}</div>
+    {% endif %}
+    {% if infra_repo_creation_failed %}
+    <div class="alert alert-warn mb-1" role="status">
+      <span class="text-sm">Auto-create of a GitOps infra repo failed — register manually via Register for GitOps if shown above.</span>
+    </div>
+    {% endif %}
+    {% if _soft_gitops_pending %}
+    <div class="alert alert-info mb-1" role="status">
+      <span class="text-sm">GitOps infra repo configured (<a href="{{ infra_repo_url | safe_url }}" target="_blank" hx-boost="false">{{ infra_repo_url }}</a>). Registered after the next Scan delivery PR is merged.</span>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
 {% from "_macros.html" import client_tab_nav %}
 {# Initial tab honors ?tab=<key> (e.g. Fleet's per-app pending-action badge
    links here with ?tab=ledger) -- same query-param-driven Alpine init
@@ -331,10 +344,7 @@
     <div class="dimension-label">{{ s.dimension | dimension_label }}</div>
     <div class="dimension-bar">
       <div class="score-bar-bg">
-        <div class="score-bar-fill
-          {% if s.score > 70 %} score-green
-          {% elif s.score >= 40 %} score-yellow
-          {% else %} score-red{% endif %}"
+        <div class="score-bar-fill {{ score_bar_class(s.score) }}"
           style="--pct:{{ s.score }}%"></div>
       </div>
     </div>
