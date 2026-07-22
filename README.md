@@ -112,7 +112,7 @@ Useful commands: `self-assess`, `watch`, `learn`, `test-skill`, `activate-skill`
 
 ## Portal journey
 
-**Primary path:** Assess → Findings → Scan opens PRs → merge on GitHub → Argo deploys → Fleet/Ledger for day-2.
+**Primary path:** Assess → Findings → Scan opens PRs → merge on GitHub → Argo deploys → Fleet/Ledger for day-2. Assessment Notices auto-open for `success`/`warning` flashes (e.g. Register for GitOps).
 
 **Operator / advanced:** Events, Decisions, DLQ, Ledger detail, Agents/Capabilities activity. See [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md).
 
