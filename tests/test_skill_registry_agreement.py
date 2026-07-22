@@ -65,6 +65,18 @@ class TestSolutionContracts:
         assert lookup("scaling") == ("infrastructure", "hpa")
         assert contract_for("scaling").skill_name == "hpa"
 
+    def test_resources_plural_aliases_resource_limits(self) -> None:
+        assert lookup("resources") == ("security", "resource-limits")
+        assert contract_for("resources").skill_name == "resource-limits"
+
+    def test_contract_for_is_exact_key_not_substring(self) -> None:
+        """Multi-word / unrelated categories must not steal a contract via
+        substring (``cost … resources`` must not become ``resource``)."""
+        assert contract_for("cost rightsize resources") is None
+        assert contract_for("availability resilience") is None
+        assert contract_for("network security") is None
+        assert contract_for("network") is not None
+
 
 @pytest.fixture(scope="module")
 def engine() -> SkillEngine:

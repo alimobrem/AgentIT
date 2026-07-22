@@ -90,6 +90,11 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
         "security", "resource-limits", "cluster",
         "setting container resource requests/limits",
     ),
+    # Analyzer emits plural ``resources`` (infrastructure.py).
+    "resources": _c(
+        "security", "resource-limits", "cluster",
+        "setting container resource requests/limits",
+    ),
     # Non-skill sentinel — RemediationDispatcher special-cases patch_base_image.
     "base_image": _c(
         "security", "patch_base_image", "source",
@@ -186,14 +191,18 @@ def _normalize(category: str) -> str:
 
 
 def contract_for(category: str) -> SolutionContract | None:
-    """Return the solution contract for a finding category, or None."""
+    """Return the solution contract for a finding category, or None.
+
+    Exact normalized key only. Bare substring matching falsely mapped
+    multi-word fixture categories (e.g. ``cost … resources`` → ``resource``)
+    and swallowed domains that have no SOLUTION_CONTRACT. Analyzer categories
+    are already exact keys (``container``, ``availability``, ``resources``, …);
+    multi-word / unknown categories stay uncontracted so ``SkillEngine.match()``
+    can trigger-match them without attaching pinky companions onto contracted
+    findings.
+    """
     cat = _normalize(category)
-    if cat in SOLUTION_CONTRACTS:
-        return SOLUTION_CONTRACTS[cat]
-    for key, contract in SOLUTION_CONTRACTS.items():
-        if key in cat:
-            return contract
-    return None
+    return SOLUTION_CONTRACTS.get(cat)
 
 
 def lookup(category: str) -> tuple[str, str] | None:
