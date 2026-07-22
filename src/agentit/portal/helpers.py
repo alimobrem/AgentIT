@@ -557,6 +557,37 @@ def clone_assess_cleanup(
 # ── Run onboarding ───────────────────────────────────────────────────
 
 
+def _codechange_category_override(target_path: str) -> bool:
+    """True when a real ``target_path`` should override ``AgentResult.category``
+    (``"skills"``) to ``"codechange"`` so ``delivery.classify_file()`` routes
+    the file to ``CATEGORY_SOURCE_PATCH`` (a real patch against the app's own
+    repo) rather than ``CATEGORY_CLUSTER_CONFIG`` (a gitops manifest destined
+    for ``apps/{app}/``).
+
+    ``target_path`` is set on a skill-generated file *only* by
+    ``SkillEngine._generate_source_patch()`` (``delivery: source`` skills) --
+    every cluster-mode skill path in ``skill_engine.py`` never sets it. So by
+    the time this runs, any non-empty ``target_path`` is unconditionally a
+    real app-repo patch, regardless of file extension -- ``chart/``/
+    ``skills/`` targets are the one exception: those are self-managed remaps
+    (AgentIT's own ``chart/`` or a skill-catalog markdown improvement) that
+    must stay untouched.
+
+    Before this, the check also required the suffix to be non-YAML (or the
+    filename to be literally ``dockerfile``/``containerfile``) -- true for
+    every source-patch skill that existed until
+    ``skills/infrastructure/helm-chart.md`` (a *multi-file*, all-``.yaml``
+    source patch: ``helm/Chart.yaml``, ``helm/values.yaml``,
+    ``helm/templates/*.yaml``). Under the old check, those files kept
+    ``category="skills"`` and ``classify_file()`` then parsed them as YAML
+    and returned ``CATEGORY_CLUSTER_CONFIG`` -- silently misrouting a Helm
+    chart meant for the app's own repo into a GitOps PR against
+    ``apps/{app}/`` instead.
+    """
+    tp = str(target_path or "")
+    return bool(tp) and not tp.startswith(("chart/", "skills/"))
+
+
 async def run_onboarding(report, assessment_id: str | None = None, store: object | None = None):
     """Run orchestrated onboarding. Returns (files, orchestration_summary).
 
@@ -635,19 +666,12 @@ async def run_onboarding(report, assessment_id: str | None = None, store: object
                     if target_path:
                         entry["target_path"] = target_path
                         # Skills that emit real app-repo patches (Dockerfile,
-                        # package.json, audit.py, …) must route as
-                        # source_patch even though AgentResult.category is
-                        # "skills". chart/ and skills/ targets are
+                        # package.json, audit.py, a whole Helm chart, …) must
+                        # route as source_patch even though AgentResult.category
+                        # is "skills". chart/ and skills/ targets are
                         # self-managed remaps — leave those alone.
-                        from pathlib import Path as _Path
-                        tp = str(target_path)
-                        if not tp.startswith(("chart/", "skills/")):
-                            t_suffix = _Path(tp).suffix.lower()
-                            t_name = _Path(tp).name.lower()
-                            if t_suffix not in (".yaml", ".yml") or t_name in (
-                                "dockerfile", "containerfile",
-                            ):
-                                entry["category"] = "codechange"
+                        if _codechange_category_override(target_path):
+                            entry["category"] = "codechange"
                     all_files.append(entry)
 
         orch_summary = {

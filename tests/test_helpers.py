@@ -10,6 +10,7 @@ from starlette.requests import Request
 
 from agentit.portal.helpers import (
     OAUTH_PROXY_SIGN_OUT_PATH,
+    _codechange_category_override,
     get_current_user,
     is_authenticated,
 )
@@ -98,3 +99,44 @@ def test_oauth_proxy_sign_out_path_matches_chart_deployment():
         "match the new prefix + '/sign_out'."
     )
     assert OAUTH_PROXY_SIGN_OUT_PATH == "/oauth/sign_out"
+
+
+class TestCodechangeCategoryOverride:
+    """run_onboarding()'s delivery.classify_file() routing decision for
+    delivery: source skill output -- see _codechange_category_override's
+    own docstring for the bug this closes (a multi-file, all-``.yaml``
+    source patch like skills/infrastructure/helm-chart.md's Helm chart was
+    wrongly left at category="skills", which delivery.classify_file() then
+    parsed as a K8s manifest and routed to CATEGORY_CLUSTER_CONFIG --
+    gitops apps/{app}/ -- instead of the app's own repo)."""
+
+    def test_yaml_target_path_outside_chart_and_skills_becomes_codechange(self):
+        """The regression case: skills/infrastructure/helm-chart.md's
+        multi-file Helm chart target paths (helm/Chart.yaml,
+        helm/templates/deployment.yaml, ...) must all become codechange."""
+        assert _codechange_category_override("helm/Chart.yaml") is True
+        assert _codechange_category_override("helm/values.yaml") is True
+        assert _codechange_category_override("helm/templates/deployment.yaml") is True
+        assert _codechange_category_override("helm/templates/service.yaml") is True
+
+    def test_non_yaml_target_paths_still_become_codechange(self):
+        """Unchanged behavior for every pre-existing delivery: source
+        skill (Dockerfile, .node-version, audit.py, alembic.ini, ...)."""
+        assert _codechange_category_override("Dockerfile") is True
+        assert _codechange_category_override(".node-version") is True
+        assert _codechange_category_override("audit.py") is True
+        assert _codechange_category_override("alembic/env.py") is True
+
+    def test_chart_prefixed_target_path_is_excluded(self):
+        """AgentIT's own self-managed chart/ remap target -- must stay
+        untouched (routes as cluster-shaped self-managed content, handled
+        by a completely different code path in delivery.py)."""
+        assert _codechange_category_override("chart/templates/foo.yaml") is False
+
+    def test_skills_prefixed_target_path_is_excluded(self):
+        """A skill-catalog markdown improvement -- must stay untouched."""
+        assert _codechange_category_override("skills/infrastructure/foo.md") is False
+
+    def test_empty_target_path_is_false(self):
+        assert _codechange_category_override("") is False
+        assert _codechange_category_override(None) is False

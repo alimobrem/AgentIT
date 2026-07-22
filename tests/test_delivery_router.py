@@ -281,6 +281,28 @@ class TestClassifyFile:
     def test_source_patch_from_codechange_category(self):
         assert classify_file(_source_patch_file()) == CATEGORY_SOURCE_PATCH
 
+    def test_source_patch_yaml_file_from_codechange_category(self):
+        """Regression: a delivery: source skill's .yaml-suffixed output
+        (e.g. skills/infrastructure/helm-chart.md's helm/Chart.yaml,
+        helm/templates/deployment.yaml) must also classify as
+        CATEGORY_SOURCE_PATCH once helpers.py's run_onboarding() has
+        already tagged it category="codechange" -- classify_file() itself
+        never inspects target_path, only category/path, so this is purely
+        about the category tag being set correctly upstream (see
+        test_helpers.py::TestCodechangeCategoryOverride)."""
+        helm_chart_file = {
+            "category": "codechange",
+            "path": "patch-helm-templates-deployment.yaml",
+            "content": (
+                "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: pinky\n"
+                "spec:\n  template:\n    spec:\n      containers:\n"
+                "        - name: pinky\n          image: pinky:1\n"
+            ),
+            "description": "Helm chart Deployment",
+            "target_path": "helm/templates/deployment.yaml",
+        }
+        assert classify_file(helm_chart_file) == CATEGORY_SOURCE_PATCH
+
     def test_codechange_summary_is_narrative_not_source_patch(self):
         summary = {"category": "codechange", "path": "code-changes-summary.md", "content": "# summary"}
         assert classify_file(summary) == CATEGORY_NARRATIVE_REPORT
