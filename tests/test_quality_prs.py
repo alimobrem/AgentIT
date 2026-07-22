@@ -370,6 +370,38 @@ class TestAutoDeliveryQualityGate:
         mock_commit.assert_not_called()
         mock_source.assert_not_called()
 
+    async def test_refuses_pr_when_only_detect_only_findings(self):
+        """license/backup/secrets are contracted detect_only — no Scan PR."""
+        store = await make_store()
+        report = _report_with_findings("license", "secrets", repo_name="detect-only-app")
+        aid = await store.save(report)
+        companion = {
+            "category": "skills",
+            "path": "fake-license-policy.yaml",
+            "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: license\n",
+            "description": "wrong companion",
+            "skill_name": "kyverno-require-labels",
+        }
+
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.create_source_patch_pr") as mock_source:
+            result = await auto_validate_and_deliver(
+                store=store, report=report, app_name=report.repo_name, namespace="ns",
+                assessment_id=aid, actor="auto-delivery",
+                files=[companion],
+                orchestration={},
+                target_findings=[
+                    ("license", "No LICENSE file found"),
+                    ("secrets", "Potential api_key found"),
+                ],
+            )
+
+        assert result["status"] == "needs_attention"
+        assert "detect_only" in result["reason"] or "no_auto_pr" in result["reason"]
+        mock_commit.assert_not_called()
+        mock_source.assert_not_called()
+
     async def test_refuses_when_files_do_not_map_to_findings(self):
         store = await make_store()
         # Non-property finding so validate/fix does not inject a matching fix.

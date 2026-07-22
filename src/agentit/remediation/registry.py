@@ -9,11 +9,11 @@ docs/agent-removal-readiness.md) -- the registry now maps a category to a
 SkillEngine instead of an agent class/method.
 
 **Solution contracts** (2026-07-22): each registered finding also declares
-the delivery surface that actually clears it (``source`` vs ``cluster``)
-and human-readable clear evidence. Scan must open only that surface's PR
-— never a wrong-layer companion (e.g. Kyverno for a Dockerfile ``:latest``
-finding, or apiserver ``audit-policy`` for app audit logging). See
-``portal/quality_prs.py`` and ``SkillEngine.match()``.
+the delivery surface that actually clears it (``source`` vs ``cluster``
+vs ``none`` for detect_only) and human-readable clear evidence. Scan must
+open only that surface's PR — never a wrong-layer companion (e.g. Kyverno
+for a Dockerfile ``:latest`` finding, or apiserver ``audit-policy`` for
+app audit logging). See ``portal/quality_prs.py`` and ``SkillEngine.match()``.
 """
 
 from __future__ import annotations
@@ -28,14 +28,18 @@ class SolutionContract:
     domain: str
     skill_name: str
     # ``source`` → app-repo patch (CATEGORY_SOURCE_PATCH); ``cluster`` →
-    # gitops / chart manifests. Companion PRs on the other surface do not
-    # clear the finding and must not be opened for "finding-clear".
+    # gitops / chart manifests; ``none`` → detect_only / no Scan PR.
+    # Companion PRs on the wrong surface do not clear the finding and must
+    # not be opened for "finding-clear".
     delivery: str
     # One-line honesty for PR bodies: "Clears finding X by doing Y".
     clear_evidence: str
     # Skills that keyword-overlap this finding but never clear it (wrong
     # layer). Match + quality filter refuse these as companions.
     refuse_companions: frozenset[str] = field(default_factory=frozenset)
+    # False → detect_only / no_auto_pr: Scan must not open a PR for this
+    # category (mode:detect skill, or human-only remediation like secrets).
+    auto_pr: bool = True
 
 
 def _c(
@@ -44,6 +48,7 @@ def _c(
     delivery: str,
     clear_evidence: str,
     *refuse: str,
+    auto_pr: bool = True,
 ) -> SolutionContract:
     return SolutionContract(
         domain=domain,
@@ -51,12 +56,13 @@ def _c(
         delivery=delivery,
         clear_evidence=clear_evidence,
         refuse_companions=frozenset(refuse),
+        auto_pr=auto_pr,
     )
 
 
 # Authoritative per-finding solution contracts. FIX_REGISTRY below is derived
-# so RemediationDispatcher / skill_for_category keep a stable (domain, skill)
-# API.
+# from auto_pr rows so RemediationDispatcher / skill_for_category keep a
+# stable (domain, skill) API for remediable findings only.
 SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
     "container": _c(
         "security", "containerfile", "source",
@@ -87,6 +93,11 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
         "adding a Tekton image-scan Task referenced by the pipeline",
     ),
     "resource": _c(
+        "security", "resource-limits", "cluster",
+        "setting container resource requests/limits",
+    ),
+    # Analyzer emits plural ``resources`` (infrastructure.py); same contract.
+    "resources": _c(
         "security", "resource-limits", "cluster",
         "setting container resource requests/limits",
     ),
@@ -126,6 +137,14 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
     "tracing": _c(
         "observability", "otel-collector", "cluster",
         "adding OpenTelemetry collector config for the app",
+    ),
+    "dashboards": _c(
+        "observability", "grafana-dashboard", "cluster",
+        "adding a Grafana dashboard ConfigMap for RED metrics",
+    ),
+    "alerting": _c(
+        "observability", "alerting-rules", "cluster",
+        "adding PrometheusRule alerting rules for the app",
     ),
     "rbac": _c(
         "security", "rbac", "cluster",
@@ -172,12 +191,48 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
         "infrastructure", "health-probes-policy", "cluster",
         "adding a Kyverno mutate Policy that injects liveness/readiness probes",
     ),
+    # --- detect_only / no_auto_pr (mode:detect skills or human-only) ---
+    # Contracted so Scan never fuzzy-attaches companions; auto_pr=False
+    # means no Scan PR for the finding itself.
+    "license": _c(
+        "compliance", "license-file-exists", "none",
+        "detect-only: LICENSE* presence — human adds license text (no auto-PR)",
+        auto_pr=False,
+    ),
+    "backup": _c(
+        "data_governance", "backup-config-exists", "none",
+        "detect-only: backup CronJob/Crunchy schedule — human designs backup (no auto-PR)",
+        auto_pr=False,
+    ),
+    "retention": _c(
+        "data_governance", "retention-policy-exists", "none",
+        "detect-only: retention policy doc/config — human authors policy (no auto-PR)",
+        auto_pr=False,
+    ),
+    "logging": _c(
+        "observability", "structured-logging-detected", "none",
+        "detect-only: structured logging library — human wires logging (no auto-PR)",
+        auto_pr=False,
+    ),
+    "instrumentation": _c(
+        "observability", "structured-logging-detected", "none",
+        "detect-only: OpenTelemetry SDK in app source — human instruments (no auto-PR)",
+        auto_pr=False,
+    ),
+    "secrets": _c(
+        "security", "human-secrets-remediation", "none",
+        "detect-only: rotate leaked secret + ExternalSecrets/Vault — human-only (no auto-PR)",
+        auto_pr=False,
+    ),
 }
 
 
-# Backward-compatible (domain, skill_name) map — derived from contracts.
+# Remediate-only (domain, skill_name) map — detect_only rows stay in
+# SOLUTION_CONTRACTS but not FIX_REGISTRY.
 FIX_REGISTRY: dict[str, tuple[str, str]] = {
-    key: (c.domain, c.skill_name) for key, c in SOLUTION_CONTRACTS.items()
+    key: (c.domain, c.skill_name)
+    for key, c in SOLUTION_CONTRACTS.items()
+    if c.auto_pr
 }
 
 
@@ -196,10 +251,27 @@ def contract_for(category: str) -> SolutionContract | None:
     return None
 
 
-def lookup(category: str) -> tuple[str, str] | None:
-    """Find the (domain, skill_name) for a finding category."""
+def allows_auto_pr(category: str) -> bool:
+    """True when Scan may open a finding-clear PR for this category.
+
+    Fail-closed: uncontracted categories and ``auto_pr=False`` (detect_only /
+    no_auto_pr) never open PRs — closes the fuzzy-companion hole for gaps.
+    """
     contract = contract_for(category)
-    if contract is None:
+    return contract is not None and contract.auto_pr
+
+
+def remediable_findings(
+    target_findings: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Keep only findings that have an auto_pr solution contract."""
+    return [(c, d) for c, d in target_findings if c and allows_auto_pr(c)]
+
+
+def lookup(category: str) -> tuple[str, str] | None:
+    """Find the (domain, skill_name) for a remediable finding category."""
+    contract = contract_for(category)
+    if contract is None or not contract.auto_pr:
         return None
     return (contract.domain, contract.skill_name)
 
@@ -207,7 +279,11 @@ def lookup(category: str) -> tuple[str, str] | None:
 def clears_via_source(category: str) -> bool:
     """True when the finding only clears via an app-repo source patch."""
     contract = contract_for(category)
-    return contract is not None and contract.delivery == "source"
+    return (
+        contract is not None
+        and contract.auto_pr
+        and contract.delivery == "source"
+    )
 
 
 def expected_clear_lines(target_findings: list[tuple[str, str]]) -> list[str]:
@@ -217,6 +293,12 @@ def expected_clear_lines(target_findings: list[tuple[str, str]]) -> list[str]:
         contract = contract_for(cat)
         if contract is None:
             lines.append(f"Clear `{cat}` on next re-Assess.")
+            continue
+        if not contract.auto_pr:
+            lines.append(
+                f"`{cat}` is detect-only / no auto-PR — "
+                f"{contract.clear_evidence}."
+            )
             continue
         lines.append(
             f"Clears `{cat}` by {contract.clear_evidence} "

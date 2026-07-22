@@ -56,8 +56,18 @@ def finding_gate_allows_pr(
     score_delta_claimed: float | None = None,
     min_score_delta: float = 5.0,
 ) -> bool:
-    """Phase A: open a PR only when tied to open findings or a material score claim."""
-    if target_findings:
+    """Phase A: open a PR only when tied to remediable findings or a material score claim.
+
+    detect_only / no_auto_pr / uncontracted categories do not count — Scan
+    must not open companion PRs for findings that have no clearing skill.
+    """
+    try:
+        from agentit.remediation.registry import remediable_findings
+
+        remediable = remediable_findings(target_findings)
+    except Exception:
+        remediable = list(target_findings)
+    if remediable:
         return True
     if score_delta_claimed is not None and abs(score_delta_claimed) >= min_score_delta:
         return True
@@ -65,8 +75,21 @@ def finding_gate_allows_pr(
 
 
 def finding_gate_refuse_reason(target_findings: list[tuple[str, str]]) -> str:
-    if target_findings:
-        return ""
+    try:
+        from agentit.remediation.registry import allows_auto_pr, remediable_findings
+
+        if remediable_findings(target_findings):
+            return ""
+        if target_findings:
+            blocked = sorted({c for c, _ in target_findings if c and not allows_auto_pr(c)})
+            return (
+                "Open findings are detect_only / no_auto_pr / uncontracted — "
+                f"refusing PR ({', '.join(blocked) or 'none'}). "
+                "Add a remediating SOLUTION_CONTRACT or leave as detect-only."
+            )
+    except Exception:
+        if target_findings:
+            return ""
     return (
         "No open findings / score delta — refusing to open a PR "
         "(catalog dumps are not helpful; see docs/plan-quality-helpful-prs.md Phase A)."

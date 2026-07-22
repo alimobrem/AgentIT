@@ -439,7 +439,15 @@ async def auto_validate_and_deliver(
         return {"status": "needs_attention", "reason": reason, "iterations": validation["iterations"]}
 
     # Phase A: finding / score-delta gate — no catalog dumps with empty need.
+    # Strip detect_only / no_auto_pr / uncontracted so Scan only opens for
+    # remediable SOLUTION_CONTRACTS (fail-closed coverage).
     resolved_findings = resolve_target_findings(report, target_findings)
+    try:
+        from agentit.remediation.registry import remediable_findings
+
+        remediable = remediable_findings(resolved_findings)
+    except Exception:
+        remediable = list(resolved_findings)
     if not finding_gate_allows_pr(resolved_findings, score_delta_claimed=score_delta_claimed):
         reason = finding_gate_refuse_reason(resolved_findings)
         logger.warning("Auto-delivery finding gate refused for %s: %s", app_name, reason)
@@ -451,6 +459,9 @@ async def auto_validate_and_deliver(
         except Exception:
             logger.warning("Failed to log finding-gate event for %s", app_name, exc_info=True)
         return {"status": "needs_attention", "reason": reason}
+
+    # Downstream filter/cluster/PR body only see remediable findings.
+    resolved_findings = remediable if remediable else resolved_findings
 
     kept_files, drop_reasons = filter_files_to_open_findings(final_files, resolved_findings)
     # Solution-complete: drop wrong-layer companions (gitops Kyverno for a

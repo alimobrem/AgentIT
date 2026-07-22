@@ -923,7 +923,7 @@ class SkillEngine:
         keyword-trigger matching, preserving this method's pre-unification
         behavior for anything the static registry doesn't yet know about.
         """
-        from agentit.remediation.registry import lookup
+        from agentit.remediation.registry import contract_for, lookup
 
         match = lookup(category)
         if match is not None:
@@ -936,6 +936,12 @@ class SkillEngine:
                 "is loaded (or it's a non-skill sentinel handled elsewhere)",
                 category, skill_name,
             )
+            return None
+
+        # detect_only / no_auto_pr contracts: never fall back to trigger matching
+        # (would reattach wrong-layer companions the contract exists to refuse).
+        contracted = contract_for(category)
+        if contracted is not None and not contracted.auto_pr:
             return None
 
         category_lower = category.lower()

@@ -27,22 +27,67 @@ import pytest
 from agentit.remediation.registry import (
     FIX_REGISTRY,
     SOLUTION_CONTRACTS,
+    allows_auto_pr,
     clears_via_source,
     contract_for,
     lookup,
+    remediable_findings,
 )
 from agentit.skill_engine import SkillEngine
 from conftest import make_report
 
 _SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 
+# Analyzer-emitted finding categories that must have an explicit contract
+# (remediate or detect_only). Fail CI if a new analyzer category ships bare.
+_ANALYZER_CATEGORIES = frozenset({
+    "license", "sbom", "audit", "policy",
+    "backup", "migration", "retention",
+    "secrets", "container", "network", "scanning",
+    "iac", "manifests", "resources", "quota",
+    "availability", "scaling", "health",
+    "pipeline", "gitops",
+    "eol",
+    "instrumentation", "metrics", "logging", "tracing", "dashboards", "alerting",
+})
+
 
 class TestSolutionContracts:
-    def test_fix_registry_derived_from_contracts(self) -> None:
-        assert set(FIX_REGISTRY) == set(SOLUTION_CONTRACTS)
+    def test_fix_registry_derived_from_auto_pr_contracts(self) -> None:
+        remediable = {k for k, c in SOLUTION_CONTRACTS.items() if c.auto_pr}
+        assert set(FIX_REGISTRY) == remediable
         for key, (domain, skill) in FIX_REGISTRY.items():
             c = SOLUTION_CONTRACTS[key]
             assert (c.domain, c.skill_name) == (domain, skill)
+            assert c.auto_pr
+
+    def test_every_analyzer_category_has_a_contract(self) -> None:
+        for cat in sorted(_ANALYZER_CATEGORIES):
+            assert contract_for(cat) is not None, (
+                f"analyzer category '{cat}' has no SOLUTION_CONTRACT — "
+                f"add remediate or detect_only/no_auto_pr"
+            )
+
+    def test_detect_only_categories_refuse_auto_pr(self) -> None:
+        for cat in (
+            "license", "backup", "retention", "logging",
+            "instrumentation", "secrets",
+        ):
+            c = contract_for(cat)
+            assert c is not None, cat
+            assert c.auto_pr is False, cat
+            assert c.delivery == "none", cat
+            assert allows_auto_pr(cat) is False
+            assert lookup(cat) is None
+
+    def test_remediable_findings_strips_detect_only(self) -> None:
+        kept = remediable_findings([
+            ("container", "latest"),
+            ("license", "no LICENSE"),
+            ("secrets", "api key"),
+            ("scaling", "no HPA"),
+        ])
+        assert [c for c, _ in kept] == ["container", "scaling"]
 
     def test_source_findings_clear_via_source(self) -> None:
         for cat in ("container", "dockerfile", "audit", "eol", "migration", "iac", "manifests"):
@@ -64,6 +109,10 @@ class TestSolutionContracts:
     def test_lookup_agrees_with_contract(self) -> None:
         assert lookup("scaling") == ("infrastructure", "hpa")
         assert contract_for("scaling").skill_name == "hpa"
+
+    def test_resources_plural_aliases_resource_limits(self) -> None:
+        assert lookup("resources") == ("security", "resource-limits")
+        assert contract_for("resources").skill_name == "resource-limits"
 
 
 @pytest.fixture(scope="module")
