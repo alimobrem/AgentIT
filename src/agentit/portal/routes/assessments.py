@@ -238,8 +238,12 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
 
     pr_history = await get_app_pr_history(s, assessment_id, report.repo_url, report.repo_name)
     open_prs = [pr for pr in pr_history if pr["state"] == "open"]
+    from agentit.remediation.clear_evidence import contract_lines_for_portal
+
     for pr in open_prs:
         pr["kind"] = "pr"
+        # Honesty line on PR cards: Clears X by Y (solution contract).
+        pr["contract_lines"] = contract_lines_for_portal(pr.get("target_findings") or [])
     merged_prs = [pr for pr in pr_history if pr.get("state") == "merged" or pr.get("lifecycle") == "merged"]
 
     unresolved_rollbacks, unresolved_escalations = await list_unresolved_recommendations(

@@ -1,14 +1,21 @@
 # The Ledger — design spec (buildable, not philosophy)
 
+> **Update (2026-07-22):** The in-app **gates table** and Assessment Detail
+> Actions/Timeline tabs are gone. Live approval UX is Ledger + GitHub PR
+> merge (`pr_action_card` / recommendations). Card types below that assume
+> pending `gates` rows are partially historical — verify against
+> `pr_tracking.py` / current `/ledger` before implementing from this spec.
+> Product overview: [../README.md](../README.md).
+
 **Status: implemented (Phase 0, Phase 1, and the §2/§4 noise-at-scale +
 rewind pieces originally sequenced as Phase 4).** `agentit/ledger.py`'s
-`get_ledger_cards()` unions `events`/`gates`/`deliveries`/fix-review
-`skill_effectiveness` rows into the card types below; a per-app **Ledger**
-tab lives on Assessment Detail (additive, alongside Actions/Timeline) and a
-fleet-wide `/ledger` page is linked from nav (additive, alongside
-Events/Decisions). The two Phase 0 gap-fills (`slo_tracker.py`'s
-`rollback-recommended` event, `drift_detector.py`'s `drift-auto-synced`/
-`drift-auto-sync-failed` events) are also in.
+`get_ledger_cards()` unions `events`/`deliveries`/fix-review
+`skill_effectiveness` rows (and legacy gate-shaped data where still present)
+into the card types below; a per-app **Ledger** tab lives on Assessment
+Detail and a fleet-wide `/ledger` page is linked from nav. The two Phase 0
+gap-fills (`slo_tracker.py`'s `rollback-recommended` event,
+`drift_detector.py`'s `drift-auto-synced`/`drift-auto-sync-failed` events)
+are also in.
 
 Also shipped in this same pass, ahead of their original §5 Phase 4
 sequencing: the fleet-wide `/ledger` default is now §2 rule 2's

@@ -30,6 +30,7 @@ import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
+from agentit.models import DimensionScore, Finding, Severity
 from agentit.portal.app import app
 from agentit.portal.routes import assessments
 from agentit.portal.services import onboard_pipeline
@@ -40,11 +41,19 @@ def _cluster_config_file(path: str = "netpol.yaml") -> dict:
     return {
         "category": "skills",
         "path": path,
-        "content": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: test\n",
+        "content": (
+            "apiVersion: networking.k8s.io/v1\n"
+            "kind: NetworkPolicy\n"
+            "metadata:\n  name: deny-all\n"
+            "spec:\n"
+            "  podSelector: {}\n"
+            "  policyTypes:\n"
+            "  - Ingress\n"
+            "  - Egress\n"
+        ),
         "description": "network policy",
-        # Phase A: must map to make_report's default finding category "test".
-        "finding_addressed": "test",
-        "skill_name": "test",
+        "finding_addressed": "network",
+        "skill_name": "network-policy",
     }
 
 
@@ -64,7 +73,18 @@ async def onboard_client():
 
 
 async def _seed_assessment(store, *, repo_name: str = "onboard-app", infra_repo_url: str | None = None) -> str:
-    report = make_report(repo_name=repo_name)
+    # Remediable network contract so clear-evidence / finding gate can open a PR.
+    report = make_report(
+        repo_name=repo_name,
+        scores=[DimensionScore(
+            dimension="security", score=40, max_score=100,
+            findings=[Finding(
+                category="network", severity=Severity.high,
+                description="No NetworkPolicy manifests found",
+                recommendation="Add deny-all NetworkPolicy",
+            )],
+        )],
+    )
     report.infra_repo_url = infra_repo_url
     return await store.save(report)
 

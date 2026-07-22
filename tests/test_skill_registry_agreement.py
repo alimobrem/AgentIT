@@ -27,27 +27,88 @@ import pytest
 from agentit.remediation.registry import (
     FIX_REGISTRY,
     SOLUTION_CONTRACTS,
+    allows_auto_pr,
     clears_via_source,
     contract_for,
+    delivery_path_hint,
     lookup,
+    remediable_findings,
 )
-from agentit.skill_engine import SkillEngine
+from agentit.skill_engine import SkillEngine, load_all_skills
 from conftest import make_report
 
 _SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 
+# Analyzer-emitted finding categories that must have an explicit contract
+# (remediate or detect_only). Fail CI if a new analyzer category ships bare.
+_ANALYZER_CATEGORIES = frozenset({
+    "license", "sbom", "audit", "policy",
+    "backup", "migration", "retention",
+    "secrets", "container", "network", "scanning",
+    "iac", "manifests", "resources", "quota",
+    "availability", "scaling", "health",
+    "pipeline", "gitops",
+    "eol",
+    "instrumentation", "metrics", "logging", "tracing", "dashboards", "alerting",
+})
+
 
 class TestSolutionContracts:
-    def test_fix_registry_derived_from_contracts(self) -> None:
-        assert set(FIX_REGISTRY) == set(SOLUTION_CONTRACTS)
+    def test_fix_registry_derived_from_auto_pr_contracts(self) -> None:
+        remediable = {k for k, c in SOLUTION_CONTRACTS.items() if c.auto_pr}
+        assert set(FIX_REGISTRY) == remediable
         for key, (domain, skill) in FIX_REGISTRY.items():
             c = SOLUTION_CONTRACTS[key]
             assert (c.domain, c.skill_name) == (domain, skill)
+            assert c.auto_pr
+
+    def test_every_analyzer_category_has_a_contract(self) -> None:
+        for cat in sorted(_ANALYZER_CATEGORIES):
+            assert contract_for(cat) is not None, (
+                f"analyzer category '{cat}' has no SOLUTION_CONTRACT — "
+                f"add remediate or detect_only/no_auto_pr"
+            )
+
+    def test_detect_only_categories_refuse_auto_pr(self) -> None:
+        for cat in (
+            "license", "backup", "retention", "logging",
+            "instrumentation", "secrets",
+        ):
+            c = contract_for(cat)
+            assert c is not None, cat
+            assert c.auto_pr is False, cat
+            assert c.delivery == "none", cat
+            assert allows_auto_pr(cat) is False
+            assert lookup(cat) is None
+
+    def test_remediable_findings_strips_detect_only(self) -> None:
+        kept = remediable_findings([
+            ("container", "latest"),
+            ("license", "no LICENSE"),
+            ("secrets", "api key"),
+            ("scaling", "no HPA"),
+        ])
+        assert [c for c, _ in kept] == ["container", "scaling"]
+
+    def test_every_remediable_contract_has_evidence_kind(self) -> None:
+        for key, c in SOLUTION_CONTRACTS.items():
+            assert c.evidence_kind, key
+            if c.auto_pr:
+                assert c.evidence_kind != "detect_only", key
+                assert c.delivery in ("source", "cluster"), key
+            else:
+                assert c.evidence_kind == "detect_only", key
 
     def test_source_findings_clear_via_source(self) -> None:
         for cat in ("container", "dockerfile", "audit", "eol", "migration", "iac", "manifests"):
             assert clears_via_source(cat), cat
             assert contract_for(cat).delivery == "source"
+
+    def test_fleet_vs_self_managed_path_hints(self) -> None:
+        assert "gitops" in delivery_path_hint("scaling", self_managed=False)
+        assert "apps/" in delivery_path_hint("scaling", self_managed=False)
+        assert "chart" in delivery_path_hint("scaling", self_managed=True)
+        assert "source" in delivery_path_hint("container", self_managed=False).lower()
 
     def test_audit_refuses_apiserver_policy_companion(self) -> None:
         c = contract_for("audit")
@@ -76,6 +137,45 @@ class TestSolutionContracts:
         assert contract_for("availability resilience") is None
         assert contract_for("network security") is None
         assert contract_for("network") is not None
+
+
+class TestSkillContractCiDrift:
+    """Fail CI when FIX_REGISTRY / SOLUTION_CONTRACTS drift from skill files."""
+
+    @pytest.fixture(scope="class")
+    def skills_by_name(self) -> dict:
+        return {s.name: s for s in load_all_skills(_SKILLS_DIR)}
+
+    def test_every_remediable_skill_exists(self, skills_by_name: dict) -> None:
+        for cat, c in SOLUTION_CONTRACTS.items():
+            if not c.auto_pr:
+                continue
+            if c.skill_name == "patch_base_image":
+                continue
+            assert c.skill_name in skills_by_name, (
+                f"contract '{cat}' skill '{c.skill_name}' missing from skills/"
+            )
+
+    def test_delivery_matches_skill_frontmatter(self, skills_by_name: dict) -> None:
+        for cat, c in SOLUTION_CONTRACTS.items():
+            if not c.auto_pr or c.skill_name == "patch_base_image":
+                continue
+            skill = skills_by_name[c.skill_name]
+            # Skills may omit delivery (defaults cluster). Source must match.
+            skill_delivery = (getattr(skill, "delivery", None) or "cluster").lower()
+            if c.delivery == "source":
+                assert skill_delivery == "source", (
+                    f"contract '{cat}' delivery=source but skill "
+                    f"'{c.skill_name}' frontmatter delivery={skill_delivery!r}"
+                )
+
+    def test_detect_only_auto_pr_false(self) -> None:
+        for cat, c in SOLUTION_CONTRACTS.items():
+            if c.delivery == "none":
+                assert c.auto_pr is False, cat
+            if c.auto_pr is False:
+                assert c.delivery == "none", cat
+                assert cat not in FIX_REGISTRY
 
 
 @pytest.fixture(scope="module")

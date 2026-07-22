@@ -1,20 +1,21 @@
 # Unified Apply Flow
 
-**Status: implemented.** This design shipped in `e041d05` ("Unify
-apply/delivery flow, add real server-side-apply, and scope auto-mode by
-allowlist") and is now the live routing path for every delivery mechanism —
-`portal/delivery.py::route_and_deliver()` exists, `gates.py::resolve_gate()`
-and `AutoMode.execute()` both call it, the `deliveries` table is real, and
-`kube.apply_yaml()` really does use per-field-manager server-side-apply via
-the Kubernetes Python client (not `oc` subprocess) as described below. See
-the README's "Unified apply flow" section for the current, living
-description of this system, and `docs/ui-redesign-proposal.md`/
-`docs/ledger-design-spec.md` for what was built on top of it since. The rest
-of this document is preserved as the original design rationale — read it for
-*why* the system is shaped this way, not as a to-do list. Two items from
-"Deliberately not addressed" below remain genuinely open (auto-merge opt-in
-knob, GitOps-branch rollback semantics) — verify against current code before
-assuming either has since landed.
+> **HISTORICAL (2026-07-22).** This document describes the design era that
+> introduced `route_and_deliver()` while Direct Apply, AutoMode, and in-app
+> gates still existed. **Do not treat the body below as the live product.**
+>
+> **Current truth:** Scan/`auto_delivery` → quality filter → SSA dry-run →
+> GitOps/source PR → human merge → Argo. No Direct Apply, no AutoMode, no
+> gates table. See [../README.md](../README.md), [architecture.md](./architecture.md),
+> and [architecture-agentit-vs-fleet-gitops.md](./architecture-agentit-vs-fleet-gitops.md).
+>
+> What remains true from this work: `portal/delivery.py::route_and_deliver()`
+> is still the single delivery router, and `kube.apply_yaml()` is real
+> server-side-apply (used for dry-run preflight and AgentIT CI notify paths —
+> not portal Direct Apply).
+
+**Original status line (superseded):** implemented in `e041d05` with AutoMode /
+gate-approve callers that no longer exist.
 
 ## The gap this closes, and why it's urgent rather than just untidy
 

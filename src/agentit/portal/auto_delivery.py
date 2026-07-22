@@ -439,7 +439,15 @@ async def auto_validate_and_deliver(
         return {"status": "needs_attention", "reason": reason, "iterations": validation["iterations"]}
 
     # Phase A: finding / score-delta gate — no catalog dumps with empty need.
+    # Strip detect_only / no_auto_pr / uncontracted so Scan only opens for
+    # remediable SOLUTION_CONTRACTS (fail-closed coverage).
     resolved_findings = resolve_target_findings(report, target_findings)
+    try:
+        from agentit.remediation.registry import remediable_findings
+
+        remediable = remediable_findings(resolved_findings)
+    except Exception:
+        remediable = list(resolved_findings)
     if not finding_gate_allows_pr(resolved_findings, score_delta_claimed=score_delta_claimed):
         reason = finding_gate_refuse_reason(resolved_findings)
         logger.warning("Auto-delivery finding gate refused for %s: %s", app_name, reason)
@@ -451,6 +459,9 @@ async def auto_validate_and_deliver(
         except Exception:
             logger.warning("Failed to log finding-gate event for %s", app_name, exc_info=True)
         return {"status": "needs_attention", "reason": reason}
+
+    # Downstream filter/cluster/PR body only see remediable findings.
+    resolved_findings = remediable if remediable else resolved_findings
 
     kept_files, drop_reasons = filter_files_to_open_findings(final_files, resolved_findings)
     # Solution-complete: drop wrong-layer companions (gitops Kyverno for a
@@ -499,6 +510,7 @@ async def auto_validate_and_deliver(
         # live workloads are app-api / Rollout/app). Self-managed uses
         # delivery._deliver_self_managed_source_pr + self_managed_hpa instead.
         from agentit.portal.delivery import is_self_managed_delivery_target
+        from agentit.portal.quality_prs import clear_evidence_simulation_ok
 
         cluster_files = list(cluster.files)
         # Per-cluster wrong-layer strip (source-only findings → no gitops YAML).
@@ -520,6 +532,7 @@ async def auto_validate_and_deliver(
             continue
 
         self_managed = await is_self_managed_delivery_target(app_name, report)
+        live_workloads = None
         if not self_managed:
             from agentit.portal.fleet_hpa import (
                 discover_namespace_workloads,
@@ -529,6 +542,12 @@ async def auto_validate_and_deliver(
             workloads = await asyncio.to_thread(
                 discover_namespace_workloads, namespace or app_name,
             )
+            live_workloads = None
+            if workloads is not None and getattr(workloads, "discovery_ok", False):
+                live_workloads = [
+                    *[{"kind": "Deployment", "name": n} for n in workloads.deployments],
+                    *[{"kind": "Rollout", "name": n} for n in workloads.rollouts],
+                ]
             cluster_files, hpa_drops = filter_fleet_hpa_files(
                 cluster_files, workloads, app_name=app_name,
             )
@@ -545,6 +564,30 @@ async def auto_validate_and_deliver(
                     cluster.key, app_name, reason,
                 )
                 continue
+
+        # Pre-open clear-evidence simulation: refuse if MERGE would not clear.
+        sim_ok, sim_reason = clear_evidence_simulation_ok(
+            cluster_files, cluster.target_findings,
+            live_workloads=live_workloads,
+            self_managed=self_managed,
+        )
+        if not sim_ok:
+            cluster_refusals.append(f"{cluster.key}: {sim_reason}")
+            logger.warning(
+                "Auto-delivery cluster %s for %s refused by clear-evidence simulation: %s",
+                cluster.key, app_name, sim_reason,
+            )
+            try:
+                await store.log_event(
+                    "auto-delivery", "auto-delivery-clear-evidence", app_name, "warning",
+                    f"Cluster {cluster.key}: {sim_reason}",
+                    correlation_id=assessment_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to log clear-evidence refusal for %s", app_name, exc_info=True,
+                )
+            continue
 
         # Phase C: per-cluster validation before open.
         dry_errors, dry_warnings, _ = await _dry_run_check(
@@ -571,9 +614,11 @@ async def auto_validate_and_deliver(
 
         cluster_warnings = dry_warnings or soft_warnings
         validation_summary = (
-            "SSA dry-run (concrete YAML), property checks for targeted "
+            "SSA dry-run (concrete YAML), clear-evidence simulation "
+            "(contract evidence_kind), property checks for targeted "
             "findings, fleet HPA scaleTargetRef gate, and self-managed "
             "chart gate (#119) passed for this cluster."
+            f"\n\nClear-evidence: {sim_reason}"
         )
         if cluster_warnings:
             validation_summary += (

@@ -93,6 +93,12 @@ class TestFindingGatePhaseA:
     def test_allows_open_findings(self):
         assert finding_gate_allows_pr([("rbac", "missing rbac")]) is True
 
+    def test_refuses_detect_only_findings_alone(self):
+        assert finding_gate_allows_pr([
+            ("license", "No LICENSE"),
+            ("secrets", "api key"),
+        ]) is False
+
     def test_allows_material_score_delta_claim(self):
         assert finding_gate_allows_pr([], score_delta_claimed=8.0) is True
         assert finding_gate_allows_pr([], score_delta_claimed=2.0) is False
@@ -312,6 +318,7 @@ class TestPrBodyPhaseD:
         assert "### Expected effect" in body
         assert "Clears `rbac` by" in body
         assert "delivery: **cluster**" in body
+        assert "evidence: `cluster_kind`" in body
         assert "### Finding-clear proof (post-merge)" in body
         assert "correlate_delivery_finding" in body
         assert "### Validation" in body
@@ -367,6 +374,76 @@ class TestAutoDeliveryQualityGate:
 
         assert result["status"] == "needs_attention"
         assert "No open findings" in result["reason"]
+        mock_commit.assert_not_called()
+        mock_source.assert_not_called()
+
+    async def test_refuses_pr_when_only_detect_only_findings(self):
+        """license/backup/secrets are contracted detect_only — no Scan PR."""
+        store = await make_store()
+        report = _report_with_findings("license", "secrets", repo_name="detect-only-app")
+        aid = await store.save(report)
+        companion = {
+            "category": "skills",
+            "path": "fake-license-policy.yaml",
+            "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: license\n",
+            "description": "wrong companion",
+            "skill_name": "kyverno-require-labels",
+        }
+
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.create_source_patch_pr") as mock_source:
+            result = await auto_validate_and_deliver(
+                store=store, report=report, app_name=report.repo_name, namespace="ns",
+                assessment_id=aid, actor="auto-delivery",
+                files=[companion],
+                orchestration={},
+                target_findings=[
+                    ("license", "No LICENSE file found"),
+                    ("secrets", "Potential api_key found"),
+                ],
+            )
+
+        assert result["status"] == "needs_attention"
+        assert "detect_only" in result["reason"] or "no_auto_pr" in result["reason"]
+        mock_commit.assert_not_called()
+        mock_source.assert_not_called()
+
+    async def test_refuses_when_clear_evidence_simulation_fails(self):
+        """Dockerfile still on :latest must not open a container Scan PR."""
+        store = await make_store()
+        report = _report_with_findings("container", repo_name="sim-fail-app")
+        aid = await store.save(report)
+        files = [{
+            "category": "codechange",
+            "path": "patch-Dockerfile",
+            "target_path": "Dockerfile",
+            "content": "FROM ubi9/python-312:latest\nUSER 1001\n",
+            "description": "bad pin",
+            "skill_name": "containerfile",
+        }]
+
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None), \
+             patch("agentit.portal.auto_delivery.validate_and_fix_manifests",
+                   return_value={"files": files, "clean": True, "iterations": []}), \
+             patch("agentit.portal.auto_delivery._dry_run_check",
+                   return_value=([], [], set())), \
+             patch("agentit.portal.auto_delivery._check_properties", return_value=[]), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.create_source_patch_pr") as mock_source, \
+             patch("agentit.portal.github_pr.ensure_applicationset"):
+            result = await auto_validate_and_deliver(
+                store=store, report=report, app_name=report.repo_name, namespace="ns",
+                assessment_id=aid, actor="auto-delivery",
+                files=files,
+                orchestration={},
+                target_findings=[("container", "using :latest")],
+            )
+
+        assert result["status"] == "needs_attention"
+        assert "Clear-evidence" in result.get("reason", "") or any(
+            "Clear-evidence" in r for r in (result.get("cluster_refusals") or [])
+        ) or "clear-evidence" in str(result).lower() or "latest" in str(result).lower()
         mock_commit.assert_not_called()
         mock_source.assert_not_called()
 

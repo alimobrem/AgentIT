@@ -124,6 +124,15 @@
     {% if record.app_name %}{{ record.app_name }} &mdash; {% endif %}
     <a href="{{ record.html_url | default(record.pr_url) | safe_url }}" target="_blank" rel="noopener" hx-boost="false">{{ record.title or record.pr_url }}</a>
   </p>
+  {% if record.contract_lines %}
+  <ul class="text-muted text-sm my-2">
+    {% for line in record.contract_lines %}
+    <li>{{ line }}</li>
+    {% endfor %}
+  </ul>
+  {% elif record.target_findings %}
+  {# Fallback when route did not precompute contract_lines #}
+  {% endif %}
 
   <div class="action-bar">
     <form method="POST" action="/prs/merge" x-ref="mergeForm">

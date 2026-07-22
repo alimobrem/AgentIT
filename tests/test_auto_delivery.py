@@ -282,8 +282,26 @@ class TestAutoValidateAndDeliver:
         report = make_report(repo_name="deliver-app")
         report.infra_repo_url = "https://github.com/org/deliver-app-gitops"
         aid = await store.save(report)
+        # Remediable SOLUTION_CONTRACT + clear-evidence shape (rbac Role).
+        rbac = {
+            "category": "skills",
+            "path": "rbac.yaml",
+            "content": (
+                "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: app\n"
+                "---\napiVersion: rbac.authorization.k8s.io/v1\nkind: Role\n"
+                "metadata:\n  name: app\nrules: []\n"
+            ),
+            "description": "RBAC",
+            "skill_name": "rbac",
+            "finding_addressed": "rbac",
+        }
 
         with patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None), \
+             patch("agentit.portal.auto_delivery.validate_and_fix_manifests",
+                   return_value={"files": [rbac], "clean": True, "iterations": []}), \
+             patch("agentit.portal.auto_delivery._dry_run_check",
+                   return_value=([], [], set())), \
+             patch("agentit.portal.auto_delivery._check_properties", return_value=[]), \
              patch("agentit.portal.github_pr.commit_to_infra_repo",
                    return_value={"pr_url": "https://github.com/org/deliver-app-gitops/pull/1",
                                  "commit_url": "https://github.com/org/deliver-app-gitops/commit/abc",
@@ -291,9 +309,9 @@ class TestAutoValidateAndDeliver:
              patch("agentit.portal.github_pr.ensure_applicationset"):
             result = await auto_validate_and_deliver(
                 store=store, report=report, app_name=report.repo_name, namespace="ns",
-                assessment_id=aid, actor="auto-delivery", files=[_configmap_file()],
+                assessment_id=aid, actor="auto-delivery", files=[rbac],
                 orchestration={},
-                target_findings=[("test", "minor")],
+                target_findings=[("rbac", "missing rbac")],
             )
 
         assert result["status"] == "delivered"
@@ -336,15 +354,32 @@ class TestAutoValidateAndDeliver:
         report = make_report(repo_name="commit-fails-app")
         report.infra_repo_url = "https://github.com/org/commit-fails-app-gitops"
         aid = await store.save(report)
+        rbac = {
+            "category": "skills",
+            "path": "rbac.yaml",
+            "content": (
+                "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: app\n"
+                "---\napiVersion: rbac.authorization.k8s.io/v1\nkind: Role\n"
+                "metadata:\n  name: app\nrules: []\n"
+            ),
+            "description": "RBAC",
+            "skill_name": "rbac",
+            "finding_addressed": "rbac",
+        }
 
         with patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None), \
+             patch("agentit.portal.auto_delivery.validate_and_fix_manifests",
+                   return_value={"files": [rbac], "clean": True, "iterations": []}), \
+             patch("agentit.portal.auto_delivery._dry_run_check",
+                   return_value=([], [], set())), \
+             patch("agentit.portal.auto_delivery._check_properties", return_value=[]), \
              patch("agentit.portal.github_pr.commit_to_infra_repo",
                    return_value={"error": "GitHub API unavailable"}):
             result = await auto_validate_and_deliver(
                 store=store, report=report, app_name=report.repo_name, namespace="ns",
-                assessment_id=aid, actor="auto-delivery", files=[_configmap_file()],
+                assessment_id=aid, actor="auto-delivery", files=[rbac],
                 orchestration={},
-                target_findings=[("test", "minor")],
+                target_findings=[("rbac", "missing rbac")],
             )
 
         assert result["status"] == "delivery_failed"

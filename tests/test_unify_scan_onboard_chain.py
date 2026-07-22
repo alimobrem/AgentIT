@@ -30,19 +30,27 @@ import base64
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from agentit.models import AssessmentReport
+from agentit.models import AssessmentReport, DimensionScore, Finding, Severity
 from agentit.portal.services import assess_pipeline, onboard_pipeline
 from conftest import make_report
 
 
 def _make_report(repo_name: str, *, infra_repo_url: str | None = None) -> AssessmentReport:
-    """Delegates to conftest's `make_report()` (default finding category
-    "test", not any of property_verifier's four gated categories --
-    network/rbac/autoscaling/monitoring) so the single plain NetworkPolicy
-    `_cluster_config_file()` below converges cleanly through the real
-    validate/fix loop, matching test_onboard_auto_validate_deliver.py's own
-    proven "completes and opens a PR" setup exactly."""
-    report = make_report(repo_name=repo_name, criticality="medium")
+    """Remediable ``network`` finding + NetworkPolicy file so solution-contract
+    clear-evidence + finding gate allow the PR (uncontracted ``test`` is
+    refuse-closed after contract hardening)."""
+    report = make_report(
+        repo_name=repo_name,
+        criticality="medium",
+        scores=[DimensionScore(
+            dimension="security", score=40, max_score=100,
+            findings=[Finding(
+                category="network", severity=Severity.high,
+                description="No NetworkPolicy manifests found",
+                recommendation="Add deny-all NetworkPolicy",
+            )],
+        )],
+    )
     report.infra_repo_url = infra_repo_url
     return report
 
@@ -51,11 +59,19 @@ def _cluster_config_file(path: str = "netpol.yaml") -> dict:
     return {
         "category": "skills",
         "path": path,
-        "content": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: test\n",
+        "content": (
+            "apiVersion: networking.k8s.io/v1\n"
+            "kind: NetworkPolicy\n"
+            "metadata:\n  name: deny-all\n"
+            "spec:\n"
+            "  podSelector: {}\n"
+            "  policyTypes:\n"
+            "  - Ingress\n"
+            "  - Egress\n"
+        ),
         "description": "network policy",
-        # Phase A: must map to make_report's default finding category "test".
-        "finding_addressed": "test",
-        "skill_name": "test",
+        "finding_addressed": "network",
+        "skill_name": "network-policy",
     }
 
 
