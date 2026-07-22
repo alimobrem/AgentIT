@@ -1,50 +1,40 @@
 # AgentIT documentation
 
-**Canonical product truth:** [../README.md](../README.md) and [architecture.md](./architecture.md) (merged `main`, post-dogfood Scan HITL).
+**Canonical product truth:** [../README.md](../README.md), [architecture.md](./architecture.md), [score-methodology.md](./score-methodology.md).
+
+Brand spelling: **AgentIT** (not AgentIt / Agentit).
 
 ## Start here
 
 | Doc | Role |
 | --- | --- |
-| [../README.md](../README.md) | Product contract, architecture at a glance, setup |
-| [architecture.md](./architecture.md) | System diagrams, Scan pipeline, obsolete paths |
-| [architecture-agentit-vs-fleet-gitops.md](./architecture-agentit-vs-fleet-gitops.md) | **Normative** self-managed vs fleet delivery |
-| [deployment.md](./deployment.md) | OpenShift / Argo / Tekton ops runbook |
-| [plan-quality-helpful-prs.md](./plan-quality-helpful-prs.md) | Quality PR Phases A–F (implemented) |
+| [../README.md](../README.md) | Product front door — score path, core loop, quick start |
+| [score-methodology.md](./score-methodology.md) | 7 dimensions, penalties, overall average, PR impact |
+| [release-notes.md](./release-notes.md) | Product contract, solution contracts, portal IA |
+| [../CHANGELOG.md](../CHANGELOG.md) | Keep a Changelog history |
+| [architecture.md](./architecture.md) | System diagrams, Scan pipeline |
+| [architecture-agentit-vs-fleet-gitops.md](./architecture-agentit-vs-fleet-gitops.md) | Self-managed vs fleet delivery |
+| [deployment.md](./deployment.md) | OpenShift / Argo / Tekton ops |
+| [plan-quality-helpful-prs.md](./plan-quality-helpful-prs.md) | Quality PR rules (implemented) |
 | [portal-experience-design-language.md](./portal-experience-design-language.md) | Portal EDL |
+| [compare.md](./compare.md) | Short differentiators |
+| [adr/](./adr/) | Architecture Decision Records |
 
 ## Current product (short)
 
-- Skills-primary; Scan/`auto_delivery` is the only PR creator
-- No Direct Apply, no Per-Agent PRs, no AutoMode auto-merge
-- SSA dry-run preflight; humans merge; Argo deploys
-- Fleet: `apps/{app}/` + AppSet recurse; AgentIT: Helm `chart/` (never `apps/agentit/`)
+- Score any repo with `agentit assess` (no cluster)
+- Skills-primary generation; Scan opens quality-filtered PRs
+- Human merge → Argo CD deploy (GitOps-only Scan HITL)
+- Postgres store for portal / fleet ([ADR 0002](./adr/0002-postgres-store.md))
+- Fleet: `apps/{app}/` + AppSet recurse; AgentIT: Helm `chart/`
 
-**Solution contracts + catalog:** Every analyzer category is contracted (remediable or detect-only). Live UI: Capabilities → [Checks & resolutions](../README.md#checks-vs-resolutions-layers) (`portal/check_catalog.py`, `/api/check-catalog`). See README **Solution contracts** and **Checks vs resolutions**.
+**Live catalog:** Capabilities → Checks & resolutions (`portal/check_catalog.py`). Detail: [release-notes.md](./release-notes.md#solution-contracts).
 
-## Historical / planning (do not treat as live product)
+## Historical (not live product)
 
-| Doc | Status |
+Session notes, phase dumps, audits, superseded designs: **[history/](./history/)**. Deferred legibility work: [history/backlog.md](./history/backlog.md).
+
+| Still at `docs/` root (reference) | Role |
 | --- | --- |
-| [unified-apply-flow.md](./unified-apply-flow.md) | **Historical** — Direct Apply / AutoMode era design |
-| [onboarding-loop-vision-gap-analysis.md](./onboarding-loop-vision-gap-analysis.md) | Planning record; much superseded |
-| [changelog-dogfood-notes.md](./changelog-dogfood-notes.md) | Session notes archived from README |
-| [agent-removal-readiness.md](./agent-removal-readiness.md) | Pre–skills-primary audit; agents mostly gone |
-| [postgres-migration-plan.md](./postgres-migration-plan.md) | Migration complete |
-| [dogfood-self-improve-milestone.md](./dogfood-self-improve-milestone.md) | Milestone notes |
-| [extension-model-unification-*.md](./extension-model-unification-plan-2026-07-18.md) | Unification design; Phases 1–5 shipped |
-| [ui-redesign-proposal.md](./ui-redesign-proposal.md), [next-gen-ux-concepts.md](./next-gen-ux-concepts.md), [ux-design-requirements.md](./ux-design-requirements.md) | UX proposals — verify against live portal |
-| [ledger-design-spec.md](./ledger-design-spec.md) | Ledger design; gates table removed since |
-| [kafka-hardening-plan.md](./kafka-hardening-plan.md) | Deferred hardening |
-| [self-improvement-for-agentit.md](./self-improvement-for-agentit.md) | capability-scout design (implemented core) |
-
-## Other
-
-| Doc | Role |
-| --- | --- |
-| [agentit-pr-types-quality-review.md](./agentit-pr-types-quality-review.md) | PR-types quality inventory |
+| [extension-model-unification-spec.md](./extension-model-unification-spec.md) | Extension model design spec (plans → history) |
 | [portal-crawl-matrix.md](./portal-crawl-matrix.md) | Portal crawl coverage |
-| [resilience-audit-2026-07-18.md](./resilience-audit-2026-07-18.md) | Resilience audit |
-| [cicd-stall-hardening-2026-07-17.md](./cicd-stall-hardening-2026-07-17.md) | Tekton stall incident |
-| [self-health-check-backlog.md](./self-health-check-backlog.md) | Self-health watcher backlog |
-| [capabilities-ux-redesign-notes.md](./capabilities-ux-redesign-notes.md) | Capabilities UX notes |

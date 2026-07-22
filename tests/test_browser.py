@@ -704,14 +704,13 @@ class TestComponents:
 
     def test_pipeline_flow_on_workflows(self, page: Page, app_url):
         url, _, _ = app_url
-        # /workflows now redirects into the merged Capabilities & Workflows
-        # page; "Onboarding Pipeline"/"Onboarding Agents" moved into the
-        # collapsed "How Onboarding Works" reference section (collapsed by
-        # default so activity/stats stay above the fold) -- expand it first.
+        # /workflows redirects into Capabilities; crisp IA uses Checks /
+        # Skills / Activity client sections (How Onboarding Works removed).
         page.goto(f"{url}/workflows")
-        page.click("button.collapse-toggle:has-text('How Onboarding Works')")
-        expect(page.locator("text=Onboarding Pipeline")).to_be_visible()
-        expect(page.locator("text=Onboarding Agents")).to_be_visible()
+        expect(page.locator(".tab-link", has_text="Checks")).to_be_visible()
+        expect(page.locator("#checks-resolutions")).to_be_visible()
+        page.click(".tab-link:has-text('Skills')")
+        expect(page.locator("button.collapse-toggle:has-text('Skills by Domain')")).to_be_visible()
 
 
 # ── Accessibility Tests ──────────────────────────────────────────────

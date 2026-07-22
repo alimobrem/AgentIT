@@ -2,7 +2,7 @@
 
 **Status:** normative decision (2026-07-20)  
 **Audience:** founders, contributors changing delivery / Argo / onboard routing  
-**Related:** [deployment.md](./deployment.md), [unified-apply-flow.md](./unified-apply-flow.md), [lessons-learned-building-agentit.md](./lessons-learned-building-agentit.md), [self-improvement-for-agentit.md](./self-improvement-for-agentit.md)
+**Related:** [deployment.md](./deployment.md), [adr/0001-gitops-scan-hitl.md](./adr/0001-gitops-scan-hitl.md), [history/unified-apply-flow.md](./history/unified-apply-flow.md), [history/self-improvement-for-agentit.md](./history/self-improvement-for-agentit.md)
 
 ---
 
@@ -130,7 +130,7 @@ High level — implementation can follow in a focused PR.
 | Deploy topology diagram | [`docs/architecture.md`](./architecture.md) “Deployment topology” |
 | Skills baked into image; activate → AgentIT.git PR | [`tests/test_portal.py`](../tests/test_portal.py) (~3174–3217); skill-learner / activate routes |
 | Fleet self-register webhook (not gitops deploy) | `register-self-in-fleet` in [`chart/templates/tekton/pipeline.yaml`](../chart/templates/tekton/pipeline.yaml) (~366–399) |
-| PR-only + Argo sole deployer (product) | [`docs/lessons-learned-building-agentit.md`](./lessons-learned-building-agentit.md) |
+| PR-only + Argo sole deployer (product) | [ADR 0001](./adr/0001-gitops-scan-hitl.md), [release-notes.md](./release-notes.md) |
 
 ---
 

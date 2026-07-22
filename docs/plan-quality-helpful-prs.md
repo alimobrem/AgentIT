@@ -1,7 +1,7 @@
 # Founder plan: quality PRs that help the app
 
-**Status:** implemented (2026-07-21) — Phases A–F landed in `feat/quality-helpful-prs`  
-**Follow-up (2026-07-22):** Solution contracts — every FIX_REGISTRY finding declares `delivery` + `clear_evidence` + `refuse_companions`; Scan refuses wrong-layer companion PRs (pinky gitops #22/#23 class). See README "Solution-complete Scan PRs".
+**Status:** implemented — Phases A–F in `portal/quality_prs.py` / `auto_delivery`  
+**Follow-up:** Solution contracts — every FIX_REGISTRY finding declares `delivery` + `clear_evidence` + `refuse_companions`; Scan refuses wrong-layer companion PRs. See [release-notes.md](./release-notes.md#solution-contracts) and [score-methodology.md](./score-methodology.md).
 
 ## Phase completion matrix
 
@@ -17,7 +17,7 @@
 What NOT to do (still enforced): no skill-pack dumps, no Per-Agent product, no auto-merge, no Direct Apply, no approve-on-PR-open.
 
 **Audience:** founders sequencing dogfood quality after destination/gate/filter work  
-**Normative companions:** [architecture-agentit-vs-fleet-gitops.md](./architecture-agentit-vs-fleet-gitops.md), [onboarding-loop-vision-gap-analysis.md](./onboarding-loop-vision-gap-analysis.md), [unified-apply-flow.md](./unified-apply-flow.md)
+**Normative companions:** [architecture-agentit-vs-fleet-gitops.md](./architecture-agentit-vs-fleet-gitops.md), [history/onboarding-loop-vision-gap-analysis.md](./history/onboarding-loop-vision-gap-analysis.md), [history/unified-apply-flow.md](./history/unified-apply-flow.md)
 
 ---
 

@@ -1,16 +1,30 @@
 # AgentIT Portal — Experience Design Language (EDL)
 
 **Status: normative for portal UI.** This is the machine-checked contract for
-Jinja templates under `src/agentit/portal/templates/`. Broader UX research lives
-in [`ux-design-requirements.md`](ux-design-requirements.md); IA history in
-[`ui-redesign-proposal.md`](ui-redesign-proposal.md). When those conflict with
-this EDL on shipped portal chrome, **this document wins**.
+Jinja templates under `src/agentit/portal/templates/`. Broader UX research
+(historical) lives in [`history/ux-design-requirements.md`](history/ux-design-requirements.md);
+IA history in [`history/ui-redesign-proposal.md`](history/ui-redesign-proposal.md).
+When those conflict with this EDL on shipped portal chrome, **this document wins**.
 
 Conformance is enforced by `scripts/check_portal_edl.py` and
 `tests/test_portal_edl.py` (see [Running checks](#running-checks)).
 
 Rules use **MUST** / **SHOULD** / **MAY**. Rules tagged `[check]` are asserted
 by the automated checker or the pytest suite.
+
+---
+
+## 0. Primary journey
+
+**First-run / day-1 path:** Assess a repo → review Findings → Scan opens
+quality-filtered PRs → human merges on GitHub → Argo deploys → Fleet (scoreboard)
+and Ledger (Needs You) for day-2.
+
+**Operator / advanced** (not the primary journey): Events (bell / full feed),
+Decisions, DLQ, Ledger deep history, Agents / skill activity under Capabilities.
+Do not promote these into the first-run story or primary-nav peers of Assess/Scan.
+
+Product front door: [`../README.md`](../README.md#portal-journey).
 
 ---
 
@@ -25,10 +39,10 @@ Shipped pattern (do not regress):
 | **Events** | Bell control → slide-over drawer | Full `/events` (+ DLQ) remains for filters/pagination — the system's real-time activity/audit-trail feed (every action the system takes, behind the scenes), not ops home |
 | **Decisions**, Capabilities, Settings, Schedules | Account / main menu | Not primary-nav text links |
 
-Admin Review (a fifth primary-nav surface, an elevated RBAC queue for
-`cluster-admin-review` gates) was retired 2026-07-18 along with that gate
-type -- every gate type is per-app now, so there's no cross-app queue left
-to give a dedicated surface to.
+**Chrome:** primary `<nav>` and `.site-footer` are **fixed** (not sticky).
+`base.css` sets `--nav-height` / `--footer-height` and pads `body` so
+`#main-content` clears both. Events drawer / modals / toasts stay above
+footer (`z-index`). Skip-to-content still targets `#main-content`.
 
 ### Exclusive ownership (MUST NOT duplicate jobs)
 

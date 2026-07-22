@@ -1,6 +1,6 @@
 # Proposal: Add failure alerting / retry logic for the remediation-loop agent
 
-> Proposed by AgentIT's capability-scout — see docs/self-improvement-for-agentit.md
+> Proposed by AgentIT's capability-scout — see docs/history/self-improvement-for-agentit.md
 
 **Risk:** low
 

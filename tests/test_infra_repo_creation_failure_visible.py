@@ -122,7 +122,8 @@ class TestAssessmentDetailShowsFailureBanner:
 
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
-        assert "tried to auto-create a GitOps infra repo" in resp.text
+        # Crisp IA: shortened notice copy inside the Notices collapse.
+        assert "Auto-create of a GitOps infra repo failed" in resp.text
 
     async def test_no_banner_when_no_failure_event(self, portal_client):
         client, store, _seed_aid = portal_client
@@ -131,7 +132,7 @@ class TestAssessmentDetailShowsFailureBanner:
 
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
-        assert "tried to auto-create a GitOps infra repo" not in resp.text
+        assert "Auto-create of a GitOps infra repo failed" not in resp.text
 
     async def test_banner_cleared_after_later_successful_registration(self, portal_client):
         """A later successful "gitops-registered" event (e.g. a manual
@@ -154,4 +155,4 @@ class TestAssessmentDetailShowsFailureBanner:
 
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
-        assert "tried to auto-create a GitOps infra repo" not in resp.text
+        assert "Auto-create of a GitOps infra repo failed" not in resp.text
