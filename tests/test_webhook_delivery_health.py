@@ -198,6 +198,51 @@ def test_latest_delivery_302_reports_failing():
 
 
 @patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test123"})
+def test_http_hook_302_hints_route_redirect_not_oauth_proxy():
+    """Pinky 2026-07-22: http:// hook URL → OpenShift Route HTTPS redirect.
+    Must not blame oauth-proxy skip-auth-regex."""
+    hooks_resp = _hooks_response(url="http://agentit.example.com/api/webhook/github-push")
+    deliveries_resp = _deliveries_response([
+        {"status_code": 302, "status": "Invalid HTTP Response: 302", "delivered_at": "2026-07-22T18:50:42Z"},
+    ])
+    with patch("agentit.portal.github_pr.requests.get", side_effect=[hooks_resp, deliveries_resp]):
+        result = github_pr.check_webhook_delivery_health("https://github.com/t/r")
+    assert result["ok"] is False
+    assert result["status"] == "failing"
+    assert "http://" in result["detail"].lower() or "HTTP→HTTPS" in result["detail"]
+    assert "skip-auth-regex" not in result["detail"]
+
+
+@patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test123"})
+def test_prefers_https_hook_when_http_duplicate_listed_first():
+    """GitHub may return the stale http:// hook before https:// — health
+    must score the https hook (the one that can actually deliver)."""
+    hooks_resp = type("Resp", (), {})()
+    hooks_resp.status_code = 200
+    hooks_resp.json = lambda: [
+        {"id": 1, "active": True, "config": {"url": "http://agentit.example.com/api/webhook/github-push"}},
+        {"id": 2, "active": True, "config": {"url": "https://agentit.example.com/api/webhook/github-push"}},
+    ]
+    hooks_resp.raise_for_status = lambda: None
+    deliveries_resp = _deliveries_response([
+        {"status_code": 200, "status": "OK", "delivered_at": "2026-07-22T23:53:28Z"},
+    ])
+
+    def _get(url, *args, **kwargs):
+        if url.endswith("/hooks"):
+            return hooks_resp
+        if url.endswith("/deliveries"):
+            assert "/hooks/2/deliveries" in url
+            return deliveries_resp
+        raise AssertionError(f"unexpected url {url}")
+
+    with patch("agentit.portal.github_pr.requests.get", side_effect=_get):
+        result = github_pr.check_webhook_delivery_health("https://github.com/t/r")
+    assert result["ok"] is True
+    assert result["status"] == "delivering"
+
+
+@patch.dict(os.environ, {"GITHUB_TOKEN": "ghp_test123"})
 def test_only_the_most_recent_delivery_determines_status():
     """A hook that failed in the past but is delivering again right now
     must report healthy -- GitHub's deliveries list is newest-first."""

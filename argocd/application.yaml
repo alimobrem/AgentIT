@@ -47,6 +47,13 @@ spec:
           value: itpc-gcp-product-all-claude
         - name: env.CLOUD_ML_REGION
           value: global
+        # Dogfood OpenShift wildcard ingress is not publicly trusted — without
+        # this, ensure_webhook() registers hooks with insecure_ssl=0 and GitHub
+        # fails every delivery (TLS "unknown authority"). Same setting AgentIT's
+        # own working push hook already has live; pinky 2026-07-22 reproduced
+        # the failure for a managed fleet app. See docs/deployment.md.
+        - name: env.AGENTIT_WEBHOOK_INSECURE_SSL
+          value: "1"
         - name: gcp.credentialsSecret
           value: gcp-credentials
         - name: tektonCI.enabled

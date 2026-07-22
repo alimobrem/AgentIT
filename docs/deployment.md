@@ -250,6 +250,19 @@ sits atop ≥2 recent 2xx deliveries. Founder hook checklist for this cluster: U
 `https://agentit-agentit.apps…/api/webhook/github-push`, `content_type=json`, `insecure_ssl=1`,
 secret matching `github-webhook-secret`.
 
+**Follow-up (2026-07-22): pinky fleet-app webhook 302 was Route HTTP→HTTPS, not oauth-proxy.**
+AgentIT's own chart `--skip-auth-regex=^/api/webhook/` was already correct (live `POST` to the
+portal Route returned 200). Managed app `alimobrem/pinky` still had a stale `http://…/api/webhook/
+github-push` hook (OpenShift edge Route 302 → https; GitHub does not follow) *and* a sibling
+`https://` hook with `insecure_ssl: "0"` (TLS "unknown authority" against the dogfood wildcard
+cert). Health matched the http hook first by URL suffix, so the row said "check oauth-proxy"
+while AgentIT's own hook stayed green (`transient` 504 during canary — ignore). Live remediated
+pinky (deleted http hook id `651750346`, PATCHed https hook `652396193` to `insecure_ssl=1` +
+`github-webhook-secret`; ping → 200). Product: `ensure_webhook()` now normalizes `http→https`,
+deletes stale http duplicates, and PATCHes drifted `insecure_ssl`/missing secret; dogfood
+`argocd/application.yaml` sets `env.AGENTIT_WEBHOOK_INSECURE_SSL=1`; health prefers https hooks
+and distinguishes Route-redirect 302 from oauth-proxy 302.
+
 **Found and fixed** (originally logged here as "found but explicitly not fixed"):
 `chart/templates/argo-events/sensor-onboard.yaml` and `sensor-auto-apply.yaml` both set
 `retryStrategy.factor` as `{value: 2.0}` (a nested object), which Argo Events fails to parse as a

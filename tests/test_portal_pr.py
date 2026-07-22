@@ -760,12 +760,14 @@ def test_ensure_webhook_defaults_to_verifying_tls(mock_requests):
     mock_requests.post.return_value = post_resp
 
     os.environ.pop("AGENTIT_WEBHOOK_INSECURE_SSL", None)
+    os.environ.pop("GITHUB_WEBHOOK_SECRET", None)
     result = ensure_webhook(
         "https://github.com/org/my-app.git", "https://agentit.example.com/api/webhook/github-push",
     )
 
-    assert result == {"id": 42, "created": True}
+    assert result == {"id": 42, "created": True, "updated": False}
     assert mock_requests.post.call_args.kwargs["json"]["config"]["insecure_ssl"] == "0"
+    assert "secret" not in mock_requests.post.call_args.kwargs["json"]["config"]
 
 
 @patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123", "AGENTIT_WEBHOOK_INSECURE_SSL": "1"})
@@ -788,19 +790,27 @@ def test_ensure_webhook_insecure_ssl_override_for_self_signed_clusters(mock_requ
         "https://github.com/org/my-app.git", "https://agentit.example.com/api/webhook/github-push",
     )
 
-    assert result == {"id": 43, "created": True}
+    assert result == {"id": 43, "created": True, "updated": False}
     assert mock_requests.post.call_args.kwargs["json"]["config"]["insecure_ssl"] == "1"
 
 
-@patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"})
+@patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"}, clear=False)
 @patch("agentit.portal.github_pr.requests")
 def test_ensure_webhook_idempotent_skips_create_on_existing_url(mock_requests):
     """A hook already registered at the exact same URL must not be
     recreated -- unaffected by the `insecure_ssl` change above."""
+    os.environ.pop("AGENTIT_WEBHOOK_INSECURE_SSL", None)
+    os.environ.pop("GITHUB_WEBHOOK_SECRET", None)
     get_resp = MagicMock()
     get_resp.status_code = 200
     get_resp.json.return_value = [
-        {"id": 7, "config": {"url": "https://agentit.example.com/api/webhook/github-push"}},
+        {
+            "id": 7,
+            "config": {
+                "url": "https://agentit.example.com/api/webhook/github-push",
+                "insecure_ssl": "0",
+            },
+        },
     ]
     mock_requests.get.return_value = get_resp
 
@@ -808,5 +818,96 @@ def test_ensure_webhook_idempotent_skips_create_on_existing_url(mock_requests):
         "https://github.com/org/my-app.git", "https://agentit.example.com/api/webhook/github-push",
     )
 
-    assert result == {"id": 7, "created": False}
+    assert result == {"id": 7, "created": False, "updated": False}
+    mock_requests.post.assert_not_called()
+    mock_requests.patch.assert_not_called()
+
+
+@patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123", "AGENTIT_WEBHOOK_INSECURE_SSL": "1"})
+@patch("agentit.portal.github_pr.requests")
+def test_ensure_webhook_normalizes_http_url_and_deletes_stale_http_hook(mock_requests):
+    """Pinky 2026-07-22: a stale http:// hook 302'd forever on the OpenShift
+    Route while a sibling https:// hook existed. ensure_webhook must upgrade
+    the requested URL and delete the http duplicate."""
+    list1 = MagicMock()
+    list1.status_code = 200
+    list1.json.return_value = [
+        {
+            "id": 1,
+            "config": {
+                "url": "http://agentit.example.com/api/webhook/github-push",
+                "insecure_ssl": "0",
+            },
+        },
+        {
+            "id": 2,
+            "config": {
+                "url": "https://agentit.example.com/api/webhook/github-push",
+                "insecure_ssl": "1",
+            },
+        },
+    ]
+    list2 = MagicMock()
+    list2.status_code = 200
+    list2.json.return_value = [
+        {
+            "id": 2,
+            "config": {
+                "url": "https://agentit.example.com/api/webhook/github-push",
+                "insecure_ssl": "1",
+            },
+        },
+    ]
+    mock_requests.get.side_effect = [list1, list2]
+    mock_requests.delete.return_value = MagicMock(status_code=204, raise_for_status=lambda: None)
+
+    result = ensure_webhook(
+        "https://github.com/org/pinky.git",
+        "http://agentit.example.com/api/webhook/github-push",
+    )
+
+    assert result == {"id": 2, "created": False, "updated": False}
+    mock_requests.delete.assert_called_once()
+    assert mock_requests.delete.call_args.args[0].endswith("/hooks/1")
+    mock_requests.post.assert_not_called()
+
+
+@patch.dict(
+    "os.environ",
+    {
+        "GITHUB_TOKEN": "ghp_test123",
+        "AGENTIT_WEBHOOK_INSECURE_SSL": "1",
+        "GITHUB_WEBHOOK_SECRET": "s3cret",
+    },
+)
+@patch("agentit.portal.github_pr.requests")
+def test_ensure_webhook_patches_insecure_ssl_and_missing_secret(mock_requests):
+    """https hook already registered with insecure_ssl=0 and no secret must
+    be PATCHed — not left as a silent TLS/HMAC failure on the next push."""
+    get_resp = MagicMock()
+    get_resp.status_code = 200
+    get_resp.json.return_value = [
+        {
+            "id": 9,
+            "config": {
+                "url": "https://agentit.example.com/api/webhook/github-push",
+                "insecure_ssl": "0",
+            },
+        },
+    ]
+    mock_requests.get.return_value = get_resp
+    patch_resp = MagicMock()
+    patch_resp.status_code = 200
+    patch_resp.raise_for_status = lambda: None
+    mock_requests.patch.return_value = patch_resp
+
+    result = ensure_webhook(
+        "https://github.com/org/my-app.git",
+        "https://agentit.example.com/api/webhook/github-push",
+    )
+
+    assert result == {"id": 9, "created": False, "updated": True}
+    cfg = mock_requests.patch.call_args.kwargs["json"]["config"]
+    assert cfg["insecure_ssl"] == "1"
+    assert cfg["secret"] == "s3cret"
     mock_requests.post.assert_not_called()

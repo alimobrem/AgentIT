@@ -120,7 +120,7 @@ Useful commands: `self-assess`, `watch`, `learn`, `test-skill`, `activate-skill`
 
 Helm chart in `chart/` + Argo CD Application in `argocd/application.yaml`. Argo is the deployer: merge to `main` alone does not move the portal — Tekton `agentit-ci` builds, smokes, then pins `image.tag`. Confirm rollout via Health → deploy-status (or `AGENTIT_IMAGE_TAG` on the portal pod) matching the tip SHA — green GitHub Actions alone is not a deploy. Tekton `run-tests` is capped (chart default 20m after the tip-stall hardening); under node pressure a failed/retried TaskRun can leave dogfood on the last good image.
 
-Ops: [`docs/deployment.md`](docs/deployment.md). **Merge gate + post-merge tip:** [`docs/ci-deploy.md`](docs/ci-deploy.md) (`scripts/ci-merge-gate.sh` — never merge on queued checks). Topology: [`docs/architecture.md`](docs/architecture.md).
+Ops: [`docs/deployment.md`](docs/deployment.md) (dogfood sets `env.AGENTIT_WEBHOOK_INSECURE_SSL=1` so fleet push webhooks deliver past the self-signed Route cert; `ensure_webhook` also heals stale `http://` hooks). **Merge gate + post-merge tip:** [`docs/ci-deploy.md`](docs/ci-deploy.md) (`scripts/ci-merge-gate.sh` — never merge on queued checks). Topology: [`docs/architecture.md`](docs/architecture.md).
 
 ## Docs
 

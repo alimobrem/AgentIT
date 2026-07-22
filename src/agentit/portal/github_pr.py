@@ -1347,24 +1347,67 @@ def ensure_infra_repo(owner: str, repo_name: str = "agentit-gitops") -> dict:
         return {"error": str(exc)}
 
 
+def _webhook_insecure_ssl_flag() -> str:
+    """``"1"`` when ``AGENTIT_WEBHOOK_INSECURE_SSL`` opts into skipping TLS
+    verify (self-signed OpenShift wildcard certs); otherwise ``"0"``."""
+    return "1" if os.environ.get("AGENTIT_WEBHOOK_INSECURE_SSL", "").strip().lower() in (
+        "1", "true", "yes",
+    ) else "0"
+
+
+def _normalize_webhook_url(webhook_url: str) -> str:
+    """GitHub will not follow OpenShift Route ``http→https`` redirects
+    (302). Force https so a stale ``http://`` base URL from an older
+    registration path cannot recreate the pinky 2026-07-22 failure mode."""
+    url = (webhook_url or "").strip()
+    if url.startswith("http://"):
+        return "https://" + url[len("http://"):]
+    return url
+
+
+def _select_push_webhook(hooks: list[dict], url_suffix: str) -> dict | None:
+    """Pick the managed push webhook for health checks / healing.
+
+    Prefers ``https://`` over ``http://`` when both end in ``url_suffix`` —
+    GitHub's hooks list is not sorted for our purposes, and matching the
+    first suffix hit alone made Health report the stale ``http://`` pinky
+    hook's Route 302 while a sibling ``https://`` hook existed.
+    """
+    matches = [
+        h for h in hooks
+        if (h.get("config") or {}).get("url", "").endswith(url_suffix)
+    ]
+    if not matches:
+        return None
+    https = [h for h in matches if (h.get("config") or {}).get("url", "").startswith("https://")]
+    return (https or matches)[0]
+
+
 def ensure_webhook(repo_url: str, webhook_url: str) -> dict:
     """Ensure a GitHub push webhook exists on the repo pointing to our endpoint.
 
-    Idempotent — if a webhook with the same URL already exists, returns it.
-    Returns {"id": webhook_id, "created": bool} or {"error": str}.
+    Idempotent and self-healing: upgrades ``http://`` → ``https://``, deletes
+    stale http duplicate hooks for the same path, and PATCHes an existing
+    https hook when ``insecure_ssl`` / ``secret`` drift from what this
+    cluster needs (see docs/deployment.md webhook section — pinky 2026-07-22
+    hit both a Route HTTP→HTTPS 302 and TLS verify failure on a second hook).
+
+    Returns ``{"id": webhook_id, "created": bool, "updated": bool}`` or
+    ``{"error": str}``.
     """
     try:
         token = _get_token()
         hdrs = _headers(token)
         owner, repo = _parse_owner_repo(repo_url)
         base_url = f"{_API}/repos/{owner}/{repo}"
-
-        resp = requests.get(f"{base_url}/hooks", headers=hdrs, timeout=10)
-        resp.raise_for_status()
-        for hook in resp.json():
-            if hook.get("config", {}).get("url", "") == webhook_url:
-                logger.info("Webhook already exists on %s/%s (id=%s)", owner, repo, hook["id"])
-                return {"id": hook["id"], "created": False}
+        webhook_url = _normalize_webhook_url(webhook_url)
+        # Path suffix used to find duplicates registered under http:// or an
+        # older host — same matching rule as check_webhook_delivery_health.
+        url_suffix = "/api/webhook/github-push"
+        if url_suffix not in webhook_url:
+            # Allow callers that pass a non-standard path; still normalize
+            # scheme and exact-match / heal that URL only.
+            url_suffix = "/" + webhook_url.split("://", 1)[-1].split("/", 1)[-1]
 
         # Verify TLS by default (secure default for clusters with a real,
         # publicly-trusted cert). Self-signed-ingress dev clusters (e.g. the
@@ -1377,9 +1420,62 @@ def ensure_webhook(repo_url: str, webhook_url: str) -> dict:
         # verification" forever. `AGENTIT_WEBHOOK_INSECURE_SSL=1` opts a
         # cluster into skipping verification, mirroring the CI webhook's
         # already-hand-patched `insecure_ssl` (see docs/deployment.md).
-        insecure_ssl = "1" if os.environ.get("AGENTIT_WEBHOOK_INSECURE_SSL", "").strip().lower() in (
-            "1", "true", "yes",
-        ) else "0"
+        insecure_ssl = _webhook_insecure_ssl_flag()
+        secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "").strip() or None
+
+        resp = requests.get(f"{base_url}/hooks", headers=hdrs, timeout=10)
+        resp.raise_for_status()
+        hooks = resp.json()
+
+        desired_config = {
+            "url": webhook_url,
+            "content_type": "json",
+            "insecure_ssl": insecure_ssl,
+        }
+        if secret:
+            desired_config["secret"] = secret
+
+        # Drop stale http:// duplicates for this path (OpenShift edge Routes
+        # 302 them to https; GitHub treats that as delivery failure).
+        for hook in hooks:
+            existing_url = (hook.get("config") or {}).get("url", "")
+            if existing_url.startswith("http://") and existing_url.endswith(url_suffix):
+                hook_id = hook["id"]
+                del_resp = requests.delete(f"{base_url}/hooks/{hook_id}", headers=hdrs, timeout=10)
+                del_resp.raise_for_status()
+                logger.info(
+                    "Deleted stale http:// push webhook on %s/%s (id=%s) → %s",
+                    owner, repo, hook_id, existing_url,
+                )
+
+        resp = requests.get(f"{base_url}/hooks", headers=hdrs, timeout=10)
+        resp.raise_for_status()
+        hooks = resp.json()
+
+        for hook in hooks:
+            existing = hook.get("config") or {}
+            if existing.get("url", "") != webhook_url:
+                continue
+            needs_patch = existing.get("insecure_ssl", "0") != insecure_ssl
+            # GitHub never returns the secret value — only whether one is set
+            # (key present). If we have a secret and the hook has none, patch.
+            if secret and "secret" not in existing:
+                needs_patch = True
+            if not needs_patch:
+                logger.info("Webhook already exists on %s/%s (id=%s)", owner, repo, hook["id"])
+                return {"id": hook["id"], "created": False, "updated": False}
+            patch_resp = requests.patch(
+                f"{base_url}/hooks/{hook['id']}",
+                headers=hdrs, timeout=10,
+                json={"config": desired_config},
+            )
+            patch_resp.raise_for_status()
+            logger.info(
+                "Updated push webhook on %s/%s (id=%s) insecure_ssl=%s secret=%s",
+                owner, repo, hook["id"], insecure_ssl, "set" if secret else "unchanged",
+            )
+            return {"id": hook["id"], "created": False, "updated": True}
+
         resp = requests.post(
             f"{base_url}/hooks",
             headers=hdrs, timeout=10,
@@ -1387,17 +1483,13 @@ def ensure_webhook(repo_url: str, webhook_url: str) -> dict:
                 "name": "web",
                 "active": True,
                 "events": ["push"],
-                "config": {
-                    "url": webhook_url,
-                    "content_type": "json",
-                    "insecure_ssl": insecure_ssl,
-                },
+                "config": desired_config,
             },
         )
         resp.raise_for_status()
         hook_id = resp.json()["id"]
         logger.info("Created push webhook on %s/%s (id=%s) → %s", owner, repo, hook_id, webhook_url)
-        return {"id": hook_id, "created": True}
+        return {"id": hook_id, "created": True, "updated": False}
 
     except requests.HTTPError as exc:
         # See `create_onboarding_pr`'s except block above: same
@@ -1447,10 +1539,7 @@ def check_webhook_delivery_health(repo_url: str, url_suffix: str = "/api/webhook
         owner, repo = _parse_owner_repo(repo_url)
         hooks_resp = requests.get(f"{_API}/repos/{owner}/{repo}/hooks", headers=hdrs, timeout=10)
         hooks_resp.raise_for_status()
-        hook = next(
-            (h for h in hooks_resp.json() if h.get("config", {}).get("url", "").endswith(url_suffix)),
-            None,
-        )
+        hook = _select_push_webhook(hooks_resp.json(), url_suffix)
     except Exception as exc:
         logger.warning("Failed to list webhooks on %s: %s", repo_url, exc)
         return {"ok": False, "status": "error", "detail": f"Could not list webhooks: {exc}"}
@@ -1465,6 +1554,7 @@ def check_webhook_delivery_health(repo_url: str, url_suffix: str = "/api/webhook
             "ok": False, "status": "inactive",
             "detail": f"Webhook {hook['id']} is registered but disabled on GitHub",
         }
+    hook_url = (hook.get("config") or {}).get("url", "")
 
     try:
         deliveries_resp = requests.get(
@@ -1516,22 +1606,38 @@ def check_webhook_delivery_health(repo_url: str, url_suffix: str = "/api/webhook
         }
 
     if status_code in (301, 302, 303, 307, 308):
-        hint = (
-            "GitHub hit an HTTP redirect instead of the app -- check "
-            "oauth-proxy's --skip-auth-regex covers ^/api/webhook/ "
-            "(chart/templates/deployment.yaml)"
-        )
+        # Two distinct 302 modes hit dogfood: (1) hook URL is http:// and the
+        # OpenShift Route redirects to https (GitHub does not follow) — pinky
+        # 2026-07-22; (2) https URL reaches oauth-proxy without
+        # --skip-auth-regex=^/api/webhook/ (AgentIT 2026-07-18).
+        if hook_url.startswith("http://"):
+            hint = (
+                "GitHub hit an HTTP→HTTPS redirect (hook URL is http://) — "
+                "re-register with https:// (ensure_webhook normalizes this) "
+                "or delete the stale http hook"
+            )
+        else:
+            hint = (
+                "GitHub hit an HTTP redirect instead of the app -- check "
+                "oauth-proxy's --skip-auth-regex covers ^/api/webhook/ "
+                "(chart/templates/deployment.yaml)"
+            )
     elif status_code in _GATEWAY_BLIP_CODES:
         hint = (
             "GitHub reached the Route but got a gateway/timeout error -- "
             "check portal pods are Ready (canary/rollout) before blaming "
             "oauth-proxy or insecure_ssl"
         )
-    elif status_code == 0:
+    elif status_code == 0 or (
+        isinstance(status_code, int)
+        and status_code >= 500
+        and "certificate" in str(latest.get("status", "")).lower()
+    ):
         hint = (
             "GitHub could not complete TLS to this app -- check the hook's "
             "insecure_ssl setting for self-signed ingress certs "
-            "(docs/deployment.md webhook section)"
+            "(docs/deployment.md webhook section; dogfood needs "
+            "AGENTIT_WEBHOOK_INSECURE_SSL=1)"
         )
     else:
         hint = (
