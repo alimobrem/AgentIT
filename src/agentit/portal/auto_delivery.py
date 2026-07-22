@@ -565,19 +565,29 @@ async def auto_validate_and_deliver(
                 )
                 continue
 
-        # Container pin-only enrichment before clear-evidence: fetch existing
-        # Dockerfile/Containerfile and pin FROM only so simulation sees the
-        # real patch (never the greenfield stub that gutted #165).
+        # Enrich source patches before clear-evidence so simulation sees the
+        # merge-ready shape (not the skill's greenfield/orphan stubs):
+        # - container: pin FROM on the existing Dockerfile/Containerfile
+        # - audit: relocate root audit.py into the app package + wire entrypoint
+        #   (without this, clear-evidence correctly refuses "root only" and
+        #   Scan never reaches create_source_patch_pr enrichment — pinky dogfood)
+        cluster_target_findings = list(cluster.target_findings)
         if report.repo_url:
             try:
                 from agentit.portal import github_pr as ghp
+                from agentit.remediation.audit_wire import (
+                    enrich_audit_files_from_paths,
+                    is_audit_delivery_file,
+                )
                 from agentit.remediation.source_patches import apply_containerfile_pin_only
 
                 token = ghp._get_token()
                 hdrs = ghp._headers(token)
                 owner, repo = ghp._parse_owner_repo(report.repo_url)
                 base_url = f"{ghp._API}/repos/{owner}/{repo}"
-                default_branch, _ = ghp._get_default_branch_and_base_sha(base_url, hdrs)
+                default_branch, base_sha = ghp._get_default_branch_and_base_sha(
+                    base_url, hdrs,
+                )
 
                 def _read(path: str) -> str | None:
                     return ghp._get_file_content_at_ref(
@@ -587,15 +597,53 @@ async def auto_validate_and_deliver(
                 cluster_files = apply_containerfile_pin_only(
                     cluster_files, read_file=_read,
                 )
+                before_audit = len(cluster_files)
+                tree_paths = ghp._list_tree_paths(base_url, hdrs, base_sha)
+                if tree_paths:
+                    cluster_files = enrich_audit_files_from_paths(
+                        cluster_files, tree_paths=tree_paths, read_file=_read,
+                    )
+                # Already-wired repos drop orphan audit stubs — strip the
+                # audit finding so we do not refuse / open theater.
+                if before_audit and not any(
+                    is_audit_delivery_file(f) for f in cluster_files
+                ):
+                    had_audit_files = any(
+                        is_audit_delivery_file(f) for f in cluster.files
+                    )
+                    if had_audit_files:
+                        cluster_target_findings = [
+                            (c, d) for c, d in cluster_target_findings
+                            if str(c).lower() != "audit"
+                        ]
+                        logger.info(
+                            "Audit already wired on %s default branch — "
+                            "skipping audit cluster files for %s",
+                            repo, app_name,
+                        )
+                if not cluster_files:
+                    if not cluster_target_findings:
+                        logger.info(
+                            "Auto-delivery cluster %s for %s skipped — "
+                            "audit already wired on default branch",
+                            cluster.key, app_name,
+                        )
+                        continue
+                    reason = (
+                        "Pre-enrich emptied cluster (audit already wired or "
+                        "no mergeable patch)"
+                    )
+                    cluster_refusals.append(f"{cluster.key}: {reason}")
+                    continue
             except Exception:
                 logger.info(
-                    "container pin-only pre-enrich skipped for %s",
+                    "source-patch pre-enrich skipped for %s",
                     app_name, exc_info=True,
                 )
 
         # Pre-open clear-evidence simulation: refuse if MERGE would not clear.
         sim_ok, sim_reason = clear_evidence_simulation_ok(
-            cluster_files, cluster.target_findings,
+            cluster_files, cluster_target_findings,
             live_workloads=live_workloads,
             self_managed=self_managed,
         )

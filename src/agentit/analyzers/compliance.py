@@ -30,7 +30,14 @@ class ComplianceAnalyzer:
                 has_sbom = True
             if name in _AUDIT_MODULE_NAMES:
                 # Module alone is insufficient — import/call must appear elsewhere.
-                has_audit_module = True
+                # Root-only orphans (pinky#8 theater) do not count; require a
+                # package path (e.g. src/agentit/audit.py, apps/api/.../audit.py).
+                try:
+                    rel = fp.relative_to(repo_path).as_posix()
+                except ValueError:
+                    continue
+                if "/" in rel:
+                    has_audit_module = True
                 continue
 
             if fp.suffix.lower() in {".py", ".ts", ".js", ".go"}:
