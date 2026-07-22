@@ -1,18 +1,22 @@
 {% extends "base.html" %}
 {% block title %}Capabilities - AgentIT{% endblock %}
 {% block content %}
-{% from "_macros.html" import tab_nav %}
+{% from "_macros.html" import tab_nav, client_tab_nav %}
 {{ tab_nav([
   {"href": "/capabilities", "label": "Catalog"},
   {"href": "/agents", "label": "Agent Activity", "prefix": "/agents"},
   {"href": "/capabilities/self-improvement", "label": "Self-Improvement", "prefix": "/capabilities/self-improvement"},
 ], request) }}
 <h1>Capabilities &amp; Workflows</h1>
-<p class="text-muted">Skills, checks, agents, and automation — everything AgentIT can do. <strong>Checks &amp; resolutions</strong> below is the source of truth for what Assess detects vs what Scan will open a PR for. For what's actually run, see the <a href="/agents">Agent Activity</a> tab.</p>
+<p class="text-muted mb-2">
+  Source of truth for the check catalog (what Assess detects vs what Scan opens a PR for).
+  Run history lives on <a href="/agents">Agent Activity</a>.
+</p>
 
-<div class="action-bar mb-1">
+<div class="action-bar mb-2">
   <form method="post" action="/capabilities/learn" class="inline-form" x-data>
     <button type="submit" class="btn btn-sm btn-action"
+      title="{% if skill_learner_status.has_run and not skill_learner_status.stale %}Skill-learner last tick {{ skill_learner_status.last_heartbeat[:16] }}{% elif skill_learner_status.has_run %}Skill-learner stale — last {{ skill_learner_status.last_heartbeat[:16] }}{% else %}Skill-learner has never ticked here{% endif %}"
       @click="showToast('Researching &amp; drafting skills\u2026 this can take up to 3 minutes \u2014 please don\u2019t close this tab.', 'info', 8000)">
       <span class="btn-label">Research Skills</span>
       <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Researching&hellip;</span>
@@ -20,28 +24,19 @@
   </form>
   <span class="text-muted text-sm">
     {% if flagged_skills %}
-      Will attempt to <strong>improve {{ flagged_skills|length if flagged_skills|length <= 3 else 3 }} flagged low-effectiveness skill(s)</strong>: {{ flagged_skills[:3]|map(attribute='skill')|join(', ') }}{% if flagged_skills|length > 3 %} (+{{ flagged_skills|length - 3 }} more currently flagged){% endif %}.
+      Will attempt to <strong>improve {{ flagged_skills|length if flagged_skills|length <= 3 else 3 }} flagged skill(s)</strong>: {{ flagged_skills[:3]|map(attribute='skill')|join(', ') }}{% if flagged_skills|length > 3 %} (+{{ flagged_skills|length - 3 }} more){% endif %}.
     {% else %}
-      No skills are currently flagged as low-effectiveness — will research recent Kubernetes CVEs and draft new skills for any that aren't covered yet.
+      No skills are currently flagged as low-effectiveness — researches recent Kubernetes CVEs and drafts skills for gaps.
     {% endif %}
     {% if llm_available %}
-      <span class="text-success">LLM connected — ready to run.</span>
+      <span class="text-success">LLM ready.</span>
     {% else %}
-      <strong class="text-warning">No LLM connection configured</strong> — set an API key in Settings before this will work.
+      <strong class="text-warning">No LLM</strong> — set an API key in Settings.
     {% endif %}
   </span>
 </div>
-<p class="text-muted text-sm mb-2">
-  {% if skill_learner_status.has_run and not skill_learner_status.stale %}
-    Automatic research (skill-learner watcher) is running — last tick <span data-timestamp="{{ skill_learner_status.last_heartbeat }}">{{ skill_learner_status.last_heartbeat[:16] }}</span>, ticks every ~24h.
-  {% elif skill_learner_status.has_run and skill_learner_status.stale %}
-    Automatic research last ticked <span data-timestamp="{{ skill_learner_status.last_heartbeat }}">{{ skill_learner_status.last_heartbeat[:16] }}</span> — more than 48h ago, so the skill-learner watcher may be disabled or stalled. This button is the only guaranteed way to trigger research right now.
-  {% else %}
-    Automatic research has never ticked on this deployment — the skill-learner watcher is likely disabled. This button is the only way to trigger research right now.
-  {% endif %}
-</p>
 
-<div class="stat-grid">
+<div class="stat-grid mb-2">
   <div class="stat-card">
     <div class="stat-label">Total Skills</div>
     <div class="stat-value">{{ total_skills }}</div>
@@ -70,18 +65,28 @@
   {% endif %}
 </div>
 
+{% set _requested_section = request.query_params.get('section', 'checks') %}
+{% set _initial_section = _requested_section if _requested_section in ('checks', 'skills', 'activity') else 'checks' %}
+<div x-data="{ tab: '{{ _initial_section }}' }">
+{{ client_tab_nav([
+  {"key": "checks", "label": "Checks"},
+  {"key": "skills", "label": "Skills"},
+  {"key": "activity", "label": "Activity"},
+]) }}
+
+{# ── Checks ───────────────────────────────────────────────────────── #}
+<div x-show="tab === 'checks'">
 {% if check_catalog_by_dimension %}
-<h2 class="section-title" id="checks-resolutions">Checks &amp; resolutions</h2>
+<h2 class="section-title mt-0" id="checks-resolutions">Checks &amp; resolutions</h2>
 <p class="text-muted mb-1">
   Every Assess finding category: how it is detected, and whether Scan opens a finding-clear PR
   (<span class="badge badge-success">remediable</span>),
   human-only (<span class="badge badge-warning">detect-only</span>),
   or missing a contract (<span class="badge badge-muted">uncontracted</span>).
-  Scan never opens PRs for detect-only or uncontracted categories.
   JSON: <a href="/api/check-catalog"><code>/api/check-catalog</code></a>.
 </p>
 {% for dimension, rows in check_catalog_by_dimension.items() %}
-<div x-data="{ open: {{ 'true' if loop.index <= 2 else 'false' }} }" class="mb-2">
+<div x-data="{ open: false }" class="mb-2">
   <div class="collapse-toggle-row">
     <button type="button" class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
       {{ dimension | dimension_label }}
@@ -148,11 +153,67 @@
   </div>
 </div>
 {% endfor %}
+{% else %}
+<div class="empty-state">
+  <p>No check catalog rows yet — solution contracts and analyzers populate this section.</p>
+</div>
 {% endif %}
 
+<div x-data="{ open: false }">
+<button type="button" class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
+  Detections ({{ total_detections }})
+</button>
+<div class="collapse-body" x-show="open" x-transition>
+<p class="text-muted mb-1">Declarative detection rules (<code>mode: detect</code> skills plus any legacy <code>checks/*.yaml</code>).</p>
+{% for dimension, dim_detections in detections_by_dimension.items()|sort %}
+<h3 class="section-title">{{ dimension }}</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Detection</th>
+      <th>Source</th>
+      <th>Type</th>
+      <th>Severity</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for d in dim_detections|sort(attribute='name') %}
+    <tr>
+      <td class="text-bold">
+        {% if d.source == "skill" %}
+          <a href="/capabilities/skills/{{ d.skill_name }}/history">{{ d.name }}</a>
+        {% else %}
+          {{ d.name }}
+        {% endif %}
+      </td>
+      <td class="text-sm">
+        {% if d.source == "skill" %}
+          <span class="badge badge-success" title="mode: detect skill">skill</span>
+          {% if d.status and d.status != "active" %}<span class="badge badge-warning">{{ d.status }}</span>{% endif %}
+        {% else %}
+          <span class="badge badge-muted" title="Legacy checks/*.yaml">legacy YAML</span>
+        {% endif %}
+      </td>
+      <td class="text-sm">{{ d.check_type }}</td>
+      <td>
+        <span class="badge badge-{{ d.severity }}">{{ d.severity }}</span>
+      </td>
+      <td class="text-sm text-muted">{{ d.description }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endfor %}
+</div>
+</div>
+</div>
+
+{# ── Skills ───────────────────────────────────────────────────────── #}
+<div x-show="tab === 'skills'" x-cloak>
 {% if draft_skills %}
-<h2 class="section-title">Needs Review <span class="badge badge-accent">{{ draft_skills|length }}</span></h2>
-<p class="text-muted mb-1">LLM-drafted skills, awaiting a human decision before the skill engine can match them. Not reference material — kept above the fold on purpose.</p>
+<h2 class="section-title mt-0">Needs Review <span class="badge badge-accent">{{ draft_skills|length }}</span></h2>
+<p class="text-muted mb-1">LLM-drafted skills awaiting a human decision before the skill engine can match them.</p>
 <table class="mb-2">
   <thead>
     <tr>
@@ -183,87 +244,6 @@
 </table>
 {% endif %}
 
-<h2 class="section-title">Recent Catalog Changes</h2>
-<p class="text-muted mb-1">Skills and checks added to or removed from the catalog, detected automatically every hour. Full history on the <a href="/events">Events</a> page.</p>
-
-{% if catalog_changes %}
-<table>
-  <thead>
-    <tr>
-      <th>Timestamp</th>
-      <th>Change</th>
-      <th>Details</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for change in catalog_changes %}
-    <tr>
-      <td class="text-sm"><span data-timestamp="{{ change.timestamp }}">{{ change.timestamp[:16] if change.timestamp else '—' }}</span></td>
-      <td>
-        {% if change.action in ('skill-added', 'check-added') %}
-          <span class="badge badge-success">{{ change.action | humanize_action }}</span>
-        {% else %}
-          <span class="badge badge-warning">{{ change.action | humanize_action }}</span>
-        {% endif %}
-      </td>
-      <td class="text-sm text-muted">{{ change.summary }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% else %}
-<div class="empty-state">
-  <p>No catalog changes detected yet. Checked hourly against the last saved snapshot of <code>skills/</code> and <code>checks/</code>.</p>
-</div>
-{% endif %}
-
-<h2 class="section-title">Learning Agent Runs</h2>
-<p class="text-muted mb-1">Every research run — the button above, or the skill-learner watcher's 24h tick — leaves a record here, whether or not it generated a skill. Full history on the <a href="/events">Events</a> page.</p>
-
-{% if learning_runs %}
-<table>
-  <thead>
-    <tr>
-      <th>Timestamp</th>
-      <th>Trigger</th>
-      <th>Researched</th>
-      <th>Outcome</th>
-      <th>Details</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for run in learning_runs %}
-    <tr>
-      <td class="text-sm"><span data-timestamp="{{ run.timestamp }}">{{ run.timestamp[:16] if run.timestamp else '—' }}</span></td>
-      <td><span class="badge badge-info">{{ run.trigger }}</span></td>
-      <td class="text-sm">{{ run.researched }}</td>
-      <td>
-        {% if run.severity == "info" %}
-          <span class="badge badge-success">generated</span>
-        {% elif run.severity == "error" %}
-          <span class="badge badge-danger">failed</span>
-        {% else %}
-          <span class="badge badge-warning">no-op</span>
-        {% endif %}
-      </td>
-      <td class="text-sm text-muted">{{ run.summary }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% else %}
-<div class="empty-state">
-  <p>No learning agent runs recorded yet. Click "Research Skills" above, or wait for the skill-learner watcher's next tick.</p>
-</div>
-{% endif %}
-
-{# Skills by Domain / Assessment Checks are reference-catalog data (45
-   skills across 14 domains, 20 checks across 7 dimensions as of this
-   writing) -- collapsed by default, matching the same collapse-toggle/
-   collapse-body pattern assessment_detail.html's Findings/Remediation
-   Plan sections already use, so a returning user checking recent
-   activity/stats above isn't forced to scroll past every skill/check
-   table every time. #}
 <div x-data="{ open: false }">
 <button type="button" class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
   Skills by Domain ({{ total_skills }})
@@ -370,59 +350,86 @@
 
 </div>
 </div>
+</div>
 
-<div x-data="{ open: false }">
-<button type="button" class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
-  Detections ({{ total_detections }})
-</button>
-<div class="collapse-body" x-show="open" x-transition>
-<p class="text-muted mb-1">Every declarative detection rule that can produce a Finding during an assessment -- <code>mode: detect</code> skills (the current, unified format -- see <a href="https://github.com/alimobrem/AgentIT/blob/main/docs/extension-model-unification-plan-2026-07-18.md" target="_blank" rel="noopener">the unification plan</a>) plus any legacy <code>checks/*.yaml</code> file not yet ported to one. Source column shows which.</p>
+{# ── Activity ─────────────────────────────────────────────────────── #}
+<div x-show="tab === 'activity'" x-cloak>
+<h2 class="section-title mt-0">Recent Catalog Changes</h2>
+<p class="text-muted mb-1">Last 5 skill/check catalog changes. Full history on <a href="/events">Events</a>.</p>
 
-{% for dimension, dim_detections in detections_by_dimension.items()|sort %}
-<h3 class="section-title">{{ dimension }}</h3>
-<table>
+{% if catalog_changes %}
+<table class="mb-2">
   <thead>
     <tr>
-      <th>Detection</th>
-      <th>Source</th>
-      <th>Type</th>
-      <th>Severity</th>
-      <th>Description</th>
+      <th>Timestamp</th>
+      <th>Change</th>
+      <th>Details</th>
     </tr>
   </thead>
   <tbody>
-    {% for d in dim_detections|sort(attribute='name') %}
+    {% for change in catalog_changes[:5] %}
     <tr>
-      <td class="text-bold">
-        {% if d.source == "skill" %}
-          <a href="/capabilities/skills/{{ d.skill_name }}/history">{{ d.name }}</a>
-        {% else %}
-          {{ d.name }}
-        {% endif %}
-      </td>
-      <td class="text-sm">
-        {% if d.source == "skill" %}
-          <span class="badge badge-success" title="mode: detect skill -- git-trackable, has a full draft/active/deprecated/retired lifecycle">skill</span>
-          {% if d.status and d.status != "active" %}<span class="badge badge-warning">{{ d.status }}</span>{% endif %}
-        {% else %}
-          <span class="badge badge-muted" title="Legacy checks/*.yaml file -- no lifecycle, not yet ported to a mode: detect skill">legacy YAML</span>
-        {% endif %}
-      </td>
-      <td class="text-sm">{{ d.check_type }}</td>
+      <td class="text-sm"><span data-timestamp="{{ change.timestamp }}">{{ change.timestamp[:16] if change.timestamp else '—' }}</span></td>
       <td>
-        <span class="badge badge-{{ d.severity }}">{{ d.severity }}</span>
+        {% if change.action in ('skill-added', 'check-added') %}
+          <span class="badge badge-success">{{ change.action | humanize_action }}</span>
+        {% else %}
+          <span class="badge badge-warning">{{ change.action | humanize_action }}</span>
+        {% endif %}
       </td>
-      <td class="text-sm text-muted">{{ d.description }}</td>
+      <td class="text-sm text-muted">{{ change.summary }}</td>
     </tr>
     {% endfor %}
   </tbody>
 </table>
-{% endfor %}
-
+{% else %}
+<div class="empty-state mb-2">
+  <p>No catalog changes detected yet. Checked hourly against the last saved snapshot of <code>skills/</code> and <code>checks/</code>.</p>
 </div>
-</div>
+{% endif %}
 
-<h2>Skill Activity</h2>
+<h2 class="section-title">Learning Agent Runs</h2>
+<p class="text-muted mb-1">Last 5 research runs. Full history on <a href="/events">Events</a>.</p>
+
+{% if learning_runs %}
+<table class="mb-2">
+  <thead>
+    <tr>
+      <th>Timestamp</th>
+      <th>Trigger</th>
+      <th>Researched</th>
+      <th>Outcome</th>
+      <th>Details</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for run in learning_runs[:5] %}
+    <tr>
+      <td class="text-sm"><span data-timestamp="{{ run.timestamp }}">{{ run.timestamp[:16] if run.timestamp else '—' }}</span></td>
+      <td><span class="badge badge-info">{{ run.trigger }}</span></td>
+      <td class="text-sm">{{ run.researched }}</td>
+      <td>
+        {% if run.severity == "info" %}
+          <span class="badge badge-success">generated</span>
+        {% elif run.severity == "error" %}
+          <span class="badge badge-danger">failed</span>
+        {% else %}
+          <span class="badge badge-warning">no-op</span>
+        {% endif %}
+      </td>
+      <td class="text-sm text-muted">{{ run.summary }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty-state mb-2">
+  <p>No learning agent runs recorded yet. Click "Research Skills" above, or wait for the skill-learner watcher's next tick.</p>
+</div>
+{% endif %}
+
+<h2 class="section-title">Skill Activity</h2>
+<p class="text-muted mb-1">Last 5 skill outcomes. Full stream on <a href="/events">Events</a>.</p>
 
 {% if recent_activity %}
 <table>
@@ -436,11 +443,8 @@
     </tr>
   </thead>
   <tbody>
-    {# Rows come from skill_effectiveness via get_recent_skill_activity()
-       (skill_name / outcome / reason) — not agent_feedback (agent_name /
-       action / human_reason). Incomplete rows are skipped so App+Timestamp
-       alone cannot look like a real skill decision. #}
     {% for fb in recent_activity if fb.skill_name and fb.outcome %}
+    {% if loop.index <= 5 %}
     <tr>
       <td class="text-sm"><span data-timestamp="{{ fb.created_at }}">{{ fb.created_at[:16] if fb.created_at else '—' }}</span></td>
       <td class="text-bold">{{ fb.skill_name }}</td>
@@ -450,6 +454,7 @@
       </td>
       <td class="text-sm text-muted">{{ fb.reason or '—' }}</td>
     </tr>
+    {% endif %}
     {% else %}
     <tr>
       <td colspan="5" class="text-sm text-muted">Skill activity rows exist but lack skill name or outcome — check skill_effectiveness writes.</td>
@@ -462,96 +467,7 @@
   <p>No skill activity yet. Run an assessment and provide feedback to see activity here.</p>
 </div>
 {% endif %}
-
-{# Reference/how-it-works material -- static (doesn't change run to run,
-   unlike the activity/stats sections above), so collapsed by default for
-   the same reason Skills by Domain/Assessment Checks are above. #}
-<div x-data="{ open: false }">
-<button type="button" class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
-  How Onboarding Works
-</button>
-<div class="collapse-body" x-show="open" x-transition>
-
-<h3 class="section-title">Onboarding Pipeline</h3>
-<div class="pipeline-flow mb-2">
-  <div class="pipeline-step">
-    <div class="pipeline-step-number">1</div>
-    <div class="pipeline-step-title">Assess</div>
-    <div class="pipeline-step-desc">Clone repo, detect stack, score 7 dimensions</div>
-  </div>
-  <div class="pipeline-arrow">&rarr;</div>
-  <div class="pipeline-step">
-    <div class="pipeline-step-number">2</div>
-    <div class="pipeline-step-title">Onboard</div>
-    <div class="pipeline-step-desc">{{ agents|length }} agents generate manifests in parallel</div>
-  </div>
-  <div class="pipeline-arrow">&rarr;</div>
-  <div class="pipeline-step">
-    <div class="pipeline-step-number">3</div>
-    <div class="pipeline-step-title">Review</div>
-    <div class="pipeline-step-desc">Dry-run, preview, approve or create PR</div>
-  </div>
-  <div class="pipeline-arrow">&rarr;</div>
-  <div class="pipeline-step">
-    <div class="pipeline-step-number">4</div>
-    <div class="pipeline-step-title">Apply</div>
-    <div class="pipeline-step-desc">Deploy to cluster with canary rollout</div>
-  </div>
-  <div class="pipeline-arrow">&rarr;</div>
-  <div class="pipeline-step">
-    <div class="pipeline-step-number">5</div>
-    <div class="pipeline-step-title">Monitor</div>
-    <div class="pipeline-step-desc">Watchers verify SLOs, detect drift, scan CVEs</div>
-  </div>
 </div>
 
-{% if agents %}
-<h3 class="section-title">Onboarding Agents ({{ agents|length }})</h3>
-<p class="text-muted mb-1">Each agent reads the assessment report and generates manifests for its domain.</p>
-<table>
-  <thead>
-    <tr><th>Agent</th><th>What It Generates</th><th>Category</th></tr>
-  </thead>
-  <tbody>
-    {% for a in agents %}
-    <tr>
-      <td class="text-bold"><a href="/agents/{{ a.category }}">{{ a.name }}</a></td>
-      <td class="text-sm">{{ a.generates }}</td>
-      <td><span class="badge badge-info">{{ a.category }}</span></td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-<p class="text-muted text-sm mb-1">Agent names link to their real run history on the <a href="/agents">Agent Activity</a> tab.</p>
-{% endif %}
-
-{% if watchers %}
-<h3 class="section-title">Long-Lived Watchers</h3>
-<p class="text-muted mb-1">Continuously monitor managed apps after onboarding.</p>
-<table>
-  <thead>
-    <tr><th>Watcher</th><th>What It Does</th><th>Interval</th></tr>
-  </thead>
-  <tbody>
-    {% for w in watchers %}
-    <tr>
-      <td class="text-bold"><a href="/agents/{{ w.name }}">{{ w.name }}</a></td>
-      <td class="text-sm">{{ w.description }}</td>
-      <td>{{ w.interval }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-<p class="text-muted text-sm mb-1">Watcher names link to their real heartbeat/run history on the <a href="/agents">Agent Activity</a> tab.</p>
-{% endif %}
-
-<p class="text-muted text-sm mb-1">
-  Finding categories Scan can clear are listed in
-  <a href="#checks-resolutions">Checks &amp; resolutions</a> above
-  (solution contracts — not a separate agent catalog).
-</p>
-
 </div>
-</div>
-
 {% endblock %}

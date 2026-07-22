@@ -194,9 +194,20 @@
   </div>
 </div>
 
-{# ── Delivery history -- what was routed, which mechanism, status, verification #}
-{% if deliveries %}
-<div x-data="{ open: false }">
+{# ── Diagnostics (single accordion): verbose logs/report stay out of the
+   PR-first success path. Apply Report is omitted on PR-only Scan HITL
+   success (PRs open, no apply errors). #}
+{% set _pr_only_success = (pr_opened_count|default(0) > 0) and not (apply_results and apply_results.errors) %}
+{% set _show_apply_report = apply_results and not _pr_only_success %}
+{% set _has_orchestration = orchestration and orchestration.agents %}
+{% set _has_files = total.count > 0 %}
+{% set _has_deliveries = deliveries and deliveries|length > 0 %}
+{% if _show_apply_report or _has_orchestration or _has_files or _has_deliveries or missing_operators %}
+<details class="delivery-meta mb-1">
+  <summary class="text-sm text-muted">Diagnostics — delivery history, apply report, generation, manifests</summary>
+
+{% if _has_deliveries %}
+<div x-data="{ open: false }" class="mb-1">
   <h3 class="text-sm collapse-toggle mb-1" @click="open = !open" :aria-expanded="open">Delivery History ({{ deliveries|length }})</h3>
   <table class="mb-1" x-show="open" x-transition>
     <thead><tr><th>When</th><th>Mechanism</th><th>Status</th><th>Verification</th><th>Content</th></tr></thead>
@@ -221,8 +232,7 @@
 </div>
 {% endif %}
 
-{# ── Apply Report ────────────────────────────────────────────────── #}
-{% if apply_results %}
+{% if _show_apply_report %}
 <h2 class="section-title">Apply Report{% if apply_results.dry_run %} (dry run){% endif %}</h2>
 <p class="text-muted text-sm mb-1">{{ apply_results.namespace }} &middot; <span data-timestamp="{{ apply_results.created_at }}">{{ apply_results.created_at[:19] }}</span></p>
 
@@ -268,10 +278,6 @@
   <h3 class="text-sm collapse-toggle mb-1" @click="open = !open" :aria-expanded="open">Errors ({{ apply_results.errors|length }})</h3>
   <ul class="finding-list mb-1" x-show="open" x-transition>
     {% for f in apply_results.errors %}
-    {# Error strings are shaped "filename.yaml: <the actual reason>" (see
-       cluster_apply.py's errors.append(f"{fpath}: {result['error']}")) --
-       split on only the first colon and show both the filename and the
-       full reason, never just the filename fragment. #}
     {% set _parts = f.split(':', 1) %}
     <li class="finding-item finding-critical">
       <span class="badge badge-critical">fail</span> <strong>{{ _parts[0] }}</strong>{% if _parts|length > 1 %}: {{ _parts[1].strip() }}{% endif %}
@@ -324,9 +330,7 @@
 {% endif %}
 {% endif %}
 
-{# ── Generation summary (skills-primary; optional codechange) — collapsed
-   diagnostics, never a parallel 3-agent fleet table. #}
-{% if orchestration and orchestration.agents %}
+{% if _has_orchestration %}
 {% set _skills = orchestration.agents | selectattr('name', 'equalto', 'skills') | list %}
 {% set _codechange = orchestration.agents | selectattr('name', 'equalto', 'codechange') | list %}
 {% set _other = orchestration.agents | rejectattr('name', 'in', ['skills', 'codechange']) | list %}
@@ -358,7 +362,6 @@
         </tr>
         {% endfor %}
         {% for a in _other %}
-        {# Legacy rows from older onboardings that still listed cost/dependency #}
         <tr class="{% if a.success %}row-border-green{% else %}row-border-red{% endif %}">
           <td>{{ a.name }}</td>
           <td class="text-sm text-muted">Legacy</td>
@@ -372,11 +375,7 @@
 </div>
 {% endif %}
 
-{# ── Generated Files (collapsed by default) -- the raw manifests behind
-   the Pull Requests above, organized by which agent/skill generated them
-   (not by PR/repo target -- see the Pull Requests section for that view).
-   Kept here, still fully editable before delivery, but no longer the
-   page's default, always-visible framing. #}
+{% if _has_files %}
 <details class="delivery-meta mb-1">
   <summary class="text-sm text-muted">Generated Files — {{ total.count }} manifest{{ 's' if total.count != 1 }} across {{ grouped|length }} categor{{ 'y' if grouped|length == 1 else 'ies' }} (view/edit)</summary>
 
@@ -425,4 +424,7 @@
 </div>
 {% endfor %}
 </details>
+{% endif %}
+</details>
+{% endif %}
 {% endblock %}

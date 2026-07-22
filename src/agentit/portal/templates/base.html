@@ -285,6 +285,18 @@
     </div>
   </template>
 </div>
+<footer class="site-footer">
+  {# div + role=navigation (not <nav>): masthead styles target the bare
+     `nav` element for fixed chrome; a nested <nav> would inherit them. #}
+  <div class="site-footer-links" role="navigation" aria-label="Footer">
+    <a href="/ledger">Ledger</a>
+    <a href="/fleet">Fleet</a>
+    <a href="/health">Health</a>
+    <a href="/capabilities">Capabilities</a>
+    <a href="/decisions">Decisions</a>
+  </div>
+  <span class="site-footer-meta">AgentIT · Scan HITL</span>
+</footer>
 {# JS extracted from an inline <script> block into real static files
    (2026-07-20 base.html split) -- see static/js/base.js (CSRF header
    injection, htmx wiring, confirm modal, toasts, timestamps),

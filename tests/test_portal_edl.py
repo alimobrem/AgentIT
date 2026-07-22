@@ -135,10 +135,18 @@ async def test_base_shell_has_toasts_confirm_dialog_and_events_drawer(edl_client
     assert "events-bell" in html
     assert 'id="events-drawer"' in html
     assert 'href="/decisions"' in html
+    assert 'class="site-footer"' in html
+    assert "AgentIT · Scan HITL" in html
+    assert 'id="main-content"' in html
+    assert 'class="skip-link"' in html
 
     css = (await client.get("/static/css/components.css")).text
     assert re.search(r"\.btn-danger\s*\{", css)
     assert "font-size: var(--font-xs)" in css or "font-size:var(--font-xs)" in css
+    base_css = (await client.get("/static/css/base.css")).text
+    assert "--nav-height" in base_css and "--footer-height" in base_css
+    assert re.search(r"nav\s*\{[^}]*position:\s*fixed", base_css, re.S)
+    assert re.search(r"\.site-footer\s*\{[^}]*position:\s*fixed", base_css, re.S)
 
 
 async def test_fleet_assess_modal_has_dialog_semantics(edl_client):

@@ -37,55 +37,23 @@
   {% endif %}
 </p>
 
+{# Critical path stays visible: error (+ Retry Onboard) and Register for
+   GitOps. Soft flash/info banners collapse into one Alpine summary so
+   above-fold stays identity + next action + Scan. #}
 {% if request.query_params.get('error') %}
 <div class="alert alert-error mb-2" role="alert">
   <span class="text-sm">{{ request.query_params.get('error') }}</span>
   {% if failed_onboard_job %}
-  {# The one narrow, secondary recovery action this page keeps for onboarding
-     (2026-07-20, single-button collapse): the automatic chain's onboard step
-     itself crashed before generating any manifests (_run_onboarding_job()'s
-     "failed" status -- see _onboard_terminal_redirect_url()) -- retrying via
-     plain Onboard re-runs generation against the score already computed, no
-     re-scoring/re-cloning needed. Deliberately NOT a permanent button next
-     to Scan below: it only appears here, inside this failure banner, for
-     this exact failure mode. #}
   <form method="post" action="/assessments/{{ assessment_id }}/onboard" class="inline-form">
     <button type="submit" class="btn btn-sm btn-outline">Retry Onboard</button>
   </form>
   {% endif %}
 </div>
 {% endif %}
-{% if request.query_params.get('warning') %}
-{% for w in request.query_params.get('warning').split('|') %}
-<div class="alert alert-warn mb-2" role="status">{{ w }}</div>
-{% endfor %}
-{% endif %}
-{% if request.query_params.get('success') %}
-<div class="alert alert-success mb-2" role="status">{{ request.query_params.get('success') }}</div>
-{% endif %}
-
-{% if infra_repo_creation_failed %}
-{# _auto_create_infra_repo() (assessments.py's main assess_submit
-   background job) tried and failed to auto-create a GitOps infra repo for
-   this app during assessment -- previously this was only a server log
-   line nobody watching the portal ever saw. Distinct from, and shown
-   above, the generic "never registered" nudge below -- this specifically
-   says an attempt was already made and it didn't work. #}
-<div x-data="{ dismissed: false }" x-show="!dismissed" x-cloak class="alert alert-warn mb-2">
-  <span class="text-sm">AgentIT tried to auto-create a GitOps infra repo for this app during assessment, but it failed (often a <code>GITHUB_TOKEN</code> permissions issue) -- this predates GitOps registration becoming mandatory, and this app cannot be delivered until you register a GitOps infra repo manually below.</span>
-  <button type="button" class="btn btn-sm btn-outline" @click="dismissed = true">Dismiss</button>
-</div>
-{% endif %}
 
 {% if not self_managed and not gitops_registered and not infra_repo_url %}
-{# Parent x-data owns dismissed + busy; form only has x-ref (same pattern as
-   Findings Fix) so $refs.registerGitopsForm resolves in the button scope.
-   Optional infra_repo_url covers third-party app owners where auto-create
-   under the app's GitHub org/user is not allowed for our token.
-   Self-managed AgentIT skips this nudge — PRs go to AgentIT.git, not
-   apps/agentit on a separate gitops repo. #}
 <div x-data="{ dismissed: false, busy: false }" x-show="!dismissed" x-cloak class="alert alert-info mb-2">
-  <span class="text-sm">Not GitOps-registered -- this app cannot be delivered until it is (Direct Apply has been removed; see docs/unified-apply-flow.md). This predates GitOps registration becoming mandatory for new assessments.</span>
+  <span class="text-sm">Not GitOps-registered — register before Scan can deliver.</span>
   <form method="post" action="/assessments/{{ assessment_id }}/register-gitops" class="inline-form register-gitops-form"
         x-ref="registerGitopsForm" @submit="busy = true">
     <div class="form-group">
@@ -108,16 +76,36 @@
   </form>
   <button type="button" class="btn btn-sm btn-outline" @click="dismissed = true">Dismiss</button>
 </div>
-{% elif not self_managed and not gitops_registered and infra_repo_url %}
-{# infra_repo_url is set (registration was submitted, and the infra repo +
-   ApplicationSet exist) but no live Argo CD Application targets this app
-   yet -- that only appears once a delivery actually commits manifests under
-   apps/{{ report.repo_name }}/ in the infra repo and the resulting PR is
-   merged (see delivery.is_gitops_registered()'s docstring). Self-managed
-   AgentIT is excluded — it never uses apps/agentit on gitops. #}
-<div x-data="{ dismissed: false }" x-show="!dismissed" x-cloak class="alert alert-info mb-2">
-  <span class="text-sm">GitOps infra repo configured (<a href="{{ infra_repo_url | safe_url }}" target="_blank" hx-boost="false">{{ infra_repo_url }}</a>). This app will show as GitOps-registered once your next Scan delivery PR is merged there.</span>
-  <button type="button" class="btn btn-sm btn-outline" @click="dismissed = true">Dismiss</button>
+{% endif %}
+
+{% set _soft_warning = request.query_params.get('warning') %}
+{% set _soft_success = request.query_params.get('success') %}
+{% set _soft_gitops_pending = (not self_managed and not gitops_registered and infra_repo_url) %}
+{% if _soft_warning or _soft_success or infra_repo_creation_failed or _soft_gitops_pending %}
+<div class="mb-2" x-data="{ open: false }">
+  <button type="button" class="btn btn-sm btn-outline collapse-toggle" @click="open = !open" :aria-expanded="open">
+    Notices
+  </button>
+  <div class="collapse-body mt-1" x-show="open" x-cloak x-transition>
+    {% if _soft_warning %}
+    {% for w in _soft_warning.split('|') %}
+    <div class="alert alert-warn mb-1" role="status">{{ w }}</div>
+    {% endfor %}
+    {% endif %}
+    {% if _soft_success %}
+    <div class="alert alert-success mb-1" role="status">{{ _soft_success }}</div>
+    {% endif %}
+    {% if infra_repo_creation_failed %}
+    <div class="alert alert-warn mb-1" role="status">
+      <span class="text-sm">Auto-create of a GitOps infra repo failed (often <code>GITHUB_TOKEN</code> permissions) — register manually via Register for GitOps if shown above.</span>
+    </div>
+    {% endif %}
+    {% if _soft_gitops_pending %}
+    <div class="alert alert-info mb-1" role="status">
+      <span class="text-sm">GitOps infra repo configured (<a href="{{ infra_repo_url | safe_url }}" target="_blank" hx-boost="false">{{ infra_repo_url }}</a>). Registered after the next Scan delivery PR is merged.</span>
+    </div>
+    {% endif %}
+  </div>
 </div>
 {% endif %}
 
@@ -274,42 +262,6 @@
   </form>
 </div>
 
-{# Real, per-app setting -- read by watchers/reassess_scheduler.py's tick
-   loop (get_apps_due_for_reassessment()) to decide when to automatically
-   re-Assess this app, via the same /api/webhook/assess route the Fleet
-   page's own Scan button uses. Saving this is always real
-   (persisted on the app row) -- the note below is honest about whether
-   anything is currently deployed to act on it. #}
-<div class="mb-2">
-  <h2 class="section-title">Automatic re-assessment</h2>
-  {% if reassess_scheduler_active %}
-  <p class="text-muted text-sm mb-1">
-    AgentIT automatically re-Assesses this app on the cadence below (in addition to the manual Scan button above and push-triggered re-checks).
-  </p>
-  {% else %}
-  <p class="text-muted text-sm mb-1">
-    Cadence saved here is real, but no re-assessment scheduler is currently running in this deployment to act on it yet
-    (the <code>reassess-scheduler</code> agent is disabled or hasn't ticked) -- until it's enabled, this app is only
-    re-checked via the manual Scan button above (or from <a href="/fleet">Fleet</a>) or a push to its repo.
-  </p>
-  {% endif %}
-  <form method="post" action="/assessments/{{ assessment_id }}/set-cadence" class="inline-form">
-    <div class="form-group">
-      <label class="form-label" for="cadence-select">Re-assess automatically</label>
-      <select id="cadence-select" name="cadence">
-        <option value="daily" {% if assessment_cadence == "daily" %}selected{% endif %}>Every 24 hours</option>
-        <option value="weekly" {% if assessment_cadence == "weekly" %}selected{% endif %}>Weekly</option>
-        <option value="monthly" {% if assessment_cadence == "monthly" %}selected{% endif %}>Monthly</option>
-        <option value="manual" {% if assessment_cadence == "manual" %}selected{% endif %}>Manual only</option>
-      </select>
-    </div>
-    <button type="submit" class="btn btn-sm btn-outline">
-      <span class="btn-label">Save</span>
-      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
-    </button>
-  </form>
-</div>
-
 {% from "_macros.html" import client_tab_nav %}
 {# Initial tab honors ?tab=<key> (e.g. Fleet's per-app pending-action badge
    links here with ?tab=ledger) -- same query-param-driven Alpine init
@@ -340,7 +292,10 @@
   {# Open PRs -- always visible (empty state nudges Scan). Mental model:
      Scan → see list of PRs → review/merge on GitHub. Self-managed AgentIT
      delivers to AgentIT.git (code), never apps/agentit on a gitops repo. #}
-  <h2 class="section-title mt-0" id="open-prs">Open PRs{% if open_prs %} ({{ open_prs|length }}){% endif %}</h2>
+  <div class="action-bar mb-1">
+    <h2 class="section-title mt-0 mb-0" id="open-prs">Open PRs{% if open_prs %} ({{ open_prs|length }}){% endif %}</h2>
+    <a href="#" class="text-sm" @click.prevent="tab = 'ledger'">Full history → Ledger</a>
+  </div>
   {% if open_prs %}
   <ul class="finding-list mb-2">
     {% for pr in open_prs %}
@@ -409,103 +364,110 @@
     </tbody>
   </table>
   {% endif %}
+
+  {# Cadence lives under Overview (not above tabs) — still persisted on the
+     app row; reassess-scheduler reads it when enabled. #}
+  <h2 class="section-title mt-2">Automatic re-assessment</h2>
+  {% if reassess_scheduler_active %}
+  <p class="text-muted text-sm mb-1">
+    Re-Assesses this app on the cadence below (plus manual Scan and push-triggered checks).
+  </p>
+  {% else %}
+  <p class="text-muted text-sm mb-1">
+    Cadence is saved, but <code>reassess-scheduler</code> is not running here yet — until then, re-check via Scan or a push.
+  </p>
+  {% endif %}
+  <form method="post" action="/assessments/{{ assessment_id }}/set-cadence" class="inline-form">
+    <div class="form-group">
+      <label class="form-label" for="cadence-select">Re-assess automatically</label>
+      <select id="cadence-select" name="cadence">
+        <option value="daily" {% if assessment_cadence == "daily" %}selected{% endif %}>Every 24 hours</option>
+        <option value="weekly" {% if assessment_cadence == "weekly" %}selected{% endif %}>Weekly</option>
+        <option value="monthly" {% if assessment_cadence == "monthly" %}selected{% endif %}>Monthly</option>
+        <option value="manual" {% if assessment_cadence == "manual" %}selected{% endif %}>Manual only</option>
+      </select>
+    </div>
+    <button type="submit" class="btn btn-sm btn-outline">
+      <span class="btn-label">Save</span>
+      <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+    </button>
+  </form>
 </div>
 
 <div x-show="tab === 'findings'" x-cloak>
+  {# Findings owns the tab: list + Fix CTAs. Remediation Plan is folded in
+     as a default-collapsed reference (same Fix path), not a second full table. #}
   {% if urgent_findings %}
-  <div x-data="{ open: true }">
-    <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
-      Findings (<span x-text="findingsCount"></span>)
-    </h2>
-    <div class="collapse-body" x-show="open" x-transition>
-      {# Pre-onboard: Scan (which always chains into onboarding, 2026-07-20)
-         already generates manifests for every finding. Per-finding Fix is a
-         competing generation path that lands on the same Dry Run → Apply
-         flow and was shipping as a dead/confusing control (confirm without
-         busy feedback; Remediation Plan Fix had no confirm). Hide it until
-         onboarding has run; then Fix is the right verb for incremental
-         remediations. #}
-      {% if lifecycle_stage == "assessed" and fixable_categories %}
-      <p class="text-muted text-sm mb-1" role="status">
-        Onboarding for these findings is running automatically (or about to)
-        via <strong>Scan</strong> below -- automatic validation and delivery
-        run on their own from there. Per-finding Fix appears here after onboarding.
-      </p>
+  <h2 class="section-title mt-0">Findings (<span x-text="findingsCount"></span>)</h2>
+  {% if lifecycle_stage == "assessed" and fixable_categories %}
+  <p class="text-muted text-sm mb-1" role="status">
+    Use <strong>Scan</strong> above for the first onboard — per-finding Fix appears after onboarding.
+  </p>
+  {% endif %}
+  <ul class="finding-list mb-2">
+    {% for f in urgent_findings %}
+    <li class="finding-item {% if f.severity.name == 'critical' %}finding-critical{% else %}finding-high{% endif %}"
+        x-data="{ suppressing: false, suppressed: false }" x-show="!suppressed"
+        x-transition:leave="suppress-leave" x-transition:leave-end="suppress-leave-end">
+      <span class="badge badge-{{ f.severity.name }} finding-badge">{{ f.severity.name }}</span>
+      {% if finding_badges is defined and f.category in finding_badges %}
+        {% set fb = finding_badges[f.category] %}
+        {% if fb == 'remediable' %}
+        <span class="badge badge-success" title="Scan can open a finding-clear PR">remediable</span>
+        {% elif fb == 'detect_only' %}
+        <span class="badge badge-warning" title="Detected only — Scan will not open a PR. Suppress if handled externally.">detect-only</span>
+        {% else %}
+        <span class="badge badge-muted" title="No solution contract yet">uncontracted</span>
+        {% endif %}
       {% endif %}
-      <ul class="finding-list">
-        {% for f in urgent_findings %}
-        {# Optimistic UI (docs/ux-design-requirements.md checklist #7):
-           Suppress is genuinely reversible (Unsuppress below undoes it) and
-           low-stakes (it only affects which checks future assessments
-           re-run -- nothing cluster-side). The finding hides
-           the instant Suppress is confirmed, reconciling back to visible
-           only if the real request actually fails -- never a bare spinner
-           + full-page reload for an action this safe. #}
-        <li class="finding-item {% if f.severity.name == 'critical' %}finding-critical{% else %}finding-high{% endif %}"
-            x-data="{ suppressing: false, suppressed: false }" x-show="!suppressed"
-            x-transition:leave="suppress-leave" x-transition:leave-end="suppress-leave-end">
-          <span class="badge badge-{{ f.severity.name }} finding-badge">{{ f.severity.name }}</span>
-          {% if finding_badges is defined and f.category in finding_badges %}
-            {% set fb = finding_badges[f.category] %}
-            {% if fb == 'remediable' %}
-            <span class="badge badge-success" title="Scan can open a finding-clear PR">remediable</span>
-            {% elif fb == 'detect_only' %}
-            <span class="badge badge-warning" title="Detected only — Scan will not open a PR. Suppress if handled externally.">detect-only</span>
-            {% else %}
-            <span class="badge badge-muted" title="No solution contract yet">uncontracted</span>
-            {% endif %}
-          {% endif %}
-          {{ f.description }}
-          {% if f.source %}<span class="badge badge-muted finding-source">{{ f.source | clean_source }}</span>{% endif %}
-          {% if f.file_path %}<span class="finding-file">{{ f.file_path }}</span>{% endif %}
-          {% if f.category in fixable_categories and lifecycle_stage != "assessed" %}
-          {# x-data on the form (same pattern as Delete / Register for GitOps)
-             so $refs resolves in the button's Alpine scope; htmx-indicator
-             gives busy feedback while /fix generates. #}
-          <form method="post" action="/assessments/{{ assessment_id }}/fix" class="inline-form"
-                x-data x-ref="fixFinding{{ loop.index }}">
-            <input type="hidden" name="category" value="{{ f.category }}">
-            <input type="hidden" name="description" value="{{ f.description }}">
-            <button type="button" class="btn btn-sm btn-green"
-              @click="$dispatch('show-confirm', {
-                title: 'Generate Fix',
-                message: 'Generate a fix for this finding? You will review it on Onboard Results before delivering.',
-                form: $refs.fixFinding{{ loop.index }},
-                opts: { confirmText: 'Generate Fix', danger: false }
-              })">
-              <span class="btn-label">Fix</span>
-              <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Generating&hellip;</span>
-            </button>
-          </form>
-          {% elif finding_badges is defined and finding_badges.get(f.category) == 'detect_only' %}
-          <span class="text-muted text-sm" role="status">No Scan PR — human-only / detect-only. <a href="/capabilities#checks-resolutions">Why?</a></span>
-          {% endif %}
-          {% if f.source %}
-          <form action="/api/suppress" class="inline-form"
-                hx-post="/api/suppress" hx-swap="none"
-                @submit="suppressed = true; findingsCount--"
-                @htmx:response-error.camel="suppressed = false; findingsCount++"
-                @htmx:send-error.camel="suppressed = false; findingsCount++">
-            <input type="hidden" name="app_name" value="{{ report.repo_name }}">
-            <input type="hidden" name="check_source" value="{{ f.source }}">
-            <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
-            <button type="button" class="btn btn-sm btn-outline" x-show="!suppressing"
-              @click="suppressing = true">Suppress</button>
-            <div x-show="suppressing" class="gate-reject-row">
-              <input type="text" name="reason" placeholder="Why suppress? (e.g. handled externally)" class="gate-reject-input">
-              <button type="submit" class="btn btn-sm btn-outline">Confirm</button>
-            </div>
-          </form>
-          {% endif %}
-        </li>
-        {% endfor %}
-      </ul>
-    </div>
-  </div>
+      {{ f.description }}
+      {% if f.source %}<span class="badge badge-muted finding-source">{{ f.source | clean_source }}</span>{% endif %}
+      {% if f.file_path %}<span class="finding-file">{{ f.file_path }}</span>{% endif %}
+      {% if f.category in fixable_categories and lifecycle_stage != "assessed" %}
+      <form method="post" action="/assessments/{{ assessment_id }}/fix" class="inline-form"
+            x-data x-ref="fixFinding{{ loop.index }}">
+        <input type="hidden" name="category" value="{{ f.category }}">
+        <input type="hidden" name="description" value="{{ f.description }}">
+        <button type="button" class="btn btn-sm btn-green"
+          @click="$dispatch('show-confirm', {
+            title: 'Generate Fix',
+            message: 'Generate a fix for this finding? You will review it on Onboard Results before delivering.',
+            form: $refs.fixFinding{{ loop.index }},
+            opts: { confirmText: 'Generate Fix', danger: false }
+          })">
+          <span class="btn-label">Fix</span>
+          <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Generating&hellip;</span>
+        </button>
+      </form>
+      {% elif finding_badges is defined and finding_badges.get(f.category) == 'detect_only' %}
+      <span class="text-muted text-sm" role="status">No Scan PR — human-only / detect-only. <a href="/capabilities#checks-resolutions">Why?</a></span>
+      {% endif %}
+      {% if f.source %}
+      <form action="/api/suppress" class="inline-form"
+            hx-post="/api/suppress" hx-swap="none"
+            @submit="suppressed = true; findingsCount--"
+            @htmx:response-error.camel="suppressed = false; findingsCount++"
+            @htmx:send-error.camel="suppressed = false; findingsCount++">
+        <input type="hidden" name="app_name" value="{{ report.repo_name }}">
+        <input type="hidden" name="check_source" value="{{ f.source }}">
+        <input type="hidden" name="assessment_id" value="{{ assessment_id }}">
+        <button type="button" class="btn btn-sm btn-outline" x-show="!suppressing"
+          @click="suppressing = true">Suppress</button>
+        <div x-show="suppressing" class="gate-reject-row">
+          <input type="text" name="reason" placeholder="Why suppress? (e.g. handled externally)" class="gate-reject-input">
+          <button type="submit" class="btn btn-sm btn-outline">Confirm</button>
+        </div>
+      </form>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="text-muted text-sm mb-2" role="status">No urgent findings for this score.</p>
   {% endif %}
 
   {% if report.remediation_plan %}
-  <div x-data="{ open: true }">
+  <div x-data="{ open: false }">
     <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
       Remediation Plan ({{ report.remediation_plan|length }})
     </h2>

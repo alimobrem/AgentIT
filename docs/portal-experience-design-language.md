@@ -25,6 +25,11 @@ Shipped pattern (do not regress):
 | **Events** | Bell control → slide-over drawer | Full `/events` (+ DLQ) remains for filters/pagination — the system's real-time activity/audit-trail feed (every action the system takes, behind the scenes), not ops home |
 | **Decisions**, Capabilities, Settings, Schedules | Account / main menu | Not primary-nav text links |
 
+**Chrome:** primary `<nav>` and `.site-footer` are **fixed** (not sticky).
+`base.css` sets `--nav-height` / `--footer-height` and pads `body` so
+`#main-content` clears both. Events drawer / modals / toasts stay above
+footer (`z-index`). Skip-to-content still targets `#main-content`.
+
 Admin Review (a fifth primary-nav surface, an elevated RBAC queue for
 `cluster-admin-review` gates) was retired 2026-07-18 along with that gate
 type -- every gate type is per-app now, so there's no cross-app queue left

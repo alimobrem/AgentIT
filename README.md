@@ -95,7 +95,7 @@ flowchart LR
 
 **Live catalog:** Capabilities → **Checks & resolutions** (`/capabilities#checks-resolutions`) and `GET /api/check-catalog`. Built from `portal/check_catalog.py` so the UI cannot drift from `SOLUTION_CONTRACTS`.
 
-**Portal map:** Capabilities = definitions + contracts; Assessment Detail = per-finding badges + Fix only for remediable; Insights = fleet rollup + contract badges (deep-links to Agents/Capabilities/Decisions/Ledger — not duplicate tables); Ledger/Fleet = PRs/scores (Fleet table omits Namespace/Trend); **Health** = tabbed platform telemetry (Overview / Workloads / Messaging / Access — not app checks); **Schedules** = CronWorkflows + reminders (watcher status via Agents); **Decisions** = LLM approve/reject audit leading with filter + log (not the check catalog).
+**Portal map:** Fixed masthead + footer chrome (`--nav-height` / `--footer-height`). **Capabilities** = Checks / Skills / Activity sections (check catalog SoT; no “How Onboarding Works” dump). **Assessment Detail** = above-fold identity + next action + Scan; cadence under Overview; Findings owns remediations (plan collapsed); full PR history on Ledger tab. **Onboard Results** = PR-first + single Diagnostics accordion (Apply Report hidden on PR-only Scan HITL success). Insights = fleet rollup + deep links (not duplicate tables); Ledger/Fleet = PRs/scores (Fleet omits Namespace/Trend); **Health** = tabbed platform telemetry; **Schedules** = CronWorkflows + reminders; **Decisions** = LLM audit filter + log.
 
 ### Image promotion (live portal)
 
