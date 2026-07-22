@@ -1,0 +1,25 @@
+apiVersion: kyverno.io/v1
+kind: Policy
+metadata:
+  name: "{{ .Release.Name }}-trusted-registries"
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app.kubernetes.io/name: agentit
+spec:
+  validationFailureAction: Audit
+  rules:
+    - name: validate-registries
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              selector:
+                matchLabels:
+                  app.kubernetes.io/name: agentit
+      validate:
+        message: "Images must come from a trusted registry: registry.access.redhat.com, registry.redhat.io, quay.io, or the OpenShift internal registry."
+        pattern:
+          spec:
+            containers:
+              - image: "registry.access.redhat.com/* | registry.redhat.io/* | quay.io/* | image-registry.openshift-image-registry.svc*/*"
