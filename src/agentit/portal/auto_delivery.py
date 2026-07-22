@@ -33,6 +33,7 @@ out of this module's scope; the dedicated gate-removal effort owns that.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from agentit.models import AssessmentReport
@@ -478,13 +479,46 @@ async def auto_validate_and_deliver(
     unchanged_any = False
 
     for cluster in clusters:
+        # Fleet HPA gate: refuse invented scaleTargetRef (Deployment/app when
+        # live workloads are app-api / Rollout/app). Self-managed uses
+        # delivery._deliver_self_managed_source_pr + self_managed_hpa instead.
+        from agentit.portal.delivery import is_self_managed_delivery_target
+
+        cluster_files = list(cluster.files)
+        self_managed = await is_self_managed_delivery_target(app_name, report)
+        if not self_managed:
+            from agentit.portal.fleet_hpa import (
+                discover_namespace_workloads,
+                filter_fleet_hpa_files,
+            )
+
+            workloads = await asyncio.to_thread(
+                discover_namespace_workloads, namespace or app_name,
+            )
+            cluster_files, hpa_drops = filter_fleet_hpa_files(
+                cluster_files, workloads, app_name=app_name,
+            )
+            if hpa_drops:
+                drop_reasons = list(drop_reasons or []) + hpa_drops
+            if not cluster_files:
+                reason = (
+                    "Fleet HPA scaleTargetRef gate emptied cluster — "
+                    + "; ".join(hpa_drops[:3])
+                )
+                cluster_refusals.append(f"{cluster.key}: {reason}")
+                logger.warning(
+                    "Auto-delivery cluster %s for %s refused by fleet HPA gate: %s",
+                    cluster.key, app_name, reason,
+                )
+                continue
+
         # Phase C: per-cluster validation before open.
         dry_errors, dry_warnings, _ = await _dry_run_check(
-            cluster.files, app_name=app_name, namespace=namespace, report=report,
+            cluster_files, app_name=app_name, namespace=namespace, report=report,
             store=store, assessment_id=assessment_id, actor=actor,
         )
         relevant_failed = [
-            r for r in _check_properties(cluster.files)
+            r for r in _check_properties(cluster_files)
             if not r.passed and _assessment_has_finding_category(
                 report, _PROPERTY_TO_FIX_CATEGORY.get(r.property_name, ""),
             )
@@ -504,7 +538,8 @@ async def auto_validate_and_deliver(
         cluster_warnings = dry_warnings or soft_warnings
         validation_summary = (
             "SSA dry-run (concrete YAML), property checks for targeted "
-            "findings, and self-managed chart gate (#119) passed for this cluster."
+            "findings, fleet HPA scaleTargetRef gate, and self-managed "
+            "chart gate (#119) passed for this cluster."
         )
         if cluster_warnings:
             validation_summary += (
@@ -517,7 +552,7 @@ async def auto_validate_and_deliver(
             "body": build_helpful_pr_body(
                 title_line=f"AgentIT Scan: {cluster.key} for {app_name}",
                 target_findings=cluster.target_findings,
-                files=cluster.files,
+                files=cluster_files,
                 validation_summary=validation_summary,
                 drop_reasons=drop_reasons,
                 score_dimensions=score_dims,
@@ -526,7 +561,7 @@ async def auto_validate_and_deliver(
             "cluster_key": cluster.key,
         }
         delivery = await route_and_deliver(
-            cluster.files, app_name=app_name, namespace=namespace, report=report,
+            cluster_files, app_name=app_name, namespace=namespace, report=report,
             store=store, assessment_id=assessment_id, actor=actor, dry_run=False,
             target_findings=cluster.target_findings,
             pr_context=pr_context,

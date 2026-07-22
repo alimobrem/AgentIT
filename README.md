@@ -38,6 +38,10 @@ Self-managed delivery gates (#119/#121), watchers, and Scan→GitOps delivery ar
 
 ---
 
+**Fleet HPA workload discovery (2026-07-22).** Closed bad pinky gitops [#18](https://github.com/alimobrem/agentit-gitops/pull/18) (only lowered `minReplicas`; still targeted nonexistent `Deployment/pinky`). Fleet Scan now lists live Deployments/Rollouts in the app namespace (`portal/fleet_hpa.py`), generates HPA `scaleTargetRef` from those names (prefer exact `Rollout/{app}`, else `Deployment/{app}`, else `{app}-api|web|worker|…`, skip infra sidecars), and **fail-closes** in SkillEngine + `auto_delivery` + GitOps deliver if the target is missing — same posture as self-managed HPA. Skill: `skills/infrastructure/hpa.md` v2. Tests: `tests/test_fleet_hpa.py`.
+
+---
+
 **PR-types quality follow-ups (2026-07-21).** Inventory: [`docs/agentit-pr-types-quality-review.md`](docs/agentit-pr-types-quality-review.md). P0 HPA app-correctness (#136) + SSA soft dry-run (#137). P1/P2: refuse `.agentit/` dump PRs; source-repo patch titles by mechanism; finding-clear proof section + Ledger `finding-clear-pending`; shared-NS blast-radius in GitOps PR bodies; scout `evidence-usefulness` gate (cite dogfood/finding/PR failure). Activate already stages one skill file.
 
 ---

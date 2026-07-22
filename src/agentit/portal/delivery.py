@@ -1106,11 +1106,41 @@ async def _deliver_via_gitops_pr(
             ),
         }
 
+    ns = namespace or getattr(report, "namespace", None) or app_name
+    # Defense in depth: never open a fleet GitOps PR whose HPA points at a
+    # nonexistent Deployment/Rollout (pinky #18 class).
+    from agentit.portal.fleet_hpa import (
+        discover_namespace_workloads,
+        filter_fleet_hpa_files,
+    )
+
+    deliver_files = list(files)
+    workloads = await asyncio.to_thread(discover_namespace_workloads, str(ns))
+    deliver_files, hpa_drops = filter_fleet_hpa_files(
+        deliver_files, workloads, app_name=app_name,
+    )
+    if hpa_drops and not deliver_files:
+        return {
+            "error": (
+                "Fleet HPA scaleTargetRef gate refused delivery — "
+                + "; ".join(hpa_drops[:5])
+                + ". No PR opened."
+            ),
+            "gate_refused": True,
+            "drop_reasons": hpa_drops,
+        }
+    if hpa_drops:
+        # Mixed batch: drop bad HPA docs, continue with the rest.
+        logger.warning(
+            "Fleet HPA gate dropped %d file(s) for %s before GitOps PR: %s",
+            len(hpa_drops), app_name, "; ".join(hpa_drops[:3]),
+        )
+
     outcome = await deliver_with_verification(
-        mechanism=MECHANISM_INFRA_REPO_COMMIT, files=files, report=report,
+        mechanism=MECHANISM_INFRA_REPO_COMMIT, files=deliver_files, report=report,
         app_name=app_name, store=store, assessment_id=assessment_id,
         actor=actor, dry_run=dry_run, path_prefix=path_prefix, branch_name=branch_name,
-        namespace=namespace or getattr(report, "namespace", None) or app_name,
+        namespace=ns,
         record_skill_approval=False, pr_context=effective_context,
     )
     pr_url = outcome.get("pr_url") if isinstance(outcome, dict) and not dry_run else None
