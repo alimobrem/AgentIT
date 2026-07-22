@@ -594,3 +594,9 @@ class LLMClient:
             llm_breaker.record_failure()
             logger.warning("LLM response parse failed: %s", exc)
             return None
+        except Exception as exc:
+            # Credentials / SDK init side-effects and other unexpected errors
+            # must not crash assessments — same fail-soft contract as above.
+            llm_breaker.record_failure()
+            logger.warning("LLM call failed: %s", exc)
+            return None

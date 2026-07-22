@@ -1609,7 +1609,7 @@ async def test_dashboard_uses_design_system_classes(client, _override_store):
     resp = await client.get("/fleet")
     assert "<h1>Fleet</h1>" in resp.text
     assert "css-app" in resp.text
-    assert "<table>" in resp.text
+    assert 'class="fleet-table"' in resp.text
     assert "Scan" in resp.text
 
 
