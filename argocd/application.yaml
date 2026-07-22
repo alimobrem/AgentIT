@@ -212,6 +212,16 @@ spec:
         - .spec.tasks[].taskSpec.sidecars[].computeResources
         - .spec.finally[].taskSpec.metadata
         - .spec.finally[].taskSpec.spec
+    # HPA owns Rollout.spec.replicas at runtime while the chart still pins
+    # replicaCount; secret-rotation (and similar) patches restartAt for
+    # restarts. Both are expected live drift — without this the Application
+    # stays OutOfSync forever while Healthy, which used to pin the portal
+    # badge to "Deploying · syncing".
+    - group: argoproj.io
+      kind: Rollout
+      jsonPointers:
+        - /spec/replicas
+        - /spec/restartAt
   destination:
     server: https://kubernetes.default.svc
     namespace: agentit

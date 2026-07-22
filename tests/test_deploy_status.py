@@ -289,11 +289,30 @@ def test_deploy_status_pipeline_failure_is_reported_not_hidden():
     assert "Failed" in status["reason"]
 
 
-def test_deploy_status_argo_out_of_sync_is_deploying_syncing():
+def test_deploy_status_argo_out_of_sync_healthy_idle_is_not_deploying():
+    """Residual OutOfSync (e.g. HPA vs chart replicas) while Healthy and
+    with no in-flight Argo operation must not pin the badge to
+    'Deploying · syncing'."""
     succeeded_pr = _pipelinerun("Succeeded", "True")
     with patch("agentit.portal.deploy_status.kube") as mock_kube:
         mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
             [succeeded_pr] if "tekton" in group else [_argo_app("OutOfSync", "Healthy")]
+        )
+        status = _get_deploy_status()
+
+    assert status["state"] == "idle"
+    assert status["stage"] is None
+    assert status["argo"]["sync"] == "OutOfSync"
+    assert status["argo"]["health"] == "Healthy"
+
+
+def test_deploy_status_argo_out_of_sync_non_healthy_is_deploying_syncing():
+    """OutOfSync paired with a non-Healthy status (and not already covered
+    by Progressing/Suspended/Degraded) still means sync work is pending."""
+    succeeded_pr = _pipelinerun("Succeeded", "True")
+    with patch("agentit.portal.deploy_status.kube") as mock_kube:
+        mock_kube.list_custom_resources.side_effect = lambda group, *a, **kw: (
+            [succeeded_pr] if "tekton" in group else [_argo_app("OutOfSync", "Missing")]
         )
         status = _get_deploy_status()
 
