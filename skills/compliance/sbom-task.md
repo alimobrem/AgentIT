@@ -5,7 +5,6 @@ version: 1
 triggers:
   - sbom
   - bom
-  - license
   - software
   - bill
 outputs:

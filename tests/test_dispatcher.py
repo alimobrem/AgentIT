@@ -58,6 +58,19 @@ class TestRegistryLookup:
         assert lookup("audit") == ("compliance", "app-audit-logging")
         assert lookup("container") == ("security", "containerfile")
 
+    def test_availability_resolves_to_pdb_not_registry_lookup_alone(self):
+        """ha_dr's "No PodDisruptionBudget defined" finding (category
+        "availability") had no registry row, so skill_for_category() fell
+        back to trigger-keyword matching -- both skills/infrastructure/pdb.md
+        (the real remediation) and skills/chaos/pod-delete.md (a resiliency
+        -test generator, not a fix) declare trigger "availability", and
+        load_all_skills() sorts by path ("skills/chaos/" < "skills/
+        infrastructure/" alphabetically), so pod-delete silently won every
+        time. This only proves the registry row itself; see
+        test_skill_engine.py for the full skill_for_category() proof that
+        pod-delete is no longer selected."""
+        assert lookup("availability") == ("infrastructure", "pdb")
+
 
 # ── patch_base_image ────────────────────────────────────────────────
 
