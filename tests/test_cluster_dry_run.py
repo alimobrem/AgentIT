@@ -3,7 +3,8 @@ Kubernetes server-side-apply dryRun=All — never via kubectl/oc CLI, and
 never persists resources on the cluster.
 
 Hard failures (schema/admission/unreachable) block Scan delivery.
-Soft failures (Forbidden / missing optional CRD) warn without blocking.
+Soft failures (Forbidden / missing optional CRD / field-manager conflict)
+warn without blocking.
 """
 from __future__ import annotations
 
@@ -162,6 +163,32 @@ class TestDryRunManifestsAgainstCluster:
 
         assert result["errors"] == []
         assert any("Forbidden" in w for w in result["warnings"])
+
+    def test_field_manager_conflict_is_soft_warning_not_hard_error(self):
+        """Re-onboard with prior kubectl CSA ConfigMaps must not block PRs."""
+        files = [_file("pinky-cost-labels.yaml", _k8s_yaml("ConfigMap", "pinky-cost-labels"))]
+        conflict_msg = (
+            'ConfigMap/pinky-cost-labels: field-manager conflict -- '
+            'Apply failed with 1 conflict: conflict with '
+            '"kubectl-client-side-apply" using v1: .data.cost-center'
+        )
+        with patch("agentit.portal.cluster_apply.kube.apply_yaml") as mock_apply:
+            mock_apply.return_value = {
+                "applied": False,
+                "error": conflict_msg,
+                "errors": [],
+                "conflict": True,
+                "conflict_details": [{
+                    "kind": "ConfigMap",
+                    "name": "pinky-cost-labels",
+                    "message": conflict_msg,
+                }],
+            }
+            result = dry_run_manifests_against_cluster(files, namespace="pinky")
+
+        assert result["errors"] == []
+        assert result["conflicts"]
+        assert any("field-manager conflict" in w for w in result["warnings"])
 
     def test_mixed_soft_and_hard_in_one_file_keeps_hard(self):
         """Per-doc errors: soft Forbidden must not hide hard Bad Request."""

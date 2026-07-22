@@ -25,7 +25,12 @@ generates an SBOM, and deploys — all automated via Tekton.
 ## Constraints
 - Pipeline uses tekton.dev/v1 API
 - Standard step ordering: git-clone → build → test → image-build → image-push → image-scan → sbom-generate → deploy
-- Uses ClusterTasks where available (git-clone, buildah)
+- Shared Tasks (git-clone, buildah, openshift-client) MUST use the
+  `resolver: cluster` form pointing at `openshift-pipelines` — never
+  `kind: ClusterTask` (ClusterTask CRD is removed on current OpenShift
+  Pipelines; admission returns Bad Request: "custom task ref must specify
+  apiVersion")
+- App-local Tasks (image-scan, sbom) may use `kind: Task` in the app namespace
 - PipelineRun references the pipeline with appropriate params
 - Workspaces for shared-data and credentials
 - Pipeline must be idempotent — safe to re-run
@@ -40,14 +45,14 @@ tailor the build and test steps:
 - **Node.js**: `npm ci`, `npm test`
 
 All variants must include:
-1. **git-clone** — ClusterTask reference, writes to shared-data workspace
+1. **git-clone** — cluster resolver → `openshift-pipelines/git-clone`, writes to shared-data workspace
 2. **build** — language-specific compilation/dependency install
 3. **test** — language-specific test runner
-4. **image-build** — buildah bud using the generated Containerfile
-5. **image-push** — buildah push to the target registry
+4. **image-build** — cluster resolver → `openshift-pipelines/buildah`
+5. **image-push** — buildah push to the target registry (often part of buildah)
 6. **image-scan** — reference the image-scan Task for Trivy scanning
 7. **sbom-generate** — syft or cyclonedx to produce SBOM
-8. **deploy** — kubectl apply or kustomize build | kubectl apply
+8. **deploy** — cluster resolver → `openshift-pipelines/openshift-client`
 
 PipelineRun must set:
 - `pipelineRef` to the generated pipeline name
@@ -63,6 +68,8 @@ language" — only `{{app_name}}` is substituted); the LLM enhancement inserts
 a `build`/`test` task tailored to the app's stack ahead of `image-build`. The
 `image-scan` and `sbom-generate` task references match the names produced by
 the `image-scan-task` and `sbom-task` skills in this same assessment.
+Shared catalog Tasks match AgentIT's own `chart/templates/tekton/pipeline.yaml`
+(`resolver: cluster` → `openshift-pipelines`).
 
 ```yaml
 apiVersion: tekton.dev/v1
@@ -82,18 +89,30 @@ spec:
   tasks:
     - name: git-clone
       taskRef:
-        name: git-clone
-        kind: ClusterTask
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: git-clone
+          - name: namespace
+            value: openshift-pipelines
       params:
-        - name: url
+        - name: URL
           value: $(params.repo-url)
       workspaces:
         - name: output
           workspace: shared-workspace
     - name: image-build
       taskRef:
-        name: buildah
-        kind: ClusterTask
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: buildah
+          - name: namespace
+            value: openshift-pipelines
       runAfter:
         - git-clone
       params:
@@ -122,13 +141,19 @@ spec:
           value: $(params.image-ref)
     - name: deploy
       taskRef:
-        name: kubernetes-actions
-        kind: ClusterTask
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: openshift-client
+          - name: namespace
+            value: openshift-pipelines
       runAfter:
         - image-scan
         - sbom-generate
       params:
-        - name: script
+        - name: SCRIPT
           value: kubectl rollout restart deployment/{{app_name}}
 ---
 apiVersion: tekton.dev/v1
