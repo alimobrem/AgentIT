@@ -130,7 +130,7 @@ High level — implementation can follow in a focused PR.
 | Deploy topology diagram | [`docs/architecture.md`](./architecture.md) “Deployment topology” |
 | Skills baked into image; activate → AgentIT.git PR | [`tests/test_portal.py`](../tests/test_portal.py) (~3174–3217); skill-learner / activate routes |
 | Fleet self-register webhook (not gitops deploy) | `register-self-in-fleet` in [`chart/templates/tekton/pipeline.yaml`](../chart/templates/tekton/pipeline.yaml) (~366–399) |
-| PR-only + Argo sole deployer (product) | [`docs/lessons-learned-building-agentit.md`](./lessons-learned-building-agentit.md) |
+| PR-only + Argo sole deployer (product) | [ADR 0001](./adr/0001-gitops-scan-hitl.md), [release-notes.md](./release-notes.md) |
 
 ---
 
