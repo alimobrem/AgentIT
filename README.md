@@ -65,6 +65,38 @@ Docs index: [`docs/README.md`](docs/README.md). Normative delivery split: [`docs
 
 [#155](https://github.com/alimobrem/AgentIT/pull/155) (detect_only coverage) is **superseded** by this hardening (closed; do not revive the old substring `contract_for`). Session notes: [`docs/changelog-dogfood-notes.md`](docs/changelog-dogfood-notes.md).
 
+### Checks vs resolutions (layers)
+
+```mermaid
+flowchart LR
+  subgraph detect [Detect]
+    A[7 analyzers]
+    D[20 mode detect skills]
+  end
+  subgraph score [Score]
+    F[Findings by category]
+  end
+  subgraph resolve [Resolve via Scan]
+    C[SOLUTION_CONTRACTS]
+    PR[Source or gitops PR]
+  end
+  A --> F
+  D --> F
+  F --> C
+  C --> PR
+```
+
+| Layer | What | Opens a Scan PR? |
+| ----- | ---- | ---------------- |
+| Analyzers (7 dims → ~27 categories) | Pattern / source / cluster posture | Only if contracted + `auto_pr` |
+| `mode: detect` skills (~20) | File/YAML rule checks | Never by themselves — emit findings only |
+| Remediable contracts | Skill + `delivery: source\|cluster` + evidence | **Yes** (quality-gated) |
+| Detect-only contracts | e.g. `license`, `backup`, `secrets` | **No** — human-only |
+
+**Live catalog:** Capabilities → **Checks & resolutions** (`/capabilities#checks-resolutions`) and `GET /api/check-catalog`. Built from `portal/check_catalog.py` so the UI cannot drift from `SOLUTION_CONTRACTS`.
+
+**Portal map:** Capabilities = definitions + contracts; Assessment Detail = per-finding badges + Fix only for remediable; Insights = check pass rates + contract annotation; Ledger/Fleet = PRs/scores; **Health** = platform self-health (not app checks); **Decisions** = LLM approve/reject audit (not the check catalog).
+
 ### Image promotion (live portal)
 
 Merge to `main` alone does not move the portal. Tekton `agentit-ci`: `run-tests` → `build-image` → `smoke-test-image` → `notify-argocd` (pins Application `agentit` `image.tag`). GitHub context `agentit-ci/tekton` must succeed. Details: [`docs/deployment.md`](docs/deployment.md).
@@ -73,6 +105,7 @@ Merge to `main` alone does not move the portal. Tekton `agentit-ci`: `run-tests`
 
 - [Why AgentIT](#why-agentit)
 - [Architecture, at a glance](#architecture-at-a-glance)
+- [Checks vs resolutions (layers)](#checks-vs-resolutions-layers)
 - [Skills & check engine](#skills--check-engine)
 - [The agent fleet](#the-agent-fleet)
 - [Self-improvement loop](#self-improvement-loop)
