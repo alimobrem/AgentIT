@@ -479,6 +479,10 @@ class TestIntegration:
             assert full_path.exists(), f"Expected file {full_path} not found"
             all_output_files.append(gf.path)
 
-        # Security domain coverage: a Containerfile-equivalent skill fires
-        # (original Dockerfile lacks USER).
-        assert any("containerfile" in f.lower() for f in all_output_files)
+        # Security domain coverage: containerfile skill emits a source-repo
+        # Dockerfile patch (delivery: source → patch-Dockerfile), not a
+        # gitops BuildConfig named "containerfile".
+        assert any(
+            "dockerfile" in f.lower() or "containerfile" in f.lower()
+            for f in all_output_files
+        ), f"expected container source patch among {all_output_files}"

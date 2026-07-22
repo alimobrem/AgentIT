@@ -164,8 +164,26 @@ async def test_onboard_agent_crash_returns_partial(client, _override_store):
     assert len(files) > 0, "Skills should still produce files despite codechange crash"
 
     categories = {f["category"] for f in files}
-    assert "codechange" not in categories, "Crashed agent should not produce output"
-    assert "skills" in categories
+    # Source-delivery skills (containerfile → Dockerfile, etc.) are
+    # reclassified to category=codechange for CATEGORY_SOURCE_PATCH routing
+    # even though CodeChangeAgent crashed. That is intentional product
+    # behavior — assert the agent failed, and any codechange files come
+    # from skills (skill_name set), not the crashed agent.
+    orch = await store.get_orchestration(aid)
+    assert orch is not None
+    codechange_agent = next(
+        (a for a in orch.get("agents", []) if a.get("name") == "codechange"),
+        None,
+    )
+    assert codechange_agent is not None
+    assert codechange_agent.get("success") is False
+    for f in files:
+        if f["category"] == "codechange":
+            assert f.get("skill_name"), (
+                "codechange-categorized file after CodeChangeAgent crash "
+                "must be a skill source patch"
+            )
+    assert "skills" in categories or any(f.get("skill_name") for f in files)
 
 
 # ------------------------------------------------------------------
