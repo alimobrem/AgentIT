@@ -44,9 +44,44 @@ def live_quota_present(namespace: str) -> bool | None:
         return None
 
 
-def live_hpa_present(namespace: str) -> bool | None:
-    """True when any HorizontalPodAutoscaler exists in *namespace*.
+def _hpa_scale_target_resolves(namespace: str, hpa: dict) -> bool:
+    """True when the HPA's scaleTargetRef names a live Deployment or Rollout.
 
+    A leftover HPA pointing at a deleted/wrong workload must not clear
+    ``scaling`` — dogfood pinky had Deployment/pinky while only Rollout/pinky
+    existed, AbleToScale=False, yet presence-only clearing hid the finding.
+    """
+    ref = (hpa.get("spec") or {}).get("scaleTargetRef") or {}
+    kind = (ref.get("kind") or "").strip()
+    name = (ref.get("name") or "").strip()
+    if not kind or not name:
+        return False
+    try:
+        from agentit import kube
+
+        if kind == "Deployment":
+            return kube.apps_v1().read_namespaced_deployment(
+                name, namespace, _request_timeout=10,
+            ) is not None
+        if kind == "Rollout":
+            obj = kube.get_custom_resource(
+                "argoproj.io", "v1alpha1", "rollouts", name, namespace=namespace,
+            )
+            return obj is not None
+    except Exception as exc:
+        logger.debug(
+            "HPA scaleTargetRef check failed for %s/%s %s/%s: %s",
+            namespace, hpa.get("metadata", {}).get("name"), kind, name, exc,
+        )
+        return False
+    # ReplicaSet/StatefulSet/etc. — treat as unresolved for clearing purposes
+    return False
+
+
+def live_hpa_present(namespace: str) -> bool | None:
+    """True when a *working* HorizontalPodAutoscaler exists in *namespace*.
+
+    "Working" means scaleTargetRef resolves to a live Deployment or Rollout.
     Returns ``None`` when discovery fails (no signal — do not clear).
     """
     if not namespace:
@@ -63,8 +98,13 @@ def live_hpa_present(namespace: str) -> bool | None:
                     "autoscaling", version, "horizontalpodautoscalers",
                     namespace=namespace, timeout=10,
                 )
-                if items:
+                if items is None:
+                    continue
+                if any(_hpa_scale_target_resolves(namespace, h) for h in items):
                     return True
+                if items:
+                    # HPAs exist but none resolve — do not clear scaling
+                    return False
             except Exception as inner:
                 logger.debug(
                     "HPA list autoscaling/%s failed for %s: %s",

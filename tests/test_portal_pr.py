@@ -533,6 +533,9 @@ def test_ensure_applicationset_creates_when_missing(mock_kube):
     assert args[:3] == ("argoproj.io", "v1alpha1", "applicationsets")
     assert args[3] == "openshift-gitops"
     assert args[4]["kind"] == "ApplicationSet"
+    directory = args[4]["spec"]["template"]["spec"]["source"]["directory"]
+    assert directory["recurse"] is True
+    assert "*.yaml" in directory["include"]
     mock_kube.patch_custom_resource.assert_not_called()
 
 
@@ -549,6 +552,9 @@ def test_ensure_applicationset_patches_when_existing(mock_kube):
     assert args[0] == "argoproj.io"
     assert args[3] == "agentit-managed-apps"
     assert args[4] == "openshift-gitops"
+    directory = args[5]["spec"]["template"]["spec"]["source"]["directory"]
+    assert directory["recurse"] is True
+    assert "*.yml" in directory["include"]
 
 
 @patch("agentit.portal.github_pr.kube")

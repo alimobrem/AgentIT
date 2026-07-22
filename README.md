@@ -42,6 +42,10 @@ Self-managed delivery gates (#119/#121), watchers, and Scan→GitOps delivery ar
 
 ---
 
+**Fleet ApplicationSet must recurse YAML (2026-07-22).** Dogfood `managed-pinky` reported Synced/Healthy with **0 resources** because `ensure_applicationset()` used Argo Directory mode without `recurse` — manifests live under `apps/{app}/{category}/` and `apps/{app}/skills/`, so top-level `apps/pinky/` has no YAML. Merged HPA fixes (e.g. gitops `#21` → `Rollout/pinky`) never reached the cluster; live HPA stayed on missing `Deployment/pinky`. Fix: ApplicationSet source `directory.recurse=true` + `include: '{*.yaml,*.yml}'` (exclude grafana `*.json` / markdown that fail unmarshal). Live finding-clear for `scaling` now requires an HPA whose `scaleTargetRef` resolves to a live Deployment/Rollout — presence of a broken HPA no longer drops the finding. Tests: `test_ensure_applicationset_*`, `TestLiveClusterFindingClear::test_broken_hpa_scale_target_does_not_clear`.
+
+---
+
 **Open-finding skill mapping (2026-07-22).** Pinky gitops [#21](https://github.com/alimobrem/agentit-gitops/pull/21) correctly kept only scaling (HPA delta) under the quality filter — but `FIX_REGISTRY` lacked exact `scaling`/`quota` rows, `containerfile` declared a non-API `outputs: [Containerfile]` so `has_api()` skipped generation entirely, and `SkillEngine.match()` did not guarantee a FIX_REGISTRY skill attempt per open finding category. Registry now maps `scaling`→`hpa` and `quota`→`resourcequota`; non-API output labels are exempt from the API gate; match() unions trigger matches with `skill_for_category` for every open finding. Fail-closed quality filter unchanged.
 
 ---

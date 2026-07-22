@@ -8,7 +8,10 @@ import pytest
 
 from agentit.analyzers.data_governance import DataGovernanceAnalyzer
 from agentit.analyzers.eol import _scan_package_json
-from agentit.analyzers.live_evidence import apply_live_cluster_finding_clear
+from agentit.analyzers.live_evidence import (
+    apply_live_cluster_finding_clear,
+    live_hpa_present,
+)
 from agentit.models import DimensionScore, Finding, Language, Severity
 from agentit.remediation.source_patches import generate_source_patch_for_skill
 from agentit.skill_engine import SkillEngine, load_skill
@@ -76,6 +79,27 @@ class TestLiveClusterFindingClear:
         ):
             out = apply_live_cluster_finding_clear(scores, "pinky")
         assert [f.category for f in out[0].findings] == ["scaling"]
+
+    def test_broken_hpa_scale_target_does_not_clear(self):
+        """HPA present but scaleTargetRef missing must not clear scaling."""
+        broken = [{
+            "metadata": {"name": "pinky-hpa"},
+            "spec": {
+                "scaleTargetRef": {
+                    "apiVersion": "apps/v1",
+                    "kind": "Deployment",
+                    "name": "pinky",
+                },
+            },
+        }]
+        with (
+            patch("agentit.kube.list_custom_resources", return_value=broken),
+            patch("agentit.kube.apps_v1") as apps_v1,
+        ):
+            apps_v1.return_value.read_namespaced_deployment.side_effect = (
+                Exception('deployments.apps "pinky" not found')
+            )
+            assert live_hpa_present("pinky") is False
 
 
 class TestNestedMigrationDetection:
