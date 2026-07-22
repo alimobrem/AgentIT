@@ -305,6 +305,7 @@ class FleetOrchestrator:
                 for f in skill_files:
                     safe = _safe_path(skill_dir, f.path)
                     safe.write_text(f.content, encoding="utf-8")
+                _write_target_path_manifest(skill_dir, skill_files)
                 _write_file_metadata_manifest(skill_dir, skill_files)
         except Exception as exc:
             logger.debug("Skill engine failed (non-fatal): %s", exc)

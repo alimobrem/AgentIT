@@ -628,6 +628,20 @@ async def run_onboarding(report, assessment_id: str | None = None, store: object
                     target_path = target_paths.get(rel_path, "")
                     if target_path:
                         entry["target_path"] = target_path
+                        # Skills that emit real app-repo patches (Dockerfile,
+                        # package.json, audit.py, …) must route as
+                        # source_patch even though AgentResult.category is
+                        # "skills". chart/ and skills/ targets are
+                        # self-managed remaps — leave those alone.
+                        from pathlib import Path as _Path
+                        tp = str(target_path)
+                        if not tp.startswith(("chart/", "skills/")):
+                            t_suffix = _Path(tp).suffix.lower()
+                            t_name = _Path(tp).name.lower()
+                            if t_suffix not in (".yaml", ".yml") or t_name in (
+                                "dockerfile", "containerfile",
+                            ):
+                                entry["category"] = "codechange"
                     all_files.append(entry)
 
         orch_summary = {

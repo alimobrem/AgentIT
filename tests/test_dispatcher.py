@@ -50,9 +50,13 @@ class TestRegistryLookup:
         "autoscaling" substring bridge or trigger-only fallback."""
         assert lookup("scaling") == ("infrastructure", "hpa")
         assert lookup("quota") == ("infrastructure", "resourcequota")
-        # Detect-only today — no remediation skill registered yet.
-        assert lookup("eol") is None
-        assert lookup("migration") is None
+
+    def test_source_patch_categories_resolve(self):
+        """eol / migration / audit map to source-repo remediation skills."""
+        assert lookup("eol") == ("infrastructure", "eol-upgrade")
+        assert lookup("migration") == ("data_governance", "db-migration-tooling")
+        assert lookup("audit") == ("compliance", "app-audit-logging")
+        assert lookup("container") == ("security", "containerfile")
 
 
 # ── patch_base_image ────────────────────────────────────────────────

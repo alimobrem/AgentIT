@@ -42,7 +42,11 @@ Self-managed delivery gates (#119/#121), watchers, and Scan→GitOps delivery ar
 
 ---
 
-**Open-finding skill mapping (2026-07-22).** Pinky gitops [#21](https://github.com/alimobrem/agentit-gitops/pull/21) correctly kept only scaling (HPA delta) under the quality filter — but `FIX_REGISTRY` lacked exact `scaling`/`quota` rows, `containerfile` declared a non-API `outputs: [Containerfile]` so `has_api()` skipped generation entirely, and `SkillEngine.match()` did not guarantee a FIX_REGISTRY skill attempt per open finding category. Registry now maps `scaling`→`hpa` and `quota`→`resourcequota`; containerfile emits `BuildConfig`; non-API output labels are exempt from the API gate; match() unions trigger matches with `skill_for_category` for every open finding. `eol`/`migration` remain detect-only (no remediation skill yet). Fail-closed quality filter unchanged.
+**Open-finding skill mapping (2026-07-22).** Pinky gitops [#21](https://github.com/alimobrem/agentit-gitops/pull/21) correctly kept only scaling (HPA delta) under the quality filter — but `FIX_REGISTRY` lacked exact `scaling`/`quota` rows, `containerfile` declared a non-API `outputs: [Containerfile]` so `has_api()` skipped generation entirely, and `SkillEngine.match()` did not guarantee a FIX_REGISTRY skill attempt per open finding category. Registry now maps `scaling`→`hpa` and `quota`→`resourcequota`; non-API output labels are exempt from the API gate; match() unions trigger matches with `skill_for_category` for every open finding. Fail-closed quality filter unchanged.
+
+---
+
+**Clearable finding remediations (2026-07-22).** Scan can open merge-ready PRs across pinky’s open areas — not just HPA. (1) **Source patches** (`delivery: source`): `containerfile` → Dockerfile pin (clears `:latest`), `eol-upgrade` → `.node-version`, `app-audit-logging` → `audit.py`/`audit.ts`, `db-migration-tooling` → Alembic/`migrations/` scaffold; helpers force `category=codechange` when `target_path` is set so delivery uses `CATEGORY_SOURCE_PATCH`. (2) **Live finding-clear** for `quota`/`scaling`: `analyzers/live_evidence.py` drops those findings when ResourceQuota/LimitRange/HPA already exist in the app namespace (gitops merge + Argo sync can clear on re-Assess). (3) **Nested migration** detection (`apps/api/alembic`). (4) Audit semantics = **app audit logging** (not apiserver ConfigMap). Registry maps `eol`/`migration`/`audit` to the new skills. Tests: `tests/test_clearable_findings.py`.
 
 ---
 

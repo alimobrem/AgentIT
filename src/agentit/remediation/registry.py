@@ -22,7 +22,10 @@ FIX_REGISTRY: dict[str, tuple[str, str]] = {
     "base_image":    ("security", "patch_base_image"),
     "policy":        ("compliance", "kyverno-require-labels"),
     "sbom":          ("compliance", "sbom-task"),
-    "audit":         ("compliance", "audit-policy"),
+    # App-level audit logging (compliance analyzer looks for audit.py / audit
+    # + log in source). Cluster apiserver policy remains skills/compliance/
+    # audit-policy.md (advisory ConfigMap) — it does not clear this finding.
+    "audit":         ("compliance", "app-audit-logging"),
     "pipeline":      ("cicd", "tekton-pipeline"),
     "gitops":        ("cicd", "argocd-application"),
     "metrics":       ("observability", "service-monitor"),
@@ -46,9 +49,10 @@ FIX_REGISTRY: dict[str, tuple[str, str]] = {
     # RemediationDispatcher / skill_for_category all agree.
     "scaling":       ("infrastructure", "hpa"),
     "quota":         ("infrastructure", "resourcequota"),
-    # Intentionally unmapped today (detect-only; no remediation skill yet):
-    #   eol       — analyzers/eol.py; needs source upgrade skill + source PR
-    #   migration — analyzers/data_governance.py; needs Alembic/Flyway source skill
+    # Source-repo remediations (CATEGORY_SOURCE_PATCH) — clear on re-Assess
+    # of the app repo after merge.
+    "eol":           ("infrastructure", "eol-upgrade"),
+    "migration":     ("data_governance", "db-migration-tooling"),
 }
 
 

@@ -29,11 +29,25 @@ class DataGovernanceAnalyzer:
             if "backup" in content_lower and ("schedule" in content_lower or "cron" in content_lower):
                 has_backup = True
 
-        migration_dirs = ["migrations", "migrate", "alembic", "flyway", "liquibase", "db/migrate"]
+        # Root-level and nested (e.g. apps/api/alembic) — monorepos keep
+        # tooling under a package, not the repo root.
+        migration_dirs = ("migrations", "migrate", "alembic", "flyway", "liquibase", "db/migrate")
         for d in migration_dirs:
-            if (repo_path / d).exists():
+            if (repo_path / d).exists() or any(repo_path.glob(f"**/{d}")):
                 has_migration = True
                 break
+        if not has_migration:
+            for pattern in (
+                "**/alembic.ini",
+                "**/flyway.conf",
+                "**/flyway.toml",
+                "**/db/migrate/**",
+                "**/liquibase*.xml",
+                "**/goose/*.sql",
+            ):
+                if any(repo_path.glob(pattern)):
+                    has_migration = True
+                    break
 
         if not has_backup:
             findings.append(Finding(

@@ -101,6 +101,13 @@ def run_assessment(
 
     scores = [analyzer.analyze(repo_path) for analyzer in analyzers]
 
+    # Fleet remediations (ResourceQuota/HPA) land in gitops → Argo → live
+    # namespace. Source-only analyzers never see them; clear quota/scaling
+    # when the live namespace already has the resource (finding-clear proof).
+    repo_name_early = repo_url.rstrip("/").split("/")[-1].removesuffix(".git")
+    from agentit.analyzers.live_evidence import apply_live_cluster_finding_clear
+    scores = apply_live_cluster_finding_clear(scores, repo_name_early)
+
     # Run data-driven checks -- both legacy checks/*.yaml files and
     # mode: detect Markdown skills (docs/extension-model-unification-plan-2026-07-18.md,
     # Phase 1) -- and merge findings into dimension scores.

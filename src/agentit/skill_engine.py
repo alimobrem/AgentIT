@@ -171,6 +171,10 @@ class Skill:
     category: str = ""
     description: str = ""
     recommendation: str = ""
+    # ``source`` → emit app-repo patches (Dockerfile, package.json, …) with
+    # ``GeneratedFile.target_path``; ``cluster`` (default) → K8s YAML for
+    # gitops / chart delivery. Source skills skip the has_api() kind gate.
+    delivery: str = "cluster"
 
     def matches(self, report: AssessmentReport) -> bool:
         """Return True if any trigger keyword appears in the report findings.
@@ -267,6 +271,7 @@ def load_skill(path: Path) -> Skill | None:
         category=str(meta.get("category", "")),
         description=str(meta.get("description", "")),
         recommendation=str(meta.get("recommendation", "")),
+        delivery=str(meta.get("delivery", "cluster") or "cluster"),
     )
 
 
@@ -503,6 +508,12 @@ class SkillEngine:
 
         app_name = _sanitize_name(report.repo_name)
 
+        # Source-repo patches (Dockerfile, package.json, audit.py, …) —
+        # skip the K8s has_api gate; emit files with target_path for
+        # CATEGORY_SOURCE_PATCH delivery.
+        if skill.delivery == "source":
+            return self._generate_source_patch(skill, report, app_name, llm_client)
+
         # Check if the output kind is available on the platform
         if self.platform:
             for output_kind in skill.outputs:
@@ -608,6 +619,26 @@ class SkillEngine:
             finding_addressed=skill.property_description,
             skill_name=skill.name,
         )]
+
+    def _generate_source_patch(
+        self,
+        skill: Skill,
+        report: AssessmentReport,
+        app_name: str,
+        llm_client: object | None,
+    ) -> list[GeneratedFile]:
+        """Emit app-repo patches that clear source-visible findings.
+
+        Prefer the skill template (```text / ```dockerfile / ```json fences)
+        with simple substitutions; optionally LLM-tailor when available.
+        Always sets ``target_path`` so delivery routes CATEGORY_SOURCE_PATCH.
+        """
+        from agentit.remediation.source_patches import generate_source_patch_for_skill
+
+        files = generate_source_patch_for_skill(
+            skill, report, app_name, llm_client=llm_client,
+        )
+        return files
 
     @staticmethod
     def _is_self_managed_safe_content(content: str) -> bool:
