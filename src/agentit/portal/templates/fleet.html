@@ -42,7 +42,7 @@
 {% endif %}
 
 {% if fleet %}
-<table>
+<table class="fleet-table">
   <thead>
     <tr>
       <th>Application</th>
@@ -57,7 +57,7 @@
   <tbody>
     {% for r in fleet %}
     <tr class="{{ score_row_border_class(r.latest_score) }}">
-      <td>
+      <td data-label="Application">
         <a href="/assessments/{{ r.id }}">{{ r.repo_name }}</a>
         {# Every app has a code repo (report.repo_url); GitOps-registered
            apps also have a distinct infra repo manifests actually sync
@@ -103,8 +103,8 @@
         </div>
         {% endif %}
       </td>
-      <td class="text-bold {{ score_text_class(r.latest_score) }}">{{ "%.0f"|format(r.latest_score) }}</td>
-      <td>
+      <td data-label="Score" class="text-bold {{ score_text_class(r.latest_score) }}">{{ "%.0f"|format(r.latest_score) }}</td>
+      <td data-label="Deployed">
         {% if r.deploy_status == "synced" %}
           <span class="badge badge-low">synced</span>
         {% elif r.deploy_status == "applied" %}
@@ -126,12 +126,12 @@
           <span class="badge badge-warning" title="No GitOps infra repo known for this app -- register it for GitOps before it can be delivered">Not GitOps-registered</span>
         {% endif %}
       </td>
-      <td>
+      <td data-label="Criticality">
         <span class="badge badge-{{ r.criticality }}"
           title="How much oversight this app needs -- set at Assess time, not inferred. High/critical apps can never auto-deliver (a human must click Deliver before any PR opens) and get stricter default SLO targets.">{{ r.criticality }}</span>
       </td>
-      <td class="{% if r.critical_count > 0 %}text-danger text-bold{% endif %}">{{ r.critical_count }}</td>
-      <td class="text-sm">
+      <td data-label="Critical + High" class="{% if r.critical_count > 0 %}text-danger text-bold{% endif %}">{{ r.critical_count }}</td>
+      <td data-label="Open PRs / Total" class="text-sm">
         {# Open PRs AgentIT has tracked for this app, out of every PR ever opened
            (code repo + GitOps infra repo) -- see pr_tracking.py. Total is a pure
            DB count; Open additionally reflects a live, fleet-wide-cached GitHub
@@ -142,7 +142,7 @@
         <span class="text-muted">—</span>
         {% endif %}
       </td>
-      <td>
+      <td data-label="Actions">
         <div class="gate-actions">
           {# One consolidated Scan action per row -- same label either way,
              both branches POST the same /assess route and both auto-chain

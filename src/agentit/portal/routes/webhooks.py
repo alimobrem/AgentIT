@@ -163,15 +163,7 @@ async def webhook_assess(request: Request, background_tasks: BackgroundTasks):
                   correlation_id=assessment_id,
                   extra_topic=TOPIC_ASSESSMENTS)
 
-    # Deterministic, server-side assess->onboard chain (2026-07-20, closing
-    # root cause #2 of the Onboard/Scan button investigation, PR #99): this
-    # route used to save a new assessment with no `continue_onboard`
-    # concept at all, so ReassessScheduler's cadence tick / a GitHub push /
-    # Tekton's self-registration step (every real caller of this route)
-    # could never chain into onboarding, full stop. Fires the exact same
-    # background job `onboard_submit()` uses (`_run_onboarding_job()`),
-    # scheduled the same way (FastAPI `BackgroundTasks`) rather than
-    # depending on anything a human does afterward.
+    # Chain assess → onboard (same job as onboard_submit). See docs/adr/0001.
     onboard_job_id = await s.create_remediation_job(assessment_id)
     from agentit.portal.helpers import _get_trusted_base_url
     from agentit.portal.services.onboard_pipeline import _run_onboarding_job
@@ -252,11 +244,7 @@ async def webhook_github_push(request: Request, background_tasks: BackgroundTask
                       correlation_id=assessment_id,
                       extra_topic=_TOPIC_ASSESSMENTS)
 
-        # Deterministic, server-side assess->onboard chain (2026-07-20,
-        # closing root cause #2 of the Onboard/Scan button investigation,
-        # PR #99) -- see webhook_assess()'s identical addition above for
-        # the full rationale. A push-triggered re-assessment used to save a
-        # new assessment with no chaining concept at all.
+        # Chain assess → onboard (same as webhook_assess). See docs/adr/0001.
         onboard_job_id = await s.create_remediation_job(assessment_id)
         from agentit.portal.helpers import _get_trusted_base_url
         from agentit.portal.services.onboard_pipeline import _run_onboarding_job
@@ -596,17 +584,12 @@ async def webhook_backup_status(request: Request):
 
 @router.post("/api/webhook/secret-check", dependencies=[Depends(verify_internal_token)])
 async def webhook_secret_check(request: Request):
-    """Reports whether a security-sensitive Secret still exists on-cluster --
-    a drift check, not a rotation. Exists specifically to prevent a repeat of
-    the 2026-07-13 incident (docs/deployment.md): github-webhook-secret went
-    missing/unset for ~8.5 hours with nothing surfacing it until a human
-    happened to investigate a symptom. This can't verify the secret's value
-    matches what's configured on GitHub's side (that would require holding a
-    GitHub token capable of reading webhook config), only that it exists at
-    all in-cluster -- see secret-rotation-cronjob.yaml's module comment for
-    the full reasoning.
+    """Drift check: whether a security-sensitive Secret still exists in-cluster.
 
-    Accepts JSON: {"secret": str, "exists": bool}.
+    Does not verify the secret *value* matches GitHub. Fail-closed webhook
+    auth is ADR 0004; missing-secret detection history is in docs/deployment.md.
+
+    Accepts JSON: ``{"secret": str, "exists": bool}``.
     """
     import time as _time
     body = await request.json()

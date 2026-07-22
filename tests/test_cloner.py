@@ -91,3 +91,42 @@ def test_allows_https():
 def test_rejects_http():
     with pytest.raises(CloneError):
         _validate_repo_url("http://github.com/org/repo.git")
+
+
+def test_rejects_private_literal_ip():
+    with pytest.raises(CloneError):
+        _validate_repo_url("https://10.0.0.1/org/repo.git")
+
+
+def test_rejects_link_local_literal():
+    with pytest.raises(CloneError):
+        _validate_repo_url("https://169.254.169.254/latest/meta-data")
+
+
+def test_validate_returns_public_ips_for_https_host(monkeypatch):
+    from agentit import cloner
+
+    monkeypatch.setattr(
+        cloner.socket,
+        "getaddrinfo",
+        lambda *a, **k: [(None, None, None, None, ("140.82.112.3", 0))],
+    )
+    ips = _validate_repo_url("https://github.com/org/repo.git")
+    assert ips == ["140.82.112.3"]
+
+
+def test_rebinding_to_private_rejected_before_clone(monkeypatch, tmp_path):
+    """Second resolve (immediately before clone) must fail closed on private."""
+    from agentit import cloner
+
+    answers = iter([
+        [(None, None, None, None, ("140.82.112.3", 0))],
+        [(None, None, None, None, ("10.0.0.5", 0))],
+    ])
+
+    def fake_getaddrinfo(*_a, **_k):
+        return next(answers)
+
+    monkeypatch.setattr(cloner.socket, "getaddrinfo", fake_getaddrinfo)
+    with pytest.raises(CloneError, match="private"):
+        clone_repo("https://evil.example.com/r.git", target_dir=tmp_path / "c")

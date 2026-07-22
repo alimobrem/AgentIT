@@ -7,7 +7,7 @@ import re
 
 import anthropic
 
-from agentit.portal.helpers import llm_breaker
+from agentit.interfaces.breakers import llm_breaker
 
 logger = logging.getLogger(__name__)
 
@@ -45,37 +45,11 @@ def _strip_code_fence(raw: str) -> str:
             return body.strip()
     return text
 
-# _chat()'s default output budget — enough for the small, fixed-shape JSON
-# responses most callers expect (a couple of scalar fields plus a one-sentence
-# "reason"): classify_secret, review_fix, summarize_architecture.
-# Callers whose response shape is genuinely open-ended or has several
-# free-text/paragraph fields must pass their own higher max_tokens explicitly
-# (see detect_eol_risks/propose_capability_improvement below) rather than
-# raising this default for everyone — those simple callers don't need a bigger
-# worst-case generation budget, and this cap also bounds cost/latency if the
-# model ever misbehaves and rambles.
+# Token budgets: small JSON classifiers use the default; open-ended lists /
+# prose proposals pass a higher max_tokens. See Anthropic model limits.
 _DEFAULT_MAX_TOKENS = 512
-
-# detect_eol_risks() returns an open-ended *list* of risk dicts (one per
-# EOL/near-EOL component found across base image, runtime, and frameworks),
-# each with 6 fields including a full-sentence "reason" — a repo with several
-# aging components at once (e.g. an old base image + an EOL runtime + 2-3
-# outdated framework versions) can realistically need more than a single
-# 3-field response, so this gets double the default budget.
 _EOL_MAX_TOKENS = 1024
-
-# propose_capability_improvement() returns 7 fields, several of them full
-# prose paragraphs (gap_description, evidence, change_summary, test_plan) plus
-# a target_files list — several times the content of the simple classifiers
-# above. This is the call that was observed truncating real proposals at the
-# 512-token default. 2048 tokens comfortably covers a realistic proposal
-# (title + up to ~4 paragraphs + a short file list, well under ~1000 tokens in
-# practice) with headroom, while staying far below the real output ceiling for
-# claude-sonnet-4-6 (64,000 tokens per Anthropic's published model limits) —
-# there's no reason to approach that ceiling for a handful of prose fields.
 _CAPABILITY_PROPOSAL_MAX_TOKENS = 2048
-# Full-file source generation needs more headroom than the proposal JSON
-# (escaped newlines in JSON strings inflate token use vs raw source).
 _CAPABILITY_FILES_MAX_TOKENS = 16384
 _CAPABILITY_FILES_TIMEOUT_SECONDS = 120.0
 
@@ -612,7 +586,11 @@ class LLMClient:
                     stop, len(text or ""),
                 )
             return text
-        except Exception as exc:
+        except (anthropic.APIError, anthropic.APIConnectionError, TimeoutError, OSError, RuntimeError) as exc:
             llm_breaker.record_failure()
             logger.warning("LLM call failed: %s", exc)
+            return None
+        except (TypeError, IndexError, AttributeError) as exc:
+            llm_breaker.record_failure()
+            logger.warning("LLM response parse failed: %s", exc)
             return None

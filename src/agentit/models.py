@@ -111,7 +111,8 @@ class AssessmentReport(BaseModel):
         if not self.scores:
             return
         if self.score_version >= 2:
-            from agentit.scoring import weighted_overall_score
+            # interfaces layer — avoid models ↔ scoring import cycle (ADR 0006).
+            from agentit.interfaces.score_aggregate import weighted_overall_score
             self.overall_score = weighted_overall_score(self.scores, self.criticality)
         else:
             self.overall_score = sum(s.score for s in self.scores) / len(self.scores)

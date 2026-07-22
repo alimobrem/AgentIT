@@ -10,6 +10,11 @@ from __future__ import annotations
 from typing import Any
 
 from agentit.analyzers.base import DEFAULT_PENALTIES, calculate_score
+from agentit.interfaces.score_aggregate import (
+    DIMENSION_WEIGHTS,
+    dimension_weights_for,
+    weighted_overall_score,
+)
 from agentit.models import AssessmentReport, DimensionScore, Finding, Severity
 
 # Single source of truth for "what's a good score" (templates + CSS classes).
@@ -20,27 +25,6 @@ SCORE_VERSION_V2 = 2
 # Baseline applicable controls when a dimension has findings but no check rows
 # (pure analyzer path) — keeps pass-ratio meaningful vs. floor-at-zero.
 _ANALYZER_BASELINE_CONTROLS = 8
-
-# Relative dimension weights by app criticality (must sum conceptually;
-# normalized at use time). Security/compliance heavier for critical apps.
-DIMENSION_WEIGHTS: dict[str, dict[str, float]] = {
-    "critical": {
-        "security": 1.6, "compliance": 1.4, "ha_dr": 1.2, "infrastructure": 1.1,
-        "cicd": 1.0, "observability": 1.0, "data_governance": 0.9,
-    },
-    "high": {
-        "security": 1.4, "compliance": 1.2, "ha_dr": 1.15, "infrastructure": 1.05,
-        "cicd": 1.0, "observability": 1.0, "data_governance": 0.95,
-    },
-    "medium": {
-        "security": 1.15, "compliance": 1.05, "ha_dr": 1.0, "infrastructure": 1.0,
-        "cicd": 1.0, "observability": 1.0, "data_governance": 1.0,
-    },
-    "low": {
-        "security": 1.0, "compliance": 1.0, "ha_dr": 1.0, "infrastructure": 1.0,
-        "cicd": 1.0, "observability": 1.0, "data_governance": 1.0,
-    },
-}
 
 
 def score_band(score: float | int) -> str:
@@ -122,26 +106,6 @@ def calculate_dimension_score_v2(
         return 100
     return max(0, min(100, round(100 * passed / applicable)))
 
-
-def dimension_weights_for(criticality: str) -> dict[str, float]:
-    key = (criticality or "medium").lower()
-    return dict(DIMENSION_WEIGHTS.get(key, DIMENSION_WEIGHTS["medium"]))
-
-
-def weighted_overall_score(
-    scores: list[DimensionScore],
-    criticality: str,
-) -> float:
-    weights = dimension_weights_for(criticality)
-    total_w = 0.0
-    acc = 0.0
-    for sc in scores:
-        w = weights.get(sc.dimension, 1.0)
-        acc += sc.score * w
-        total_w += w
-    if total_w <= 0:
-        return 0.0
-    return round(acc / total_w, 2)
 
 
 def apply_score_model_v2(

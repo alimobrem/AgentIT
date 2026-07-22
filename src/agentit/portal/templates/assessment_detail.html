@@ -418,6 +418,7 @@
     Use <strong>Scan</strong> above for the first onboard — per-finding Fix appears after onboarding.
   </p>
   {% endif %}
+  {% from "_macros.html" import pr_action_card %}
   <ul class="finding-list mb-2">
     {% for f in urgent_findings %}
     <li class="finding-item {% if f.severity.name == 'critical' %}finding-critical{% else %}finding-high{% endif %}"
@@ -472,6 +473,12 @@
           <button type="submit" class="btn btn-sm btn-outline">Confirm</button>
         </div>
       </form>
+      {% endif %}
+      {% set finding_pr = finding_decision_prs.get(f.category) if finding_decision_prs is defined else none %}
+      {% if finding_pr %}
+      <div class="finding-decision mt-2">
+        {{ pr_action_card(finding_pr, assessment_id) }}
+      </div>
       {% endif %}
     </li>
     {% endfor %}

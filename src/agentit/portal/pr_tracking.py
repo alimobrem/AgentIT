@@ -70,6 +70,7 @@ def delivery_pr_records(deliveries: list[dict]) -> list[dict]:
             if not pr_url:
                 continue
             mechanism = cat_to_mechanism.get(category, "")
+            warnings = outcome.get("dry_run_warnings") or []
             records.append({
                 "pr_url": pr_url,
                 "repo_kind": repo_kind_for_mechanism(mechanism) or "code",
@@ -80,6 +81,8 @@ def delivery_pr_records(deliveries: list[dict]) -> list[dict]:
                 "assessment_id": d.get("assessment_id"),
                 "created_at": d.get("created_at"),
                 "target_findings": d.get("target_findings") or [],
+                "dry_run_warnings": warnings,
+                "validation_summary": outcome.get("validation_summary") or "",
                 "known_state": None,
             })
     return records
@@ -188,7 +191,12 @@ async def get_app_pr_history(store: object, assessment_id: str, repo_url: str, a
     records = collect_pr_records(deliveries, onboardings)
     await resolve_pr_states(records)
     records = await sync_and_attach_pr_outcomes(store, records)
-    return [annotate_lifecycle(r) for r in records]
+    out = []
+    for r in records:
+        annotate_lifecycle(r)
+        enrich_decision_card(r)
+        out.append(r)
+    return out
 
 
 # ── Fleet-wide PR lifecycle (the Ledger) ───────────────────────────────────
@@ -217,18 +225,74 @@ _LIFECYCLE_LABELS: dict[str, str] = {
 }
 
 
+
+def enrich_decision_card(record: dict) -> dict:
+    """Fill why · confidence · dry-run · evidence fields for the decision card.
+
+    Idempotent; safe to call on Ledger and Assessment Detail records.
+    Confidence is derived from solution-contract / dry-run signals already
+    on the record (never invented).
+    """
+    targets = record.get("target_findings") or []
+    contract_lines = list(record.get("contract_lines") or [])
+    if not contract_lines and targets:
+        try:
+            from agentit.remediation.clear_evidence import contract_lines_for_portal
+            contract_lines = list(contract_lines_for_portal(targets) or [])
+            record["contract_lines"] = contract_lines
+        except (ImportError, TypeError, ValueError):
+            pass
+    warnings = record.get("dry_run_warnings") or []
+    validation = (record.get("validation_summary") or "").strip()
+
+    if contract_lines and not warnings:
+        confidence = "high"
+        confidence_label = "High — finding-clear contract + clean dry-run gate"
+    elif contract_lines or targets:
+        confidence = "medium"
+        confidence_label = "Medium — targeted findings; review the PR diff"
+    else:
+        confidence = "low"
+        confidence_label = "Low — no finding-clear contract on this PR"
+
+    if validation:
+        dry_run_label = validation.split("\n", 1)[0][:180]
+    elif warnings:
+        dry_run_label = (
+            "SSA dry-run soft warnings only (non-blocking): "
+            + "; ".join(str(w) for w in warnings[:2])
+        )
+    elif record.get("source") == "delivery":
+        dry_run_label = "Scan gate: SSA dry-run + clear-evidence passed before open"
+    else:
+        dry_run_label = "No separate dry-run row — review the PR diff before merge"
+
+    why = record.get("decision_why")
+    if not why:
+        cat = record.get("category") or "remediation"
+        if targets:
+            why = f"Scan remediation for {cat} — clears {', '.join(str(t) for t in targets[:5])}"
+        else:
+            why = f"Scan remediation for {cat}"
+
+    evidence = list(contract_lines)
+    if not evidence and targets:
+        evidence = [f"Target finding: {t}" for t in targets[:8]]
+
+    record["decision_why"] = why
+    record["confidence"] = confidence
+    record["confidence_label"] = confidence_label
+    record["dry_run_label"] = dry_run_label
+    record["evidence_lines"] = evidence
+    return record
+
+
 def annotate_lifecycle(record: dict) -> dict:
-    """Add ``lifecycle``/``lifecycle_label``/``needs_attention`` to a PR
-    record already run through ``resolve_pr_states()`` (i.e. it has
-    ``state``) and ``sync_and_attach_pr_outcomes()`` (i.e. ``reject_reason``
-    is set when known). Every open, unmerged PR "needs approval" now --
-    with the gates table removed, a real GitHub PR merge/close IS the one
-    approval step for every category equally (see ``routes/
-    pr_actions.py``'s Merge/Close actions, available for any open PR
-    record, not just a subset of categories a gate used to exist for).
-    "Rejected" (a real, captured close reason) is distinguished from a bare
-    "closed" (state known, no reason captured) via ``pr_outcomes.py``'s
-    durable rejection-reason capture, not a gate's own ``status`` column.
+    """Add ``lifecycle`` / ``lifecycle_label`` / ``needs_attention``.
+
+    Requires ``resolve_pr_states()`` (and outcomes when available). Open
+    unmerged PRs need approval — merge/close on GitHub is the HITL step.
+    See docs/adr/0001-gitops-scan-hitl.md.
     """
     state = record.get("state")
     if state == "open":
@@ -346,5 +410,6 @@ async def collect_fleet_pr_records(store: object, fleet: list[dict] | None = Non
     await sync_and_attach_pr_outcomes(store, all_records)
     for r in all_records:
         annotate_lifecycle(r)
+        enrich_decision_card(r)
     all_records.sort(key=lambda r: r.get("created_at") or "", reverse=True)
     return all_records
