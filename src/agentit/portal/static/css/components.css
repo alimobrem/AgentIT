@@ -1183,10 +1183,25 @@
     color: var(--color-muted);
   }
   .decision-card {
-    border-left: 3px solid var(--color-border);
-    padding-left: var(--space-3);
+    border-left: 3px solid var(--color-accent);
+    padding: var(--space-2) var(--space-3);
     display: grid;
-    gap: var(--space-1);
+    gap: var(--space-2);
+    background: var(--color-surface, transparent);
+  }
+  .decision-card-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-2);
+  }
+  .decision-card-evidence {
+    margin: 0;
+    padding-left: 1.1rem;
+    width: 100%;
+  }
+  .finding-decision .card {
+    margin-bottom: 0;
   }
 
   /* ── Responsive ────────────────────────────────────────────────── */
@@ -1298,4 +1313,15 @@
     .dim-bar-row { grid-template-columns: 1fr; }
     .score-hero { font-size: var(--font-3xl); }
     .top-fix-item { flex-direction: column; align-items: flex-start; }
+    .fleet-table tr,
+    .ledger-table tr {
+      padding: var(--space-2);
+      margin-bottom: var(--space-2);
+    }
+    .fleet-table td,
+    .ledger-table td { padding: 2px 0; }
+    .decision-card { padding: var(--space-2); }
+    .decision-card-row { flex-direction: column; align-items: flex-start; gap: 2px; }
+    .site-footer { flex-wrap: wrap; gap: var(--space-2); }
+    .action-bar .btn { width: 100%; }
   }

@@ -134,21 +134,45 @@
   {# Fallback when route did not precompute contract_lines #}
   {% endif %}
 
-  {# Thin decision card: why · targets · approve/reject — confidence/dry-run
-     expand in a later pass; keep identical on Ledger + Assessment. #}
+  {# Decision card: why · confidence · dry-run · evidence · approve/reject. #}
   <div class="decision-card text-sm mb-2" role="group" aria-label="Decision summary">
-    <div><span class="text-muted">Why:</span> Scan remediation for
-      <strong>{{ record.category | dimension_label }}</strong>
-      {% if record.target_findings %}
-      — clears {{ record.target_findings | join(", ") }}
+    <div class="decision-card-row">
+      <span class="text-muted">Why:</span>
+      {% if record.decision_why %}{{ record.decision_why }}{% else %}
+      Scan remediation for <strong>{{ record.category | dimension_label }}</strong>
+      {% if record.target_findings %}— clears {{ record.target_findings | join(", ") }}{% endif %}
       {% endif %}
     </div>
+    <div class="decision-card-row">
+      <span class="text-muted">Confidence:</span>
+      <span class="badge badge-{{ 'success' if record.confidence == 'high' else ('warning' if record.confidence == 'medium' else 'muted') }}">
+        {{ record.confidence | default('medium') }}
+      </span>
+      {% if record.confidence_label %}
+      <span class="text-muted text-xs">{{ record.confidence_label }}</span>
+      {% endif %}
+    </div>
+    <div class="decision-card-row">
+      <span class="text-muted">Dry-run:</span>
+      {{ record.dry_run_label | default('Review the PR diff before merge') }}
+    </div>
     {% if record.estimated_delta is defined and record.estimated_delta %}
-    <div><span class="text-muted">Estimated impact:</span>
+    <div class="decision-card-row">
+      <span class="text-muted">Estimated impact:</span>
       overall +{{ "%.0f"|format(record.estimated_delta) }}
     </div>
     {% endif %}
-    <div class="text-muted text-xs">Review the PR diff on GitHub, then Merge or Close with a reason.</div>
+    {% if record.evidence_lines %}
+    <div class="decision-card-row">
+      <span class="text-muted">Evidence:</span>
+      <ul class="decision-card-evidence">
+        {% for line in record.evidence_lines[:6] %}
+        <li>{{ line }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    <div class="text-muted text-xs">Approve = Merge PR · Reject = Close with a reason (helps agents learn).</div>
   </div>
 
   <div class="action-bar">

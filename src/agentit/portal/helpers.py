@@ -8,82 +8,19 @@ import threading
 import time as _time
 from urllib.parse import urlparse
 
+# Re-export breakers from interfaces (canonical home — see docs/adr/0006).
+from agentit.interfaces.breakers import (  # noqa: F401
+    CircuitBreaker,
+    get_circuit_breaker_states,
+    kube_breaker,
+    llm_breaker,
+)
+
 log = logging.getLogger(__name__)
 
 
 def get_retention_days() -> int:
     return int(os.environ.get("AGENTIT_RETENTION_DAYS", "30"))
-
-
-# ── Circuit breaker ──────────────────────────────────────────────────
-
-
-class CircuitBreaker:
-    """Simple circuit breaker: opens after threshold failures, resets after reset_after seconds.
-
-    ``llm_breaker``/``kube_breaker`` below are each one shared instance
-    called concurrently from many real OS threads (every ``LLMClient._chat()``
-    call and most of ``kube.py``'s real API-calling functions run inside
-    ``asyncio.to_thread`` from the portal's request handlers, plus every
-    watcher's own thread) -- ``record_failure()``/``record_success()``/
-    ``is_open`` used to read-modify-write ``self._failures``/
-    ``self._last_failure`` with no lock at all. Two concurrent failures
-    could interleave their ``+= 1`` (a lost update, undercounting real
-    failures and delaying an open breaker exactly when the dependency is
-    genuinely down) and a concurrent ``record_success()`` reset racing a
-    failing caller's ``record_failure()`` could similarly drop a real
-    failure. A ``threading.Lock`` (not an ``asyncio.Lock``) is correct here
-    the same way ``portal/routes/*.py``'s other to_thread-invoked TTL
-    caches use one: this class has no ``await`` in its critical section and
-    is called from plain synchronous code on worker threads, not
-    coroutines.
-    """
-
-    def __init__(self, name: str, threshold: int = 3, reset_after: float = 30.0):
-        self.name = name
-        self._threshold = threshold
-        self._reset_after = reset_after
-        self._failures = 0
-        self._last_failure: float = 0
-        self._lock = threading.Lock()
-
-    @property
-    def is_open(self) -> bool:
-        with self._lock:
-            if self._failures < self._threshold:
-                return False
-            return (_time.monotonic() - self._last_failure) < self._reset_after
-
-    def record_failure(self) -> None:
-        with self._lock:
-            self._failures += 1
-            self._last_failure = _time.monotonic()
-
-    def record_success(self) -> None:
-        with self._lock:
-            self._failures = 0
-
-    def __repr__(self) -> str:
-        state = "OPEN" if self.is_open else "CLOSED"
-        return f"CircuitBreaker({self.name}, {state}, failures={self._failures})"
-
-
-llm_breaker = CircuitBreaker("llm", threshold=3, reset_after=30)
-kube_breaker = CircuitBreaker("kube", threshold=5, reset_after=60)
-
-_ALL_BREAKERS: dict[str, CircuitBreaker] = {"llm": llm_breaker, "kube": kube_breaker}
-
-
-def get_circuit_breaker_states() -> dict[str, dict[str, object]]:
-    """Expose current open/closed state for every registered circuit breaker.
-
-    Used by `/health`, the Prometheus `agentit_circuit_breaker_open` gauge,
-    and the Health page — a single accessor so all three stay in sync.
-    """
-    return {
-        name: {"open": breaker.is_open, "failures": breaker._failures}
-        for name, breaker in _ALL_BREAKERS.items()
-    }
 
 
 # ── Credential health ─────────────────────────────────────────────────
@@ -326,33 +263,11 @@ async def get_store():
 
 
 # ── Nav pending-action badge ─────────────────────────────────────────
-#
-# approval on Ledger's link -- the same PR-status-derived count Ledger's
-# own "Waiting for your approval" stat shows (pr_tracking.py's
-# count_fleet_prs_waiting_for_approval()/fleet_prs_waiting_for_approval()):
-# any PR that's still open and unmerged on GitHub. Every other app-owner
-# recommendation (`rollback-review`, `finding-unresolved-escalation`, ...)
-# stays visible via Fleet's per-app "needs action"/escalation badges and
-# Assessment Detail's own Ledger tab, not this nav badge -- deliberately
-# not the same "how many pending actions" definition
-# `pending_actions.py`'s helpers cover (see that module's own docstring).
-# Cached briefly since nav renders on every page.
-#
-# Named `_nav_gate_*`/`get_nav_gate_badge_counts` until this rename: pure
-# naming leftover from when the now-removed `gates` table backed this
-# count -- it has been PR-status-derived, not gate-derived, since
-# 2026-07-19 (see git history), so the name no longer matched what this
-# actually computes.
+# Open/unmerged PR count (same as Ledger "Waiting for your approval").
+# Cached briefly; asyncio.Lock for double-checked refresh. See ADR 0001.
 
 _nav_pending_actions_cache: dict = {"pending_actions": 0, "ts": 0.0}
 _NAV_PENDING_ACTIONS_CACHE_TTL = 20  # seconds
-# Double-checked locking, mirroring get_store() above: the `await
-# count_fleet_prs_waiting_for_approval(...)` below is a genuine yield
-# point, so without a lock, multiple concurrent requests can all see a
-# stale cache, all refresh, and interleave their writes into a torn read
-# for a third caller. This is async-only (never invoked via
-# asyncio.to_thread), so an `asyncio.Lock` -- not a `threading.Lock` -- is
-# the correct primitive here.
 _nav_pending_actions_lock = asyncio.Lock()
 
 

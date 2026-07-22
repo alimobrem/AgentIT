@@ -250,12 +250,26 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     open_prs = [pr for pr in pr_history if pr["state"] == "open"]
     from agentit.remediation.clear_evidence import contract_lines_for_portal
 
+    from agentit.portal.pr_tracking import enrich_decision_card
+
+    finding_decision_prs: dict[str, dict] = {}
     for pr in open_prs:
         pr["kind"] = "pr"
         # Honesty line on PR cards: Clears X by Y (solution contract).
         pr["contract_lines"] = contract_lines_for_portal(pr.get("target_findings") or [])
-        targets = {str(t).lower() for t in (pr.get("target_findings") or [])}
+        targets = {str(x).lower() for x in (pr.get("target_findings") or [])}
         pr["_target_set"] = targets
+        for fix in top_fixes:
+            cat = (fix.get("category") or "").lower()
+            if cat and cat in targets and fix.get("estimated_delta"):
+                pr["estimated_delta"] = max(
+                    pr.get("estimated_delta") or 0.0,
+                    float(fix["estimated_delta"]),
+                )
+        enrich_decision_card(pr)
+        if pr.get("lifecycle") == "needs_approval" or pr.get("state") == "open":
+            for tgt in targets:
+                finding_decision_prs.setdefault(tgt, pr)
     for fix in top_fixes:
         cat = (fix.get("category") or "").lower()
         fix["pr"] = next(
@@ -458,6 +472,7 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "recently_resolved_actions_count": recently_resolved_actions_count,
             "open_prs": open_prs,
             "pr_history": pr_history,
+            "finding_decision_prs": finding_decision_prs,
             "assessment_cadence": assessment_cadence,
             "reassess_scheduler_active": reassess_scheduler_active,
             "top_fixes": top_fixes,

@@ -38,4 +38,10 @@ spec:
           port: 8443
     {{- end }}
   egress:
+    # Allow-all today: portal needs kube API (private), DNS, Postgres/Kafka,
+    # LLM HTTPS, and git HTTPS. Denying RFC1918 here would break the
+    # apiserver. Residual clone SSRF TOCTOU is handled in-process
+    # (resolve + re-resolve; https-only) — see docs/adr/0005-ssrf-clone.md.
+    # Prefer an OVN EgressFirewall / egress proxy for git host allowlists
+    # rather than pinning clone IPs (TLS SAN mismatch).
     - {}

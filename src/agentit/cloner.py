@@ -21,22 +21,32 @@ _DANGEROUS_URL_RE = re.compile(r"ext::|--upload-pack|--config")
 _INTERNAL_SUFFIXES = (".internal", ".local", ".corp", ".lan", ".svc")
 
 
-def _assert_public_resolution(hostname: str) -> None:
-    """Resolve hostname; fail closed on DNS errors or any private answer.
+def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return bool(
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+    )
 
-    ``git clone`` will re-resolve at fetch time (residual TOCTOU / DNS
-    rebinding). Production should also egress-block RFC1918 + 169.254/16
-    via NetworkPolicy. This check still stops literal private hosts, suffix
-    tricks, and current private DNS answers at validation time.
+
+def resolve_public_ips(hostname: str) -> list[str]:
+    """Resolve hostname once; fail closed on DNS errors or private answers.
+
+    TLS hostname verification prevents cloning via a literal pinned IP for
+    HTTPS remotes (cert SAN mismatch). Residual TOCTOU after the last
+    resolve is mitigated in production by egress controls — see
+    docs/adr/0005-ssrf-clone.md.
     """
     try:
         addr = ipaddress.ip_address(hostname)
     except ValueError:
         addr = None
     if addr is not None:
-        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+        if _is_blocked_ip(addr):
             raise CloneError(f"Rejected URL with private/internal host: {hostname}")
-        return
+        return [str(addr)]
 
     lower = hostname.lower()
     if any(lower.endswith(s) for s in _INTERNAL_SUFFIXES):
@@ -50,19 +60,33 @@ def _assert_public_resolution(hostname: str) -> None:
     if not infos:
         raise CloneError(f"Rejected URL: no addresses for {hostname}")
 
+    public: list[str] = []
+    seen: set[str] = set()
     for info in infos:
         raw = info[4][0]
         try:
             ip = ipaddress.ip_address(raw)
         except ValueError:
             continue
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+        if _is_blocked_ip(ip):
             raise CloneError(
                 f"Rejected URL with private/internal host: {hostname} → {ip}"
             )
+        key = str(ip)
+        if key not in seen:
+            seen.add(key)
+            public.append(key)
+
+    if not public:
+        raise CloneError(f"Rejected URL: no usable addresses for {hostname}")
+    return public
 
 
-def _validate_repo_url(repo_url: str) -> None:
+def _assert_resolution_still_public(hostname: str) -> list[str]:
+    return resolve_public_ips(hostname)
+
+
+def _validate_repo_url(repo_url: str) -> list[str]:
     if repo_url.startswith("-"):
         raise CloneError(f"Rejected URL starting with dash: {repo_url}")
 
@@ -79,7 +103,7 @@ def _validate_repo_url(repo_url: str) -> None:
     if not hostname:
         raise CloneError("Rejected URL: missing hostname")
 
-    _assert_public_resolution(hostname)
+    return resolve_public_ips(hostname)
 
 
 def clone_repo(
@@ -91,6 +115,9 @@ def clone_repo(
 ) -> Path:
     if not allow_local:
         _validate_repo_url(repo_url)
+        hostname = urlparse(repo_url).hostname
+        if hostname:
+            _assert_resolution_still_public(hostname)
 
     if target_dir is None:
         target_dir = Path(tempfile.mkdtemp(prefix="agentit-"))
