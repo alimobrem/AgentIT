@@ -69,6 +69,11 @@ class TestAllSkills:
         meta, body = _parse_frontmatter(skill_file)
         if meta.get("mode") != "template":
             pytest.skip("not template mode")
+        # Source-repo patches (Dockerfile, .node-version, audit.py, …) are
+        # not K8s manifests — they use language-specific code fences or
+        # programmatic generators, not ```yaml.
+        if meta.get("delivery") == "source":
+            pytest.skip("source-delivery skill (non-YAML patch)")
         outputs = set(meta.get("outputs", []))
         if outputs and outputs <= NON_K8S_OUTPUTS:
             pytest.skip("non-K8s output type")

@@ -39,13 +39,22 @@ SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 # product owner flagged as a hard blocker for removing the Python fallback.
 FORMERLY_LLM_ONLY_SKILLS: dict[str, set[str]] = {
     "skills/security/network-policy.md": {"NetworkPolicy"},
-    "skills/security/containerfile.md": {"BuildConfig"},
+    # containerfile is delivery: source (Dockerfile patch), not BuildConfig —
+    # covered by SOURCE_PATCH_SKILLS / tests/test_clearable_findings.py.
     "skills/cicd/tekton-pipeline.md": {"Pipeline", "PipelineRun"},
     "skills/retirement/decommission-plan.md": {"ConfigMap"},
     "skills/release/release-runbook.md": {"ConfigMap"},
     "skills/incident/runbook.md": {"ConfigMap"},
     "skills/compliance/image-registry-policy.md": {"Policy"},
     "skills/compliance/compliance-evidence.md": {"ConfigMap"},
+}
+
+# Skills that emit app-repo source patches (non-YAML) without an LLM.
+SOURCE_PATCH_SKILLS = {
+    "skills/security/containerfile.md",
+    "skills/infrastructure/eol-upgrade.md",
+    "skills/compliance/app-audit-logging.md",
+    "skills/data_governance/db-migration-tooling.md",
 }
 
 # Domains that a hardcoded Python agent (src/agentit/agents/*.py) currently
@@ -284,6 +293,44 @@ class TestFormerlyLLMOnlySkillsHaveTemplateFallback:
                 assert "parity-app" in f.content, f"{skill_path}: expected app name in output"
 
 
+class TestSourcePatchSkillsHaveTemplateFallback:
+    """delivery: source skills produce non-YAML app-repo patches without LLM."""
+
+    @pytest.mark.parametrize("skill_path", sorted(SOURCE_PATCH_SKILLS))
+    def test_generates_nonempty_source_patch_without_llm(
+        self, skill_path: str, full_report: AssessmentReport,
+    ) -> None:
+        repo_root = Path(__file__).resolve().parent.parent
+        skill = load_skill(repo_root / skill_path)
+        assert skill is not None, f"failed to load {skill_path}"
+        assert skill.delivery == "source", f"{skill_path}: expected delivery=source"
+
+        # Ensure category-exact findings so generators that key on
+        # _open_findings("eol"|"container"|"audit"|"migration") fire.
+        report = full_report.model_copy(deep=True)
+        report.scores = list(report.scores) + [
+            DimensionScore(
+                dimension="infrastructure",
+                score=40,
+                max_score=100,
+                findings=[
+                    _finding("eol", "node 20 is past end-of-life (EOL 2026-04-30)"),
+                    _finding("migration", "No database migration tooling detected"),
+                    _finding("audit", "No audit logging implementation detected"),
+                    _finding("container", "No Dockerfile or Containerfile found"),
+                ],
+            ),
+        ]
+
+        engine = SkillEngine(SKILLS_DIR, platform=None)
+        files = engine.generate(skill, report, llm_client=None)
+        assert files, f"{skill_path}: source-patch fallback produced no files"
+        for f in files:
+            assert f.content.strip(), f"{skill_path}: empty content"
+            assert f.target_path, f"{skill_path}: missing target_path"
+            assert "{{app_name}}" not in f.content
+
+
 # ---------------------------------------------------------------------------
 # 2. Narrative-document skills embed a real markdown baseline in a ConfigMap.
 # ---------------------------------------------------------------------------
@@ -352,7 +399,14 @@ class TestDomainCoverageParity:
 
         for f in files:
             assert f.content.strip(), f"{f.path}: empty content"
-            docs = [d for d in yaml.safe_load_all(f.content) if d is not None]
+            # Source-delivery skills emit Dockerfile / version pins / audit
+            # modules — not K8s YAML. Skip YAML parse for those.
+            if getattr(f, "target_path", ""):
+                continue
+            try:
+                docs = [d for d in yaml.safe_load_all(f.content) if d is not None]
+            except yaml.YAMLError as exc:
+                raise AssertionError(f"{f.path}: not valid YAML") from exc
             assert docs, f"{f.path}: no parseable YAML documents"
             for d in docs:
                 assert isinstance(d, dict), f"{f.path}: doc is not a mapping"
@@ -365,13 +419,25 @@ class TestDomainCoverageParity:
         fire on resiliency/availability findings and produce ChaosEngines."""
         files = engine.run_all(full_report, llm_client=None)
 
-        def _first_doc(content: str) -> dict:
-            return next(d for d in yaml.safe_load_all(content) if d is not None)
+        def _first_k8s_doc(content: str) -> dict | None:
+            try:
+                docs = list(yaml.safe_load_all(content))
+            except yaml.YAMLError:
+                return None
+            for d in docs:
+                if isinstance(d, dict) and d.get("kind"):
+                    return d
+            return None
 
-        chaos_files = [f for f in files if _first_doc(f.content).get("kind") == "ChaosEngine"]
+        chaos_files = [
+            f for f in files
+            if (doc := _first_k8s_doc(f.content)) is not None
+            and doc.get("kind") == "ChaosEngine"
+        ]
         assert chaos_files, "expected at least one chaos skill to fire"
         for f in chaos_files:
-            doc = _first_doc(f.content)
+            doc = _first_k8s_doc(f.content)
+            assert doc is not None
             assert doc["kind"] == "ChaosEngine"
             assert doc["spec"]["chaosServiceAccount"]
 

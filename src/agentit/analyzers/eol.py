@@ -243,7 +243,38 @@ def _scan_python_version_files(repo_path: Path, today: date) -> list[Finding]:
     return []
 
 
+def _scan_node_version_pin(repo_path: Path) -> str | None:
+    """Return major Node version from .node-version / .nvmrc when present."""
+    for name in (".node-version", ".nvmrc"):
+        p = repo_path / name
+        if not p.is_file():
+            continue
+        try:
+            text = p.read_text(errors="ignore").strip()
+        except OSError:
+            continue
+        # Allow "22", "v22", "22.11.0"
+        match = re.search(r"v?(\d+)", text.split("\n", 1)[0])
+        if match:
+            return match.group(1)
+    return None
+
+
 def _scan_package_json(repo_path: Path, today: date) -> list[Finding]:
+    # Runtime pin files take precedence over package.json engines — source
+    # remediations emit .node-version without destroying package.json.
+    pinned = _scan_node_version_pin(repo_path)
+    if pinned is not None:
+        resolved = _match_table_version(NODE_EOL, pinned)
+        if resolved is None:
+            return []
+        status = _status_for(NODE_EOL[resolved], today)
+        if status is None:
+            return []
+        return [_make_baseline_finding(
+            "node", resolved, status, NODE_EOL[resolved], ".node-version",
+        )]
+
     p = repo_path / "package.json"
     if not p.exists():
         return []

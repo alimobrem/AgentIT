@@ -22,7 +22,10 @@ FIX_REGISTRY: dict[str, tuple[str, str]] = {
     "base_image":    ("security", "patch_base_image"),
     "policy":        ("compliance", "kyverno-require-labels"),
     "sbom":          ("compliance", "sbom-task"),
-    "audit":         ("compliance", "audit-policy"),
+    # App-level audit logging (compliance analyzer looks for audit.py / audit
+    # + log in source). Cluster apiserver policy remains skills/compliance/
+    # audit-policy.md (advisory ConfigMap) — it does not clear this finding.
+    "audit":         ("compliance", "app-audit-logging"),
     "pipeline":      ("cicd", "tekton-pipeline"),
     "gitops":        ("cicd", "argocd-application"),
     "metrics":       ("observability", "service-monitor"),
@@ -38,6 +41,18 @@ FIX_REGISTRY: dict[str, tuple[str, str]] = {
     "rbac":          ("security", "rbac"),
     "autoscaling":   ("infrastructure", "hpa"),
     "monitoring":    ("observability", "service-monitor"),
+    # Analyzer categories used by ha_dr / infrastructure (pinky Scan open
+    # findings). "scaling" is not a substring of "autoscaling", so lookup
+    # previously returned None and skill_for_category fell back to trigger
+    # matching. "quota" had no registry row at all (resourcequota skill
+    # only matched via triggers). Keep these exact so quality_prs /
+    # RemediationDispatcher / skill_for_category all agree.
+    "scaling":       ("infrastructure", "hpa"),
+    "quota":         ("infrastructure", "resourcequota"),
+    # Source-repo remediations (CATEGORY_SOURCE_PATCH) — clear on re-Assess
+    # of the app repo after merge.
+    "eol":           ("infrastructure", "eol-upgrade"),
+    "migration":     ("data_governance", "db-migration-tooling"),
 }
 
 
