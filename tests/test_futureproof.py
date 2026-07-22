@@ -193,6 +193,10 @@ class TestPropertyVerifier:
         assert "rbac" in PROPERTY_VERIFIERS
         assert "autoscaling" in PROPERTY_VERIFIERS
         assert "monitoring" in PROPERTY_VERIFIERS
+        # health-probes closes the "only 4 categories" scope gap for
+        # `health` -- see tests/test_property_verifier_health.py for the
+        # detailed behavior.
+        assert "health-probes" in PROPERTY_VERIFIERS
 
 
 class TestAPIDrift:

@@ -1,10 +1,23 @@
-"""Live-cluster evidence for finding-clear (quota / scaling).
+"""Live-cluster evidence for finding-clear (quota / scaling / health).
 
 Fleet remediations land in gitops and are applied by Argo. Source-only
 analyzers never see those manifests, so a merged ResourceQuota/HPA would
 leave the finding open forever. When the app namespace is known, treat
 live ResourceQuota/LimitRange/HPA as clearing evidence — the same truth
 ``correlate_delivery_finding`` needs after merge + sync.
+
+``health`` (ha_dr.py's "No liveness or readiness probes defined") gets the
+same treatment for a stronger reason than quota/scaling: unlike a
+ResourceQuota/HPA (standalone additive resources AgentIT can safely
+generate into gitops), `livenessProbe`/`readinessProbe` are a patch to an
+*existing* container spec AgentIT does not own the base definition of --
+see skills/infrastructure/health-probes-policy.md's docstring for the full
+"why not generate a Deployment patch" reasoning. That skill instead
+generates a namespace-scoped Kyverno mutate policy, which fixes the live
+workload's containers without AgentIT ever touching the app's source repo
+or gitops Deployment file -- exactly the shape of fix a source-only
+analyzer would otherwise never learn about. ``live_health_probes_present``
+closes that loop.
 """
 from __future__ import annotations
 
@@ -117,6 +130,98 @@ def live_hpa_present(namespace: str) -> bool | None:
         return None
 
 
+def _deployment_containers_have_probes(containers: list) -> bool:
+    """``containers``: ``list[V1Container]`` (typed kubernetes-client objects,
+    snake_case attributes) from a live ``Deployment``. Empty containers is
+    treated as "no signal" (False, not vacuously True) -- a Deployment with
+    no readable container spec should never look like a passing probe check.
+    """
+    if not containers:
+        return False
+    return all(bool(c.liveness_probe) and bool(c.readiness_probe) for c in containers)
+
+
+def _rollout_containers_have_probes(containers: list[dict]) -> bool:
+    """``containers``: raw dicts (camelCase keys) from a live ``Rollout``
+    custom resource -- ``list_custom_resources`` never returns typed
+    objects, only plain dicts."""
+    if not containers:
+        return False
+    return all(
+        isinstance(c, dict) and bool(c.get("livenessProbe")) and bool(c.get("readinessProbe"))
+        for c in containers
+    )
+
+
+def live_health_probes_present(namespace: str) -> bool | None:
+    """True when every container of every live Deployment/Rollout in
+    *namespace* already has both ``livenessProbe`` and ``readinessProbe``
+    configured -- i.e. a real fix (GitOps-delivered Deployment edit,
+    ``skills/infrastructure/health-probes-policy.md``'s Kyverno mutate
+    policy, or a hand-applied change) has already landed on the *live*
+    workload, even though the app's source repo (all ``ha_dr.py`` can see)
+    never mentions a probe anywhere.
+
+    Mirrors ``live_quota_present``/``live_hpa_present``'s tri-state
+    contract:
+
+    - ``True``: at least one Deployment/Rollout was found and every one of
+      their containers has both probes configured.
+    - ``False``: at least one Deployment/Rollout was found but at least one
+      container is missing a probe -- the finding legitimately still holds.
+    - ``None``: no signal at all (no Deployment/Rollout found yet, or
+      discovery failed) -- do not clear. An app with nothing running yet
+      should keep the source-repo finding, not silently look "fixed".
+    """
+    if not namespace:
+        return None
+    try:
+        from agentit import kube
+
+        found_any = False
+        all_have_probes = True
+
+        try:
+            deployments = kube.apps_v1().list_namespaced_deployment(
+                namespace, _request_timeout=10,
+            )
+            for dep in deployments.items:
+                spec = dep.spec if dep.spec else None
+                template_spec = spec.template.spec if spec and spec.template else None
+                containers = template_spec.containers if template_spec else []
+                found_any = True
+                if not _deployment_containers_have_probes(containers):
+                    all_have_probes = False
+        except Exception as exc:
+            logger.debug("live Deployment probe discovery failed for %s: %s", namespace, exc)
+            return None
+
+        try:
+            rollouts = kube.list_custom_resources(
+                "argoproj.io", "v1alpha1", "rollouts", namespace=namespace, timeout=10,
+            )
+            for ro in rollouts:
+                ro_spec = ro.get("spec") or {}
+                containers = ((ro_spec.get("template") or {}).get("spec") or {}).get(
+                    "containers", [],
+                )
+                found_any = True
+                if not _rollout_containers_have_probes(containers):
+                    all_have_probes = False
+        except Exception as exc:
+            # Rollout CRD may legitimately be absent -- Deployments alone
+            # are enough (mirrors fleet_hpa.discover_namespace_workloads'
+            # own posture of tolerating a missing Rollout CRD).
+            logger.debug("Rollouts unavailable in %s: %s", namespace, exc)
+
+        if not found_any:
+            return None
+        return all_have_probes
+    except Exception as exc:
+        logger.debug("live health-probe discovery failed for %s: %s", namespace, exc)
+        return None
+
+
 def _drop_categories(findings: list[Finding], categories: set[str]) -> list[Finding]:
     return [f for f in findings if f.category not in categories]
 
@@ -125,7 +230,7 @@ def apply_live_cluster_finding_clear(
     scores: list[DimensionScore],
     repo_name: str,
 ) -> list[DimensionScore]:
-    """Drop quota/scaling findings cleared by live cluster evidence.
+    """Drop quota/scaling/health findings cleared by live cluster evidence.
 
     Fail-open on discovery errors (returns scores unchanged for that
     category) so a kube blip never fabricates a clean bill of health.
@@ -136,6 +241,8 @@ def apply_live_cluster_finding_clear(
         drop.add("quota")
     if live_hpa_present(ns) is True:
         drop.add("scaling")
+    if live_health_probes_present(ns) is True:
+        drop.add("health")
     if not drop:
         return scores
 
