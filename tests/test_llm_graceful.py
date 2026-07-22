@@ -42,14 +42,15 @@ def test_llm_chat_failure_does_not_crash_summarize():
 
 
 def test_assessment_succeeds_without_llm(create_mock_repo):
-    """Full assessment works when LLM is None."""
+    """Full assessment works when LLM is None (score may be 0 under v2 pass-ratio)."""
     repo = create_mock_repo({
         "main.go": "package main\nfunc main() {}\n",
         "go.mod": "module test\n\ngo 1.22\n",
     })
     from agentit.runner import run_assessment
     report = run_assessment(repo, repo_url="https://github.com/test/app", criticality="medium", llm_client=None)
-    assert report.overall_score > 0
+    assert report.score_version == 2
+    assert report.overall_score >= 0
     assert len(report.scores) == 7
 
 
@@ -65,7 +66,8 @@ def test_assessment_succeeds_with_broken_llm(create_mock_repo):
 
     from agentit.runner import run_assessment
     report = run_assessment(repo, repo_url="https://github.com/test/app", criticality="medium", llm_client=broken_llm)
-    assert report.overall_score > 0
+    assert report.score_version == 2
+    assert report.overall_score >= 0
     assert len(report.scores) == 7
 
 

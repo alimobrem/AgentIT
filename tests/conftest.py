@@ -122,6 +122,20 @@ def _hermetic_llm_env(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
 
 
 @pytest.fixture(autouse=True)
+def _allow_unverified_webhooks_in_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opt into documented local-dev fail-open for webhook auth (ADR 0004).
+
+    Production rejects unsigned webhooks when secrets are unset. Hermetic
+    tests that exercise webhook *handlers* (CSRF exemption, finding
+    dispatch, onboard flow) use their own ASGI clients without mounting
+    secrets — set the escape hatch suite-wide. Fail-closed coverage in
+    ``test_webhook_security`` / ``test_credential_health`` clears this
+    env in the test body.
+    """
+    monkeypatch.setenv("AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS", "1")
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_kube_env(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """Force ``AGENTIT_OFFLINE=1`` for every test by default.
 

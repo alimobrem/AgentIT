@@ -118,7 +118,10 @@ class TestAssessorEdgeCases:
             "SECURITY.md": "# Security Policy\n",
         })
         report = run_assessment(repo, repo_url="https://example.com/enterprise.git")
-        assert report.overall_score >= 50, f"Expected high score, got {report.overall_score}"
+        # Score v2 pass-ratio is stricter than v1 subtractive; a well-equipped
+        # fixture still outscores a bare repo but rarely clears the old >=50 bar.
+        assert report.score_version == 2
+        assert report.overall_score >= 10, f"Expected non-trivial v2 score, got {report.overall_score}"
 
 
 # ═══════════════════════════════════════════════════════════════════════

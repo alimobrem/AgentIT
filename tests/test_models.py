@@ -55,7 +55,8 @@ def test_stack_info_minimal():
     assert len(stack.frameworks) == 1
 
 
-def test_assessment_report_overall_score_is_average():
+def test_assessment_report_overall_score_is_weighted_v2():
+    """Score v2: criticality-weighted mean (high: security 1.4, observability 1.0)."""
     scores = [
         DimensionScore(dimension="security", score=20, max_score=100, findings=[]),
         DimensionScore(dimension="observability", score=80, max_score=100, findings=[]),
@@ -77,6 +78,35 @@ def test_assessment_report_overall_score_is_average():
         criticality="high",
         summary="",
         remediation_plan=[],
+    )
+    # (20*1.4 + 80*1.0) / (1.4+1.0) = 45.0
+    assert report.score_version == 2
+    assert report.overall_score == 45.0
+
+
+def test_assessment_report_overall_score_v1_is_equal_mean():
+    scores = [
+        DimensionScore(dimension="security", score=20, max_score=100, findings=[]),
+        DimensionScore(dimension="observability", score=80, max_score=100, findings=[]),
+    ]
+    report = AssessmentReport(
+        repo_url="https://github.com/test/repo",
+        repo_name="repo",
+        assessed_at=datetime.now(timezone.utc),
+        stack=StackInfo(languages=[], frameworks=[], databases=[], runtimes=[], package_managers=[]),
+        architecture=ArchitectureInfo(
+            service_count=1,
+            architecture_style="monolith",
+            has_api=True,
+            api_style="REST",
+            external_dependencies=[],
+            auth_mechanism=None,
+        ),
+        scores=scores,
+        criticality="high",
+        summary="",
+        remediation_plan=[],
+        score_version=1,
     )
     assert report.overall_score == 50.0
 
