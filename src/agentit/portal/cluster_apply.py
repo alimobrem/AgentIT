@@ -306,9 +306,13 @@ def dry_run_manifests_against_cluster(
     - **hard** (``errors``): schema/Bad Request, admission, unreachable —
       block PR / ``needs_attention``
     - **soft** (``warnings``): Forbidden (SA lacks dry-run RBAC), missing
-      optional CRD / GVK — warn in PR body; do not block when hard is empty
+      optional CRD / GVK, field-manager conflict on dry-run — warn in PR
+      body; do not block when hard is empty
 
-    Field-manager conflicts stay hard (ownership fight needs a human).
+    Field-manager conflicts are soft on dry-run: AgentIT is not seizing
+    ownership here (GitOps/Argo applies after merge). Re-onboarding an app
+    with prior ``kubectl`` client-side-apply ConfigMaps must not hard-block
+    PR open. Structured ``conflicts`` is still populated for UI/PR notes.
     Non-YAML / narrative files are listed under ``repo_files`` and skipped.
     """
     applied: list[str] = []
@@ -370,7 +374,13 @@ def dry_run_manifests_against_cluster(
                 "path": fpath, "error": result["error"],
                 "details": result.get("conflict_details", []),
             })
-            logger.warning("Dry-run field-manager conflict for %s: %s", fpath, result["error"])
+            # Soft: dry-run does not take ownership; Argo sync after merge does.
+            tagged = f"{fpath}: {result['error']}"
+            warnings.append(tagged)
+            logger.warning(
+                "Dry-run field-manager conflict for %s (non-blocking): %s",
+                fpath, result["error"],
+            )
         else:
             # Prefer per-document ``errors`` so a soft Forbidden on doc 1
             # cannot hide a hard Bad Request on doc 2.

@@ -892,8 +892,13 @@ async def deliver_with_verification(
             dry_conflicts = list(validation.get("conflicts") or [])
             missing_operators = dict(validation.get("missing_operators") or {})
             validated = list(validation.get("applied") or [])
+            # Field-manager conflicts are already soft-warned in
+            # dry_run_manifests_against_cluster; keep structured list for
+            # callers but do not promote them to hard dry_errors.
             for c in dry_conflicts:
-                dry_errors.append(f"{c.get('path')}: {c.get('error')}")
+                tagged = f"{c.get('path')}: {c.get('error')}"
+                if tagged not in dry_warnings:
+                    dry_warnings.append(tagged)
 
         outcome = "dry-run-failed" if dry_errors else "dry-run"
         audit_log(
@@ -913,8 +918,8 @@ async def deliver_with_verification(
         if dry_warnings:
             result["dry_run_warnings"] = dry_warnings
         if dry_errors:
-            # Fail closed on hard errors only (schema/admission/unreachable /
-            # field-manager conflict). Soft Forbidden / missing-CRD stay in
+            # Fail closed on hard errors only (schema/admission/unreachable).
+            # Soft Forbidden / missing-CRD / field-manager conflict stay in
             # dry_run_warnings and do not set error when hard is empty.
             hint = ""
             if missing_operators:
