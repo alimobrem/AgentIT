@@ -97,19 +97,80 @@ def _file_signals(file: dict) -> list[str]:
 
 
 def file_matches_finding_categories(file: dict, finding_categories: set[str]) -> str | None:
-    """Return the matched finding category (normalized key from the set), or None."""
+    """Return the matched finding category (normalized key from the set), or None.
+
+    Solution-contract findings (FIX_REGISTRY / SOLUTION_CONTRACTS) only accept
+    the registered clearing skill — fuzzy path/description overlap must not
+    attach Kyverno / LimitRange / apiserver audit-policy to source-only
+    findings (pinky gitops #22/#23).
+    """
     if not finding_categories:
         return None
-    for signal in _file_signals(file):
+
+    skill = normalize_category(str(file.get("skill_name") or ""))
+    contracted: list[str] = []
+    uncontracted: list[str] = []
+    try:
+        from agentit.remediation.registry import contract_for
+
         for cat in finding_categories:
+            if contract_for(cat) is not None:
+                contracted.append(cat)
+            else:
+                uncontracted.append(cat)
+
+        # Exact skill_name == contract.skill_name wins.
+        for cat in contracted:
+            c = contract_for(cat)
+            if c and skill == normalize_category(c.skill_name):
+                return cat
+
+        # Explicit refuse list (wrong-layer companions).
+        if skill:
+            for cat in contracted:
+                c = contract_for(cat)
+                if c and skill in {normalize_category(s) for s in c.refuse_companions}:
+                    return None
+
+        # Contracted findings: only the registered skill — no fuzzy attach.
+        if contracted and not uncontracted:
+            # Allow registry bridge when skill_name missing but path/signals
+            # uniquely identify the contract skill (e.g. tests without metadata).
+            if not skill:
+                for cat in contracted:
+                    c = contract_for(cat)
+                    if c is None:
+                        continue
+                    needle = normalize_category(c.skill_name)
+                    for signal in _file_signals(file):
+                        if categories_overlap(signal, needle) or categories_overlap(
+                            signal, cat,
+                        ):
+                            # Reject if signal also matches a refuse companion.
+                            refuse = {normalize_category(s) for s in c.refuse_companions}
+                            if any(categories_overlap(signal, r) for r in refuse):
+                                continue
+                            # Prefer exact skill token in path/description.
+                            if needle in normalize_category(signal) or categories_overlap(
+                                signal, needle,
+                            ):
+                                return cat
+            return None
+    except Exception:
+        contracted, uncontracted = [], list(finding_categories)
+
+    # Legacy fuzzy match only for findings without a solution contract.
+    match_cats = set(uncontracted) if contracted else finding_categories
+    if not match_cats:
+        return None
+    for signal in _file_signals(file):
+        for cat in match_cats:
             if categories_overlap(signal, cat):
                 return cat
-    # Skill / FIX_REGISTRY bridge: skill "network-policy" ↔ finding "network".
     try:
         from agentit.remediation.registry import FIX_REGISTRY, lookup
 
-        skill = normalize_category(str(file.get("skill_name") or ""))
-        for finding_cat in finding_categories:
+        for finding_cat in match_cats:
             mapped = lookup(finding_cat)
             if mapped and (
                 categories_overlap(mapped[1], skill)
@@ -120,8 +181,10 @@ def file_matches_finding_categories(file: dict, finding_categories: set[str]) ->
         if skill:
             for key, (domain, skill_name) in FIX_REGISTRY.items():
                 if categories_overlap(skill, skill_name) or categories_overlap(skill, key):
-                    for finding_cat in finding_categories:
-                        if categories_overlap(finding_cat, key) or categories_overlap(finding_cat, domain):
+                    for finding_cat in match_cats:
+                        if categories_overlap(finding_cat, key) or categories_overlap(
+                            finding_cat, domain,
+                        ):
                             return finding_cat
     except Exception:
         pass
@@ -227,6 +290,64 @@ def cluster_validation_ok(
     return True, ""
 
 
+def strip_wrong_layer_companions(
+    files: list[dict],
+    target_findings: list[tuple[str, str]],
+) -> tuple[list[dict], list[str]]:
+    """Drop cluster YAML from source-only finding clusters (and vice versa).
+
+    Pinky gitops #22/#23 opened infra PRs that listed Dockerfile/audit.py
+    alongside Kyverno/audit-policy — wrong layer; merging never clears the
+    finding. When every targeted finding clears via ``delivery: source``,
+    keep only source-patch files; refuse pure-cluster leftovers.
+    """
+    if not target_findings or not files:
+        return list(files), []
+
+    try:
+        from agentit.remediation.registry import clears_via_source, contract_for
+    except Exception:
+        return list(files), []
+
+    cats = [c for c, _ in target_findings if c]
+    if not cats or not all(clears_via_source(c) for c in cats):
+        return list(files), []
+
+    from agentit.portal.delivery import (
+        CATEGORY_CICD_SHARED_NAMESPACE,
+        CATEGORY_CLUSTER_CONFIG,
+        classify_file,
+    )
+
+    kept: list[dict] = []
+    drops: list[str] = []
+    allowed_skills = {
+        (contract_for(c).skill_name if contract_for(c) else "")
+        for c in cats
+    }
+    allowed_skills.discard("")
+
+    for f in files:
+        skill = str(f.get("skill_name") or "")
+        cat = classify_file(f)
+        if cat in (CATEGORY_CLUSTER_CONFIG, CATEGORY_CICD_SHARED_NAMESPACE):
+            path = f.get("path") or f.get("target_path") or "?"
+            drops.append(
+                f"{path}: wrong layer for source-only finding "
+                f"({', '.join(cats)}) — clears via app-repo patch, not gitops"
+            )
+            continue
+        if skill and allowed_skills and skill not in allowed_skills:
+            path = f.get("path") or f.get("target_path") or "?"
+            drops.append(
+                f"{path}: skill '{skill}' is not the clearing skill "
+                f"({', '.join(sorted(allowed_skills))})"
+            )
+            continue
+        kept.append(f)
+    return kept, drops
+
+
 def build_helpful_pr_body(
     *,
     title_line: str,
@@ -246,10 +367,22 @@ def build_helpful_pr_body(
         finding_lines.append("- _(score-delta claim; no discrete finding keys)_")
 
     if not expected_effect:
-        dims = ", ".join(score_dimensions or []) or "targeted dimension(s)"
-        expected_effect = (
-            f"Clear the finding(s) above on next re-Assess / raise score in {dims}."
-        )
+        try:
+            from agentit.remediation.registry import expected_clear_lines
+
+            clear_lines = expected_clear_lines(target_findings)
+        except Exception:
+            clear_lines = []
+        if clear_lines:
+            expected_effect = "\n".join(clear_lines)
+            dims = ", ".join(score_dimensions or [])
+            if dims:
+                expected_effect += f"\n\nScore lift expected in: {dims}."
+        else:
+            dims = ", ".join(score_dimensions or []) or "targeted dimension(s)"
+            expected_effect = (
+                f"Clear the finding(s) above on next re-Assess / raise score in {dims}."
+            )
 
     file_lines = []
     for f in files:

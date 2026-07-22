@@ -14,6 +14,7 @@ from agentit.portal.quality_prs import (
     finding_gate_allows_pr,
     partition_by_finding_cluster,
     resolve_target_findings,
+    strip_wrong_layer_companions,
 )
 from conftest import make_report, make_store
 
@@ -160,6 +161,144 @@ class TestClusterPhaseB:
         assert len(clusters[1].files) == 2
 
 
+class TestSolutionContractFilter:
+    """Pinky gitops #22/#23: wrong-layer companions must not clear-attach."""
+
+    def test_container_refuses_kyverno_and_limitrange_companions(self):
+        findings = [("container", "using :latest tag in base image in dockerfile")]
+        files = [
+            {
+                "category": "codechange",
+                "path": "patch-Dockerfile",
+                "target_path": "Dockerfile",
+                "content": "FROM registry.access.redhat.com/ubi9/ubi-minimal:1\n",
+                "description": "pin Dockerfile",
+                "skill_name": "containerfile",
+            },
+            {
+                "category": "skills",
+                "path": "pinky-image-registry-policy.yaml",
+                "content": "apiVersion: kyverno.io/v1\nkind: Policy\n",
+                "description": "Kyverno image registry",
+                "skill_name": "image-registry-policy",
+            },
+            {
+                "category": "skills",
+                "path": "pinky-limitrange.yaml",
+                "content": "apiVersion: v1\nkind: LimitRange\n",
+                "description": "LimitRange",
+                "skill_name": "limitrange",
+            },
+        ]
+        kept, drops = filter_files_to_open_findings(files, findings)
+        assert len(kept) == 1
+        assert kept[0]["skill_name"] == "containerfile"
+        assert len(drops) == 2
+
+    def test_audit_refuses_apiserver_audit_policy_companion(self):
+        findings = [("audit", "no audit logging implementation detected")]
+        files = [
+            {
+                "category": "codechange",
+                "path": "patch-audit.py",
+                "target_path": "audit.py",
+                "content": "def audit_event(*a, **k): ...\n",
+                "description": "app audit module",
+                "skill_name": "app-audit-logging",
+            },
+            {
+                "category": "skills",
+                "path": "pinky-audit-policy.yaml",
+                "content": "apiVersion: v1\nkind: ConfigMap\n",
+                "description": "apiserver audit policy",
+                "skill_name": "audit-policy",
+            },
+        ]
+        kept, drops = filter_files_to_open_findings(files, findings)
+        assert len(kept) == 1
+        assert kept[0]["skill_name"] == "app-audit-logging"
+        assert any("audit-policy" in d or "pinky-audit-policy" in d for d in drops)
+
+    def test_strip_wrong_layer_drops_gitops_yaml_for_source_findings(self):
+        findings = [("container", "using :latest")]
+        source = {
+            "category": "codechange",
+            "path": "patch-Dockerfile",
+            "target_path": "Dockerfile",
+            "content": "FROM ubi9:1\n",
+            "skill_name": "containerfile",
+        }
+        # Wrong skill slipped past an older filter — strip must still drop it.
+        companion = {
+            "category": "skills",
+            "path": "pinky-image-scan-task.yaml",
+            "content": (
+                "apiVersion: tekton.dev/v1\nkind: Task\n"
+                "metadata:\n  name: image-scan\n"
+            ),
+            "skill_name": "image-scan-task",
+        }
+        kept, layer_drops = strip_wrong_layer_companions(
+            [source, companion], findings,
+        )
+        assert kept == [source]
+        assert len(layer_drops) == 1
+        assert "wrong layer" in layer_drops[0] or "image-scan" in layer_drops[0]
+
+    async def test_source_only_cluster_opens_source_pr_not_gitops(self):
+        """container finding → source-repo PR only; no agentit-gitops companion."""
+        store = await make_store()
+        report = _report_with_findings("container", repo_name="pinky")
+        aid = await store.save(report)
+        files = [
+            {
+                "category": "codechange",
+                "path": "patch-Dockerfile",
+                "target_path": "Dockerfile",
+                "content": "FROM registry.access.redhat.com/ubi9/ubi-minimal:1\n",
+                "description": "pin Dockerfile",
+                "skill_name": "containerfile",
+            },
+            {
+                "category": "skills",
+                "path": "pinky-image-registry-policy.yaml",
+                "content": (
+                    "apiVersion: kyverno.io/v1\nkind: Policy\n"
+                    "metadata:\n  name: pinky-registry\nspec:\n  rules: []\n"
+                ),
+                "description": "Kyverno",
+                "skill_name": "image-registry-policy",
+            },
+        ]
+
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value=None), \
+             patch("agentit.portal.auto_delivery.validate_and_fix_manifests",
+                   return_value={"files": files, "clean": True, "iterations": []}), \
+             patch("agentit.portal.auto_delivery._dry_run_check",
+                   return_value=([], [], set())), \
+             patch("agentit.portal.auto_delivery._check_properties", return_value=[]), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_gitops, \
+             patch("agentit.portal.github_pr.create_source_patch_pr",
+                   return_value={
+                       "pr_url": "https://github.com/alimobrem/pinky/pull/99",
+                       "commit_url": "https://github.com/alimobrem/pinky/commit/abc",
+                       "files_committed": 1,
+                   }) as mock_source, \
+             patch("agentit.portal.github_pr.ensure_applicationset"):
+            result = await auto_validate_and_deliver(
+                store=store, report=report, app_name="pinky", namespace="pinky",
+                assessment_id=aid, actor="auto-delivery",
+                files=files,
+                orchestration={},
+                target_findings=[("container", "using :latest tag")],
+            )
+
+        assert result["status"] == "delivered"
+        mock_source.assert_called_once()
+        mock_gitops.assert_not_called()
+        assert any("pinky/pull/99" in u for u in result["pr_urls"])
+
+
 class TestPrBodyPhaseD:
     def test_body_has_finding_change_outcome_and_no_auto_merge(self):
         body = build_helpful_pr_body(
@@ -171,6 +310,8 @@ class TestPrBodyPhaseD:
         assert "### Targeted findings" in body
         assert "`rbac`" in body
         assert "### Expected effect" in body
+        assert "Clears `rbac` by" in body
+        assert "delivery: **cluster**" in body
         assert "### Finding-clear proof (post-merge)" in body
         assert "correlate_delivery_finding" in body
         assert "### Validation" in body
@@ -178,6 +319,19 @@ class TestPrBodyPhaseD:
         assert "Not included" in body
         assert "does **not** auto-merge" in body
         assert "Argo deploys after merge" in body
+
+    def test_body_source_finding_names_source_delivery(self):
+        body = build_helpful_pr_body(
+            title_line="AgentIT Scan: container for pinky",
+            target_findings=[("container", "using :latest tag")],
+            files=[{
+                "path": "Dockerfile", "target_path": "Dockerfile",
+                "description": "pin base", "skill_name": "containerfile",
+            }],
+        )
+        assert "Clears `container` by" in body
+        assert "delivery: **source**" in body
+        assert ":latest" in body or "Dockerfile" in body
 
     def test_body_includes_shared_ns_blast_radius(self):
         body = build_helpful_pr_body(

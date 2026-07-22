@@ -432,15 +432,14 @@ class SkillEngine:
     def match(self, report: AssessmentReport) -> list[Skill]:
         """Return skills to generate for this report.
 
-        When the assessment has open findings, match against *finding text
-        only* (dimension/category/description/recommendation) — never the
-        free-form ``summary``. Live AgentIT self-managed Onboards at score
-        ~96 timed out because ``Skill.matches`` haystack includes the long
-        stack summary ("Python", "Kubernetes", …), pulling in 10+ catalog
-        skills; each sequential LLM call (× self-managed reject/retry)
-        burned the generation ceiling before auto_delivery's finding gate
-        could drop the junk. FIX_REGISTRY skills for each open finding
-        category are always included via ``skill_for_category``.
+        When the assessment has open findings, resolve **exactly one skill
+        per finding** via ``skill_for_category`` / FIX_REGISTRY solution
+        contracts — never trigger-keyword companions. Pinky gitops #22/#23
+        attached ``audit-policy`` (apiserver ConfigMap) to ``audit`` and
+        ``image-registry-policy`` / ``limitrange`` to ``container`` because
+        finding prose contained shared trigger words; those companions never
+        clear the finding. Summary-wide trigger matching also caused
+        self-managed Onboard timeouts (~96 score, 10+ LLM calls).
 
         Greenfield reports with no open findings still use full-report
         trigger matching (including summary) so Onboard Results can
@@ -462,17 +461,7 @@ class SkillEngine:
                 by_name[skill.name] = skill
 
         if has_open_findings:
-            haystack = _findings_text(report).lower()
-            for skill in self.skills:
-                if skill.name in by_name:
-                    continue
-                if skill.mode == "detect" or skill.status in ("retired", "draft"):
-                    continue
-                if any(t.lower() in haystack for t in skill.triggers):
-                    if skill.status == "deprecated":
-                        # Mirror Skill.matches warning path for consistency.
-                        logger.warning("Skill '%s' is deprecated", skill.name)
-                    by_name[skill.name] = skill
+            # Solution-complete: registry skill only — no trigger companions.
             return self._resolve_conflicts(list(by_name.values()))
 
         matched = [s for s in self.skills if s.matches(report)]

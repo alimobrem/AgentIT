@@ -922,6 +922,108 @@ class TestDetectModeNeverRemediates:
         matched = engine.match(report)
         assert [s.name for s in matched] == ["hpa"]
 
+    def test_match_open_findings_no_trigger_companions_for_container(
+        self, tmp_path: Path,
+    ) -> None:
+        """container finding must not pull Kyverno/LimitRange via trigger words.
+
+        Pinky gitops #23 attached image-registry-policy + limitrange because
+        finding prose contains "container"/"image"/"dockerfile".
+        """
+        (tmp_path / "security").mkdir()
+        (tmp_path / "compliance").mkdir()
+        (tmp_path / "infrastructure").mkdir()
+        (tmp_path / "security" / "containerfile.md").write_text(
+            "---\n"
+            "name: containerfile\n"
+            "domain: security\n"
+            "version: 1\n"
+            "triggers:\n"
+            "  - container\n"
+            "  - dockerfile\n"
+            "outputs:\n"
+            "  - Dockerfile\n"
+            "delivery: source\n"
+            "property: secure image\n"
+            "mode: template\n"
+            "---\n\n"
+            "# Containerfile\n\n"
+            "```dockerfile\n"
+            "FROM registry.access.redhat.com/ubi9/ubi-minimal:1\n"
+            "```\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "compliance" / "image-registry-policy.md").write_text(
+            "---\n"
+            "name: image-registry-policy\n"
+            "domain: compliance\n"
+            "version: 1\n"
+            "triggers:\n"
+            "  - registry\n"
+            "  - image\n"
+            "  - container\n"
+            "  - policy\n"
+            "outputs:\n"
+            "  - Policy\n"
+            "property: trusted registries\n"
+            "mode: template\n"
+            "---\n\n"
+            "# Registry\n\n"
+            "```yaml\n"
+            "apiVersion: kyverno.io/v1\n"
+            "kind: Policy\n"
+            "metadata:\n"
+            "  name: {{app_name}}-registry\n"
+            "```\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "infrastructure" / "limitrange.md").write_text(
+            "---\n"
+            "name: limitrange\n"
+            "domain: infrastructure\n"
+            "version: 1\n"
+            "triggers:\n"
+            "  - limit\n"
+            "  - container\n"
+            "  - resources\n"
+            "outputs:\n"
+            "  - LimitRange\n"
+            "property: defaults\n"
+            "mode: template\n"
+            "---\n\n"
+            "# LimitRange\n\n"
+            "```yaml\n"
+            "apiVersion: v1\n"
+            "kind: LimitRange\n"
+            "metadata:\n"
+            "  name: {{app_name}}-limits\n"
+            "```\n",
+            encoding="utf-8",
+        )
+        # FIX_REGISTRY lookup needs the real registry mapping — monkeypatch
+        # skill_for_category via loading skills that match registry names.
+        engine = SkillEngine(tmp_path, platform=None)
+        from agentit.models import DimensionScore, Finding, Severity
+
+        report = make_report()
+        report.scores = [
+            DimensionScore(
+                dimension="security",
+                score=40,
+                max_score=100,
+                findings=[
+                    Finding(
+                        category="container",
+                        severity=Severity.high,
+                        description="using :latest tag in base image in dockerfile",
+                        recommendation="pin the container image tag",
+                    ),
+                ],
+            ),
+        ]
+        matched = engine.match(report)
+        assert [s.name for s in matched] == ["containerfile"]
+
 
 class TestNonApiOutputGating:
     """outputs like Containerfile must not skip generation when platform is set."""

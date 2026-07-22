@@ -591,6 +591,14 @@ def classify_file(entry: dict) -> str:
             return CATEGORY_NARRATIVE_REPORT
         return CATEGORY_SOURCE_PATCH
 
+    # Real app-repo patches (Dockerfile, audit.py, Chart.yaml, …) carry
+    # target_path outside chart/skills — always SOURCE_PATCH even when the
+    # AgentResult category is still "skills" (belt-and-suspenders with
+    # helpers._codechange_category_override).
+    target = str(entry.get("target_path") or "")
+    if target and not target.startswith(("chart/", "skills/")):
+        return CATEGORY_SOURCE_PATCH
+
     # Legacy cost/dependency narrative reports (agents removed) — still
     # excluded from delivery if present in older onboarding_results rows.
     if category in ("dependency", "cost") and path in _NARRATIVE_REPORT_FILENAMES:
