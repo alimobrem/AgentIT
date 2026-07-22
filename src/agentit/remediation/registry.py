@@ -239,7 +239,8 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
     ),
     "migration": _c(
         "data_governance", "db-migration-tooling", "source",
-        "scaffolding Alembic/migrations tooling in the app repo",
+        "scaffolding real Alembic/SQL migrations (revision + env URL; "
+        "not target_metadata=None theater); hand-rolled store DDL already passes",
         _ev.MIGRATION_TOOLING,
     ),
     "iac": _c(

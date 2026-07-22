@@ -253,6 +253,35 @@ class TestNestedMigrationDetection:
         cats = {f.category for f in score.findings}
         assert "migration" not in cats
 
+    def test_hand_rolled_schema_sql_clears_migration_finding(self, tmp_path: Path):
+        """AgentIT-style store DDL (ADR 0002) must pass — no stub Alembic PR."""
+        store = tmp_path / "src" / "app" / "store"
+        store.mkdir(parents=True)
+        (store / "_shared.py").write_text(
+            'SCHEMA_SQL = """\n'
+            "CREATE TABLE IF NOT EXISTS assessments (id TEXT PRIMARY KEY);\n"
+            "CREATE TABLE IF NOT EXISTS apps (repo_url TEXT PRIMARY KEY);\n"
+            "-- Additive, idempotent column (same no-migration-framework convention)\n"
+            "ALTER TABLE apps ADD COLUMN IF NOT EXISTS assessment_cadence TEXT;\n"
+            '"""\n',
+            encoding="utf-8",
+        )
+        score = DataGovernanceAnalyzer().analyze(tmp_path)
+        cats = {f.category for f in score.findings}
+        assert "migration" not in cats
+
+    def test_tests_dir_create_table_does_not_count_as_migration(self, tmp_path: Path):
+        tests = tmp_path / "tests"
+        tests.mkdir()
+        (tests / "test_schema.py").write_text(
+            'SCHEMA_SQL = "CREATE TABLE IF NOT EXISTS t (id INT)"\n'
+            'x = "CREATE TABLE IF NOT EXISTS u (id INT)"\n',
+            encoding="utf-8",
+        )
+        score = DataGovernanceAnalyzer().analyze(tmp_path)
+        cats = {f.category for f in score.findings}
+        assert "migration" in cats
+
 
 class TestNodeVersionPinClearsEol:
     def test_node_version_preferred_over_engines(self, tmp_path: Path):
@@ -344,6 +373,39 @@ class TestSourcePatchSkills:
         assert len(files) == 1
         assert files[0].target_path == "audit.ts"
         assert "auditLog" in files[0].content
+
+    def test_db_migration_emits_revision_not_theater_stub(self):
+        from agentit.remediation.clear_evidence import verify_migration_tooling
+
+        skill = load_skill(Path("skills/data_governance/db-migration-tooling.md"))
+        assert skill is not None
+        report = make_report(
+            repo_name="pinky",
+            languages=[Language(name="python", file_count=10, percentage=100.0)],
+            scores=[
+                DimensionScore(
+                    dimension="data_governance", score=50, max_score=100,
+                    findings=[
+                        Finding(
+                            category="migration", severity=Severity.medium,
+                            description="No database migration tooling detected",
+                            recommendation="Add Alembic",
+                        ),
+                    ],
+                ),
+            ],
+        )
+        files = generate_source_patch_for_skill(skill, report, "pinky")
+        paths = {f.target_path for f in files}
+        assert "alembic.ini" in paths
+        assert "alembic/versions/0001_baseline.py" in paths
+        assert any("DATABASE_URL" in f.content for f in files if f.target_path == "alembic/env.py")
+        staged = [
+            {"target_path": f.target_path, "content": f.content, "skill_name": skill.name}
+            for f in files
+        ]
+        ok, reason = verify_migration_tooling(staged)
+        assert ok, reason
 
     def test_skill_engine_source_delivery_sets_target_path(self):
         engine = SkillEngine(Path("skills"), platform=None)

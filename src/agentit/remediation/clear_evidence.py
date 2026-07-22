@@ -142,21 +142,79 @@ def verify_runtime_pin(files: list[dict]) -> tuple[bool, str]:
     return False, "no .node-version / .python-version (or similar) pin with a version"
 
 
+_TARGET_METADATA_NONE = re.compile(r"target_metadata\s*=\s*None\b")
+_TARGET_METADATA_WIRED = re.compile(r"target_metadata\s*=\s*(?!None\b)\S+")
+_UPGRADE_DEF = re.compile(r"^\s*def\s+upgrade\s*\(", re.MULTILINE)
+
+
 def verify_migration_tooling(files: list[dict]) -> tuple[bool, str]:
+    """Accept real migrators; refuse ``target_metadata = None`` theater stubs.
+
+    A greenfield Alembic PR must wire URL/metadata **or** ship a revision
+    with ``upgrade()``. Config-only / empty-env scaffolds do not clear the
+    finding and must not pass pre-open simulation (see closed AgentIT #157).
+    """
     staged = _staged_map(files)
-    markers = (
-        "alembic.ini", "flyway.conf", "flyway.toml", "liquibase",
-        "db/migrate", "goose/",
-    )
+    has_alembic_ini = False
+    has_theater_env = False
+    has_wired_metadata = False
+    has_url_wiring = False
+    has_revision = False
+    has_sql_migration = False
+    has_other_tool = False
+
     for path, content in staged.items():
-        low = path.lower()
-        if any(m in low for m in markers):
-            if "alembic.ini" in low or "flyway" in low or "liquibase" in low:
-                return True, f"migration config at {path}"
-            if content.strip():
-                return True, f"migration path {path}"
-        if low.endswith("env.py") and "alembic" in content.lower():
-            return True, f"alembic env at {path}"
+        low = path.lower().replace("\\", "/")
+        body = content or ""
+        if low.endswith("alembic.ini") or low.endswith("/alembic.ini"):
+            has_alembic_ini = True
+        if any(m in low for m in ("flyway.conf", "flyway.toml", "liquibase")):
+            has_other_tool = True
+        if ("/goose/" in low or low.startswith("goose/")) and low.endswith(".sql"):
+            if body.strip():
+                has_sql_migration = True
+        if "db/migrate" in low and body.strip():
+            has_sql_migration = True
+        if (
+            ("/migrations/" in low or low.startswith("migrations/"))
+            and low.endswith(".sql")
+            and len(body.strip()) > 20
+        ):
+            has_sql_migration = True
+        if low.endswith("env.py") and "alembic" in body.lower():
+            if _TARGET_METADATA_NONE.search(body):
+                has_theater_env = True
+            if _TARGET_METADATA_WIRED.search(body):
+                has_wired_metadata = True
+            if "os.environ" in body and any(
+                key in body for key in ("DATABASE_URL", "SQLALCHEMY_URL", "AGENTIT_DB_DSN")
+            ):
+                has_url_wiring = True
+        if (
+            ("/versions/" in low or "/migrations/" in low)
+            and low.endswith(".py")
+            and _UPGRADE_DEF.search(body)
+        ):
+            has_revision = True
+
+    if has_other_tool:
+        return True, "Flyway/Liquibase migration config in staged files"
+    if has_sql_migration:
+        return True, "versioned SQL migration file(s) in staged files"
+    if has_alembic_ini and has_wired_metadata:
+        return True, "alembic.ini + env.py with wired target_metadata"
+    if has_alembic_ini and has_revision:
+        detail = "alembic.ini + revision with upgrade()"
+        if has_url_wiring:
+            detail += " + env URL wiring"
+        return True, detail
+    if has_theater_env:
+        return False, (
+            "alembic env sets target_metadata = None without a real revision "
+            "(theater stub — refuse Scan PR)"
+        )
+    if has_alembic_ini:
+        return False, "alembic.ini without wired metadata or upgrade() revision"
     return False, "no Alembic/Flyway/Liquibase/goose migration tooling in staged files"
 
 

@@ -54,7 +54,7 @@ flowchart LR
 | --- | --- |
 | **Assess** | 7 dimensions → findings + scores |
 | **Generate** | SkillEngine matches findings to skills; Scan/onboard produces remediations |
-| **Gate** | Finding-tied PRs only; SSA dry-run + clear-evidence simulation |
+| **Gate** | Finding-tied PRs only; SSA dry-run + clear-evidence simulation (refuses theater stubs; hand-rolled store DDL passes `migration`) |
 | **Operate** | Human merges on GitHub; Argo CD deploys (Scan HITL — no auto-merge) |
 | **Learn** | Watchers surface drift/CVEs/SLOs; learning drafts skills for human activation |
 
@@ -114,7 +114,7 @@ Useful commands: `self-assess`, `watch`, `learn`, `test-skill`, `activate-skill`
 
 **Primary spine:** Fleet → Assessment Detail → Ledger (assess → findings → merge PR → operate). Empty fleets land on Fleet’s guided empty state; once apps exist, `/` redirects to Ledger.
 
-**Operate (Menu):** Health, Insights, Events, Decisions, DLQ, Schedules. The fixed footer is an action-status strip (not a second nav). See [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md).
+**Operate (Menu):** Health, Insights, Events, Decisions, DLQ, Schedules. The fixed footer is an action-status strip (not a second nav). Ledger / Findings share one **decision card** (why · confidence · dry-run · evidence · merge/close). See [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md) and [ADR 0007](docs/adr/0007-decision-card.md).
 
 ## Deploy to OpenShift
 
