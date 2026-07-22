@@ -54,7 +54,7 @@ flowchart LR
 | --- | --- |
 | **Assess** | 7 dimensions → findings + scores |
 | **Generate** | SkillEngine matches findings to skills; Scan/onboard produces remediations |
-| **Gate** | Finding-tied PRs only; SSA dry-run + clear-evidence simulation (refuses theater stubs; hand-rolled store DDL passes `migration`) |
+| **Gate** | Finding-tied PRs only; SSA dry-run + clear-evidence simulation (refuses theater stubs / destructive Containerfile rewrites; hand-rolled store DDL passes `migration`) |
 | **Operate** | Human merges on GitHub; Argo CD deploys (Scan HITL — no auto-merge) |
 | **Learn** | Watchers surface drift/CVEs/SLOs; learning drafts skills for human activation |
 
@@ -118,9 +118,9 @@ Useful commands: `self-assess`, `watch`, `learn`, `test-skill`, `activate-skill`
 
 ## Deploy to OpenShift
 
-Helm chart in `chart/` + Argo CD Application in `argocd/application.yaml`. Argo is the deployer: merge to `main` alone does not move the portal — Tekton `agentit-ci` builds, smokes, then pins `image.tag`.
+Helm chart in `chart/` + Argo CD Application in `argocd/application.yaml`. Argo is the deployer: merge to `main` alone does not move the portal — Tekton `agentit-ci` builds, smokes, then pins `image.tag`. Confirm rollout via Health → deploy-status (or `AGENTIT_IMAGE_TAG` on the portal pod) matching the tip SHA — green GitHub Actions alone is not a deploy. Tekton `run-tests` is capped (chart default 20m after the tip-stall hardening); under node pressure a failed/retried TaskRun can leave dogfood on the last good image.
 
-Ops: [`docs/deployment.md`](docs/deployment.md). Topology: [`docs/architecture.md`](docs/architecture.md).
+Ops: [`docs/deployment.md`](docs/deployment.md). **Merge gate + post-merge tip:** [`docs/ci-deploy.md`](docs/ci-deploy.md) (`scripts/ci-merge-gate.sh` — never merge on queued checks). Topology: [`docs/architecture.md`](docs/architecture.md).
 
 ## Docs
 
@@ -130,7 +130,8 @@ Ops: [`docs/deployment.md`](docs/deployment.md). Topology: [`docs/architecture.m
 | [`docs/architecture.md`](docs/architecture.md) | System diagrams, Scan pipeline |
 | [`docs/architecture-agentit-vs-fleet-gitops.md`](docs/architecture-agentit-vs-fleet-gitops.md) | Self-managed vs fleet delivery |
 | [`docs/release-notes.md`](docs/release-notes.md) | Product contract (Scan HITL, contracts, portal IA) |
-| [`CHANGELOG.md`](CHANGELOG.md) | Version history (Keep a Changelog); recent: Tekton `run-tests` 20m timeout + LLM fail-soft |
+| [`docs/ci-deploy.md`](docs/ci-deploy.md) | **Merge gate + post-merge Tekton/rollout tip checklist** |
+| [`CHANGELOG.md`](CHANGELOG.md) | Version history (Keep a Changelog); recent: container pin-only + CI merge gate |
 | [`docs/adr/`](docs/adr/) | Architecture Decision Records |
 | [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md) | Portal EDL |
 | [`docs/plan-quality-helpful-prs.md`](docs/plan-quality-helpful-prs.md) | Quality PR rules |

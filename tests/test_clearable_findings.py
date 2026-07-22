@@ -326,7 +326,35 @@ class TestSourcePatchSkills:
         assert len(files) == 1
         assert files[0].target_path == "Dockerfile"
         assert ":latest" not in files[0].content
+        # Existing-path findings emit a pin-only marker (never a full stub
+        # rewrite — #165). Delivery enrichment applies pin_dockerfile_from_lines.
+        assert "pin-only" in (files[0].description or "").lower()
+        assert "FROM" in files[0].content
+
+    def test_containerfile_greenfield_emits_full_stub(self):
+        skill = load_skill(Path("skills/security/containerfile.md"))
+        assert skill is not None
+        report = make_report(
+            repo_name="pinky",
+            languages=[Language(name="python", file_count=10, percentage=80.0)],
+            scores=[
+                DimensionScore(
+                    dimension="security", score=50, max_score=100,
+                    findings=[
+                        Finding(
+                            category="container", severity=Severity.medium,
+                            description="No Dockerfile or Containerfile found",
+                            recommendation="Create a Containerfile",
+                        ),
+                    ],
+                ),
+            ],
+        )
+        files = generate_source_patch_for_skill(skill, report, "pinky")
+        assert len(files) == 1
+        assert ":latest" not in files[0].content
         assert "USER 1001" in files[0].content
+        assert "greenfield" in (files[0].description or "").lower()
 
     def test_eol_upgrade_emits_node_version(self):
         skill = load_skill(Path("skills/infrastructure/eol-upgrade.md"))

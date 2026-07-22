@@ -13,6 +13,7 @@ Product contract detail: [`docs/release-notes.md`](docs/release-notes.md).
 
 ### Added
 
+- Merge-gate + post-merge deploy tip docs: [`docs/ci-deploy.md`](docs/ci-deploy.md) + [`scripts/ci-merge-gate.sh`](scripts/ci-merge-gate.sh) (do not merge on queued checks; verify GHA + `agentit-ci/tekton` + rollout tip).
 - **Phase 3 hardening**: interfaces layer (`agentit.interfaces`), full decision card (why · confidence · dry-run · evidence · approve/reject), Fleet/Ledger card-collapse at 375px, ADRs 0005–0007.
 - **Score model v2**: pass-ratio dimensions + criticality-weighted overall; letter grades; SVG badge at `/badge/{app}.svg` ([ADR 0003](docs/adr/0003-score-model-v2.md)).
 - **RepoSnapshot** single-pass tree read + concurrent analyzers (assessment latency).
@@ -27,6 +28,7 @@ Product contract detail: [`docs/release-notes.md`](docs/release-notes.md).
 
 ### Fixed
 
+- Scan **container** remediation is **pin-only** on existing Dockerfile/Containerfile (FROM `:latest` → `:1` / digest); clear-evidence refuses destructive stub rewrites (#165 class; same bar as migration [#163](https://github.com/alimobrem/AgentIT/pull/163)).
 - Tekton `agentit-ci` `run-tests` timeout raised to **20m** (was 10m) so UBI pip+pytest under node pressure / one retry does not TaskRunTimeout before image pin (tip `b4ae400f` / `agentit-ci-bwb76`).
 - Align hermetic tests with PR [#161](https://github.com/alimobrem/AgentIT/pull/161): suite-wide `AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS=1`, score v2 expectations, first-run `/` → `/fleet`, Assessment Detail status-strip copy.
 - Scan **migration** finding: detect hand-rolled idempotent store DDL (AgentIT ADR 0002 / `SCHEMA_SQL`) so dogfood does not open stub Alembic PRs; clear-evidence refuses `target_metadata = None` theater; `db-migration-tooling` emits a real first revision + env URL wiring (closes the #157 class of useless PRs).

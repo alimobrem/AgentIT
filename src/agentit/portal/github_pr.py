@@ -787,6 +787,26 @@ def _enrich_audit_patches_for_repo(
     return enriched
 
 
+def _enrich_containerfile_pin_only_for_repo(
+    base_url: str,
+    hdrs: dict,
+    default_branch: str,
+    files: list[dict],
+) -> list[dict]:
+    """Pin ``:latest`` on existing Dockerfile/Containerfile FROM lines only.
+
+    Mirrors migration #163's "no theater stubs" bar for containers: never
+    replace a real multi-stage/app Containerfile with the greenfield stub
+    (#165 closed as that failure mode).
+    """
+    from agentit.remediation.source_patches import apply_containerfile_pin_only
+
+    def read_file(path: str) -> str | None:
+        return _get_file_content_at_ref(base_url, hdrs, path, default_branch)
+
+    return apply_containerfile_pin_only(files, read_file=read_file)
+
+
 def path_exists_on_default_branch(repo_url: str, path: str) -> bool | None:
     """Whether ``path`` exists on the repo's default branch.
 
@@ -936,6 +956,11 @@ def create_source_patch_pr(
         # relocate into the app package and wire middleware when possible.
         files = _enrich_audit_patches_for_repo(
             base_url, hdrs, default_branch, base_sha, files,
+        )
+        # Container/EOL Dockerfile patches: pin FROM only — never gut an
+        # existing Containerfile into a greenfield stub (#165).
+        files = _enrich_containerfile_pin_only_for_repo(
+            base_url, hdrs, default_branch, files,
         )
 
         tree_items = []
