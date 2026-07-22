@@ -6,11 +6,13 @@ from agentit.remediation.clear_evidence import (
     AUDIT_WIRED,
     DOCKERFILE_PIN,
     HPA_TARGET,
+    MIGRATION_TOOLING,
     simulate_finding_clearance,
     simulation_gate,
     verify_audit_wired,
     verify_dockerfile_pin,
     verify_hpa_target,
+    verify_migration_tooling,
     verify_quota_manifest,
     verify_runtime_pin,
 )
@@ -131,6 +133,70 @@ class TestQuotaManifest:
         assert ok, reason
 
 
+class TestMigrationTooling:
+    def test_refuses_target_metadata_none_theater(self) -> None:
+        ok, reason = verify_migration_tooling([
+            {
+                "target_path": "alembic.ini",
+                "content": "[alembic]\nscript_location = alembic\n",
+                "skill_name": "db-migration-tooling",
+            },
+            {
+                "target_path": "alembic/env.py",
+                "content": (
+                    "from alembic import context\n"
+                    "target_metadata = None\n"
+                ),
+                "skill_name": "db-migration-tooling",
+            },
+        ])
+        assert not ok
+        assert "theater" in reason.lower() or "target_metadata" in reason
+
+    def test_allows_alembic_with_upgrade_revision(self) -> None:
+        ok, reason = verify_migration_tooling([
+            {
+                "target_path": "alembic.ini",
+                "content": "[alembic]\nscript_location = alembic\n",
+                "skill_name": "db-migration-tooling",
+            },
+            {
+                "target_path": "alembic/env.py",
+                "content": (
+                    "import os\nfrom alembic import context\n"
+                    "db_url = os.environ.get('DATABASE_URL')\n"
+                    "target_metadata = None\n"
+                ),
+                "skill_name": "db-migration-tooling",
+            },
+            {
+                "target_path": "alembic/versions/0001_baseline.py",
+                "content": "def upgrade():\n    pass\n\ndef downgrade():\n    pass\n",
+                "skill_name": "db-migration-tooling",
+            },
+        ])
+        assert ok, reason
+
+    def test_simulation_refuses_stub_migration_pr(self) -> None:
+        files = [
+            {
+                "target_path": "alembic.ini",
+                "content": "[alembic]\nscript_location = alembic\n",
+                "skill_name": "db-migration-tooling",
+            },
+            {
+                "target_path": "alembic/env.py",
+                "content": "from alembic import context\ntarget_metadata = None\n",
+                "skill_name": "db-migration-tooling",
+            },
+        ]
+        ok, reason = clear_evidence_simulation_ok(
+            files, [("migration", "No database migration tooling detected")],
+        )
+        assert not ok
+        assert "migration" in reason
+
+
 class TestSimulationGate:
     def test_allows_container_pin(self) -> None:
         files = [{
@@ -185,3 +251,4 @@ class TestSimulationGate:
         assert contract_for("container").evidence_kind == DOCKERFILE_PIN
         assert contract_for("audit").evidence_kind == AUDIT_WIRED
         assert contract_for("scaling").evidence_kind == HPA_TARGET
+        assert contract_for("migration").evidence_kind == MIGRATION_TOOLING

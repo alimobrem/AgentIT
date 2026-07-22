@@ -13,6 +13,7 @@ Product contract detail: [`docs/release-notes.md`](docs/release-notes.md).
 
 ### Added
 
+- **Phase 3 hardening**: interfaces layer (`agentit.interfaces`), full decision card (why · confidence · dry-run · evidence · approve/reject), Fleet/Ledger card-collapse at 375px, ADRs 0005–0007.
 - **Score model v2**: pass-ratio dimensions + criticality-weighted overall; letter grades; SVG badge at `/badge/{app}.svg` ([ADR 0003](docs/adr/0003-score-model-v2.md)).
 - **RepoSnapshot** single-pass tree read + concurrent analyzers (assessment latency).
 - Score-first Assessment Detail with top-3 estimated fix impacts; centralized score bands.
@@ -28,10 +29,15 @@ Product contract detail: [`docs/release-notes.md`](docs/release-notes.md).
 
 - Align hermetic tests with PR [#161](https://github.com/alimobrem/AgentIT/pull/161): suite-wide `AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS=1`, score v2 expectations, first-run `/` → `/fleet`, Assessment Detail status-strip copy.
 
+### Fixed
+
+- Scan **migration** finding: detect hand-rolled idempotent store DDL (AgentIT ADR 0002 / `SCHEMA_SQL`) so dogfood does not open stub Alembic PRs; clear-evidence refuses `target_metadata = None` theater; `db-migration-tooling` emits a real first revision + env URL wiring (closes the #157 class of useless PRs).
+
 ### Changed
 
 - Portal footer is an action-feedback status strip (no duplicated nav links); toasts mirror into it.
-- Clone SSRF: HTTPS-only; DNS resolution fail-closed; reject private answers (pair with egress NetworkPolicy for hard pin).
+- Clone SSRF: HTTPS-only; resolve + re-resolve before clone; TLS blocks IP-pin ([ADR 0005](docs/adr/0005-ssrf-clone.md)).
+- Circuit breakers and score aggregation moved to `agentit.interfaces` ([ADR 0006](docs/adr/0006-interfaces-layer.md)); portal re-exports breakers.
 - README is the product front door (~100–150 lines); history and contracts moved out.
 - Scan HITL + GitOps-only delivery is the documented operate path (see [ADR 0001](docs/adr/0001-gitops-scan-hitl.md)).
 - Postgres is the only assessment store (see [ADR 0002](docs/adr/0002-postgres-store.md)).
