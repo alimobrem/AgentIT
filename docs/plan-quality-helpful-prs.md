@@ -302,6 +302,7 @@ Prioritize dogfood AgentIT.git; keep simplify unblocked.
 | Scan pre-PR pipeline | `src/agentit/portal/auto_delivery.py` |
 | Route + deliver + filter + chart gate | `src/agentit/portal/delivery.py` (`filter_self_managed_delivery_files`, `validate_self_managed_chart_delivery`, `route_and_deliver`, `correlate_delivery_finding`) |
 | Self-managed HPA app-correctness | `src/agentit/portal/self_managed_hpa.py` (Rollout name/kind + RWO maxReplicas; wired into filter/gate + SkillEngine) |
+| Fleet HPA scaleTargetRef | `src/agentit/portal/fleet_hpa.py` (list Deployments/Rollouts; refuse invented names; SkillEngine + auto_delivery + GitOps deliver) |
 | SSA dry-run | `src/agentit/portal/cluster_apply.py` (`dry_run_manifests_against_cluster`) |
 | Source / infra PRs | `src/agentit/portal/github_pr.py` (`create_source_patch_pr`, `commit_to_infra_repo`) |
 | Generation constraints | `src/agentit/skill_engine.py` (`SkillEngine(self_managed=…)`, `generate_for_finding`, `record_skill_outcomes`) |

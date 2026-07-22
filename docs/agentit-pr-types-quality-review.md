@@ -13,6 +13,7 @@
 | Priority | Recommendation | Status | Where / PR |
 | -------- | -------------- | ------ | ---------- |
 | **P0** | Chart-aware HPA correctness (Rollout name/kind, RWO maxReplicas); fail closed | **Merged** | `portal/self_managed_hpa.py` + SkillEngine + skill template — [#136](https://github.com/alimobrem/AgentIT/pull/136); #134 closed |
+| **P0** | Fleet HPA scaleTargetRef vs live Deployments/Rollouts; fail closed | **This PR** | `portal/fleet_hpa.py` + SkillEngine + auto_delivery + GitOps deliver; closed bad pinky gitops #18 |
 | **P0/P1 enabler** | SSA dry-run soft-fail Forbidden / missing optional CRD | **Merged** | `classify_dry_run_error` — [#137](https://github.com/alimobrem/AgentIT/pull/137) |
 | **P1** | Fleet/pinky finding-clear proof after Scan PR merge | **Done (this PR)** | PR body “Finding-clear proof”; `finding-clear-pending` Ledger event; cicd also schedules SLO verify |
 | **P2** | Kill / hard-refuse `.agentit/` Scan deliveries | **Done (this PR)** | `MECHANISM_APP_REPO_PR` refused in `deliver_with_verification` + `route_and_deliver`; `create_onboarding_pr` not called |

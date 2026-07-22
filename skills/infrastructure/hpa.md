@@ -1,7 +1,7 @@
 ---
 name: hpa
 domain: infrastructure
-version: 1
+version: 2
 triggers:
   - scaling
   - autoscal
@@ -26,23 +26,53 @@ without manual intervention.
 - Maximum 10 replicas only when storage allows multi-attach (RWX / no RWO data volume); never maxReplicas>1 against RWO
 - Scale on CPU utilization at 80% threshold
 - Use autoscaling/v2 API (not v2beta1 — deprecated since K8s 1.23)
-- **scaleTargetRef.name** must match the workload's `metadata.name` exactly (for Helm charts prefer `{{ .Release.Name }}`, not `{{ .Release.Name }}-app` guesses)
+- **scaleTargetRef MUST resolve to a live Deployment or Rollout** in the app namespace — never invent `Deployment/{{app_name}}` when the real workloads are `{{app_name}}-api` / `{{app_name}}-web` / `Rollout/{{app_name}}`
+- Prefer exact `Rollout/{{app_name}}` when present (`apiVersion: argoproj.io/v1alpha1`); else exact `Deployment/{{app_name}}`; else existing `{{app_name}}-api|web|worker|…` Deployments
 - When the chart uses Argo Rollouts (`kind: Rollout` / `rollout.enabled`): target `apiVersion: argoproj.io/v1alpha1`, `kind: Rollout` — not `apps/v1` Deployment
 - Prefer emitting nothing (empty) over an HPA that would not attach or would Multi-Attach — fail closed into human review
+- Fleet generation discovers Deployments/Rollouts via the apiserver (`portal/fleet_hpa.py`) and refuses PRs whose `scaleTargetRef` is missing on the cluster
 
 ## Template (fleet / plain Deployment apps)
+
+Only use this shape when a Deployment named `{{app_name}}` **actually exists**.
+For multi-service apps, emit one HPA per live scalable Deployment (e.g. `{{app_name}}-api`), or target `Rollout/{{app_name}}` when that Rollout exists.
 
 ```yaml
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{app_name}}
+  name: {{app_name}}-hpa
   labels:
     app.kubernetes.io/name: {{app_name}}
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
+    name: {{app_name}}
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+```
+
+## Fleet / Argo Rollout (when Rollout/{{app_name}} exists)
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{app_name}}-hpa
+  labels:
+    app.kubernetes.io/name: {{app_name}}
+spec:
+  scaleTargetRef:
+    apiVersion: argoproj.io/v1alpha1
+    kind: Rollout
     name: {{app_name}}
   minReplicas: 2
   maxReplicas: 10

@@ -806,6 +806,64 @@ class TestSelfManagedGenerationConstraints:
         engine = SkillEngine(tmp_path, platform=None, self_managed=True)
         assert engine.generate(skill, make_report(repo_name="agentit"), llm_client=None) == []
 
+    def test_fleet_hpa_uses_discovered_rollout_not_invented_deployment(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """pinky-class: Rollout/pinky exists — do not emit Deployment/pinky."""
+        from agentit.portal.fleet_hpa import NamespaceWorkloads
+
+        skill = Skill(
+            name="hpa",
+            domain="infrastructure",
+            version=2,
+            triggers=["scaling"],
+            outputs=["HorizontalPodAutoscaler"],
+            property_description="scales",
+            body="# HPA\n",
+            file_path="skills/infrastructure/hpa.md",
+            mode="template",
+        )
+        engine = SkillEngine(tmp_path, platform=None, self_managed=False)
+        monkeypatch.setattr(
+            "agentit.portal.fleet_hpa.discover_namespace_workloads",
+            lambda ns: NamespaceWorkloads(
+                namespace=ns,
+                deployments=("pinky-api", "pinky-web", "pinky-worker"),
+                rollouts=("pinky",),
+            ),
+        )
+        files = engine.generate(skill, make_report(repo_name="pinky"), llm_client=None)
+        assert len(files) == 1
+        assert "kind: Rollout" in files[0].content
+        assert "name: pinky\n" in files[0].content
+        # Must not invent Deployment/pinky
+        assert "kind: Deployment" not in files[0].content
+
+    def test_fleet_hpa_skips_when_no_live_targets(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from agentit.portal.fleet_hpa import NamespaceWorkloads
+
+        skill = Skill(
+            name="hpa",
+            domain="infrastructure",
+            version=2,
+            triggers=["scaling"],
+            outputs=["HorizontalPodAutoscaler"],
+            property_description="scales",
+            body="# HPA\n```yaml\napiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\n```\n",
+            file_path="skills/infrastructure/hpa.md",
+            mode="template",
+        )
+        engine = SkillEngine(tmp_path, platform=None, self_managed=False)
+        monkeypatch.setattr(
+            "agentit.portal.fleet_hpa.discover_namespace_workloads",
+            lambda ns: NamespaceWorkloads(
+                namespace=ns, deployments=(), rollouts=(), discovery_ok=True,
+            ),
+        )
+        assert engine.generate(skill, make_report(repo_name="ghost"), llm_client=None) == []
+
     def test_self_managed_llm_rejects_wrong_hpa_accepts_rollout(self, tmp_path: Path) -> None:
         skill = _make_skill(
             "hpa", outputs=["HorizontalPodAutoscaler"], mode="llm", triggers=["scaling"],
