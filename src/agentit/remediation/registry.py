@@ -155,10 +155,12 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
         kinds=("Task", "ClusterTask"),
     ),
     # App-level audit logging (compliance analyzer). Cluster apiserver
-    # audit-policy ConfigMap does NOT clear this finding.
+    # audit-policy ConfigMap does NOT clear this finding. Root-only
+    # audit.py theater is refused — package path + import/call site required.
     "audit": _c(
         "compliance", "app-audit-logging", "source",
-        "wiring an app audit module into the API entrypoint (import + middleware)",
+        "wiring a packaged app audit module + import/call site "
+        "(not repo-root audit.py alone)",
         _ev.AUDIT_WIRED,
         "audit-policy",
     ),

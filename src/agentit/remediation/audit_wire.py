@@ -36,6 +36,98 @@ def has_audit_usage(content: str) -> bool:
     return any(p.search(content) for p in _USAGE_PATTERNS)
 
 
+def _is_audit_module_path(path: str) -> bool:
+    name = Path(path.replace("\\", "/")).name.lower()
+    return name in _AUDIT_MODULE_NAMES
+
+
+def _packaged_audit_paths(paths: list[str]) -> list[str]:
+    """Audit modules under a package dir (not orphan repo-root ``audit.py``)."""
+    out: list[str] = []
+    for p in paths:
+        norm = p.replace("\\", "/").strip("/")
+        if not _is_audit_module_path(norm):
+            continue
+        if "/" in norm:
+            out.append(norm)
+    return out
+
+
+def repo_has_wired_audit(repo_path: Path) -> bool:
+    """True when a packaged audit module exists and a non-module file uses it."""
+    packaged = False
+    callsite = False
+    for fp in repo_path.rglob("*"):
+        if not fp.is_file():
+            continue
+        if _IGNORED_PARTS & set(fp.parts):
+            continue
+        name = fp.name.lower()
+        if name in _AUDIT_MODULE_NAMES:
+            # Root-only orphan does not count as wired.
+            try:
+                rel = fp.relative_to(repo_path).as_posix()
+            except ValueError:
+                continue
+            if "/" in rel:
+                packaged = True
+            continue
+        if fp.suffix.lower() not in {".py", ".ts", ".js", ".go"}:
+            continue
+        try:
+            content = fp.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if has_audit_usage(content):
+            callsite = True
+        if packaged and callsite:
+            return True
+    return packaged and callsite
+
+
+def tree_has_wired_audit(
+    tree_paths: list[str],
+    read_file,
+) -> bool:
+    """GitHub-tree variant of :func:`repo_has_wired_audit`.
+
+    Reads only source files under packaged-audit directory roots (plus
+    common entrypoints) so Scan does not fetch the whole tree.
+    """
+    packaged = _packaged_audit_paths(tree_paths)
+    if not packaged:
+        return False
+    roots = {str(Path(p).parent).replace("\\", "/") for p in packaged}
+    candidates: list[str] = []
+    for p in tree_paths:
+        norm = p.replace("\\", "/")
+        if _IGNORED_PARTS & set(Path(norm).parts):
+            continue
+        suffix = Path(norm).suffix.lower()
+        if suffix not in {".py", ".ts", ".js", ".go"}:
+            continue
+        if _is_audit_module_path(norm):
+            continue
+        parent = str(Path(norm).parent).replace("\\", "/")
+        if parent == ".":
+            parent = ""
+        under_pkg = any(
+            parent == r or (r and parent.startswith(r + "/"))
+            or (parent and r.startswith(parent + "/"))
+            for r in roots
+        )
+        is_entry = Path(norm).name in {
+            "app.py", "main.py", "server.ts", "app.ts", "index.ts", "main.ts",
+        }
+        if under_pkg or is_entry:
+            candidates.append(norm)
+    for path in candidates:
+        text = read_file(path)
+        if text and has_audit_usage(text):
+            return True
+    return False
+
+
 def discover_python_app_entry(repo_path: Path) -> tuple[str, str] | None:
     """Return ``(package_dir_rel, app_entry_rel)`` for a FastAPI/Flask app."""
     candidates: list[tuple[str, str]] = []
@@ -115,7 +207,7 @@ def wire_python_app(app_content: str) -> str:
                 )
                 outcome = "success" if response.status_code < 400 else "failure"
                 audit_log(
-                    f"{request.method} {request.url.path}",
+                    action=f"{request.method} {request.url.path}",
                     actor=actor,
                     resource=request.url.path,
                     outcome=outcome,
@@ -220,6 +312,18 @@ def _append_wired_entry(out: list[dict], audit_idx: int, entry: str, wired: str)
     })
 
 
+def _drop_orphan_audit_files(files: list[dict]) -> list[dict]:
+    """Remove root-only audit module stubs from staged delivery files."""
+    out: list[dict] = []
+    for f in files:
+        target = str(f.get("target_path") or f.get("path") or "")
+        name = Path(target.replace("\\", "/")).name.lower()
+        if name in _AUDIT_MODULE_NAMES and "/" not in target.replace("\\", "/").strip("/"):
+            continue
+        out.append(f)
+    return out
+
+
 def enrich_audit_files_from_repo(
     repo_path: Path,
     files: list[dict],
@@ -227,10 +331,17 @@ def enrich_audit_files_from_repo(
     """Relocate root audit modules into the app package and wire the entrypoint.
 
     ``files`` entries are delivery dicts with ``target_path`` / ``content``.
+    When the repo already has packaged audit + usage, orphan root stubs are
+    dropped (no theater PR) — re-Assess should clear the finding.
     """
     found = _orphan_audit_index(files)
     if found is None:
         return files
+    if repo_has_wired_audit(repo_path):
+        logger.info(
+            "Repo already has wired audit logging — dropping orphan root audit patch",
+        )
+        return _drop_orphan_audit_files(files)
     audit_idx, audit_name = found
     out = [dict(f) for f in files]
 
@@ -281,6 +392,12 @@ def enrich_audit_files_from_paths(
     found = _orphan_audit_index(files)
     if found is None:
         return files
+    if tree_has_wired_audit(tree_paths, read_file):
+        logger.info(
+            "Default branch already has wired audit logging — "
+            "dropping orphan root audit patch",
+        )
+        return _drop_orphan_audit_files(files)
     audit_idx, audit_name = found
     out = [dict(f) for f in files]
 
@@ -346,3 +463,15 @@ def enrich_audit_files_from_paths(
         if wired != app_content:
             _append_wired_entry(out, audit_idx, entry, wired)
     return out
+
+
+def is_audit_delivery_file(file: dict) -> bool:
+    """True when a staged file is an audit module or audit-wiring patch."""
+    skill = str(file.get("skill_name") or "")
+    if skill in {"app-audit-logging", "audit-policy"}:
+        return True
+    path = str(file.get("target_path") or file.get("path") or "").replace("\\", "/")
+    if _is_audit_module_path(path):
+        return True
+    desc = str(file.get("description") or "").lower()
+    return "audit" in desc and ("wire" in desc or "middleware" in desc)

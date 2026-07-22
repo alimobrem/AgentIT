@@ -313,11 +313,11 @@ def _eol_upgrade_patch(skill: "Skill", report: AssessmentReport) -> list[Generat
 
 
 def _app_audit_logging_patch(skill: "Skill", report: AssessmentReport) -> list[GeneratedFile]:
-    """Emit a language-matched audit helper.
+    """Emit a language-matched audit helper (root path is a stub only).
 
-    Delivery (``create_source_patch_pr``) relocates root modules into the
-    detected FastAPI/Express package and wires middleware — required for
-    the compliance analyzer's module+usage evidence check.
+    Delivery must relocate into the app package and wire middleware
+    *before* clear-evidence (``audit_wired`` refuses root-only ``audit.py``).
+    See ``remediation/audit_wire.py`` + auto_delivery pre-enrich.
     """
     lang = _primary_language(report)
     if lang in ("javascript", "typescript", "node"):

@@ -54,7 +54,7 @@ flowchart LR
 | --- | --- |
 | **Assess** | 7 dimensions → findings + scores |
 | **Generate** | SkillEngine matches findings to skills; Scan/onboard produces remediations |
-| **Gate** | Finding-tied PRs only; SSA dry-run + clear-evidence simulation (refuses theater stubs / destructive Containerfile rewrites; hand-rolled store DDL passes `migration`). App `Containerfile` base is digest-pinned (`ubi9/python-312@sha256:…`), not floating `:latest`/`:1`. |
+| **Gate** | Finding-tied PRs only; SSA dry-run + clear-evidence simulation (refuses theater stubs / destructive Containerfile rewrites; root-only `audit.py` without package wire-up; hand-rolled store DDL passes `migration`). App `Containerfile` base is digest-pinned (`ubi9/python-312@sha256:…`), not floating `:latest`/`:1`. |
 | **Operate** | Human merges on GitHub; Argo CD deploys (Scan HITL — no auto-merge) |
 | **Learn** | Watchers surface drift/CVEs/SLOs; learning drafts skills for human activation |
 
