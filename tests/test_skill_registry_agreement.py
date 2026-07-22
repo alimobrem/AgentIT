@@ -79,6 +79,55 @@ class TestRegistryAndSkillEngineAgree:
         assert skill is not None
         assert skill.name == "kyverno-require-labels"
 
+    def test_availability_category_resolves_to_pdb_not_pod_delete(
+        self, engine: SkillEngine,
+    ) -> None:
+        """The same class of bug as "policy" above, for ha_dr's "No
+        PodDisruptionBudget defined" finding (category "availability"):
+        both skills/infrastructure/pdb.md (the real remediation) and
+        skills/chaos/pod-delete.md (a resiliency-test generator, not a fix)
+        declare trigger "availability" -- pod-delete silently won by
+        alphabetical file-load order ("skills/chaos/" < "skills/
+        infrastructure/") before "availability" had a FIX_REGISTRY row."""
+        skill = engine.skill_for_category("availability")
+        assert skill is not None
+        assert skill.name == "pdb"
+        assert skill.domain == "infrastructure"
+
+
+class TestCategoriesWithNoRealRemediationYetResolveHonestly:
+    """`license` (missing LICENSE file) and `backup` (no recurring backup
+    config) have no FIX_REGISTRY row and no real remediation skill in the
+    catalog -- only their own `mode: detect` detection skills
+    (license-file-exists.md, backup-config-exists.md). Before this,
+    keyword-trigger fallback matching silently mispaired them with an
+    unrelated skill that happened to share a trigger word
+    (sbom-task.md's "license" trigger, meant for SBOM/license-compliance
+    context; data-archive-job.md's "backup" trigger, meant for
+    pre-decommission data export, not recurring backups) -- generating the
+    *wrong* content instead of honestly reporting "no fix yet," matching
+    eol/migration's pre-#145 status quo."""
+
+    @pytest.fixture(scope="class")
+    def engine(self) -> SkillEngine:
+        return SkillEngine(_SKILLS_DIR, platform=None)
+
+    def test_license_resolves_to_none_not_sbom_task(self, engine: SkillEngine) -> None:
+        assert engine.skill_for_category("license") is None
+
+    def test_backup_resolves_to_none_not_data_archive_job(self, engine: SkillEngine) -> None:
+        assert engine.skill_for_category("backup") is None
+
+    def test_sbom_trigger_removal_does_not_break_real_sbom_matching(
+        self, engine: SkillEngine,
+    ) -> None:
+        """Removing "license" from sbom-task.md's triggers must not lose
+        its real SBOM-related matching -- "sbom"/"bom"/"software"/"bill"
+        are untouched."""
+        skill = engine.skill_for_category("sbom")
+        assert skill is not None
+        assert skill.name == "sbom-task"
+
 
 class TestDispatcherRoutesThroughSameFunction:
     """`RemediationDispatcher._dispatch_generate` must resolve the skill via

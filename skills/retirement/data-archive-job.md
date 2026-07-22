@@ -4,7 +4,6 @@ domain: retirement
 version: 1
 triggers:
   - archive
-  - backup
   - data
   - export
   - retirement

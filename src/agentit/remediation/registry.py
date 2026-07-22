@@ -49,6 +49,14 @@ FIX_REGISTRY: dict[str, tuple[str, str]] = {
     # RemediationDispatcher / skill_for_category all agree.
     "scaling":       ("infrastructure", "hpa"),
     "quota":         ("infrastructure", "resourcequota"),
+    # ha_dr's "No PodDisruptionBudget defined" finding (category
+    # "availability") had no registry row, so skill_for_category() fell
+    # back to trigger-keyword matching -- two skills both declare trigger
+    # "availability" (this one, and skills/chaos/pod-delete.md, a
+    # resiliency-test generator, not a remediation), and load_all_skills()
+    # sorts by path, so "skills/chaos/" < "skills/infrastructure/"
+    # alphabetically meant pod-delete silently won every time. Pin it.
+    "availability":  ("infrastructure", "pdb"),
     # Source-repo remediations (CATEGORY_SOURCE_PATCH) — clear on re-Assess
     # of the app repo after merge.
     "eol":           ("infrastructure", "eol-upgrade"),
