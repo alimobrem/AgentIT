@@ -1,7 +1,7 @@
 # Unifying checks/analyzers/skills into one extension model — design spec
 
 **Status update (2026-07-18): superseded in part, see
-`docs/extension-model-unification-plan-2026-07-18.md`.** This doc's own
+`docs/history/extension-model-unification-plan-2026-07-18.md`.** This doc's own
 scope (per its "Scope note" below) never re-examined the agents-vs-skills
 question, and its §2 "Option B" recommendation is specifically about *not*
 merging checks' detection-matching machinery into skills' remediation-
@@ -21,7 +21,7 @@ otherwise still accurate and is left as-is below, unmodified, per this
 repo's docs convention of appending status rather than rewriting history.
 
 **Original status: design spec, not yet implemented.** No code changes are
-made by this doc. Written in the same style as `docs/ledger-design-spec.md`:
+made by this doc. Written in the same style as `docs/history/ledger-design-spec.md`:
 grounded in the *actual current* code (read directly, not designed against
 an imagined system), with a phased, incremental rollout that never breaks
 the working product mid-flight.
@@ -30,7 +30,7 @@ the working product mid-flight.
 The major-refactor item this responds to was "collapse skills/checks/
 analyzers/remaining-Python-agents into one extension model." The
 agents-vs-skills half of that question is **already answered** by
-`docs/agent-removal-readiness.md` (audited 2026-07-12/13, days before this
+`docs/history/agent-removal-readiness.md` (audited 2026-07-12/13, days before this
 doc): skills already cover every domain a Python agent used to own except
 `codechange` (fundamentally not skill-shaped — see that doc's §3) and two
 narrative-report gaps (`cost-report.md`, `dependency-report.md`) that are
@@ -151,7 +151,7 @@ the `eol.py` helper): `security.py`, `infrastructure.py`.**
   arithmetic and LLM calls aren't declarative-rule-shaped.
 
 These two **must stay Python** regardless of what happens to the other
-five — this mirrors `docs/agent-removal-readiness.md`'s own finding that
+five — this mirrors `docs/history/agent-removal-readiness.md`'s own finding that
 `codechange` must stay a standalone Python agent because the *capability*
 itself (not the file format) doesn't fit the declarative model.
 
@@ -199,7 +199,7 @@ actually found:
    duplication between skills and checks/analyzers to justify merging
    those two.
 3. **Lower blast radius, matching this project's own "ship incrementally"
-   discipline** (`docs/ledger-design-spec.md` §5's phasing, this repo's
+   discipline** (`docs/history/ledger-design-spec.md` §5's phasing, this repo's
    real precedent). Option B touches `check_engine.py` (one new rule
    capability) and deletes 5 self-contained analyzer files one at a time,
    each independently testable and revertible. Option A means rewriting
@@ -285,7 +285,7 @@ Do not build it speculatively before a concrete ported analyzer needs it.
 
 ## 5. Rollout sequencing
 
-Mirrors `docs/ledger-design-spec.md` §5's own "each phase independently
+Mirrors `docs/history/ledger-design-spec.md` §5's own "each phase independently
 shippable" discipline.
 
 **Phase 0 — rule-vocabulary Gap 1 only (§3), no analyzer touched yet.**
@@ -325,7 +325,7 @@ non-declarative findings, or is deleted outright if none remain — this is
 **Phase 3 — document the final state.** Once Phase 2 settles (some
 findings ported, some left as small Python residuals, some analyzer files
 fully deleted), update this doc's status header and add a
-`docs/agent-removal-readiness.md`-style table recording exactly which
+`docs/history/agent-removal-readiness.md`-style table recording exactly which
 findings are "checks now" vs. "Python permanently, and why" per dimension —
 so this decision doesn't need re-auditing from scratch next time, the same
 service `agent-removal-readiness.md` already provides for the agents side.

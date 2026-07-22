@@ -2,7 +2,7 @@
 
 **Status:** normative decision (2026-07-20)  
 **Audience:** founders, contributors changing delivery / Argo / onboard routing  
-**Related:** [deployment.md](./deployment.md), [unified-apply-flow.md](./unified-apply-flow.md), [lessons-learned-building-agentit.md](./lessons-learned-building-agentit.md), [self-improvement-for-agentit.md](./self-improvement-for-agentit.md)
+**Related:** [deployment.md](./deployment.md), [adr/0001-gitops-scan-hitl.md](./adr/0001-gitops-scan-hitl.md), [history/unified-apply-flow.md](./history/unified-apply-flow.md), [history/self-improvement-for-agentit.md](./history/self-improvement-for-agentit.md)
 
 ---
 

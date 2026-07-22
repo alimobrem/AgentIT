@@ -55,7 +55,7 @@
 | `argocd/application.yaml` | `ignoreDifferences` for Pipeline/EventListener; scout params |
 | `docs/proposals/` | L2 artifacts (existing) |
 | `tests/test_capability_scout*.py`, `tests/test_skill_learner.py` | Regression for retry, JSON, source-diff gates |
-| `docs/self-improvement-for-agentit.md` | Retag v1 vs v2 (source diff) when L3 ships |
+| `docs/history/self-improvement-for-agentit.md` | Retag v1 vs v2 (source diff) when L3 ships |
 
 ---
 
@@ -233,9 +233,9 @@ Allowed change classes for v1 source autonomy (pick in order):
 
 ### Task 4.2: Write the milestone retrospective
 
-**Files:** `docs/dogfood-self-improve-milestone.md`
+**Files:** `docs/history/dogfood-self-improve-milestone.md`
 
-- [x] Evidence: PR links, merge times, metrics moved, failures hit, what remains manual — see [`docs/dogfood-self-improve-milestone.md`](../dogfood-self-improve-milestone.md)
+- [x] Evidence: PR links, merge times, metrics moved, failures hit, what remains manual — see [`docs/history/dogfood-self-improve-milestone.md`](../dogfood-self-improve-milestone.md)
 - [x] Explicit claim: “L4 on AgentIT; L5 full on app pinky” (portal Approve & Deliver merge)
 - [x] Explicit non-claim: AutoMode / unattended merge still off
 

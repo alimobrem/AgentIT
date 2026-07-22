@@ -1,6 +1,6 @@
 # Dogfood / session notes (historical)
 
-**Status: historical.** Product pitch: [README.md](../README.md). Product contract / release detail: [release-notes.md](./release-notes.md). Architecture: [architecture.md](./architecture.md). This file preserves dated dogfood/session writeups that used to dominate the README.
+**Status: historical.** Product pitch: [../../README.md](../../README.md). Product contract / release detail: [../release-notes.md](../release-notes.md). Architecture: [../architecture.md](../architecture.md). Index: [README.md](./README.md). This file preserves dated dogfood/session writeups that used to dominate the README. Index: [README.md](./README.md).
 
 **Crisp portal IA (2026-07-22).** [#160](https://github.com/alimobrem/AgentIT/pull/160) — fixed masthead + footer; Assessment/Capabilities/Health/Insights/Onboard/Fleet/Schedules/Decisions density cuts. Summary: [release-notes.md](./release-notes.md#portal-ia-crisp-chrome).
 

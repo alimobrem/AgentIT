@@ -11,119 +11,132 @@
 
 # AgentIT
 
-AgentIT assesses OpenShift apps, matches findings to property-based skills, and opens **quality-filtered** GitOps pull requests. Humans merge on GitHub; Argo CD deploys. Scan is the only PR creator — no auto-merge, no Direct Apply to the cluster.
-
-It runs **on** OpenShift **for** OpenShift (Argo CD, Rollouts, Tekton, optional Kafka / Argo Events). Watchers surface CVEs, SLO breaches, drift, and self-health; a learning loop drafts new skills for human activation.
+**AgentIT scores a repo’s enterprise readiness and opens quality-filtered GitOps PRs so humans merge and Argo CD deploys.**
 
 ## Table of contents
 
+- [Score any repo in 30 seconds](#score-any-repo-in-30-seconds-no-cluster-required)
 - [Core loop](#core-loop)
 - [Quick start](#quick-start)
+- [Works on plain Kubernetes?](#works-on-plain-kubernetes)
+- [Portal journey](#portal-journey)
 - [Deploy to OpenShift](#deploy-to-openshift)
-- [Testing](#testing)
-- [Security](#security)
 - [Docs](#docs)
 - [License](#license)
 
+## Score any repo in 30 seconds (no cluster required)
+
+```bash
+uv sync --extra dev
+uv run agentit assess https://github.com/some-org/some-app --format terminal
+```
+
+Clones the repo, runs seven analyzers (+ `mode: detect` skills), prints an overall score and findings. No OpenShift cluster, no Postgres, no LLM required (`--no-llm` forces heuristics; LLM is used only when credentials are present unless you pass `--llm` / `--no-llm`).
+
+How scoring works: [`docs/score-methodology.md`](docs/score-methodology.md).
+
 ## Core loop
 
-1. **Assess** — analyzers + `mode: detect` skills → findings and scores.
-2. **Scan / Onboard** — SkillEngine generates remediations; quality gates open finding-tied PRs (SSA dry-run + clear-evidence simulation).
-3. **Human merge** — review and merge on GitHub.
-4. **Argo deploys** — fleet apps via ApplicationSet → `apps/{app}/` in the gitops repo; AgentIT itself via Application `agentit` → Helm `chart/` in this repo.
+Point AgentIT at a git repo → **assess** → **generate** remediations → **gate** (quality + SSA dry-run) → open PRs → human **operates** (merge) → Argo syncs → watchers / learning **learn**.
 
 ```mermaid
 flowchart LR
-    A["Git repo"] --> B["Assess"]
-    B --> C["Scan"]
-    C --> D["Quality filter + dry-run"]
+    A["Repo"] --> B["Assess"]
+    B --> C["Generate"]
+    C --> D["Gate"]
     D --> E["Open PRs"]
     E --> F["Human merge"]
-    F --> G["Argo sync"]
+    F --> G["Argo operate"]
+    G --> H["Learn"]
 ```
 
-| | Fleet apps | AgentIT itself |
-| --- | --- | --- |
-| Desired state | `agentit-gitops` `apps/{app}/` | This repo: `chart/`, `skills/`, `src/` |
-| Argo | ApplicationSet (`directory.recurse`) | Application `agentit` (Helm) |
+| Step | What happens |
+| --- | --- |
+| **Assess** | 7 dimensions → findings + scores |
+| **Generate** | SkillEngine matches findings to skills; Scan/onboard produces remediations |
+| **Gate** | Finding-tied PRs only; SSA dry-run + clear-evidence simulation |
+| **Operate** | Human merges on GitHub; Argo CD deploys (Scan HITL — no auto-merge) |
+| **Learn** | Watchers surface drift/CVEs/SLOs; learning drafts skills for human activation |
 
-Product contract detail, solution contracts, and portal IA notes: [`docs/release-notes.md`](docs/release-notes.md).
+Fleet apps land under `apps/{app}/` in the gitops repo (ApplicationSet). AgentIT itself deploys from this repo’s Helm `chart/` via Application `agentit`.
 
 ## Quick start
 
-Requires **Python >= 3.12** and [`uv`](https://docs.astral.sh/uv/). **Postgres is required** — set `AGENTIT_DB_DSN`.
+Requires **Python ≥ 3.12** and [`uv`](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/alimobrem/AgentIT.git
 cd AgentIT
 uv sync --extra dev
 
-# Assess a repo
+# 1) Score a repo (no cluster)
 uv run agentit assess https://github.com/some-org/some-app --format terminal
 
-# Full pipeline (assess + skills + validate)
+# 2) Assess + generate hardening manifests locally
 uv run agentit onboard https://github.com/some-org/some-app --output-dir ./out
 
-# Local portal
+# 3) Local portal (needs Postgres: AGENTIT_DB_DSN)
 uv run agentit portal --port 8080
 # open http://localhost:8080
 ```
 
-Add `--llm` for Claude-backed reasoning (or set `ANTHROPIC_API_KEY` / Vertex env). Useful CLI: `orchestrate`, `watch`, `self-assess`, `self-fix`, `learn`, `test-skill`, `activate-skill`, `propose-watch`.
-
-**Portal:** Ledger (`/`) is ops home; Fleet is the scoreboard; Assessment Detail drives Assess → Scan; Capabilities holds Checks & resolutions / Skills / Activity. Fixed masthead + footer. Assessment Notices auto-open for `success`/`warning` query flashes (e.g. Register for GitOps). EDL: [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md).
+Useful commands: `self-assess`, `watch`, `learn`, `test-skill`, `activate-skill`. Full list: `uv run agentit --help`.
 
 <details>
 <summary><b>Environment variables</b></summary>
 
 | Variable | Purpose |
 |---|---|
-| `AGENTIT_DB_DSN` | Postgres DSN (required) |
-| `ANTHROPIC_API_KEY` or Vertex (`ANTHROPIC_VERTEX_PROJECT_ID` + `CLOUD_ML_REGION`) | LLM |
+| `AGENTIT_DB_DSN` | Postgres DSN (**required** for portal / fleet / watchers) |
+| `ANTHROPIC_API_KEY` or Vertex (`ANTHROPIC_VERTEX_PROJECT_ID` + `CLOUD_ML_REGION`) | Optional LLM |
 | `GITHUB_TOKEN` | PR create / infra-repo / webhooks |
 | `AGENTIT_KAFKA_BOOTSTRAP` | Kafka (optional; no-op if unset) |
-| `AGENTIT_EXTERNAL_URL` | Trusted public base URL for outbound registrations |
+| `AGENTIT_EXTERNAL_URL` | Public base URL for outbound registrations |
 | `AGENTIT_AGENT_MODE` | `local` (default) or `kubernetes` Jobs |
 | `AGENTIT_OFFLINE` | `1` — hard-stop kube client (tests/review) |
 
 </details>
 
+## Works on plain Kubernetes?
+
+| Capability | OpenShift (supported) | Plain Kubernetes |
+| --- | --- | --- |
+| `agentit assess` / local CLI | Yes | Yes — no cluster needed |
+| Portal + Postgres store | Yes (bundled chart) | Possible with your own Postgres; chart targets OpenShift |
+| Browser auth (`auth.enabled`) | OpenShift oauth-proxy + Route | Not the same path — bring your own ingress/IdP |
+| GitOps deploy | Argo CD Application / ApplicationSet | Argo CD works; chart assumes OpenShift-friendly defaults |
+| Self-deploy (Rollouts, Tekton `agentit-ci`, ImageStreams) | Hard-requires OpenShift Pipelines / Rollouts as charted | Degrades — use your own CI promote path |
+| Watchers (drift, vuln, SLO, self-health) | Designed for this stack | Partial — kube client works; OpenShift-only APIs/CRDs skip or warn |
+
+**Bottom line:** scoring and local generation are cluster-agnostic. Full operate loop (portal, Scan → PR → Argo, watchers) is built and tested for OpenShift.
+
+## Portal journey
+
+**Primary path:** Assess → Findings → Scan opens PRs → merge on GitHub → Argo deploys → Fleet/Ledger for day-2.
+
+**Operator / advanced:** Events, Decisions, DLQ, Ledger detail, Agents/Capabilities activity. See [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md).
+
 ## Deploy to OpenShift
 
-Helm chart in `chart/` + Argo CD Application in `argocd/application.yaml`. **Argo is the sole deployer** — never `helm upgrade` or `oc edit` the Rollout by hand. Merge to `main` alone does not move the portal: Tekton `agentit-ci` builds, smokes, then `notify-argocd` pins `image.tag`.
+Helm chart in `chart/` + Argo CD Application in `argocd/application.yaml`. Argo is the deployer: merge to `main` alone does not move the portal — Tekton `agentit-ci` builds, smokes, then pins `image.tag`.
 
-Ops runbook: [`docs/deployment.md`](docs/deployment.md). Topology: [`docs/architecture.md`](docs/architecture.md).
-
-## Testing
-
-```bash
-uv run pytest -q
-uv run pytest tests/test_portal_edl.py -q
-uv run python scripts/check_portal_edl.py
-```
-
-Browser-critical journeys (Playwright) run in GitHub Actions; locally: `uv sync --extra browser && uv run playwright install chromium && uv run pytest tests/test_browser_critical.py --browser-tests -q`.
-
-## Security
-
-- Opt-in browser auth via `auth.enabled` (oauth-proxy). CSRF always on for browser mutations.
-- Internal `/api/webhook/*` requires `X-Internal-Webhook-Token`; GitHub push uses HMAC.
-- Secrets never in Git. Delivery always stops at a PR — human merge only.
-- Details: [`docs/deployment.md#authentication`](docs/deployment.md#authentication).
+Ops: [`docs/deployment.md`](docs/deployment.md). Topology: [`docs/architecture.md`](docs/architecture.md).
 
 ## Docs
 
 | Doc | Role |
 | --- | --- |
-| [`docs/README.md`](docs/README.md) | Docs index |
+| [`docs/score-methodology.md`](docs/score-methodology.md) | **Score dimensions, weights, PR impact** |
 | [`docs/architecture.md`](docs/architecture.md) | System diagrams, Scan pipeline |
 | [`docs/architecture-agentit-vs-fleet-gitops.md`](docs/architecture-agentit-vs-fleet-gitops.md) | Self-managed vs fleet delivery |
-| [`docs/plan-quality-helpful-prs.md`](docs/plan-quality-helpful-prs.md) | Quality PR Phases A–F |
+| [`docs/release-notes.md`](docs/release-notes.md) | Product contract (Scan HITL, contracts, portal IA) |
+| [`CHANGELOG.md`](CHANGELOG.md) | Version history (Keep a Changelog) |
+| [`docs/adr/`](docs/adr/) | Architecture Decision Records |
 | [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md) | Portal EDL |
-| [`docs/release-notes.md`](docs/release-notes.md) | **Release notes** (contracts, portal IA, promotion) |
-| [`docs/changelog-dogfood-notes.md`](docs/changelog-dogfood-notes.md) | Dated dogfood / session writeups |
-
-Skills live under `skills/` (~67 across 14 domains; ~20 `mode: detect`). Optional source patches: CodeChangeAgent. Capability-scout: [`docs/self-improvement-for-agentit.md`](docs/self-improvement-for-agentit.md).
+| [`docs/plan-quality-helpful-prs.md`](docs/plan-quality-helpful-prs.md) | Quality PR rules |
+| [`docs/compare.md`](docs/compare.md) | Short differentiators |
+| [`docs/history/`](docs/history/) | Session notes, plans, audits (not product truth) |
+| [`docs/README.md`](docs/README.md) | Docs index |
 
 ## License
 

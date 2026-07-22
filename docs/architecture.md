@@ -1,6 +1,6 @@
 # Architecture
 
-How AgentIT is put together **as of merged `main` (post-dogfood, 2026-07)**: skills-primary Scan HITL, GitOps-only deploy, self-managed vs fleet delivery. Setup/usage: [README](../README.md). Docs index: [README.md](./README.md).
+How AgentIT is put together: skills-primary Scan HITL, GitOps-only deploy, self-managed vs fleet delivery. Setup/usage: [README](../README.md). Score math: [score-methodology.md](./score-methodology.md). Docs index: [README.md](./README.md).
 
 ## Table of Contents
 
@@ -15,7 +15,7 @@ How AgentIT is put together **as of merged `main` (post-dogfood, 2026-07)**: ski
 - [Deployment topology (OpenShift)](#deployment-topology-openshift)
 - [Agents & watchers](#agents--watchers)
 - [Assessment dimensions](#assessment-dimensions)
-- [Obsolete paths (do not document as live)](#obsolete-paths-do-not-document-as-live)
+- [Out of scope](#out-of-scope)
 
 ## System overview
 
@@ -79,7 +79,7 @@ graph TB
     Portal --> Store
 ```
 
-**Deploy path is always:** PR opened by Scan → human merges on GitHub → Argo syncs. There is no Direct Apply and no AutoMode auto-merge.
+**Deploy path is always:** PR opened by Scan → human merges on GitHub → Argo syncs ([ADR 0001](./adr/0001-gitops-scan-hitl.md)).
 
 ## Cluster access (`kube.py`)
 
@@ -146,9 +146,9 @@ Lifecycle: `draft` → `active` → `deprecated` → `retired`. Activate opens a
 ## Self-improvement loops
 
 1. **Skills catalog** — outcomes from merge/finding-clear; learning agent drafts; HITL Activate; drift auto-deprecates.
-2. **AgentIT itself** — `capability-scout` proposes one evidence-cited change as a draft PR against this repo (never auto-merge). See [self-improvement-for-agentit.md](./self-improvement-for-agentit.md).
+2. **AgentIT itself** — `capability-scout` proposes one evidence-cited change as a draft PR against this repo (never auto-merge). Historical design notes: [history/self-improvement-for-agentit.md](./history/self-improvement-for-agentit.md).
 
-There is **no** autonomous “detect → apply to cluster → verify” AutoMode loop. Watchers alert; humans Assess/Scan.
+Watchers alert; humans Assess/Scan. Deploy is always PR → merge → Argo.
 
 ## Platform awareness & API drift
 
@@ -199,6 +199,8 @@ Cost/dependency **Python agents** and **Per-Agent PRs** are removed.
 
 ## Assessment dimensions
 
+Full scoring math (penalties, overall average, PR impact): [score-methodology.md](./score-methodology.md).
+
 | Dimension | Analyzer | Detections (skills) | Examples |
 | --- | --- | --- | --- |
 | `security` | SecurityAnalyzer | containerfile-exists, network-policy-exists, secrets-scanning-in-ci | `:latest`, missing NetPol, secrets in CI |
@@ -209,17 +211,10 @@ Cost/dependency **Python agents** and **Per-Agent PRs** are removed.
 | `data_governance` | DataGovernanceAnalyzer | backup-config-exists, retention-policy-exists | backup, retention |
 | `ha_dr` | HADRAnalyzer | hpa-exists, pdb-exists, multi-replica-deployment | HPA, PDB, replicas |
 
-Remediation skills (e.g. `infrastructure/hpa`, `helm-chart`, `health-probes-policy`) are separate from `mode: detect` skills. Some categories remain detect-only (e.g. `secrets`, `license`, `backup`) until a real remediation skill exists — wrong-skill trigger fallbacks are stripped so Scan does not open junk PRs.
+Remediation skills (e.g. `infrastructure/hpa`, `helm-chart`, `health-probes-policy`) are separate from `mode: detect` skills. Some categories remain detect-only (e.g. `secrets`, `license`, `backup`) — Scan does not open PRs for those.
 
-## Obsolete paths (do not document as live)
+## Out of scope
 
-| Removed / rejected | Reality |
-| --- | --- |
-| Direct Apply | Fail closed without GitOps; Argo sole deployer |
-| Per-Agent PRs / `create-agent-prs` | Deleted; Scan only |
-| AutoMode / auto-merge | Removed; HITL merge |
-| In-app gates table / Approve & Deliver | Ledger + GitHub |
-| `apps/agentit/` in gitops for AgentIT | Self-managed → AgentIT.git |
-| “Fully autonomous apply pipeline” | Not the product |
+Supported operate path is Scan → PR → human merge → Argo only. AgentIT does not: live-mutate the cluster from portal Deliver, auto-merge its own PRs, open per-agent PR factories, or deploy self-managed AgentIT into `apps/agentit/` in gitops.
 
-Historical design writeups: [unified-apply-flow.md](./unified-apply-flow.md), [changelog-dogfood-notes.md](./changelog-dogfood-notes.md), [onboarding-loop-vision-gap-analysis.md](./onboarding-loop-vision-gap-analysis.md).
+Historical design / session writeups: [history/](./history/).
