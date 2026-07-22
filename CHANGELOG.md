@@ -26,6 +26,7 @@ Product contract detail: [`docs/release-notes.md`](docs/release-notes.md).
 
 ### Changed
 
+- Portal footer is an action-feedback status strip (no duplicated nav links); toasts mirror into it.
 - Clone SSRF: HTTPS-only; DNS resolution fail-closed; reject private answers (pair with egress NetworkPolicy for hard pin).
 - README is the product front door (~100–150 lines); history and contracts moved out.
 - Scan HITL + GitOps-only delivery is the documented operate path (see [ADR 0001](docs/adr/0001-gitops-scan-hitl.md)).

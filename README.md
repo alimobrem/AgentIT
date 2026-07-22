@@ -114,7 +114,7 @@ Useful commands: `self-assess`, `watch`, `learn`, `test-skill`, `activate-skill`
 
 **Primary spine:** Fleet → Assessment Detail → Ledger (assess → findings → merge PR → operate). Empty fleets land on Fleet’s guided empty state; once apps exist, `/` redirects to Ledger.
 
-**Operate (Menu):** Health, Insights, Events, Decisions, DLQ, Schedules. See [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md).
+**Operate (Menu):** Health, Insights, Events, Decisions, DLQ, Schedules. The fixed footer is an action-status strip (not a second nav). See [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md).
 
 ## Deploy to OpenShift
 

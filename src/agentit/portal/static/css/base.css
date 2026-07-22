@@ -230,8 +230,8 @@
   h2 { font-family: var(--font-display); font-size: 1.15rem; color: var(--color-heading); margin: var(--space-7) 0 var(--space-4); letter-spacing: -0.3px; }
 
   /* ── Site footer (fixed bottom chrome) ─────────────────────────────
-     Compact secondary links; stays below Events drawer (250+) and
-     modals/command palette (400). */
+     Action feedback status strip (not a second nav). Stays below Events
+     drawer (250+) and modals/command palette (400). */
   .site-footer {
     position: fixed;
     bottom: 0;
@@ -250,19 +250,37 @@
     font-size: var(--font-xs);
     color: var(--color-muted);
   }
-  .site-footer-links {
+  .site-footer-status {
     display: flex;
     align-items: center;
-    gap: var(--space-5);
+    gap: var(--space-2);
     min-width: 0;
-    overflow-x: auto;
-    flex-wrap: nowrap;
-    scrollbar-width: thin;
+    flex: 1;
   }
-  .site-footer-links a {
-    color: var(--color-muted);
+  .site-footer-status-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--color-muted);
+  }
+  .site-footer-status-dot.status-idle { background: var(--color-muted); opacity: 0.55; }
+  .site-footer-status-dot.status-info { background: var(--color-info); }
+  .site-footer-status-dot.status-success { background: var(--color-success); }
+  .site-footer-status-dot.status-warning { background: var(--color-warning); }
+  .site-footer-status-dot.status-error { background: var(--color-danger); }
+  .site-footer-status-msg {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
+    color: var(--color-text);
   }
-  .site-footer-links a:hover { color: var(--color-text); text-decoration: none; }
+  .site-footer-status-dot.status-idle + .site-footer-status-msg { color: var(--color-muted); }
   .site-footer-meta { flex-shrink: 0; white-space: nowrap; }
+  .site-footer-repo {
+    color: var(--color-muted);
+    text-decoration: none;
+  }
+  .site-footer-repo:hover { color: var(--color-text); text-decoration: underline; }
 

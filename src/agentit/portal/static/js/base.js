@@ -194,6 +194,36 @@ function confirmModal() {
   };
 }
 
+// Footer action-feedback strip (fixed chrome). Idle until showToast /
+// HTMX error paths push a message; auto-clears back to Ready.
+function actionFeedback() {
+  return {
+    message: 'Ready',
+    type: 'idle',
+    _timer: null,
+    show(message, type, duration) {
+      type = type || 'info';
+      duration = (duration === undefined) ? 8000 : duration;
+      this.message = message;
+      this.type = type;
+      if (this._timer) clearTimeout(this._timer);
+      var self = this;
+      if (duration > 0) {
+        this._timer = setTimeout(function() {
+          self.message = 'Ready';
+          self.type = 'idle';
+          self._timer = null;
+        }, duration);
+      }
+    }
+  };
+}
+function setActionFeedback(message, type, duration) {
+  var el = document.getElementById('action-feedback');
+  if (el && window.Alpine && Alpine.$data(el)) {
+    Alpine.$data(el).show(message, type, duration);
+  }
+}
 // Toast notification manager
 function toastManager() {
   return {
@@ -204,6 +234,9 @@ function toastManager() {
       duration = (duration === undefined) ? 5000 : duration;
       var id = ++this._id;
       this.toasts.push({ id: id, message: message, type: type, visible: true });
+      // Mirror into the footer status strip so action outcomes stay visible
+      // in fixed chrome even after the floating toast dismisses.
+      setActionFeedback(message, type, duration > 0 ? Math.max(duration, 8000) : 0);
       var self = this;
       if (duration > 0) setTimeout(function() { self.dismiss(id); }, duration);
     },
@@ -223,6 +256,7 @@ function toastManager() {
 function showToast(message, type, duration) {
   var tm = document.getElementById('toasts');
   if (tm && Alpine.$data(tm)) Alpine.$data(tm).show(message, type, duration);
+  else setActionFeedback(message, type, duration);
 }
 // Auto-show toasts from URL params. Must wait for 'alpine:initialized' (fires
 // once ALL components on the page have been initialized), not 'alpine:init'

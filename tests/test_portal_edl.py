@@ -136,7 +136,10 @@ async def test_base_shell_has_toasts_confirm_dialog_and_events_drawer(edl_client
     assert 'id="events-drawer"' in html
     assert 'href="/decisions"' in html
     assert 'class="site-footer"' in html
-    assert "AgentIT · Scan HITL" in html
+    assert 'id="action-feedback"' in html
+    assert "site-footer-links" not in html
+    assert "github.com/alimobrem/AgentIT" in html
+    assert "Scan HITL" in html
     assert 'id="main-content"' in html
     assert 'class="skip-link"' in html
 
