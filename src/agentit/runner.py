@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import contextvars
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,10 +14,24 @@ from agentit.analyzers.ha_dr import HADRAnalyzer
 from agentit.analyzers.infrastructure import InfrastructureAnalyzer
 from agentit.analyzers.observability import ObservabilityAnalyzer
 from agentit.analyzers.security import SecurityAnalyzer
+from agentit.analyzers.snapshot import RepoSnapshot, use_snapshot
 from agentit.analyzers.stack_detector import StackDetector
 from agentit.check_engine import load_checks, run_checks_by_dimension_with_status
 from agentit.models import (
     ArchitectureInfo, AssessmentReport, DimensionScore, RemediationItem, Severity,
+)
+
+log = logging.getLogger(__name__)
+
+# Stable analyzer order for deterministic DimensionScore list after concurrent run.
+_ANALYZER_ORDER = (
+    "security",
+    "observability",
+    "cicd",
+    "infrastructure",
+    "compliance",
+    "data_governance",
+    "ha_dr",
 )
 
 AGENT_MAP = {
@@ -84,60 +101,76 @@ def run_assessment(
     same "populate then persist once an assessment_id exists" pattern as
     `check_results_out`.
     """
-    detector = StackDetector()
-    stack = detector.detect(repo_path)
-
-    architecture = _detect_architecture(repo_path)
-
-    analyzers = [
-        SecurityAnalyzer(llm_client=llm_client, secret_decisions_out=secret_decisions_out),
-        ObservabilityAnalyzer(),
-        CICDAnalyzer(),
-        InfrastructureAnalyzer(llm_client=llm_client),
-        ComplianceAnalyzer(),
-        DataGovernanceAnalyzer(),
-        HADRAnalyzer(),
-    ]
-
-    scores = [analyzer.analyze(repo_path) for analyzer in analyzers]
-
-    # Fleet remediations (ResourceQuota/HPA) land in gitops → Argo → live
-    # namespace. Source-only analyzers never see them; clear quota/scaling
-    # when the live namespace already has the resource (finding-clear proof).
-    repo_name_early = repo_url.rstrip("/").split("/")[-1].removesuffix(".git")
-    from agentit.analyzers.live_evidence import apply_live_cluster_finding_clear
-    scores = apply_live_cluster_finding_clear(scores, repo_name_early)
-
-    # Run data-driven checks -- both legacy checks/*.yaml files and
-    # mode: detect Markdown skills (docs/extension-model-unification-plan-2026-07-18.md,
-    # Phase 1) -- and merge findings into dimension scores.
-    resolved_checks_dir = checks_dir if checks_dir is not None else _default_checks_dir()
-    check_defs = load_checks(resolved_checks_dir)
-
-    resolved_skills_dir = skills_dir if skills_dir is not None else _default_skills_dir()
-    from agentit.skill_engine import detect_check_definitions, load_all_skills
-    check_defs = check_defs + detect_check_definitions(load_all_skills(resolved_skills_dir))
-
-    if check_defs:
-        scores, check_statuses = _merge_check_findings(scores, check_defs, repo_path)
-        if check_results_out is not None:
-            check_results_out.extend(check_statuses)
-
-    if suppressions:
-        scores = _apply_suppressions(scores, suppressions)
-
-    remediation_plan = generate_remediation_plan(scores)
-
-    repo_name = repo_url.rstrip("/").split("/")[-1].removesuffix(".git")
-
-    summary = _generate_summary(scores, repo_name)
-    if llm_client is not None:
-        llm_summary = llm_client.summarize_architecture(
-            stack.model_dump(),
-            [str(p.relative_to(repo_path)) for p in repo_path.rglob("*") if p.is_file() and not is_ignored(p, repo_path)],
+    # Analyzers call Path.relative_to(repo_path); snapshot paths are absolute
+    # under the resolved root — keep one canonical path for the whole run.
+    repo_path = repo_path.resolve()
+    snapshot = RepoSnapshot.build(repo_path)
+    if snapshot.skipped_oversized:
+        log.debug(
+            "RepoSnapshot skipped %d oversized file(s) under %s",
+            snapshot.skipped_oversized, repo_path,
         )
-        if llm_summary is not None:
-            summary = llm_summary
+
+    with use_snapshot(snapshot):
+        detector = StackDetector()
+        stack = detector.detect(repo_path)
+
+        architecture = _detect_architecture(repo_path, snapshot)
+
+        analyzers = [
+            SecurityAnalyzer(llm_client=llm_client, secret_decisions_out=secret_decisions_out),
+            ObservabilityAnalyzer(),
+            CICDAnalyzer(),
+            InfrastructureAnalyzer(llm_client=llm_client),
+            ComplianceAnalyzer(),
+            DataGovernanceAnalyzer(),
+            HADRAnalyzer(),
+        ]
+
+        scores = _run_analyzers_concurrent(analyzers, repo_path)
+
+        # Fleet remediations (ResourceQuota/HPA) land in gitops → Argo → live
+        # namespace. Source-only analyzers never see them; clear quota/scaling
+        # when the live namespace already has the resource (finding-clear proof).
+        repo_name_early = repo_url.rstrip("/").split("/")[-1].removesuffix(".git")
+        from agentit.analyzers.live_evidence import apply_live_cluster_finding_clear
+        scores = apply_live_cluster_finding_clear(scores, repo_name_early)
+
+        # Run data-driven checks -- both legacy checks/*.yaml files and
+        # mode: detect Markdown skills (docs/extension-model-unification-plan-2026-07-18.md,
+        # Phase 1) -- and merge findings into dimension scores.
+        resolved_checks_dir = checks_dir if checks_dir is not None else _default_checks_dir()
+        check_defs = load_checks(resolved_checks_dir)
+
+        resolved_skills_dir = skills_dir if skills_dir is not None else _default_skills_dir()
+        from agentit.skill_engine import detect_check_definitions, load_all_skills
+        check_defs = check_defs + detect_check_definitions(load_all_skills(resolved_skills_dir))
+
+        check_statuses: list[dict] = []
+        if check_defs:
+            scores, check_statuses = _merge_check_findings(scores, check_defs, repo_path)
+            if check_results_out is not None:
+                check_results_out.extend(check_statuses)
+
+        if suppressions:
+            scores = _apply_suppressions(scores, suppressions)
+
+        # Score model v2: pass-ratio per dimension + criticality weights.
+        from agentit.scoring import SCORE_VERSION_V2, apply_score_model_v2
+        scores = apply_score_model_v2(scores, check_statuses, criticality)
+
+        remediation_plan = generate_remediation_plan(scores)
+
+        repo_name = repo_url.rstrip("/").split("/")[-1].removesuffix(".git")
+
+        summary = _generate_summary(scores, repo_name)
+        if llm_client is not None:
+            llm_summary = llm_client.summarize_architecture(
+                stack.model_dump(),
+                snapshot.file_paths(),
+            )
+            if llm_summary is not None:
+                summary = llm_summary
 
     return AssessmentReport(
         repo_url=repo_url,
@@ -150,7 +183,37 @@ def run_assessment(
         summary=summary,
         remediation_plan=remediation_plan,
         infra_repo_url=infra_repo_url or None,
+        score_version=SCORE_VERSION_V2,
     )
+
+
+def _run_analyzers_concurrent(analyzers: list, repo_path: Path) -> list[DimensionScore]:
+    """Run analyzers in a thread pool; preserve stable dimension order."""
+    if len(analyzers) <= 1:
+        return [a.analyze(repo_path) for a in analyzers]
+
+    by_dim: dict[str, DimensionScore] = {}
+    max_workers = min(8, len(analyzers))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        # Fresh copy_context() per submit so workers inherit the active
+        # RepoSnapshot without sharing one entered Context object.
+        futures = {
+            pool.submit(contextvars.copy_context().run, analyzer.analyze, repo_path): analyzer
+            for analyzer in analyzers
+        }
+        for fut in as_completed(futures):
+            analyzer = futures[fut]
+            try:
+                score = fut.result()
+            except Exception:
+                log.exception("Analyzer %s failed", getattr(analyzer, "dimension", analyzer))
+                raise
+            by_dim[score.dimension] = score
+
+    ordered = [by_dim[d] for d in _ANALYZER_ORDER if d in by_dim]
+    # Any unexpected dimensions append deterministically.
+    extras = sorted(d for d in by_dim if d not in _ANALYZER_ORDER)
+    return ordered + [by_dim[d] for d in extras]
 
 
 def _merge_check_findings(
@@ -259,27 +322,19 @@ def generate_remediation_plan(scores: list[DimensionScore]) -> list[RemediationI
     ]
 
 
-def _detect_architecture(repo_path: Path) -> ArchitectureInfo:
+def _detect_architecture(
+    repo_path: Path,
+    snapshot: RepoSnapshot | None = None,
+) -> ArchitectureInfo:
     service_count = 1
     has_api = False
     api_style = None
     auth_mechanism = None
 
-    docker_composes = list(repo_path.glob("docker-compose*.y*ml"))
-    if docker_composes:
-        for dc in docker_composes:
-            content = dc.read_text(errors="ignore")
-            service_count = content.count("image:") + content.count("build:")
+    code_exts = {".py", ".go", ".java", ".js", ".ts"}
 
-    for fp in repo_path.rglob("*"):
-        if not fp.is_file() or is_ignored(fp, repo_path):
-            continue
-        if fp.suffix.lower() not in {".py", ".go", ".java", ".js", ".ts"}:
-            continue
-        try:
-            content = fp.read_text(errors="ignore")
-        except OSError:
-            continue
+    def _scan_content(content: str) -> None:
+        nonlocal has_api, api_style, auth_mechanism
         content_lower = content.lower()
         if any(kw in content_lower for kw in ["router", "endpoint", "handler", "@app.route", "@api", "http.handle"]):
             has_api = True
@@ -294,6 +349,37 @@ def _detect_architecture(repo_path: Path) -> ArchitectureInfo:
         elif any(kw in content_lower for kw in ["basic auth", "basicauth", "session", "cookie"]):
             if auth_mechanism is None:
                 auth_mechanism = "basic/session"
+
+    def _compose_service_count(content: str) -> int:
+        # Avoid double-counting a service that has both image: and build:.
+        return max(content.count("image:"), content.count("build:"), 1)
+
+    if snapshot is not None:
+        for rel, content in snapshot.files.items():
+            name = Path(rel).name
+            if name.startswith("docker-compose") and rel.endswith((".yml", ".yaml")):
+                service_count = max(service_count, _compose_service_count(content))
+            if Path(rel).suffix.lower() not in code_exts:
+                continue
+            _scan_content(content)
+    else:
+        docker_composes = list(repo_path.glob("docker-compose*.y*ml"))
+        if docker_composes:
+            for dc in docker_composes:
+                service_count = max(
+                    service_count,
+                    _compose_service_count(dc.read_text(errors="ignore")),
+                )
+
+        for fp in repo_path.rglob("*"):
+            if not fp.is_file() or is_ignored(fp, repo_path):
+                continue
+            if fp.suffix.lower() not in code_exts:
+                continue
+            try:
+                _scan_content(fp.read_text(errors="ignore"))
+            except OSError:
+                continue
 
     style = "monolith" if service_count <= 1 else "multi-service"
     if service_count > 3:

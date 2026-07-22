@@ -279,8 +279,24 @@ async def _attach_pr_counts(fleet: list[dict], s: object) -> None:
 
 @router.get("/")
 async def home() -> RedirectResponse:
-    """Ops home is the Ledger (Needs You inbox) — Fleet is the scoreboard at /fleet."""
+    """First-run → Fleet guided empty state; otherwise Ledger inbox."""
+    s = await get_store()
+    fleet = await s.get_fleet_data()
+    if not fleet:
+        return RedirectResponse(url="/fleet", status_code=302)
     return RedirectResponse(url="/ledger", status_code=302)
+
+
+@router.get("/gates")
+async def gates_page_redirect() -> RedirectResponse:
+    """Retired Gates page → Ledger (stale bookmarks)."""
+    return RedirectResponse(url="/ledger", status_code=301)
+
+
+@router.get("/api/gates")
+async def api_gates_retired() -> RedirectResponse:
+    """Retired JSON gates API → Ledger HTML (callers should use PR APIs)."""
+    return RedirectResponse(url="/ledger", status_code=301)
 
 
 @router.get("/fleet", response_class=HTMLResponse)

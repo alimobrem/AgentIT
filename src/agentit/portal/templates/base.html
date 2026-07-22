@@ -38,19 +38,12 @@
 <div class="nav-start">
     <span class="logo">AgentIT</span>
     <div id="nav-primary" class="links" :class="{ 'links-open': navOpen }">
-      {# Exclusive jobs (docs/portal-experience-design-language.md §1):
-         Ledger = fleet-wide PR list/lifecycle (badge = PRs waiting for
-         your approval); Fleet = scoreboard only. Admin Review (a third,
-         elevated-queue nav item) was retired 2026-07-18 along with the
-         `cluster-admin-review` gate type it existed solely for -- every
-         gate type is per-app now, so there's no longer a cross-app queue
-         to link here. #}
+      {# Primary spine: Fleet (scoreboard / first-run) → Assessment (via
+         Fleet rows) → Ledger (PR inbox). Operator surfaces live under Menu. #}
+      <a href="/fleet" class="{{ 'nav-active' if request.url.path.startswith('/fleet') or request.url.path.startswith('/assessments') }}">Fleet</a>
       <a href="/ledger" class="{{ 'nav-active' if request.url.path == '/' or request.url.path.startswith('/ledger') }}">Ledger
         {% if nav_pending_actions %}<span class="nav-badge">{{ nav_pending_actions }}</span>{% endif %}
       </a>
-      <a href="/fleet" class="{{ 'nav-active' if request.url.path.startswith('/fleet') or request.url.path.startswith('/assessments') }}">Fleet</a>
-      <a href="/health" class="{{ 'nav-active' if request.url.path.startswith('/health') }}">Health</a>
-      <a href="/insights" class="{{ 'nav-active' if request.url.path == '/insights' }}">Insights</a>
     </div>
   </div>
   <div class="nav-end">
@@ -99,17 +92,19 @@
         </button>
         <div id="user-menu-dropdown" class="user-menu-dropdown" x-show="open" x-cloak x-transition.opacity.duration.100ms
              @click.outside.capture="open = false" @click="open = false" role="menu">
-          <a href="/capabilities" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/capabilities' or request.url.path.startswith('/agents') }}">Capabilities</a>
-          <a href="/settings" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/settings' }}">Settings</a>
+          <div class="user-menu-section-label" role="presentation">Operate</div>
+          <a href="/health" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/health') }}">Health</a>
+          <a href="/insights" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/insights' }}">Insights</a>
           <a href="/schedules" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/schedules' }}">Schedules</a>
-          {# aria-label + aria-describedby (rather than letting the sub-span's
-             text run into the link's accessible name by default) so a screen
-             reader announces "Decisions, Audit log — Events owns the stream"
-             as label + description, not one run-on name. #}
+          <a href="/events" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/events') }}">Events</a>
           <a href="/decisions" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/decisions') }}"
              aria-label="Decisions" aria-describedby="user-menu-decisions-sub">Decisions
             <span class="user-menu-item-sub" id="user-menu-decisions-sub">Audit log — Events owns the stream</span>
           </a>
+          <a href="/dlq" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path.startswith('/dlq') }}">DLQ</a>
+          <div class="user-menu-divider"></div>
+          <a href="/capabilities" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/capabilities' or request.url.path.startswith('/agents') }}">Capabilities</a>
+          <a href="/settings" role="menuitem" class="user-menu-item {{ 'nav-active' if request.url.path == '/settings' }}">Settings</a>
           {% if is_authenticated %}
           <div class="user-menu-divider"></div>
           <div class="user-menu-info">Logged in as {{ current_user }}</div>

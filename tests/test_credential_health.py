@@ -26,7 +26,8 @@ from conftest import prime_csrf
 
 
 @pytest.fixture
-async def client():
+async def client(monkeypatch):
+    monkeypatch.setenv("AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS", "1")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", follow_redirects=True) as c:
         await prime_csrf(c)
         yield c
@@ -108,7 +109,10 @@ def test_credential_states_github_token_missing(monkeypatch):
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     states = get_credential_states()
     assert states["github-token"] == {
-        "ok": False, "status": "missing", "detail": "GITHUB_TOKEN is not set",
+        "ok": False,
+        "status": "missing",
+        "detail": "GITHUB_TOKEN is not set",
+        "blocking": False,
     }
 
 
@@ -136,9 +140,11 @@ def test_credential_states_github_token_invalid(monkeypatch):
 def test_credential_states_webhook_secret_missing(monkeypatch):
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
+    monkeypatch.delenv("AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS", raising=False)
     states = get_credential_states()
     assert states["github-webhook-secret"]["ok"] is False
     assert states["github-webhook-secret"]["status"] == "missing"
+    assert states["github-webhook-secret"]["blocking"] is True
 
 
 def test_credential_states_webhook_secret_configured(monkeypatch):
@@ -147,6 +153,16 @@ def test_credential_states_webhook_secret_configured(monkeypatch):
     states = get_credential_states()
     assert states["github-webhook-secret"]["ok"] is True
     assert states["github-webhook-secret"]["status"] == "configured"
+    assert states["github-webhook-secret"]["blocking"] is False
+
+
+def test_credential_states_internal_token_missing_is_blocking(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("AGENTIT_INTERNAL_WEBHOOK_TOKEN", raising=False)
+    monkeypatch.delenv("AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS", raising=False)
+    states = get_credential_states()
+    assert states["internal-webhook-token"]["ok"] is False
+    assert states["internal-webhook-token"]["blocking"] is True
 
 
 # ── helpers.py: get_credential_states -- LLM backend ─────────────────────
@@ -250,8 +266,9 @@ async def test_health_page_shows_credentials_section(client, monkeypatch):
     assert "llm-backend" in resp.text
 
     gh_row = _row(resp.text, "github-token")
-    assert "row-border-red" in gh_row
-    assert "badge-critical" in gh_row
+    # Missing GitHub token is important but not webhook-blocking → warning row.
+    assert "row-border-yellow" in gh_row
+    assert "badge-medium" in gh_row
     assert "Missing" in gh_row
 
 
@@ -294,7 +311,7 @@ async def test_health_page_credentials_render_red_when_token_invalid(client, mon
 
     assert resp.status_code == 200
     gh_row = _row(resp.text, "github-token")
-    assert "row-border-red" in gh_row
+    assert "row-border-yellow" in gh_row
     assert "Invalid" in gh_row
     assert "expired" in gh_row.lower() or "invalid" in gh_row.lower()
 

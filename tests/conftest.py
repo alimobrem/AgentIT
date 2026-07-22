@@ -534,7 +534,10 @@ async def portal_client():
         "kafka_stats": {"available": False, "topics": {}, "consumer_groups": []},
     }
 
-    with patch("agentit.portal.app.get_store", return_value=store), \
+    # Portal tests exercise webhook routes without mounting production
+    # secrets — opt into the documented local-dev fail-open escape hatch.
+    with patch.dict(os.environ, {"AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS": "1"}, clear=False), \
+         patch("agentit.portal.app.get_store", return_value=store), \
          patch("agentit.portal.helpers.get_store", return_value=store), \
          patch("agentit.portal.helpers._store", store), \
          patch("agentit.portal.routes.webhooks.get_store", return_value=store), \

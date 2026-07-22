@@ -1,22 +1,25 @@
 # AgentIT score methodology
 
-How AgentIT turns a git repository into an **overall score** and per-dimension findings. Source of truth: `src/agentit/models.py`, `src/agentit/analyzers/base.py`, `src/agentit/runner.py`.
+How AgentIT turns a git repository into an **overall score** and per-dimension findings. Source of truth: `src/agentit/scoring.py`, `src/agentit/models.py`, `src/agentit/runner.py`.
 
 ## Quick path
 
 ```bash
 uv run agentit assess <repo-url> --format terminal
-# Heuristics only:
+# Heuristics only (no API key):
 uv run agentit assess <repo-url> --no-llm --format terminal
 # Machine-readable:
 uv run agentit assess <repo-url> --format json --output report.json
 ```
 
-No cluster and no Postgres are required for a single-repo assess (unless you use `--rescan`, which reads the fleet store).
+No cluster and no Postgres are required for a single-repo assess.
+
+Checked-in sample (no install beyond reading the files):
+
+- [`examples/sample-assessment.md`](../examples/sample-assessment.md)
+- [`examples/sample-assessment.json`](../examples/sample-assessment.json)
 
 ## Seven dimensions
-
-Equal contribution to the overall score. Analyzers in `runner.run_assessment()`:
 
 | Dimension | Analyzer | What it looks for (examples) |
 | --- | --- | --- |
@@ -28,56 +31,72 @@ Equal contribution to the overall score. Analyzers in `runner.run_assessment()`:
 | `data_governance` | `DataGovernanceAnalyzer` | Backup / retention posture |
 | `ha_dr` | `HADRAnalyzer` | HPA, PDB, multi-replica |
 
-Each dimension also absorbs findings from `mode: detect` skills (and legacy YAML checks) merged in `runner.py`. Display labels: `portal/helpers.py` (`ha_dr` → “HA/DR”, `cicd` → “CI/CD”, `data_governance` → “Data Governance”).
+Each dimension also absorbs `mode: detect` skills / YAML checks merged in `runner.py`.
 
-## Weights (as implemented)
+## Score model v2 (current)
 
-There are **no per-dimension product weights**. Overall score is the **simple average** of dimension scores:
+New assessments set `score_version: 2` ([ADR 0003](./adr/0003-score-model-v2.md)).
 
-```text
-overall_score = sum(dimension.score) / len(scores)
-```
+### Per-dimension
 
-(`AssessmentReport.model_post_init` in `models.py`.)
+`score = 100 × passed / applicable` over applicable controls:
 
-### Per-dimension score
+- When data-driven checks ran for the dimension: each check row is a control (`passed` true/false). Extra analyzer findings without a matching check add failed controls.
+- When only analyzer findings exist: baseline of 8 controls, each finding counts as one failure.
 
-Each dimension starts at **100** and subtracts severity penalties (`analyzers/base.py` `DEFAULT_PENALTIES` / `calculate_score()`):
+Clamped to `[0, 100]`.
 
-| Severity | Penalty |
+### Overall
+
+Criticality-weighted mean of dimension scores (`scoring.DIMENSION_WEIGHTS`). Security and compliance weigh more for `critical` / `high` apps.
+
+### Letter grades
+
+| Grade | Score |
 | --- | ---: |
-| critical | 25 |
-| high | 20 |
-| medium | 10 |
-| low | 3 |
-| info | 0 |
+| A | ≥ 90 |
+| B | ≥ 80 |
+| C | ≥ 70 (`SCORE_GOOD`) |
+| D | ≥ 40 (`SCORE_OK`) |
+| F | &lt; 40 |
 
-Clamped to `[0, 100]` per dimension (`DimensionScore` validator).
+Portal color bands use the same thresholds (`scoring.score_band`).
+
+## Legacy model v1
+
+Historical reports with `score_version: 1` (or missing): start at 100, subtract severity penalties (`DEFAULT_PENALTIES`), equal average of dimensions. Not used for new assessments.
 
 ## What “enterprise-ready” means here
 
-There is **no shipped numeric threshold** labeled “enterprise-ready” in product code. Practically:
+There is **no shipped certification threshold**. Practically:
 
-- CLI help frames assess as scoring **enterprise readiness** across the seven dimensions.
-- Portal celebrates a **first perfect score** when `overall_score >= 100` (joy copy only — not a gate).
-- Scan quality gates refuse empty “catalog dump” PRs: open remediable findings, or a claimed score delta of at least **5.0** (`quality_prs.finding_gate_allows_pr`, `min_score_delta=5.0`).
+- Continuous readiness signal across seven dimensions.
+- Portal celebrates a first perfect score (`overall_score >= 100`).
+- Scan quality gates refuse empty catalog-dump PRs (`min_score_delta=5.0`).
 
-Treat the score as a continuous readiness signal, not a pass/fail certification.
+## Per-PR / fix impact
 
-## Per-PR impact framing
-
-Intent of quality-filtered Scan PRs ([`plan-quality-helpful-prs.md`](./plan-quality-helpful-prs.md)):
-
-- PRs are **finding-tied** (or material score-delta claims), not whole-catalog dumps.
-- Bodies explain **finding → change → expected clear** (evidence kinds / clear-evidence simulation).
-- Assessment Detail shows score history with **deltas** between assessments (`get_score_history` + `delta` in the portal).
-- After merge + re-assess, finding resolution / score movement is how impact is verified — AgentIT does not auto-merge.
+Assessment Detail ranks **top fixes by estimated overall-score delta** if that finding alone were cleared (same model as the report’s `score_version`). Labelled “estimated” in the UI. Ledger decision cards show category targets + approve/reject.
 
 ## Shareable score badge
 
-**Planned:** a shareable score badge (e.g. shields-style URL for overall or per-dimension score). **Not shipped** — there is no public badge endpoint or documented badge URL today. Do not invent one; track under [`history/backlog.md`](./history/backlog.md).
+```text
+GET /badge/{repo_name}.svg
+```
+
+Authorization (any one):
+
+- `AGENTIT_BADGE_PUBLIC=1`, or
+- `?token=` matching `AGENTIT_BADGE_TOKEN`, or
+- `repo_name` listed in `AGENTIT_PUBLIC_BADGE_APPS` (comma-separated).
+
+Example markdown:
+
+```markdown
+![score](https://<your-portal>/badge/my-app.svg?token=<token>)
+```
 
 ## Related
 
-- Dimensions catalog also summarized in [`architecture.md`](./architecture.md#assessment-dimensions)
-- Solution contracts / detect-only categories: [`release-notes.md`](./release-notes.md#solution-contracts)
+- [ADR 0003](./adr/0003-score-model-v2.md)
+- [CHANGELOG](../CHANGELOG.md)

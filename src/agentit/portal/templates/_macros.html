@@ -134,6 +134,23 @@
   {# Fallback when route did not precompute contract_lines #}
   {% endif %}
 
+  {# Thin decision card: why · targets · approve/reject — confidence/dry-run
+     expand in a later pass; keep identical on Ledger + Assessment. #}
+  <div class="decision-card text-sm mb-2" role="group" aria-label="Decision summary">
+    <div><span class="text-muted">Why:</span> Scan remediation for
+      <strong>{{ record.category | dimension_label }}</strong>
+      {% if record.target_findings %}
+      — clears {{ record.target_findings | join(", ") }}
+      {% endif %}
+    </div>
+    {% if record.estimated_delta is defined and record.estimated_delta %}
+    <div><span class="text-muted">Estimated impact:</span>
+      overall +{{ "%.0f"|format(record.estimated_delta) }}
+    </div>
+    {% endif %}
+    <div class="text-muted text-xs">Review the PR diff on GitHub, then Merge or Close with a reason.</div>
+  </div>
+
   <div class="action-bar">
     <form method="POST" action="/prs/merge" x-ref="mergeForm">
       <input type="hidden" name="pr_url" value="{{ record.pr_url }}">

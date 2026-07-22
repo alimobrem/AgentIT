@@ -138,14 +138,31 @@ def _pattern_list(pattern: str | list[str]) -> list[str]:
     return pattern if isinstance(pattern, list) else [pattern]
 
 
+def _iter_repo_files(repo_path: Path):
+    """Yield ``(name, rel_posix, content_or_None)`` preferring the active snapshot."""
+    from agentit.analyzers.snapshot import get_active_snapshot
+
+    snap = get_active_snapshot()
+    if snap is not None and snap.root == repo_path.resolve():
+        for rel, content in snap.files.items():
+            yield Path(rel).name, rel, content
+        return
+    for fp in repo_path.rglob("*"):
+        if not fp.is_file() or is_ignored(fp, repo_path):
+            continue
+        try:
+            content = fp.read_text(errors="ignore")
+        except OSError:
+            content = ""
+        yield fp.name, fp.relative_to(repo_path).as_posix(), content
+
+
 def _run_file_exists(check: CheckDefinition, repo_path: Path) -> Finding | None:
     """Return ``None`` (pass) if at least one file matches any glob in *pattern*."""
     patterns = _pattern_list(check.pattern)
-    for fp in repo_path.rglob("*"):
-        if fp.is_file() and not is_ignored(fp, repo_path):
-            if any(fnmatch.fnmatch(fp.name, p) for p in patterns):
-                return None
-    # No match -> finding
+    for name, _rel, _content in _iter_repo_files(repo_path):
+        if any(fnmatch.fnmatch(name, p) for p in patterns):
+            return None
     return _make_finding(check)
 
 
@@ -155,12 +172,8 @@ def _run_file_contains(check: CheckDefinition, repo_path: Path) -> Finding | Non
     patterns = _pattern_list(check.pattern)
     if check.case_insensitive:
         patterns = [p.lower() for p in patterns]
-    for fp in repo_path.rglob("*"):
-        if not fp.is_file() or is_ignored(fp, repo_path):
-            continue
-        try:
-            content = fp.read_text(errors="ignore")
-        except OSError:
+    for _name, _rel, content in _iter_repo_files(repo_path):
+        if content is None:
             continue
         haystack = content.lower() if check.case_insensitive else content
         if any(p in haystack for p in patterns):
@@ -171,10 +184,9 @@ def _run_file_contains(check: CheckDefinition, repo_path: Path) -> Finding | Non
 def _run_file_missing(check: CheckDefinition, repo_path: Path) -> Finding | None:
     """Return a finding if a file matching any glob in *pattern* IS found."""
     patterns = _pattern_list(check.pattern)
-    for fp in repo_path.rglob("*"):
-        if fp.is_file() and not is_ignored(fp, repo_path):
-            if any(fnmatch.fnmatch(fp.name, p) for p in patterns):
-                return _make_finding(check, file_path=str(fp.relative_to(repo_path)))
+    for name, rel, _content in _iter_repo_files(repo_path):
+        if any(fnmatch.fnmatch(name, p) for p in patterns):
+            return _make_finding(check, file_path=rel)
     return None
 
 

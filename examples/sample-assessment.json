@@ -1,0 +1,618 @@
+{
+  "repo_url": "https://github.com/example/sample-app",
+  "repo_name": "sample-app",
+  "assessed_at": "2026-07-22T19:59:57.052578Z",
+  "stack": {
+    "languages": [
+      {
+        "name": "python",
+        "version": null,
+        "file_count": 1,
+        "percentage": 100.0
+      }
+    ],
+    "frameworks": [],
+    "databases": [],
+    "runtimes": [
+      {
+        "name": "cpython",
+        "version": null
+      }
+    ],
+    "package_managers": []
+  },
+  "architecture": {
+    "service_count": 1,
+    "architecture_style": "monolith",
+    "has_api": false,
+    "api_style": null,
+    "external_dependencies": [],
+    "auth_mechanism": null
+  },
+  "scores": [
+    {
+      "dimension": "security",
+      "score": 0,
+      "max_score": 100,
+      "findings": [
+        {
+          "category": "container",
+          "severity": 2,
+          "description": "No HEALTHCHECK defined in Dockerfile",
+          "file_path": "Dockerfile",
+          "recommendation": "Add HEALTHCHECK for container orchestration readiness probes",
+          "source": "analyzer:security"
+        },
+        {
+          "category": "network",
+          "severity": 1,
+          "description": "No NetworkPolicy manifests found",
+          "file_path": null,
+          "recommendation": "Add deny-all default NetworkPolicy with explicit allow rules",
+          "source": "analyzer:security"
+        },
+        {
+          "category": "scanning",
+          "severity": 1,
+          "description": "No container or dependency vulnerability scanning detected in CI",
+          "file_path": null,
+          "recommendation": "Add ACS (StackRox) or Trivy scanning to the CI pipeline; enable automated dependency updates (Renovate/Dependabot) via skills",
+          "source": "analyzer:security"
+        },
+        {
+          "category": "container",
+          "severity": 3,
+          "description": "Base image is not UBI (Red Hat Universal Base Image) in Dockerfile",
+          "file_path": "Dockerfile",
+          "recommendation": "Use registry.access.redhat.com/ubi9/ubi-minimal for supported, secure base image",
+          "source": "analyzer:security"
+        },
+        {
+          "category": "container",
+          "severity": 2,
+          "description": "No Containerfile found for container builds",
+          "file_path": null,
+          "recommendation": "Create a multi-stage Containerfile using UBI base image",
+          "source": "check:/Users/amobrem/ali/AgentIT_Claude/AgentIT/skills/security/containerfile-exists.md"
+        }
+      ]
+    },
+    {
+      "dimension": "observability",
+      "score": 0,
+      "max_score": 100,
+      "findings": [
+        {
+          "category": "instrumentation",
+          "severity": 1,
+          "description": "No OpenTelemetry or metrics instrumentation detected",
+          "file_path": null,
+          "recommendation": "Add OpenTelemetry SDK for auto-instrumentation",
+          "source": "analyzer:observability"
+        },
+        {
+          "category": "metrics",
+          "severity": 1,
+          "description": "No Prometheus metrics or ServiceMonitor found",
+          "file_path": null,
+          "recommendation": "Create ServiceMonitor for Prometheus scraping",
+          "source": "analyzer:observability"
+        },
+        {
+          "category": "logging",
+          "severity": 2,
+          "description": "No structured logging library detected",
+          "file_path": null,
+          "recommendation": "Add structured JSON logging (e.g., structlog for Python, zap for Go)",
+          "source": "analyzer:observability"
+        },
+        {
+          "category": "tracing",
+          "severity": 2,
+          "description": "No distributed tracing detected",
+          "file_path": null,
+          "recommendation": "Add OpenTelemetry tracing with Tempo exporter",
+          "source": "analyzer:observability"
+        },
+        {
+          "category": "dashboards",
+          "severity": 2,
+          "description": "No Grafana dashboards found",
+          "file_path": null,
+          "recommendation": "Create Grafana dashboards for RED metrics",
+          "source": "analyzer:observability"
+        },
+        {
+          "category": "alerting",
+          "severity": 2,
+          "description": "No alerting rules or integrations found",
+          "file_path": null,
+          "recommendation": "Define PrometheusRule alerting rules for SLO-based alerts",
+          "source": "analyzer:observability"
+        },
+        {
+          "category": "health",
+          "severity": 1,
+          "description": "No liveness/readiness probes detected in manifests",
+          "file_path": null,
+          "recommendation": "Add livenessProbe and readinessProbe to all containers",
+          "source": "check:/Users/amobrem/ali/AgentIT_Claude/AgentIT/skills/observability/health-probes-check.md"
+        },
+        {
+          "category": "metrics",
+          "severity": 1,
+          "description": "No Prometheus ServiceMonitor found",
+          "file_path": null,
+          "recommendation": "Create ServiceMonitor for Prometheus scraping",
+          "source": "check:/Users/amobrem/ali/AgentIT_Claude/AgentIT/skills/observability/prometheus-metrics-exists.md"
+        }
+      ]
+    },
+    {
+      "dimension": "cicd",
+      "score": 17,
+      "max_score": 100,
+      "findings": [
+        {
+          "category": "pipeline",
+          "severity": 1,
+          "description": "No CI/CD pipeline configuration found",
+          "file_path": null,
+          "recommendation": "Create Tekton Pipeline for build/test/scan/deploy",
+          "source": "analyzer:cicd"
+        },
+        {
+          "category": "gitops",
+          "severity": 2,
+          "description": "No GitOps configuration (Argo CD) detected",
+          "file_path": null,
+          "recommendation": "Create Argo CD Application for GitOps delivery",
+          "source": "analyzer:cicd"
+        },
+        {
+          "category": "pipeline",
+          "severity": 1,
+          "description": "No GitLab CI pipeline configuration found",
+          "file_path": null,
+          "recommendation": "Create .gitlab-ci.yml or Tekton Pipeline for build/test/scan/deploy",
+          "source": "check:/Users/amobrem/ali/AgentIT_Claude/AgentIT/skills/cicd/ci-pipeline-exists.md"
+        }
+      ]
+    },
+    {
+      "dimension": "infrastructure",
+      "score": 12,
+      "max_score": 100,
+      "findings": [
+        {
+          "category": "iac",
+          "severity": 1,
+          "description": "No IaC tooling detected (no Helm chart, Kustomize, or Terraform)",
+          "file_path": null,
+          "recommendation": "Generate Helm chart with values.yaml and environment overlays",
+          "source": "analyzer:infrastructure"
+        },
+        {
+          "category": "resources",
+          "severity": 2,
+          "description": "No resource limits/requests defined in manifests — workloads may be over- or under-provisioned (cost/rightsize risk)",
+          "file_path": null,
+          "recommendation": "Add CPU and memory requests/limits to all containers; enable VPA and cost labels via skills for ongoing right-sizing",
+          "source": "analyzer:infrastructure"
+        },
+        {
+          "category": "quota",
+          "severity": 3,
+          "description": "No ResourceQuota or LimitRange defined",
+          "file_path": null,
+          "recommendation": "Add ResourceQuota and LimitRange for namespace governance",
+          "source": "analyzer:infrastructure"
+        },
+        {
+          "category": "iac",
+          "severity": 1,
+          "description": "No Helm chart detected",
+          "file_path": null,
+          "recommendation": "Generate Helm chart with values.yaml and environment overlays",
+          "source": "check:/Users/amobrem/ali/AgentIT_Claude/AgentIT/skills/infrastructure/helm-chart-exists.md"
+        },
+        {
+          "category": "quota",
+          "severity": 3,
+          "description": "No ResourceQuota defined for namespace governance",
+          "file_path": null,
+          "recommendation": "Add ResourceQuota and LimitRange for namespace governance",
+          "source": "check:/Users/amobrem/ali/AgentIT_Claude/AgentIT/skills/infrastructure/resource-quota-exists.md"
+        }
+      ]
+    },
+    {
+      "dimension": "compliance",
+      "score": 0,
+      "max_score": 100,
+      "findings": [
+        {
+          "category": "license",
+          "severity": 1,
+          "description": "No LICENSE file found",
+          "file_path": null,
+          "recommendation": "Add a LICENSE file (Apache 2.0 recommended for enterprise open source)",
+          "source": "analyzer:compliance"
+        },
+        {
+          "category": "sbom",
+          "severity": 1,
+          "description": "No SBOM (Software Bill of Materials) found",
+          "file_path": null,
+          "recommendation": "Generate SBOM using Syft, store in ODF",
+          "source": "analyzer:compliance"
+        },
+        {
+          "category": "audit",
+          "severity": 1,
+          "description": "No audit logging implementation detected",
+          "file_path": null,
+          "recommendation": "Add an audit logging module in the app package and wire it into privileged/mutating request handlers (import + call site)",
+          "source": "analyzer:compliance"
+        },
+        {
+          "category": "policy",
+          "severity": 2,
+          "description": "No admission policies (Kyverno/OPA/Gatekeeper) found",
+          "file_path": null,
+          "recommendation": "Create Kyverno policies for resource limits, labels, approved base images",
+          "source": "analyzer:compliance"
+        }
+      ]
+    },
+    {
+      "dimension": "data_governance",
+      "score": 0,
+      "max_score": 100,
+      "findings": [
+        {
+          "category": "backup",
+          "severity": 1,
+          "description": "No backup configuration detected",
+          "file_path": null,
+          "recommendation": "Configure Crunchy PostgreSQL backup schedule or add backup CronJob",
+          "source": "analyzer:data_governance"
+        },
+        {
+          "category": "migration",
+          "severity": 2,
+          "description": "No database migration tooling detected",
+          "file_path": null,
+          "recommendation": "Add database migration tool (Alembic, Flyway, golang-migrate)",
+          "source": "analyzer:data_governance"
+        },
+        {
+          "category": "retention",
+          "severity": 2,
+          "description": "No data retention policy detected",
+          "file_path": null,
+          "recommendation": "Define data retention policies for compliance (GDPR, SOC 2)",
+          "source": "analyzer:data_governance"
+        }
+      ]
+    },
+    {
+      "dimension": "ha_dr",
+      "score": 0,
+      "max_score": 100,
+      "findings": [
+        {
+          "category": "availability",
+          "severity": 1,
+          "description": "Single replica or no replica count defined -- no redundancy",
+          "file_path": null,
+          "recommendation": "Set replicas >= 2 for high availability",
+          "source": "analyzer:ha_dr"
+        },
+        {
+          "category": "availability",
+          "severity": 2,
+          "description": "No PodDisruptionBudget defined",
+          "file_path": null,
+          "recommendation": "Add PDB to prevent all pods being evicted during maintenance",
+          "source": "analyzer:ha_dr"
+        },
+        {
+          "category": "scaling",
+          "severity": 2,
+          "description": "No HorizontalPodAutoscaler defined",
+          "file_path": null,
+          "recommendation": "Add HPA for automatic scaling under load",
+          "source": "analyzer:ha_dr"
+        },
+        {
+          "category": "health",
+          "severity": 1,
+          "description": "No liveness or readiness probes defined",
+          "file_path": null,
+          "recommendation": "Add livenessProbe and readinessProbe to all containers",
+          "source": "analyzer:ha_dr"
+        },
+        {
+          "category": "availability",
+          "severity": 1,
+          "description": "No multi-replica deployment found -- no redundancy",
+          "file_path": null,
+          "recommendation": "Set replicas >= 2 for high availability",
+          "source": "check:/Users/amobrem/ali/AgentIT_Claude/AgentIT/skills/ha_dr/multi-replica-deployment.md"
+        }
+      ]
+    }
+  ],
+  "overall_score": 4.03,
+  "criticality": "medium",
+  "summary": "sample-app: overall score 4/100 with 33 findings (0 critical, 17 high). Lowest dimensions: security, observability, compliance.",
+  "remediation_plan": [
+    {
+      "priority": 1,
+      "dimension": "security",
+      "description": "No NetworkPolicy manifests found",
+      "estimated_effort": "1 agent-hour",
+      "agent_responsible": "Security Hardening Agent",
+      "category": "network"
+    },
+    {
+      "priority": 2,
+      "dimension": "security",
+      "description": "No container or dependency vulnerability scanning detected in CI",
+      "estimated_effort": "1 agent-hour",
+      "agent_responsible": "Security Hardening Agent",
+      "category": "scanning"
+    },
+    {
+      "priority": 3,
+      "dimension": "observability",
+      "description": "No OpenTelemetry or metrics instrumentation detected",
+      "estimated_effort": "1 agent-hour",
+      "agent_responsible": "Observability Bootstrap Agent",
+      "category": "instrumentation"
+    },
+    {
+      "priority": 4,
+      "dimension": "observability",
+      "description": "No Prometheus metrics or ServiceMonitor found",
+      "estimated_effort": "1 agent-hour",
+      "agent_responsible": "Observability Bootstrap Agent",
+      "category": "metrics"
+    },
+    {
+      "priority": 5,
+      "dimension": "observability",
+      "description": "No liveness/readiness probes detected in manifests",
+      "estimated_effort": "1 agent-hour",
+      "agent_responsible": "Observability Bootstrap Agent",
+      "category": "health"
+    },
+    {
+      "priority": 6,
+      "dimension": "observability",
+      "description": "No Prometheus ServiceMonitor found",
+      "estimated_effort": "1 agent-hour",
+      "agent_responsible": "Observability Bootstrap Agent",
+      "category": "metrics"
+    },
+    {
+      "priority": 7,
+      "dimension": "cicd",
+      "description": "No CI/CD pipeline configuration found",
+      "estimated_effort": "1 agent-hour",
+      "agent_responsible": "CI/CD & GitOps Agent",
+      "category": "pipeline"
+    },
+    {
+      "priority": 8,
+      "dimension": "cicd",
+      "description": "No GitLab CI pipeline configuration found",
+      "estimated_effort": "1 agent-hour",
+      "agent_responsible": "CI/CD & GitOps Agent",
+      "category": "pipeline"
+    },
+    {
+      "priority": 9,
+      "dimension": "infrastructure",
+      "description": "No IaC tooling detected (no Helm chart, Kustomize, or Terraform)",
+      "estimated_effort": "1 agent-hour",
+      "agent_responsible": "Infrastructure Codification Agent",
+      "category": "iac"
+    },
+    {
+      "priority": 10,
+      "dimension": "infrastructure",
+      "description": "No Helm chart detected",
+      "estimated_effort": "1 agent-hour",
+      "agent_responsible": "Infrastructure Codification Agent",
+      "category": "iac"
+    },
+    {
+      "priority": 11,
+      "dimension": "compliance",
+      "description": "No LICENSE file found",
+      "estimated_effort": "1 agent-hour",
+      "agent_responsible": "Compliance & Policy Agent",
+      "category": "license"
+    },
+    {
+      "priority": 12,
+      "dimension": "compliance",
+      "description": "No SBOM (Software Bill of Materials) found",
+      "estimated_effort": "1 agent-hour",
+      "agent_responsible": "Compliance & Policy Agent",
+      "category": "sbom"
+    },
+    {
+      "priority": 13,
+      "dimension": "compliance",
+      "description": "No audit logging implementation detected",
+      "estimated_effort": "1 agent-hour",
+      "agent_responsible": "Compliance & Policy Agent",
+      "category": "audit"
+    },
+    {
+      "priority": 14,
+      "dimension": "data_governance",
+      "description": "No backup configuration detected",
+      "estimated_effort": "1 agent-hour",
+      "agent_responsible": "Data Governance Agent",
+      "category": "backup"
+    },
+    {
+      "priority": 15,
+      "dimension": "ha_dr",
+      "description": "Single replica or no replica count defined -- no redundancy",
+      "estimated_effort": "1 agent-hour",
+      "agent_responsible": "HA/DR Agent",
+      "category": "availability"
+    },
+    {
+      "priority": 16,
+      "dimension": "ha_dr",
+      "description": "No liveness or readiness probes defined",
+      "estimated_effort": "1 agent-hour",
+      "agent_responsible": "HA/DR Agent",
+      "category": "health"
+    },
+    {
+      "priority": 17,
+      "dimension": "ha_dr",
+      "description": "No multi-replica deployment found -- no redundancy",
+      "estimated_effort": "1 agent-hour",
+      "agent_responsible": "HA/DR Agent",
+      "category": "availability"
+    },
+    {
+      "priority": 18,
+      "dimension": "security",
+      "description": "No HEALTHCHECK defined in Dockerfile",
+      "estimated_effort": "30 agent-minutes",
+      "agent_responsible": "Security Hardening Agent",
+      "category": "container"
+    },
+    {
+      "priority": 19,
+      "dimension": "security",
+      "description": "No Containerfile found for container builds",
+      "estimated_effort": "30 agent-minutes",
+      "agent_responsible": "Security Hardening Agent",
+      "category": "container"
+    },
+    {
+      "priority": 20,
+      "dimension": "observability",
+      "description": "No structured logging library detected",
+      "estimated_effort": "30 agent-minutes",
+      "agent_responsible": "Observability Bootstrap Agent",
+      "category": "logging"
+    },
+    {
+      "priority": 21,
+      "dimension": "observability",
+      "description": "No distributed tracing detected",
+      "estimated_effort": "30 agent-minutes",
+      "agent_responsible": "Observability Bootstrap Agent",
+      "category": "tracing"
+    },
+    {
+      "priority": 22,
+      "dimension": "observability",
+      "description": "No Grafana dashboards found",
+      "estimated_effort": "30 agent-minutes",
+      "agent_responsible": "Observability Bootstrap Agent",
+      "category": "dashboards"
+    },
+    {
+      "priority": 23,
+      "dimension": "observability",
+      "description": "No alerting rules or integrations found",
+      "estimated_effort": "30 agent-minutes",
+      "agent_responsible": "Observability Bootstrap Agent",
+      "category": "alerting"
+    },
+    {
+      "priority": 24,
+      "dimension": "cicd",
+      "description": "No GitOps configuration (Argo CD) detected",
+      "estimated_effort": "30 agent-minutes",
+      "agent_responsible": "CI/CD & GitOps Agent",
+      "category": "gitops"
+    },
+    {
+      "priority": 25,
+      "dimension": "infrastructure",
+      "description": "No resource limits/requests defined in manifests — workloads may be over- or under-provisioned (cost/rightsize risk)",
+      "estimated_effort": "30 agent-minutes",
+      "agent_responsible": "Infrastructure Codification Agent",
+      "category": "resources"
+    },
+    {
+      "priority": 26,
+      "dimension": "compliance",
+      "description": "No admission policies (Kyverno/OPA/Gatekeeper) found",
+      "estimated_effort": "30 agent-minutes",
+      "agent_responsible": "Compliance & Policy Agent",
+      "category": "policy"
+    },
+    {
+      "priority": 27,
+      "dimension": "data_governance",
+      "description": "No database migration tooling detected",
+      "estimated_effort": "30 agent-minutes",
+      "agent_responsible": "Data Governance Agent",
+      "category": "migration"
+    },
+    {
+      "priority": 28,
+      "dimension": "data_governance",
+      "description": "No data retention policy detected",
+      "estimated_effort": "30 agent-minutes",
+      "agent_responsible": "Data Governance Agent",
+      "category": "retention"
+    },
+    {
+      "priority": 29,
+      "dimension": "ha_dr",
+      "description": "No PodDisruptionBudget defined",
+      "estimated_effort": "30 agent-minutes",
+      "agent_responsible": "HA/DR Agent",
+      "category": "availability"
+    },
+    {
+      "priority": 30,
+      "dimension": "ha_dr",
+      "description": "No HorizontalPodAutoscaler defined",
+      "estimated_effort": "30 agent-minutes",
+      "agent_responsible": "HA/DR Agent",
+      "category": "scaling"
+    },
+    {
+      "priority": 31,
+      "dimension": "security",
+      "description": "Base image is not UBI (Red Hat Universal Base Image) in Dockerfile",
+      "estimated_effort": "15 agent-minutes",
+      "agent_responsible": "Security Hardening Agent",
+      "category": "container"
+    },
+    {
+      "priority": 32,
+      "dimension": "infrastructure",
+      "description": "No ResourceQuota or LimitRange defined",
+      "estimated_effort": "15 agent-minutes",
+      "agent_responsible": "Infrastructure Codification Agent",
+      "category": "quota"
+    },
+    {
+      "priority": 33,
+      "dimension": "infrastructure",
+      "description": "No ResourceQuota defined for namespace governance",
+      "estimated_effort": "15 agent-minutes",
+      "agent_responsible": "Infrastructure Codification Agent",
+      "category": "quota"
+    }
+  ],
+  "infra_repo_url": null,
+  "score_version": 2
+}

@@ -116,13 +116,13 @@ Exempt: `/api/webhook/*` (Part 3 below secures those separately; they're not bro
 
 `/api/webhook/{assess,onboard,auto-apply,finding,remediate}` are called only by Argo Events Sensors (`chart/templates/argo-events/sensor-*.yaml`), never by a browser — always created regardless of `auth.enabled`/`argoEvents.enabled`. A `agentit-internal-webhook-token` Secret (`chart/templates/internal-webhook-token-secret.yaml`, auto-generated with `lookup`+`randAlphaNum`, same idempotent pattern as `postgres-secret.yaml`) is:
 
-- Mounted into the app as `AGENTIT_INTERNAL_WEBHOOK_TOKEN` (optional, like `GITHUB_WEBHOOK_SECRET`).
+- Mounted into the app as `AGENTIT_INTERNAL_WEBHOOK_TOKEN` (required in production).
 - Read by each Sensor's HTTP trigger via `secureHeaders` (resolved from the Secret at trigger-fire time, not Helm-render time, so it always matches whatever Helm most recently wrote) and sent as `X-Internal-Webhook-Token`.
 - Verified by `verify_internal_token` (`src/agentit/portal/routes/webhooks.py`) as a FastAPI dependency on all 5 routes.
 
 `/api/webhook/github-push` is unaffected — it keeps its own pre-existing HMAC-SHA256 signature check against `GITHUB_WEBHOOK_SECRET`.
 
-Like `GITHUB_WEBHOOK_SECRET`, `verify_internal_token` fails open (skips the check) if `AGENTIT_INTERNAL_WEBHOOK_TOKEN` isn't set in the app's env — but since the Secret is *always* templated (not gated behind a flag), that path should only be exercised in local dev/tests that never configure it, not in a real cluster.
+**Fail closed by default:** if `GITHUB_WEBHOOK_SECRET` or `AGENTIT_INTERNAL_WEBHOOK_TOKEN` is unset, webhook auth rejects the request. For local demos/tests only, set `AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS=1` to opt back into the old unverified behavior. Chart deployments always template both secrets — the Health → Access tab surfaces a **blocking** warning when either is missing without the opt-in flag.
 
 ## DO NOT
 

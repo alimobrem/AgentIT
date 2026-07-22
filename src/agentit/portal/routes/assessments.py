@@ -228,6 +228,8 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
     finding_badges = {
         f.category: badge_for_category(f.category) for f in all_findings if f.category
     }
+    from agentit.scoring import letter_grade, top_fix_impacts
+    top_fixes = top_fix_impacts(report, remediable_categories=fixable_categories, limit=3)
 
     # Actions tab: every real thing still waiting on a human for this app --
     # an open, unmerged PR (Merge/Close, routes/pr_actions.py -- the real
@@ -252,6 +254,14 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
         pr["kind"] = "pr"
         # Honesty line on PR cards: Clears X by Y (solution contract).
         pr["contract_lines"] = contract_lines_for_portal(pr.get("target_findings") or [])
+        targets = {str(t).lower() for t in (pr.get("target_findings") or [])}
+        pr["_target_set"] = targets
+    for fix in top_fixes:
+        cat = (fix.get("category") or "").lower()
+        fix["pr"] = next(
+            (pr for pr in open_prs if cat and cat in pr.get("_target_set", set())),
+            open_prs[0] if len(open_prs) == 1 else None,
+        )
     merged_prs = [pr for pr in pr_history if pr.get("state") == "merged" or pr.get("lifecycle") == "merged"]
 
     unresolved_rollbacks, unresolved_escalations = await list_unresolved_recommendations(
@@ -450,6 +460,8 @@ async def assessment_detail(request: Request, assessment_id: str) -> HTMLRespons
             "pr_history": pr_history,
             "assessment_cadence": assessment_cadence,
             "reassess_scheduler_active": reassess_scheduler_active,
+            "top_fixes": top_fixes,
+            "score_letter": letter_grade(report.overall_score),
         },
     )
 

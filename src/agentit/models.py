@@ -104,7 +104,14 @@ class AssessmentReport(BaseModel):
     summary: str
     remediation_plan: list[RemediationItem]
     infra_repo_url: str | None = None
+    # 1 = legacy subtractive + equal mean; 2 = pass-ratio + criticality weights
+    score_version: int = 2
 
     def model_post_init(self, _context: object) -> None:
-        if self.scores:
+        if not self.scores:
+            return
+        if self.score_version >= 2:
+            from agentit.scoring import weighted_overall_score
+            self.overall_score = weighted_overall_score(self.scores, self.criticality)
+        else:
             self.overall_score = sum(s.score for s in self.scores) / len(self.scores)

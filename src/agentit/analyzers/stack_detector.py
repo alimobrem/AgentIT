@@ -95,11 +95,20 @@ class StackDetector:
     def _detect_languages(self, repo_path: Path) -> list[Language]:
         counts: Counter[str] = Counter()
 
-        for file_path in repo_path.rglob("*"):
-            if file_path.is_file() and not is_ignored(file_path, repo_path):
-                ext = file_path.suffix.lower()
+        from agentit.analyzers.snapshot import get_active_snapshot
+
+        snap = get_active_snapshot()
+        if snap is not None and snap.root == repo_path.resolve():
+            for rel in snap.files:
+                ext = Path(rel).suffix.lower()
                 if ext in LANG_EXTENSIONS:
                     counts[LANG_EXTENSIONS[ext]] += 1
+        else:
+            for file_path in repo_path.rglob("*"):
+                if file_path.is_file() and not is_ignored(file_path, repo_path):
+                    ext = file_path.suffix.lower()
+                    if ext in LANG_EXTENSIONS:
+                        counts[LANG_EXTENSIONS[ext]] += 1
 
         total = sum(counts.values())
         if total == 0:

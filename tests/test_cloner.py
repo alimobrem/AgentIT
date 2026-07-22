@@ -88,5 +88,6 @@ def test_allows_https():
     _validate_repo_url("https://github.com/org/repo.git")
 
 
-def test_allows_http():
-    _validate_repo_url("http://github.com/org/repo.git")
+def test_rejects_http():
+    with pytest.raises(CloneError):
+        _validate_repo_url("http://github.com/org/repo.git")

@@ -15,23 +15,51 @@ class CloneError(Exception):
     pass
 
 
-_ALLOWED_SCHEMES = {"https", "http"}
+# HTTPS only — cleartext http:// is rejected.
+_ALLOWED_SCHEMES = {"https"}
 _DANGEROUS_URL_RE = re.compile(r"ext::|--upload-pack|--config")
-_INTERNAL_SUFFIXES = ('.internal', '.local', '.corp', '.lan', '.svc')
+_INTERNAL_SUFFIXES = (".internal", ".local", ".corp", ".lan", ".svc")
 
 
-def _is_private_host(hostname: str) -> bool:
-    """Check if hostname resolves to a private/internal IP."""
+def _assert_public_resolution(hostname: str) -> None:
+    """Resolve hostname; fail closed on DNS errors or any private answer.
+
+    ``git clone`` will re-resolve at fetch time (residual TOCTOU / DNS
+    rebinding). Production should also egress-block RFC1918 + 169.254/16
+    via NetworkPolicy. This check still stops literal private hosts, suffix
+    tricks, and current private DNS answers at validation time.
+    """
     try:
-        for info in socket.getaddrinfo(hostname, None):
-            addr = ipaddress.ip_address(info[4][0])
-            if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
-                return True
-    except (socket.gaierror, ValueError):
-        pass
-    # Block common internal suffixes
+        addr = ipaddress.ip_address(hostname)
+    except ValueError:
+        addr = None
+    if addr is not None:
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+            raise CloneError(f"Rejected URL with private/internal host: {hostname}")
+        return
+
     lower = hostname.lower()
-    return any(lower.endswith(s) for s in _INTERNAL_SUFFIXES)
+    if any(lower.endswith(s) for s in _INTERNAL_SUFFIXES):
+        raise CloneError(f"Rejected URL with private/internal host: {hostname}")
+
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror as exc:
+        raise CloneError(f"Rejected URL: DNS lookup failed for {hostname}: {exc}") from exc
+
+    if not infos:
+        raise CloneError(f"Rejected URL: no addresses for {hostname}")
+
+    for info in infos:
+        raw = info[4][0]
+        try:
+            ip = ipaddress.ip_address(raw)
+        except ValueError:
+            continue
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            raise CloneError(
+                f"Rejected URL with private/internal host: {hostname} → {ip}"
+            )
 
 
 def _validate_repo_url(repo_url: str) -> None:
@@ -44,14 +72,14 @@ def _validate_repo_url(repo_url: str) -> None:
     parsed = urlparse(repo_url)
     if parsed.scheme and parsed.scheme not in _ALLOWED_SCHEMES:
         raise CloneError(
-            f"Rejected URL scheme '{parsed.scheme}'. Only https:// and http:// are allowed."
+            f"Rejected URL scheme '{parsed.scheme}'. Only https:// is allowed."
         )
 
     hostname = parsed.hostname
-    if hostname and _is_private_host(hostname):
-        raise CloneError(
-            f"Rejected URL with private/internal host: {hostname}"
-        )
+    if not hostname:
+        raise CloneError("Rejected URL: missing hostname")
+
+    _assert_public_resolution(hostname)
 
 
 def clone_repo(

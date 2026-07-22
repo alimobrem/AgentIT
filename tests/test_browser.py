@@ -481,14 +481,10 @@ class TestNavigation:
     def test_secondary_nav_links(self, page: Page, app_url):
         url, _, _ = app_url
         page.goto(url)
-        # "Agents" and "Workflows" haven't been standalone nav items since
-        # c274055 paired them into Capabilities (Registry/Catalog tabs,
-        # base.html) as part of the 9->7 top-level-items consolidation
-        # docs/ui-redesign-proposal.md builds on -- check the current
-        # top-level items instead (Fleet/Ledger are covered by
-        # test_primary_nav_links above).
-        for link in ["Health", "Insights"]:
-            expect(page.locator(f"nav >> text={link}")).to_be_visible()
+        # Primary spine is Fleet + Ledger only. Operate surfaces (Health,
+        # Insights, Events page, Decisions, DLQ, Schedules) live under Menu.
+        assert page.locator('#nav-primary a[href="/health"]').count() == 0
+        assert page.locator('#nav-primary a[href="/insights"]').count() == 0
         # Events is a notification-bell icon that opens a drawer (real
         # events from /api/events); full page still at /events.
         bell = page.locator(".events-bell")
@@ -505,11 +501,21 @@ class TestNavigation:
         expect(page.locator("#events-drawer-panel")).to_be_hidden()
         expect(bell).to_be_focused()
         expect(bell).to_have_attribute("aria-expanded", "false")
-        # Capabilities/Settings/Schedules/Decisions live in the user/main
-        # menu (base.html's .user-menu) -- closed by default.
         page.click(".user-menu-trigger")
-        for link in ["Capabilities", "Settings", "Schedules", "Decisions"]:
-            expect(page.locator(f".user-menu-dropdown >> text={link}")).to_be_visible()
+        # Prefer role=menuitem + exact text: /health also matches deploy-status link.
+        for label in (
+            "Health",
+            "Insights",
+            "Capabilities",
+            "Settings",
+            "Schedules",
+            "Decisions",
+            "Events",
+            "DLQ",
+        ):
+            expect(
+                page.locator("#user-menu-dropdown").get_by_role("menuitem", name=label, exact=True)
+            ).to_be_visible()
 
     def test_fleet_link_navigates(self, page: Page, app_url):
         url, _, _ = app_url
@@ -524,14 +530,14 @@ class TestNavigation:
         hamburger = page.locator("[aria-label='Toggle menu']")
         expect(hamburger).to_be_visible()
         expect(hamburger).to_have_attribute("aria-expanded", "false")
-        # Primary Ledger…Insights + Events/account are collapsed until open.
+        # Primary Fleet+Ledger + Events/account are collapsed until open.
         expect(page.locator("#nav-primary")).to_be_hidden()
         expect(page.locator("#nav-secondary")).to_be_hidden()
         hamburger.click()
         expect(hamburger).to_have_attribute("aria-expanded", "true")
         expect(page.locator("#nav-primary >> text=Ledger")).to_be_visible()
         expect(page.locator("#nav-primary >> text=Fleet")).to_be_visible()
-        expect(page.locator("#nav-primary >> text=Insights")).to_be_visible()
+        expect(page.locator("#nav-primary >> text=Insights")).to_have_count(0)
         expect(page.locator("#nav-secondary .events-bell")).to_be_visible()
         expect(page.locator("#nav-secondary .user-menu-trigger")).to_be_visible()
         hamburger.click()
@@ -950,7 +956,8 @@ class TestFixButtonVisibility:
         item = page.locator(".finding-item", has_text="Pre-onboard finding: no NetworkPolicy")
         expect(item).to_be_visible()
         assert item.locator("button:has-text('Fix')").count() == 0
-        expect(page.locator("text=running automatically")).to_be_visible()
+        # Score-first Assessment Detail: primary CTA is Scan (not Fix) pre-onboard.
+        expect(page.get_by_role("button", name="Scan")).to_be_visible()
 
     def test_fix_button_opens_confirm_modal(self, page: Page, app_url):
         """Post-onboard Fix must open the shared confirm modal (not a silent no-op)."""

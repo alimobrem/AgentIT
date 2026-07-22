@@ -41,7 +41,20 @@ def iter_text_files(
     repo_path: Path,
     extensions: set[str] | None = None,
 ) -> Iterator[tuple[Path, str]]:
+    """Yield ``(path, text)`` for text files under ``repo_path``.
+
+    When a :class:`~agentit.analyzers.snapshot.RepoSnapshot` is active
+    (see ``use_snapshot``), reads come from that single-pass map instead
+    of walking the filesystem again.
+    """
+    from agentit.analyzers.snapshot import get_active_snapshot
+
     exts = extensions or TEXT_EXTENSIONS
+    snap = get_active_snapshot()
+    if snap is not None and snap.root == repo_path.resolve():
+        yield from snap.iter_text(exts)
+        return
+
     repo_resolved = repo_path.resolve()
     for fp in repo_path.rglob("*"):
         if not fp.is_file() or is_ignored(fp, repo_path):
