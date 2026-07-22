@@ -37,6 +37,77 @@ class TestDockerfilePin:
         assert not ok
         assert ":latest" in reason
 
+    def test_refuses_destructive_rewrite_when_base_known(self) -> None:
+        """#165 class: gutting a real Containerfile into a short stub."""
+        existing = (
+            "FROM registry.access.redhat.com/ubi9/python-312:latest\n"
+            "USER 0\n"
+            "RUN curl -sfL https://example.com/oc | tar -xz -C /usr/local/bin oc\n"
+            "USER 1001\n"
+            "WORKDIR /opt/app-root/src\n"
+            "COPY pyproject.toml ./\n"
+            "RUN pip install --no-cache-dir .\n"
+            "COPY src/ src/\n"
+            "COPY skills/ skills/\n"
+            "COPY tests/ tests/\n"
+            "HEALTHCHECK CMD curl -f http://localhost:8080/healthz || exit 1\n"
+        )
+        stub = (
+            "FROM registry.access.redhat.com/ubi9/python-312:1\n"
+            "WORKDIR /app\n"
+            "COPY . .\n"
+            "USER 1001\n"
+            "EXPOSE 8080\n"
+            "HEALTHCHECK CMD curl -f http://localhost:8080/healthz || exit 1\n"
+        )
+        ok, reason = verify_dockerfile_pin([{
+            "target_path": "Containerfile",
+            "content": stub,
+            "base_content": existing,
+            "skill_name": "containerfile",
+        }])
+        assert not ok
+        assert "destructive" in reason.lower() or "guts" in reason.lower()
+
+    def test_allows_pin_only_of_existing(self) -> None:
+        from agentit.remediation.source_patches import pin_dockerfile_from_lines
+
+        existing = (
+            "FROM registry.access.redhat.com/ubi9/python-312:latest\n"
+            "USER 0\n"
+            "RUN curl -sfL https://example.com/oc | tar -xz -C /usr/local/bin oc\n"
+            "USER 1001\n"
+            "WORKDIR /opt/app-root/src\n"
+            "COPY pyproject.toml ./\n"
+            "RUN pip install --no-cache-dir .\n"
+            "COPY src/ src/\n"
+            "COPY skills/ skills/\n"
+            "COPY tests/ tests/\n"
+            "HEALTHCHECK CMD curl -f http://localhost:8080/healthz || exit 1\n"
+        )
+        pinned = pin_dockerfile_from_lines(existing)
+        ok, reason = verify_dockerfile_pin([{
+            "target_path": "Containerfile",
+            "content": pinned,
+            "base_content": existing,
+            "skill_name": "containerfile",
+        }])
+        assert ok, reason
+        assert ":latest" not in pinned
+        assert "pip install" in pinned
+
+    def test_refuses_unenriched_pin_only_marker(self) -> None:
+        ok, reason = verify_dockerfile_pin([{
+            "target_path": "Containerfile",
+            "content": (
+                "# agentit-pin-only: delivery will pin FROM on existing Containerfile\n"
+                "FROM registry.access.redhat.com/ubi9/ubi-minimal:1\n"
+            ),
+            "skill_name": "containerfile",
+        }])
+        assert not ok
+        assert "pin-only" in reason.lower() or "enrich" in reason.lower()
+
 
 class TestAuditWired:
     def test_refuses_orphan_root_module(self) -> None:

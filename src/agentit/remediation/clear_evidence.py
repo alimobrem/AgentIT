@@ -76,8 +76,21 @@ def _staged_map(files: list[dict]) -> dict[str, str]:
 
 
 def verify_dockerfile_pin(files: list[dict]) -> tuple[bool, str]:
-    """True when a Dockerfile/Containerfile has FROM lines and no ``:latest``."""
+    """True when a Dockerfile/Containerfile has FROM lines and no ``:latest``.
+
+    When ``base_content`` is present on a staged file (delivery enrichment
+    after fetching the existing Dockerfile), also refuse destructive
+    rewrites that gut the file into a short stub (#165 / migration #163
+    quality bar).
+    """
+    from agentit.remediation.source_patches import is_destructive_dockerfile_rewrite
+
     staged = _staged_map(files)
+    base_by_path = {
+        _file_path(f): f.get("base_content")
+        for f in files
+        if _file_path(f) and f.get("base_content")
+    }
     candidates = [
         (p, c) for p, c in staged.items()
         if "dockerfile" in p.lower() or "containerfile" in p.lower()
@@ -95,6 +108,18 @@ def verify_dockerfile_pin(files: list[dict]) -> tuple[bool, str]:
             return False, f"{path}: missing FROM line"
         if _FROM_LATEST.search(content):
             return False, f"{path}: still uses :latest on a FROM line"
+        base = base_by_path.get(path)
+        if base:
+            destructive, reason = is_destructive_dockerfile_rewrite(base, content)
+            if destructive:
+                return False, f"{path}: destructive rewrite refused — {reason}"
+        # Refuse pin-only markers that never got enriched (would overwrite
+        # a real file with a 2-line stub if committed).
+        if "agentit-pin-only" in content and not base:
+            return False, (
+                f"{path}: pin-only marker not enriched with existing file — "
+                "refusing theater stub"
+            )
     return True, f"pinned base image in {candidates[0][0]} (no :latest)"
 
 

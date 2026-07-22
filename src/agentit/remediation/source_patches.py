@@ -21,6 +21,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _LATEST_TAG_RE = re.compile(r"(FROM\s+\S+):latest(\b)", re.IGNORECASE | re.MULTILINE)
+_FROM_LINE_RE = re.compile(r"^\s*FROM\s+\S+", re.IGNORECASE | re.MULTILINE)
+
+# Instructions that indicate a real app image (not our greenfield stub).
+_SUBSTANTIVE_DF_TOKENS = ("RUN ", "COPY ", "ADD ", "ARG ", "ENV ", "WORKDIR ")
 
 
 def _open_findings(report: AssessmentReport, category: str) -> list[Finding]:
@@ -38,13 +42,126 @@ def _primary_language(report: AssessmentReport) -> str:
     return (report.stack.languages[0].name or "python").lower()
 
 
-def _pin_latest_in_dockerfile(content: str) -> str:
-    """Replace ``:latest`` on FROM lines with a floating major tag ``:1``.
+def pin_dockerfile_from_lines(content: str, *, floating_tag: str = "1") -> str:
+    """Pin ``:latest`` on FROM lines only; leave the rest of the file untouched.
 
-    UBI/Node/Python images publish a ``:1`` stream that is more reproducible
-    than ``:latest`` without requiring a live registry digest lookup.
+    Uses the floating major stream ``:1`` (UBI/Node/Python) by default —
+    more reproducible than ``:latest`` without a live registry digest
+    lookup. When ``floating_tag`` is a ``sha256:…`` digest, rewrite
+    ``:latest`` FROM lines to ``image@sha256:…``.
     """
-    return _LATEST_TAG_RE.sub(r"\1:1\2", content)
+    tag = (floating_tag or "1").lstrip(":")
+    if tag.startswith("sha256:"):
+        return re.sub(
+            r"(FROM\s+)(\S+):latest(\b)",
+            rf"\1\2@{tag}\3",
+            content,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+    return _LATEST_TAG_RE.sub(rf"\1:{tag}\2", content)
+
+
+def _pin_latest_in_dockerfile(content: str) -> str:
+    """Replace ``:latest`` on FROM lines with a floating major tag ``:1``."""
+    return pin_dockerfile_from_lines(content, floating_tag="1")
+
+
+def is_destructive_dockerfile_rewrite(
+    existing: str, proposed: str,
+) -> tuple[bool, str]:
+    """True when ``proposed`` guts an existing Dockerfile into a short stub.
+
+    Pin-only transforms of ``existing`` are never destructive. Used by
+    clear-evidence and delivery enrichment so Scan never repeats the #165
+    class of PR (136-line Containerfile → 11-line stub).
+    """
+    if not (existing or "").strip():
+        return False, "no existing file"
+    exist = existing if existing.endswith("\n") else existing + "\n"
+    prop = proposed if (proposed or "").endswith("\n") else (proposed or "") + "\n"
+    pinned = pin_dockerfile_from_lines(exist)
+    if prop.strip() == pinned.strip():
+        return False, "pin-only of existing"
+    exist_body = [
+        ln for ln in exist.splitlines()
+        if ln.strip() and not ln.strip().startswith("#")
+    ]
+    prop_body = [
+        ln for ln in prop.splitlines()
+        if ln.strip() and not ln.strip().startswith("#")
+    ]
+    if len(exist_body) >= 8 and len(prop_body) < max(6, len(exist_body) // 3):
+        return True, (
+            f"proposed Dockerfile guts existing "
+            f"({len(exist_body)} → {len(prop_body)} non-comment lines)"
+        )
+    for token in _SUBSTANTIVE_DF_TOKENS:
+        if exist.count(token) > prop.count(token):
+            return True, f"proposed drops {token.strip()} instructions from existing Dockerfile"
+    # Non-FROM body diverged beyond a pin — refuse wholesale rewrites.
+    def _body_without_from(text: str) -> str:
+        return "\n".join(
+            ln for ln in text.splitlines() if not _FROM_LINE_RE.match(ln)
+        ).strip()
+
+    if _body_without_from(exist) != _body_without_from(prop):
+        return True, "proposed rewrites Dockerfile body (pin-only allowed)"
+    return False, "ok"
+
+
+def apply_containerfile_pin_only(
+    files: list[dict],
+    *,
+    read_file=None,
+) -> list[dict]:
+    """Rewrite containerfile outputs to pin-only when the target already exists.
+
+    ``read_file(path) -> str | None`` fetches the default-branch content
+    (GitHub REST). When the target exists, staged content becomes
+    ``pin_dockerfile_from_lines(existing)`` and ``base_content`` is set for
+    clear-evidence. Greenfield (missing file) keeps the generator stub.
+    """
+    out: list[dict] = []
+    for f in files:
+        skill = (f.get("skill_name") or "").lower().replace("_", "-")
+        target = str(f.get("target_path") or f.get("path") or "")
+        is_df = (
+            "dockerfile" in target.lower()
+            or "containerfile" in target.lower()
+            or target.lower().endswith("dockerfile")
+            or target.lower().endswith("containerfile")
+        )
+        if skill not in ("containerfile", "eol-upgrade") or not is_df:
+            out.append(f)
+            continue
+        existing = f.get("base_content")
+        if existing is None and read_file is not None:
+            try:
+                existing = read_file(target)
+            except Exception:
+                logger.info("container pin-only: read_file failed for %s", target, exc_info=True)
+                existing = None
+        if not existing:
+            # Greenfield — keep stub (no Dockerfile yet).
+            out.append(f)
+            continue
+        pinned = pin_dockerfile_from_lines(existing)
+        destructive, reason = is_destructive_dockerfile_rewrite(existing, f.get("content") or "")
+        new_f = dict(f)
+        new_f["base_content"] = existing
+        new_f["content"] = pinned if pinned.endswith("\n") else pinned + "\n"
+        desc = (f.get("description") or "").rstrip()
+        if "pin-only" not in desc.lower():
+            new_f["description"] = (
+                f"{desc} — pin-only FROM (no rewrite)" if desc else "pin-only FROM (no rewrite)"
+            )
+        if destructive:
+            logger.info(
+                "container pin-only: replaced destructive stub for %s (%s)",
+                target, reason,
+            )
+        out.append(new_f)
+    return out
 
 
 def _dockerfile_for_stack(lang: str, port: int = 8080) -> str:
@@ -72,9 +189,17 @@ def _dockerfile_for_stack(lang: str, port: int = 8080) -> str:
 
 
 def _containerfile_patch(skill: "Skill", report: AssessmentReport) -> list[GeneratedFile]:
+    """Emit a Containerfile/Dockerfile source patch.
+
+    Greenfield (no Dockerfile finding): emit the UBI stub.
+    Existing-file findings (``:latest``, missing USER/HEALTHCHECK): emit a
+    pin-only *placeholder* that delivery enrichment replaces with
+    ``pin_dockerfile_from_lines(existing)`` — never a full rewrite stub
+    (#165 class). Clear-evidence refuses destructive rewrites when
+    ``base_content`` is present.
+    """
     findings = _open_findings(report, "container")
     lang = _primary_language(report)
-    # Prefer patching an existing Dockerfile path from the finding.
     target = "Dockerfile"
     for f in findings:
         if f.file_path and (
@@ -84,14 +209,37 @@ def _containerfile_patch(skill: "Skill", report: AssessmentReport) -> list[Gener
             target = f.file_path
             break
 
-    content = _dockerfile_for_stack(lang)
-    content = _pin_latest_in_dockerfile(content)
     addressed = findings[0].description if findings else skill.property_description
+    has_existing_path = any(
+        f.file_path and (
+            "dockerfile" in f.file_path.lower()
+            or "containerfile" in f.file_path.lower()
+        )
+        for f in findings
+    )
+
+    if has_existing_path:
+        # Existing path: emit a pin-shaped marker. Delivery
+        # ``apply_containerfile_pin_only`` replaces this with pin-only of the
+        # real file; clear-evidence refuses if a stub would gut it.
+        content = (
+            f"# agentit-pin-only: delivery will pin FROM on existing {target}\n"
+            f"FROM registry.access.redhat.com/ubi9/ubi-minimal:1\n"
+        )
+        description = (
+            f"Generated by skill {skill.name} — pin-only FROM on existing "
+            f"{target} (no rewrite)"
+        )
+    else:
+        content = _pin_latest_in_dockerfile(_dockerfile_for_stack(lang))
+        description = (
+            f"Generated by skill {skill.name} — greenfield Containerfile/Dockerfile"
+        )
 
     return [GeneratedFile(
         path=f"patch-{target.replace('/', '-')}",
         content=content if content.endswith("\n") else content + "\n",
-        description=f"Generated by skill {skill.name} — source Containerfile/Dockerfile patch",
+        description=description,
         finding_addressed=addressed,
         skill_name=skill.name,
         target_path=target,
@@ -143,12 +291,20 @@ def _eol_upgrade_patch(skill: "Skill", report: AssessmentReport) -> list[Generat
             "dockerfile" in finding.file_path.lower()
             or "containerfile" in finding.file_path.lower()
         ):
-            lang = _primary_language(report)
-            content = _pin_latest_in_dockerfile(_dockerfile_for_stack(lang))
+            # Pin-only marker — never gut an existing Dockerfile (same bar as
+            # containerfile / #165). Delivery enrichment applies the pin.
+            content = (
+                f"# agentit-pin-only: delivery will pin FROM on existing "
+                f"{finding.file_path}\n"
+                f"FROM registry.access.redhat.com/ubi9/ubi-minimal:1\n"
+            )
             files.append(GeneratedFile(
                 path=f"patch-eol-{finding.file_path.replace('/', '-')}",
                 content=content,
-                description=f"Generated by skill {skill.name} — EOL base image bump",
+                description=(
+                    f"Generated by skill {skill.name} — pin-only FROM on "
+                    f"existing {finding.file_path} (EOL base image)"
+                ),
                 finding_addressed=finding.description,
                 skill_name=skill.name,
                 target_path=finding.file_path,

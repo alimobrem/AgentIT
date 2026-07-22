@@ -30,14 +30,21 @@ The application is packaged in a container image using a UBI base (not
 - Final stage runs as non-root `USER 1001`
 - `HEALTHCHECK` instruction present
 - No secrets baked into the image
+- **Pin-only on existing files:** when a Dockerfile/Containerfile already
+  exists, change **only** `FROM` lines (pin `:latest` → `:1` or digest).
+  Never rewrite the body into a greenfield stub (#165 class / same bar as
+  migration #163).
 
 ## Delivery
 This skill opens a **source-repo PR** against the app's `Dockerfile` (or
 `Containerfile`) — not a gitops BuildConfig. Re-Assess after merge clears
-the `container` finding.
+the `container` finding. Clear-evidence refuses destructive rewrites when
+the existing file is known.
 
 ## Template
-Deterministic baseline used when no LLM is available:
+Deterministic **greenfield** baseline (no Dockerfile yet). When a file
+already exists, delivery applies pin-only — this template is not used as a
+replacement:
 
 ```dockerfile
 FROM registry.access.redhat.com/ubi9/ubi-minimal:1
@@ -51,6 +58,5 @@ ENTRYPOINT ["/bin/sh"]
 ```
 
 ## Verification
-- `podman build -t test .` builds without errors
-- Image runs as uid 1001
-- HEALTHCHECK is present; no `:latest` on FROM lines
+- Existing file: diff is FROM-only (body preserved)
+- Greenfield: `podman build -t test .` builds; uid 1001; HEALTHCHECK; no `:latest`

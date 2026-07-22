@@ -565,6 +565,34 @@ async def auto_validate_and_deliver(
                 )
                 continue
 
+        # Container pin-only enrichment before clear-evidence: fetch existing
+        # Dockerfile/Containerfile and pin FROM only so simulation sees the
+        # real patch (never the greenfield stub that gutted #165).
+        if report.repo_url:
+            try:
+                from agentit.portal import github_pr as ghp
+                from agentit.remediation.source_patches import apply_containerfile_pin_only
+
+                token = ghp._get_token()
+                hdrs = ghp._headers(token)
+                owner, repo = ghp._parse_owner_repo(report.repo_url)
+                base_url = f"{ghp._API}/repos/{owner}/{repo}"
+                default_branch, _ = ghp._get_default_branch_and_base_sha(base_url, hdrs)
+
+                def _read(path: str) -> str | None:
+                    return ghp._get_file_content_at_ref(
+                        base_url, hdrs, path, default_branch,
+                    )
+
+                cluster_files = apply_containerfile_pin_only(
+                    cluster_files, read_file=_read,
+                )
+            except Exception:
+                logger.info(
+                    "container pin-only pre-enrich skipped for %s",
+                    app_name, exc_info=True,
+                )
+
         # Pre-open clear-evidence simulation: refuse if MERGE would not clear.
         sim_ok, sim_reason = clear_evidence_simulation_ok(
             cluster_files, cluster.target_findings,
