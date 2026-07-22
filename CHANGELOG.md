@@ -27,6 +27,7 @@ Product contract detail: [`docs/release-notes.md`](docs/release-notes.md).
 
 ### Fixed
 
+- Tekton `agentit-ci` `run-tests` timeout raised to **20m** (was 10m) so UBI pip+pytest under node pressure / one retry does not TaskRunTimeout before image pin (tip `b4ae400f` / `agentit-ci-bwb76`).
 - Align hermetic tests with PR [#161](https://github.com/alimobrem/AgentIT/pull/161): suite-wide `AGENTIT_ALLOW_UNVERIFIED_WEBHOOKS=1`, score v2 expectations, first-run `/` → `/fleet`, Assessment Detail status-strip copy.
 - Scan **migration** finding: detect hand-rolled idempotent store DDL (AgentIT ADR 0002 / `SCHEMA_SQL`) so dogfood does not open stub Alembic PRs; clear-evidence refuses `target_metadata = None` theater; `db-migration-tooling` emits a real first revision + env URL wiring (closes the #157 class of useless PRs).
 - Post–Phase 3 CI: `LLMClient._chat` fail-soft on unexpected errors again (credentials / bare SDK failures); Fleet design-system test asserts `fleet-table` class.

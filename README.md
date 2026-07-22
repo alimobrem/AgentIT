@@ -130,7 +130,7 @@ Ops: [`docs/deployment.md`](docs/deployment.md). Topology: [`docs/architecture.m
 | [`docs/architecture.md`](docs/architecture.md) | System diagrams, Scan pipeline |
 | [`docs/architecture-agentit-vs-fleet-gitops.md`](docs/architecture-agentit-vs-fleet-gitops.md) | Self-managed vs fleet delivery |
 | [`docs/release-notes.md`](docs/release-notes.md) | Product contract (Scan HITL, contracts, portal IA) |
-| [`CHANGELOG.md`](CHANGELOG.md) | Version history (Keep a Changelog); recent: LLM fail-soft + Fleet `fleet-table` test alignment |
+| [`CHANGELOG.md`](CHANGELOG.md) | Version history (Keep a Changelog); recent: Tekton `run-tests` 20m timeout + LLM fail-soft |
 | [`docs/adr/`](docs/adr/) | Architecture Decision Records |
 | [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md) | Portal EDL |
 | [`docs/plan-quality-helpful-prs.md`](docs/plan-quality-helpful-prs.md) | Quality PR rules |
