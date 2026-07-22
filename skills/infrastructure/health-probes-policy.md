@@ -74,6 +74,26 @@ alternatives:
   never a guessed HTTP path. A TCP check on a real, already-open port is
   strictly safer than the status quo (zero probe) and cannot fail due to an
   unknown app-specific health endpoint.
+- **Skip containers with zero declared ports entirely** — a background
+  worker/consumer container often has no `ports` at all, and there is no
+  safe TCP target to check for one. Each `foreach` entry's own
+  `preconditions` require `element.ports[0].containerPort` to be non-empty
+  before attempting either patch. Without this, the JSON patch would try
+  to set `tcpSocket.port` to an empty/null value, which the API server's
+  own schema validation for `Probe.tcpSocket.port` (a required field)
+  rejects at admission time — silently breaking *every* future update to
+  that Deployment (Argo sync included), not just this one, until the
+  policy is fixed or removed. Leaving a genuinely portless container
+  without a probe is strictly safer than that.
+- **`livenessProbe` and `readinessProbe` are two independent `foreach`
+  entries, each gated on its own field being empty** — not one shared
+  precondition covering both. A container that already has exactly one of
+  the two (e.g. a real, already-tuned `readinessProbe` but no
+  `livenessProbe`) must only get the missing one added. `patchesJson6902`'s
+  `op: add` on a JSON path that already has a value *replaces* it (RFC
+  6902) — a single precondition gating both patches would silently
+  overwrite a real, existing probe the moment the *other* one was missing,
+  directly violating the "never overwrite an existing probe" rule above.
 - Generous timing (`initialDelaySeconds`, `failureThreshold`) — a probe
   that's too aggressive and causes false restarts on a healthy but
   slow-starting app is the one way this fix could be actively harmful; bias
@@ -111,11 +131,19 @@ spec:
                 - {{namespace}}
       mutate:
         foreach:
+          # Two independent entries -- each probe is only added when it,
+          # specifically, is missing, and only when the container actually
+          # declares a port to check. See "Constraints" above for why a
+          # single shared precondition covering both probes (the earlier
+          # version of this policy) was unsafe.
           - list: "request.object.spec.template.spec.containers"
             preconditions:
               all:
                 - key: "{{ element.livenessProbe || '' }}"
                   operator: Equals
+                  value: ""
+                - key: "{{ element.ports[0].containerPort || '' }}"
+                  operator: NotEquals
                   value: ""
             patchesJson6902: |-
               - path: "/spec/template/spec/containers/{{ elementIndex }}/livenessProbe"
@@ -126,6 +154,16 @@ spec:
                   initialDelaySeconds: 30
                   periodSeconds: 20
                   failureThreshold: 5
+          - list: "request.object.spec.template.spec.containers"
+            preconditions:
+              all:
+                - key: "{{ element.readinessProbe || '' }}"
+                  operator: Equals
+                  value: ""
+                - key: "{{ element.ports[0].containerPort || '' }}"
+                  operator: NotEquals
+                  value: ""
+            patchesJson6902: |-
               - path: "/spec/template/spec/containers/{{ elementIndex }}/readinessProbe"
                 op: add
                 value:
