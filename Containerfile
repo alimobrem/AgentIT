@@ -1,4 +1,4 @@
-FROM registry.access.redhat.com/ubi9/python-312:latest
+FROM registry.access.redhat.com/ubi9/python-312:1
 
 USER 0
 # Optional oc/kubectl binaries for break-glass / live e2e from a pod shell.
