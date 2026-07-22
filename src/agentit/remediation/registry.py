@@ -61,6 +61,29 @@ FIX_REGISTRY: dict[str, tuple[str, str]] = {
     # of the app repo after merge.
     "eol":           ("infrastructure", "eol-upgrade"),
     "migration":     ("data_governance", "db-migration-tooling"),
+    # infrastructure.py's "iac" (no Helm/Kustomize/Terraform) and "manifests"
+    # (no K8s manifests) findings both had detection with zero remediation
+    # (docs: fleet-wide audit "why does most stuff get filtered out of
+    # PRs"). Both are cleared by the same skill: a real Helm chart with
+    # Chart.yaml (clears "iac") whose templates carry literal
+    # `apiVersion:`/`kind:` text (clears "manifests" too, per
+    # infrastructure.py:32-33's plain substring check) — see
+    # skills/infrastructure/helm-chart.md. Source-repo delivery
+    # (CATEGORY_SOURCE_PATCH): the finding is read from the app's own repo,
+    # so the fix must land there too, not in gitops.
+    "iac":           ("infrastructure", "helm-chart"),
+    "manifests":     ("infrastructure", "helm-chart"),
+    # ha_dr.py's "health" (no liveness/readiness probes) finding had
+    # detection with zero remediation. Unlike iac/manifests/quota/scaling,
+    # a probe is a patch to an *existing* container spec AgentIT doesn't
+    # own the source definition of — see skills/infrastructure/
+    # health-probes-policy.md's docstring for why this generates a
+    # namespace-scoped Kyverno mutate policy (cluster delivery) instead of
+    # a source-repo Deployment patch or a fabricated gitops Deployment
+    # copy. live_evidence.live_health_probes_present() closes the
+    # resulting source-analyzer-never-sees-it gap the same way
+    # quota/scaling already do.
+    "health":        ("infrastructure", "health-probes-policy"),
 }
 
 

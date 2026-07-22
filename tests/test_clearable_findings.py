@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from agentit.analyzers.data_governance import DataGovernanceAnalyzer
 from agentit.analyzers.eol import _scan_package_json
+from agentit.analyzers.infrastructure import InfrastructureAnalyzer
 from agentit.analyzers.live_evidence import (
     apply_live_cluster_finding_clear,
     live_hpa_present,
@@ -76,6 +77,9 @@ class TestLiveClusterFindingClear:
         ), patch(
             "agentit.analyzers.live_evidence.live_quota_present",
             return_value=None,
+        ), patch(
+            "agentit.analyzers.live_evidence.live_health_probes_present",
+            return_value=None,
         ):
             out = apply_live_cluster_finding_clear(scores, "pinky")
         assert [f.category for f in out[0].findings] == ["scaling"]
@@ -100,6 +104,145 @@ class TestLiveClusterFindingClear:
                 Exception('deployments.apps "pinky" not found')
             )
             assert live_hpa_present("pinky") is False
+
+    def test_drops_health_when_live_workloads_have_probes(self):
+        """ha_dr.py's `health` finding is source-only (iter_yaml_files on the
+        app repo) and never learns a fix landed elsewhere (a GitOps-synced
+        Deployment edit, or health-probes-policy.md's Kyverno mutate policy)
+        -- the same disconnect quota/scaling already had."""
+        scores = [
+            DimensionScore(
+                dimension="ha_dr", score=50, max_score=100,
+                findings=[
+                    Finding(
+                        category="health", severity=Severity.high,
+                        description="No liveness or readiness probes defined",
+                        recommendation="Add probes",
+                    ),
+                    Finding(
+                        category="availability", severity=Severity.high,
+                        description="Single replica", recommendation="scale",
+                    ),
+                ],
+            ),
+        ]
+        with (
+            patch("agentit.analyzers.live_evidence.live_quota_present", return_value=None),
+            patch("agentit.analyzers.live_evidence.live_hpa_present", return_value=None),
+            patch("agentit.analyzers.live_evidence.live_health_probes_present", return_value=True),
+        ):
+            out = apply_live_cluster_finding_clear(scores, "pinky")
+        cats = {f.category for s in out for f in s.findings}
+        assert cats == {"availability"}
+
+    def test_health_not_cleared_when_a_live_container_is_missing_a_probe(self):
+        scores = [
+            DimensionScore(
+                dimension="ha_dr", score=50, max_score=100,
+                findings=[
+                    Finding(
+                        category="health", severity=Severity.high,
+                        description="No liveness or readiness probes defined",
+                        recommendation="Add probes",
+                    ),
+                ],
+            ),
+        ]
+        with (
+            patch("agentit.analyzers.live_evidence.live_quota_present", return_value=None),
+            patch("agentit.analyzers.live_evidence.live_hpa_present", return_value=None),
+            patch("agentit.analyzers.live_evidence.live_health_probes_present", return_value=False),
+        ):
+            out = apply_live_cluster_finding_clear(scores, "pinky")
+        assert [f.category for f in out[0].findings] == ["health"]
+
+
+class TestLiveHealthProbesPresent:
+    """Unit coverage for live_evidence.live_health_probes_present()'s own
+    tri-state discovery logic (True/False/None), independent of the
+    finding-clear wiring above."""
+
+    @staticmethod
+    def _make_container(has_liveness: bool, has_readiness: bool) -> MagicMock:
+        c = MagicMock()
+        c.liveness_probe = MagicMock() if has_liveness else None
+        c.readiness_probe = MagicMock() if has_readiness else None
+        return c
+
+    def _make_deployment(self, containers: list) -> MagicMock:
+        dep = MagicMock()
+        dep.spec.template.spec.containers = containers
+        return dep
+
+    def test_true_when_every_container_has_both_probes(self):
+        from agentit.analyzers.live_evidence import live_health_probes_present
+
+        with (
+            patch("agentit.kube.apps_v1") as mock_apps,
+            patch("agentit.kube.list_custom_resources", return_value=[]),
+        ):
+            mock_apps.return_value.list_namespaced_deployment.return_value.items = [
+                self._make_deployment([self._make_container(True, True)]),
+            ]
+            assert live_health_probes_present("pinky") is True
+
+    def test_false_when_a_container_is_missing_readiness_probe(self):
+        from agentit.analyzers.live_evidence import live_health_probes_present
+
+        with (
+            patch("agentit.kube.apps_v1") as mock_apps,
+            patch("agentit.kube.list_custom_resources", return_value=[]),
+        ):
+            mock_apps.return_value.list_namespaced_deployment.return_value.items = [
+                self._make_deployment([self._make_container(True, False)]),
+            ]
+            assert live_health_probes_present("pinky") is False
+
+    def test_none_when_no_live_workloads_found(self):
+        from agentit.analyzers.live_evidence import live_health_probes_present
+
+        with (
+            patch("agentit.kube.apps_v1") as mock_apps,
+            patch("agentit.kube.list_custom_resources", return_value=[]),
+        ):
+            mock_apps.return_value.list_namespaced_deployment.return_value.items = []
+            assert live_health_probes_present("pinky") is None
+
+    def test_none_on_discovery_failure(self):
+        from agentit.analyzers.live_evidence import live_health_probes_present
+
+        with patch("agentit.kube.apps_v1", side_effect=RuntimeError("api down")):
+            assert live_health_probes_present("pinky") is None
+
+    def test_none_for_empty_namespace(self):
+        from agentit.analyzers.live_evidence import live_health_probes_present
+
+        assert live_health_probes_present("") is None
+
+    def test_true_via_rollout_when_deployments_empty_but_rollout_has_probes(self):
+        """A live Rollout (dict-shaped custom resource, camelCase keys) with
+        probes on every container also counts as real evidence -- not just
+        typed Deployment objects."""
+        from agentit.analyzers.live_evidence import live_health_probes_present
+
+        rollout = {
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [
+                            {"name": "pinky", "livenessProbe": {"tcpSocket": {"port": "http"}},
+                             "readinessProbe": {"tcpSocket": {"port": "http"}}},
+                        ],
+                    },
+                },
+            },
+        }
+        with (
+            patch("agentit.kube.apps_v1") as mock_apps,
+            patch("agentit.kube.list_custom_resources", return_value=[rollout]),
+        ):
+            mock_apps.return_value.list_namespaced_deployment.return_value.items = []
+            assert live_health_probes_present("pinky") is True
 
 
 class TestNestedMigrationDetection:
@@ -223,3 +366,240 @@ class TestSourcePatchSkills:
         files = engine.generate(skill, report, llm_client=None)
         assert files
         assert files[0].target_path in ("Dockerfile", "Containerfile")
+
+    def test_helm_chart_skill_is_source_delivery_llm_mode(self):
+        skill = load_skill(Path("skills/infrastructure/helm-chart.md"))
+        assert skill is not None
+        assert skill.delivery == "source"
+        assert skill.mode == "llm"
+
+    def test_helm_chart_template_fallback_emits_chart_and_manifests(self):
+        skill = load_skill(Path("skills/infrastructure/helm-chart.md"))
+        assert skill is not None
+        report = make_report(
+            repo_name="pinky",
+            languages=[Language(name="python", file_count=10, percentage=100.0)],
+            scores=[
+                DimensionScore(
+                    dimension="infrastructure", score=40, max_score=100,
+                    findings=[
+                        Finding(
+                            category="iac", severity=Severity.high,
+                            description="No IaC tooling detected (no Helm chart, Kustomize, or Terraform)",
+                            recommendation="Generate Helm chart with values.yaml and environment overlays",
+                        ),
+                        Finding(
+                            category="manifests", severity=Severity.high,
+                            description="No Kubernetes manifests found",
+                            recommendation="Create deployment, service, and ingress manifests",
+                        ),
+                    ],
+                ),
+            ],
+        )
+        files = generate_source_patch_for_skill(skill, report, "pinky", llm_client=None)
+        target_paths = {f.target_path for f in files}
+        assert target_paths == {
+            "helm/Chart.yaml", "helm/values.yaml",
+            "helm/templates/deployment.yaml", "helm/templates/service.yaml",
+        }
+        for f in files:
+            assert f.skill_name == "helm-chart"
+            # Both open findings' descriptions are recorded as addressed —
+            # one skill invocation clears both categories in one PR.
+            assert "IaC tooling" in f.finding_addressed
+            assert "Kubernetes manifests" in f.finding_addressed
+
+    def test_helm_chart_clears_iac_and_manifests_findings_on_reassess(self, tmp_path: Path):
+        """Functional/parity test: write the generated chart into a real
+        repo tree and re-run the real analyzer -- both `iac` and
+        `manifests` must disappear, exactly like infrastructure.py:41-56
+        computes them (has_helm / has_k8s_manifests over iter_yaml_files)."""
+        skill = load_skill(Path("skills/infrastructure/helm-chart.md"))
+        report = make_report(repo_name="pinky")
+        files = generate_source_patch_for_skill(skill, report, "pinky", llm_client=None)
+        for f in files:
+            target = tmp_path / f.target_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(f.content, encoding="utf-8")
+
+        score = InfrastructureAnalyzer().analyze(tmp_path)
+        cats = {f.category for f in score.findings}
+        assert "iac" not in cats
+        assert "manifests" not in cats
+
+    def test_helm_chart_llm_tailored_multi_file_response_is_used(self):
+        """A well-formed multi-file LLM response is parsed and used verbatim
+        (not silently discarded in favor of the template fallback)."""
+        skill = load_skill(Path("skills/infrastructure/helm-chart.md"))
+        report = make_report(repo_name="pinky")
+
+        llm_response = (
+            "===FILE: Chart.yaml===\n"
+            "apiVersion: v2\n"
+            "name: pinky\n"
+            "version: 0.1.0\n"
+            "===FILE: values.yaml===\n"
+            "replicaCount: 2\n"
+            "===FILE: templates/deployment.yaml===\n"
+            "apiVersion: apps/v1\n"
+            "kind: Deployment\n"
+            "metadata:\n"
+            "  name: pinky\n"
+            "spec:\n"
+            "  replicas: \"{{ .Values.replicaCount }}\"\n"
+            "  selector:\n"
+            "    matchLabels:\n"
+            "      app: pinky\n"
+            "  template:\n"
+            "    metadata:\n"
+            "      labels:\n"
+            "        app: pinky\n"
+            "    spec:\n"
+            "      containers:\n"
+            "        - name: pinky\n"
+            "          image: \"internal-registry/agentit/pinky:latest\"\n"
+            "===FILE: templates/service.yaml===\n"
+            "apiVersion: v1\n"
+            "kind: Service\n"
+            "metadata:\n"
+            "  name: pinky\n"
+            "spec:\n"
+            "  selector:\n"
+            "    app: pinky\n"
+            "  ports:\n"
+            "    - port: 8080\n"
+            "===END===\n"
+        )
+
+        class _FakeLLM:
+            def __init__(self, response: str) -> None:
+                self.response = response
+                self.calls = 0
+
+            def _chat(self, system, user, max_tokens=None, **_kwargs):
+                self.calls += 1
+                return self.response
+
+        fake_llm = _FakeLLM(llm_response)
+        files = generate_source_patch_for_skill(skill, report, "pinky", llm_client=fake_llm)
+        assert fake_llm.calls == 1
+        by_path = {f.target_path: f.content for f in files}
+        assert "replicaCount: 2" in by_path["helm/values.yaml"]
+        assert '"{{ .Values.replicaCount }}"' in by_path["helm/templates/deployment.yaml"]
+        for f in files:
+            assert "LLM-tailored" in f.description
+
+    def test_helm_chart_rejects_unquoted_helm_expression_that_breaks_yaml(self):
+        """A real, easy-to-make Helm mistake: an unquoted `{{ .Values.x }}`
+        starting a YAML scalar parses as YAML flow-mapping syntax, not a
+        string, and fails validate_manifest() -- this must be rejected
+        (falling back to the template), not shipped as a broken chart."""
+        skill = load_skill(Path("skills/infrastructure/helm-chart.md"))
+        report = make_report(repo_name="pinky")
+
+        class _FakeLLM:
+            def _chat(self, system, user, max_tokens=None, **_kwargs):
+                return (
+                    "===FILE: Chart.yaml===\n"
+                    "apiVersion: v2\nname: pinky\nversion: 0.1.0\n"
+                    "===FILE: values.yaml===\n"
+                    "replicaCount: 2\n"
+                    "===FILE: templates/deployment.yaml===\n"
+                    "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: pinky\n"
+                    "spec:\n  replicas: {{ .Values.replicaCount }}\n"
+                    "===FILE: templates/service.yaml===\n"
+                    "apiVersion: v1\nkind: Service\nmetadata:\n  name: pinky\n"
+                    "===END===\n"
+                )
+
+        files = generate_source_patch_for_skill(skill, report, "pinky", llm_client=_FakeLLM())
+        for f in files:
+            assert "deterministic template" in f.description
+
+    def test_helm_chart_falls_back_to_template_when_llm_output_invalid(self):
+        """An LLM response missing Chart.yaml (or otherwise failing the
+        real validation gate) must never ship -- this skill falls back to
+        the deterministic template rather than a broken chart ("a wrong
+        chart is worse than no chart")."""
+        skill = load_skill(Path("skills/infrastructure/helm-chart.md"))
+        report = make_report(repo_name="pinky")
+
+        class _FakeLLM:
+            def _chat(self, system, user, max_tokens=None, **_kwargs):
+                return "===FILE: templates/deployment.yaml===\nnot: a chart\n===END===\n"
+
+        files = generate_source_patch_for_skill(skill, report, "pinky", llm_client=_FakeLLM())
+        target_paths = {f.target_path for f in files}
+        assert target_paths == {
+            "helm/Chart.yaml", "helm/values.yaml",
+            "helm/templates/deployment.yaml", "helm/templates/service.yaml",
+        }
+        for f in files:
+            assert "deterministic template" in f.description
+
+    def test_helm_chart_generated_templates_pass_manifest_validation(self):
+        """Every templates/*.yaml file this skill emits (LLM or fallback)
+        must pass the same validate_manifest() gate every other generated
+        K8s manifest in this codebase passes before shipping."""
+        from agentit.agents.base import validate_manifest
+
+        skill = load_skill(Path("skills/infrastructure/helm-chart.md"))
+        report = make_report(repo_name="pinky")
+        files = generate_source_patch_for_skill(skill, report, "pinky", llm_client=None)
+        for f in files:
+            if f.target_path.startswith("helm/templates/"):
+                assert validate_manifest(f.content) == []
+
+    def test_skill_engine_generate_helm_chart_end_to_end(self):
+        """SkillEngine.generate() for delivery: source routes correctly and
+        sets target_path on every produced file (mirrors the containerfile
+        parity test above, for the multi-file case)."""
+        engine = SkillEngine(Path("skills"), platform=None)
+        skill = engine.skill_for_category("iac")
+        assert skill is not None
+        assert skill.name == "helm-chart"
+        assert engine.skill_for_category("manifests") is skill
+        report = make_report(repo_name="pinky")
+        report.scores = [
+            DimensionScore(
+                dimension="infrastructure", score=40, max_score=100,
+                findings=[
+                    Finding(
+                        category="iac", severity=Severity.high,
+                        description="No IaC tooling detected",
+                        recommendation="Generate Helm chart",
+                    ),
+                    Finding(
+                        category="manifests", severity=Severity.high,
+                        description="No Kubernetes manifests found",
+                        recommendation="Create manifests",
+                    ),
+                ],
+            ),
+        ]
+        files = engine.generate(skill, report, llm_client=None)
+        assert len(files) == 4
+        assert all(f.target_path.startswith("helm/") for f in files)
+
+    def test_one_skill_invocation_covers_both_iac_and_manifests(self):
+        """SkillEngine.match() must resolve both open findings to the SAME
+        skill instance (not two separate ones) -- run_all() should call
+        the LLM/template generator only once for an app with both findings
+        open, not duplicate the chart PR."""
+        engine = SkillEngine(Path("skills"), platform=None)
+        report = make_report(repo_name="pinky")
+        report.scores = [
+            DimensionScore(
+                dimension="infrastructure", score=40, max_score=100,
+                findings=[
+                    Finding(category="iac", severity=Severity.high,
+                            description="No IaC tooling detected", recommendation="x"),
+                    Finding(category="manifests", severity=Severity.high,
+                            description="No Kubernetes manifests found", recommendation="x"),
+                ],
+            ),
+        ]
+        matched = engine.match(report)
+        helm_matches = [s for s in matched if s.name == "helm-chart"]
+        assert len(helm_matches) == 1

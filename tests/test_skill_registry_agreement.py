@@ -129,6 +129,38 @@ class TestCategoriesWithNoRealRemediationYetResolveHonestly:
         assert skill.name == "sbom-task"
 
 
+class TestNewSkillTriggersDoNotCollide:
+    """iac/manifests/health are now registered in FIX_REGISTRY (exact-match
+    lookup, authoritative), but ``Skill.matches()``'s own trigger-keyword
+    fallback (used for greenfield reports with no open findings, see
+    ``SkillEngine.match()``) still runs across every skill's ``triggers``
+    list. The `policy`/`availability`/`license`/`backup` bugs this file
+    already guards against were all *exact* trigger-string collisions
+    between two skills that both listed the same word -- verify
+    helm-chart's and health-probes-policy's new trigger words don't repeat
+    any word an existing, unrelated skill already uses."""
+
+    @pytest.fixture(scope="class")
+    def all_skills(self) -> list:
+        from agentit.skill_engine import load_all_skills
+
+        return load_all_skills(_SKILLS_DIR)
+
+    @pytest.mark.parametrize("skill_name,triggers", [
+        ("helm-chart", ["helm", "chart", "iac", "kustomize", "terraform", "k8s manifest", "kubernetes manifest"]),
+        ("health-probes-policy", ["health", "probe", "liveness", "readiness"]),
+    ])
+    def test_new_skill_triggers_are_unique(self, all_skills: list, skill_name: str, triggers: list[str]) -> None:
+        others = [s for s in all_skills if s.name != skill_name]
+        for trigger in triggers:
+            colliding = [s.name for s in others if trigger in [t.lower() for t in s.triggers]]
+            assert not colliding, (
+                f"trigger {trigger!r} on skill '{skill_name}' also declared by "
+                f"{colliding} -- exact-match trigger collision (see policy/"
+                f"availability/license/backup precedent above)"
+            )
+
+
 class TestDispatcherRoutesThroughSameFunction:
     """`RemediationDispatcher._dispatch_generate` must resolve the skill via
     the exact same `skill_for_category()` used by `generate_for_finding()`,
