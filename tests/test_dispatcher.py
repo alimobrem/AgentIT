@@ -44,6 +44,16 @@ class TestRegistryLookup:
         assert lookup("autoscaling") == ("infrastructure", "hpa")
         assert lookup("monitoring") == ("observability", "service-monitor")
 
+    def test_scaling_and_quota_analyzer_categories_resolve(self):
+        """ha_dr / infrastructure analyzers emit these exact category names
+        (pinky open findings). They must resolve without relying on the
+        "autoscaling" substring bridge or trigger-only fallback."""
+        assert lookup("scaling") == ("infrastructure", "hpa")
+        assert lookup("quota") == ("infrastructure", "resourcequota")
+        # Detect-only today — no remediation skill registered yet.
+        assert lookup("eol") is None
+        assert lookup("migration") is None
+
 
 # ── patch_base_image ────────────────────────────────────────────────
 

@@ -25,6 +25,18 @@ _IRREGULAR_KIND_PLURALS: dict[str, str] = {
     "ingress": "ingresses",
 }
 
+# Output labels that are not Kubernetes API kinds. Skills may declare these
+# in ``outputs:`` for documentation, but ``has_api()`` must not skip the
+# skill — generation either emits a real kind (e.g. BuildConfig wrapping a
+# Containerfile) or advisory ConfigMap/docs the template already produces.
+_NON_API_OUTPUT_KINDS: frozenset[str] = frozenset({
+    "containerfile",
+    "dockerfile",
+    "securitycontext",
+    "complianceevidence",
+    "decommissionplan",
+})
+
 
 def _pluralize_kind(kind: str) -> str:
     """Return the correct lowercase plural API resource name for a K8s kind."""
@@ -411,9 +423,26 @@ class SkillEngine:
 
         Retired/draft skills are excluded by Skill.matches().
         Conflicts between active and deprecated skills are resolved (active wins).
+
+        Also includes the FIX_REGISTRY skill for every open finding category
+        (via ``skill_for_category``), even when that skill's trigger keywords
+        would not have matched the report prose. Pinky-class Scans with open
+        ``quota``/``scaling``/``audit`` findings must still attempt those
+        remediations; trigger-only matching previously depended on summary
+        text luck and left categories with a registry skill unattempted when
+        generation was filtered to open findings only.
         """
         matched = [s for s in self.skills if s.matches(report)]
-        return self._resolve_conflicts(matched)
+        by_name = {s.name: s for s in matched}
+        for score in report.scores:
+            for finding in score.findings:
+                skill = self.skill_for_category(finding.category)
+                if skill is None or skill.name in by_name:
+                    continue
+                if skill.mode == "detect" or skill.status in ("retired", "draft"):
+                    continue
+                by_name[skill.name] = skill
+        return self._resolve_conflicts(list(by_name.values()))
 
     @staticmethod
     def _resolve_conflicts(skills: list[Skill]) -> list[Skill]:
@@ -477,6 +506,8 @@ class SkillEngine:
         # Check if the output kind is available on the platform
         if self.platform:
             for output_kind in skill.outputs:
+                if output_kind.lower() in _NON_API_OUTPUT_KINDS:
+                    continue
                 if not self.platform.has_api(_pluralize_kind(output_kind)) and not self.platform.has_api(output_kind.lower()):
                     logger.debug("Skipping skill %s: %s not available", skill.name, output_kind)
                     return []

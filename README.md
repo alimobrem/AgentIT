@@ -42,6 +42,10 @@ Self-managed delivery gates (#119/#121), watchers, and Scan→GitOps delivery ar
 
 ---
 
+**Open-finding skill mapping (2026-07-22).** Pinky gitops [#21](https://github.com/alimobrem/agentit-gitops/pull/21) correctly kept only scaling (HPA delta) under the quality filter — but `FIX_REGISTRY` lacked exact `scaling`/`quota` rows, `containerfile` declared a non-API `outputs: [Containerfile]` so `has_api()` skipped generation entirely, and `SkillEngine.match()` did not guarantee a FIX_REGISTRY skill attempt per open finding category. Registry now maps `scaling`→`hpa` and `quota`→`resourcequota`; containerfile emits `BuildConfig`; non-API output labels are exempt from the API gate; match() unions trigger matches with `skill_for_category` for every open finding. `eol`/`migration` remain detect-only (no remediation skill yet). Fail-closed quality filter unchanged.
+
+---
+
 **PR-types quality follow-ups (2026-07-21).** Inventory: [`docs/agentit-pr-types-quality-review.md`](docs/agentit-pr-types-quality-review.md). P0 HPA app-correctness (#136) + SSA soft dry-run (#137). P1/P2: refuse `.agentit/` dump PRs; source-repo patch titles by mechanism; finding-clear proof section + Ledger `finding-clear-pending`; shared-NS blast-radius in GitOps PR bodies; scout `evidence-usefulness` gate (cite dogfood/finding/PR failure). Activate already stages one skill file.
 
 ---

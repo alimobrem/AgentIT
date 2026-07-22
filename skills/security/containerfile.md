@@ -8,8 +8,13 @@ triggers:
   - containerfile
   - image
   - base_image
+# BuildConfig (not "Containerfile"): SkillEngine.has_api() gates on outputs
+# against the live apiserver. "Containerfile" is not a K8s kind, so a set
+# platform previously skipped this skill entirely (no file → quality filter
+# never saw a container remediation). The template/LLM emit an OpenShift
+# BuildConfig that embeds the Dockerfile — a real applyable kind.
 outputs:
-  - Containerfile
+  - BuildConfig
 property: "Application runs in a secure, minimal container image"
 mode: llm
 ---

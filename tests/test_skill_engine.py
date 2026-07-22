@@ -708,6 +708,88 @@ class TestDetectModeNeverRemediates:
         report = make_report()
         assert engine.match(report) == []
 
+    def test_match_includes_fix_registry_skill_for_open_finding(
+        self, tmp_path: Path,
+    ) -> None:
+        """Open finding categories must attempt their FIX_REGISTRY skill even
+        when that skill's trigger keywords do not appear in report prose."""
+        (tmp_path / "infrastructure").mkdir()
+        (tmp_path / "infrastructure" / "hpa.md").write_text(
+            "---\n"
+            "name: hpa\n"
+            "domain: infrastructure\n"
+            "version: 1\n"
+            "triggers:\n"
+            "  - zzznomatch-trigger\n"
+            "outputs:\n"
+            "  - HorizontalPodAutoscaler\n"
+            "property: scales\n"
+            "mode: template\n"
+            "---\n\n"
+            "# HPA\n\n"
+            "```yaml\n"
+            "apiVersion: autoscaling/v2\n"
+            "kind: HorizontalPodAutoscaler\n"
+            "metadata:\n"
+            "  name: {{app_name}}-hpa\n"
+            "```\n",
+            encoding="utf-8",
+        )
+        engine = SkillEngine(tmp_path, platform=None)
+        from agentit.models import DimensionScore, Finding, Severity
+
+        report = make_report()
+        report.scores = [
+            DimensionScore(
+                dimension="ha_dr",
+                score=50,
+                max_score=100,
+                findings=[
+                    Finding(
+                        category="scaling",
+                        severity=Severity.medium,
+                        description="No HorizontalPodAutoscaler defined",
+                        recommendation="Add HPA for automatic scaling under load",
+                    ),
+                ],
+            ),
+        ]
+        # Trigger keyword absent from prose; category alone must pull hpa in.
+        assert "zzznomatch-trigger" not in " ".join(
+            f"{f.category} {f.description} {f.recommendation}"
+            for s in report.scores for f in s.findings
+        )
+        matched = engine.match(report)
+        assert [s.name for s in matched] == ["hpa"]
+
+
+class TestNonApiOutputGating:
+    """outputs like Containerfile must not skip generation when platform is set."""
+
+    def test_non_api_output_kind_does_not_skip_generate(self, tmp_path: Path) -> None:
+        skill = _make_skill(
+            "containerfile",
+            outputs=["Containerfile"],
+            mode="template",
+            triggers=["container"],
+        )
+        skill.body = (
+            "# Container\n\n"
+            "```yaml\n"
+            "apiVersion: build.openshift.io/v1\n"
+            "kind: BuildConfig\n"
+            "metadata:\n"
+            "  name: {{app_name}}\n"
+            "```\n"
+        )
+        from agentit.platform_context import PlatformContext
+
+        platform = PlatformContext(available_kinds={"buildconfig", "configmap"})
+        engine = SkillEngine(tmp_path, platform=platform)
+        files = engine.generate(skill, make_report(repo_name="pinky"), llm_client=None)
+        assert len(files) == 1
+        assert "kind: BuildConfig" in files[0].content
+
 
 class TestSelfManagedGenerationConstraints:
     """P1: self-managed AgentIT skips fleet-only kinds and non-Helm templates."""

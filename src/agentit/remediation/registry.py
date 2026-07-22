@@ -38,6 +38,17 @@ FIX_REGISTRY: dict[str, tuple[str, str]] = {
     "rbac":          ("security", "rbac"),
     "autoscaling":   ("infrastructure", "hpa"),
     "monitoring":    ("observability", "service-monitor"),
+    # Analyzer categories used by ha_dr / infrastructure (pinky Scan open
+    # findings). "scaling" is not a substring of "autoscaling", so lookup
+    # previously returned None and skill_for_category fell back to trigger
+    # matching. "quota" had no registry row at all (resourcequota skill
+    # only matched via triggers). Keep these exact so quality_prs /
+    # RemediationDispatcher / skill_for_category all agree.
+    "scaling":       ("infrastructure", "hpa"),
+    "quota":         ("infrastructure", "resourcequota"),
+    # Intentionally unmapped today (detect-only; no remediation skill yet):
+    #   eol       — analyzers/eol.py; needs source upgrade skill + source PR
+    #   migration — analyzers/data_governance.py; needs Alembic/Flyway source skill
 }
 
 
