@@ -17,6 +17,8 @@
 | Image promotion | App’s own CI / image digest in gitops (as designed per app) | Tekton `notify-argocd` pins live `image.tag` on Application `agentit` |
 | Human gate | Merge PR on agentit-gitops | Merge PR on AgentIT.git (never auto-merge) |
 | Deployer | Argo only | Argo only |
+| Solution contracts (`delivery: cluster`) | gitops `apps/{app}/…` | app repo `chart/` (source PR) |
+| Solution contracts (`delivery: source`) | app repo patch | app repo patch |
 
 **Why this is correct**
 
@@ -46,14 +48,15 @@
 ### (a) Fleet app (e.g. pinky)
 
 ```text
-Scan (Assess→Onboard) → route_and_deliver()
-  → MECHANISM_INFRA_REPO_COMMIT → PR on agentit-gitops under apps/{app}/
+Scan (Assess→Onboard) → quality filter + SSA dry-run → route_and_deliver()
+  → MECHANISM_INFRA_REPO_COMMIT → PR on agentit-gitops under apps/{app}/…
   → human merge
-  → ApplicationSet agentit-managed-apps discovers/updates managed-{app}
+  → ApplicationSet agentit-managed-apps (directory.recurse=true, *.yaml/*.yml)
+    discovers/updates managed-{app}
   → Argo sync (prune/selfHeal) → app namespace
 ```
 
-Registration: `ensure_applicationset(infra_repo_url)` once; first merge bootstraps `apps/{app}/` so `managed-{app}` appears.
+Registration: `ensure_applicationset(infra_repo_url)` once; first merge bootstraps `apps/{app}/` so `managed-{app}` appears. Without `recurse`, nested skill/category YAML never syncs (dogfood: Synced/Healthy, 0 resources).
 
 ### (b) AgentIT itself (onboard / harden / skills / self-improve)
 
@@ -117,7 +120,7 @@ High level — implementation can follow in a focused PR.
 
 | Fact | Where |
 | ---- | ----- |
-| AppSet watches `apps/*`, excludes `apps/agentit` | `ensure_applicationset()` in [`src/agentit/portal/github_pr.py`](../src/agentit/portal/github_pr.py) (~1059–1061) |
+| AppSet watches `apps/*`, excludes `apps/agentit`; `directory.recurse=true` + yaml include | `ensure_applicationset()` in [`src/agentit/portal/github_pr.py`](../src/agentit/portal/github_pr.py) |
 | Application `agentit` → AgentIT.git `chart` + `image.tag` bootstrap note | [`argocd/application.yaml`](../argocd/application.yaml) |
 | Self-managed = literal Application sourcing app’s own repo (not `managed-{app}`) | `is_self_managed_application()` / `is_gitops_registered()` in [`src/agentit/portal/delivery.py`](../src/agentit/portal/delivery.py) (~328–384) |
 | Fleet deliver = `apps/{app}/{category}/…` via `commit_to_infra_repo` | [`src/agentit/portal/github_pr.py`](../src/agentit/portal/github_pr.py) (~854–892); `route_and_deliver()` in [`delivery.py`](../src/agentit/portal/delivery.py) |

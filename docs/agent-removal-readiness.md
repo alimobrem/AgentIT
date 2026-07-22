@@ -1,5 +1,12 @@
 # Agent Removal Readiness
 
+> **SUPERSEDED outcome (2026-07-21).** Skills-primary simplification landed:
+> cost/dependency Python agents and Per-Agent PRs are **gone**; optional
+> **CodeChangeAgent** remains for source patches. `checks/` YAML is empty
+> (`mode: detect` skills). Treat this audit as historical evidence for *why*
+> that cut was safe — not as a live backlog of eight domain agents.
+> Current model: [../README.md](../README.md) § The agent fleet.
+
 Status of the skills-side work required before the hardcoded Python agents
 (`src/agentit/agents/*.py`) can be deleted in favor of skills
 (`skills/**/*.md`, loaded by `src/agentit/skill_engine.py`) plus the
@@ -10,12 +17,8 @@ revisit *whether* to remove the agents — that's decided — only whether the
 skills side is actually ready to stand alone, and if not, exactly what's
 missing.
 
-**Audit date:** 2026-07-12/13. Several other in-flight workstreams
-(`orchestrator.py`, `skill_engine.py`, every file under `agents/`, CI/Tekton
-chart files) were being edited concurrently by other subagents while this
-audit was performed — some observations below note the state as observed at
-audit time, which may have already changed by the time this is read. Verify
-against current `git log` before treating anything here as final.
+**Audit date:** 2026-07-12/13 (pre–skills-primary). Verify against current
+`git log` / README before treating anything here as final.
 
 ## 1. The 8 hard-blocker skills now have a working template fallback
 

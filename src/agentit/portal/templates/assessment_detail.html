@@ -354,6 +354,13 @@
       {% if pr.lifecycle == 'needs_approval' %}
       <span class="text-muted text-sm">&middot; waiting for your approval &mdash; review and merge on GitHub</span>
       {% endif %}
+      {% if pr.contract_lines %}
+      <ul class="text-muted text-sm mt-1 mb-0">
+        {% for line in pr.contract_lines %}
+        <li>{{ line }}</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
     </li>
     {% endfor %}
   </ul>

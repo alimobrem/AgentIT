@@ -1,13 +1,14 @@
 # The product owner's "one simple loop" vision — a grounded gap analysis
 
-**Status: mostly SHIPPED.** See "Final status (2026-07-17): what actually
-shipped, phase by phase" at the end of this document for the real commit
-hashes and an honest accounting of what's done versus still genuinely open
-(some of it is; this update does not claim otherwise). Everything below
-this line is preserved exactly as originally written — as the planning
-record that motivated the work — except for this status line and that new
-closing section; it is *not* rewritten to read as always having described
-already-shipped work.
+> **HISTORICAL planning record (2026-07-22).** Written when Direct Apply,
+> Per-Agent PRs, and AutoMode were still in play. The live product is
+> **Scan-only HITL → GitOps PR → human merge → Argo**. Use
+> [../README.md](../README.md) and [architecture.md](./architecture.md) for
+> current truth. Keep this file for the gap analysis / phase history only.
+
+**Status: mostly SHIPPED (as of 2026-07-17 closing section), then further
+superseded by skills-primary + Scan-only + quality PRs (2026-07-21).** See
+"Final status" at the end. Body below is preserved as planning record.
 
 **Original status: design/planning analysis, no code changes.** Written
 against `AgentIT-ui-redesign` @ `origin/main` (pulled fresh this session —

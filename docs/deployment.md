@@ -1,12 +1,17 @@
 # AgentIT Deployment Guide
 
+AgentIT **itself** is self-managed: Application `agentit` → Helm `chart/` in this repo. Fleet apps use ApplicationSet → `apps/{app}/` in the gitops repo (never `apps/agentit/`). Product contract: [architecture-agentit-vs-fleet-gitops.md](./architecture-agentit-vs-fleet-gitops.md), [../README.md](../README.md).
+
 ## Architecture
 
-AgentIT is deployed via **Argo CD GitOps**. Argo CD is the sole deployer — never run `helm upgrade` manually.
+AgentIT is deployed via **Argo CD GitOps**. Argo CD is the sole deployer — never run `helm upgrade` manually. Portal Scan opens PRs; humans merge; there is no Direct Apply.
 
 ```
-Git push → Argo CD detects change → Renders Helm chart → Applies to cluster → Argo Rollouts manages canary
+Git push → Tekton agentit-ci (test/build/smoke) → notify-argocd pins image.tag
+         → Argo syncs Helm chart/ → Argo Rollouts canary
 ```
+
+**Fleet ApplicationSet:** `ensure_applicationset()` sets `directory.recurse=true` and `include: '{*.yaml,*.yml}'` so manifests under `apps/{app}/{category}/` and `apps/{app}/skills/` sync (top-level-only Directory mode showed Synced/Healthy with 0 resources).
 
 ## How to Change Configuration
 
