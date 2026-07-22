@@ -39,7 +39,7 @@
   {% elif job.status == "needs_attention" %}
   <div class="alert alert-warn mt-1">
     {{ job.error or "Automatic validation could not finish on its own." }}
-    Manifests were saved -- review and deliver manually on Onboard Results.
+    Manifests were saved -- review on Onboard Results, then use Retry Scan delivery if a PR still hasn't opened.
   </div>
   <a href="/assessments/{{ assessment_id }}/onboard-results" class="btn btn-outline" hx-boost="false">Review Manifests</a>
   {% endif %}

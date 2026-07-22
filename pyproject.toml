@@ -10,7 +10,7 @@ license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "click>=8.1",
-    "gitpython>=3.1.41",
+    "gitpython>=3.1.52",  # 3.1.51/3.1.52 fix 4 HIGH command-injection/exfil CVEs (GHSA-2f96-g7mh-g2hx, GHSA-956x-8gvw-wg5v, GHSA-rwj8-pgh3-r573, GHSA-v396-v7q4-x2qj)
     "pydantic>=2.7",
     "rich>=13.0",
     "anthropic[vertex]>=0.42",
