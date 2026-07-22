@@ -120,7 +120,11 @@ spec:
 
     - name: run-tests
       retries: 1
-      timeout: "10m0s"
+      # GHA finishes ~3m; cluster UBI pip+pytest often needs longer, and a
+      # retried TaskRun under node pressure previously hit TaskRunTimeout
+      # after the first attempt failed (agentit-ci-bwb76 on b4ae400f),
+      # blocking notify-argocd / image pin.
+      timeout: "20m0s"
       runAfter: [git-clone]
       taskSpec:
         workspaces:

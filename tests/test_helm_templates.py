@@ -264,6 +264,16 @@ class TestTektonPipeline:
         for task in doc["spec"]["tasks"]:
             assert "timeout" in task, f"Task {task['name']} missing timeout"
 
+    def test_run_tests_timeout_tolerates_ubi_pip_and_retry(self):
+        """Cluster UBI pip+pytest is slower than GHA (~3m). A retried
+        TaskRun under node pressure hit TaskRunTimeout at 10m
+        (agentit-ci-bwb76 on b4ae400f), blocking notify-argocd / image pin.
+        Keep headroom at ≥20m so one retry can finish."""
+        doc = _load(self.TEMPLATE)
+        tasks = {t["name"]: t for t in doc["spec"]["tasks"]}
+        assert tasks["run-tests"]["timeout"] == "20m0s"
+        assert tasks["run-tests"].get("retries", 0) >= 1
+
     def test_smoke_test_image_runs_after_build_before_argocd_notify(self):
         """The image smoke test must gate promotion: it runs after
         build-image produces the real tag, and notify-argocd (which patches
