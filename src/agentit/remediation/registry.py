@@ -88,14 +88,16 @@ def _c(
 SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
     "container": _c(
         "security", "containerfile", "source",
-        "pinning the app Dockerfile/Containerfile base image (no :latest)",
+        "pinning each targeted Dockerfile/Containerfile base image "
+        "(no :latest on that file; HEALTHCHECK/USER/non-UBI need matching evidence)",
         _ev.DOCKERFILE_PIN,
         "image-registry-policy", "limitrange", "image-scan-task",
         "kyverno-require-labels",
     ),
     "dockerfile": _c(
         "security", "containerfile", "source",
-        "pinning the app Dockerfile/Containerfile base image (no :latest)",
+        "pinning each targeted Dockerfile/Containerfile base image "
+        "(no :latest on that file; HEALTHCHECK/USER/non-UBI need matching evidence)",
         _ev.DOCKERFILE_PIN,
         "image-registry-policy", "limitrange", "image-scan-task",
         "kyverno-require-labels",
