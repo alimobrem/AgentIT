@@ -402,6 +402,32 @@ class TestPrBodyPhaseD:
         assert "does **not** auto-merge" in body
         assert "Argo deploys after merge" in body
 
+    def test_body_does_not_repeat_the_same_clear_line_per_finding(self):
+        """pulse-agent#2: a PR with seven "container" findings (":latest"
+        across multiple Dockerfiles, missing HEALTHCHECK, non-UBI base)
+        printed the identical "Clears `container` by pinning..." sentence
+        seven times in a row -- expected_clear_lines() emits one line per
+        finding, but every finding in the same category resolves to the
+        exact same contract-derived sentence. One line per distinct
+        category, not per finding."""
+        body = build_helpful_pr_body(
+            title_line="AgentIT Scan: container for pulse-agent",
+            target_findings=[
+                ("container", "base image is not ubi in dockerfile.fast"),
+                ("container", "no healthcheck defined in dockerfile"),
+                ("container", "no healthcheck defined in dockerfile.deps"),
+                ("container", "no healthcheck defined in dockerfile.fast"),
+                ("container", "using :latest tag in dockerfile"),
+                ("container", "using :latest tag in dockerfile.deps"),
+                ("container", "using :latest tag in dockerfile.fast"),
+            ],
+            files=[{
+                "path": "Dockerfile", "target_path": "Dockerfile",
+                "description": "pin base", "skill_name": "containerfile",
+            }],
+        )
+        assert body.count("Clears `container` by") == 1
+
     def test_body_source_finding_names_source_delivery(self):
         body = build_helpful_pr_body(
             title_line="AgentIT Scan: container for pinky",

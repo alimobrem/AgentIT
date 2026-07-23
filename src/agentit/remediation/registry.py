@@ -405,9 +405,24 @@ def delivery_path_hint(category: str, *, self_managed: bool) -> str:
 
 
 def expected_clear_lines(target_findings: list[tuple[str, str]]) -> list[str]:
-    """PR-body lines: 'Clears `cat` by …' for each targeted finding."""
+    """PR-body lines: 'Clears `cat` by …' for each targeted finding.
+
+    One line **per distinct category**, not per finding -- several open
+    findings in the same category (e.g. seven separate ``container``
+    findings for ":latest" tags across multiple Dockerfiles) all resolve
+    to the identical contract-derived sentence, since the line's content
+    depends only on ``cat``, never the finding's own description. Without
+    deduping, a multi-finding-same-category PR body repeated that sentence
+    once per finding -- confirmed live, pulse-agent#2's body printed the
+    same "Clears `container` by pinning..." line seven times in a row.
+    Order of first appearance is preserved.
+    """
     lines: list[str] = []
+    seen_categories: set[str] = set()
     for cat, _desc in target_findings:
+        if cat in seen_categories:
+            continue
+        seen_categories.add(cat)
         contract = contract_for(cat)
         if contract is None:
             lines.append(f"Clear `{cat}` on next re-Assess.")
