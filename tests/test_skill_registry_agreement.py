@@ -100,9 +100,16 @@ class TestSolutionContracts:
                 assert c.evidence_kind == "detect_only", key
 
     def test_source_findings_clear_via_source(self) -> None:
-        for cat in ("container", "dockerfile", "audit", "eol", "migration", "iac", "manifests"):
+        for cat in ("container", "dockerfile", "audit", "eol", "migration", "iac", "manifests", "sbom"):
             assert clears_via_source(cat), cat
             assert contract_for(cat).delivery == "source"
+
+    def test_sbom_refuses_tekton_task_companion(self) -> None:
+        c = contract_for("sbom")
+        assert c is not None
+        assert c.skill_name == "sbom-artifact"
+        assert c.evidence_kind == "sbom_file"
+        assert "sbom-task" in c.refuse_companions
 
     def test_fleet_vs_self_managed_path_hints(self) -> None:
         assert "gitops" in delivery_path_hint("scaling", self_managed=False)
@@ -121,6 +128,14 @@ class TestSolutionContracts:
         assert c is not None
         assert "image-registry-policy" in c.refuse_companions
         assert "limitrange" in c.refuse_companions
+
+    def test_image_signing_contract(self) -> None:
+        c = contract_for("image_signing")
+        assert c is not None
+        assert c.skill_name == "cosign-sign-task"
+        assert c.delivery == "cluster"
+        assert c.evidence_kind == "cosign_sign_task"
+        assert "image-scan-task" in c.refuse_companions
 
     def test_lookup_agrees_with_contract(self) -> None:
         assert lookup("scaling") == ("infrastructure", "hpa")
@@ -268,12 +283,11 @@ class TestCategoriesWithNoRealRemediationYetResolveHonestly:
     def test_sbom_trigger_removal_does_not_break_real_sbom_matching(
         self, engine: SkillEngine,
     ) -> None:
-        """Removing "license" from sbom-task.md's triggers must not lose
-        its real SBOM-related matching -- "sbom"/"bom"/"software"/"bill"
-        are untouched."""
+        """``sbom`` resolves via FIX_REGISTRY to source ``sbom-artifact``
+        (not the cluster Tekton ``sbom-task`` companion)."""
         skill = engine.skill_for_category("sbom")
         assert skill is not None
-        assert skill.name == "sbom-task"
+        assert skill.name == "sbom-artifact"
 
 
 class TestNewSkillTriggersDoNotCollide:

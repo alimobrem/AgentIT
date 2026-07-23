@@ -14,7 +14,7 @@ spec:
       description: Path to the generated SBOM file
   steps:
     - name: generate-sbom
-      image: anchore/syft:latest
+      image: anchore/syft:v1.48.0
       args:
         - $(params.IMAGE)
         - --output

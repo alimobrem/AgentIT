@@ -124,6 +124,16 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
         _ev.CLUSTER_KIND,
         kinds=("Task", "ClusterTask"),
     ),
+    # Detect: image-signing-exists (file_contains cosign). Clear via a real
+    # cosign sign/attest Tekton Task — refuse scan/sbom/registry companions
+    # and SLSA/hermetic theater (clear-evidence cosign_sign_task).
+    "image_signing": _c(
+        "security", "cosign-sign-task", "cluster",
+        "adding a Tekton Task that runs cosign sign (keyless Sigstore)",
+        _ev.COSIGN_SIGN_TASK,
+        "image-scan-task", "sbom-task", "image-registry-policy",
+        "compliance-evidence",
+    ),
     "resource": _c(
         "security", "resource-limits", "cluster",
         "setting container resource requests/limits",
@@ -148,11 +158,14 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
         "image-registry-policy",
         kinds=("Policy", "ClusterPolicy"),
     ),
+    # Analyzer + sbom-exists detect an *app-repo* SBOM file. A cluster
+    # Tekton Task (sbom-task) does not clear that finding — refuse it as
+    # a wrong-layer companion (same class as audit-policy vs app-audit).
     "sbom": _c(
-        "compliance", "sbom-task", "cluster",
-        "adding a Tekton SBOM Task",
-        _ev.CLUSTER_KIND,
-        kinds=("Task", "ClusterTask"),
+        "compliance", "sbom-artifact", "source",
+        "adding a CycloneDX SBOM artifact (sbom.cdx.json) in the app repo",
+        _ev.SBOM_FILE,
+        "sbom-task",
     ),
     # App-level audit logging (compliance analyzer). Cluster apiserver
     # audit-policy ConfigMap does NOT clear this finding. Root-only

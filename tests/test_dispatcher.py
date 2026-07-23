@@ -181,12 +181,12 @@ class TestDispatcher:
         content = "\n".join(f["content"] for f in result["files"])
         assert "ServiceAccount" in content and "RoleBinding" in content
 
-    async def test_dispatch_sbom_generates_task(self, store):
+    async def test_dispatch_sbom_generates_cyclonedx_artifact(self, store):
         from agentit.models import DimensionScore, Finding, Severity
         async_store, raw = store
         report = make_report(scores=[
             DimensionScore(dimension="compliance", score=30, max_score=100, findings=[
-                Finding(category="sbom supply chain", severity=Severity.medium,
+                Finding(category="sbom", severity=Severity.medium,
                         description="No SBOM", recommendation="Add SBOM"),
             ]),
         ])
@@ -195,7 +195,10 @@ class TestDispatcher:
         result = await dispatcher.dispatch(aid, "sbom")
         assert result["error"] is None
         assert result["agent"] == "compliance"
+        assert result["method"] == "sbom-artifact"
         assert any("sbom" in f["path"].lower() for f in result["files"])
+        content = "\n".join(f["content"] for f in result["files"])
+        assert "CycloneDX" in content
 
 
 # ── Webhook Integration ────────────────────────────────────────────

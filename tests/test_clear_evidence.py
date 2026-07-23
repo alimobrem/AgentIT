@@ -4,12 +4,16 @@ from __future__ import annotations
 from agentit.portal.quality_prs import clear_evidence_simulation_ok
 from agentit.remediation.clear_evidence import (
     AUDIT_WIRED,
+    COSIGN_SIGN_TASK,
+    SBOM_FILE,
     DOCKERFILE_PIN,
     HPA_TARGET,
     MIGRATION_TOOLING,
     simulate_finding_clearance,
     simulation_gate,
     verify_audit_wired,
+    verify_cosign_sign_task,
+    verify_sbom_file,
     verify_dockerfile_pin,
     verify_hpa_target,
     verify_migration_tooling,
@@ -367,3 +371,137 @@ class TestSimulationGate:
         assert contract_for("audit").evidence_kind == AUDIT_WIRED
         assert contract_for("scaling").evidence_kind == HPA_TARGET
         assert contract_for("migration").evidence_kind == MIGRATION_TOOLING
+        assert contract_for("image_signing").evidence_kind == COSIGN_SIGN_TASK
+        assert contract_for("sbom").evidence_kind == SBOM_FILE
+
+
+class TestCosignSignTask:
+    def test_allows_cosign_sign_task(self) -> None:
+        ok, reason = verify_cosign_sign_task([{
+            "target_path": "apps/pinky/cosign-sign-task.yaml",
+            "content": (
+                "apiVersion: tekton.dev/v1\n"
+                "kind: Task\n"
+                "metadata:\n  name: pinky-cosign-sign\n"
+                "spec:\n  steps:\n"
+                "  - name: cosign-sign\n"
+                "    image: gcr.io/projectsigstore/cosign:v2.4.3\n"
+                "    script: |\n"
+                "      cosign sign --yes $(params.IMAGE)\n"
+            ),
+            "skill_name": "cosign-sign-task",
+        }])
+        assert ok, reason
+
+    def test_refuses_empty_task_theater(self) -> None:
+        ok, reason = verify_cosign_sign_task([{
+            "target_path": "apps/pinky/sign-task.yaml",
+            "content": (
+                "apiVersion: tekton.dev/v1\n"
+                "kind: Task\n"
+                "metadata:\n  name: pretend-sign\n"
+                "spec:\n  steps: []\n"
+            ),
+            "skill_name": "cosign-sign-task",
+        }])
+        assert not ok
+        assert "cosign" in reason.lower() or "theater" in reason.lower()
+
+    def test_refuses_slsa_hermetic_theater(self) -> None:
+        ok, reason = verify_cosign_sign_task([{
+            "target_path": "apps/pinky/slsa-l3.yaml",
+            "content": (
+                "apiVersion: tekton.dev/v1\n"
+                "kind: Task\n"
+                "metadata:\n"
+                "  name: hermetic-konflux-slsa-l3\n"
+                "  annotations:\n"
+                "    description: Claims SLSA Level 3 hermetic Konflux build\n"
+                "spec:\n  steps:\n"
+                "  - name: noop\n"
+                "    image: registry.access.redhat.com/ubi9-minimal:latest\n"
+                "    script: echo theater\n"
+            ),
+            "skill_name": "cosign-sign-task",
+        }])
+        assert not ok
+        assert "theater" in reason.lower() or "slsa" in reason.lower() or "hermetic" in reason.lower()
+
+    def test_simulation_allows_signing_pr(self) -> None:
+        files = [{
+            "target_path": "chart/templates/tekton/cosign-sign-task.yaml",
+            "content": (
+                "apiVersion: tekton.dev/v1\n"
+                "kind: Task\n"
+                "metadata:\n  name: app-cosign-sign\n"
+                "spec:\n  steps:\n"
+                "  - name: sign\n"
+                "    image: gcr.io/projectsigstore/cosign:v2.4.3\n"
+                "    script: cosign sign --yes $(params.IMAGE)\n"
+            ),
+            "skill_name": "cosign-sign-task",
+        }]
+        ok, reason = clear_evidence_simulation_ok(
+            files,
+            [("image_signing", "No cosign/Sigstore image signing detected in CI or Tekton")],
+        )
+        assert ok, reason
+
+    def test_simulation_refuses_scan_task_as_signing(self) -> None:
+        files = [{
+            "target_path": "apps/pinky/image-scan-task.yaml",
+            "content": (
+                "apiVersion: tekton.dev/v1\n"
+                "kind: Task\n"
+                "metadata:\n  name: image-scan\n"
+                "spec:\n  steps:\n"
+                "  - name: scan\n"
+                "    image: aquasec/trivy:latest\n"
+                "    script: trivy image $(params.IMAGE)\n"
+            ),
+            "skill_name": "image-scan-task",
+        }]
+        ok, reason = clear_evidence_simulation_ok(
+            files,
+            [("image_signing", "No cosign/Sigstore image signing detected")],
+        )
+        assert not ok
+        assert "image_signing" in reason or "Clear-evidence" in reason
+
+
+class TestSbomFile:
+    def test_allows_cyclonedx(self) -> None:
+        ok, reason = verify_sbom_file([{
+            "target_path": "sbom.cdx.json",
+            "content": '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}\n',
+            "skill_name": "sbom-artifact",
+        }])
+        assert ok, reason
+
+    def test_refuses_empty_json_theater(self) -> None:
+        ok, reason = verify_sbom_file([{
+            "target_path": "sbom.json",
+            "content": "{}\n",
+            "skill_name": "sbom-artifact",
+        }])
+        assert not ok
+
+    def test_refuses_tekton_task_wrong_layer(self) -> None:
+        ok, reason = verify_sbom_file([{
+            "target_path": "apps/pinky/sbom-task.yaml",
+            "content": "apiVersion: tekton.dev/v1\nkind: Task\nmetadata:\n  name: x\n",
+            "skill_name": "sbom-task",
+        }])
+        assert not ok
+        assert "Task" in reason
+
+    def test_simulation_allows_sbom_source_pr(self) -> None:
+        files = [{
+            "target_path": "sbom.cdx.json",
+            "content": '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}\n',
+            "skill_name": "sbom-artifact",
+        }]
+        ok, reason = clear_evidence_simulation_ok(
+            files, [("sbom", "No SBOM (Software Bill of Materials) found")],
+        )
+        assert ok, reason

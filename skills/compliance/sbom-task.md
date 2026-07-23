@@ -15,13 +15,15 @@ mode: template
 
 # SBOM Generation Task
 
+> **Does not clear compliance `sbom`.** Use `sbom-artifact` for source PRs.
+
 ## Property
 Every container image build produces a CycloneDX Software Bill of
 Materials, enabling license compliance checks and vulnerability
 correlation against known CVE databases.
 
 ## Constraints
-- Uses syft for SBOM generation (anchore/syft)
+- Uses syft for SBOM generation (anchore/syft — pinned tag, not `:latest`)
 - Output format: CycloneDX JSON
 - Runs against the built container image (not source tree)
 - SBOM artifact is stored as a Tekton result for downstream consumption
@@ -45,7 +47,7 @@ spec:
       description: Path to the generated SBOM file
   steps:
     - name: generate-sbom
-      image: anchore/syft:latest
+      image: anchore/syft:v1.48.0
       args:
         - $(params.IMAGE)
         - --output
