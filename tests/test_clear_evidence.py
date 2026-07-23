@@ -1018,6 +1018,58 @@ class TestArgocdApplication:
         assert not ok
         assert "path" in reason or "chart" in reason
 
+    def test_refuses_placeholder_org_repo_url(self) -> None:
+        """gitops#32: an Application with repoURL "your-org/hello-world.git"
+        reached a merged file before this was caught live -- the fabricated
+        org placeholder must be refused outright, even with a plausible
+        path present (previously a no-op "pass", never actually refused)."""
+        ok, reason = verify_argocd_application([{
+            "target_path": "app.yaml",
+            "content": (
+                "apiVersion: argoproj.io/v1alpha1\nkind: Application\n"
+                "metadata:\n  name: x\n"
+                "spec:\n  source:\n"
+                "    repoURL: https://github.com/your-org/hello-world.git\n"
+                "    path: chart/\n"
+            ),
+            "skill_name": "argocd-application",
+        }])
+        assert not ok
+        assert "placeholder" in reason.lower()
+
+    def test_refuses_example_com_repo_url(self) -> None:
+        ok, reason = verify_argocd_application([{
+            "target_path": "app.yaml",
+            "content": (
+                "apiVersion: argoproj.io/v1alpha1\nkind: Application\n"
+                "metadata:\n  name: x\n"
+                "spec:\n  source:\n"
+                "    repoURL: https://example.com/org/app.git\n"
+                "    path: chart/\n"
+            ),
+            "skill_name": "argocd-application",
+        }])
+        assert not ok
+        assert "placeholder" in reason.lower()
+
+    def test_generic_github_org_repo_url_still_allowed(self) -> None:
+        """"github.com/org/..." alone is not fabricated-looking enough to
+        refuse -- this codebase's own fixtures (test_allows_repo_url_and_path,
+        above) rely on that exact shape for a fine, real-looking repo URL;
+        only "your-org"/"example.com" are specific enough to hard-refuse."""
+        ok, reason = verify_argocd_application([{
+            "target_path": "app.yaml",
+            "content": (
+                "apiVersion: argoproj.io/v1alpha1\nkind: Application\n"
+                "metadata:\n  name: x\n"
+                "spec:\n  source:\n"
+                "    repoURL: https://github.com/org/x.git\n"
+                "    path: chart/\n"
+            ),
+            "skill_name": "argocd-application",
+        }])
+        assert ok, reason
+
     def test_refuses_bogus_deploy_when_tree_missing(self) -> None:
         ok, reason = verify_argocd_application(
             [{

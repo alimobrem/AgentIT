@@ -96,6 +96,25 @@ _NARRATIVE_REPORT_FILENAMES = frozenset({"dependency-report.md", "cost-report.md
 # cluster or GitOps PR (agents/base.py defaults CronJob images to this).
 _UNRESOLVED_PLACEHOLDERS = ("REPLACE_WITH_AGENTIT_IMAGE",)
 
+# Field-scoped placeholder patterns: a fabricated repo/image reference an
+# LLM or template can still emit even when no hardcoded bootstrap token
+# matches -- confirmed root cause of two real incidents that reached
+# merged content before being caught live: an Argo Application repoURL of
+# "your-org/hello-world.git" (gitops#32), and a container image of
+# "quay.io/org/pinky". Scoped to the exact repoURL:/image: field (not a
+# blanket content scan) so a deliberately placeholder-shaped value
+# elsewhere in a generated file -- e.g. skills/incident/alertmanager-
+# config.md's own sample "team@example.com" alerting address -- is never
+# mistaken for a fabricated deploy target.
+_PLACEHOLDER_FIELD_PATTERNS = (
+    re.compile(r"(?im)^\s*repoURL:\s*[\"']?\S*\byour[-_]org\b"),
+    re.compile(r"(?im)^\s*repoURL:\s*[\"']?\S*\bexample\.com\b"),
+    # ``- image: ...`` (a container list entry) is at least as common as a
+    # bare ``image:`` key -- match the optional list-item dash too.
+    re.compile(r"(?im)^\s*(?:-\s*)?image:\s*[\"']?\S*\bquay\.io/org/"),
+    re.compile(r"(?im)^\s*(?:-\s*)?image:\s*[\"']?\S*\byour[-_]org\b"),
+)
+
 # Fail-closed gate for self-managed AgentIT deliveries into chart/ (P0 after
 # PR #116: raw skill dumps into chart/templates/). Content must look like
 # Helm templates; forbidden kinds never land; colliding paths on the default
@@ -116,9 +135,13 @@ _HARDCODED_AGENTIT_NAMESPACE_RE = re.compile(
 
 
 def has_unresolved_placeholders(content: str | None) -> bool:
-    """True when generated file content still contains bootstrap placeholders."""
+    """True when generated file content still contains bootstrap
+    placeholders, or a fabricated repoURL/image reference in the exact
+    field an LLM/template is prone to invent one for."""
     text = content or ""
-    return any(marker in text for marker in _UNRESOLVED_PLACEHOLDERS)
+    if any(marker in text for marker in _UNRESOLVED_PLACEHOLDERS):
+        return True
+    return any(pattern.search(text) for pattern in _PLACEHOLDER_FIELD_PATTERNS)
 
 
 def is_helm_shaped(content: str | None) -> bool:
