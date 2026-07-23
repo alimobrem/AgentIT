@@ -14,7 +14,9 @@ import pytest
 
 from agentit.portal.cluster_apply import (
     classify_dry_run_error,
+    classify_soft_dry_run_reason,
     dry_run_manifests_against_cluster,
+    label_soft_dry_run_warning,
 )
 
 
@@ -72,6 +74,55 @@ class TestClassifyDryRunError:
     def test_empty_message_is_hard(self):
         assert classify_dry_run_error("") == "hard"
         assert classify_dry_run_error(None) == "hard"  # type: ignore[arg-type]
+
+
+class TestClassifySoftDryRunReason:
+    """Both a Forbidden RBAC gap and a genuinely-missing optional CRD are
+    "soft" (non-blocking) -- but they are not the same kind of gap. Folding
+    them into one generic warning made it impossible for a human to tell
+    "grant AgentIT more rights and this applies" from "this cluster does
+    not run that operator at all, no RBAC change will ever make this sync"
+    -- the real, confirmed cause of a permanently-unsyncable resource
+    reaching a merged GitOps PR (pinky's managed-pinky incident)."""
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Role/pinky-compliance-reader: Forbidden",
+            "LimitRange/pinky-limits: Forbidden",
+            "ConfigMap/test: (403)\nReason: Forbidden",
+        ],
+    )
+    def test_forbidden_is_capability_limited(self, message: str):
+        assert classify_soft_dry_run_reason(message) == "capability_limited"
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Policy (kyverno.io/v1) not found on cluster: no matches for kind",
+            "Pipeline (tekton.dev/v1) not found on cluster: no matches for kind",
+            "unable to recognize \"\": no matches for kind \"Policy\" in version \"kyverno.io/v1\"",
+        ],
+    )
+    def test_missing_crd_is_cluster_incompatible(self, message: str):
+        assert classify_soft_dry_run_reason(message) == "cluster_incompatible"
+
+    def test_empty_or_other_is_other(self):
+        assert classify_soft_dry_run_reason("") == "other"
+        assert classify_soft_dry_run_reason(None) == "other"  # type: ignore[arg-type]
+        assert classify_soft_dry_run_reason("field-manager conflict") == "other"
+
+    def test_label_distinguishes_the_two_soft_reasons(self):
+        capability = label_soft_dry_run_warning("rq.yaml", "ResourceQuota/rq: Forbidden")
+        incompatible = label_soft_dry_run_warning(
+            "policy.yaml", "Policy (kyverno.io/v1) not found on cluster: no matches for kind",
+        )
+        assert "grantable" in capability.lower()
+        assert "never sync" in incompatible.lower()
+        assert capability != incompatible.replace("policy.yaml", "rq.yaml")
+        # Original message is preserved, not replaced.
+        assert "ResourceQuota/rq: Forbidden" in capability
+        assert "no matches for kind" in incompatible
 
 
 class TestDryRunManifestsAgainstCluster:
