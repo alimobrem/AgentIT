@@ -327,9 +327,14 @@ async def _process_github_push_delivery(
                     s, repo_name, report, assessment_id,
                 )
 
+                # Remediable auto-fixable findings enter the same gated
+                # auto_validate_and_deliver path as Scan/onboard (finding_gate
+                # + clear-evidence + caps). The onboard job scheduled above
+                # owns generation + delivery; human gate remains PR merge.
                 if diff.auto_fixable:
-                    from agentit.remediation.dispatcher import RemediationDispatcher
-                    dispatcher = RemediationDispatcher(s)
+                    from agentit.remediation.registry import allows_auto_pr
+
+                    queued: list[str] = []
                     for finding in diff.auto_fixable:
                         if await s.get_rejection_count(repo_name, finding.category) >= 3:
                             await s.log_event(
@@ -337,30 +342,18 @@ async def _process_github_push_delivery(
                                 f"Skipping {finding.category} -- rejected 3+ times",
                             )
                             continue
-                        dispatch_result = await dispatcher.dispatch(
-                            assessment_id, finding.category, repo_name,
-                        )
-                        if dispatch_result.get("error") and not dispatch_result["files"]:
-                            await s.log_event(
-                                "dispatcher", "no-fix-available", repo_name, "warning",
-                                dispatch_result["error"],
-                            )
+                        if not allows_auto_pr(finding.category):
                             continue
-                        if not dispatch_result["files"]:
-                            continue
+                        queued.append(finding.category)
+                    if queued:
+                        cats = ", ".join(sorted(set(queued)))
                         await s.log_event(
-                            "dispatcher", "fix-generated", repo_name, "info",
-                            f"Generated {len(dispatch_result['files'])} fix(es) for "
-                            f"'{finding.category}' via {dispatch_result['agent']}",
-                        )
-                        # D (follow-up): wire remediable findings into
-                        # gated auto_validate_and_deliver. Until then, log
-                        # only — Scan/onboard remains the PR path.
-                        await s.log_event(
-                            "dispatcher", "fix-not-delivered", repo_name, "info",
-                            f"Fix for '{finding.category}' generated but not delivered -- "
-                            "re-run Onboard for this app to review and deliver it "
-                            "from Onboard Results.",
+                            "auto-delivery", "auto-delivery-queued", repo_name, "info",
+                            f"Remediable findings ({cats}) queued for gated "
+                            f"auto_validate_and_deliver via onboard job "
+                            f"{onboard_job_id} (finding_gate + clear-evidence; "
+                            f"human gate = merge).",
+                            correlation_id=assessment_id,
                         )
 
         await s.log_event(
@@ -550,6 +543,7 @@ async def webhook_finding(request: Request):
     fleet = await s.get_fleet_data()
     app = next((a for a in fleet if a["repo_name"] == app_name), None)
     if not app:
+        await s.complete_webhook_claim(delivery_id)
         return JSONResponse({"status": "accepted", "action": "alert-only", "reason": f"app '{app_name}' not in fleet"})
 
     # RemediationDispatcher is now genuinely async -- await it directly,
@@ -560,25 +554,75 @@ async def webhook_finding(request: Request):
 
     if result.get("error") and not result["files"]:
         await s.log_event("dispatcher", "no-fix-available", app_name, "warning", result["error"])
+        await s.complete_webhook_claim(delivery_id)
         return JSONResponse({"status": "accepted", "action": "alert-only", "reason": result["error"]})
 
-    # Same reasoning as webhook_github_push's auto-fixable dispatch loop
-    # above: nothing auto-delivers without an explicit human action (see
-    # docs/unified-apply-flow.md), so this dispatched fix is never itself
-    # persisted -- the real next step is re-running Onboard for this app.
+    # Wire remediable dispatcher output into the same gated
+    # auto_validate_and_deliver path as Scan/onboard. Opens finding-tied
+    # PRs only; human gate remains merge (never auto-merge).
     if result["files"]:
-        await s.log_event(
-            "dispatcher", "fix-not-delivered", app_name, "info",
-            f"Fix for '{category}' generated but not delivered -- "
-            "re-run Onboard for this app to review and deliver it from Onboard Results.",
-        )
+        from agentit.remediation.registry import allows_auto_pr, remediable_findings
+        from agentit.portal.auto_delivery import auto_validate_and_deliver
+
+        if not allows_auto_pr(category):
+            await s.log_event(
+                "auto-delivery", "auto-delivery-finding-gate", app_name, "info",
+                f"detect_only / no_auto_pr — refusing PR for '{category}'",
+            )
+            await s.complete_webhook_claim(delivery_id)
+            return JSONResponse({
+                "status": "accepted",
+                "action": "alert-only",
+                "reason": f"detect_only / no_auto_pr for '{category}'",
+                "files_generated": len(result["files"]),
+            })
+
+        report = await s.get(app["id"])
+        if not report:
+            await s.complete_webhook_claim(delivery_id)
+            return JSONResponse({
+                "status": "accepted",
+                "action": "alert-only",
+                "reason": "assessment not found for gated delivery",
+            })
+
+        namespace = app_name.lower().replace("_", "-").replace(".", "-")
+        targets = remediable_findings([(category, description or category)])
+        if not targets:
+            targets = [(category, description or category)]
+        try:
+            delivery = await auto_validate_and_deliver(
+                store=s,
+                report=report,
+                app_name=app_name,
+                namespace=namespace,
+                assessment_id=app["id"],
+                actor="webhook-finding",
+                files=result["files"],
+                target_findings=targets,
+            )
+        except Exception as exc:
+            log.exception("webhook_finding auto_delivery failed for %s", app_name)
+            await s.release_webhook_claim(delivery_id)
+            return JSONResponse({
+                "status": "error",
+                "action": "needs_attention",
+                "reason": str(exc)[:200],
+                "files_generated": len(result["files"]),
+            })
+
+        await s.complete_webhook_claim(delivery_id)
+        action = delivery.get("status") or "needs_attention"
         return JSONResponse({
             "status": "accepted",
-            "action": "fix-not-delivered",
+            "action": action,
             "files_generated": len(result["files"]),
             "agent": result["agent"],
+            "pr_urls": delivery.get("pr_urls") or [],
+            "reason": delivery.get("reason") or "",
         })
 
+    await s.complete_webhook_claim(delivery_id)
     return JSONResponse({"status": "accepted", "action": "alert-only"})
 
 

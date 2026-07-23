@@ -234,7 +234,9 @@ class TestFindingWebhook:
         assert resp.status_code == 200
         assert resp.json()["action"] == "alert-only"
 
-    async def test_generates_fix_but_never_auto_delivers(self, client, _override_store):
+    async def test_generates_fix_enters_gated_auto_delivery(self, client, _override_store):
+        from unittest.mock import AsyncMock, patch
+
         from agentit.models import DimensionScore, Finding, Severity
         store = _override_store
         report = make_report(
@@ -245,17 +247,29 @@ class TestFindingWebhook:
             ])],
         )
         await store.save(report)
-        resp = await client.post("/api/webhook/finding", json={
-            "app_name": "gated-app",
-            "category": "network",
-            "description": "Missing NetworkPolicy",
-            "severity": "high",
-        })
+        with patch(
+            "agentit.portal.auto_delivery.auto_validate_and_deliver",
+            new_callable=AsyncMock,
+            return_value={
+                "status": "delivered",
+                "pr_urls": ["https://github.com/example/infra/pull/1"],
+                "reason": "",
+            },
+        ) as mock_deliver:
+            resp = await client.post("/api/webhook/finding", json={
+                "app_name": "gated-app",
+                "category": "network",
+                "description": "Missing NetworkPolicy",
+                "severity": "high",
+            })
         assert resp.status_code == 200
         data = resp.json()
-        # The `gates` table/generic gate-resolution machinery has been
-        # removed entirely (2026-07-19) -- a dispatched fix is generated
-        # but never gated/auto-delivered; re-running Onboard is the real
-        # next step to review and deliver it from Onboard Results.
-        assert data["action"] == "fix-not-delivered"
+        # Remediable findings enter gated auto_validate_and_deliver
+        # (finding_gate + clear-evidence). Human gate = merge only.
+        assert data["action"] == "delivered"
         assert data["files_generated"] > 0
+        assert data["pr_urls"]
+        mock_deliver.assert_awaited_once()
+        kwargs = mock_deliver.await_args.kwargs
+        assert kwargs["actor"] == "webhook-finding"
+        assert any(c == "network" for c, _ in kwargs["target_findings"])
