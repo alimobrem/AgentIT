@@ -210,16 +210,17 @@ class TestAssessmentDetailNextActionIndicator:
         assert pr_url in text
 
     async def test_honest_no_schedule_message_for_a_previously_onboarded_clean_app(self, next_action_client):
-        """A previously-onboarded clean app points at Open PRs / Scan, not a
-        fabricated re-check cadence — single next-step banner."""
+        """A previously-onboarded clean app (no remediable findings) does not
+        promise mergeable PRs or nudge Scan for a PR — single quiet banner."""
         client, store = next_action_client
         aid = await store.save(make_report(repo_name="ad-clean-onboarded-app"))
         await store.save_onboarding(aid, [{"category": "security", "path": "x.yaml", "content": "a: b", "description": "d"}])
 
         text = (await client.get(f"/assessments/{aid}")).text
 
-        assert "review and merge them on GitHub" in text
-        assert "No open PRs — run Scan." in text
+        assert "no remediable findings to open a PR for right now" in text
+        assert "No open PRs — nothing remediable to open one for right now." in text
+        assert "when pull request(s) appear below" not in text
         # No competing "Next action:" escalation/retry banner on a clean app.
         assert "automated fixes exhausted" not in text
         assert "Awaiting verification" not in text

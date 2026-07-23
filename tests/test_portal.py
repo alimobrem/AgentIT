@@ -678,7 +678,8 @@ async def test_assessment_detail_lifecycle_primary_cta_after_onboard(client, _ov
     # (re-clone + re-score + regenerate manifests) now covers what it did.
     assert "Re-onboard" not in resp.text
     assert "Onboard This App" not in resp.text
-    assert "No open PRs — run Scan." in resp.text
+    # secrets finding is detect_only / no_auto_pr — do not nudge Scan for a PR.
+    assert "No open PRs — nothing remediable to open one for right now." in resp.text
     # Stepper uses Merged (not Applied) for the PR-merge human step.
     assert ">Merged<" in resp.text or "Merged" in resp.text
 
