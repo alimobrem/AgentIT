@@ -171,12 +171,16 @@ spec:
                 value: "1"
               - name: KUBECONFIG
                 value: /tmp/nonexistent-path
+            # CPU request kept modest (was 200m): under node pressure a high
+            # request leaves the TaskRun Pending (ExceededNodeResources) and
+            # blocks tip promote. Burst via limit when the node has spare.
             computeResources:
               requests:
                 memory: 256Mi
-                cpu: 200m
+                cpu: 100m
               limits:
                 memory: 1Gi
+                cpu: 500m
             script: |
               set -euo pipefail
               pip install --no-cache-dir -e ".[dev]" 2>&1
@@ -343,12 +347,15 @@ spec:
           - name: assess
             image: registry.access.redhat.com/ubi9/python-312:latest
             workingDir: $(workspaces.source.path)
+            # Modest CPU request — same ExceededNodeResources tip-promote
+            # pressure as run-tests (burst via limit when spare capacity).
             computeResources:
               requests:
                 memory: 256Mi
-                cpu: 200m
+                cpu: 100m
               limits:
                 memory: 1Gi
+                cpu: 500m
             script: |
               set -euo pipefail
               pip install --no-cache-dir -e . 2>&1 | tail -1

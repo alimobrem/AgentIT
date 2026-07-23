@@ -41,14 +41,15 @@ spec:
         # capacity cut build-image's real duration roughly in half (151s -> 84s in an
         # A/B test with SKIP_PUSH=true, same commit, same cluster load). A full 1 CPU
         # *request* was tried first and left the pod Pending (ExceededNodeResources) —
-        # keep the request modest.
+        # keep the request modest (100m; was 200m) so tip promote can schedule
+        # under node pressure while still bursting via the limit.
         taskRunSpecs:
           - pipelineTaskName: build-image
             stepSpecs:
               - name: build
                 computeResources:
                   requests:
-                    cpu: "200m"
+                    cpu: "100m"
                     memory: 256Mi
                   limits:
                     cpu: "1"
