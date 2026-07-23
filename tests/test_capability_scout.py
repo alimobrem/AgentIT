@@ -28,6 +28,7 @@ from agentit.capability_scout import (
     fetch_pr_close_comments,
     filter_actionable_doc_gaps,
     gather_evidence,
+    last_merge_broke_ci,
     list_store_capabilities,
     outcome_from_pr_status,
     parse_reject_reason,
@@ -1120,6 +1121,49 @@ class TestCheckSyntax:
         assert passed is True
 
 
+class TestLastMergeBrokeCi:
+    def test_true_when_real_tests_pass_failure_follows_merge(self):
+        outcomes = [{
+            "state": "merged",
+            "recorded_at": "2026-07-01T00:00:00+00:00",
+            "title": "shipped something",
+        }]
+        events = [{
+            "timestamp": "2026-07-01T01:00:00+00:00",
+            "details": {
+                "gate_results": [
+                    {"name": "tests-pass", "passed": False, "detail": "1 failed"},
+                ],
+            },
+        }]
+        assert last_merge_broke_ci(outcomes, events) is True
+
+    def test_false_when_only_all_skip_infra_failure(self):
+        """All-skip (missing AGENTIT_TEST_PG_DSN) must not stick
+        fix_regression_only — that locked dogfood into no-signal declines."""
+        outcomes = [{
+            "state": "merged",
+            "recorded_at": "2026-07-01T00:00:00+00:00",
+            "title": "shipped something",
+        }]
+        events = [{
+            "timestamp": "2026-07-01T01:00:00+00:00",
+            "details": {
+                "gate_results": [{
+                    "name": "tests-pass",
+                    "passed": False,
+                    "detail": (
+                        "pytest exited 0 but 0 tests actually passed -- the whole "
+                        "suite skipped itself (likely no Postgres reachable in this "
+                        "pod; see run_test_suite()'s docstring): "
+                        "no AGENTIT_TEST_PG_DSN and no podman/docker on PATH"
+                    ),
+                }],
+            },
+        }]
+        assert last_merge_broke_ci(outcomes, events) is False
+
+
 class TestRunTestSuite:
     def test_returns_true_when_pytest_exits_zero(self, tmp_path):
         with patch("agentit.capability_scout.subprocess.run") as mock_run:
@@ -1131,18 +1175,15 @@ class TestRunTestSuite:
         assert "passed" in detail
 
     def test_returns_false_when_pytest_exits_zero_but_every_test_skipped(self, tmp_path):
-        """Real regression test: the live capability-scout pod has only the
-        production AGENTIT_DB_DSN wired in (chart/templates/agents/
-        capability-scout.yaml), no AGENTIT_TEST_PG_DSN, and the
-        Containerfile ships neither podman nor docker -- so every test's
-        session-scoped `postgres_dsn` fixture (tests/conftest.py) calls
-        `pytest.skip(...)` and the whole suite exits 0 with nothing
-        actually run. Confirmed live (unmocked) by stripping podman/docker
-        from PATH and unsetting AGENTIT_TEST_PG_DSN: `pytest
-        tests/test_capability_scout.py -q` reported "87 skipped in 0.04s"
-        with exit code 0. Before this fix, `run_test_suite()` read that as
-        "pytest passed" and this fail-closed gate would wave a proposal
-        through having verified precisely nothing."""
+        """Real regression test: without AGENTIT_TEST_PG_DSN (and with no
+        podman/docker in the image) every test's session-scoped
+        `postgres_dsn` fixture calls `pytest.skip(...)` and the suite
+        exits 0 with nothing actually run. Confirmed live before the
+        chart wired a throwaway test-postgres sidecar. Before the
+        all-skip check, `run_test_suite()` read that as "pytest passed"
+        and this fail-closed gate would wave a proposal through having
+        verified precisely nothing. The gate must still fail closed on
+        all-skip even after the sidecar lands (sidecar crash / miswire)."""
         with patch("agentit.capability_scout.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0,

@@ -146,7 +146,7 @@ Lifecycle: `draft` → `active` → `deprecated` → `retired`. Activate opens a
 ## Self-improvement loops
 
 1. **Skills catalog** — outcomes from merge/finding-clear; learning agent drafts; HITL Activate; drift auto-deprecates.
-2. **AgentIT itself** — `capability-scout` proposes one evidence-cited change as a draft PR against this repo (never auto-merge). Historical design notes: [history/self-improvement-for-agentit.md](./history/self-improvement-for-agentit.md).
+2. **AgentIT itself** — `capability-scout` proposes one evidence-cited change as a draft PR against this repo (never auto-merge). Its `tests-pass` gate runs pytest against a dedicated throwaway Postgres sidecar (`AGENTIT_TEST_PG_DSN` / `agents.capabilityScout.testPostgres`), not the fleet bundled DB. Historical design notes: [history/self-improvement-for-agentit.md](./history/self-improvement-for-agentit.md).
 
 Watchers alert; humans Assess/Scan. Deploy is always PR → merge → Argo.
 

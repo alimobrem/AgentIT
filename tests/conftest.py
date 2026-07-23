@@ -280,6 +280,23 @@ def _container_runtime() -> str | None:
     return None
 
 
+def _wait_for_postgres_dsn(dsn: str, timeout: float = 60.0) -> None:
+    """Block until ``dsn``'s host:port accepts TCP (sidecar / CI service race)."""
+    import socket
+    from urllib.parse import urlparse
+
+    parsed = urlparse(dsn)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 5432
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=2.0):
+                return
+        except OSError:
+            time.sleep(0.5)
+
+
 def _resolve_postgres_dsn() -> str | None:
     """Returns a DSN, starting a throwaway container if needed. ``None`` if
     neither a configured DSN nor a container runtime is available -- the
@@ -287,6 +304,9 @@ def _resolve_postgres_dsn() -> str | None:
     global _container_started
     env_dsn = os.environ.get("AGENTIT_TEST_PG_DSN")
     if env_dsn:
+        # Capability-scout's test-postgres sidecar (and Tekton/GHA services)
+        # may still be starting when the first pytest session begins.
+        _wait_for_postgres_dsn(env_dsn)
         return env_dsn
 
     runtime = _container_runtime()

@@ -101,6 +101,12 @@ spec:
         # L3 dogfood: prefer skills/checks/tests source PRs when targets allow
         - name: agents.capabilityScout.mode
           value: "auto"
+        # Throwaway Postgres sidecar for capability-scout's tests-pass gate
+        # (chart default enabled). Override dsn + set enabled=false only if
+        # pointing at a human-provisioned dedicated test DB — never the
+        # fleet bundled Postgres (fixtures TRUNCATE).
+        - name: agents.capabilityScout.testPostgres.enabled
+          value: "true"
         # OpenShift oauth-proxy in front of the portal Route — required for
         # dogfood (privileged automation console must not stay open). See
         # docs/deployment.md#authentication.

@@ -33,6 +33,12 @@ spec:
         # g+w; this emptyDir is the guaranteed-writable fallback for temps.
         - name: scout-tmp
           emptyDir: {}
+        {{- if .Values.agents.capabilityScout.testPostgres.enabled }}
+        # Ephemeral data dir for the tests-pass throwaway Postgres sidecar
+        # (NOT the fleet bundled PVC — fixtures TRUNCATE every table).
+        - name: scout-test-pg-data
+          emptyDir: {}
+        {{- end }}
         {{- if .Values.gcp.credentialsSecret }}
         - name: gcp-credentials
           secret:
@@ -83,6 +89,14 @@ spec:
                   key: password
             - name: AGENTIT_DB_DSN
               value: "postgresql://$(PGUSER):$(PGPASSWORD)@{{ .Release.Name }}-postgres-bundled.{{ .Release.Namespace }}.svc:5432/{{ .Values.postgres.bundled.credentials.database }}"
+            # Dedicated test DSN for run_test_suite()'s pytest subprocess.
+            # Stripped AGENTIT_DB_DSN alone left every fixture calling
+            # pytest.skip (no podman/docker in the image) → 0 passed /
+            # thousands skipped → tests-pass fail-closed forever and
+            # stuck fix_regression_only. Same credentials pattern as
+            # Tekton run-tests sidecar / GHA services — never the fleet DB.
+            - name: AGENTIT_TEST_PG_DSN
+              value: {{ .Values.agents.capabilityScout.testPostgres.dsn | default "postgresql://agentit_test:agentit_test@127.0.0.1:5432/agentit_test" | quote }}
             - name: ANTHROPIC_VERTEX_PROJECT_ID
               value: {{ .Values.env.ANTHROPIC_VERTEX_PROJECT_ID | default "" | quote }}
             - name: CLOUD_ML_REGION
@@ -121,7 +135,7 @@ spec:
             # run_test_suite()) shells out to `python -m pytest tests/ ...`
             # as a *subprocess of this same container* -- momentarily
             # doubling up the interpreter + every import (fastapi,
-            # anthropic, kubernetes client, uvicorn, ...) on top of the
+            # anthropic, kube client, uvicorn, ...) on top of the
             # long-running watcher process itself, and running the full
             # ~1900-test suite for real minutes at a time. At 250m CPU /
             # 1Gi memory this still OOMKilled the pod after ~15 minutes
@@ -143,4 +157,41 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: [ALL]
+        {{- if .Values.agents.capabilityScout.testPostgres.enabled }}
+        # Throwaway Postgres for AGENTIT_TEST_PG_DSN (shares the pod network
+        # namespace → 127.0.0.1). Same image/env pattern as the Tekton
+        # run-tests sidecar in chart/templates/tekton/pipeline.yaml.
+        - name: test-postgres
+          image: {{ .Values.agents.capabilityScout.testPostgres.image | default .Values.postgres.bundled.image | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRESQL_USER
+              value: agentit_test
+            - name: POSTGRESQL_PASSWORD
+              value: agentit_test
+            - name: POSTGRESQL_DATABASE
+              value: agentit_test
+          volumeMounts:
+            - name: scout-test-pg-data
+              mountPath: /var/lib/pgsql/data
+          readinessProbe:
+            exec:
+              command:
+                - /usr/bin/sh
+                - -c
+                - pg_isready -h 127.0.0.1 -p 5432 -U agentit_test
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+          resources:
+            {{- toYaml .Values.agents.capabilityScout.testPostgres.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: [ALL]
+        {{- end }}
 {{- end }}

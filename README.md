@@ -88,6 +88,7 @@ Useful commands: `self-assess`, `watch`, `learn`, `test-skill`, `activate-skill`
 | Variable | Purpose |
 |---|---|
 | `AGENTIT_DB_DSN` | Postgres DSN (**required** for portal / fleet / watchers) |
+| `AGENTIT_TEST_PG_DSN` | Throwaway Postgres for pytest / capability-scout `tests-pass` (never the fleet DB — fixtures truncate). Chart sidecar default; CI sets its own. |
 | `ANTHROPIC_API_KEY` or Vertex (`ANTHROPIC_VERTEX_PROJECT_ID` + `CLOUD_ML_REGION`) | Optional LLM |
 | `GITHUB_TOKEN` | PR create / infra-repo / webhooks |
 | `AGENTIT_KAFKA_BOOTSTRAP` | Kafka (optional; no-op if unset) |
@@ -131,7 +132,7 @@ Ops: [`docs/deployment.md`](docs/deployment.md) (dogfood sets `env.AGENTIT_WEBHO
 | [`docs/architecture-agentit-vs-fleet-gitops.md`](docs/architecture-agentit-vs-fleet-gitops.md) | Self-managed vs fleet delivery |
 | [`docs/release-notes.md`](docs/release-notes.md) | Product contract (Scan HITL, contracts, portal IA) |
 | [`docs/ci-deploy.md`](docs/ci-deploy.md) | **Merge gate + post-merge Tekton/rollout tip checklist** |
-| [`CHANGELOG.md`](CHANGELOG.md) | Version history (Keep a Changelog); recent: container pin-only + CI merge gate |
+| [`CHANGELOG.md`](CHANGELOG.md) | Version history (Keep a Changelog); recent: scout test-Postgres sidecar + container pin-only |
 | [`docs/adr/`](docs/adr/) | Architecture Decision Records |
 | [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md) | Portal EDL |
 | [`docs/plan-quality-helpful-prs.md`](docs/plan-quality-helpful-prs.md) | Quality PR rules |
