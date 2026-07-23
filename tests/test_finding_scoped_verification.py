@@ -27,6 +27,13 @@ from agentit.portal.delivery import (
 )
 from conftest import make_async_store, make_report
 
+# Pending finding-check queue requires an opened PR (see
+# list_deliveries_pending_finding_check) — tests that expect a delivery to
+# be queued must record a pr_url outcome.
+_PR_OUTCOME_DETAILS = {
+    "outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}},
+}
+
 
 def _report_with_network_finding(**kwargs):
     report = make_report(**kwargs)
@@ -150,6 +157,7 @@ class TestListDeliveriesPendingFindingCheck:
         delivery_id = await store.create_delivery(
             aid, "queue-app", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
             target_findings=[target],
+            details=_PR_OUTCOME_DETAILS,
         )
 
         pending = await store.list_deliveries_pending_finding_check("queue-app")
@@ -158,6 +166,20 @@ class TestListDeliveriesPendingFindingCheck:
         await store.update_delivery(delivery_id, finding_resolution="resolved")
         pending_after = await store.list_deliveries_pending_finding_check("queue-app")
         assert pending_after == []
+
+    async def test_partial_delivery_without_pr_url_is_not_queued(self):
+        """Failed/partial delivers must not sticky-badge Awaiting verification."""
+        store, _ = await make_async_store()
+        aid = await store.save(make_report(repo_name="queue-app"))
+        target = finding_key("network", "Missing NetworkPolicy")
+        await store.create_delivery(
+            aid, "queue-app", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="partial",
+            target_findings=[target],
+            details={"outcomes": {"cluster_config": {"error": "no GitOps infra repo"}}},
+        )
+
+        pending = await store.list_deliveries_pending_finding_check("queue-app")
+        assert pending == []
 
 
 class TestCheckPendingDeliveryVerifications:
@@ -169,6 +191,7 @@ class TestCheckPendingDeliveryVerifications:
         delivery_id = await store.create_delivery(
             old_aid, "verify-app", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
             target_findings=[target],
+            details=_PR_OUTCOME_DETAILS,
         )
 
         new_report = _report_with_network_finding(repo_name="verify-app")
@@ -218,6 +241,7 @@ class TestCheckPendingDeliveryVerifications:
         await store.create_delivery(
             old_aid, "attr-app", {"source_patch": 1}, "source_patch:source-repo-pr",
             status="delivered", target_findings=[target],
+            details={"outcomes": {"source_patch": {"pr_url": "https://github.com/example/app/pull/1"}}},
         )
         new_report = make_report(repo_name="attr-app")
         new_report.scores = old_report.scores
@@ -240,6 +264,7 @@ class TestCheckPendingDeliveryVerifications:
         delivery_id = await store.create_delivery(
             old_aid, "verify-app2", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
             target_findings=[target],
+            details=_PR_OUTCOME_DETAILS,
         )
 
         new_report = _report_with_unrelated_finding(repo_name="verify-app2")
@@ -264,6 +289,7 @@ class TestCheckPendingDeliveryVerifications:
         delivery_id = await store.create_delivery(
             old_aid, "verify-app3", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
             target_findings=[target],
+            details=_PR_OUTCOME_DETAILS,
         )
         new_report = _report_with_network_finding(repo_name="verify-app3")
         new_aid = await store.save(new_report)
@@ -289,6 +315,7 @@ class TestCheckPendingDeliveryVerifications:
         await store.create_delivery(
             old_aid, "verify-app4", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
             target_findings=[target],
+            details=_PR_OUTCOME_DETAILS,
         )
         new_report = _report_with_network_finding(repo_name="verify-app4")
         new_aid = await store.save(new_report)
@@ -314,6 +341,7 @@ class TestWebhookWiring:
         delivery_id = await store.create_delivery(
             old_aid, old_report.repo_name, {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT,
             status="delivered", target_findings=[target],
+            details=_PR_OUTCOME_DETAILS,
         )
 
         new_report = _report_with_network_finding(repo_name=old_report.repo_name, repo_url=repo_url)
@@ -344,6 +372,7 @@ class TestWebhookWiring:
         await store.create_delivery(
             old_aid, old_report.repo_name, {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT,
             status="delivered", target_findings=[target],
+            details=_PR_OUTCOME_DETAILS,
         )
         # No prior confirmed failures on record yet -- below threshold.
         new_report = _report_with_network_finding(repo_name=old_report.repo_name, repo_url=repo_url)

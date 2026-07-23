@@ -65,6 +65,7 @@ class TestFleetNextActionIndicator:
         aid = await store.save(make_report(repo_name="fleet-pend-app", repo_url="https://github.com/org/fleet-pend-app"))
         await store.create_delivery(
             aid, "fleet-pend-app", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}}},
             target_findings=[_NETWORK_TARGET],
         )
 
@@ -78,11 +79,13 @@ class TestFleetNextActionIndicator:
         aid = await store.save(make_report(repo_name="fleet-retry-app"))
         first_id = await store.create_delivery(
             aid, "fleet-retry-app", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}}},
             target_findings=[_NETWORK_TARGET],
         )
         await store.update_delivery(first_id, finding_resolution="still_present")
         await store.create_delivery(
             aid, "fleet-retry-app", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}}},
             target_findings=[_NETWORK_TARGET],
         )
 
@@ -123,6 +126,7 @@ class TestAssessmentDetailNextActionIndicator:
         await store.save_onboarding(aid, [{"category": "security", "path": "x.yaml", "content": "a: b", "description": "d"}])
         await store.create_delivery(
             aid, "ad-pend-app", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}}},
             target_findings=[_NETWORK_TARGET],
         )
 
@@ -139,11 +143,13 @@ class TestAssessmentDetailNextActionIndicator:
         await store.save_onboarding(aid, [{"category": "security", "path": "x.yaml", "content": "a: b", "description": "d"}])
         first_id = await store.create_delivery(
             aid, "ad-retry-app", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}}},
             target_findings=[_NETWORK_TARGET],
         )
         await store.update_delivery(first_id, finding_resolution="still_present")
         await store.create_delivery(
             aid, "ad-retry-app", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}}},
             target_findings=[_NETWORK_TARGET],
         )
 

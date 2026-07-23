@@ -1575,9 +1575,17 @@ async def route_and_deliver(
 
         any_error = any(isinstance(o, dict) and "error" in o for o in outcomes.values())
         overall_status = "delivered" if not any_error else "partial"
+        # No PR opened ⇒ nothing to re-verify on the next push. Clear the
+        # pending-finding queue so Fleet does not show a false
+        # "Awaiting verification" badge for partial/failed delivers.
+        opened_pr = any(
+            isinstance(o, dict) and (o.get("pr_url") or "")
+            for o in outcomes.values()
+        )
         await store.update_delivery(
             delivery_id, status=overall_status,
             details={"outcomes": {k: v for k, v in outcomes.items()}},
+            finding_resolution=None if opened_pr or dry_run else "not_delivered",
         )
 
         # SLO watch for any infra-repo delivery (cluster-config + shared-NS cicd).
