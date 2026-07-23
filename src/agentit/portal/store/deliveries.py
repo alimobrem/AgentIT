@@ -212,6 +212,19 @@ class DeliveriesMixin:
         )
         return row is not None
 
+    async def release_webhook_claim(self, delivery_id: str) -> None:
+        """Drop a prior ``claim_webhook`` so the same delivery_id can retry.
+
+        Used when the portal fails soft before doing real work (e.g. assess
+        concurrency slot busy → HTTP 503). Without this, GitHub's automatic
+        redelivery of the same ``X-GitHub-Delivery`` would hit the duplicate
+        short-circuit forever and never reassess.
+        """
+        await self._pool.execute(
+            "DELETE FROM processed_webhooks WHERE delivery_id = $1",
+            delivery_id,
+        )
+
     async def claim_delivery_lock(self, lock_key: str, stale_after_seconds: int = 1800) -> bool:
         """Atomically claim a per-app mutex around the actual
         delivery-commit step (``portal/delivery.py::route_and_deliver()``).

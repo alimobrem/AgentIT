@@ -54,17 +54,21 @@ def _clone_assess_cleanup(
     secret_decisions_out: list[dict] | None = None,
     secret_classify_cache: object | None = None,
 ):
-    repo_path = clone_repo(repo_url)
-    try:
-        return run_assessment(
-            repo_path, repo_url, criticality,
-            llm_client=get_llm_client(), infra_repo_url=infra_repo_url,
-            check_results_out=check_results_out,
-            secret_decisions_out=secret_decisions_out,
-            secret_classify_cache=secret_classify_cache,
-        )
-    finally:
-        shutil.rmtree(repo_path, ignore_errors=True)
+    # Same process-wide slot webhook assesses use (helpers.assess_concurrency_slot)
+    # so a UI Assess click cannot race a GitHub push into a dual-clone OOM.
+    from agentit.portal.helpers import assess_concurrency_slot
+    with assess_concurrency_slot():
+        repo_path = clone_repo(repo_url)
+        try:
+            return run_assessment(
+                repo_path, repo_url, criticality,
+                llm_client=get_llm_client(), infra_repo_url=infra_repo_url,
+                check_results_out=check_results_out,
+                secret_decisions_out=secret_decisions_out,
+                secret_classify_cache=secret_classify_cache,
+            )
+        finally:
+            shutil.rmtree(repo_path, ignore_errors=True)
 
 
 class InfraRepoRequiredError(Exception):

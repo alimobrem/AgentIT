@@ -490,7 +490,71 @@ def _get_trusted_base_url(request) -> str:
 
 # ── Clone + assess + cleanup ─────────────────────────────────────────
 
+import contextlib  # noqa: E402
 import shutil  # noqa: E402
+
+
+class AssessBusyError(RuntimeError):
+    """Raised when another clone+assess is already holding the concurrency slot.
+
+    Callers (GitHub webhooks especially) should fail soft -- return 503 so the
+    delivery can retry -- rather than stacking concurrent assesses that OOMKill
+    the portal pod (dogfood: pinky push mid-assess → exit 137 → webhook 504).
+    """
+
+
+def _assess_max_concurrent() -> int:
+    raw = os.environ.get("AGENTIT_ASSESS_MAX_CONCURRENT", "1").strip() or "1"
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 1
+
+
+def _assess_acquire_timeout() -> float:
+    raw = os.environ.get("AGENTIT_ASSESS_ACQUIRE_TIMEOUT", "5").strip() or "5"
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 5.0
+
+
+# Process-wide slot for clone+assess. Default 1: one full assess (clone + up to
+# 8 analyzer threads + LLM) already approaches the portal's memory budget; two
+# overlapping webhook/UI assesses OOMKilled the dogfood Rollout at 512Mi.
+_assess_slots = threading.BoundedSemaphore(_assess_max_concurrent())
+_assess_slots_configured_for = _assess_max_concurrent()
+
+
+def _ensure_assess_slots() -> threading.BoundedSemaphore:
+    """Recreate the semaphore if tests/ops changed AGENTIT_ASSESS_MAX_CONCURRENT."""
+    global _assess_slots, _assess_slots_configured_for
+    desired = _assess_max_concurrent()
+    if desired != _assess_slots_configured_for:
+        _assess_slots = threading.BoundedSemaphore(desired)
+        _assess_slots_configured_for = desired
+    return _assess_slots
+
+
+@contextlib.contextmanager
+def assess_concurrency_slot():
+    """Serialize (or bound) clone+assess work across webhook + UI paths.
+
+    Non-blocking after ``AGENTIT_ASSESS_ACQUIRE_TIMEOUT`` seconds so a piled-up
+    GitHub webhook storm fails soft (``AssessBusyError`` → HTTP 503) instead of
+    holding connections until the pod OOMs.
+    """
+    slots = _ensure_assess_slots()
+    timeout = _assess_acquire_timeout()
+    if not slots.acquire(timeout=timeout):
+        raise AssessBusyError(
+            "another assessment is already in progress "
+            f"(max concurrent={_assess_max_concurrent()}); retry shortly"
+        )
+    try:
+        yield
+    finally:
+        slots.release()
 
 
 def clone_assess_cleanup(
@@ -513,20 +577,24 @@ def clone_assess_cleanup(
     ``store.log_event()`` once it has an ``assessment_id``/repo name (see
     ``runner.run_assessment``). Pass ``secret_classify_cache`` (bridged store
     facade) so repeat Scans skip LLM + Decisions for the same content hash.
+
+    Serialized via ``assess_concurrency_slot()`` so concurrent GitHub push
+    webhooks cannot stack clone+assess working sets and OOMKill the portal.
     """
     from agentit.cloner import clone_repo
     from agentit.runner import run_assessment
-    repo_path = clone_repo(repo_url)
-    try:
-        return run_assessment(
-            repo_path, repo_url, criticality,
-            llm_client=get_llm_client(), infra_repo_url=infra_repo_url,
-            check_results_out=check_results_out,
-            secret_decisions_out=secret_decisions_out,
-            secret_classify_cache=secret_classify_cache,
-        )
-    finally:
-        shutil.rmtree(repo_path, ignore_errors=True)
+    with assess_concurrency_slot():
+        repo_path = clone_repo(repo_url)
+        try:
+            return run_assessment(
+                repo_path, repo_url, criticality,
+                llm_client=get_llm_client(), infra_repo_url=infra_repo_url,
+                check_results_out=check_results_out,
+                secret_decisions_out=secret_decisions_out,
+                secret_classify_cache=secret_classify_cache,
+            )
+        finally:
+            shutil.rmtree(repo_path, ignore_errors=True)
 
 
 # ── Run onboarding ───────────────────────────────────────────────────

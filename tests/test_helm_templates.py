@@ -1443,6 +1443,29 @@ class TestOauthProxyHealthzBypass:
         assert "value: {{ .Values.env.AGENTIT_WEBHOOK_INSECURE_SSL | default \"\" | quote }}" in raw
 
 
+
+    def test_portal_memory_headroom_for_clone_assess(self):
+        """Regression: portal at 512Mi OOMKilled under concurrent GitHub
+        push webhook assesses (pinky dogfood → webhook 504). Limit must
+        stay at least 1Gi. Asserted on values.yaml because deployment.yaml
+        injects resources via ``toYaml .Values.resources`` (this test file's
+        lightweight Helm renderer does not expand that)."""
+        values = yaml.safe_load((CHART_DIR.parent / "values.yaml").read_text())
+        limit = values["resources"]["limits"]["memory"]
+        assert limit.endswith("Gi") or (limit.endswith("Mi") and int(limit[:-2]) >= 1024), (
+            f"portal memory limit {limit} is too low for clone+assess under webhook load"
+        )
+        assert "toYaml .Values.resources" in self.TEMPLATE.read_text()
+
+    def test_templates_assess_concurrency_env_from_values(self):
+        raw = self.TEMPLATE.read_text()
+        assert "- name: AGENTIT_ASSESS_MAX_CONCURRENT" in raw
+        assert "- name: AGENTIT_ASSESS_ACQUIRE_TIMEOUT" in raw
+        assert ".Values.assessConcurrency.maxConcurrent" in raw
+        values = yaml.safe_load((CHART_DIR.parent / "values.yaml").read_text())
+        assert values["assessConcurrency"]["maxConcurrent"] == 1
+
+
 class TestSyntheticProbeCertCheck:
     """Regression guard for a live bug: ubi-minimal (this Job's probe image)
     doesn't ship an `openssl` CLI, so the old `command -v openssl` guard
@@ -1935,7 +1958,7 @@ class TestCapabilityScoutDeployment:
         live on the real agentit-capability-scout pod, twice (exit 137 at
         256Mi immediately, exit 137 at 1Gi after ~15 minutes of a CPU-
         throttled full-suite run). Must stay comfortably above the portal
-        Rollout's 512Mi, which can trigger the same gate via the
+        Rollout's 1Gi, which can trigger the same gate via the
         manual-run route."""
         doc = _load(self.TEMPLATE)
         container = doc["spec"]["template"]["spec"]["containers"][0]
