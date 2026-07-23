@@ -1,7 +1,9 @@
 """``ChecksMixin`` -- the ``check_results`` table (per-check pass/fail
 snapshots recorded for every assessment, backing fleet-wide compliance
-reporting) and the ``suppressed_checks`` table (a human's explicit
-opt-out of a specific check for a specific app).
+reporting) the ``suppressed_checks`` table (a human's explicit opt-out
+of a specific check for a specific app), and ``secret_classify_cache``
+(persisted LLM secret false-positive verdicts keyed by content hash so
+repeat Scans skip LLM + Decisions spam).
 
 Grouped together since both are about the data-driven check engine's
 per-app/fleet-wide state -- distinct from ``skills.py``'s skill-outcome
@@ -15,7 +17,7 @@ from __future__ import annotations
 
 import asyncpg
 
-from ._shared import _now, _rows_to_dicts
+from ._shared import _now, _row_to_dict, _rows_to_dicts
 
 
 class ChecksMixin:
@@ -88,3 +90,68 @@ class ChecksMixin:
             app_name,
         )
         return _rows_to_dicts(rows)
+
+    async def lookup_secret_classify(
+        self, app_name: str, file_path: str, snippet_hash: str,
+    ) -> dict | None:
+        row = await self._pool.fetchrow(
+            "SELECT app_name, file_path, snippet_hash, secret_type, outcome, "
+            "confidence, reason, source, first_seen_at, last_seen_at, hit_count "
+            "FROM secret_classify_cache "
+            "WHERE app_name = $1 AND file_path = $2 AND snippet_hash = $3",
+            app_name, file_path, snippet_hash,
+        )
+        return _row_to_dict(row)
+
+    async def upsert_secret_classify(
+        self,
+        app_name: str,
+        file_path: str,
+        snippet_hash: str,
+        secret_type: str,
+        outcome: str,
+        confidence: float,
+        reason: str,
+        source: str = "llm",
+    ) -> None:
+        now = _now()
+        await self._pool.execute(
+            """
+            INSERT INTO secret_classify_cache (
+                app_name, file_path, snippet_hash, secret_type, outcome,
+                confidence, reason, source, first_seen_at, last_seen_at, hit_count
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, 1)
+            ON CONFLICT (app_name, file_path, snippet_hash) DO UPDATE SET
+                secret_type = EXCLUDED.secret_type,
+                outcome = EXCLUDED.outcome,
+                confidence = EXCLUDED.confidence,
+                reason = EXCLUDED.reason,
+                source = EXCLUDED.source,
+                last_seen_at = EXCLUDED.last_seen_at,
+                hit_count = secret_classify_cache.hit_count + 1
+            """,
+            app_name, file_path, snippet_hash, secret_type, outcome,
+            float(confidence), reason, source, now,
+        )
+
+    async def touch_secret_classify(
+        self, app_name: str, file_path: str, snippet_hash: str,
+    ) -> None:
+        await self._pool.execute(
+            """
+            UPDATE secret_classify_cache
+            SET last_seen_at = $4, hit_count = hit_count + 1
+            WHERE app_name = $1 AND file_path = $2 AND snippet_hash = $3
+            """,
+            app_name, file_path, snippet_hash, _now(),
+        )
+
+    async def delete_secret_classify(
+        self, app_name: str, file_path: str, snippet_hash: str,
+    ) -> None:
+        await self._pool.execute(
+            "DELETE FROM secret_classify_cache "
+            "WHERE app_name = $1 AND file_path = $2 AND snippet_hash = $3",
+            app_name, file_path, snippet_hash,
+        )
+

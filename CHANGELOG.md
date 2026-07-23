@@ -13,6 +13,7 @@ Product contract detail: [`docs/release-notes.md`](docs/release-notes.md).
 
 ### Added
 
+- **Secret-classify dedup:** quick-win heuristics for `__PLACEHOLDER__` tokens and Prometheus/alert `secret="…"` *name* labels (no LLM / no Decisions rows); durable `secret_classify_cache` keyed by `(app, path, snippet_hash)` so repeat Scans skip LLM + event logging on confident drops (log only first sight or outcome flip).
 - Merge-gate + post-merge deploy tip docs: [`docs/ci-deploy.md`](docs/ci-deploy.md) + [`scripts/ci-merge-gate.sh`](scripts/ci-merge-gate.sh) (do not merge on queued checks; verify GHA + `agentit-ci/tekton` + rollout tip).
 - **Phase 3 hardening**: interfaces layer (`agentit.interfaces`), full decision card (why · confidence · dry-run · evidence · approve/reject), Fleet/Ledger card-collapse at 375px, ADRs 0005–0007.
 - **Score model v2**: pass-ratio dimensions + criticality-weighted overall; letter grades; SVG badge at `/badge/{app}.svg` ([ADR 0003](docs/adr/0003-score-model-v2.md)).

@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agentit.analyzers.base import calculate_score, iter_text_files, iter_yaml_files
 from agentit.models import DimensionScore, Finding, Severity
+from agentit.secret_classify_cache import snippet_hash
+
+if TYPE_CHECKING:
+    from agentit.secret_classify_cache import SecretClassifyCache
 
 SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("password", re.compile(r"""(?:password|passwd|pwd)\s*[:=]\s*['"]?[^\s'"]{8,}""", re.IGNORECASE)),
@@ -27,6 +32,14 @@ IGNORED_SECRET_SUFFIXES = {
 }
 
 HELM_TEMPLATE_RE = re.compile(r"\{\{.*\}\}")
+# Templating / pinky-style placeholders (e.g. __PINKY_OAUTH_SECRET__) — not credentials.
+PLACEHOLDER_TOKEN_RE = re.compile(r"__\w+__")
+# Prometheus/alert expressions that reference a secret *name* as a label value,
+# not a credential (e.g. secret="github-webhook-secret").
+SECRET_NAME_LABEL_RE = re.compile(r"""secret\s*=\s*["'][\w-]+["']""", re.IGNORECASE)
+
+# Fail-conservative drop threshold — must stay aligned with `_check_secrets`.
+_DROP_CONFIDENCE = 0.7
 
 # Action name for the durable event `classify_secret` decisions are persisted
 # under (see `agentit.llm_decisions`) -- mirrors `capability_scout
@@ -42,16 +55,22 @@ class SecurityAnalyzer:
         self,
         llm_client: object | None = None,
         secret_decisions_out: list[dict] | None = None,
+        app_name: str | None = None,
+        secret_classify_cache: SecretClassifyCache | None = None,
     ) -> None:
         """``secret_decisions_out``, if given, is populated (in place) with one
         ``{"file_path", "secret_type", "is_secret", "confidence", "reason", "kept"}``
-        row per real `classify_secret` LLM call -- mirrors `runner.run_assessment`'s
-        `check_results_out` convention. The caller (once it has an
-        `assessment_id`) persists these via `llm_decisions.build_secret_classify_events()`
-        + `store.log_event()`.
+        row per *new or flipped* `classify_secret` verdict -- mirrors
+        `runner.run_assessment`'s `check_results_out` convention. Cache hits
+        for a prior confident drop (or kept) skip the LLM and do not append
+        here, so Decisions stays an audit of first sight / outcome flips.
+        The caller (once it has an `assessment_id`) persists these via
+        `llm_decisions.build_secret_classify_events()` + `store.log_event()`.
         """
         self._llm = llm_client
         self._secret_decisions_out = secret_decisions_out
+        self._app_name = app_name
+        self._classify_cache = secret_classify_cache
 
     def analyze(self, repo_path: Path) -> DimensionScore:
         findings: list[Finding] = []
@@ -79,13 +98,36 @@ class SecurityAnalyzer:
             for secret_type, pattern in SECRET_PATTERNS:
                 match = pattern.search(content)
                 if match and not _is_false_positive(content, match):
+                    matched_line = _get_match_line(content, match.start())
+                    line_hash = snippet_hash(matched_line)
+
+                    cached = self._cache_lookup(rel_path, line_hash)
+                    if cached is not None:
+                        if cached["outcome"] == "dropped" and float(cached["confidence"]) > _DROP_CONFIDENCE:
+                            self._cache_touch(rel_path, line_hash)
+                            continue
+                        if cached["outcome"] == "kept":
+                            self._cache_touch(rel_path, line_hash)
+                            findings.append(_secret_finding(rel_path, secret_type))
+                            continue
+
                     if self._llm is not None:
-                        matched_line = _get_match_line(content, match.start())
                         context_lines = _get_context_lines(content, match.start(), radius=3)
                         verdict = self._llm.classify_secret(rel_path, matched_line, context_lines)
                         if verdict is not None:
-                            dropped = not verdict["is_secret"] and verdict["confidence"] > 0.7
-                            if self._secret_decisions_out is not None:
+                            dropped = (
+                                not verdict["is_secret"]
+                                and float(verdict["confidence"]) > _DROP_CONFIDENCE
+                            )
+                            outcome = "dropped" if dropped else "kept"
+                            should_log = (
+                                cached is None or cached.get("outcome") != outcome
+                            )
+                            self._cache_upsert(
+                                rel_path, line_hash, secret_type, outcome,
+                                float(verdict["confidence"]), str(verdict["reason"]),
+                            )
+                            if should_log and self._secret_decisions_out is not None:
                                 self._secret_decisions_out.append({
                                     "file_path": rel_path,
                                     "secret_type": secret_type,
@@ -96,15 +138,34 @@ class SecurityAnalyzer:
                                 })
                             if dropped:
                                 continue
-                    findings.append(Finding(
-                        category="secrets",
-                        severity=Severity.critical,
-                        description=f"Potential {secret_type} found in {rel_path}",
-                        file_path=rel_path,
-                        recommendation="Migrate to ExternalSecrets Operator or HashiCorp Vault",
-                        source="analyzer:security",
-                    ))
+                    findings.append(_secret_finding(rel_path, secret_type))
         return findings
+
+    def _cache_lookup(self, file_path: str, line_hash: str) -> dict | None:
+        if self._classify_cache is None or not self._app_name:
+            return None
+        return self._classify_cache.lookup(self._app_name, file_path, line_hash)
+
+    def _cache_touch(self, file_path: str, line_hash: str) -> None:
+        if self._classify_cache is None or not self._app_name:
+            return
+        self._classify_cache.touch(self._app_name, file_path, line_hash)
+
+    def _cache_upsert(
+        self,
+        file_path: str,
+        line_hash: str,
+        secret_type: str,
+        outcome: str,
+        confidence: float,
+        reason: str,
+    ) -> None:
+        if self._classify_cache is None or not self._app_name:
+            return
+        self._classify_cache.upsert(
+            self._app_name, file_path, line_hash, secret_type,
+            outcome, confidence, reason, source="llm",
+        )
 
     def _check_dockerfile(self, repo_path: Path) -> list[Finding]:
         findings: list[Finding] = []
@@ -234,6 +295,10 @@ def _is_false_positive(content: str, match: re.Match) -> bool:
     matched_line = _get_match_line(content, match.start())
     if HELM_TEMPLATE_RE.search(matched_line):
         return True
+    if PLACEHOLDER_TOKEN_RE.search(matched_line):
+        return True
+    if SECRET_NAME_LABEL_RE.search(matched_line):
+        return True
     placeholder_patterns = [
         "example", "placeholder", "changeme", "your_", "xxx", "<",
         "REPLACE", "TODO", "${", "$(", "os.environ", "os.getenv",
@@ -251,6 +316,17 @@ def _is_false_positive(content: str, match: re.Match) -> bool:
     if re.search(r'[A-Z_]+="\$\(', matched_line):
         return True
     return False
+
+
+def _secret_finding(rel_path: str, secret_type: str) -> Finding:
+    return Finding(
+        category="secrets",
+        severity=Severity.critical,
+        description=f"Potential {secret_type} found in {rel_path}",
+        file_path=rel_path,
+        recommendation="Migrate to ExternalSecrets Operator or HashiCorp Vault",
+        source="analyzer:security",
+    )
 
 
 def _get_match_line(content: str, pos: int) -> str:

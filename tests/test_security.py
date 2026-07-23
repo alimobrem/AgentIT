@@ -1,7 +1,9 @@
 from unittest.mock import MagicMock
 
-from agentit.analyzers.security import SecurityAnalyzer
+from agentit.analyzers.security import SecurityAnalyzer, _is_false_positive
 from agentit.models import Severity
+from agentit.secret_classify_cache import InMemorySecretClassifyCache, snippet_hash
+import re
 
 
 def test_detects_hardcoded_secrets(create_mock_repo):
@@ -177,3 +179,143 @@ def test_run_assessment_without_secret_decisions_out_is_safe(create_mock_repo):
     )
     security_score = next(s for s in report.scores if s.dimension == "security")
     assert any(f.category == "secrets" for f in security_score.findings)
+
+
+# ── Quick-win heuristics (no LLM, no Decisions rows) ────────────────────────
+
+
+def _match_on(content: str, pattern: str) -> re.Match:
+    m = re.search(pattern, content, re.IGNORECASE)
+    assert m is not None
+    return m
+
+
+def test_placeholder_token_is_false_positive():
+    content = 'OAUTH_SECRET = "__PINKY_OAUTH_SECRET__"\n'
+    match = _match_on(content, r"""(?:secret[_-]?key|secret)\s*[:=]\s*['"]?[a-zA-Z0-9_\-]{16,}""")
+    assert _is_false_positive(content, match) is True
+
+
+def test_prometheus_secret_name_label_is_false_positive():
+    content = 'expr: agentit_secret_check_status{secret="github-webhook-secret"} == 0\n'
+    match = _match_on(content, r"""(?:secret[_-]?key|secret)\s*[:=]\s*['"]?[a-zA-Z0-9_\-]{16,}""")
+    assert _is_false_positive(content, match) is True
+
+
+def test_placeholder_token_never_hits_llm_or_decisions(create_mock_repo):
+    repo = create_mock_repo({"config.py": 'OAUTH_SECRET = "__PINKY_OAUTH_SECRET__"\n'})
+    fake_llm = MagicMock()
+    decisions: list[dict] = []
+    analyzer = SecurityAnalyzer(llm_client=fake_llm, secret_decisions_out=decisions)
+    score = analyzer.analyze(repo)
+    fake_llm.classify_secret.assert_not_called()
+    assert decisions == []
+    assert not any(f.category == "secrets" for f in score.findings)
+
+
+def test_prometheus_label_never_hits_llm_or_decisions(create_mock_repo):
+    repo = create_mock_repo({
+        "chart/templates/prometheusrule.yaml": (
+            'expr: agentit_secret_check_status{secret="github-webhook-secret"} == 0\n'
+        ),
+    })
+    fake_llm = MagicMock()
+    decisions: list[dict] = []
+    analyzer = SecurityAnalyzer(llm_client=fake_llm, secret_decisions_out=decisions)
+    score = analyzer.analyze(repo)
+    fake_llm.classify_secret.assert_not_called()
+    assert decisions == []
+    assert not any(f.category == "secrets" for f in score.findings)
+
+
+# ── Persist classify cache ──────────────────────────────────────────────────
+
+
+def test_cache_hit_skips_llm_and_decision_event(create_mock_repo):
+    repo = create_mock_repo({"app.py": 'SECRET_KEY = "d4c8f1e2b3a4c5d6e7f80123"\n'})
+    line = 'SECRET_KEY = "d4c8f1e2b3a4c5d6e7f80123"'
+    cache = InMemorySecretClassifyCache()
+    cache.upsert(
+        "app", "app.py", snippet_hash(line), "secret_key",
+        "dropped", 0.9, "env var name only", source="llm",
+    )
+    fake_llm = MagicMock()
+    decisions: list[dict] = []
+    analyzer = SecurityAnalyzer(
+        llm_client=fake_llm,
+        secret_decisions_out=decisions,
+        app_name="app",
+        secret_classify_cache=cache,
+    )
+    score = analyzer.analyze(repo)
+    fake_llm.classify_secret.assert_not_called()
+    assert decisions == []
+    assert not any(f.category == "secrets" for f in score.findings)
+    assert cache.lookup("app", "app.py", snippet_hash(line))["hit_count"] == 2
+
+
+def test_first_llm_verdict_logs_and_caches(create_mock_repo):
+    repo = create_mock_repo({"app.py": 'SECRET_KEY = "d4c8f1e2b3a4c5d6e7f80123"\n'})
+    cache = InMemorySecretClassifyCache()
+    fake_llm = MagicMock()
+    fake_llm.classify_secret.return_value = {
+        "is_secret": False, "confidence": 0.88, "reason": "placeholder-looking",
+    }
+    decisions: list[dict] = []
+    analyzer = SecurityAnalyzer(
+        llm_client=fake_llm,
+        secret_decisions_out=decisions,
+        app_name="app",
+        secret_classify_cache=cache,
+    )
+    analyzer.analyze(repo)
+    assert fake_llm.classify_secret.call_count == 1
+    assert len(decisions) == 1
+    assert decisions[0]["kept"] is False
+    line = 'SECRET_KEY = "d4c8f1e2b3a4c5d6e7f80123"'
+    cached = cache.lookup("app", "app.py", snippet_hash(line))
+    assert cached is not None
+    assert cached["outcome"] == "dropped"
+    assert cached["hit_count"] == 1
+
+
+def test_repeat_scan_cache_hit_does_not_log_again(create_mock_repo):
+    repo = create_mock_repo({"app.py": 'SECRET_KEY = "d4c8f1e2b3a4c5d6e7f80123"\n'})
+    cache = InMemorySecretClassifyCache()
+    fake_llm = MagicMock()
+    fake_llm.classify_secret.return_value = {
+        "is_secret": False, "confidence": 0.88, "reason": "placeholder-looking",
+    }
+    decisions: list[dict] = []
+    kwargs = dict(
+        llm_client=fake_llm,
+        secret_decisions_out=decisions,
+        app_name="app",
+        secret_classify_cache=cache,
+    )
+    SecurityAnalyzer(**kwargs).analyze(repo)
+    SecurityAnalyzer(**kwargs).analyze(repo)
+    assert fake_llm.classify_secret.call_count == 1
+    assert len(decisions) == 1
+
+
+def test_content_hash_change_invalidates_cache(create_mock_repo):
+    """Editing the matched line produces a new hash → LLM runs again."""
+    cache = InMemorySecretClassifyCache()
+    fake_llm = MagicMock()
+    fake_llm.classify_secret.return_value = {
+        "is_secret": False, "confidence": 0.9, "reason": "still fine",
+    }
+    decisions: list[dict] = []
+    repo1 = create_mock_repo({"app.py": 'SECRET_KEY = "d4c8f1e2b3a4c5d6e7f80123"\n'})
+    SecurityAnalyzer(
+        llm_client=fake_llm, secret_decisions_out=decisions,
+        app_name="app", secret_classify_cache=cache,
+    ).analyze(repo1)
+    repo2 = create_mock_repo({"app.py": 'SECRET_KEY = "eeeeeeeeeeeeeeeeeeeeeeee"\n'})
+    SecurityAnalyzer(
+        llm_client=fake_llm, secret_decisions_out=decisions,
+        app_name="app", secret_classify_cache=cache,
+    ).analyze(repo2)
+    assert fake_llm.classify_secret.call_count == 2
+    assert len(decisions) == 2

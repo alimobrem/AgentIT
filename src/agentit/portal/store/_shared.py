@@ -323,6 +323,24 @@ CREATE TABLE IF NOT EXISTS suppressed_checks (
     UNIQUE(app_name, check_source)
 );
 
+-- Persisted secret-classify verdicts so repeat Scans skip LLM + Decisions
+-- rows for the same (app, path, content-hash) false positive. Content hash
+-- invalidates when the matched line changes (real secret rotated in).
+CREATE TABLE IF NOT EXISTS secret_classify_cache (
+    app_name TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    snippet_hash TEXT NOT NULL,
+    secret_type TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    confidence DOUBLE PRECISION NOT NULL,
+    reason TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'llm',
+    first_seen_at TIMESTAMPTZ NOT NULL,
+    last_seen_at TIMESTAMPTZ NOT NULL,
+    hit_count INT NOT NULL DEFAULT 1,
+    PRIMARY KEY (app_name, file_path, snippet_hash)
+);
+
 CREATE TABLE IF NOT EXISTS skill_inventory_snapshots (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     snapshot_json JSONB NOT NULL,
@@ -426,7 +444,7 @@ _ALL_TABLES = [
     "agent_registry", "slos", "apply_results",
     "settings", "remediation_jobs", "scheduled_operations",
     "processed_webhooks", "agent_feedback", "skill_effectiveness",
-    "suppressed_checks", "skill_inventory_snapshots",
+    "suppressed_checks", "secret_classify_cache", "skill_inventory_snapshots",
     "agent_runs", "check_results", "deliveries", "pr_outcomes",
     "delivery_locks",
 ]

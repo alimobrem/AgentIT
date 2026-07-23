@@ -929,6 +929,35 @@ class TestSuppressedChecks:
         assert await store.get_suppressions("app") == []
 
 
+class TestSecretClassifyCache:
+    async def test_upsert_lookup_touch_delete(self, store):
+        await store.upsert_secret_classify(
+            "pinky", "chart/prometheusrule.yaml", "abc123",
+            "secret_key", "dropped", 0.95, "label name not a credential",
+        )
+        row = await store.lookup_secret_classify("pinky", "chart/prometheusrule.yaml", "abc123")
+        assert row is not None
+        assert row["outcome"] == "dropped"
+        assert row["hit_count"] == 1
+        assert row["confidence"] == 0.95
+
+        await store.touch_secret_classify("pinky", "chart/prometheusrule.yaml", "abc123")
+        row = await store.lookup_secret_classify("pinky", "chart/prometheusrule.yaml", "abc123")
+        assert row["hit_count"] == 2
+
+        await store.upsert_secret_classify(
+            "pinky", "chart/prometheusrule.yaml", "abc123",
+            "secret_key", "dropped", 0.95, "label name not a credential",
+        )
+        row = await store.lookup_secret_classify("pinky", "chart/prometheusrule.yaml", "abc123")
+        assert row["hit_count"] == 3
+
+        await store.delete_secret_classify("pinky", "chart/prometheusrule.yaml", "abc123")
+        assert await store.lookup_secret_classify(
+            "pinky", "chart/prometheusrule.yaml", "abc123",
+        ) is None
+
+
 class TestSkillInventorySnapshots:
     async def test_save_and_get_last_snapshot(self, store):
         assert await store.get_last_skill_inventory_snapshot() is None
