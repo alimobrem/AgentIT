@@ -32,6 +32,8 @@ RESOURCE_LIMITS = "resource_limits"
 DETECT_ONLY = "detect_only"
 # Tekton Task that actually runs cosign sign/attest (not SLSA theater).
 COSIGN_SIGN_TASK = "cosign_sign_task"
+# App-repo CycloneDX/SPDX artifact — clears compliance ``sbom`` finding.
+SBOM_FILE = "sbom_file"
 # Non-skill sentinel (patch_base_image) — same pin check as dockerfile.
 BASE_IMAGE_PIN = "base_image_pin"
 
@@ -374,6 +376,41 @@ def verify_cluster_kind(files: list[dict], kinds: frozenset[str]) -> tuple[bool,
 
 
 
+def verify_sbom_file(files: list[dict]) -> tuple[bool, str]:
+    """True when staged files include a CycloneDX/SPDX SBOM artifact.
+
+    Matches ComplianceAnalyzer / ``sbom-exists`` filename globs (``*sbom*`` /
+    ``*bom*``) but refuses empty ``{}`` theater — require bomFormat or SPDX
+    markers so Scan PRs clear honestly (founder bar: merge clears finding).
+    """
+    staged = _staged_map(files)
+    named: list[tuple[str, str]] = []
+    for path, content in staged.items():
+        name = path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if "sbom" in name or "bom" in name:
+            named.append((path, content))
+    if not named:
+        return False, "no *sbom*/*bom* artifact in staged files"
+    for path, content in named:
+        body = (content or "").strip()
+        if not body:
+            continue
+        low = body.lower()
+        if "bomformat" in low and "cyclonedx" in low:
+            return True, f"CycloneDX SBOM in {path}"
+        if "spdxversion" in low or '"spdxid"' in low or "spdx-license-id" in low:
+            return True, f"SPDX SBOM in {path}"
+        if re.search(r"^\s*kind:\s*Task\s*$", body, re.I | re.M):
+            return False, (
+                f"{path}: Tekton Task does not clear app-repo SBOM finding "
+                "(need CycloneDX/SPDX artifact — refuse sbom-task theater)"
+            )
+    return False, (
+        f"{named[0][0]}: sbom-named file without CycloneDX/SPDX content "
+        "(refuse empty theater stub)"
+    )
+
+
 def verify_cosign_sign_task(files: list[dict]) -> tuple[bool, str]:
     """True when staged files include a Tekton Task that runs cosign sign/attest.
 
@@ -446,6 +483,8 @@ def verify_evidence(
         return verify_resource_limits(files)
     if evidence_kind == COSIGN_SIGN_TASK:
         return verify_cosign_sign_task(files)
+    if evidence_kind == SBOM_FILE:
+        return verify_sbom_file(files)
     return False, f"unknown evidence_kind {evidence_kind!r}"
 
 

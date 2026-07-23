@@ -194,7 +194,7 @@ AgentIT is a **GitOps assistant**, not an auto-apply bot.
 - **No catalog dumps** — auto delivery and manual `/deliver` only open finding-tied PRs (`finding_gate`)
 - **Human merge required** — AgentIT opens PRs; it does not merge them
 - **No silent cluster applies** for app remediations — path is PR → merge → Argo
-- **Clear-evidence gate** — refuses theater stubs, root-only `audit.py` without package wire-up, destructive Containerfile rewrites, and SLSA/hermetic prose without a real `cosign sign` Task (`image_signing` → `cosign-sign-task`)
+- **Clear-evidence gate** — refuses theater stubs, root-only `audit.py` without package wire-up, destructive Containerfile rewrites, SLSA/hermetic prose without a real `cosign sign` Task (`image_signing` → `cosign-sign-task`), and Tekton `sbom-task` theater for the app-repo `sbom` finding (`sbom` → `sbom-artifact`)
 - **Awaiting verification** only when a delivery actually produced a `pr_url`
 - Treat outputs as drafts until you validate against your sources of record (cluster, GitHub, Argo)
 

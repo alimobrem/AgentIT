@@ -15,6 +15,8 @@ mode: template
 
 # SBOM Generation Task
 
+> **Does not clear compliance `sbom`.** Use `sbom-artifact` for source PRs.
+
 ## Property
 Every container image build produces a CycloneDX Software Bill of
 Materials, enabling license compliance checks and vulnerability

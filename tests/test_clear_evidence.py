@@ -5,6 +5,7 @@ from agentit.portal.quality_prs import clear_evidence_simulation_ok
 from agentit.remediation.clear_evidence import (
     AUDIT_WIRED,
     COSIGN_SIGN_TASK,
+    SBOM_FILE,
     DOCKERFILE_PIN,
     HPA_TARGET,
     MIGRATION_TOOLING,
@@ -12,6 +13,7 @@ from agentit.remediation.clear_evidence import (
     simulation_gate,
     verify_audit_wired,
     verify_cosign_sign_task,
+    verify_sbom_file,
     verify_dockerfile_pin,
     verify_hpa_target,
     verify_migration_tooling,
@@ -370,6 +372,7 @@ class TestSimulationGate:
         assert contract_for("scaling").evidence_kind == HPA_TARGET
         assert contract_for("migration").evidence_kind == MIGRATION_TOOLING
         assert contract_for("image_signing").evidence_kind == COSIGN_SIGN_TASK
+        assert contract_for("sbom").evidence_kind == SBOM_FILE
 
 
 class TestCosignSignTask:
@@ -464,3 +467,41 @@ class TestCosignSignTask:
         )
         assert not ok
         assert "image_signing" in reason or "Clear-evidence" in reason
+
+
+class TestSbomFile:
+    def test_allows_cyclonedx(self) -> None:
+        ok, reason = verify_sbom_file([{
+            "target_path": "sbom.cdx.json",
+            "content": '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}\n',
+            "skill_name": "sbom-artifact",
+        }])
+        assert ok, reason
+
+    def test_refuses_empty_json_theater(self) -> None:
+        ok, reason = verify_sbom_file([{
+            "target_path": "sbom.json",
+            "content": "{}\n",
+            "skill_name": "sbom-artifact",
+        }])
+        assert not ok
+
+    def test_refuses_tekton_task_wrong_layer(self) -> None:
+        ok, reason = verify_sbom_file([{
+            "target_path": "apps/pinky/sbom-task.yaml",
+            "content": "apiVersion: tekton.dev/v1\nkind: Task\nmetadata:\n  name: x\n",
+            "skill_name": "sbom-task",
+        }])
+        assert not ok
+        assert "Task" in reason
+
+    def test_simulation_allows_sbom_source_pr(self) -> None:
+        files = [{
+            "target_path": "sbom.cdx.json",
+            "content": '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}\n',
+            "skill_name": "sbom-artifact",
+        }]
+        ok, reason = clear_evidence_simulation_ok(
+            files, [("sbom", "No SBOM (Software Bill of Materials) found")],
+        )
+        assert ok, reason
