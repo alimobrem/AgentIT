@@ -92,7 +92,7 @@ flowchart LR
 | **Scan / generate** | Skills match findings; Scan/onboard produces remediations |
 | **Gate** | Finding-tied PRs only on auto delivery **and** manual `/deliver`. Manual also mirrors auto’s file filter, wrong-layer strip, per-cluster file cap, and clear-evidence (blocks Hello-World `#31`/`#32`-class catalog dumps; refuses `octocat/Hello-World` probes; refuses theater audit stubs even when middleware is wired — pinky `#12`). SSA dry-run + clear-evidence also refuse destructive Containerfile rewrites / root-only `audit.py`. |
 | **Operate** | Human merges on GitHub; Argo CD deploys. **Awaiting verification** only when a PR was actually opened |
-| **Learn** | Watchers surface drift/CVEs/SLOs; Decisions audit LLM approve/reject; repeated theater cools down. Security-analyzer fixtures use fragment-joined fake hex + `.gitleaks.toml` allowlist (InfoSec Generic Secret FP; never real credentials). |
+| **Learn** | Watchers surface drift/CVEs/SLOs; Decisions audit LLM approve/reject; repeated theater cools down. Security-analyzer fixtures use short `EXAMPLE…` placeholders + `# notsecret`; historical hex allowlisted via root `.gitleaks.toml` top-level `[allowlist].regexes` (InfoSec / PwnedAlert Generic Secret FP; never real credentials). |
 
 Fleet apps land under `apps/{app}/` in the gitops repo (ApplicationSet). AgentIT itself deploys from this repo’s Helm `chart/` via Application `agentit`.
 
