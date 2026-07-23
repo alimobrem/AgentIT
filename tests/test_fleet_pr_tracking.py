@@ -171,6 +171,7 @@ class TestAssessmentDetailPrHistory:
         """Open PRs section is always visible; empty state is honest when
         the seeded app has no remediable findings (no Scan-for-PR nudge)."""
         client, store, aid = portal_client
+        await store.set_infra_repo_url(aid, "https://github.com/org/test-gitops")
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
         assert "Open PRs" in resp.text
