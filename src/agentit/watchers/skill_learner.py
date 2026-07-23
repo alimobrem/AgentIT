@@ -361,14 +361,36 @@ class SkillLearner:
         """Low-effectiveness skills from the store, or ``[]`` if there's no
         store (e.g. ``agentit learn`` CLI invocations without a DB path) or
         the lookup fails -- never lets this new prioritization block the
-        existing CVE-sweep fallback."""
-        if self._store is None or not hasattr(self._store, "get_low_effectiveness_skills"):
+        existing CVE-sweep fallback.
+
+        Merges the generic ``get_low_effectiveness_skills`` list with the
+        identical-reject fast path (same threshold as skill cool-down) so
+        theater / still-present loops do not wait for five generic outcomes.
+        """
+        if self._store is None:
             return []
-        try:
-            return await self._store.get_low_effectiveness_skills()
-        except Exception:
-            logger.warning("Failed to fetch low-effectiveness skills", exc_info=True)
-            return []
+        flagged: list[dict] = []
+        if hasattr(self._store, "get_low_effectiveness_skills"):
+            try:
+                flagged = list(await self._store.get_low_effectiveness_skills())
+            except Exception:
+                logger.warning("Failed to fetch low-effectiveness skills", exc_info=True)
+        by_name = {entry["skill"]: entry for entry in flagged if entry.get("skill")}
+        if hasattr(self._store, "get_skills_with_identical_reject_reasons"):
+            try:
+                for entry in await self._store.get_skills_with_identical_reject_reasons():
+                    name = entry.get("skill")
+                    if not name:
+                        continue
+                    if name not in by_name:
+                        by_name[name] = entry
+                    else:
+                        by_name[name] = {**by_name[name], **entry}
+            except Exception:
+                logger.warning(
+                    "Failed to fetch identical-reject fast-path skills", exc_info=True,
+                )
+        return list(by_name.values())
 
     async def _recent_improvement_failure_counts(self) -> dict[str, int]:
         """How many times each flagged skill has already failed to improve

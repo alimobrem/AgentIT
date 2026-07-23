@@ -206,13 +206,16 @@ class TestHandleConfirmedFindingFailure:
 
 class TestRepeatedFailureLoopStopsAtThreshold:
     async def test_escalation_fires_at_threshold_not_before(self):
-        """The core Phase 4 guarantee: repeated confirmed failures for the
-        same (app, category) count up correctly across separate
-        `check_pending_delivery_verifications()` calls (one per simulated
-        push), auto-retrying below the threshold and escalating -- exactly
-        once, never before -- at it. After escalation, no further delivery
-        is created for this finding, so the loop provably stops instead of
-        regenerating an identical fix forever."""
+        """Repeated confirmed still-present failures for the same
+        (app, category) count up across `check_pending_delivery_
+        verifications()` calls. Identical skill_effectiveness reject
+        reasons cool down after 2 (see SKILL_COOLDOWN_SAME_REASON) and
+        escalate instead of blind redispatches — so with unchanged
+        still-present reasons the loop stops at attempt 2, not at
+        FINDING_ESCALATION_THRESHOLD. After escalation, no further
+        delivery is created for this finding."""
+        from agentit.portal.store.skills import SKILL_COOLDOWN_SAME_REASON
+
         store, _ = await make_async_store()
         app_name = "esc-app5"
         report = _report_with_network_finding(repo_name=app_name)
@@ -228,6 +231,10 @@ class TestRepeatedFailureLoopStopsAtThreshold:
 
         patches = _gitops_patches()
         escalated_at = None
+        # Same-reason cool-down escalates once skill_effectiveness has
+        # SKILL_COOLDOWN_SAME_REASON identical still-present rejects
+        # (recorded before handle_confirmed on each attempt).
+        same_reason_escalate_at = SKILL_COOLDOWN_SAME_REASON
         with patches[0], patches[1] as mock_commit, patches[2]:
             for attempt in range(1, FINDING_ESCALATION_THRESHOLD + 2):
                 # Each "push" re-assesses and finds the SAME finding, unchanged.
@@ -239,32 +246,29 @@ class TestRepeatedFailureLoopStopsAtThreshold:
                 assert results[0]["status"] == "still_present"
                 escalation_actions = [e["action"] for e in results[0]["escalations"]]
 
-                if attempt < FINDING_ESCALATION_THRESHOLD:
+                if attempt < same_reason_escalate_at:
                     assert escalation_actions == ["redispatched"], f"attempt {attempt}"
                 else:
                     assert escalation_actions == ["escalated"], f"attempt {attempt}"
                     escalated_at = attempt
                     break
 
-        assert escalated_at == FINDING_ESCALATION_THRESHOLD
+        assert escalated_at == same_reason_escalate_at
 
         unresolved = await store.list_unresolved_events(
             "finding-escalated", ["finding-escalation-acknowledged"], target_app=app_name,
         )
         assert len(unresolved) == 1
 
-        # Every delivery attempt up to (and including) the one that
-        # triggered escalation is real and accounted for: the seeded one
-        # plus one re-dispatched delivery per below-threshold attempt --
-        # never more (escalating logs an event, not another delivery).
+        # Seeded delivery + one redispatch (attempt 1); attempt 2 escalates
+        # without another delivery.
         all_deliveries = await store.list_all_deliveries(limit=200)
         target_deliveries = {
             d["id"] for d in all_deliveries
             if d["app_name"] == app_name and [tuple(t) for t in d["target_findings"]] == [_NETWORK_TARGET]
         }
         assert first_delivery_id in target_deliveries
-        # threshold-1 redispatched deliveries + the original seeded one.
-        assert len(target_deliveries) == FINDING_ESCALATION_THRESHOLD
+        assert len(target_deliveries) == same_reason_escalate_at
 
         # One more push after escalation: no further redispatch/escalation
         # attempt fires (nothing left in the pending-check queue for this

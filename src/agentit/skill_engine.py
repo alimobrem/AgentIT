@@ -429,7 +429,12 @@ class SkillEngine:
         self.skills = load_all_skills(self.skills_dir)
         logger.info("Loaded %d skills from %s", len(self.skills), self.skills_dir)
 
-    def match(self, report: AssessmentReport) -> list[Skill]:
+    def match(
+        self,
+        report: AssessmentReport,
+        *,
+        cooled_skills: set[str] | None = None,
+    ) -> list[Skill]:
         """Return skills to generate for this report.
 
         When open findings have a ``SOLUTION_CONTRACT`` (exact analyzer
@@ -451,11 +456,16 @@ class SkillEngine:
         matching (including summary) so Onboard Results can populate a
         catalog.
 
+        ``cooled_skills`` (app-scoped names from
+        ``store.list_cooled_skills``) are skipped so theater / still-
+        present failures stop regenerating the same skill.
+
         Retired/draft skills are excluded. Conflicts resolve active-over-
         deprecated via ``_resolve_conflicts``.
         """
         from agentit.remediation.registry import contract_for
 
+        cooled = cooled_skills or set()
         by_name: dict[str, Skill] = {}
         refused: set[str] = set()
         uncontracted_parts: list[str] = []
@@ -466,7 +476,9 @@ class SkillEngine:
                 contract = contract_for(finding.category)
                 if contract is not None:
                     refused |= set(contract.refuse_companions)
-                    skill = self.skill_for_category(finding.category)
+                    skill = self.skill_for_category(
+                        finding.category, cooled_skills=cooled,
+                    )
                     if skill is None or skill.name in by_name:
                         continue
                     if skill.mode == "detect" or skill.status in ("retired", "draft"):
@@ -481,7 +493,10 @@ class SkillEngine:
                 ])
 
         if not has_open_findings:
-            matched = [s for s in self.skills if s.matches(report)]
+            matched = [
+                s for s in self.skills
+                if s.name not in cooled and s.matches(report)
+            ]
             return self._resolve_conflicts(matched)
 
         # Uncontracted findings only — never re-scan contracted prose
@@ -489,7 +504,7 @@ class SkillEngine:
         if uncontracted_parts:
             haystack = " ".join(uncontracted_parts).lower()
             for skill in self.skills:
-                if skill.name in by_name or skill.name in refused:
+                if skill.name in by_name or skill.name in refused or skill.name in cooled:
                     continue
                 if skill.mode == "detect" or skill.status in ("retired", "draft"):
                     continue
@@ -522,7 +537,8 @@ class SkillEngine:
 
     def generate(self, skill: Skill, report: AssessmentReport,
                  llm_client: object | None = None,
-                 human_override: str | None = None) -> list[GeneratedFile]:
+                 human_override: str | None = None,
+                 prior_reject_reasons: list[str] | None = None) -> list[GeneratedFile]:
         """Render a skill against the report. Uses LLM if available, falls back to template."""
         if skill.mode == "detect":
             # Defense in depth alongside Skill.matches()'s own `mode ==
@@ -591,7 +607,11 @@ class SkillEngine:
 
         # Try LLM generation first (tailored to the specific app)
         if llm_client and hasattr(llm_client, '_chat'):
-            llm_result = self._generate_with_llm(skill, report, app_name, llm_client, human_override=human_override)
+            llm_result = self._generate_with_llm(
+                skill, report, app_name, llm_client,
+                human_override=human_override,
+                prior_reject_reasons=prior_reject_reasons,
+            )
             if llm_result:
                 return llm_result
             logger.debug("LLM generation failed for %s — falling back to template", skill.name)
@@ -712,7 +732,8 @@ class SkillEngine:
 
     def _generate_with_llm(self, skill: Skill, report: AssessmentReport,
                            app_name: str, llm_client: object,
-                           human_override: str | None = None) -> list[GeneratedFile]:
+                           human_override: str | None = None,
+                           prior_reject_reasons: list[str] | None = None) -> list[GeneratedFile]:
         """Use LLM to generate a tailored fix based on the skill knowledge + app context.
 
         ``human_override``, when given, is the most recent human-corrected
@@ -761,6 +782,14 @@ class SkillEngine:
                 f"application's '{skill.domain}' domain to the following value -- "
                 f"prefer patterns consistent with it where applicable:\n{human_override}"
             )
+        if prior_reject_reasons:
+            bullets = "\n".join(f"- {r}" for r in prior_reject_reasons if r)
+            if bullets:
+                user += (
+                    "\n\nPrior attempts for this application were rejected for these "
+                    "reasons — do NOT repeat the same failing approach:\n"
+                    f"{bullets}"
+                )
 
         for attempt in range(2):
             raw = llm_client._chat(system, user, max_tokens=_SKILL_GENERATION_MAX_TOKENS)
@@ -833,14 +862,17 @@ class SkillEngine:
         via the same feedback data ``webhooks.py`` already uses to skip
         auto-fix-after-3-rejections:
 
-        - ``get_rejection_count(app_name, skill.domain)`` -- a domain that's
-          been rejected 3+ times for this app is skipped entirely (mirroring
-          the ``webhooks.py`` threshold) rather than regenerating the same
-          kind of fix a human keeps turning down.
-        - ``get_human_override(app_name, skill.domain)`` -- if a human
-          previously corrected a fix for this app+domain, that value is
-          passed to LLM generation as extra guidance (see
-          ``_generate_with_llm``'s ``human_override`` param).
+        - ``get_rejection_count(app_name, finding.category)`` -- a finding
+          category that's been rejected 3+ times for this app is skipped
+          (mirroring ``webhooks.py``). Uses the finding category, not
+          ``skill.domain`` (domains rarely match category keys).
+        - ``list_cooled_skills(app)`` -- skills with 2+ identical reject
+          reason prefixes for this app are skipped in ``match()``.
+        - ``get_human_override(app_name, finding.category)`` -- prior human
+          correction for a category addressed by the skill is passed to LLM
+          generation (see ``_generate_with_llm``'s ``human_override``).
+        - ``get_recent_skill_reject_reasons`` -- last reject reasons feed
+          the LLM prompt so generation avoids repeating theater failures.
 
         Generation of matched skills runs concurrently (ThreadPoolExecutor,
         up to ``_RUN_ALL_MAX_WORKERS``) sharing one ``llm_client``. Store
@@ -857,41 +889,99 @@ class SkillEngine:
                 return result
             return asyncio.run_coroutine_threadsafe(result, loop).result(timeout=30)
 
-        matched = self.match(report)
-        work: list[tuple[Skill, str | None]] = []
-        for skill in matched:
-            if store is not None:
+        cooled: set[str] = set()
+        if store is not None and hasattr(store, "list_cooled_skills"):
+            try:
+                cooled = {
+                    row["skill_name"]
+                    for row in _bridge(store.list_cooled_skills(report.repo_name))
+                }
+            except Exception:
+                logger.warning(
+                    "list_cooled_skills lookup failed for %s", report.repo_name,
+                    exc_info=True,
+                )
+
+        would_match = {s.name for s in self.match(report)}
+        matched = self.match(report, cooled_skills=cooled)
+        if store is not None:
+            for name in sorted(cooled & would_match):
                 try:
-                    if _bridge(store.get_rejection_count(report.repo_name, skill.domain)) >= 3:
-                        logger.info(
-                            "Skipping skill %s -- domain '%s' rejected 3+ times for %s",
-                            skill.name, skill.domain, report.repo_name,
+                    _bridge(store.log_event(
+                        "skill-engine", "skipped-cooldown", report.repo_name, "info",
+                        f"Skipping skill {name} -- cooling down after repeated rejects",
+                    ))
+                except Exception:
+                    pass
+
+        work: list[tuple[Skill, str | None, list[str] | None]] = []
+        for skill in matched:
+            categories = self._finding_categories_for_skill(skill, report)
+            skipped_category = None
+            if store is not None and categories:
+                for cat in categories:
+                    try:
+                        if _bridge(store.get_rejection_count(report.repo_name, cat)) >= 3:
+                            skipped_category = cat
+                            break
+                    except Exception:
+                        logger.warning(
+                            "get_rejection_count lookup failed for %s/%s",
+                            report.repo_name, cat, exc_info=True,
                         )
+                if skipped_category is not None:
+                    logger.info(
+                        "Skipping skill %s -- category '%s' rejected 3+ times for %s",
+                        skill.name, skipped_category, report.repo_name,
+                    )
+                    try:
                         _bridge(store.log_event(
                             "skill-engine", "skipped-rejected", report.repo_name, "info",
-                            f"Skipping skill {skill.name} -- domain '{skill.domain}' rejected 3+ times",
+                            f"Skipping skill {skill.name} -- category "
+                            f"'{skipped_category}' rejected 3+ times",
                         ))
-                        continue
-                except Exception:
-                    logger.warning("get_rejection_count lookup failed for %s/%s",
-                                   report.repo_name, skill.domain, exc_info=True)
+                    except Exception:
+                        pass
+                    continue
 
             human_override = None
+            prior_rejects: list[str] | None = None
             if store is not None:
-                try:
-                    human_override = _bridge(store.get_human_override(report.repo_name, skill.domain))
-                except Exception:
-                    logger.warning("get_human_override lookup failed for %s/%s",
-                                   report.repo_name, skill.domain, exc_info=True)
+                for cat in categories or [skill.domain]:
+                    try:
+                        human_override = _bridge(
+                            store.get_human_override(report.repo_name, cat),
+                        )
+                    except Exception:
+                        logger.warning(
+                            "get_human_override lookup failed for %s/%s",
+                            report.repo_name, cat, exc_info=True,
+                        )
+                    if human_override:
+                        break
+                if hasattr(store, "get_recent_skill_reject_reasons"):
+                    try:
+                        prior_rejects = _bridge(
+                            store.get_recent_skill_reject_reasons(
+                                report.repo_name, skill.name, limit=3,
+                            ),
+                        ) or None
+                    except Exception:
+                        logger.warning(
+                            "get_recent_skill_reject_reasons failed for %s/%s",
+                            report.repo_name, skill.name, exc_info=True,
+                        )
 
-            work.append((skill, human_override))
+            work.append((skill, human_override, prior_rejects))
 
         if not work:
             return []
         if len(work) == 1:
-            skill, human_override = work[0]
+            skill, human_override, prior_rejects = work[0]
             return self.generate(
-                skill, report, llm_client=llm_client, human_override=human_override,
+                skill, report, llm_client=llm_client,
+                human_override=human_override,
+                prior_reject_reasons=prior_rejects,
             )
 
         all_files: list[GeneratedFile] = []
@@ -901,11 +991,11 @@ class SkillEngine:
                 pool.submit(
                     self.generate, skill, report,
                     llm_client=llm_client, human_override=human_override,
+                    prior_reject_reasons=prior_rejects,
                 ): skill
-                for skill, human_override in work
+                for skill, human_override, prior_rejects in work
             }
-            # Preserve match order for stable downstream manifests / tests.
-            by_skill = {skill.name: [] for skill, _ in work}
+            by_skill = {skill.name: [] for skill, _, _ in work}
             for fut in as_completed(futures):
                 skill = futures[fut]
                 try:
@@ -916,9 +1006,34 @@ class SkillEngine:
                         skill.name, exc_info=True,
                     )
                     by_skill[skill.name] = []
-            for skill, _ in work:
+            for skill, _, _ in work:
                 all_files.extend(by_skill.get(skill.name, []))
         return all_files
+
+    def _finding_categories_for_skill(
+        self, skill: Skill, report: AssessmentReport,
+    ) -> list[str]:
+        """Open finding categories on ``report`` that this skill addresses."""
+        cats: list[str] = []
+        seen: set[str] = set()
+        for score in report.scores:
+            for finding in score.findings:
+                resolved = self.skill_for_category(finding.category)
+                addressed = (
+                    resolved is not None and resolved.name == skill.name
+                )
+                if not addressed:
+                    hay = " ".join([
+                        finding.category,
+                        finding.description,
+                        finding.recommendation or "",
+                    ]).lower()
+                    addressed = any(t.lower() in hay for t in skill.triggers)
+                if not addressed or finding.category in seen:
+                    continue
+                seen.add(finding.category)
+                cats.append(finding.category)
+        return cats
 
     def covered_domains(self, files: list[GeneratedFile]) -> set[str]:
         """Return the set of skill domains that produced output.
@@ -932,7 +1047,12 @@ class SkillEngine:
                 domains.add(skill.domain)
         return domains
 
-    def skill_for_category(self, category: str) -> Skill | None:
+    def skill_for_category(
+        self,
+        category: str,
+        *,
+        cooled_skills: set[str] | None = None,
+    ) -> Skill | None:
         """Resolve a finding category to the one skill responsible for fixing it.
 
         This is the single function both ``generate_for_finding`` (the CLI's
@@ -956,9 +1076,12 @@ class SkillEngine:
         """
         from agentit.remediation.registry import contract_for, lookup
 
+        cooled = cooled_skills or set()
         match = lookup(category)
         if match is not None:
             _domain, skill_name = match
+            if skill_name in cooled:
+                return None
             skill = next((s for s in self.skills if s.name == skill_name), None)
             if skill is not None:
                 return skill
@@ -977,6 +1100,8 @@ class SkillEngine:
 
         category_lower = category.lower()
         for skill in self.skills:
+            if skill.name in cooled:
+                continue
             if any(t.lower() in category_lower or category_lower in t.lower() for t in skill.triggers):
                 return skill
         return None

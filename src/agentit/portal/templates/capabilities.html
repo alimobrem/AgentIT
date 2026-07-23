@@ -36,6 +36,20 @@
   </span>
 </div>
 
+{% if cooled_skills %}
+<div class="mb-2 text-sm text-muted" role="status">
+  <strong class="text-warning">Cooling down</strong>
+  (skipped for regenerate after 2+ identical rejects):
+  {% for c in cooled_skills[:5] %}
+    <code>{{ c.skill_name }}</code> on {{ c.app_name }}
+    ({{ c.count }}× {{ c.reason_prefix }}){% if not loop.last %}; {% endif %}
+  {% endfor %}
+  {% if cooled_skills|length > 5 %}
+    (+{{ cooled_skills|length - 5 }} more)
+  {% endif %}
+</div>
+{% endif %}
+
 <div class="stat-grid mb-2">
   <div class="stat-card">
     <div class="stat-label">Total Skills</div>

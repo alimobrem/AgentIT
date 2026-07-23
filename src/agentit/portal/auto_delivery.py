@@ -504,6 +504,10 @@ async def auto_validate_and_deliver(
     cluster_refusals: list[str] = []
     last_delivery: dict | None = None
     unchanged_any = False
+    # One skill_effectiveness row per (skill, reason prefix) per delivery
+    # attempt — multi-cluster theater refusals must not double-count into
+    # cool-down within a single auto_validate_and_deliver call.
+    clear_evidence_recorded: set[tuple[str, str]] = set()
 
     for cluster in clusters:
         # Fleet HPA gate: refuse invented scaleTargetRef (Deployment/app when
@@ -662,6 +666,34 @@ async def auto_validate_and_deliver(
             except Exception:
                 logger.warning(
                     "Failed to log clear-evidence refusal for %s", app_name, exc_info=True,
+                )
+            # Theater / clear-evidence failures must count toward skill
+            # cool-down (same path as post-merge still-present rejects).
+            try:
+                from agentit.portal.store.skills import skill_reject_reason_prefix
+                from agentit.skill_engine import (
+                    record_skill_outcomes_for_findings,
+                    skill_names_for_findings,
+                )
+
+                reason = f"clear-evidence: {sim_reason}"
+                prefix = skill_reject_reason_prefix(reason)
+                pending_keys = cluster.target_findings
+                names = [
+                    n for n in skill_names_for_findings(pending_keys)
+                    if (n, prefix) not in clear_evidence_recorded
+                ]
+                for n in names:
+                    clear_evidence_recorded.add((n, prefix))
+                if names:
+                    await record_skill_outcomes_for_findings(
+                        store, app_name, pending_keys, "rejected", reason,
+                        skill_names=names,
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to record skill_effectiveness for clear-evidence refusal on %s",
+                    app_name, exc_info=True,
                 )
             continue
 
