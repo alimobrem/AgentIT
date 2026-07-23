@@ -186,6 +186,52 @@ class TestCheckPendingDeliveryVerifications:
         assert len(matching) == 1
         assert delivery_id in matching[0]["summary"]
 
+    async def test_still_present_attributes_only_contract_skill_not_companions(self):
+        """Source-patch still_present must not blast-reject every onboarding skill.
+
+        Dogfood: migration/container theater PRs left findings present, then
+        check_pending_delivery_verifications rejected pdb/limitrange/etc. on
+        Decisions even though those skills were never in the delivery.
+        """
+        store, _ = await make_async_store()
+        old_report = make_report(repo_name="attr-app")
+        old_report.scores = [
+            DimensionScore(
+                dimension="data_governance", score=40, max_score=100,
+                findings=[Finding(
+                    category="migration", severity=Severity.medium,
+                    description="no database migration tooling detected",
+                    recommendation="Add Alembic",
+                )],
+            ),
+        ]
+        old_aid = await store.save(old_report)
+        # Companion skill YAML on the assessment (as Scan saves them) —
+        # must NOT become skill_effectiveness rejects for this delivery.
+        await store.save_onboarding(old_aid, [
+            {"category": "codechange", "path": "patch-alembic-ini", "content": "x"},
+            {"category": "skills", "path": "attr-app-pdb.yaml", "content": "kind: PodDisruptionBudget"},
+            {"category": "skills", "path": "attr-app-limitrange.yaml", "content": "kind: LimitRange"},
+            {"category": "skills", "path": "attr-app-security-context.yaml", "content": "kind: SecurityContextConstraints"},
+        ])
+        target = finding_key("migration", "no database migration tooling detected")
+        await store.create_delivery(
+            old_aid, "attr-app", {"source_patch": 1}, "source_patch:source-repo-pr",
+            status="delivered", target_findings=[target],
+        )
+        new_report = make_report(repo_name="attr-app")
+        new_report.scores = old_report.scores
+        new_aid = await store.save(new_report)
+
+        await check_pending_delivery_verifications(store, "attr-app", new_report, new_aid)
+
+        rows = await store.get_recent_skill_activity(limit=50)
+        app_rows = [r for r in rows if r["app_name"] == "attr-app"]
+        assert [(r["skill_name"], r["outcome"]) for r in app_rows] == [
+            ("db-migration-tooling", "rejected"),
+        ]
+        assert "finding still present after merge" in (app_rows[0].get("reason") or "")
+
     async def test_resolved_outcome_is_persisted_and_logged(self):
         store, _ = await make_async_store()
         old_report = _report_with_network_finding(repo_name="verify-app2")

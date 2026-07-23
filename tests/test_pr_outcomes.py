@@ -119,6 +119,35 @@ class TestSyncPrOutcomesRejection:
         )
         assert await store.get_rejection_count("feedback-app", "cluster_config") == 1
 
+    async def test_rejection_attributes_only_delivered_skills_not_companions(self):
+        """Closing a source-patch PR must not reject every companion skill YAML
+        on the assessment (Decisions flood of empty-reason rejects)."""
+        store = await make_store()
+        aid = await store.save(make_report(repo_name="src-reject"))
+        await store.save_onboarding(aid, [
+            {"category": "codechange", "path": "patch-Dockerfile", "content": "FROM x", "description": "d"},
+            {"category": "skills", "path": "src-reject-pdb.yaml", "content": "x", "description": "d"},
+            {"category": "skills", "path": "src-reject-limitrange.yaml", "content": "x", "description": "d"},
+        ])
+        record = {
+            "pr_url": "https://github.com/org/src-reject/pull/12",
+            "state": "closed", "assessment_id": aid, "app_name": "src-reject",
+            "category": "source_patch",
+            # Same shape pr_tracking.delivery_pr_records() emits.
+            "target_findings": [["container", "using :latest tag in base image in containerfile"]],
+        }
+        await pr_outcomes.sync_pr_outcomes(
+            store, [record],
+            get_status=lambda url: {"labels": [], "body": ""},
+            get_extra_commits=lambda url: [],
+            get_comments=lambda url: [],
+        )
+        rows = await store.get_recent_skill_activity(limit=20)
+        app_rows = [r for r in rows if r["app_name"] == "src-reject"]
+        assert [(r["skill_name"], r["outcome"], r.get("reason") or "") for r in app_rows] == [
+            ("containerfile", "rejected", "PR closed without merge"),
+        ]
+
     async def test_already_recorded_pr_is_never_re_detected(self):
         """The one batched pr_outcomes_recorded_for() check must stop a
         second sync pass from re-running the real GitHub calls (comments/

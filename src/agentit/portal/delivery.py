@@ -1854,16 +1854,18 @@ async def check_pending_delivery_verifications(
                 store, app_name, "delivery-finding-resolved", "info",
                 f"Delivery {d['id']} confirmed resolved: {resolved_desc} no longer present on re-assessment",
             )
-            # Phase E: approve skills only after merge + evidence the finding cleared.
+            # Phase E: approve only the contract skill(s) for findings that
+            # cleared — never every skill YAML on the assessment (source-
+            # patch migration/container failures were falsely rejecting
+            # companion cluster skills on Decisions).
             try:
-                from agentit.skill_engine import record_skill_outcomes
+                from agentit.skill_engine import record_skill_outcomes_for_findings
 
-                onboarding = await store.get_onboarding(d.get("assessment_id") or "")
-                if onboarding:
-                    await record_skill_outcomes(
-                        store, app_name, onboarding, None, "approved",
-                        f"finding cleared after merge (delivery {d['id']})",
-                    )
+                await record_skill_outcomes_for_findings(
+                    store, app_name, outcome["resolved_findings"] or outcome["target_findings"],
+                    "approved",
+                    f"finding cleared after merge (delivery {d['id']})",
+                )
             except Exception:
                 logger.warning(
                     "Failed to record skill approved after finding resolve for delivery %s",
@@ -1880,15 +1882,22 @@ async def check_pending_delivery_verifications(
             store, app_name, "delivery-finding-still-present", "warning",
             f"Delivery {d['id']} did NOT resolve: {still_present_desc} still present on re-assessment{resolved_note}",
         )
-        # Phase E: merged but ineffective — do not treat as approved.
+        # Phase E: attribute reject/approve per finding that this delivery
+        # targeted — not the whole onboarding skill catalog.
         try:
-            from agentit.skill_engine import record_skill_outcomes
+            from agentit.skill_engine import record_skill_outcomes_for_findings
 
-            onboarding = await store.get_onboarding(d.get("assessment_id") or "")
-            if onboarding:
-                await record_skill_outcomes(
-                    store, app_name, onboarding, None, "rejected",
+            if outcome["still_present_findings"]:
+                await record_skill_outcomes_for_findings(
+                    store, app_name, outcome["still_present_findings"],
+                    "rejected",
                     f"finding still present after merge (delivery {d['id']})",
+                )
+            if outcome["resolved_findings"]:
+                await record_skill_outcomes_for_findings(
+                    store, app_name, outcome["resolved_findings"],
+                    "approved",
+                    f"finding cleared after merge (delivery {d['id']})",
                 )
         except Exception:
             logger.warning(

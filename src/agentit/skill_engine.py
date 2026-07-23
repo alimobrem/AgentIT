@@ -1255,3 +1255,72 @@ async def record_skill_outcomes(
             await store.record_skill_outcome(skill_name, app_name, outcome, reason)
         except Exception:
             logger.warning("Failed to record skill outcome for %s/%s", skill_name, app_name, exc_info=True)
+
+
+def skill_names_for_findings(finding_keys: list[tuple[str, str]] | list) -> list[str]:
+    """Contract skill names for finding ``(category, desc)`` keys.
+
+    Source-patch deliveries (migration/container/audit) never put skill
+    YAML in onboarding ``category=="skills"`` — attributing against the
+    whole onboarding list incorrectly rejected every companion cluster
+    skill on Decisions. Always prefer the SOLUTION_CONTRACT skill for the
+    finding category.
+    """
+    from agentit.remediation.registry import lookup
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for key in finding_keys or []:
+        if not key:
+            continue
+        category = key[0] if isinstance(key, (list, tuple)) else ""
+        if not category:
+            continue
+        hit = lookup(str(category))
+        if hit is None:
+            continue
+        skill_name = hit[1]
+        if skill_name in seen:
+            continue
+        seen.add(skill_name)
+        names.append(skill_name)
+    return names
+
+
+async def record_skill_outcomes_for_findings(
+    store: object | None,
+    app_name: str,
+    finding_keys: list[tuple[str, str]] | list,
+    outcome: str,
+    reason: str = "",
+    *,
+    skill_names: list[str] | None = None,
+) -> None:
+    """Record skill_effectiveness for the skills that own these findings.
+
+    Prefer explicit ``skill_names`` (e.g. recovered from a PR's delivered
+    skill files). Otherwise map each finding category through
+    ``SOLUTION_CONTRACTS`` via ``skill_names_for_findings``. Never blast
+    every skill in an assessment's onboarding list — that made Decisions
+    show mass false rejects when a source-patch delivery failed clear-
+    evidence after merge.
+    """
+    if store is None:
+        return
+    # Empty explicit list still falls back to contract mapping — source-patch
+    # PRs have no category=="skills" files, so skill_names from path recovery
+    # is [] even when the finding has a SOLUTION_CONTRACT skill.
+    names = list(skill_names) if skill_names else skill_names_for_findings(finding_keys)
+    # Dedup while preserving order.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in names:
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        ordered.append(name)
+    for skill_name in ordered:
+        try:
+            await store.record_skill_outcome(skill_name, app_name, outcome, reason)
+        except Exception:
+            logger.warning("Failed to record skill outcome for %s/%s", skill_name, app_name, exc_info=True)
