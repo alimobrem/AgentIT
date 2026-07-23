@@ -6,16 +6,21 @@ from agentit.secret_classify_cache import InMemorySecretClassifyCache, snippet_h
 import re
 
 # InfoSec FP (GitHub Generic Secret / PDS): synthetic values only — never real
-# credentials. Assembled from fragments so tip source has no contiguous
-# high-entropy hex for scanners; runtime value still matches AgentIT's
-# secret_key pattern and avoids `_is_false_positive` heuristics so the LLM
-# classify path under test still runs. See .gitleaks.toml allowlist + RH wiki
-# "Handling false positives" (Pattern Distribution Server).
-_FAKE_SECRET_HEX = "".join(("d4c8", "f1e2", "b3a4", "c5d6", "e7f8", "0123"))
-_FAKE_SECRET_LINE = f'SECRET_KEY = "{_FAKE_SECRET_HEX}"'
+# credentials. Tip uses short EXAMPLE placeholders (RH PDS best practice) so
+# scanners do not see high-entropy hex; runtime values still match AgentIT's
+# secret_key / api_key patterns. Uppercase EXAMPLE avoids `_is_false_positive`'s
+# lowercase "example" heuristic so the LLM classify path under test still runs.
+# Historical hex from ce58beb8 is allowlisted via root .gitleaks.toml [allowlist].regexes.
+def _synthetic_secret(tag: str) -> str:
+    """Build a clearly-fake value at call/import time (not a committed real secret)."""
+    return f"EXAMPLE{tag}0001"
+
+
+_FAKE_SECRET_HEX = _synthetic_secret("secret")  # notsecret
+_FAKE_SECRET_LINE = f'SECRET_KEY = "{_FAKE_SECRET_HEX}"'  # notsecret
 _FAKE_SECRET_FILE = _FAKE_SECRET_LINE + "\n"
-_FAKE_SECRET_HEX_EDITED = "e" * 24
-_FAKE_API_KEY_HEX = "".join(("abcd", "ef01", "2345", "6789"))
+_FAKE_SECRET_HEX_EDITED = _synthetic_secret("edited")  # notsecret
+_FAKE_API_KEY_HEX = _synthetic_secret("apikey")  # notsecret
 
 
 def test_detects_hardcoded_secrets(create_mock_repo):
