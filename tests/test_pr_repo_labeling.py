@@ -18,14 +18,14 @@ from agentit.portal.delivery import repo_kind_for_mechanism
 from conftest import make_report, make_store, prime_csrf
 
 
-def _report_with_remediable_findings(repo_name: str):
+def _report_with_remediable_findings(repo_name: str, category: str = "network"):
     return make_report(
         repo_name=repo_name,
         scores=[DimensionScore(
             dimension="security", score=40, max_score=100,
             findings=[Finding(
-                category="network", severity=Severity.high,
-                description="missing network", recommendation="add NetworkPolicy",
+                category=category, severity=Severity.high,
+                description=f"missing {category}", recommendation=f"add {category}",
             )],
         )],
     )
@@ -65,6 +65,8 @@ def _skill_file(path: str = "netpol.yaml") -> dict:
         "path": path,
         "content": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: test\n",
         "description": "network policy",
+        "skill_name": "network-policy",
+        "finding_addressed": "network",
     }
 
 
@@ -72,9 +74,14 @@ def _source_patch_file() -> dict:
     return {
         "category": "codechange",
         "path": "patch-01-Dockerfile",
-        "content": "FROM ubi9\n",
-        "description": "Dockerfile fix",
+        "content": (
+            "FROM registry.access.redhat.com/ubi9/python-312:1\n"
+            "USER 1001\n"
+        ),
+        "description": "Dockerfile pin",
         "target_path": "Dockerfile",
+        "skill_name": "containerfile",
+        "finding_addressed": "container",
     }
 
 
@@ -217,7 +224,7 @@ class TestDeliverFlowFlashRepoLabels:
 
     async def test_source_repo_pr_flash_labels_code_repo(self):
         store = await make_store()
-        report = _report_with_remediable_findings("deliver-flash-code-app")
+        report = _report_with_remediable_findings("deliver-flash-code-app", category="container")
         aid = await store.save(report)
         await store.save_onboarding(aid, [_source_patch_file()])
 
