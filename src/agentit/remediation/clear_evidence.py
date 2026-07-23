@@ -380,9 +380,13 @@ def verify_sbom_file(files: list[dict]) -> tuple[bool, str]:
     """True when staged files include a CycloneDX/SPDX SBOM artifact.
 
     Matches ComplianceAnalyzer / ``sbom-exists`` filename globs (``*sbom*`` /
-    ``*bom*``) but refuses empty ``{}`` theater — require bomFormat or SPDX
-    markers so Scan PRs clear honestly (founder bar: merge clears finding).
+    ``*bom*``) but refuses empty ``{}`` theater and CycloneDX shells with
+    ``components: []`` — require bomFormat/SPDX markers *and* at least one
+    component so Scan PRs have supply-chain value (founder bar: merge clears
+    finding with a real BOM).
     """
+    import json
+
     staged = _staged_map(files)
     named: list[tuple[str, str]] = []
     for path, content in staged.items():
@@ -396,15 +400,33 @@ def verify_sbom_file(files: list[dict]) -> tuple[bool, str]:
         if not body:
             continue
         low = body.lower()
-        if "bomformat" in low and "cyclonedx" in low:
-            return True, f"CycloneDX SBOM in {path}"
-        if "spdxversion" in low or '"spdxid"' in low or "spdx-license-id" in low:
-            return True, f"SPDX SBOM in {path}"
         if re.search(r"^\s*kind:\s*Task\s*$", body, re.I | re.M):
             return False, (
                 f"{path}: Tekton Task does not clear app-repo SBOM finding "
                 "(need CycloneDX/SPDX artifact — refuse sbom-task theater)"
             )
+        if "bomformat" in low and "cyclonedx" in low:
+            try:
+                doc = json.loads(body)
+            except json.JSONDecodeError:
+                return False, f"{path}: CycloneDX marker but invalid JSON"
+            comps = doc.get("components") if isinstance(doc, dict) else None
+            if not isinstance(comps, list) or len(comps) == 0:
+                return False, (
+                    f"{path}: CycloneDX shell with empty components[] "
+                    "(refuse — need inventory from Syft or lockfiles/manifests)"
+                )
+            return True, f"CycloneDX SBOM ({len(comps)} component(s)) in {path}"
+        if "spdxversion" in low or '"spdxid"' in low or "spdx-license-id" in low:
+            # SPDX: refuse trivial Document-only shells (no packages).
+            if re.search(r'"packages"\s*:\s*\[\s*\]', body) or (
+                '"packages"' in low and not re.search(r'"packages"\s*:\s*\[\s*\{', body)
+            ):
+                return False, (
+                    f"{path}: SPDX shell with empty packages[] "
+                    "(refuse trivial SBOM theater)"
+                )
+            return True, f"SPDX SBOM in {path}"
     return False, (
         f"{named[0][0]}: sbom-named file without CycloneDX/SPDX content "
         "(refuse empty theater stub)"

@@ -807,6 +807,30 @@ def _enrich_containerfile_pin_only_for_repo(
     return apply_containerfile_pin_only(files, read_file=read_file)
 
 
+def _enrich_sbom_artifact_for_repo(
+    base_url: str,
+    hdrs: dict,
+    default_branch: str,
+    base_sha: str,
+    files: list[dict],
+    repo_name: str,
+) -> list[dict]:
+    """Populate empty CycloneDX ``components`` from repo manifests / Syft."""
+    from agentit.remediation.source_patches import enrich_sbom_from_repo
+
+    tree_paths = _list_tree_paths(base_url, hdrs, base_sha)
+
+    def read_file(path: str) -> str | None:
+        return _get_file_content_at_ref(base_url, hdrs, path, default_branch)
+
+    return enrich_sbom_from_repo(
+        files,
+        read_file=read_file,
+        tree_paths=tree_paths or None,
+        app_name=repo_name,
+    )
+
+
 def path_exists_on_default_branch(repo_url: str, path: str) -> bool | None:
     """Whether ``path`` exists on the repo's default branch.
 
@@ -961,6 +985,11 @@ def create_source_patch_pr(
         # existing Containerfile into a greenfield stub (#165).
         files = _enrich_containerfile_pin_only_for_repo(
             base_url, hdrs, default_branch, files,
+        )
+        # SBOM: populate CycloneDX components from manifests (or Syft when
+        # available) — empty components[] shells are theater.
+        files = _enrich_sbom_artifact_for_repo(
+            base_url, hdrs, default_branch, base_sha, files, repo_name,
         )
 
         tree_items = []
