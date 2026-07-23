@@ -174,17 +174,14 @@ class TestCVEWebhook:
         data = resp.json()
         assert data["action"] == "alert-only"
 
-    async def test_finding_webhook_never_auto_delivers(
+    async def test_finding_webhook_enters_gated_auto_delivery(
         self, client, _override_store,
     ) -> None:
-        """AutoMode (which used to conditionally auto-apply here via an LLM
-        safety classification, logged as a per-agent-attributed 'decision'
-        event) has been removed -- a dispatched fix is now generated but
-        never delivered (no gate is created either, the `gates` table/
-        generic gate-resolution machinery has been removed entirely) --
-        the real next step is re-running Onboard for this app to review
-        and deliver it from Onboard Results, with no LLM classification
-        step and no 'decision' event at all for this path."""
+        """Remediable finding webhooks call gated auto_validate_and_deliver
+        (finding_gate + clear-evidence). Never AutoMode auto-apply; human
+        gate remains PR merge. No LLM 'decision' classification event."""
+        from unittest.mock import AsyncMock, patch
+
         store = _override_store
         report = make_report(
             repo_name="netpol-app",
@@ -192,24 +189,32 @@ class TestCVEWebhook:
         )
         await store.save(report)
 
-        resp = await client.post(
-            "/api/webhook/finding",
-            json={
-                "app_name": "netpol-app",
-                "category": "network",
-                "description": "Missing NetworkPolicy",
-                "severity": "high",
+        with patch(
+            "agentit.portal.auto_delivery.auto_validate_and_deliver",
+            new_callable=AsyncMock,
+            return_value={
+                "status": "delivered",
+                "pr_urls": ["https://github.com/example/infra/pull/9"],
+                "reason": "",
             },
-        )
+        ) as mock_deliver:
+            resp = await client.post(
+                "/api/webhook/finding",
+                json={
+                    "app_name": "netpol-app",
+                    "category": "network",
+                    "description": "Missing NetworkPolicy",
+                    "severity": "high",
+                },
+            )
         assert resp.status_code == 200
         data = resp.json()
-        assert data["action"] == "fix-not-delivered"
+        assert data["action"] == "delivered"
         assert data["files_generated"] >= 1
+        mock_deliver.assert_awaited_once()
 
-        # No more LLM safety classification -- no "decision" event for this
-        # path anymore.
         decision_events = await store.list_events_by_action("decision")
         assert decision_events == []
 
         events = await store.list_events(target_app="netpol-app")
-        assert any(e["action"] == "fix-not-delivered" for e in events)
+        assert not any(e["action"] == "fix-not-delivered" for e in events)

@@ -176,8 +176,14 @@ async def _run_onboarding_job(
 
         from agentit.assessment_diff import current_finding_keys
         from agentit.portal.auto_delivery import auto_validate_and_deliver
+        from agentit.remediation.registry import remediable_findings
 
         namespace = report.repo_name.lower().replace("_", "-").replace(".", "-")
+        # Prefer remediable (auto_pr) finding keys so webhook-chained onboard
+        # hits the same finding_gate + clear-evidence path as Scan — never
+        # a catalog dump. Fall back to all keys so the gate can refuse honestly.
+        all_keys = sorted(current_finding_keys(report))
+        target_findings = remediable_findings(all_keys) or all_keys
         # Generation is already bounded by with_timeout above; auto-delivery
         # LLM validate/fix/review had no ceiling and could leave the progress
         # page spinning for hours after a pod kept the row "running".
@@ -187,7 +193,7 @@ async def _run_onboarding_job(
             auto_validate_and_deliver(
                 store=s, report=report, app_name=report.repo_name, namespace=namespace,
                 assessment_id=assessment_id, actor="auto-delivery", files=files,
-                orchestration=orch_summary, target_findings=sorted(current_finding_keys(report)),
+                orchestration=orch_summary, target_findings=target_findings,
                 job_id=job_id,
             ),
             timeout=600,
