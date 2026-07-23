@@ -599,13 +599,16 @@ class TestGitOpsVisibility:
         shows "Not GitOps-registered" for an app with no known infra repo,
         never a "Direct apply" badge implying a live mutating fallback."""
         client, store = ui_client
-        await store.save(make_report(repo_name="plain-fleet-app"))
+        aid = await store.save(make_report(repo_name="plain-fleet-app"))
         with patch("agentit.portal.routes.fleet._argo_cache", {"data": {}, "ts": 0}):
             resp = await client.get("/fleet")
 
         assert resp.status_code == 200
         assert ">Direct apply<" not in resp.text
         assert "Not GitOps-registered" in resp.text
+        assert "Register GitOps" in resp.text
+        assert f'href="/assessments/{aid}"' in resp.text
+        assert 'btn-label">Scan</span>' not in resp.text
 
     async def test_register_gitops_route_sets_infra_repo_url_and_ensures_applicationset(self, ui_client):
         client, store = ui_client
@@ -697,9 +700,11 @@ class TestGitOpsVisibility:
         assert 'name="infra_repo_url"' in resp.text
         assert "show-confirm" in resp.text
         assert "$refs.registerGitopsForm" in resp.text
-        assert 'x-data="{ dismissed: false, busy: false }"' in resp.text
+        assert 'x-data="{ busy: false }"' in resp.text
         assert 'data-action="register-gitops"' in resp.text
         assert "htmx-indicator" in resp.text
+        assert "Register for GitOps before Scan can deliver" in resp.text
+        assert 'btn-label">Scan</span>' not in resp.text
 
     async def test_register_gitops_auto_create_failure_surfaces_error(self, ui_client):
         """Failed auto-create must redirect with a visible error — silent

@@ -465,6 +465,16 @@ class TestDuplicateRejectionDetection:
     def test_parse_reject_reason_no_signal_stays_empty(self):
         assert parse_reject_reason([], "just needs a rebase", comments=["looks good, will merge after CI"]) == ""
 
+    def test_parse_reject_reason_infers_theater_from_close_comment(self):
+        assert parse_reject_reason(
+            [], "", comments=["Closing — clear-evidence theater stub, not helpful"],
+        ) == "theater"
+
+    def test_parse_reject_reason_infers_wrong_layer_from_close_comment(self):
+        assert parse_reject_reason(
+            [], "", comments=["wrong-layer companion for a source-only finding"],
+        ) == "wrong-layer"
+
     def test_outcome_from_pr_status_picks_up_duplicate_from_comments(self):
         out = outcome_from_pr_status(
             {

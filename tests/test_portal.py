@@ -39,6 +39,7 @@ def _make_report(repo_name: str = "test-repo") -> AssessmentReport:
     return AssessmentReport(
         repo_url=f"https://github.com/org/{repo_name}",
         repo_name=repo_name,
+        infra_repo_url=f"https://github.com/org/{repo_name}-gitops",
         assessed_at=datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc),
         stack=StackInfo(
             languages=[Language(name="python", version="3.12", file_count=10, percentage=100.0)],
@@ -1363,6 +1364,7 @@ def _make_report_scored(repo_name: str, score: int, criticality: str = "medium")
     return AssessmentReport(
         repo_url=f"https://github.com/org/{repo_name}",
         repo_name=repo_name,
+        infra_repo_url=f"https://github.com/org/{repo_name}-gitops",
         assessed_at=datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc),
         stack=StackInfo(
             languages=[Language(name="python", version="3.12", file_count=10, percentage=100.0)],

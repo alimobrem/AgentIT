@@ -152,7 +152,9 @@
              confirm dialog: shown for ever_onboarded apps (since re-scanning
              regenerates and re-delivers existing onboard manifests), skipped
              for never-onboarded apps (nothing to overwrite yet). #}
-          {% if r.ever_onboarded %}
+          {% if not r.gitops_registered and not r.infra_repo_url %}
+          <a href="/assessments/{{ r.id }}" class="btn btn-sm btn-action" title="Register for GitOps before Scan can deliver">Register GitOps</a>
+          {% elif r.ever_onboarded %}
           <form method="post" action="/assess" class="inline-form"
                 x-data x-ref="rescanForm{{ r.id }}">
             <input type="hidden" name="repo_url" value="{{ r.repo_url }}">

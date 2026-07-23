@@ -69,6 +69,7 @@
       <th>Target App</th>
       <th>Outcome</th>
       <th>Reasoning</th>
+      <th>PR</th>
     </tr>
   </thead>
   <tbody>
@@ -82,6 +83,13 @@
         <span class="badge badge-{{ 'success' if d.outcome in success_outcomes else 'warning' if d.outcome in warning_outcomes else 'danger' }}">{{ d.outcome }}</span>
       </td>
       <td class="text-sm text-muted">{{ d.reason or '—' }}</td>
+      <td class="text-sm">
+        {% if d.pr_url %}
+        <a href="{{ d.pr_url | safe_url }}" target="_blank" hx-boost="false" rel="noopener">PR</a>
+        {% else %}
+        —
+        {% endif %}
+      </td>
     </tr>
     {% endfor %}
   </tbody>
