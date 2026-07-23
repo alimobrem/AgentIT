@@ -16,6 +16,7 @@ Brand spelling: **AgentIT** (not AgentIt / Agentit).
 | [architecture-agentit-vs-fleet-gitops.md](./architecture-agentit-vs-fleet-gitops.md) | Self-managed vs fleet delivery |
 | [deployment.md](./deployment.md) | OpenShift / Argo / Tekton ops |
 | [plan-quality-helpful-prs.md](./plan-quality-helpful-prs.md) | Quality PR rules (implemented) |
+| [checks-remediations-intent-audit.md](./checks-remediations-intent-audit.md) | Intent vs detect vs skill audit (before/after verify) |
 | [portal-experience-design-language.md](./portal-experience-design-language.md) | Portal EDL |
 | [compare.md](./compare.md) | Short differentiators |
 | [adr/](./adr/) | Architecture Decision Records |

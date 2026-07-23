@@ -268,6 +268,7 @@ Full diagrams: [`docs/architecture.md`](docs/architecture.md) · Self-managed vs
 | [`docs/architecture.md`](docs/architecture.md) | System diagrams, Scan pipeline |
 | [`docs/ci-deploy.md`](docs/ci-deploy.md) | Merge gate + post-merge Tekton/rollout tip |
 | [`docs/plan-quality-helpful-prs.md`](docs/plan-quality-helpful-prs.md) | Quality PR rules (finding-tied, no theater) |
+| [`docs/checks-remediations-intent-audit.md`](docs/checks-remediations-intent-audit.md) | Intent vs detect vs skill audit (verify before/after) |
 | [`docs/adr/`](docs/adr/) | Architecture Decision Records (HITL, Postgres, …) |
 | [`docs/release-notes.md`](docs/release-notes.md) | Product contract (Scan HITL, portal IA) |
 | [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md) | Portal EDL |
