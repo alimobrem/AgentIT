@@ -45,8 +45,15 @@ def _agents_dir() -> Path:
     already use for ``checks/``/``skills/``. This file lives at
     ``src/agentit/agents/capabilities.py``, one directory deeper than
     ``runner.py`` (``src/agentit/runner.py``), hence the extra ``.parent``.
+
+    When the package is installed into site-packages (the container image),
+    that relative climb lands under ``lib/python3.12/``, not the image
+    WORKDIR. Fall back to ``Path("agents")`` (cwd = ``/opt/app-root/src``)
+    the same way ``remediation/dispatcher._default_skills_dir()`` does for
+    ``skills/`` -- Containerfile must ``COPY agents/ agents/``.
     """
-    return Path(__file__).resolve().parent.parent.parent.parent / "agents"
+    candidate = Path(__file__).resolve().parent.parent.parent.parent / "agents"
+    return candidate if candidate.is_dir() else Path("agents")
 
 
 def _parse_agent_registration(path: Path) -> dict | None:
@@ -137,8 +144,15 @@ def _watchers_dir() -> Path:
     files for the long-lived watcher agents -- the same
     default-resolution convention ``_agents_dir()`` above (and
     ``runner.py``'s ``_default_checks_dir()``/``_default_skills_dir()``)
-    already use."""
-    return Path(__file__).resolve().parent.parent.parent.parent / "watchers"
+    already use.
+
+    Installed-package / container-image fallback matches ``_agents_dir()``
+    (cwd-relative ``watchers/``); Containerfile must ``COPY watchers/``.
+    Without that COPY, Schedules' Long-Lived Agents count stays 0 even
+    when reassess-scheduler and peers are running.
+    """
+    candidate = Path(__file__).resolve().parent.parent.parent.parent / "watchers"
+    return candidate if candidate.is_dir() else Path("watchers")
 
 
 def _parse_watcher_registration(path: Path) -> dict | None:

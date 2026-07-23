@@ -56,6 +56,15 @@ RUN mkdir -p src/agentit && touch src/agentit/__init__.py && \
 COPY src/ src/
 RUN pip install --no-cache-dir --no-deps --force-reinstall .
 COPY skills/ skills/
+# Extension-model unification registers long-lived watchers and the
+# remaining one-shot agent from Markdown at repo-root watchers/*.md and
+# agents/*.md (see agents/capabilities.py). Those dirs are NOT inside the
+# installed site-packages tree -- without shipping them next to skills/
+# under WORKDIR, load_watcher_agents()/load_agent_classes() resolve to an
+# empty list and Schedules reports "0 Long-Lived Agents" while the
+# watcher Deployments are actually running.
+COPY watchers/ watchers/
+COPY agents/ agents/
 # checks/ is intentionally NOT copied here -- Phase 4 of
 # docs/extension-model-unification-plan-2026-07-18.md ported every
 # checks/*.yaml file to a mode: detect skill under skills/, so checks/ now

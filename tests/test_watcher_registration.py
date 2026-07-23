@@ -143,6 +143,31 @@ class TestLoadWatcherAgents:
     def test_missing_directory_returns_empty_list_not_a_crash(self, tmp_path: Path) -> None:
         assert load_watcher_agents(tmp_path / "does-not-exist") == []
 
+    def test_watchers_dir_falls_back_to_cwd_when_package_relative_missing(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Installed images resolve capabilities.py under site-packages;
+        the repo-relative climb misses WORKDIR watchers/. Fall back to
+        cwd-relative Path('watchers') (Containerfile COPY target)."""
+        from agentit.agents import capabilities as caps
+
+        # Layout mirrors site-packages; do NOT create lib/python3.12/watchers
+        # or the package-relative candidate would win incorrectly.
+        fake_file = (
+            tmp_path / "lib" / "python3.12" / "site-packages"
+            / "agentit" / "agents" / "capabilities.py"
+        )
+        fake_file.parent.mkdir(parents=True)
+        fake_file.write_text("# stub\n")
+        (tmp_path / "watchers").mkdir()
+        (tmp_path / "agents").mkdir()
+        monkeypatch.setattr(caps, "__file__", str(fake_file))
+        monkeypatch.chdir(tmp_path)
+        package_relative = fake_file.resolve().parent.parent.parent.parent / "watchers"
+        assert not package_relative.is_dir()
+        assert caps._watchers_dir() == Path("watchers")
+        assert caps._agents_dir() == Path("agents")
+
     def test_skips_malformed_file_without_crashing(self, tmp_path: Path) -> None:
         (tmp_path / "good.md").write_text(
             "---\nname: good\nmode: Polling\ninterval: 1 hour\n"

@@ -115,7 +115,7 @@ Useful commands: `self-assess`, `watch`, `learn`, `test-skill`, `activate-skill`
 
 **Primary spine:** Fleet → Assessment Detail → Ledger (assess → findings → merge PR → operate). Empty fleets land on Fleet’s guided empty state; once apps exist, `/` redirects to Ledger.
 
-**Operate (Menu):** Health, Insights, Events, Decisions, DLQ, Schedules. The fixed footer is an action-status strip (not a second nav). Ledger / Findings share one **decision card** (why · confidence · dry-run · evidence · merge/close). See [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md) and [ADR 0007](docs/adr/0007-decision-card.md).
+**Operate (Menu):** Health, Insights, Events, Decisions, DLQ, Schedules. Schedules shows three layers: per-app re-assessment cadence (`reassess-scheduler`), live platform CronJobs in AgentIT’s namespace, and onboarding-generated CronJob manifests (plus optional DB reminders)—an empty onboarding table does not mean nothing is scheduled. The fixed footer is an action-status strip (not a second nav). Ledger / Findings share one **decision card** (why · confidence · dry-run · evidence · merge/close). See [`docs/portal-experience-design-language.md`](docs/portal-experience-design-language.md) and [ADR 0007](docs/adr/0007-decision-card.md).
 
 ## Deploy to OpenShift
 

@@ -143,14 +143,83 @@ from agentit.portal.routes.capabilities import watcher_heartbeat_status
 # and Capabilities can't disagree about the same watcher.
 _WATCHER_STALE_SECONDS = 2 * 86400
 
+_CADENCE_LABELS = {
+    "daily": "Every 24 hours",
+    "weekly": "Weekly",
+    "monthly": "Monthly",
+    "manual": "Manual only",
+}
+
+
+def _cron_fields_from_manifest(content: str) -> tuple[str, str]:
+    """Extract ``(schedule, concurrencyPolicy)`` from an onboarding
+    CronJob/CronWorkflow YAML.
+
+    Skill templates commonly emit a multi-document bundle that leads with
+    ServiceAccount/Role/RoleBinding and only later the CronJob. Plain
+    ``yaml.safe_load`` returns the first document only, so
+    ``spec.schedule`` looked missing and the page rendered every row as
+    "unresolvable" even when a real cron was in a later document.
+    """
+    import yaml as _yaml
+
+    if not content or not isinstance(content, str):
+        return "unknown", "unknown"
+    try:
+        for doc in _yaml.safe_load_all(content):
+            if not isinstance(doc, dict):
+                continue
+            if doc.get("kind") not in ("CronJob", "CronWorkflow"):
+                continue
+            spec = doc.get("spec") or {}
+            if not isinstance(spec, dict):
+                continue
+            schedule = spec.get("schedule")
+            if not schedule:
+                continue
+            concurrency = spec.get("concurrencyPolicy", "Allow")
+            return str(schedule), str(concurrency)
+    except (_yaml.YAMLError, ValueError, TypeError, AttributeError):
+        return "unknown", "unknown"
+    return "unknown", "unknown"
+
+
+def _list_platform_cronjobs() -> list[dict]:
+    """Live CronJobs in AgentIT's namespace (chart maintenance + probes).
+
+    Fail-soft: offline/hermetic tests and a missing kube API must not
+    500 this page. When listing fails, return [] and let the template
+    say the platform table is unavailable rather than inventing rows.
+    """
+    import os
+
+    from agentit import kube
+
+    namespace = os.environ.get("AGENTIT_NAMESPACE", "agentit")
+    try:
+        rows = kube.list_cronjobs(namespace)
+    except Exception as exc:  # noqa: BLE001 -- page must stay up offline
+        log.warning("Schedules: could not list platform CronJobs in %s: %s", namespace, exc)
+        return []
+    out: list[dict] = []
+    for row in rows:
+        schedule = row.get("schedule") or "unknown"
+        out.append({
+            "name": row.get("name") or "",
+            "schedule": schedule,
+            "human_schedule": humanize_cron(schedule) if schedule != "unknown" else None,
+            "suspended": bool(row.get("suspended")),
+            "last_schedule_time": row.get("last_schedule_time"),
+            "last_successful_time": row.get("last_successful_time"),
+        })
+    return out
+
 
 # ── Routes ────────────────────────────────────────────────────────────
 
 
 @router.get("/schedules", response_class=HTMLResponse)
 async def schedules_page(request: Request) -> HTMLResponse:
-    import yaml as _yaml
-
     s = await get_store()
     fleet = await s.get_fleet_data()
     schedules: list[dict] = []
@@ -159,6 +228,21 @@ async def schedules_page(request: Request) -> HTMLResponse:
     # resolved (every other page -- Fleet, Decisions -- already does this;
     # Schedules didn't).
     app_ids_by_name = {app_data["repo_name"]: app_data["id"] for app_data in fleet}
+
+    # Per-app re-assessment cadence (apps.assessment_cadence) is the real
+    # "does this app have a schedule?" answer for Fleet -- driven by
+    # reassess-scheduler, not by onboarding *-cronjob.yaml rows. Surface
+    # it here so an empty/unresolvable CronWorkflow table cannot imply
+    # "nothing is scheduled" when every app is on daily/weekly/monthly.
+    app_cadences: list[dict] = []
+    for app_data in fleet:
+        cadence = await s.get_assessment_cadence(app_data["repo_url"])
+        app_cadences.append({
+            "app_name": app_data["repo_name"],
+            "app_id": app_data["id"],
+            "cadence": cadence,
+            "cadence_label": _CADENCE_LABELS.get(cadence, cadence),
+        })
 
     for app_data in fleet:
         aid = app_data["id"]
@@ -176,13 +260,9 @@ async def schedules_page(request: Request) -> HTMLResponse:
             if sched_info is None:
                 continue
             agent, desc = sched_info
-            try:
-                doc = _yaml.safe_load(f["content"])
-                cron = doc.get("spec", {}).get("schedule", "unknown")
-                concurrency = doc.get("spec", {}).get("concurrencyPolicy", "Allow")
-            except (ValueError, AttributeError, _yaml.YAMLError):
-                cron = "unknown"
-                concurrency = "unknown"
+            cron, concurrency = _cron_fields_from_manifest(f.get("content") or "")
+            if cron != "unknown" and concurrency == "unknown":
+                concurrency = "Allow"
             # No settings-key override applied here (there used to be one,
             # written by this page's own now-removed Save/Enable/Disable
             # controls): that override only ever changed what THIS page
@@ -200,7 +280,9 @@ async def schedules_page(request: Request) -> HTMLResponse:
                 "schedule": cron,
                 "human_schedule": humanize_cron(cron),
                 "agent": agent,
-                "concurrency": concurrency,
+                # None → template "n/a" when the CronJob doc itself was
+                # never found in a multi-doc bundle (unresolvable cron).
+                "concurrency": None if cron == "unknown" else concurrency,
                 "enabled": True,
             })
 
@@ -254,10 +336,19 @@ async def schedules_page(request: Request) -> HTMLResponse:
             status = "active"
         watchers.append({**w, "status": status, "last_heartbeat": hb_status["last_heartbeat"]})
 
+    reassess_hb = watcher_heartbeat_status(agents, "reassess-scheduler", _WATCHER_STALE_SECONDS)
+    reassess_scheduler_active = bool(reassess_hb["has_run"]) and not reassess_hb["stale"]
+
+    platform_cronjobs = _list_platform_cronjobs()
+
     return get_templates().TemplateResponse(request, "schedules.html", {
         "schedules": schedules,
         "watchers": watchers,
         "apps": fleet,
+        "app_cadences": app_cadences,
+        "reassess_scheduler_active": reassess_scheduler_active,
+        "platform_cronjobs": platform_cronjobs,
+        "watchers_active_count": sum(1 for w in watchers if w["status"] == "active"),
     })
 
 
