@@ -138,11 +138,20 @@ async def webhook_assess(request: Request, background_tasks: BackgroundTasks):
     criticality = body.get("criticality", "medium")
     check_results: list[dict] = []
     secret_decisions: list[dict] = []
+    loop = asyncio.get_running_loop()
+
+    def _bridge(coro):
+        return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=60)
+
+    from agentit.secret_classify_cache import BridgedSecretClassifyCache
+    classify_cache = BridgedSecretClassifyCache(s, _bridge)
     try:
         report = await with_timeout(
             asyncio.to_thread(
                 clone_assess_cleanup, repo_url, criticality,
-                check_results_out=check_results, secret_decisions_out=secret_decisions,
+                check_results_out=check_results,
+                secret_decisions_out=secret_decisions,
+                secret_classify_cache=classify_cache,
             )
         )
     except Exception:
@@ -223,11 +232,20 @@ async def webhook_github_push(request: Request, background_tasks: BackgroundTask
     criticality = managed.get("criticality", "medium")
     check_results: list[dict] = []
     secret_decisions: list[dict] = []
+    loop = asyncio.get_running_loop()
+
+    def _bridge(coro):
+        return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=60)
+
+    from agentit.secret_classify_cache import BridgedSecretClassifyCache
+    classify_cache = BridgedSecretClassifyCache(s, _bridge)
     try:
         report = await with_timeout(
             asyncio.to_thread(
                 clone_assess_cleanup, repo_url, criticality,
-                check_results_out=check_results, secret_decisions_out=secret_decisions,
+                check_results_out=check_results,
+                secret_decisions_out=secret_decisions,
+                secret_classify_cache=classify_cache,
             )
         )
         assessment_id = await s.save(report)

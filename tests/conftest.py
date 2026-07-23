@@ -381,7 +381,7 @@ _ALL_STORE_TABLES = (
     "agent_registry", "slos", "apply_results",
     "settings", "remediation_jobs", "scheduled_operations",
     "processed_webhooks", "agent_feedback", "skill_effectiveness",
-    "suppressed_checks", "skill_inventory_snapshots",
+    "suppressed_checks", "secret_classify_cache", "skill_inventory_snapshots",
     "agent_runs", "check_results", "deliveries", "pr_outcomes",
     "delivery_locks",
 )

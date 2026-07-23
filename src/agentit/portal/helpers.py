@@ -499,6 +499,7 @@ def clone_assess_cleanup(
     infra_repo_url: str | None = None,
     check_results_out: list[dict] | None = None,
     secret_decisions_out: list[dict] | None = None,
+    secret_classify_cache: object | None = None,
 ):
     """Clone a repo, run assessment, clean up the clone.
 
@@ -507,9 +508,11 @@ def clone_assess_cleanup(
     an ``assessment_id`` (see ``AssessmentStore.save_check_results``).
 
     ``secret_decisions_out``, if given, is populated with the security
-    analyzer's real `classify_secret` verdicts the caller can persist via
-    ``llm_decisions.build_secret_classify_events()`` + ``store.log_event()``
-    once it has an ``assessment_id``/repo name (see ``runner.run_assessment``).
+    analyzer's *new or flipped* `classify_secret` verdicts the caller can
+    persist via ``llm_decisions.build_secret_classify_events()`` +
+    ``store.log_event()`` once it has an ``assessment_id``/repo name (see
+    ``runner.run_assessment``). Pass ``secret_classify_cache`` (bridged store
+    facade) so repeat Scans skip LLM + Decisions for the same content hash.
     """
     from agentit.cloner import clone_repo
     from agentit.runner import run_assessment
@@ -520,6 +523,7 @@ def clone_assess_cleanup(
             llm_client=get_llm_client(), infra_repo_url=infra_repo_url,
             check_results_out=check_results_out,
             secret_decisions_out=secret_decisions_out,
+            secret_classify_cache=secret_classify_cache,
         )
     finally:
         shutil.rmtree(repo_path, ignore_errors=True)

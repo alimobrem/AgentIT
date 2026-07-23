@@ -52,6 +52,7 @@ def _clone_assess_cleanup(
     infra_repo_url: str | None = None,
     check_results_out: list[dict] | None = None,
     secret_decisions_out: list[dict] | None = None,
+    secret_classify_cache: object | None = None,
 ):
     repo_path = clone_repo(repo_url)
     try:
@@ -60,6 +61,7 @@ def _clone_assess_cleanup(
             llm_client=get_llm_client(), infra_repo_url=infra_repo_url,
             check_results_out=check_results_out,
             secret_decisions_out=secret_decisions_out,
+            secret_classify_cache=secret_classify_cache,
         )
     finally:
         shutil.rmtree(repo_path, ignore_errors=True)
@@ -126,6 +128,7 @@ def _assess_sync(
     infra_repo_url: str | None = None,
     check_results_out: list[dict] | None = None,
     secret_decisions_out: list[dict] | None = None,
+    secret_classify_cache: object | None = None,
 ):
     """Run assessment synchronously. Used by webhooks and background threads.
 
@@ -139,7 +142,9 @@ def _assess_sync(
     infra = _resolve_mandatory_infra_repo_url(repo_url, infra_repo_url)
     return _clone_assess_cleanup(
         repo_url, criticality, infra,
-        check_results_out=check_results_out, secret_decisions_out=secret_decisions_out,
+        check_results_out=check_results_out,
+        secret_decisions_out=secret_decisions_out,
+        secret_classify_cache=secret_classify_cache,
     )
 
 
@@ -208,9 +213,13 @@ async def start_assess_job(
             _bridge(store.update_assessment_job(job_id, "assessing", "Analyzing repository..."))
             check_results: list[dict] = []
             secret_decisions: list[dict] = []
+            from agentit.secret_classify_cache import BridgedSecretClassifyCache
+            classify_cache = BridgedSecretClassifyCache(store, _bridge)
             report = _assess_sync(
                 repo_url, criticality, infra,
-                check_results_out=check_results, secret_decisions_out=secret_decisions,
+                check_results_out=check_results,
+                secret_decisions_out=secret_decisions,
+                secret_classify_cache=classify_cache,
             )
             _bridge(store.update_assessment_job(job_id, "saving", "Saving results..."))
             from agentit.portal.metrics import assessments_total as _at

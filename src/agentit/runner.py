@@ -79,6 +79,7 @@ def run_assessment(
     suppressions: set[str] | None = None,
     check_results_out: list[dict] | None = None,
     secret_decisions_out: list[dict] | None = None,
+    secret_classify_cache: object | None = None,
 ) -> AssessmentReport:
     """Run a full assessment.
 
@@ -95,11 +96,17 @@ def run_assessment(
     format produced any given row.
 
     ``secret_decisions_out``, if provided, is populated (in place) with one
-    row per real `classify_secret` LLM call the security analyzer made (see
-    `analyzers.security.SecurityAnalyzer`) — the caller can persist these via
-    `llm_decisions.build_secret_classify_events()` + `store.log_event()`, the
-    same "populate then persist once an assessment_id exists" pattern as
-    `check_results_out`.
+    row per *new or flipped* `classify_secret` verdict the security analyzer
+    made (see `analyzers.security.SecurityAnalyzer`) — the caller can persist
+    these via `llm_decisions.build_secret_classify_events()` +
+    `store.log_event()`, the same "populate then persist once an
+    assessment_id exists" pattern as `check_results_out`. Repeat Scans that
+    hit ``secret_classify_cache`` for the same content hash skip LLM and do
+    not append here.
+
+    ``secret_classify_cache``, if provided, is a sync
+    ``SecretClassifyCache`` (store-bridged in the portal, in-memory in
+    tests) keyed by ``(app_name, file_path, snippet_hash)``.
     """
     # Analyzers call Path.relative_to(repo_path); snapshot paths are absolute
     # under the resolved root — keep one canonical path for the whole run.
@@ -111,6 +118,8 @@ def run_assessment(
             snapshot.skipped_oversized, repo_path,
         )
 
+    app_name = repo_url.rstrip("/").split("/")[-1].removesuffix(".git")
+
     with use_snapshot(snapshot):
         detector = StackDetector()
         stack = detector.detect(repo_path)
@@ -118,7 +127,12 @@ def run_assessment(
         architecture = _detect_architecture(repo_path, snapshot)
 
         analyzers = [
-            SecurityAnalyzer(llm_client=llm_client, secret_decisions_out=secret_decisions_out),
+            SecurityAnalyzer(
+                llm_client=llm_client,
+                secret_decisions_out=secret_decisions_out,
+                app_name=app_name,
+                secret_classify_cache=secret_classify_cache,
+            ),
             ObservabilityAnalyzer(),
             CICDAnalyzer(),
             InfrastructureAnalyzer(llm_client=llm_client),
