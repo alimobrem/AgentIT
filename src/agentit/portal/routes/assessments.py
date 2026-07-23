@@ -1313,6 +1313,43 @@ async def deliver(request: Request, assessment_id: str):
                 url=f"/assessments/{assessment_id}/onboard-results?error={quote(reason)}",
                 status_code=303,
             )
+        # Populate empty SBOM shells before clear-evidence (same bar as Scan
+        # auto_delivery — refuse components: []).
+        repo_url = getattr(report, "repo_url", None) or ""
+        if repo_url and any(
+            (f.get("skill_name") or "").lower().replace("_", "-") == "sbom-artifact"
+            or "sbom" in str(f.get("target_path") or "").lower()
+            for f in kept_files
+        ):
+            try:
+                from agentit.portal import github_pr as ghp
+                from agentit.remediation.source_patches import enrich_sbom_from_repo
+
+                token = ghp._get_token()
+                hdrs = ghp._headers(token)
+                owner, repo = ghp._parse_owner_repo(repo_url)
+                base_url = f"{ghp._API}/repos/{owner}/{repo}"
+                default_branch, base_sha = ghp._get_default_branch_and_base_sha(
+                    base_url, hdrs,
+                )
+                tree_paths = ghp._list_tree_paths(base_url, hdrs, base_sha)
+
+                def _read(path: str) -> str | None:
+                    return ghp._get_file_content_at_ref(
+                        base_url, hdrs, path, default_branch,
+                    )
+
+                kept_files = enrich_sbom_from_repo(
+                    kept_files,
+                    read_file=_read,
+                    tree_paths=tree_paths or None,
+                    app_name=getattr(report, "repo_name", None),
+                )
+            except Exception:
+                log.info(
+                    "Manual Deliver SBOM enrich skipped for %s",
+                    assessment_id, exc_info=True,
+                )
         sim_ok, sim_reason = clear_evidence_simulation_ok(kept_files, gate_findings)
         if not sim_ok:
             reason = (

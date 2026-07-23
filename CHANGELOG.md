@@ -29,6 +29,11 @@ Product contract detail: [`docs/release-notes.md`](docs/release-notes.md).
 - **Image signing good-PR path:** detect `image-signing-exists` (`file_contains: cosign`) → remediable `image_signing` contract → `cosign-sign-task` (keyless Sigstore Tekton Task). Clear-evidence `cosign_sign_task` refuses empty Task / SLSA L3 / hermetic / Konflux theater without `cosign sign`/`attest`. Optional: pin Syft on `sbom-task` to `v1.48.0` (stop `:latest`).
 
 ### Fixed
+- **SBOM inventory (not empty shells):** `sbom-artifact` populates CycloneDX
+  `components` via Syft when available, else lockfiles/manifests
+  (`requirements.txt`, `package.json`, `go.mod`, …). Delivery enrichment runs
+  before clear-evidence; `sbom_file` refuses `components: []` theater
+  (pulse-agent#3 class). Tip after merge: next Scan opens a real BOM.
 - **Portal OOM under concurrent GitHub webhooks (dogfood):** clone+assess had no concurrency bound and the Rollout sat at 512Mi; overlapping push reassesses OOMKilled the pod mid-run (pinky → webhook 504, push-driven finding verification never ran). Raise portal memory to 1Gi, serialize in-process assess (default max 1 via `assessConcurrency` / `AGENTIT_ASSESS_MAX_CONCURRENT`), and fail soft with HTTP 503 + claim release so GitHub can redeliver the same `X-GitHub-Delivery`.
 - **SBOM good-PR path:** compliance `sbom` clears via source CycloneDX
   (`skills/compliance/sbom-artifact.md`, clear-evidence `sbom_file`) — not a

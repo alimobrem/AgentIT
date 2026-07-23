@@ -470,13 +470,28 @@ class TestCosignSignTask:
 
 
 class TestSbomFile:
-    def test_allows_cyclonedx(self) -> None:
+    _REAL_CDX = (
+        '{"bomFormat":"CycloneDX","specVersion":"1.5",'
+        '"components":[{"type":"library","name":"flask","version":"3.0.0",'
+        '"purl":"pkg:pypi/flask@3.0.0"}]}\n'
+    )
+
+    def test_allows_cyclonedx_with_components(self) -> None:
+        ok, reason = verify_sbom_file([{
+            "target_path": "sbom.cdx.json",
+            "content": self._REAL_CDX,
+            "skill_name": "sbom-artifact",
+        }])
+        assert ok, reason
+
+    def test_refuses_empty_components_shell(self) -> None:
         ok, reason = verify_sbom_file([{
             "target_path": "sbom.cdx.json",
             "content": '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}\n',
             "skill_name": "sbom-artifact",
         }])
-        assert ok, reason
+        assert not ok
+        assert "empty components" in reason
 
     def test_refuses_empty_json_theater(self) -> None:
         ok, reason = verify_sbom_file([{
@@ -498,10 +513,22 @@ class TestSbomFile:
     def test_simulation_allows_sbom_source_pr(self) -> None:
         files = [{
             "target_path": "sbom.cdx.json",
-            "content": '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}\n',
+            "content": self._REAL_CDX,
             "skill_name": "sbom-artifact",
         }]
         ok, reason = clear_evidence_simulation_ok(
             files, [("sbom", "No SBOM (Software Bill of Materials) found")],
         )
         assert ok, reason
+
+    def test_simulation_refuses_empty_components_shell(self) -> None:
+        files = [{
+            "target_path": "sbom.cdx.json",
+            "content": '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}\n',
+            "skill_name": "sbom-artifact",
+        }]
+        ok, reason = clear_evidence_simulation_ok(
+            files, [("sbom", "No SBOM (Software Bill of Materials) found")],
+        )
+        assert not ok
+        assert "empty components" in reason or "sbom" in reason.lower()

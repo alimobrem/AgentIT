@@ -702,6 +702,7 @@ async def auto_validate_and_deliver(
         # - audit: relocate root audit.py into the app package + wire entrypoint
         #   (without this, clear-evidence correctly refuses "root only" and
         #   Scan never reaches create_source_patch_pr enrichment — pinky dogfood)
+        # - sbom: populate CycloneDX components from Syft / lockfiles (refuse [])
         cluster_target_findings = list(cluster.target_findings)
         if report.repo_url:
             try:
@@ -710,7 +711,10 @@ async def auto_validate_and_deliver(
                     enrich_audit_files_from_paths,
                     is_audit_delivery_file,
                 )
-                from agentit.remediation.source_patches import apply_containerfile_pin_only
+                from agentit.remediation.source_patches import (
+                    apply_containerfile_pin_only,
+                    enrich_sbom_from_repo,
+                )
 
                 token = ghp._get_token()
                 hdrs = ghp._headers(token)
@@ -730,6 +734,12 @@ async def auto_validate_and_deliver(
                 )
                 before_audit = len(cluster_files)
                 tree_paths = ghp._list_tree_paths(base_url, hdrs, base_sha)
+                cluster_files = enrich_sbom_from_repo(
+                    cluster_files,
+                    read_file=_read,
+                    tree_paths=tree_paths or None,
+                    app_name=app_name,
+                )
                 if tree_paths:
                     cluster_files = enrich_audit_files_from_paths(
                         cluster_files, tree_paths=tree_paths, read_file=_read,
