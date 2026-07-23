@@ -26,7 +26,10 @@ cluster state always matches the Git source of truth.
 - Automated sync with self-heal and prune enabled
 - Retry policy for transient failures (5 attempts, backoff)
 - Destination is the in-cluster default server
-- Source points to the application's Helm chart or kustomize directory
+- `spec.source` **must** include non-empty `repoURL` and `path` **or** `chart`
+- Do not invent `path: deploy/` when that tree is missing — prefer `chart/`
+  when present; clear-evidence `argocd_application` refuses empty Application
+  / bogus path when the repo tree is known
 - Namespace is created automatically (CreateNamespace=true)
 
 ## Template
@@ -47,7 +50,7 @@ spec:
   source:
     repoURL: "{{git_url}}"
     targetRevision: HEAD
-    path: deploy/
+    path: chart/
   destination:
     server: https://kubernetes.default.svc
     namespace: "{{namespace}}"
@@ -71,3 +74,4 @@ spec:
 - Modify a resource manually — Argo CD self-heals within sync interval
 - Delete a resource from Git — Argo CD prunes it from the cluster
 - Push a change to Git — Argo CD auto-syncs the new state
+- Clear-evidence refuses Application without repoURL + path/chart

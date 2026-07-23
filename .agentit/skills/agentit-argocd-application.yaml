@@ -13,7 +13,7 @@ spec:
   source:
     repoURL: "https://github.com/org/agentit.git"
     targetRevision: HEAD
-    path: deploy/
+    path: chart/
   destination:
     server: https://kubernetes.default.svc
     namespace: agentit

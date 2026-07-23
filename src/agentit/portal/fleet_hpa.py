@@ -160,6 +160,62 @@ class NamespaceWorkloads:
         return "\n".join(lines)
 
 
+def discover_namespace_label_sets(namespace: str) -> list[dict[str, str]] | None:
+    """Return live Service selectors + Deployment pod labels, or ``None`` on failure.
+
+    Used by clear-evidence ``selector_target`` (PDB / ServiceMonitor) — same
+    fail-closed posture as HPA live workload discovery.
+    """
+    ns = (namespace or "").strip()
+    if not ns:
+        return None
+    label_sets: list[dict[str, str]] = []
+    seen: set[tuple[tuple[str, str], ...]] = set()
+
+    def _add(labels: dict | None) -> None:
+        if not labels:
+            return
+        cleaned = {str(k): str(v) for k, v in labels.items() if k and v is not None}
+        if not cleaned:
+            return
+        key = tuple(sorted(cleaned.items()))
+        if key in seen:
+            return
+        seen.add(key)
+        label_sets.append(cleaned)
+
+    try:
+        from agentit import kube
+
+        try:
+            svcs = kube.core_v1().list_namespaced_service(ns, _request_timeout=10)
+            for svc in svcs.items:
+                spec = getattr(svc, "spec", None)
+                _add(getattr(spec, "selector", None) or {})
+                meta = getattr(svc, "metadata", None)
+                _add(getattr(meta, "labels", None) or {})
+        except Exception as exc:
+            logger.warning("Failed to list Services in %s: %s", ns, exc)
+            return None
+
+        try:
+            deps = kube.apps_v1().list_namespaced_deployment(ns, _request_timeout=10)
+            for dep in deps.items:
+                tmpl = (
+                    getattr(getattr(getattr(dep, "spec", None), "template", None), "metadata", None)
+                )
+                _add(getattr(tmpl, "labels", None) or {})
+                meta = getattr(dep, "metadata", None)
+                _add(getattr(meta, "labels", None) or {})
+        except Exception as exc:
+            logger.debug("Deployments unavailable for label sets in %s: %s", ns, exc)
+
+        return label_sets
+    except Exception as exc:
+        logger.warning("Label-set discovery failed for %s: %s", ns, exc)
+        return None
+
+
 def discover_namespace_workloads(namespace: str) -> NamespaceWorkloads:
     """List Deployments and Rollouts in ``namespace``.
 

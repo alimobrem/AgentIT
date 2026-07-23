@@ -101,6 +101,8 @@ def clear_evidence_simulation_ok(
     target_findings: list[tuple[str, str]],
     *,
     live_workloads: list[dict[str, str]] | None = None,
+    live_label_sets: list[dict[str, str]] | None = None,
+    tree_paths: list[str] | None = None,
     self_managed: bool | None = None,
 ) -> tuple[bool, str]:
     """Pre-open gate: staged files must simulate clearing each remediable finding."""
@@ -109,6 +111,8 @@ def clear_evidence_simulation_ok(
     ok, reason, _results = simulation_gate(
         files, target_findings,
         live_workloads=live_workloads,
+        live_label_sets=live_label_sets,
+        tree_paths=tree_paths,
         self_managed=self_managed,
     )
     return ok, reason

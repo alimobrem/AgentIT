@@ -3,22 +3,30 @@ from __future__ import annotations
 
 from agentit.portal.quality_prs import clear_evidence_simulation_ok
 from agentit.remediation.clear_evidence import (
+    ARGOCD_APPLICATION,
     AUDIT_WIRED,
     COSIGN_SIGN_TASK,
+    GRAFANA_DASHBOARD,
+    IMAGE_SCAN_TASK,
     SBOM_FILE,
+    SELECTOR_TARGET,
     DOCKERFILE_PIN,
     HPA_TARGET,
     MIGRATION_TOOLING,
     simulate_finding_clearance,
     simulation_gate,
+    verify_argocd_application,
     verify_audit_wired,
     verify_cosign_sign_task,
+    verify_grafana_dashboard,
+    verify_image_scan_task,
     verify_sbom_file,
     verify_dockerfile_pin,
     verify_hpa_target,
     verify_migration_tooling,
     verify_quota_manifest,
     verify_runtime_pin,
+    verify_selector_target,
 )
 
 
@@ -272,7 +280,7 @@ class TestMigrationTooling:
         assert not ok
         assert "theater" in reason.lower() or "target_metadata" in reason
 
-    def test_allows_alembic_with_upgrade_revision(self) -> None:
+    def test_allows_alembic_with_real_ddl_upgrade(self) -> None:
         ok, reason = verify_migration_tooling([
             {
                 "target_path": "alembic.ini",
@@ -290,11 +298,63 @@ class TestMigrationTooling:
             },
             {
                 "target_path": "alembic/versions/0001_baseline.py",
-                "content": "def upgrade():\n    pass\n\ndef downgrade():\n    pass\n",
+                "content": (
+                    "from alembic import op\n"
+                    "def upgrade():\n"
+                    '    op.execute("CREATE TABLE IF NOT EXISTS t (id TEXT PRIMARY KEY)")\n'
+                    "def downgrade():\n"
+                    '    op.execute("DROP TABLE IF EXISTS t")\n'
+                ),
                 "skill_name": "db-migration-tooling",
             },
         ])
         assert ok, reason
+
+    def test_refuses_empty_upgrade_pass(self) -> None:
+        ok, reason = verify_migration_tooling([
+            {
+                "target_path": "alembic.ini",
+                "content": "[alembic]\nscript_location = alembic\n",
+                "skill_name": "db-migration-tooling",
+            },
+            {
+                "target_path": "alembic/versions/0001_baseline.py",
+                "content": "def upgrade():\n    pass\n\ndef downgrade():\n    pass\n",
+                "skill_name": "db-migration-tooling",
+            },
+        ])
+        assert not ok
+        assert "pass" in reason.lower() or "ddl" in reason.lower()
+
+    def test_refuses_select_1_sql_stub(self) -> None:
+        ok, reason = verify_migration_tooling([{
+            "target_path": "migrations/0001_init.up.sql",
+            "content": "-- baseline\nSELECT 1;\n",
+            "skill_name": "db-migration-tooling",
+        }])
+        assert not ok
+        assert "SELECT 1" in reason or "ddl" in reason.lower()
+
+    def test_refuses_comment_only_op_execute(self) -> None:
+        ok, reason = verify_migration_tooling([
+            {
+                "target_path": "alembic.ini",
+                "content": "[alembic]\nscript_location = alembic\n",
+                "skill_name": "db-migration-tooling",
+            },
+            {
+                "target_path": "alembic/versions/0001_baseline.py",
+                "content": (
+                    "from alembic import op\n"
+                    "def upgrade():\n"
+                    '    op.execute("-- agentit baseline: add real DDL later")\n'
+                    "def downgrade():\n    pass\n"
+                ),
+                "skill_name": "db-migration-tooling",
+            },
+        ])
+        assert not ok
+        assert "comment" in reason.lower() or "ddl" in reason.lower()
 
     def test_simulation_refuses_stub_migration_pr(self) -> None:
         files = [
@@ -373,6 +433,11 @@ class TestSimulationGate:
         assert contract_for("migration").evidence_kind == MIGRATION_TOOLING
         assert contract_for("image_signing").evidence_kind == COSIGN_SIGN_TASK
         assert contract_for("sbom").evidence_kind == SBOM_FILE
+        assert contract_for("scanning").evidence_kind == IMAGE_SCAN_TASK
+        assert contract_for("dashboards").evidence_kind == GRAFANA_DASHBOARD
+        assert contract_for("availability").evidence_kind == SELECTOR_TARGET
+        assert contract_for("metrics").evidence_kind == SELECTOR_TARGET
+        assert contract_for("gitops").evidence_kind == ARGOCD_APPLICATION
 
 
 class TestCosignSignTask:
@@ -532,3 +597,307 @@ class TestSbomFile:
         )
         assert not ok
         assert "empty components" in reason or "sbom" in reason.lower()
+
+
+_GOOD_SCAN_TASK = (
+    "apiVersion: tekton.dev/v1\n"
+    "kind: Task\n"
+    "metadata:\n  name: image-scan\n"
+    "spec:\n  steps:\n"
+    "  - name: scan\n"
+    "    image: aquasec/trivy:0.58.1\n"
+    "    script: |\n"
+    "      trivy image $(params.IMAGE)\n"
+    "  - name: report\n"
+    "    image: registry.access.redhat.com/ubi9/ubi-minimal:9.5\n"
+    "    script: echo ok\n"
+)
+
+
+class TestImageScanTask:
+    def test_allows_pinned_trivy_task(self) -> None:
+        ok, reason = verify_image_scan_task([{
+            "target_path": "apps/pinky/image-scan-task.yaml",
+            "content": _GOOD_SCAN_TASK,
+            "skill_name": "image-scan-task",
+        }])
+        assert ok, reason
+
+    def test_refuses_empty_task(self) -> None:
+        ok, reason = verify_image_scan_task([{
+            "target_path": "apps/pinky/image-scan-task.yaml",
+            "content": (
+                "apiVersion: tekton.dev/v1\nkind: Task\n"
+                "metadata:\n  name: empty-scan\n"
+                "spec:\n  steps: []\n"
+            ),
+            "skill_name": "image-scan-task",
+        }])
+        assert not ok
+        assert "empty" in reason.lower() or "trivy" in reason.lower()
+
+    def test_refuses_latest_step_images(self) -> None:
+        ok, reason = verify_image_scan_task([{
+            "target_path": "apps/pinky/image-scan-task.yaml",
+            "content": (
+                "apiVersion: tekton.dev/v1\nkind: Task\n"
+                "metadata:\n  name: image-scan\n"
+                "spec:\n  steps:\n"
+                "  - name: scan\n"
+                "    image: aquasec/trivy:latest\n"
+                "    script: trivy image $(params.IMAGE)\n"
+            ),
+            "skill_name": "image-scan-task",
+        }])
+        assert not ok
+        assert ":latest" in reason
+
+    def test_simulation_allows_good_scan_pr(self) -> None:
+        files = [{
+            "target_path": "apps/pinky/image-scan-task.yaml",
+            "content": _GOOD_SCAN_TASK,
+            "skill_name": "image-scan-task",
+        }]
+        ok, reason = clear_evidence_simulation_ok(
+            files, [("scanning", "No image vulnerability scanning")],
+        )
+        assert ok, reason
+
+    def test_simulation_refuses_latest_as_scanning(self) -> None:
+        files = [{
+            "target_path": "apps/pinky/image-scan-task.yaml",
+            "content": (
+                "apiVersion: tekton.dev/v1\nkind: Task\n"
+                "metadata:\n  name: image-scan\n"
+                "spec:\n  steps:\n"
+                "  - name: scan\n"
+                "    image: aquasec/trivy:latest\n"
+                "    script: trivy image $(params.IMAGE)\n"
+            ),
+            "skill_name": "image-scan-task",
+        }]
+        ok, reason = clear_evidence_simulation_ok(
+            files, [("scanning", "No image vulnerability scanning")],
+        )
+        assert not ok
+        assert "scanning" in reason or ":latest" in reason
+
+
+class TestGrafanaDashboard:
+    _GOOD_CM = (
+        "apiVersion: v1\nkind: ConfigMap\n"
+        "metadata:\n  name: app-grafana-dashboard\n"
+        "  labels:\n    grafana_dashboard: \"1\"\n"
+        "data:\n  dash.json: |\n"
+        '    {"title":"app","panels":[{"title":"Rate","type":"timeseries"}]}\n'
+    )
+
+    def test_allows_labeled_dashboard_with_panels(self) -> None:
+        ok, reason = verify_grafana_dashboard([{
+            "target_path": "apps/pinky/grafana-dashboard.yaml",
+            "content": self._GOOD_CM,
+            "skill_name": "grafana-dashboard",
+        }])
+        assert ok, reason
+
+    def test_refuses_missing_label(self) -> None:
+        ok, reason = verify_grafana_dashboard([{
+            "target_path": "apps/pinky/grafana-dashboard.yaml",
+            "content": (
+                "apiVersion: v1\nkind: ConfigMap\n"
+                "metadata:\n  name: app-dash\n"
+                "data:\n  dash.json: |\n"
+                '    {"panels":[{"title":"x"}]}\n'
+            ),
+            "skill_name": "grafana-dashboard",
+        }])
+        assert not ok
+        assert "grafana_dashboard" in reason
+
+    def test_refuses_empty_panels(self) -> None:
+        ok, reason = verify_grafana_dashboard([{
+            "target_path": "apps/pinky/grafana-dashboard.yaml",
+            "content": (
+                "apiVersion: v1\nkind: ConfigMap\n"
+                "metadata:\n  name: app-dash\n"
+                "  labels:\n    grafana_dashboard: \"1\"\n"
+                "data:\n  dash.json: |\n"
+                '    {"title":"app","panels":[]}\n'
+            ),
+            "skill_name": "grafana-dashboard",
+        }])
+        assert not ok
+        assert "panels" in reason.lower() or "empty" in reason.lower()
+
+    def test_simulation_allows_good_dashboard(self) -> None:
+        ok, reason = clear_evidence_simulation_ok(
+            [{
+                "target_path": "apps/pinky/grafana-dashboard.yaml",
+                "content": self._GOOD_CM,
+                "skill_name": "grafana-dashboard",
+            }],
+            [("dashboards", "No Grafana dashboard")],
+        )
+        assert ok, reason
+
+
+class TestSelectorTarget:
+    _PDB = (
+        "apiVersion: policy/v1\nkind: PodDisruptionBudget\n"
+        "metadata:\n  name: app\n"
+        "spec:\n  minAvailable: 1\n"
+        "  selector:\n    matchLabels:\n      app: pinky\n"
+    )
+    _SM = (
+        "apiVersion: monitoring.coreos.com/v1\nkind: ServiceMonitor\n"
+        "metadata:\n  name: app-monitor\n"
+        "spec:\n  selector:\n    matchLabels:\n      app: pinky\n"
+        "  endpoints:\n    - port: http\n"
+    )
+
+    def test_allows_pdb_shape(self) -> None:
+        ok, reason = verify_selector_target(
+            [{"target_path": "pdb.yaml", "content": self._PDB, "skill_name": "pdb"}],
+            frozenset({"PodDisruptionBudget"}),
+        )
+        assert ok, reason
+
+    def test_refuses_empty_selector(self) -> None:
+        ok, reason = verify_selector_target(
+            [{
+                "target_path": "pdb.yaml",
+                "content": (
+                    "apiVersion: policy/v1\nkind: PodDisruptionBudget\n"
+                    "metadata:\n  name: app\n"
+                    "spec:\n  minAvailable: 1\n  selector: {}\n"
+                ),
+                "skill_name": "pdb",
+            }],
+            frozenset({"PodDisruptionBudget"}),
+        )
+        assert not ok
+        assert "empty" in reason.lower() or "matchLabels" in reason
+
+    def test_refuses_zero_match_live(self) -> None:
+        ok, reason = verify_selector_target(
+            [{"target_path": "pdb.yaml", "content": self._PDB, "skill_name": "pdb"}],
+            frozenset({"PodDisruptionBudget"}),
+            live_label_sets=[{"app": "other"}],
+        )
+        assert not ok
+        assert "zero-match" in reason or "matches no live" in reason
+
+    def test_allows_live_match(self) -> None:
+        ok, reason = verify_selector_target(
+            [{"target_path": "sm.yaml", "content": self._SM, "skill_name": "service-monitor"}],
+            frozenset({"ServiceMonitor"}),
+            live_label_sets=[{"app": "pinky", "tier": "api"}],
+        )
+        assert ok, reason
+
+    def test_refuses_empty_live_sets(self) -> None:
+        ok, reason = verify_selector_target(
+            [{"target_path": "sm.yaml", "content": self._SM, "skill_name": "service-monitor"}],
+            frozenset({"ServiceMonitor"}),
+            live_label_sets=[],
+        )
+        assert not ok
+        assert "zero-match" in reason or "no live" in reason
+
+    def test_simulation_refuses_pdb_zero_match(self) -> None:
+        ok, reason, results = simulation_gate(
+            [{"target_path": "pdb.yaml", "content": self._PDB, "skill_name": "pdb"}],
+            [("availability", "No PodDisruptionBudget")],
+            live_label_sets=[{"app": "wrong"}],
+        )
+        assert not ok
+        assert any(r.category == "availability" and not r.ok for r in results)
+
+
+class TestArgocdApplication:
+    _GOOD = (
+        "apiVersion: argoproj.io/v1alpha1\nkind: Application\n"
+        "metadata:\n  name: pinky\n  namespace: openshift-gitops\n"
+        "spec:\n  project: default\n"
+        "  source:\n"
+        "    repoURL: https://github.com/org/pinky.git\n"
+        "    path: chart/\n"
+        "  destination:\n"
+        "    server: https://kubernetes.default.svc\n"
+        "    namespace: pinky\n"
+    )
+
+    def test_allows_repo_url_and_path(self) -> None:
+        ok, reason = verify_argocd_application([{
+            "target_path": "apps/pinky/argocd-application.yaml",
+            "content": self._GOOD,
+            "skill_name": "argocd-application",
+        }])
+        assert ok, reason
+
+    def test_refuses_missing_repo_url(self) -> None:
+        ok, reason = verify_argocd_application([{
+            "target_path": "app.yaml",
+            "content": (
+                "apiVersion: argoproj.io/v1alpha1\nkind: Application\n"
+                "metadata:\n  name: x\n"
+                "spec:\n  source:\n    path: chart/\n"
+            ),
+            "skill_name": "argocd-application",
+        }])
+        assert not ok
+        assert "repoURL" in reason
+
+    def test_refuses_missing_path_and_chart(self) -> None:
+        ok, reason = verify_argocd_application([{
+            "target_path": "app.yaml",
+            "content": (
+                "apiVersion: argoproj.io/v1alpha1\nkind: Application\n"
+                "metadata:\n  name: x\n"
+                "spec:\n  source:\n"
+                "    repoURL: https://github.com/org/x.git\n"
+            ),
+            "skill_name": "argocd-application",
+        }])
+        assert not ok
+        assert "path" in reason or "chart" in reason
+
+    def test_refuses_bogus_deploy_when_tree_missing(self) -> None:
+        ok, reason = verify_argocd_application(
+            [{
+                "target_path": "app.yaml",
+                "content": (
+                    "apiVersion: argoproj.io/v1alpha1\nkind: Application\n"
+                    "metadata:\n  name: x\n"
+                    "spec:\n  source:\n"
+                    "    repoURL: https://github.com/org/x.git\n"
+                    "    path: deploy/\n"
+                ),
+                "skill_name": "argocd-application",
+            }],
+            tree_paths=["README.md", "src/main.go", "chart/Chart.yaml"],
+        )
+        assert not ok
+        assert "deploy" in reason.lower() or "missing" in reason.lower()
+
+    def test_allows_chart_path_when_in_tree(self) -> None:
+        ok, reason = verify_argocd_application(
+            [{
+                "target_path": "app.yaml",
+                "content": self._GOOD,
+                "skill_name": "argocd-application",
+            }],
+            tree_paths=["chart/Chart.yaml", "chart/templates/deploy.yaml"],
+        )
+        assert ok, reason
+
+    def test_simulation_allows_good_application(self) -> None:
+        ok, reason = clear_evidence_simulation_ok(
+            [{
+                "target_path": "apps/pinky/argocd-application.yaml",
+                "content": self._GOOD,
+                "skill_name": "argocd-application",
+            }],
+            [("gitops", "No Argo CD Application")],
+        )
+        assert ok, reason

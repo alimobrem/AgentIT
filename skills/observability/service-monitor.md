@@ -25,6 +25,8 @@ available for dashboards and alerting.
 - Interval: 30s (balances freshness vs load)
 - Use monitoring.coreos.com/v1 API
 - Only generate if the cluster has the Prometheus operator CRD
+- `spec.selector.matchLabels` must match a **live** Service (HPA pattern).
+  Clear-evidence `selector_target` refuses empty / zero-match selectors
 
 ## Template
 
@@ -48,3 +50,4 @@ spec:
 ## Verification
 - Prometheus targets page shows the app as UP
 - PromQL query returns data: up{job="{{app_name}}"}
+- Clear-evidence refuses ServiceMonitor with empty or non-matching selector

@@ -22,11 +22,12 @@ before deployment, with findings reported to the AgentIT webhook
 for tracking and audit.
 
 ## Constraints
-- Uses Trivy scanner (aquasec/trivy) for CVE detection
+- Uses Trivy scanner (`aquasec/trivy`) for CVE detection — pin the tag
+  (never `:latest`; clear-evidence `image_scan_task` refuses latest + empty Tasks)
 - Scans for HIGH and CRITICAL vulnerabilities by default
 - Fails the pipeline if CRITICAL vulnerabilities are found
 - Posts scan findings to the AgentIT webhook endpoint
-- Runs as a Tekton Task with workspace for shared data
+- Runs as a Tekton Task with a real `trivy`/`grype`/`snyk` step
 
 ## Template
 
@@ -52,7 +53,7 @@ spec:
       description: Minimum severity to report
   steps:
     - name: scan
-      image: aquasec/trivy:latest
+      image: aquasec/trivy:0.58.1
       script: |
         #!/usr/bin/env sh
         set -e
@@ -70,7 +71,7 @@ spec:
           echo "CRITICAL vulnerabilities found"
         fi
     - name: report
-      image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+      image: registry.access.redhat.com/ubi9/ubi-minimal:9.5
       script: |
         #!/usr/bin/env sh
         set -e
@@ -82,7 +83,7 @@ spec:
           echo "Findings posted to webhook"
         fi
     - name: gate
-      image: aquasec/trivy:latest
+      image: aquasec/trivy:0.58.1
       script: |
         #!/usr/bin/env sh
         trivy image \
@@ -96,3 +97,4 @@ spec:
 - Run task against a known-vulnerable image — should fail on CRITICAL CVEs
 - Run task against a clean image — should pass
 - Check webhook endpoint received scan results JSON
+- Clear-evidence refuses empty Task / `:latest` step images

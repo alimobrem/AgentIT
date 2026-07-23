@@ -664,8 +664,10 @@ async def auto_validate_and_deliver(
 
         self_managed = await is_self_managed_delivery_target(app_name, report)
         live_workloads = None
+        live_label_sets = None
         if not self_managed:
             from agentit.portal.fleet_hpa import (
+                discover_namespace_label_sets,
                 discover_namespace_workloads,
                 filter_fleet_hpa_files,
             )
@@ -679,6 +681,9 @@ async def auto_validate_and_deliver(
                     *[{"kind": "Deployment", "name": n} for n in workloads.deployments],
                     *[{"kind": "Rollout", "name": n} for n in workloads.rollouts],
                 ]
+            live_label_sets = await asyncio.to_thread(
+                discover_namespace_label_sets, namespace or app_name,
+            )
             cluster_files, hpa_drops = filter_fleet_hpa_files(
                 cluster_files, workloads, app_name=app_name,
             )
@@ -704,6 +709,7 @@ async def auto_validate_and_deliver(
         #   Scan never reaches create_source_patch_pr enrichment — pinky dogfood)
         # - sbom: populate CycloneDX components from Syft / lockfiles (refuse [])
         cluster_target_findings = list(cluster.target_findings)
+        tree_paths: list[str] | None = None
         if report.repo_url:
             try:
                 from agentit.portal import github_pr as ghp
@@ -786,6 +792,8 @@ async def auto_validate_and_deliver(
         sim_ok, sim_reason = clear_evidence_simulation_ok(
             cluster_files, cluster_target_findings,
             live_workloads=live_workloads,
+            live_label_sets=live_label_sets,
+            tree_paths=tree_paths,
             self_managed=self_managed,
         )
         if not sim_ok:

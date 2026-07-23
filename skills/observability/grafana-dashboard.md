@@ -22,7 +22,9 @@ a single pane of glass for service health.
 
 ## Constraints
 - ConfigMap must carry the `grafana_dashboard: "1"` label for sidecar auto-discovery
-- Dashboard JSON includes 4 panels: request rate, error rate, p99 latency, pod restarts
+- Dashboard JSON includes **non-empty** `panels` (4 RED panels: request rate,
+  error rate, p99 latency, pod restarts). Clear-evidence `grafana_dashboard`
+  refuses missing label or `panels: []` shells
 - Uses monitoring.coreos.com PromQL conventions matching ServiceMonitor metrics
 - Datasource uid set to `prometheus` (default Grafana datasource name)
 

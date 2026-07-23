@@ -32,6 +32,14 @@ RESOURCE_LIMITS = "resource_limits"
 DETECT_ONLY = "detect_only"
 # Tekton Task that actually runs cosign sign/attest (not SLSA theater).
 COSIGN_SIGN_TASK = "cosign_sign_task"
+# Tekton image-scan Task with a real scanner step (not empty / :latest theater).
+IMAGE_SCAN_TASK = "image_scan_task"
+# Grafana dashboard ConfigMap with label + non-empty panels JSON.
+GRAFANA_DASHBOARD = "grafana_dashboard"
+# PDB / ServiceMonitor whose selector matches live Services/workloads.
+SELECTOR_TARGET = "selector_target"
+# Argo CD Application with real source.repoURL + path/chart.
+ARGOCD_APPLICATION = "argocd_application"
 # App-repo CycloneDX/SPDX artifact — clears compliance ``sbom`` finding.
 SBOM_FILE = "sbom_file"
 # Non-skill sentinel (patch_base_image) — same pin check as dockerfile.
@@ -217,22 +225,97 @@ def verify_runtime_pin(files: list[dict]) -> tuple[bool, str]:
 _TARGET_METADATA_NONE = re.compile(r"target_metadata\s*=\s*None\b")
 _TARGET_METADATA_WIRED = re.compile(r"target_metadata\s*=\s*(?!None\b)\S+")
 _UPGRADE_DEF = re.compile(r"^\s*def\s+upgrade\s*\(", re.MULTILINE)
+_UPGRADE_BODY = re.compile(
+    r"def\s+upgrade\s*\([^)]*\)\s*(?:->\s*[^:]+)?\s*:\s*\n"
+    r"((?:[ \t]+.*\n|\s*\n)*)",
+    re.MULTILINE,
+)
+_DDL_SQL = re.compile(
+    r"\b(CREATE|ALTER|DROP|TRUNCATE|RENAME)\s+"
+    r"(TABLE|INDEX|TYPE|SCHEMA|VIEW|SEQUENCE|COLUMN|CONSTRAINT|MATERIALIZED)\b",
+    re.IGNORECASE,
+)
+_SELECT_ONE = re.compile(r"\bSELECT\s+1\b", re.IGNORECASE)
+_COMMENT_ONLY_EXECUTE = re.compile(
+    r"""op\.execute\s*\(\s*(?:f?['"])\s*--""",
+    re.IGNORECASE,
+)
+
+
+def _strip_sql_noise(body: str) -> str:
+    """Drop SQL/Python comments and blank lines for shallow-stub detection."""
+    kept: list[str] = []
+    for ln in (body or "").splitlines():
+        s = ln.strip()
+        if not s or s.startswith("--") or s.startswith("#"):
+            continue
+        if s.startswith('"""') or s.startswith("'''"):
+            continue
+        kept.append(s)
+    return "\n".join(kept)
+
+
+def _body_has_real_ddl(body: str) -> bool:
+    """True when body contains schema DDL (SQL keywords or Alembic create_*)."""
+    if not (body or "").strip():
+        return False
+    if _DDL_SQL.search(body):
+        return True
+    return bool(re.search(
+        r"\bop\.(create_table|drop_table|add_column|drop_column|alter_column|"
+        r"create_index|drop_index)\s*\(",
+        body,
+        re.IGNORECASE,
+    ))
+
+
+def _alembic_upgrade_has_real_ddl(content: str) -> tuple[bool, str]:
+    """Return (ok, refuse_reason) for an Alembic revision's upgrade()."""
+    if not _UPGRADE_DEF.search(content or ""):
+        return False, "revision missing upgrade()"
+    m = _UPGRADE_BODY.search(content or "")
+    body = m.group(1) if m else ""
+    stripped = _strip_sql_noise(body)
+    if not stripped or re.fullmatch(r"pass(\b.*)?", stripped, re.I | re.S):
+        return False, "empty upgrade()/pass — refuse theater (need real DDL)"
+    if _COMMENT_ONLY_EXECUTE.search(body) and not _DDL_SQL.search(body):
+        return False, "comment-only op.execute — refuse theater (need real DDL)"
+    if _SELECT_ONE.search(stripped) and not _body_has_real_ddl(body):
+        return False, "SELECT 1 stub — refuse theater (need real DDL)"
+    if not _body_has_real_ddl(body):
+        return False, "upgrade() without real DDL — refuse shallow migration"
+    return True, "revision upgrade() has real DDL"
+
+
+def _sql_file_has_real_ddl(content: str) -> tuple[bool, str]:
+    stripped = _strip_sql_noise(content or "")
+    if not stripped:
+        return False, "empty SQL migration"
+    if _SELECT_ONE.search(stripped) and not _DDL_SQL.search(content or ""):
+        return False, "SELECT 1 stub — refuse theater (need real DDL)"
+    if not _DDL_SQL.search(content or ""):
+        return False, "SQL migration without CREATE/ALTER/DROP DDL"
+    return True, "versioned SQL with real DDL"
 
 
 def verify_migration_tooling(files: list[dict]) -> tuple[bool, str]:
-    """Accept real migrators; refuse ``target_metadata = None`` theater stubs.
+    """Accept real migrators; refuse shallow ``SELECT 1`` / empty upgrade theater.
 
-    A greenfield Alembic PR must wire URL/metadata **or** ship a revision
-    with ``upgrade()``. Config-only / empty-env scaffolds do not clear the
-    finding and must not pass pre-open simulation (see closed AgentIT #157).
+    A greenfield Alembic PR must ship a revision whose ``upgrade()`` runs
+    real DDL (or wired MetaData). Config-only scaffolds, ``pass``,
+    comment-only ``op.execute``, and ``SELECT 1`` stubs do not clear the
+    finding (see #157 / skills-audit shallow PRs). Skip the PR when the
+    analyzer already sees hand-rolled store DDL — do not open theater.
     """
     staged = _staged_map(files)
     has_alembic_ini = False
     has_theater_env = False
     has_wired_metadata = False
     has_url_wiring = False
-    has_revision = False
-    has_sql_migration = False
+    revision_ok = False
+    revision_refuse: str | None = None
+    sql_ok = False
+    sql_refuse: str | None = None
     has_other_tool = False
 
     for path, content in staged.items():
@@ -242,17 +325,20 @@ def verify_migration_tooling(files: list[dict]) -> tuple[bool, str]:
             has_alembic_ini = True
         if any(m in low for m in ("flyway.conf", "flyway.toml", "liquibase")):
             has_other_tool = True
-        if ("/goose/" in low or low.startswith("goose/")) and low.endswith(".sql"):
-            if body.strip():
-                has_sql_migration = True
-        if "db/migrate" in low and body.strip():
-            has_sql_migration = True
-        if (
-            ("/migrations/" in low or low.startswith("migrations/"))
-            and low.endswith(".sql")
-            and len(body.strip()) > 20
-        ):
-            has_sql_migration = True
+        is_sql_mig = (
+            (("/goose/" in low or low.startswith("goose/")) and low.endswith(".sql"))
+            or ("db/migrate" in low and low.endswith(".sql"))
+            or (
+                ("/migrations/" in low or low.startswith("migrations/"))
+                and low.endswith(".sql")
+            )
+        )
+        if is_sql_mig:
+            ok_sql, why = _sql_file_has_real_ddl(body)
+            if ok_sql:
+                sql_ok = True
+            else:
+                sql_refuse = f"{path}: {why}"
         if low.endswith("env.py") and "alembic" in body.lower():
             if _TARGET_METADATA_NONE.search(body):
                 has_theater_env = True
@@ -267,26 +353,34 @@ def verify_migration_tooling(files: list[dict]) -> tuple[bool, str]:
             and low.endswith(".py")
             and _UPGRADE_DEF.search(body)
         ):
-            has_revision = True
+            ok_rev, why = _alembic_upgrade_has_real_ddl(body)
+            if ok_rev:
+                revision_ok = True
+            else:
+                revision_refuse = f"{path}: {why}"
 
     if has_other_tool:
         return True, "Flyway/Liquibase migration config in staged files"
-    if has_sql_migration:
-        return True, "versioned SQL migration file(s) in staged files"
+    if sql_ok:
+        return True, "versioned SQL migration file(s) with real DDL"
+    if sql_refuse and not revision_ok and not has_wired_metadata:
+        return False, sql_refuse
     if has_alembic_ini and has_wired_metadata:
         return True, "alembic.ini + env.py with wired target_metadata"
-    if has_alembic_ini and has_revision:
-        detail = "alembic.ini + revision with upgrade()"
+    if has_alembic_ini and revision_ok:
+        detail = "alembic.ini + revision with real DDL upgrade()"
         if has_url_wiring:
             detail += " + env URL wiring"
         return True, detail
+    if revision_refuse:
+        return False, revision_refuse
     if has_theater_env:
         return False, (
-            "alembic env sets target_metadata = None without a real revision "
+            "alembic env sets target_metadata = None without a real DDL revision "
             "(theater stub — refuse Scan PR)"
         )
     if has_alembic_ini:
-        return False, "alembic.ini without wired metadata or upgrade() revision"
+        return False, "alembic.ini without wired metadata or real DDL upgrade() revision"
     return False, "no Alembic/Flyway/Liquibase/goose migration tooling in staged files"
 
 
@@ -464,6 +558,250 @@ def verify_cosign_sign_task(files: list[dict]) -> tuple[bool, str]:
     )
 
 
+_SCANNER_CMD = re.compile(r"\b(trivy|grype|snyk)(?:\s|$)", re.IGNORECASE)
+_STEP_IMAGE_LINE = re.compile(r"^\s+image:\s*[\"']?([^\s\"']+)", re.MULTILINE)
+_IMAGE_LATEST = re.compile(r":latest(?:@sha256:[0-9a-f]+)?$", re.IGNORECASE)
+
+
+def verify_image_scan_task(files: list[dict]) -> tuple[bool, str]:
+    """True when a Tekton Task runs trivy/grype/snyk with pinned step images.
+
+    Mirrors ``cosign_sign_task``: refuse empty Task stubs. Also refuse
+    ``:latest`` on any step image (same pin bar as Dockerfile FROM).
+    """
+    staged = _staged_map(files)
+    tasks: list[tuple[str, str]] = []
+    for path, content in staged.items():
+        if re.search(r"^\s*kind:\s*(Cluster)?Task\s*$", content, re.I | re.M):
+            tasks.append((path, content))
+    if not tasks:
+        return False, "no Tekton Task/ClusterTask in staged files"
+    for path, content in tasks:
+        if re.search(r"^\s*steps:\s*\[\s*\]\s*$", content, re.I | re.M):
+            return False, f"{path}: empty Task steps[] — refuse theater"
+        if not re.search(r"^\s+-\s+name:\s*\S+", content, re.M) and not re.search(
+            r"steps:\s*\n\s+-", content,
+        ):
+            # No step entries under steps:
+            if re.search(r"steps:\s*$", content, re.M) and not _SCANNER_CMD.search(content):
+                return False, f"{path}: empty Task — refuse theater"
+        for img in _STEP_IMAGE_LINE.findall(content):
+            if _IMAGE_LATEST.search(img.strip()):
+                return False, (
+                    f"{path}: step image uses :latest ({img}) — "
+                    "refuse (pin Trivy/UBI like Dockerfile FROM)"
+                )
+        if _SCANNER_CMD.search(content):
+            return True, f"image-scan Task (trivy/grype/snyk) with pinned images in {path}"
+    return False, (
+        f"{tasks[0][0]}: Task without trivy/grype/snyk scan step "
+        "(refuse empty or non-scanning Task theater)"
+    )
+
+
+def verify_grafana_dashboard(files: list[dict]) -> tuple[bool, str]:
+    """True when a ConfigMap has grafana_dashboard label + non-empty panels."""
+    import json
+
+    staged = _staged_map(files)
+    cms: list[tuple[str, str]] = []
+    for path, content in staged.items():
+        if re.search(r"^\s*kind:\s*ConfigMap\s*$", content, re.I | re.M):
+            cms.append((path, content))
+    if not cms:
+        return False, "no ConfigMap in staged files"
+    for path, content in cms:
+        if not re.search(r"grafana_dashboard\s*:\s*[\"']?1[\"']?", content, re.I):
+            continue
+        # Extract dashboard JSON from data: block (literal | or inline).
+        panels_ok = False
+        # Prefer parsing JSON fragments that contain "panels".
+        for m in re.finditer(r"\{[^{}]*\"panels\"\s*:\s*\[.*?\]\s*[,}]", content, re.S):
+            try:
+                doc = json.loads(m.group(0) if m.group(0).endswith("}") else m.group(0) + "}")
+            except json.JSONDecodeError:
+                continue
+            panels = doc.get("panels") if isinstance(doc, dict) else None
+            if isinstance(panels, list) and len(panels) > 0:
+                panels_ok = True
+                break
+        if not panels_ok:
+            # Looser: non-empty panels array in the YAML literal.
+            if re.search(r'"panels"\s*:\s*\[\s*\{', content):
+                panels_ok = True
+            elif re.search(r'"panels"\s*:\s*\[\s*\]', content):
+                return False, (
+                    f"{path}: grafana_dashboard label but empty panels[] "
+                    "(refuse empty dashboard shell)"
+                )
+            else:
+                return False, (
+                    f"{path}: grafana_dashboard label but no panels JSON "
+                    "(refuse empty dashboard shell)"
+                )
+        if panels_ok:
+            return True, f"Grafana dashboard ConfigMap with panels in {path}"
+    return False, (
+        f"{cms[0][0]}: ConfigMap without grafana_dashboard: \"1\" label "
+        "+ non-empty panels (refuse empty dashboard shell)"
+    )
+
+
+_MATCH_LABELS_BLOCK = re.compile(
+    r"selector:\s*\n(?:[ \t]+[^\n]+\n)*?[ \t]+matchLabels:\s*\n"
+    r"((?:[ \t]+[^\n]+\n)+)",
+    re.IGNORECASE,
+)
+_LABEL_LINE = re.compile(r"^[ \t]+([A-Za-z0-9./_-]+):\s*[\"']?([^\"'\n]+?)[\"']?\s*$")
+
+
+def _parse_match_labels(content: str) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    m = _MATCH_LABELS_BLOCK.search(content or "")
+    if not m:
+        # Flat single-line fallback
+        flat = re.search(
+            r"matchLabels:\s*\{\s*([^}]*)\s*\}", content or "", re.I,
+        )
+        if flat:
+            for part in flat.group(1).split(","):
+                if ":" not in part:
+                    continue
+                k, v = part.split(":", 1)
+                labels[k.strip().strip("\"'")] = v.strip().strip("\"'")
+        return labels
+    for ln in m.group(1).splitlines():
+        lm = _LABEL_LINE.match(ln)
+        if lm:
+            labels[lm.group(1)] = lm.group(2).strip()
+    return labels
+
+
+def _selector_matches_label_set(
+    selector: dict[str, str], label_set: dict[str, str],
+) -> bool:
+    if not selector:
+        return False
+    for k, v in selector.items():
+        if str(label_set.get(k) or "") != v:
+            return False
+    return True
+
+
+def verify_selector_target(
+    files: list[dict],
+    kinds: frozenset[str],
+    *,
+    live_label_sets: list[dict[str, str]] | None = None,
+) -> tuple[bool, str]:
+    """PDB/ServiceMonitor must declare matchLabels; optionally resolve live.
+
+    When ``live_label_sets`` is provided (HPA pattern), refuse zero-match —
+    selector must match at least one live Service/workload label set.
+    """
+    if not kinds:
+        return False, "contract missing evidence_params (expected K8s kinds)"
+    staged = _staged_map(files)
+    found: list[tuple[str, str, dict[str, str]]] = []
+    for path, content in staged.items():
+        for kind in kinds:
+            if not re.search(rf"^\s*kind:\s*{re.escape(kind)}\s*$", content, re.I | re.M):
+                continue
+            labels = _parse_match_labels(content)
+            found.append((path, kind, labels))
+    if not found:
+        return False, f"none of kinds {sorted(kinds)} found in staged files"
+    for path, kind, labels in found:
+        if not labels:
+            return False, (
+                f"{path}: {kind} selector.matchLabels empty — "
+                "refuse zero-match theater"
+            )
+    if live_label_sets is not None:
+        if not live_label_sets:
+            return False, (
+                f"{found[0][1]} selector cannot match — no live Services/"
+                "workload labels discovered (refuse zero-match)"
+            )
+        for path, kind, labels in found:
+            if not any(
+                _selector_matches_label_set(labels, live) for live in live_label_sets
+            ):
+                sample = ", ".join(
+                    str(sorted(s.items())[:3]) for s in live_label_sets[:3]
+                )
+                return False, (
+                    f"{path}: {kind} selector {labels} matches no live "
+                    f"Services/workloads [{sample}] — refuse zero-match"
+                )
+        return True, (
+            f"{found[0][1]} selector matches live label set "
+            f"({found[0][2]})"
+        )
+    return True, f"{found[0][1]} selector.matchLabels {found[0][2]} (shape ok)"
+
+
+def verify_argocd_application(
+    files: list[dict],
+    *,
+    tree_paths: list[str] | None = None,
+) -> tuple[bool, str]:
+    """True when an Argo CD Application has repoURL + path or chart.
+
+    Refuses empty Application shells and ``path: deploy/`` when the repo
+    tree is known and that directory is missing.
+    """
+    staged = _staged_map(files)
+    apps: list[tuple[str, str]] = []
+    for path, content in staged.items():
+        if re.search(r"^\s*kind:\s*(Application|ApplicationSet)\s*$", content, re.I | re.M):
+            apps.append((path, content))
+    if not apps:
+        return False, "no Argo CD Application/ApplicationSet in staged files"
+    for path, content in apps:
+        if not re.search(r"^\s*kind:\s*Application\s*$", content, re.I | re.M):
+            # ApplicationSet: require a template source shape
+            if "repoURL:" in content and (
+                re.search(r"^\s*path:\s*\S+", content, re.M)
+                or re.search(r"^\s*chart:\s*\S+", content, re.M)
+            ):
+                return True, f"ApplicationSet with source in {path}"
+            continue
+        repo = re.search(r"^\s*repoURL:\s*[\"']?(\S+?)[\"']?\s*$", content, re.M)
+        if not repo or not repo.group(1).strip() or repo.group(1).strip() in ("''", '""'):
+            return False, f"{path}: Application missing spec.source.repoURL — refuse empty shell"
+        repo_url = repo.group(1).strip().strip("\"'")
+        if "example.com" in repo_url or repo_url in ("https://github.com/org/agentit.git",):
+            # Template placeholder still ok if path/chart present — only refuse
+            # when combined with missing tree path below.
+            pass
+        path_m = re.search(r"^\s*path:\s*[\"']?([^\s\"']+)[\"']?\s*$", content, re.M)
+        chart_m = re.search(r"^\s*chart:\s*[\"']?([^\s\"']+)[\"']?\s*$", content, re.M)
+        if not path_m and not chart_m:
+            return False, (
+                f"{path}: Application missing spec.source.path or chart — "
+                "refuse empty shell"
+            )
+        src_path = (path_m.group(1).strip().strip("/'") if path_m else "")
+        if tree_paths is not None and src_path:
+            norm_tree = {p.replace("\\", "/").strip("/") for p in tree_paths}
+            prefix = src_path.strip("/")
+            # path exists if any tree entry equals or is under prefix
+            exists = any(
+                t == prefix or t.startswith(prefix + "/") for t in norm_tree
+            )
+            if not exists:
+                return False, (
+                    f"{path}: Application path {src_path!r} missing from repo "
+                    "tree — refuse bogus deploy/ (or skip until chart exists)"
+                )
+        return True, f"Argo CD Application source ({repo_url} / {src_path or chart_m.group(1)}) in {path}"
+    return False, (
+        f"{apps[0][0]}: Application without repoURL + path/chart "
+        "(refuse empty Application theater)"
+    )
+
+
 def verify_resource_limits(files: list[dict]) -> tuple[bool, str]:
     staged = _staged_map(files)
     for path, content in staged.items():
@@ -480,6 +818,8 @@ def verify_evidence(
     *,
     evidence_params: frozenset[str] | None = None,
     live_workloads: list[dict[str, str]] | None = None,
+    live_label_sets: list[dict[str, str]] | None = None,
+    tree_paths: list[str] | None = None,
 ) -> tuple[bool, str]:
     """Dispatch to the verifier for ``evidence_kind``."""
     params = evidence_params or frozenset()
@@ -505,6 +845,16 @@ def verify_evidence(
         return verify_resource_limits(files)
     if evidence_kind == COSIGN_SIGN_TASK:
         return verify_cosign_sign_task(files)
+    if evidence_kind == IMAGE_SCAN_TASK:
+        return verify_image_scan_task(files)
+    if evidence_kind == GRAFANA_DASHBOARD:
+        return verify_grafana_dashboard(files)
+    if evidence_kind == SELECTOR_TARGET:
+        return verify_selector_target(
+            files, params, live_label_sets=live_label_sets,
+        )
+    if evidence_kind == ARGOCD_APPLICATION:
+        return verify_argocd_application(files, tree_paths=tree_paths)
     if evidence_kind == SBOM_FILE:
         return verify_sbom_file(files)
     return False, f"unknown evidence_kind {evidence_kind!r}"
@@ -515,6 +865,8 @@ def simulate_finding_clearance(
     target_findings: list[tuple[str, str]],
     *,
     live_workloads: list[dict[str, str]] | None = None,
+    live_label_sets: list[dict[str, str]] | None = None,
+    tree_paths: list[str] | None = None,
     self_managed: bool | None = None,
 ) -> list[EvidenceResult]:
     """Simulate clear-evidence for each remediable target finding.
@@ -552,11 +904,14 @@ def simulate_finding_clearance(
             or skill.replace("-", "_") in _file_path(f).replace("-", "_").lower()
         ]
         check_files = relevant or list(files)
+        kind = contract.evidence_kind
         ok, reason = verify_evidence(
-            contract.evidence_kind,
+            kind,
             check_files,
             evidence_params=contract.evidence_params,
-            live_workloads=live_workloads if contract.evidence_kind == HPA_TARGET else None,
+            live_workloads=live_workloads if kind == HPA_TARGET else None,
+            live_label_sets=live_label_sets if kind == SELECTOR_TARGET else None,
+            tree_paths=tree_paths if kind == ARGOCD_APPLICATION else None,
         )
         results.append(EvidenceResult(
             category=cat, ok=ok, evidence_kind=contract.evidence_kind, reason=reason,
@@ -569,6 +924,8 @@ def simulation_gate(
     target_findings: list[tuple[str, str]],
     *,
     live_workloads: list[dict[str, str]] | None = None,
+    live_label_sets: list[dict[str, str]] | None = None,
+    tree_paths: list[str] | None = None,
     self_managed: bool | None = None,
 ) -> tuple[bool, str, list[EvidenceResult]]:
     """Return (allowed, refuse_reason, per-finding results).
@@ -585,6 +942,8 @@ def simulation_gate(
     results = simulate_finding_clearance(
         files, remediable,
         live_workloads=live_workloads,
+        live_label_sets=live_label_sets,
+        tree_paths=tree_paths,
         self_managed=self_managed,
     )
     failed = [r for r in results if not r.ok]
