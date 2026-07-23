@@ -29,6 +29,15 @@ Product contract detail: [`docs/release-notes.md`](docs/release-notes.md).
 - **Image signing good-PR path:** detect `image-signing-exists` (`file_contains: cosign`) → remediable `image_signing` contract → `cosign-sign-task` (keyless Sigstore Tekton Task). Clear-evidence `cosign_sign_task` refuses empty Task / SLSA L3 / hermetic / Konflux theater without `cosign sign`/`attest`. Optional: pin Syft on `sbom-task` to `v1.48.0` (stop `:latest`).
 
 ### Fixed
+- **Shallow-PR clear-evidence harden (skills audit):** dedicated evidence kinds
+  replace bare `cluster_kind` for the top shallow Scan skills —
+  `image_scan_task` (trivy/grype/snyk + refuse empty Task / `:latest` step
+  images), `grafana_dashboard` (label + non-empty panels), `selector_target`
+  (PDB/ServiceMonitor must match live Services/workloads; refuse zero-match),
+  `argocd_application` (repoURL + path/chart; refuse bogus `deploy/` when tree
+  missing). `migration_tooling` refuses `SELECT 1`, empty `upgrade()`/`pass`,
+  and comment-only `op.execute` (require real DDL). Generators/templates pinned
+  accordingly. Same refuse class as SBOM empty shells (#199).
 - **SBOM inventory (not empty shells):** `sbom-artifact` populates CycloneDX
   `components` via Syft when available, else lockfiles/manifests
   (`requirements.txt`, `package.json`, `go.mod`, …). Delivery enrichment runs

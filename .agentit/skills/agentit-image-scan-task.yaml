@@ -21,7 +21,7 @@ spec:
       description: Minimum severity to report
   steps:
     - name: scan
-      image: aquasec/trivy:latest
+      image: aquasec/trivy:0.58.1
       script: |
         #!/usr/bin/env sh
         set -e
@@ -39,7 +39,7 @@ spec:
           echo "CRITICAL vulnerabilities found"
         fi
     - name: report
-      image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+      image: registry.access.redhat.com/ubi9/ubi-minimal:9.5
       script: |
         #!/usr/bin/env sh
         set -e
@@ -51,6 +51,10 @@ spec:
           echo "Findings posted to webhook"
         fi
     - name: gate
-      image: aquasec/trivy:latest
+      image: aquasec/trivy:0.58.1
       script: |
-        #!/usr/bin/env
+        #!/usr/bin/env sh
+        trivy image \
+          --severity CRITICAL \
+          --exit-code 1 \
+          $(params.IMAGE)

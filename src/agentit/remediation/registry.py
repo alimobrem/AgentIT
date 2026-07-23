@@ -108,21 +108,21 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
     ),
     "scanning": _c(
         "security", "image-scan-task", "cluster",
-        "adding a Tekton image-scan Task referenced by the pipeline",
-        _ev.CLUSTER_KIND,
-        kinds=("Task", "ClusterTask"),
+        "adding a Tekton Task that runs trivy/grype/snyk with pinned images "
+        "(no :latest, no empty Task)",
+        _ev.IMAGE_SCAN_TASK,
     ),
     "vulnerability": _c(
         "security", "image-scan-task", "cluster",
-        "adding a Tekton image-scan Task referenced by the pipeline",
-        _ev.CLUSTER_KIND,
-        kinds=("Task", "ClusterTask"),
+        "adding a Tekton Task that runs trivy/grype/snyk with pinned images "
+        "(no :latest, no empty Task)",
+        _ev.IMAGE_SCAN_TASK,
     ),
     "cve": _c(
         "security", "image-scan-task", "cluster",
-        "adding a Tekton image-scan Task referenced by the pipeline",
-        _ev.CLUSTER_KIND,
-        kinds=("Task", "ClusterTask"),
+        "adding a Tekton Task that runs trivy/grype/snyk with pinned images "
+        "(no :latest, no empty Task)",
+        _ev.IMAGE_SCAN_TASK,
     ),
     # Detect: image-signing-exists (file_contains cosign). Clear via a real
     # cosign sign/attest Tekton Task — refuse scan/sbom/registry companions
@@ -185,14 +185,14 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
     ),
     "gitops": _c(
         "cicd", "argocd-application", "cluster",
-        "registering an Argo CD Application for the app",
-        _ev.CLUSTER_KIND,
-        kinds=("Application", "ApplicationSet"),
+        "registering an Argo CD Application with spec.source.repoURL + path/chart "
+        "(refuse empty Application / missing deploy/ tree)",
+        _ev.ARGOCD_APPLICATION,
     ),
     "metrics": _c(
         "observability", "service-monitor", "cluster",
-        "adding a ServiceMonitor for Prometheus scraping",
-        _ev.CLUSTER_KIND,
+        "adding a ServiceMonitor whose selector matches a live Service",
+        _ev.SELECTOR_TARGET,
         kinds=("ServiceMonitor",),
     ),
     "tracing": _c(
@@ -203,9 +203,9 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
     ),
     "dashboards": _c(
         "observability", "grafana-dashboard", "cluster",
-        "adding a Grafana dashboard ConfigMap for RED metrics",
-        _ev.CLUSTER_KIND,
-        kinds=("ConfigMap",),
+        "adding a Grafana dashboard ConfigMap (grafana_dashboard label + "
+        "non-empty panels JSON)",
+        _ev.GRAFANA_DASHBOARD,
     ),
     "alerting": _c(
         "observability", "alerting-rules", "cluster",
@@ -226,8 +226,8 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
     ),
     "monitoring": _c(
         "observability", "service-monitor", "cluster",
-        "adding a ServiceMonitor for Prometheus scraping",
-        _ev.CLUSTER_KIND,
+        "adding a ServiceMonitor whose selector matches a live Service",
+        _ev.SELECTOR_TARGET,
         kinds=("ServiceMonitor",),
     ),
     "scaling": _c(
@@ -242,8 +242,8 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
     ),
     "availability": _c(
         "infrastructure", "pdb", "cluster",
-        "adding a PodDisruptionBudget for the workload",
-        _ev.CLUSTER_KIND,
+        "adding a PodDisruptionBudget whose selector matches a live workload",
+        _ev.SELECTOR_TARGET,
         "pod-delete",
         kinds=("PodDisruptionBudget",),
     ),
@@ -254,8 +254,8 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
     ),
     "migration": _c(
         "data_governance", "db-migration-tooling", "source",
-        "scaffolding real Alembic/SQL migrations (revision + env URL; "
-        "not target_metadata=None theater); hand-rolled store DDL already passes",
+        "scaffolding Alembic/SQL with real DDL upgrade() (refuse SELECT 1 / "
+        "pass / comment-only op.execute); hand-rolled store DDL already passes",
         _ev.MIGRATION_TOOLING,
     ),
     "iac": _c(
