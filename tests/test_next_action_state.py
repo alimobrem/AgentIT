@@ -48,6 +48,7 @@ class TestGetNextActionState:
         aid = await store.save(make_report(repo_name="pend-app", repo_url="https://github.com/org/pend-app"))
         await store.create_delivery(
             aid, "pend-app", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}}},
             target_findings=[_NETWORK_TARGET],
         )
 
@@ -61,6 +62,7 @@ class TestGetNextActionState:
         aid = await store.save(make_report(repo_name="pend-app2"))
         await store.create_delivery(
             aid, "pend-app2", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}}},
             target_findings=[_NETWORK_TARGET],
         )
 
@@ -79,11 +81,13 @@ class TestGetNextActionState:
         aid = await store.save(make_report(repo_name="retry-app"))
         first_id = await store.create_delivery(
             aid, "retry-app", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}}},
             target_findings=[_NETWORK_TARGET],
         )
         await store.update_delivery(first_id, finding_resolution="still_present")
         await store.create_delivery(
             aid, "retry-app", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}}},
             target_findings=[_NETWORK_TARGET],
         )
 
@@ -101,15 +105,18 @@ class TestGetNextActionState:
         # "network" has failed once already; "container" has never failed.
         network_first = await store.create_delivery(
             aid, "retry-app2", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}}},
             target_findings=[_NETWORK_TARGET],
         )
         await store.update_delivery(network_first, finding_resolution="still_present")
         await store.create_delivery(
             aid, "retry-app2", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}}},
             target_findings=[_NETWORK_TARGET],
         )
         await store.create_delivery(
             aid, "retry-app2", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}}},
             target_findings=[_CONTAINER_TARGET],
         )
 
@@ -154,6 +161,7 @@ class TestGetNextActionState:
         await escalate_unresolved_finding(store, aid, "mixed-app", _NETWORK_TARGET, FINDING_ESCALATION_THRESHOLD)
         await store.create_delivery(
             aid, "mixed-app", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}}},
             target_findings=[_CONTAINER_TARGET],
         )
 

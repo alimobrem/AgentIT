@@ -77,18 +77,21 @@ class TestGetFindingFailureCount:
 
         still_present_id = await store.create_delivery(
             aid, "esc-app", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}}},
             target_findings=[_NETWORK_TARGET],
         )
         await store.update_delivery(still_present_id, finding_resolution="still_present")
 
         resolved_id = await store.create_delivery(
             aid, "esc-app", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}}},
             target_findings=[_NETWORK_TARGET],
         )
         await store.update_delivery(resolved_id, finding_resolution="resolved")
 
         other_category_id = await store.create_delivery(
             aid, "esc-app", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}}},
             target_findings=[finding_key("container", "Root user in Containerfile")],
         )
         await store.update_delivery(other_category_id, finding_resolution="still_present")
@@ -135,6 +138,7 @@ class TestHandleConfirmedFindingFailure:
         for _ in range(FINDING_ESCALATION_THRESHOLD):
             did = await store.create_delivery(
                 aid, "esc-app3", {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
+                details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}}},
                 target_findings=[_NETWORK_TARGET],
             )
             await store.update_delivery(did, finding_resolution="still_present")
@@ -226,6 +230,7 @@ class TestRepeatedFailureLoopStopsAtThreshold:
         # auto-fix dispatch already ran and delivered it).
         first_delivery_id = await store.create_delivery(
             aid, app_name, {"cluster_config": 1}, MECHANISM_INFRA_REPO_COMMIT, status="delivered",
+            details={"outcomes": {"cluster_config": {"pr_url": "https://github.com/example/gitops/pull/1"}}},
             target_findings=[_NETWORK_TARGET],
         )
 

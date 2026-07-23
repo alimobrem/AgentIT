@@ -145,11 +145,23 @@ class DeliveriesMixin:
         analysis.md Phase 3). A delivery with no recorded target findings at
         all (the default for most historical/whole-batch deliveries) never
         shows up here -- there's nothing to correlate.
+
+        Also requires at least one outcome ``pr_url``: partial/failed
+        deliveries that never opened a PR must not sit in the
+        "Awaiting verification" badge queue (nothing to verify on push).
         """
         rows = await self._pool.fetch(
             """
             SELECT * FROM deliveries
-            WHERE app_name = $1 AND finding_resolution IS NULL AND target_findings_json != '[]'::jsonb
+            WHERE app_name = $1
+              AND finding_resolution IS NULL
+              AND target_findings_json != '[]'::jsonb
+              AND EXISTS (
+                SELECT 1
+                FROM jsonb_each(COALESCE(details_json->'outcomes', '{}'::jsonb))
+                     AS outcome(category, value)
+                WHERE COALESCE(value->>'pr_url', '') <> ''
+              )
             ORDER BY created_at ASC
             """,
             app_name,
