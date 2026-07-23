@@ -265,7 +265,7 @@ class TestAssessmentDetailSingleButton:
         permanently-visible button on Assessment Detail in the normal
         (healthy, no-error) state -- Scan is the one action."""
         client, store, _seed_aid = portal_client
-        aid = await store.save(_make_report("single-button-app"))
+        aid = await store.save(_make_report("single-button-app", infra_repo_url="https://github.com/org/single-button-gitops"))
 
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
