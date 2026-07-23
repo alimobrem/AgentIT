@@ -80,15 +80,38 @@
   {% endfor %}
 </div>
 
-{# Single next-action banner (founder: quiet dual banners). Priority:
+{# No half-onboarded apps: without GitOps (or self-managed), delivery cannot
+   happen — Register is the only useful CTA (after open-PR / loop states). #}
+{% set _needs_gitops = (not self_managed and not gitops_registered and not infra_repo_url) %}
+
+{# Single next-action banner. Priority:
    1) open PRs → merge on GitHub
-   2) assessed → Scan / live onboard progress
-   3) escalated / retrying / pending_verification
-   4) other lifecycle copy #}
+   2) escalated / retrying / pending_verification
+   3) not GitOps → Register only
+   4) assessed → Scan
+   5) other lifecycle copy #}
 {% if next_action.state == "open_prs" %}
 <div class="next-step-hint next-step-hint-attention" role="status">
   <span class="next-step-icon" aria-hidden="true">&#9679;</span>
   <strong>Next action:</strong> {{ next_action.message }}
+</div>
+{% elif next_action.state == "escalated" %}
+<div class="alert alert-error mb-2" role="status">
+  <strong>Next action:</strong> {{ next_action.message }}
+  &nbsp;<a href="/assessments/{{ assessment_id }}?tab=ledger">See how to fix on the Ledger tab</a>
+</div>
+{% elif next_action.state == "retrying" %}
+<div class="alert alert-warn mb-2" role="status">
+  <strong>Next action:</strong> {{ next_action.message }}
+</div>
+{% elif next_action.state == "pending_verification" %}
+<div class="alert alert-info mb-2" role="status">
+  <strong>Next action:</strong> {{ next_action.message }}
+</div>
+{% elif _needs_gitops %}
+<div class="next-step-hint next-step-hint-attention" role="status">
+  <span class="next-step-icon" aria-hidden="true">&#9679;</span>
+  <strong>Next action:</strong> Register for GitOps before Scan can deliver — otherwise remove this app from Fleet.
 </div>
 {% elif lifecycle_stage == "assessed" %}
 <div class="next-step-hint next-step-hint-primary">
@@ -112,19 +135,6 @@
     </span>
     {% endif %}
   </span>
-</div>
-{% elif next_action.state == "escalated" %}
-<div class="alert alert-error mb-2" role="status">
-  <strong>Next action:</strong> {{ next_action.message }}
-  &nbsp;<a href="/assessments/{{ assessment_id }}?tab=ledger">See how to fix on the Ledger tab</a>
-</div>
-{% elif next_action.state == "retrying" %}
-<div class="alert alert-warn mb-2" role="status">
-  <strong>Next action:</strong> {{ next_action.message }}
-</div>
-{% elif next_action.state == "pending_verification" %}
-<div class="alert alert-info mb-2" role="status">
-  <strong>Next action:</strong> {{ next_action.message }}
 </div>
 {% elif non_pr_pending_actions %}
 <div class="next-step-hint next-step-hint-attention">
@@ -158,11 +168,10 @@
 <p class="text-muted text-sm mb-2">{{ next_action.message }}</p>
 {% endif %}
 
-{# Scan is the primary CTA. Review &amp; Deliver demoted: only a secondary
-   "Onboard Results" link for needs_attention edge cases with saved manifests.
-   Scan chains assess → onboard → deliver/PRs for every trigger. #}
+{# Scan primary once GitOps/self-managed can deliver; Not GitOps hides Scan. #}
 <div class="action-bar mt-2 mb-2">
   {% set ever_onboarded = lifecycle_stage != "assessed" or prior_onboarded %}
+  {% if not _needs_gitops %}
   <form method="post" action="/assess" class="inline-form"
         x-data x-ref="reassessForm">
     <input type="hidden" name="repo_url" value="{{ report.repo_url }}">
@@ -186,6 +195,7 @@
     </button>
     {% endif %}
   </form>
+  {% endif %}
   {% if show_onboard_results_link %}
   <a href="/assessments/{{ assessment_id }}/onboard-results" class="btn btn-sm btn-outline" title="Edge case: manifests saved but automatic validation/delivery needs attention">Onboard Results</a>
   {% endif %}
@@ -223,9 +233,9 @@
   {% endif %}
 </p>
 
-{% if not self_managed and not gitops_registered and not infra_repo_url %}
-<div x-data="{ dismissed: false, busy: false }" x-show="!dismissed" x-cloak class="alert alert-info mb-2">
-  <span class="text-sm">Not GitOps-registered — register before Scan can deliver.</span>
+{% if _needs_gitops %}
+<div x-data="{ busy: false }" class="alert alert-info mb-2" role="status">
+  <span class="text-sm">Not GitOps-registered — every Fleet app must be GitOps-registered (or removed). Register below, or Delete above.</span>
   <form method="post" action="/assessments/{{ assessment_id }}/register-gitops" class="inline-form register-gitops-form"
         x-ref="registerGitopsForm" @submit="busy = true">
     <div class="form-group">
@@ -233,12 +243,12 @@
       <input type="url" id="register-infra-repo-url" name="infra_repo_url"
              placeholder="https://github.com/org/agentit-gitops">
     </div>
-    <button type="button" class="btn btn-sm btn-outline" data-action="register-gitops"
+    <button type="button" class="btn btn-action btn-lg" data-action="register-gitops"
       :disabled="busy" :aria-busy="busy"
       :class="{ 'btn-loading': busy, 'submitting': busy }"
       @click="$dispatch('show-confirm', {
         title: 'Register for GitOps',
-        message: 'Register this app for GitOps delivery? Future Fix/Onboard deliveries will commit to an infra repo and open a PR. Leave blank to auto-create agentit-gitops under your GitHub account.',
+        message: 'Register this app for GitOps delivery? Future Scan deliveries will commit to an infra repo and open a PR. Leave blank to auto-create agentit-gitops under your GitHub account. Demo/fork repos you cannot deliver to (e.g. octocat/*) should be deleted from Fleet instead.',
         form: $refs.registerGitopsForm,
         opts: { confirmText: 'Register', danger: false }
       })">
@@ -246,7 +256,6 @@
       <span class="htmx-indicator spinner-wrap"><span class="spinner"></span> Working&hellip;</span>
     </button>
   </form>
-  <button type="button" class="btn btn-sm btn-outline" @click="dismissed = true">Dismiss</button>
 </div>
 {% endif %}
 
@@ -671,7 +680,7 @@
           {% elif pr.lifecycle == 'rejected' %}
           Rejected{% if pr.reject_reason %} &mdash; {{ pr.reject_reason }}{% endif %}
           {% elif pr.lifecycle == 'closed' %}
-          Closed without merging
+          Closed without merging{% if pr.reject_reason %} &mdash; {{ pr.reject_reason }}{% endif %}
           {% elif pr.lifecycle == 'unknown' %}
           Not tracked &mdash; see the badge tooltip
           {% else %}

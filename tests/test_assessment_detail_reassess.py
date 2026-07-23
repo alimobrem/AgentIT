@@ -24,7 +24,9 @@ class TestAssessmentDetailReassessButton:
         # construction (see conftest.py) -- a genuinely never-onboarded app
         # needs its own fresh assessment with no onboarding_results row.
         client, store, _seed_aid = portal_client
-        aid = await store.save(make_report(repo_name="never-onboarded-app"))
+        report = make_report(repo_name="never-onboarded-app")
+        report.infra_repo_url = "https://github.com/org/never-onboarded-gitops"
+        aid = await store.save(report)
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
         assert "Scan" in resp.text
@@ -33,6 +35,7 @@ class TestAssessmentDetailReassessButton:
 
     async def test_reassess_form_posts_repo_url_and_criticality(self, portal_client):
         client, store, aid = portal_client
+        await store.set_infra_repo_url(aid, "https://github.com/org/test-gitops")
         report = await store.get(aid)
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
@@ -44,6 +47,7 @@ class TestAssessmentDetailReassessButton:
         # Seed findings are uncontracted (category=test) — dialog must not
         # promise open PR(s) when Phase A would refuse.
         client, store, aid = portal_client
+        await store.set_infra_repo_url(aid, "https://github.com/org/test-gitops")
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
         assert "Scan" in resp.text

@@ -125,6 +125,7 @@ class TestCapabilityProposalDecisions:
         assert d["target_app"] == "agentit"
         assert d["outcome"] == "proposed"
         assert d["reason"] == "README.md:42 — Documented future idea"
+        assert d["pr_url"] == "https://github.com/org/agentit/pull/9"
 
     async def test_gate_blocked_cycle_becomes_a_gate_blocked_decision(self) -> None:
         store = await make_store()

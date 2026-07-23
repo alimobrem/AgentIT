@@ -52,9 +52,16 @@ _DUPLICATE_REASON_PHRASES = (
     "redundant with", "capability already exists",
 )
 _WONTFIX_REASON_PHRASES = ("won't fix", "wont fix", "not planned", "declining this")
+_THEATER_REASON_PHRASES = (
+    "theater stub", "refuse theater", "catalog dump", "not helpful",
+    "clear-evidence", "clear evidence",
+)
+_WRONG_LAYER_REASON_PHRASES = (
+    "wrong layer", "wrong-layer", "wrong layer companion",
+)
 
 
-_HARD_BLOCK_REASONS = ("wontfix", "duplicate")
+_HARD_BLOCK_REASONS = ("wontfix", "duplicate", "theater", "wrong-layer")
 
 
 def _is_hard_block_reason(reason: str) -> bool:
@@ -80,6 +87,10 @@ def _infer_reject_reason_from_text(text: str) -> str:
     lower = (text or "").lower()
     if any(p in lower for p in _DUPLICATE_REASON_PHRASES):
         return "duplicate"
+    if any(p in lower for p in _THEATER_REASON_PHRASES):
+        return "theater"
+    if any(p in lower for p in _WRONG_LAYER_REASON_PHRASES):
+        return "wrong-layer"
     if any(p in lower for p in _WONTFIX_REASON_PHRASES):
         return "wontfix"
     return ""
