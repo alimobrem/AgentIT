@@ -88,16 +88,16 @@ def _c(
 SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
     "container": _c(
         "security", "containerfile", "source",
-        "pinning each targeted Dockerfile/Containerfile base image "
-        "(no :latest on that file; HEALTHCHECK/USER/non-UBI need matching evidence)",
+        "pinning/hardening each targeted Dockerfile/Containerfile "
+        "(:latest pin; USER/HEALTHCHECK/UBI FROM on that file when finding asks)",
         _ev.DOCKERFILE_PIN,
         "image-registry-policy", "limitrange", "image-scan-task",
         "kyverno-require-labels",
     ),
     "dockerfile": _c(
         "security", "containerfile", "source",
-        "pinning each targeted Dockerfile/Containerfile base image "
-        "(no :latest on that file; HEALTHCHECK/USER/non-UBI need matching evidence)",
+        "pinning/hardening each targeted Dockerfile/Containerfile "
+        "(:latest pin; USER/HEALTHCHECK/UBI FROM on that file when finding asks)",
         _ev.DOCKERFILE_PIN,
         "image-registry-policy", "limitrange", "image-scan-task",
         "kyverno-require-labels",
@@ -153,9 +153,12 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
         "patching the base image reference in source",
         _ev.BASE_IMAGE_PIN,
     ),
+    # Labels-only Kyverno Policy — recommendation text may mention limits/
+    # images, but clear-evidence is honest: this skill only enforces labels.
     "policy": _c(
         "compliance", "kyverno-require-labels", "cluster",
-        "enforcing required labels via a Kyverno Policy",
+        "enforcing required app labels via a Kyverno Policy "
+        "(labels-only — not resource limits or image allow-lists)",
         _ev.CLUSTER_KIND,
         "image-registry-policy",
         kinds=("Policy", "ClusterPolicy"),
@@ -180,11 +183,19 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
         _ev.AUDIT_WIRED,
         "audit-policy",
     ),
+    # Only "no CI at all" remediates via Tekton. GHA/GitLab/Jenkins present
+    # but non-Tekton → ``tekton_migration`` detect-only (do not force Tekton).
     "pipeline": _c(
         "cicd", "tekton-pipeline", "cluster",
-        "adding a Tekton Pipeline/PipelineRun for the app",
+        "adding a Tekton Pipeline/PipelineRun when the repo has no CI yet",
         _ev.CLUSTER_KIND,
         kinds=("Pipeline", "PipelineRun"),
+    ),
+    "tekton_migration": _c(
+        "cicd", "ci-pipeline-exists", "none",
+        "detect-only: CI exists (GHA/GitLab/Jenkins) but is not Tekton — "
+        "optional OpenShift Pipelines migration (no auto-PR)",
+        _ev.DETECT_ONLY, auto_pr=False,
     ),
     "gitops": _c(
         "cicd", "argocd-application", "cluster",
@@ -198,11 +209,12 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
         _ev.SELECTOR_TARGET,
         kinds=("ServiceMonitor",),
     ),
+    # App must emit traces (SDK) — cluster otel-collector does not clear.
     "tracing": _c(
-        "observability", "otel-collector", "cluster",
-        "adding OpenTelemetry collector config for the app",
-        _ev.CLUSTER_KIND,
-        kinds=("OpenTelemetryCollector", "ConfigMap", "Deployment"),
+        "observability", "structured-logging-detected", "none",
+        "detect-only: app OpenTelemetry/Jaeger/Zipkin SDK instrumentation — "
+        "human instruments (collector YAML alone does not clear; no auto-PR)",
+        _ev.DETECT_ONLY, auto_pr=False,
     ),
     "dashboards": _c(
         "observability", "grafana-dashboard", "cluster",
@@ -243,12 +255,19 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
         "adding a ResourceQuota/LimitRange in the app namespace",
         _ev.QUOTA_MANIFEST,
     ),
+    # PDB-only (missing PodDisruptionBudget). Single-replica → ``replicas``.
     "availability": _c(
         "infrastructure", "pdb", "cluster",
         "adding a PodDisruptionBudget whose selector matches a live workload",
         _ev.SELECTOR_TARGET,
         "pod-delete",
         kinds=("PodDisruptionBudget",),
+    ),
+    "replicas": _c(
+        "infrastructure", "workload-replicas", "source",
+        "setting Deployment/Rollout replicas >= 2 in the app repo",
+        _ev.WORKLOAD_REPLICAS,
+        "pod-delete", "pdb",
     ),
     "eol": _c(
         "infrastructure", "eol-upgrade", "source",
@@ -271,11 +290,13 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
         "adding Helm templates with apiVersion/kind in the app repo",
         _ev.HELM_CHART,
     ),
+    # Probes in app-repo Deployment/Rollout YAML (Assess scans repo text).
+    # Kyverno mutate Policy is optional companion — does not clear Assess alone.
     "health": _c(
-        "infrastructure", "health-probes-policy", "cluster",
-        "adding a Kyverno mutate Policy that injects liveness/readiness probes",
-        _ev.CLUSTER_KIND,
-        kinds=("Policy", "ClusterPolicy"),
+        "infrastructure", "workload-health-probes", "source",
+        "adding livenessProbe+readinessProbe on Deployment/Rollout YAML in the app repo",
+        _ev.WORKLOAD_PROBES,
+        "health-probes-policy",
     ),
     # --- detect_only / no_auto_pr (mode:detect skills or human-only) ---
     "license": _c(

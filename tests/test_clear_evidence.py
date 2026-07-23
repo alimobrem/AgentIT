@@ -161,6 +161,35 @@ class TestDockerfilePin:
         assert "HEALTHCHECK" in reason
         assert "mismatch" in reason.lower()
 
+    def test_healthcheck_finding_cleared_when_directive_present(self) -> None:
+        ok, reason = verify_dockerfile_pin(
+            [{
+                "target_path": "Dockerfile",
+                "content": (
+                    "FROM registry.access.redhat.com/ubi9/ubi-minimal:1\n"
+                    "USER 1001\n"
+                    "HEALTHCHECK CMD curl -f http://localhost:8080/healthz || exit 1\n"
+                ),
+                "skill_name": "containerfile",
+            }],
+            finding_description="No HEALTHCHECK defined in Dockerfile",
+        )
+        assert ok, reason
+
+    def test_user_finding_cleared_when_non_root_user_present(self) -> None:
+        ok, reason = verify_dockerfile_pin(
+            [{
+                "target_path": "Dockerfile",
+                "content": (
+                    "FROM registry.access.redhat.com/ubi9/ubi-minimal:1\n"
+                    "USER 1001\n"
+                ),
+                "skill_name": "containerfile",
+            }],
+            finding_description="Container runs as root (no USER directive) in Dockerfile",
+        )
+        assert ok, reason
+
     def test_non_ubi_finding_not_cleared_by_non_ubi_pin(self) -> None:
         ok, reason = verify_dockerfile_pin(
             [{
@@ -174,6 +203,22 @@ class TestDockerfilePin:
         )
         assert not ok
         assert "ubi" in reason.lower() or "mismatch" in reason.lower()
+
+    def test_non_ubi_finding_cleared_with_ubi_from(self) -> None:
+        ok, reason = verify_dockerfile_pin(
+            [{
+                "target_path": "Dockerfile.fast",
+                "content": (
+                    "FROM registry.access.redhat.com/ubi9/python-312:1\n"
+                    "USER 1001\n"
+                ),
+                "skill_name": "containerfile",
+            }],
+            finding_description=(
+                "Base image is not UBI (Red Hat Universal Base Image) in Dockerfile.fast"
+            ),
+        )
+        assert ok, reason
 
 
 class TestAuditWired:

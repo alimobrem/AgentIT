@@ -46,6 +46,10 @@ SBOM_FILE = "sbom_file"
 SBOM_CI = "sbom_ci"
 # Non-skill sentinel (patch_base_image) — same pin check as dockerfile.
 BASE_IMAGE_PIN = "base_image_pin"
+# Deployment/Rollout replicas >= 2 in staged app-repo YAML.
+WORKLOAD_REPLICAS = "workload_replicas"
+# livenessProbe + readinessProbe on staged Deployment/Rollout YAML.
+WORKLOAD_PROBES = "workload_probes"
 
 _FROM_LATEST = re.compile(r"^\s*FROM\s+\S+:latest\b", re.IGNORECASE | re.MULTILINE)
 _FROM_LINE = re.compile(r"^\s*FROM\s+\S+", re.IGNORECASE | re.MULTILINE)
@@ -189,26 +193,18 @@ def verify_dockerfile_pin(
     must be staged and pinned — pinning an unrelated Dockerfile must not clear
     ``:latest`` findings on Dockerfile.deps / .fast (pulse-agent#2 class).
 
-    Category mismatch: HEALTHCHECK / USER(root) findings cannot clear via
-    ``dockerfile_pin`` alone. Non-UBI findings require a UBI/Red Hat FROM on
-    the finding's file (pin-only of a non-UBI base is not enough).
+    Subtype evidence on the finding's file path:
+    - ``:latest`` / pin → no ``:latest`` on FROM
+    - HEALTHCHECK → ``HEALTHCHECK`` directive present (pin alone refuses)
+    - USER/root → non-root ``USER`` present (pin alone refuses)
+    - non-UBI → UBI/Red Hat ``FROM`` on that file (pin of non-UBI refuses)
 
     When ``base_content`` is present on a staged file (delivery enrichment
     after fetching the existing Dockerfile), also refuse destructive
     rewrites that gut the file into a short stub (#165 / migration #163
-    quality bar).
+    quality bar). Additive USER/HEALTHCHECK/UBI hardens are allowed.
     """
     subtype = _container_finding_subtype(finding_description)
-    if subtype == "healthcheck":
-        return False, (
-            "HEALTHCHECK finding cannot clear via dockerfile_pin — "
-            "need HEALTHCHECK directive (finding/patch mismatch)"
-        )
-    if subtype == "user":
-        return False, (
-            "USER/root finding cannot clear via dockerfile_pin — "
-            "need USER directive (finding/patch mismatch)"
-        )
 
     staged = _staged_map(files)
     base_by_path = {
@@ -226,6 +222,30 @@ def verify_dockerfile_pin(
     if not candidates:
         return False, "no Dockerfile/Containerfile in staged files"
 
+    def _subtype_ok(path: str, content: str) -> tuple[bool, str]:
+        if subtype == "healthcheck":
+            if not re.search(r"^\s*HEALTHCHECK\s+", content, re.MULTILINE):
+                return False, (
+                    f"{path}: HEALTHCHECK finding cannot clear via pin alone — "
+                    "need HEALTHCHECK directive (finding/patch mismatch)"
+                )
+            return True, f"HEALTHCHECK present in {path}"
+        if subtype == "user":
+            if not re.search(r"^\s*USER\s+(?!0\b|root\b)\S+", content, re.MULTILINE | re.IGNORECASE):
+                return False, (
+                    f"{path}: USER/root finding cannot clear via pin alone — "
+                    "need non-root USER directive (finding/patch mismatch)"
+                )
+            return True, f"non-root USER present in {path}"
+        if subtype == "ubi":
+            if not _UBI_FROM.search(content):
+                return False, (
+                    f"{path}: non-UBI finding cannot clear via pin alone — "
+                    "FROM must use UBI/Red Hat base (finding/patch mismatch)"
+                )
+            return True, f"UBI/Red Hat FROM in {path}"
+        return True, f"pinned base image in {path} (no :latest)"
+
     target = _finding_containerfile_path(finding_description)
     if target:
         resolved = _resolve_staged_containerfile(staged, target)
@@ -241,21 +261,23 @@ def verify_dockerfile_pin(
         )
         if not ok:
             return False, reason
-        if subtype == "ubi" and not _UBI_FROM.search(content):
-            return False, (
-                f"{path}: non-UBI finding cannot clear via pin alone — "
-                "FROM must use UBI/Red Hat base (finding/patch mismatch)"
-            )
-        return True, reason
+        return _subtype_ok(path, content)
 
     # No path in description (legacy / generic): every staged containerfile
-    # must be pinned — still refuse UBI/HEALTHCHECK subtypes above.
-    if subtype == "ubi":
-        return False, (
-            "non-UBI finding cannot clear via dockerfile_pin alone — "
-            "need UBI/Red Hat FROM on the finding's Dockerfile "
-            "(finding/patch mismatch)"
-        )
+    # must be pinned; subtype evidence required on at least one file.
+    if subtype in ("healthcheck", "user", "ubi"):
+        for path, content in candidates:
+            base = base_by_path.get(path)
+            ok, reason = _check_containerfile_pin_content(
+                path, content, base_content=base if isinstance(base, str) else None,
+            )
+            if not ok:
+                continue
+            sub_ok, sub_reason = _subtype_ok(path, content)
+            if sub_ok:
+                return True, sub_reason
+        return _subtype_ok(candidates[0][0], candidates[0][1])
+
     for path, content in candidates:
         base = base_by_path.get(path)
         ok, reason = _check_containerfile_pin_content(
@@ -1002,6 +1024,14 @@ def verify_evidence(
         return verify_sbom_ci(files)
     if evidence_kind == SBOM_FILE:
         return verify_sbom_file(files)
+    if evidence_kind == WORKLOAD_REPLICAS:
+        from agentit.remediation.workload_patches import verify_workload_replicas
+
+        return verify_workload_replicas(files)
+    if evidence_kind == WORKLOAD_PROBES:
+        from agentit.remediation.workload_patches import verify_workload_probes
+
+        return verify_workload_probes(files)
     return False, f"unknown evidence_kind {evidence_kind!r}"
 
 

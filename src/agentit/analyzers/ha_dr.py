@@ -29,7 +29,7 @@ class HADRAnalyzer:
 
         if not has_replicas:
             findings.append(Finding(
-                category="availability",
+                category="replicas",
                 severity=Severity.high,
                 description="Single replica or no replica count defined -- no redundancy",
                 recommendation="Set replicas >= 2 for high availability",

@@ -30,18 +30,18 @@ The application is packaged in a container image using a UBI base (not
 - Final stage runs as non-root `USER 1001`
 - `HEALTHCHECK` instruction present
 - No secrets baked into the image
-- **Pin-only on existing files:** when a Dockerfile/Containerfile already
-  exists, change **only** `FROM` lines (pin `:latest` → `:1` or digest).
-  Never rewrite the body into a greenfield stub (#165 class / same bar as
-  migration #163).
+- **Pin/harden on existing files:** when a Dockerfile/Containerfile already
+  exists, pin `:latest` → `:1` / digest and **additively** apply USER /
+  HEALTHCHECK / UBI FROM when the finding asks — never gut the body into a
+  greenfield stub (#165 class / same bar as migration #163).
 
 ## Delivery
 This skill opens a **source-repo PR** against the app's `Dockerfile` (or
 `Containerfile`) — not a gitops BuildConfig. Re-Assess after merge clears
 the `container` finding. Clear-evidence refuses destructive rewrites when
-the existing file is known, binds each `:latest` finding to its file path
-(pinning `Dockerfile` alone cannot clear `Dockerfile.deps` / `.fast`), and
-refuses HEALTHCHECK / USER / non-UBI findings via pin-only (mismatch).
+the existing file is known, binds each finding to its file path (pinning
+`Dockerfile` alone cannot clear `Dockerfile.deps` / `.fast`), and requires
+matching USER / HEALTHCHECK / UBI evidence for those subtypes.
 
 ## Template
 Deterministic **greenfield** baseline (no Dockerfile yet). When a file

@@ -48,7 +48,7 @@ class CICDAnalyzer:
                 category="pipeline",
                 severity=Severity.high,
                 description="No CI/CD pipeline configuration found",
-                recommendation="Create Tekton Pipeline for build/test/scan/deploy",
+                recommendation="Create CI (GitHub Actions, GitLab CI, or Tekton Pipeline) for build/test/scan/deploy",
                 source="analyzer:cicd",
             ))
         if not has_container:
@@ -67,12 +67,13 @@ class CICDAnalyzer:
                 recommendation="Create Argo CD Application for GitOps delivery",
                 source="analyzer:cicd",
             ))
+        # GHA/GitLab/Jenkins already present — do not force Tekton via Scan PR.
         if has_ci and not has_tekton:
             findings.append(Finding(
-                category="pipeline",
+                category="tekton_migration",
                 severity=Severity.low,
                 description="CI pipeline exists but is not Tekton-based",
-                recommendation="Consider migrating to OpenShift Pipelines (Tekton) for OpenShift-native CI",
+                recommendation="Optional: consider OpenShift Pipelines (Tekton) for OpenShift-native CI — not required when GHA/GitLab/Jenkins already runs",
                 source="analyzer:cicd",
             ))
 

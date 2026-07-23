@@ -1,13 +1,15 @@
 ---
 name: otel-collector
 domain: observability
-version: 1
+version: 2
+# Not the SOLUTION_CONTRACT for `tracing` — app SDK instrumentation is
+# detect-only (aligns with `instrumentation`). This skill remains available
+# for operators who explicitly want a collector, but Scan will not open it
+# as a clear for "No distributed tracing detected".
 triggers:
-  - tracing
-  - opentelemetry
-  - otel
-  - traces
-  - distributed
+  - opentelemetry-collector
+  - otel-collector
+  - tempo-exporter
 outputs:
   - OpenTelemetryCollector
 property: "Application traces are collected and exported"
