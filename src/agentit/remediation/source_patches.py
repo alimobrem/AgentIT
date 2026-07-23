@@ -22,9 +22,24 @@ logger = logging.getLogger(__name__)
 
 _LATEST_TAG_RE = re.compile(r"(FROM\s+\S+):latest(\b)", re.IGNORECASE | re.MULTILINE)
 _FROM_LINE_RE = re.compile(r"^\s*FROM\s+\S+", re.IGNORECASE | re.MULTILINE)
+_USER_LINE_RE = re.compile(r"^\s*USER\s+", re.IGNORECASE | re.MULTILINE)
+_HEALTHCHECK_LINE_RE = re.compile(r"^\s*HEALTHCHECK\s+", re.IGNORECASE | re.MULTILINE)
+_UBI_FROM_RE = re.compile(
+    r"^\s*FROM\s+\S*(?:ubi|redhat|registry\.access\.redhat)\S*",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 # Instructions that indicate a real app image (not our greenfield stub).
 _SUBSTANTIVE_DF_TOKENS = ("RUN ", "COPY ", "ADD ", "ARG ", "ENV ", "WORKDIR ")
+
+_UBI_RUNTIME: dict[str, str] = {
+    "python": "registry.access.redhat.com/ubi9/python-312:1",
+    "go": "registry.access.redhat.com/ubi9/ubi-minimal:1",
+    "java": "registry.access.redhat.com/ubi9/openjdk-21:1",
+    "node": "registry.access.redhat.com/ubi9/nodejs-20:1",
+    "javascript": "registry.access.redhat.com/ubi9/nodejs-20:1",
+    "typescript": "registry.access.redhat.com/ubi9/nodejs-20:1",
+}
 
 
 def _open_findings(report: AssessmentReport, category: str) -> list[Finding]:
@@ -66,14 +81,83 @@ def _pin_latest_in_dockerfile(content: str) -> str:
     return pin_dockerfile_from_lines(content, floating_tag="1")
 
 
+def harden_dockerfile_content(
+    content: str,
+    *,
+    add_user: bool = False,
+    add_healthcheck: bool = False,
+    force_ubi: bool = False,
+    language: str = "python",
+    port: int = 8080,
+) -> str:
+    """Pin ``:latest`` and optionally add USER / HEALTHCHECK / UBI FROM.
+
+    Additive harden for existing Dockerfiles — never a greenfield rewrite.
+    """
+    body = content if (content or "").endswith("\n") else (content or "") + "\n"
+    if force_ubi and not _UBI_FROM_RE.search(body):
+        from agentit.remediation.base_image import patch_base_image
+
+        # patch_base_image uses :latest streams; re-pin to :1 afterward.
+        patched = patch_base_image(body, language)
+        if patched:
+            body = patched
+        else:
+            ubi = _UBI_RUNTIME.get(language.lower(), "registry.access.redhat.com/ubi9/ubi-minimal:1")
+            lines = body.splitlines(keepends=True)
+            from_idxs = [
+                i for i, ln in enumerate(lines)
+                if re.match(r"^\s*FROM\s+", ln, re.IGNORECASE)
+            ]
+            if from_idxs:
+                idx = from_idxs[-1]
+                m = re.match(r"^(\s*FROM\s+)(\S+)(.*)", lines[idx], re.IGNORECASE)
+                if m:
+                    lines[idx] = f"{m.group(1)}{ubi}{m.group(3)}"
+                    if not lines[idx].endswith("\n"):
+                        lines[idx] += "\n"
+                    body = "".join(lines)
+    body = pin_dockerfile_from_lines(body)
+    if add_user and not _USER_LINE_RE.search(body):
+        body = body.rstrip("\n") + "\nUSER 1001\n"
+    if add_healthcheck and not _HEALTHCHECK_LINE_RE.search(body):
+        body = (
+            body.rstrip("\n")
+            + "\n"
+            + f"HEALTHCHECK --interval=30s --timeout=5s --retries=3 \\\n"
+            + f"  CMD curl -f http://localhost:{port}/healthz || exit 1\n"
+        )
+    return body if body.endswith("\n") else body + "\n"
+
+
+def _is_allowed_dockerfile_harden(existing: str, proposed: str) -> bool:
+    """True when proposed is pin-only or additive USER/HEALTHCHECK/UBI harden."""
+    exist = existing if existing.endswith("\n") else existing + "\n"
+    prop = (proposed or "").strip()
+    for add_user in (False, True):
+        for add_hc in (False, True):
+            for force_ubi in (False, True):
+                for lang in ("python", "go", "java", "node", "javascript"):
+                    hardened = harden_dockerfile_content(
+                        exist,
+                        add_user=add_user,
+                        add_healthcheck=add_hc,
+                        force_ubi=force_ubi,
+                        language=lang,
+                    ).strip()
+                    if hardened == prop:
+                        return True
+    return False
+
+
 def is_destructive_dockerfile_rewrite(
     existing: str, proposed: str,
 ) -> tuple[bool, str]:
     """True when ``proposed`` guts an existing Dockerfile into a short stub.
 
-    Pin-only transforms of ``existing`` are never destructive. Used by
-    clear-evidence and delivery enrichment so Scan never repeats the #165
-    class of PR (136-line Containerfile → 11-line stub).
+    Pin-only and additive USER/HEALTHCHECK/UBI hardens of ``existing`` are
+    never destructive. Used by clear-evidence and delivery enrichment so
+    Scan never repeats the #165 class of PR (136-line → 11-line stub).
     """
     if not (existing or "").strip():
         return False, "no existing file"
@@ -82,6 +166,8 @@ def is_destructive_dockerfile_rewrite(
     pinned = pin_dockerfile_from_lines(exist)
     if prop.strip() == pinned.strip():
         return False, "pin-only of existing"
+    if _is_allowed_dockerfile_harden(exist, prop):
+        return False, "additive harden of existing"
     exist_body = [
         ln for ln in exist.splitlines()
         if ln.strip() and not ln.strip().startswith("#")
@@ -109,17 +195,45 @@ def is_destructive_dockerfile_rewrite(
     return False, "ok"
 
 
+def _harden_flags_for_findings(
+    target_findings: list[tuple[str, str]] | None,
+    target_path: str,
+) -> tuple[bool, bool, bool]:
+    """Derive (add_user, add_healthcheck, force_ubi) for one Dockerfile path."""
+    add_user = add_hc = force_ubi = False
+    target_cf = (target_path or "").casefold()
+    base = target_cf.rsplit("/", 1)[-1]
+    for cat, desc in target_findings or []:
+        if (cat or "").lower().replace("-", "_") not in ("container", "dockerfile"):
+            continue
+        d = (desc or "").lower()
+        # Path-bound when description names a file; else apply to this target.
+        if " in " in d:
+            named = d.rsplit(" in ", 1)[-1].strip()
+            if named and named.casefold() not in (target_cf, base):
+                continue
+        if "healthcheck" in d:
+            add_hc = True
+        if "runs as root" in d or "no user directive" in d:
+            add_user = True
+        if "not ubi" in d or "universal base image" in d:
+            force_ubi = True
+    return add_user, add_hc, force_ubi
+
+
 def apply_containerfile_pin_only(
     files: list[dict],
     *,
     read_file=None,
+    target_findings: list[tuple[str, str]] | None = None,
+    language: str = "python",
 ) -> list[dict]:
-    """Rewrite containerfile outputs to pin-only when the target already exists.
+    """Rewrite containerfile outputs to pin/harden when the target exists.
 
     ``read_file(path) -> str | None`` fetches the default-branch content
-    (GitHub REST). When the target exists, staged content becomes
-    ``pin_dockerfile_from_lines(existing)`` and ``base_content`` is set for
-    clear-evidence. Greenfield (missing file) keeps the generator stub.
+    (GitHub REST). When the target exists, staged content becomes pin-only
+    plus additive USER / HEALTHCHECK / UBI FROM for matching findings, and
+    ``base_content`` is set for clear-evidence. Greenfield keeps the stub.
     """
     out: list[dict] = []
     for f in files:
@@ -145,19 +259,38 @@ def apply_containerfile_pin_only(
             # Greenfield — keep stub (no Dockerfile yet).
             out.append(f)
             continue
-        pinned = pin_dockerfile_from_lines(existing)
-        destructive, reason = is_destructive_dockerfile_rewrite(existing, f.get("content") or "")
+        add_user, add_hc, force_ubi = _harden_flags_for_findings(
+            target_findings, target,
+        )
+        hardened = harden_dockerfile_content(
+            existing,
+            add_user=add_user,
+            add_healthcheck=add_hc,
+            force_ubi=force_ubi,
+            language=language,
+        )
+        destructive, reason = is_destructive_dockerfile_rewrite(
+            existing, f.get("content") or "",
+        )
         new_f = dict(f)
         new_f["base_content"] = existing
-        new_f["content"] = pinned if pinned.endswith("\n") else pinned + "\n"
+        new_f["content"] = hardened
         desc = (f.get("description") or "").rstrip()
-        if "pin-only" not in desc.lower():
+        harden_bits = []
+        if add_user:
+            harden_bits.append("USER")
+        if add_hc:
+            harden_bits.append("HEALTHCHECK")
+        if force_ubi:
+            harden_bits.append("UBI FROM")
+        label = "pin+harden (" + ", ".join(harden_bits) + ")" if harden_bits else "pin-only FROM"
+        if "pin-only" not in desc.lower() and "harden" not in desc.lower():
             new_f["description"] = (
-                f"{desc} — pin-only FROM (no rewrite)" if desc else "pin-only FROM (no rewrite)"
+                f"{desc} — {label} (no rewrite)" if desc else f"{label} (no rewrite)"
             )
         if destructive:
             logger.info(
-                "container pin-only: replaced destructive stub for %s (%s)",
+                "container harden: replaced destructive stub for %s (%s)",
                 target, reason,
             )
         out.append(new_f)
@@ -192,58 +325,224 @@ def _containerfile_patch(skill: "Skill", report: AssessmentReport) -> list[Gener
     """Emit a Containerfile/Dockerfile source patch.
 
     Greenfield (no Dockerfile finding): emit the UBI stub.
-    Existing-file findings (``:latest``, missing USER/HEALTHCHECK): emit a
-    pin-only *placeholder* that delivery enrichment replaces with
-    ``pin_dockerfile_from_lines(existing)`` — never a full rewrite stub
+    Existing-file findings (``:latest``, missing USER/HEALTHCHECK/non-UBI):
+    emit a pin/harden *placeholder* that delivery enrichment replaces with
+    ``harden_dockerfile_content(existing)`` — never a full rewrite stub
     (#165 class). Clear-evidence refuses destructive rewrites when
-    ``base_content`` is present.
+    ``base_content`` is present; accepts USER/HEALTHCHECK/UBI on the
+    finding path.
     """
-    findings = _open_findings(report, "container")
+    findings = _open_findings(report, "container") + _open_findings(report, "dockerfile")
     lang = _primary_language(report)
-    target = "Dockerfile"
+    paths: list[str] = []
     for f in findings:
         if f.file_path and (
             "dockerfile" in f.file_path.lower()
             or "containerfile" in f.file_path.lower()
         ):
-            target = f.file_path
-            break
+            if f.file_path not in paths:
+                paths.append(f.file_path)
 
-    addressed = findings[0].description if findings else skill.property_description
-    has_existing_path = any(
-        f.file_path and (
-            "dockerfile" in f.file_path.lower()
-            or "containerfile" in f.file_path.lower()
+    if not paths:
+        # Greenfield or path-less finding: single Dockerfile stub.
+        content = _pin_latest_in_dockerfile(_dockerfile_for_stack(lang))
+        addressed = findings[0].description if findings else skill.property_description
+        return [GeneratedFile(
+            path="patch-Dockerfile",
+            content=content if content.endswith("\n") else content + "\n",
+            description=(
+                f"Generated by skill {skill.name} — greenfield "
+                "Containerfile/Dockerfile"
+            ),
+            finding_addressed=addressed,
+            skill_name=skill.name,
+            target_path="Dockerfile",
+        )]
+
+    out: list[GeneratedFile] = []
+    for target in paths:
+        path_findings = [f for f in findings if f.file_path == target]
+        addressed = (
+            path_findings[0].description if path_findings
+            else skill.property_description
         )
-        for f in findings
-    )
-
-    if has_existing_path:
-        # Existing path: emit a pin-shaped marker. Delivery
-        # ``apply_containerfile_pin_only`` replaces this with pin-only of the
-        # real file; clear-evidence refuses if a stub would gut it.
         content = (
-            f"# agentit-pin-only: delivery will pin FROM on existing {target}\n"
+            f"# agentit-pin-only: delivery will pin/harden FROM on existing "
+            f"{target}\n"
             f"FROM registry.access.redhat.com/ubi9/ubi-minimal:1\n"
         )
-        description = (
-            f"Generated by skill {skill.name} — pin-only FROM on existing "
-            f"{target} (no rewrite)"
-        )
-    else:
-        content = _pin_latest_in_dockerfile(_dockerfile_for_stack(lang))
-        description = (
-            f"Generated by skill {skill.name} — greenfield Containerfile/Dockerfile"
-        )
+        out.append(GeneratedFile(
+            path=f"patch-{target.replace('/', '-')}",
+            content=content,
+            description=(
+                f"Generated by skill {skill.name} — pin-only/harden on "
+                f"existing {target} (no rewrite)"
+            ),
+            finding_addressed=addressed,
+            skill_name=skill.name,
+            target_path=target,
+        ))
+    return out
 
-    return [GeneratedFile(
-        path=f"patch-{target.replace('/', '-')}",
-        content=content if content.endswith("\n") else content + "\n",
-        description=description,
-        finding_addressed=addressed,
-        skill_name=skill.name,
-        target_path=target,
-    )]
+
+def _snapshot_file_text(path: str) -> str:
+    try:
+        from agentit.analyzers.snapshot import get_active_snapshot
+
+        snap = get_active_snapshot()
+        if snap is not None and hasattr(snap, "files"):
+            return str(
+                snap.files.get(path)
+                or snap.files.get(f"./{path}")
+                or "",
+            )
+    except Exception:
+        return ""
+    return ""
+
+
+def _workload_yaml_paths(report: AssessmentReport) -> list[str]:
+    from agentit.remediation.workload_patches import is_workload_manifest
+
+    paths = [p.replace("\\", "/") for p in _repo_paths_from_report(report)]
+    out: list[str] = []
+    for path in paths:
+        if not path.endswith((".yml", ".yaml")):
+            continue
+        text = _snapshot_file_text(path)
+        if text and is_workload_manifest(text):
+            out.append(path)
+    return out
+
+
+def _workload_replicas_patch(skill: "Skill", report: AssessmentReport) -> list[GeneratedFile]:
+    """Bump Deployment/Rollout replicas to >= 2 (clears ``replicas`` finding)."""
+    from agentit.remediation.workload_patches import patch_replicas
+
+    findings = _open_findings(report, "replicas")
+    addressed = findings[0].description if findings else skill.property_description
+    paths = _workload_yaml_paths(report)
+    if not paths:
+        # No workload in snapshot — emit a minimal Deployment so clear-evidence
+        # can still see replicas>=2 (greenfield / chart-values repos).
+        app = (report.repo_name or "app").lower().replace("_", "-").replace(".", "-")
+        content = textwrap.dedent(f"""\
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: {app}
+            spec:
+              replicas: 2
+              selector:
+                matchLabels:
+                  app.kubernetes.io/name: {app}
+              template:
+                metadata:
+                  labels:
+                    app.kubernetes.io/name: {app}
+                spec:
+                  containers:
+                    - name: {app}
+                      image: {app}:1
+                      ports:
+                        - containerPort: 8080
+            """)
+        return [GeneratedFile(
+            path="patch-workload-replicas",
+            content=content,
+            description=(
+                f"Generated by skill {skill.name} — Deployment replicas: 2 "
+                "(clears replicas finding)"
+            ),
+            finding_addressed=addressed,
+            skill_name=skill.name,
+            target_path="deploy/deployment.yaml",
+        )]
+
+    out: list[GeneratedFile] = []
+    for path in paths:
+        existing = _snapshot_file_text(path)
+        patched = patch_replicas(existing, replicas=2)
+        out.append(GeneratedFile(
+            path=f"patch-replicas-{path.replace('/', '-')}",
+            content=patched if patched.endswith("\n") else patched + "\n",
+            description=(
+                f"Generated by skill {skill.name} — set replicas>=2 on {path}"
+            ),
+            finding_addressed=addressed,
+            skill_name=skill.name,
+            target_path=path,
+        ))
+    return out
+
+
+def _health_probes_patch(skill: "Skill", report: AssessmentReport) -> list[GeneratedFile]:
+    """Inject liveness/readiness probes into Deployment/Rollout YAML."""
+    from agentit.remediation.workload_patches import patch_health_probes
+
+    findings = _open_findings(report, "health")
+    addressed = findings[0].description if findings else skill.property_description
+    paths = _workload_yaml_paths(report)
+    if not paths:
+        app = (report.repo_name or "app").lower().replace("_", "-").replace(".", "-")
+        content = textwrap.dedent(f"""\
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: {app}
+            spec:
+              replicas: 1
+              selector:
+                matchLabels:
+                  app.kubernetes.io/name: {app}
+              template:
+                metadata:
+                  labels:
+                    app.kubernetes.io/name: {app}
+                spec:
+                  containers:
+                    - name: {app}
+                      image: {app}:1
+                      ports:
+                        - containerPort: 8080
+                      livenessProbe:
+                        tcpSocket:
+                          port: 8080
+                        initialDelaySeconds: 15
+                        periodSeconds: 20
+                      readinessProbe:
+                        tcpSocket:
+                          port: 8080
+                        initialDelaySeconds: 5
+                        periodSeconds: 10
+            """)
+        return [GeneratedFile(
+            path="patch-workload-probes",
+            content=content,
+            description=(
+                f"Generated by skill {skill.name} — Deployment with "
+                "livenessProbe+readinessProbe (clears health finding)"
+            ),
+            finding_addressed=addressed,
+            skill_name=skill.name,
+            target_path="deploy/deployment.yaml",
+        )]
+
+    out: list[GeneratedFile] = []
+    for path in paths:
+        existing = _snapshot_file_text(path)
+        patched = patch_health_probes(existing)
+        out.append(GeneratedFile(
+            path=f"patch-probes-{path.replace('/', '-')}",
+            content=patched if patched.endswith("\n") else patched + "\n",
+            description=(
+                f"Generated by skill {skill.name} — inject probes on {path}"
+            ),
+            finding_addressed=addressed,
+            skill_name=skill.name,
+            target_path=path,
+        ))
+    return out
 
 
 def _eol_upgrade_patch(skill: "Skill", report: AssessmentReport) -> list[GeneratedFile]:
@@ -1138,6 +1437,8 @@ def generate_source_patch_for_skill(
         "db-migration-tooling": _db_migration_tooling_patch,
         "sbom-ci": _sbom_ci_patch,
         "sbom-artifact": _sbom_artifact_patch,
+        "workload-replicas": _workload_replicas_patch,
+        "workload-health-probes": _health_probes_patch,
     }
     gen = generators.get(skill.name)
     if gen is None:

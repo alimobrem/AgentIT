@@ -44,10 +44,10 @@ _SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 _ANALYZER_CATEGORIES = frozenset({
     "license", "sbom", "audit", "policy",
     "backup", "migration", "retention",
-    "secrets", "container", "network", "scanning",
+    "secrets", "container", "network", "scanning", "rbac",
     "iac", "manifests", "resources", "quota",
-    "availability", "scaling", "health",
-    "pipeline", "gitops",
+    "availability", "replicas", "scaling", "health",
+    "pipeline", "tekton_migration", "gitops",
     "eol",
     "instrumentation", "metrics", "logging", "tracing", "dashboards", "alerting",
 })
@@ -72,7 +72,7 @@ class TestSolutionContracts:
     def test_detect_only_categories_refuse_auto_pr(self) -> None:
         for cat in (
             "license", "backup", "retention", "logging",
-            "instrumentation", "secrets",
+            "instrumentation", "secrets", "tracing", "tekton_migration",
         ):
             c = contract_for(cat)
             assert c is not None, cat
@@ -100,9 +100,24 @@ class TestSolutionContracts:
                 assert c.evidence_kind == "detect_only", key
 
     def test_source_findings_clear_via_source(self) -> None:
-        for cat in ("container", "dockerfile", "audit", "eol", "migration", "iac", "manifests", "sbom"):
+        for cat in (
+            "container", "dockerfile", "audit", "eol", "migration",
+            "iac", "manifests", "sbom", "replicas", "health",
+        ):
             assert clears_via_source(cat), cat
             assert contract_for(cat).delivery == "source"
+
+    def test_replicas_and_health_contracts(self) -> None:
+        r = contract_for("replicas")
+        assert r is not None
+        assert r.skill_name == "workload-replicas"
+        assert r.evidence_kind == "workload_replicas"
+        h = contract_for("health")
+        assert h is not None
+        assert h.skill_name == "workload-health-probes"
+        assert h.evidence_kind == "workload_probes"
+        assert "health-probes-policy" in h.refuse_companions
+        assert "labels-only" in (contract_for("policy").clear_evidence or "")
 
     def test_sbom_refuses_tekton_task_and_static_artifact(self) -> None:
         c = contract_for("sbom")
@@ -310,7 +325,8 @@ class TestNewSkillTriggersDoNotCollide:
 
     @pytest.mark.parametrize("skill_name,triggers", [
         ("helm-chart", ["helm", "chart", "iac", "kustomize", "terraform", "k8s manifest", "kubernetes manifest"]),
-        ("health-probes-policy", ["health", "probe", "liveness", "readiness"]),
+        ("workload-health-probes", ["workload-probes", "health-probes-source"]),
+        ("workload-replicas", ["replicas", "multi-replica", "redundancy"]),
     ])
     def test_new_skill_triggers_are_unique(self, all_skills: list, skill_name: str, triggers: list[str]) -> None:
         others = [s for s in all_skills if s.name != skill_name]

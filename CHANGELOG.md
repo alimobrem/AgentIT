@@ -29,18 +29,32 @@ Product contract detail: [`docs/release-notes.md`](docs/release-notes.md).
 - **Image signing good-PR path:** detect `image-signing-exists` (`file_contains: cosign`) → remediable `image_signing` contract → `cosign-sign-task` (keyless Sigstore Tekton Task). Clear-evidence `cosign_sign_task` refuses empty Task / SLSA L3 / hermetic / Konflux theater without `cosign sign`/`attest`. Optional: pin Syft on `sbom-task` to `v1.48.0` (stop `:latest`).
 
 ### Fixed
-- **SBOM clears via CI generation (not static file):** Assess / `sbom-exists`
-  clear when the repo's CI generates an SBOM (`anchore/sbom-action`, Syft
-  workflow step, or Tekton Pipeline `sbom-generate` wire) — **not** a
-  committed `sbom.cdx.json`. `SOLUTION_CONTRACTS.sbom` → `sbom-ci` (source)
-  with clear-evidence `sbom_ci`; refuses bare `sbom-task` and demoted
-  `sbom-artifact` companions. pulse-agent#4 static BOM is wrong product
-  shape — next Scan opens a GHA/Tekton CI PR instead.
+- **Intent-audit mismatches (all remaining):** close the gaps from
+  [`docs/checks-remediations-intent-audit.md`](docs/checks-remediations-intent-audit.md):
+  - **SBOM → CI:** Assess / `sbom-exists` clear when CI generates an SBOM
+    (`anchore/sbom-action`, Syft workflow step, or Tekton Pipeline
+    `sbom-generate` wire) — **not** a committed `sbom.cdx.json`.
+    `SOLUTION_CONTRACTS.sbom` → `sbom-ci` (source) / `sbom_ci`; refuses bare
+    `sbom-task` and demoted `sbom-artifact`. pulse-agent#4 static BOM is
+    wrong product shape — next Scan opens a GHA/Tekton CI PR instead.
+  - **Container subtypes:** path-bound additive USER / HEALTHCHECK / UBI
+    FROM harden on the finding's Dockerfile (pin alone still refuses
+    mismatch; harden clears when directives present).
+  - **`replicas` vs PDB:** analyzer emits `replicas` (→ `workload-replicas`
+    source / `workload_replicas`); `availability` stays PDB-only.
+  - **`health`:** source `workload-health-probes` injects probes into
+    Deployment/Rollout YAML (`workload_probes`); Kyverno
+    `health-probes-policy` is refused companion.
+  - **`pipeline`:** detect skill sees GHA/GitLab/Jenkins/Tekton; non-Tekton
+    CI → `tekton_migration` detect-only (no forced Tekton PR on healthy GHA).
+  - **`tracing`:** detect-only (align instrumentation); collector does not clear.
+  - **`policy`:** honest labels-only clear_evidence text.
+  - **`rbac`:** SecurityAnalyzer emits finding when YAML lacks SA/Role/RoleBinding.
+  - Detect skill rename: `secrets-scanning-in-ci` → `vulnerability-scanning-in-ci`.
 - **`dockerfile_pin` path-bound (pulse-agent#2 class):** clear-evidence binds
   each container `:latest` finding to its Dockerfile/Containerfile — pinning
   `Dockerfile` alone no longer clears `:latest` on `Dockerfile.deps` / `.fast`.
-  HEALTHCHECK / USER(root) findings refuse via `dockerfile_pin` (mismatch);
-  non-UBI findings require a UBI/Red Hat `FROM` on the finding's file.
+  HEALTHCHECK / USER / non-UBI require matching evidence on that file.
 - **Shallow-PR clear-evidence harden (skills audit):** dedicated evidence kinds
   replace bare `cluster_kind` for the top shallow Scan skills —
   `image_scan_task` (trivy/grype/snyk + refuse empty Task / `:latest` step

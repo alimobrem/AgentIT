@@ -1,35 +1,31 @@
 ---
 name: health-probes-policy
 domain: infrastructure
-version: 1
+version: 2
 triggers:
-  - health
-  - probe
-  - liveness
-  - readiness
+  - kyverno-health-probes
+  - mutate-probes
 outputs:
   - Policy
 property: "Every container in this app's namespace has liveness and readiness probes configured"
 mode: template
 ---
 
-# Health Probes — Kyverno Mutate Policy
+# Health Probes — Kyverno Mutate Policy (companion)
 
 ## Property
 Kubernetes can detect and restart a hung/unready container only if that
-container declares a `livenessProbe`/`readinessProbe`. `ha_dr.py:54-61`'s
-`health` finding fires when no manifest anywhere in the app's **source
-repo** mentions either — a plain text scan (`ha_dr.py:18-28`:
-`"livenessProbe" in content or "readinessProbe" in content`).
+container declares a `livenessProbe`/`readinessProbe`.
 
-## Why a mutate policy, not a Deployment patch
-This finding is fundamentally different from `iac`/`manifests`/`quota`/
-`scaling`: a probe is not a standalone resource — it's a patch to a
-container spec inside a Deployment/Rollout AgentIT does **not** own the
-base definition of (unlike `ResourceQuota`/`HorizontalPodAutoscaler`, which
-are new, additive resources with no pre-existing owner). Three real,
-already-proven precedents in this codebase rule out the two more direct
-alternatives:
+## Status: companion, not primary clear
+**Primary remediation** for Assess `health` is source skill
+`workload-health-probes` (injects probes into Deployment/Rollout YAML;
+clear-evidence `workload_probes`). This Kyverno mutate Policy is optional —
+`SOLUTION_CONTRACTS.health` refuses it as the clearing surface because
+Assess scans **repo text**, not live mutation.
+
+## Historical note (why this skill existed as primary)
+Previously preferred over a Deployment patch for these reasons:
 
 1. **Source-repo patch to an existing manifest** — `ha_dr.py`'s `Finding`
    for `health` carries no `file_path`, and this codebase's skill

@@ -203,7 +203,7 @@ Full scoring math (penalties, overall average, PR impact): [score-methodology.md
 
 | Dimension | Analyzer | Detections (skills) | Examples |
 | --- | --- | --- | --- |
-| `security` | SecurityAnalyzer | containerfile-exists, network-policy-exists, secrets-scanning-in-ci | `:latest`, missing NetPol, secrets in CI |
+| `security` | SecurityAnalyzer | containerfile-exists, network-policy-exists, vulnerability-scanning-in-ci | `:latest`, missing NetPol, vulns in CI |
 | `observability` | ObservabilityAnalyzer | health-probes-check, prometheus-metrics-exists, structured-logging-detected | probes, metrics, logging |
 | `cicd` | CICDAnalyzer | ci-pipeline-exists, dockerfile-exists, argocd-application-exists | pipeline, Dockerfile, GitOps |
 | `infrastructure` | InfrastructureAnalyzer | helm-chart-exists, k8s-deployment-exists, resource-quota-exists | Helm/IaC, quota, EOL |

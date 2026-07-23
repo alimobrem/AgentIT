@@ -3987,7 +3987,8 @@ async def test_skill_detail_page_surfaces_detect_rule_content(client):
     assert "Rule Type" in resp.text
     assert "file_exists" in resp.text
     assert ".gitlab-ci.yml" in resp.text
-    assert "No GitLab CI pipeline configuration found" in resp.text
+    assert ".github/workflows" in resp.text
+    assert "No CI/CD pipeline configuration found" in resp.text
 
 
 async def test_agent_detail_renders_for_never_run_onboarding_agent(client, _override_store):

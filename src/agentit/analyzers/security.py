@@ -79,6 +79,7 @@ class SecurityAnalyzer:
         findings.extend(self._check_network_policies(repo_path))
         findings.extend(self._check_scanning(repo_path))
         findings.extend(self._check_base_image(repo_path))
+        findings.extend(self._check_rbac(repo_path))
 
         return DimensionScore(
             dimension="security",
@@ -275,6 +276,33 @@ class SecurityAnalyzer:
                     source="analyzer:security",
                 ))
         return findings
+
+    def _check_rbac(self, repo_path: Path) -> list[Finding]:
+        """Emit rbac when K8s manifests exist but no SA/Role/RoleBinding."""
+        seen_yaml = False
+        has_rbac = False
+        for _, content in iter_yaml_files(repo_path):
+            seen_yaml = True
+            if any(
+                kind in content
+                for kind in (
+                    "kind: ServiceAccount",
+                    "kind: Role",
+                    "kind: RoleBinding",
+                    "kind: ClusterRoleBinding",
+                )
+            ):
+                has_rbac = True
+                break
+        if not seen_yaml or has_rbac:
+            return []
+        return [Finding(
+            category="rbac",
+            severity=Severity.medium,
+            description="No ServiceAccount/Role/RoleBinding manifests found",
+            recommendation="Add a dedicated ServiceAccount with least-privilege Role/RoleBinding",
+            source="analyzer:security",
+        )]
 
 
 def _is_secret_scan_excluded(file_path: Path, rel_path: str) -> bool:
