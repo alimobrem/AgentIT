@@ -84,8 +84,11 @@ def test_clone_assess_cleanup_uses_concurrency_slot(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_github_push_busy_releases_claim_for_retry(portal_client, monkeypatch):
-    """503 busy must not leave X-GitHub-Delivery stuck as duplicate forever."""
+    """202 + background busy exhaustion must release the claim for retry."""
+    import asyncio
+
     from agentit.portal.helpers import AssessBusyError
+    import agentit.portal.routes.webhooks as wh
 
     client, store, aid = portal_client
     report = await store.get(aid)
@@ -96,6 +99,13 @@ async def test_github_push_busy_releases_claim_for_retry(portal_client, monkeypa
     import agentit.portal.helpers as helpers
 
     helpers._assess_slots_configured_for = -1
+    monkeypatch.setattr(wh, "_PUSH_BUSY_RETRIES", 1)
+    monkeypatch.setattr(wh, "_PUSH_BUSY_SLEEP_SECONDS", 0)
+
+    async def _no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
 
     with patch(
         "agentit.portal.routes.webhooks.clone_assess_cleanup",
@@ -119,9 +129,9 @@ async def test_github_push_busy_releases_claim_for_retry(portal_client, monkeypa
             },
         )
 
-    assert resp.status_code == 503
-    assert resp.json()["status"] == "busy"
-    assert resp.headers.get("retry-after") == "30"
+    assert resp.status_code == 202
+    assert resp.json()["status"] == "accepted"
+    # Background task should have released the incomplete claim.
     assert await store.claim_webhook("busy-release-delivery-1") is True
 
 

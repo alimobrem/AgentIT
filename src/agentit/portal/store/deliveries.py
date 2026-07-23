@@ -193,32 +193,50 @@ class DeliveriesMixin:
         )
         return row["cnt"] if row else 0
 
-    async def claim_webhook(self, delivery_id: str) -> bool:
+    async def claim_webhook(
+        self, delivery_id: str, *, stale_after_seconds: int = 900,
+    ) -> bool:
         """Atomically claim a webhook delivery for processing.
 
-        Unlike the now-deleted `webhook_already_processed()` +
-        `mark_webhook_processed()` (a check-then-act pair with a race
-        window between the two round trips), this does the check-and-mark
-        as a single INSERT relying on
-        `processed_webhooks.delivery_id`'s PRIMARY KEY constraint: only one
-        concurrent caller for a given delivery_id can ever get a row back
-        from `RETURNING`. Callers must call this *before* doing any of the
-        delivery's real work, and only proceed if it returns True.
+        Inserts ``completed=FALSE`` (in-flight). A prior incomplete claim
+        older than ``stale_after_seconds`` may be reclaimed (crashed
+        background worker). Completed claims never reclaim — true dedup.
+        Callers must ``complete_webhook_claim`` on success or
+        ``release_webhook_claim`` on any hard failure.
         """
+        from datetime import timedelta
+
         row = await self._pool.fetchrow(
-            "INSERT INTO processed_webhooks (delivery_id, processed_at) VALUES ($1, $2) "
-            "ON CONFLICT (delivery_id) DO NOTHING RETURNING delivery_id",
-            delivery_id, _now(),
+            """
+            INSERT INTO processed_webhooks (delivery_id, processed_at, completed)
+            VALUES ($1, $2, FALSE)
+            ON CONFLICT (delivery_id) DO UPDATE
+            SET processed_at = EXCLUDED.processed_at, completed = FALSE
+            WHERE processed_webhooks.completed = FALSE
+              AND processed_webhooks.processed_at < $3
+            RETURNING delivery_id
+            """,
+            delivery_id, _now(), _now() - timedelta(seconds=stale_after_seconds),
         )
         return row is not None
+
+    async def complete_webhook_claim(self, delivery_id: str) -> None:
+        """Mark a claimed delivery fully processed (dedup forever)."""
+        await self._pool.execute(
+            """
+            UPDATE processed_webhooks
+            SET completed = TRUE, processed_at = $2
+            WHERE delivery_id = $1
+            """,
+            delivery_id, _now(),
+        )
 
     async def release_webhook_claim(self, delivery_id: str) -> None:
         """Drop a prior ``claim_webhook`` so the same delivery_id can retry.
 
-        Used when the portal fails soft before doing real work (e.g. assess
-        concurrency slot busy → HTTP 503). Without this, GitHub's automatic
-        redelivery of the same ``X-GitHub-Delivery`` would hit the duplicate
-        short-circuit forever and never reassess.
+        Used when background assess fails hard or exhausts busy-retries.
+        Without this, GitHub's automatic redelivery of the same
+        ``X-GitHub-Delivery`` would hit the duplicate short-circuit forever.
         """
         await self._pool.execute(
             "DELETE FROM processed_webhooks WHERE delivery_id = $1",

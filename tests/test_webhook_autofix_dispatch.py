@@ -73,9 +73,9 @@ class TestWebhookAutoFixDispatchIsNotDiscarded:
                 headers={"X-GitHub-Event": "push"},
             )
 
-        assert resp.status_code == 200
+        assert resp.status_code == 202
         body = resp.json()
-        assert body["status"] == "assessed"
+        assert body["status"] == "accepted"
 
         # 1. Persisted as a durable, queryable fact -- not just generated
         # in memory and discarded.
@@ -109,7 +109,7 @@ class TestWebhookAutoFixDispatchIsNotDiscarded:
                 headers={"X-GitHub-Event": "push"},
             )
 
-        assert resp.status_code == 200
+        assert resp.status_code == 202
 
         events = await store.list_events(target_app=old_report.repo_name, limit=50)
         actions = [e["action"] for e in events]

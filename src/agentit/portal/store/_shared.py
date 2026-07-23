@@ -280,8 +280,15 @@ CREATE TABLE IF NOT EXISTS scheduled_operations (
 
 CREATE TABLE IF NOT EXISTS processed_webhooks (
     delivery_id TEXT PRIMARY KEY,
-    processed_at TIMESTAMPTZ NOT NULL
+    processed_at TIMESTAMPTZ NOT NULL,
+    -- FALSE while background work runs; TRUE only when assess/verify
+    -- finished successfully. Incomplete rows older than the claim TTL
+    -- may be reclaimed so a crashed worker cannot block GitHub forever.
+    completed BOOLEAN NOT NULL DEFAULT TRUE
 );
+
+ALTER TABLE processed_webhooks
+    ADD COLUMN IF NOT EXISTS completed BOOLEAN NOT NULL DEFAULT TRUE;
 
 -- Per-app mutex for the actual delivery-commit step (route_and_deliver()),
 -- closing the race github_pr.py's fixed agentit/{app} branch name +
