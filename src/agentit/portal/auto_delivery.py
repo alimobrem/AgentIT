@@ -720,6 +720,7 @@ async def auto_validate_and_deliver(
                 from agentit.remediation.source_patches import (
                     apply_containerfile_pin_only,
                     enrich_sbom_from_repo,
+                    enrich_workload_files_from_repo,
                 )
 
                 token = ghp._get_token()
@@ -756,6 +757,11 @@ async def auto_validate_and_deliver(
                     cluster_files = enrich_audit_files_from_paths(
                         cluster_files, tree_paths=tree_paths, read_file=_read,
                     )
+                    cluster_files, workload_drops = enrich_workload_files_from_repo(
+                        cluster_files, read_file=_read, tree_paths=tree_paths,
+                    )
+                    if workload_drops:
+                        drop_reasons = list(drop_reasons or []) + workload_drops
                 # Already-wired repos drop orphan audit stubs — strip the
                 # audit finding so we do not refuse / open theater.
                 if before_audit and not any(

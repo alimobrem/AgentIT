@@ -2,6 +2,18 @@
 
 Assess ``replicas`` / ``health`` findings scan app-repo YAML. Clear-evidence
 requires the same shapes in staged files — not a Kyverno mutate Policy alone.
+
+A Helm-templated workload never has a literal ``replicas: <digit>`` line —
+it references a values key (``replicas: {{ .Values.replicaCount }}``), so
+none of the plain-text helpers below can find or safely patch it in place
+(inserting a second, literal ``replicas:`` key next to the templated one
+would corrupt the chart, not fix it). ``helm_templated_replicas_key`` /
+``chart_root_for_template_path`` / ``patch_values_numeric_key`` exist so a
+caller with real repo access (``source_patches.enrich_workload_files_from_repo``)
+can detect that indirection and patch the chart's own ``values.yaml``
+instead — the same "prove the file you're patching actually attaches to the
+live workload" lesson ``self_managed_hpa.py`` / ``fleet_hpa.py`` already
+apply to HPA ``scaleTargetRef``.
 """
 from __future__ import annotations
 
@@ -20,6 +32,19 @@ _LIVENESS = re.compile(r"^\s*livenessProbe\s*:", re.IGNORECASE | re.MULTILINE)
 _READINESS = re.compile(r"^\s*readinessProbe\s*:", re.IGNORECASE | re.MULTILINE)
 _CONTAINERS = re.compile(
     r"^([ \t]*)containers:\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+# ``replicas: {{ .Values.replicaCount }}`` (optionally ``{{- ... -}}``/quoted).
+_HELM_REPLICAS_TEMPLATE_RE = re.compile(
+    r"^[ \t]*replicas:\s*[\"']?\{\{-?\s*\.Values\.([A-Za-z0-9_.]+)\s*-?\}\}[\"']?\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+# A top-level (unindented) ``replicaCount: N`` / ``replicas: N`` style key in
+# a chart's values.yaml — deliberately loose on the key name (charts vary),
+# strict on "top-level" to avoid ambiguously patching/matching a nested key
+# with the same leaf name under a different parent.
+_VALUES_REPLICA_KEY_RE = re.compile(
+    r"^(\w*replica\w*):\s*[\"']?(\d+)[\"']?",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -144,12 +169,87 @@ def patch_health_probes(content: str) -> str:
     return body[:start] + new_chunk + body[insert_at:]
 
 
+def helm_templated_replicas_key(content: str) -> str | None:
+    """The ``.Values.<key>`` a workload's ``replicas:`` line references, if any.
+
+    ``None`` for a non-workload doc, a workload with a literal replicas
+    count, or one with no ``replicas:`` line at all.
+    """
+    if not is_workload_manifest(content or ""):
+        return None
+    m = _HELM_REPLICAS_TEMPLATE_RE.search(content or "")
+    return m.group(1) if m else None
+
+
+def chart_root_for_template_path(path: str) -> str | None:
+    """``chart/templates/deployment.yaml`` -> ``"chart"``; ``"templates/x.yaml"``
+    -> ``""`` (top-level chart). ``None`` when ``path`` has no ``templates/``
+    segment at all — not a Helm chart template path."""
+    parts = (path or "").replace("\\", "/").split("/")
+    if "templates" not in parts:
+        return None
+    idx = parts.index("templates")
+    return "/".join(parts[:idx])
+
+
+def values_yaml_path_for_chart(chart_root: str) -> str:
+    return f"{chart_root}/values.yaml" if chart_root else "values.yaml"
+
+
+def values_yaml_replicas_at_least(content: str, minimum: int = 2) -> bool:
+    """True when a chart's values.yaml declares a top-level replica-count
+    key (``replicaCount`` and similar) >= ``minimum``. The literal
+    Deployment/Rollout YAML never carries the number itself once a chart
+    templates ``replicas:`` via ``{{ .Values.<key> }}``."""
+    for m in _VALUES_REPLICA_KEY_RE.finditer(content or ""):
+        try:
+            if int(m.group(2)) >= minimum:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def patch_values_numeric_key(content: str, key: str, *, minimum: int = 2) -> str | None:
+    """Bump a top-level ``key: <int>`` line in ``values.yaml`` content.
+
+    Returns the input unchanged when already ``>= minimum``, or ``None``
+    when ``key`` is nested (contains ``.``) or is not a plain numeric
+    top-level scalar in ``content`` — refuse rather than guess at an
+    ambiguous or absent chart key.
+    """
+    if not key or "." in key:
+        return None
+    pattern = re.compile(
+        rf"^({re.escape(key)}):([ \t]*)[\"']?(\d+)[\"']?([ \t]*#.*)?[ \t]*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    m = pattern.search(content or "")
+    if not m:
+        return None
+    try:
+        current = int(m.group(3))
+    except ValueError:
+        return None
+    if current >= minimum:
+        return content or ""
+    sep = m.group(2) or " "
+    comment = m.group(4) or ""
+    new_line = f"{m.group(1)}:{sep}{minimum}{comment}"
+    body = content or ""
+    return body[: m.start()] + new_line + body[m.end():]
+
+
 def verify_workload_replicas(files: list[dict[str, Any]], *, minimum: int = 2) -> tuple[bool, str]:
     for entry in files:
         path = str(entry.get("target_path") or entry.get("path") or "")
         content = str(entry.get("content") or "")
         if replicas_at_least(content, minimum=minimum):
             return True, f"replicas>={minimum} in {path or 'staged workload'}"
+        if path.endswith("values.yaml") and values_yaml_replicas_at_least(
+            content, minimum=minimum,
+        ):
+            return True, f"replica count>={minimum} in {path} (chart values)"
     return False, f"no Deployment/Rollout with replicas>={minimum} in staged files"
 
 

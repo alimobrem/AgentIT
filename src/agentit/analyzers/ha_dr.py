@@ -11,21 +11,44 @@ class HADRAnalyzer:
     dimension = "ha_dr"
 
     def analyze(self, repo_path: Path) -> DimensionScore:
+        from agentit.remediation.workload_patches import (
+            helm_templated_replicas_key,
+            values_yaml_replicas_at_least,
+        )
+
         findings: list[Finding] = []
         has_replicas = False
         has_pdb = False
         has_hpa = False
         has_health_probes = False
+        # A Helm-templated workload's ``replicas:`` line is never a literal
+        # digit (``{{ .Values.replicaCount }}``) — collect the referenced
+        # values keys and every values.yaml's content so a real chart
+        # replica count set via ``values.yaml`` (the idiomatic Helm fix)
+        # clears this finding, instead of it staying open forever because
+        # the raw template text never contains the number itself.
+        templated_replica_keys: list[str] = []
+        values_yaml_texts: list[str] = []
 
-        for _, content in iter_yaml_files(repo_path):
+        for path, content in iter_yaml_files(repo_path):
             if re.search(r"replicas:\s*([2-9]|\d{2,})", content):
                 has_replicas = True
+            helm_key = helm_templated_replicas_key(content)
+            if helm_key is not None:
+                templated_replica_keys.append(helm_key)
+            if path.name in ("values.yaml", "values.yml"):
+                values_yaml_texts.append(content)
             if "PodDisruptionBudget" in content:
                 has_pdb = True
             if "HorizontalPodAutoscaler" in content:
                 has_hpa = True
             if "livenessProbe" in content or "readinessProbe" in content:
                 has_health_probes = True
+
+        if not has_replicas and templated_replica_keys:
+            has_replicas = any(
+                values_yaml_replicas_at_least(text) for text in values_yaml_texts
+            )
 
         if not has_replicas:
             findings.append(Finding(

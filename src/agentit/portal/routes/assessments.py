@@ -1314,16 +1314,29 @@ async def deliver(request: Request, assessment_id: str):
                 status_code=303,
             )
         # Populate empty SBOM shells before clear-evidence (same bar as Scan
-        # auto_delivery — refuse components: []).
+        # auto_delivery — refuse components: []) and re-target workload
+        # replicas/health-probes stubs at the app's real Deployment/Rollout
+        # (or its chart's values.yaml) instead of a fabricated stand-in —
+        # same enrichment auto_validate_and_deliver already runs, closing
+        # the manual-Deliver parity gap for this specific class of theater.
         repo_url = getattr(report, "repo_url", None) or ""
-        if repo_url and any(
+        needs_sbom_enrich = any(
             (f.get("skill_name") or "").lower().replace("_", "-") == "sbom-artifact"
             or "sbom" in str(f.get("target_path") or "").lower()
             for f in kept_files
-        ):
+        )
+        needs_workload_enrich = any(
+            (f.get("skill_name") or "").lower().replace("_", "-")
+            in ("workload-replicas", "workload-health-probes")
+            for f in kept_files
+        )
+        if repo_url and (needs_sbom_enrich or needs_workload_enrich):
             try:
                 from agentit.portal import github_pr as ghp
-                from agentit.remediation.source_patches import enrich_sbom_from_repo
+                from agentit.remediation.source_patches import (
+                    enrich_sbom_from_repo,
+                    enrich_workload_files_from_repo,
+                )
 
                 token = ghp._get_token()
                 hdrs = ghp._headers(token)
@@ -1339,15 +1352,22 @@ async def deliver(request: Request, assessment_id: str):
                         base_url, hdrs, path, default_branch,
                     )
 
-                kept_files = enrich_sbom_from_repo(
-                    kept_files,
-                    read_file=_read,
-                    tree_paths=tree_paths or None,
-                    app_name=getattr(report, "repo_name", None),
-                )
+                if needs_sbom_enrich:
+                    kept_files = enrich_sbom_from_repo(
+                        kept_files,
+                        read_file=_read,
+                        tree_paths=tree_paths or None,
+                        app_name=getattr(report, "repo_name", None),
+                    )
+                if needs_workload_enrich and tree_paths:
+                    kept_files, workload_drops = enrich_workload_files_from_repo(
+                        kept_files, read_file=_read, tree_paths=tree_paths,
+                    )
+                    if workload_drops:
+                        drop_reasons = list(drop_reasons or []) + workload_drops
             except Exception:
                 log.info(
-                    "Manual Deliver SBOM enrich skipped for %s",
+                    "Manual Deliver SBOM/workload enrich skipped for %s",
                     assessment_id, exc_info=True,
                 )
         sim_ok, sim_reason = clear_evidence_simulation_ok(kept_files, gate_findings)
