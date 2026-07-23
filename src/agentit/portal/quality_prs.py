@@ -403,6 +403,7 @@ def build_helpful_pr_body(
     drop_reasons: list[str] | None = None,
     score_dimensions: list[str] | None = None,
     shared_ns_note: str = "",
+    llm_review: dict | None = None,
 ) -> str:
     """Phase D: finding → change → expected outcome (reviewable from GitHub alone)."""
     finding_lines = []
@@ -467,6 +468,21 @@ def build_helpful_pr_body(
         parts.extend([
             "### Not included (filtered)",
             *[f"- {r}" for r in drop_reasons[:20]],
+            "",
+        ])
+    if llm_review is not None and not llm_review.get("approved", True):
+        reason = str(llm_review.get("reason") or "").strip()
+        concerns = llm_review.get("concerns") or []
+        if not isinstance(concerns, list):
+            concerns = []
+        concern_lines = [f"- {c}" for c in concerns[:10] if str(c).strip()]
+        parts.extend([
+            "### LLM review concerns",
+            (
+                "Final LLM review flagged concerns (non-blocking — human gate "
+                "remains merge). " + (reason or "See concerns below.")
+            ),
+            *(concern_lines or []),
             "",
         ])
     parts.extend([

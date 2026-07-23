@@ -8,6 +8,7 @@ from agentit.remediation.clear_evidence import (
     COSIGN_SIGN_TASK,
     GRAFANA_DASHBOARD,
     IMAGE_SCAN_TASK,
+    SBOM_CI,
     SBOM_FILE,
     SELECTOR_TARGET,
     DOCKERFILE_PIN,
@@ -20,6 +21,7 @@ from agentit.remediation.clear_evidence import (
     verify_cosign_sign_task,
     verify_grafana_dashboard,
     verify_image_scan_task,
+    verify_sbom_ci,
     verify_sbom_file,
     verify_dockerfile_pin,
     verify_hpa_target,
@@ -511,7 +513,7 @@ class TestSimulationGate:
         assert contract_for("scaling").evidence_kind == HPA_TARGET
         assert contract_for("migration").evidence_kind == MIGRATION_TOOLING
         assert contract_for("image_signing").evidence_kind == COSIGN_SIGN_TASK
-        assert contract_for("sbom").evidence_kind == SBOM_FILE
+        assert contract_for("sbom").evidence_kind == SBOM_CI
         assert contract_for("scanning").evidence_kind == IMAGE_SCAN_TASK
         assert contract_for("dashboards").evidence_kind == GRAFANA_DASHBOARD
         assert contract_for("availability").evidence_kind == SELECTOR_TARGET
@@ -613,69 +615,99 @@ class TestCosignSignTask:
         assert "image_signing" in reason or "Clear-evidence" in reason
 
 
-class TestSbomFile:
+class TestSbomCi:
+    _GHA = (
+        "name: SBOM\non: [push]\njobs:\n  sbom:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - uses: actions/checkout@v4\n"
+        "      - uses: anchore/sbom-action@v0.24.0\n"
+        "        with:\n          format: cyclonedx-json\n"
+    )
     _REAL_CDX = (
         '{"bomFormat":"CycloneDX","specVersion":"1.5",'
         '"components":[{"type":"library","name":"flask","version":"3.0.0",'
         '"purl":"pkg:pypi/flask@3.0.0"}]}\n'
     )
 
-    def test_allows_cyclonedx_with_components(self) -> None:
-        ok, reason = verify_sbom_file([{
+    def test_allows_gha_sbom_action(self) -> None:
+        ok, reason = verify_sbom_ci([{
+            "target_path": ".github/workflows/sbom.yml",
+            "content": self._GHA,
+            "skill_name": "sbom-ci",
+        }])
+        assert ok, reason
+        assert "anchore/sbom-action" in reason
+
+    def test_allows_tekton_pipeline_wire(self) -> None:
+        ok, reason = verify_sbom_ci([{
+            "target_path": "app-sbom-pipeline.yaml",
+            "content": (
+                "apiVersion: tekton.dev/v1\nkind: Pipeline\n"
+                "metadata:\n  name: app-pipeline\n"
+                "spec:\n  tasks:\n"
+                "    - name: sbom-generate\n"
+                "      taskRef:\n        name: app-sbom\n"
+            ),
+            "skill_name": "sbom-ci",
+        }])
+        assert ok, reason
+
+    def test_refuses_static_cyclonedx(self) -> None:
+        ok, reason = verify_sbom_ci([{
             "target_path": "sbom.cdx.json",
             "content": self._REAL_CDX,
             "skill_name": "sbom-artifact",
         }])
-        assert ok, reason
-
-    def test_refuses_empty_components_shell(self) -> None:
-        ok, reason = verify_sbom_file([{
-            "target_path": "sbom.cdx.json",
-            "content": '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}\n',
-            "skill_name": "sbom-artifact",
-        }])
         assert not ok
-        assert "empty components" in reason
+        assert "static" in reason.lower() or "CI" in reason
 
-    def test_refuses_empty_json_theater(self) -> None:
-        ok, reason = verify_sbom_file([{
-            "target_path": "sbom.json",
-            "content": "{}\n",
-            "skill_name": "sbom-artifact",
-        }])
-        assert not ok
-
-    def test_refuses_tekton_task_wrong_layer(self) -> None:
-        ok, reason = verify_sbom_file([{
+    def test_refuses_bare_sbom_task(self) -> None:
+        ok, reason = verify_sbom_ci([{
             "target_path": "apps/pinky/sbom-task.yaml",
-            "content": "apiVersion: tekton.dev/v1\nkind: Task\nmetadata:\n  name: x\n",
+            "content": (
+                "apiVersion: tekton.dev/v1\nkind: Task\n"
+                "metadata:\n  name: pinky-sbom\n"
+                "spec:\n  steps:\n"
+                "  - name: generate-sbom\n"
+                "    image: anchore/syft:v1.48.0\n"
+                "    args: [$(params.IMAGE), --output, cyclonedx-json=/ws/sbom.json]\n"
+            ),
             "skill_name": "sbom-task",
         }])
         assert not ok
-        assert "Task" in reason
+        assert "bare" in reason.lower() or "Task" in reason
 
-    def test_simulation_allows_sbom_source_pr(self) -> None:
+    def test_simulation_allows_gha_pr(self) -> None:
+        files = [{
+            "target_path": ".github/workflows/sbom.yml",
+            "content": self._GHA,
+            "skill_name": "sbom-ci",
+        }]
+        ok, reason = clear_evidence_simulation_ok(
+            files, [("sbom", "No SBOM generation in CI")],
+        )
+        assert ok, reason
+
+    def test_simulation_refuses_static_file_pr(self) -> None:
         files = [{
             "target_path": "sbom.cdx.json",
             "content": self._REAL_CDX,
             "skill_name": "sbom-artifact",
         }]
         ok, reason = clear_evidence_simulation_ok(
-            files, [("sbom", "No SBOM (Software Bill of Materials) found")],
-        )
-        assert ok, reason
-
-    def test_simulation_refuses_empty_components_shell(self) -> None:
-        files = [{
-            "target_path": "sbom.cdx.json",
-            "content": '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}\n',
-            "skill_name": "sbom-artifact",
-        }]
-        ok, reason = clear_evidence_simulation_ok(
-            files, [("sbom", "No SBOM (Software Bill of Materials) found")],
+            files, [("sbom", "No SBOM generation in CI")],
         )
         assert not ok
-        assert "empty components" in reason or "sbom" in reason.lower()
+        assert "sbom" in reason.lower()
+
+    def test_legacy_verify_sbom_file_still_accepts_components(self) -> None:
+        # Demoted fallback helper — not the contract evidence_kind.
+        ok, reason = verify_sbom_file([{
+            "target_path": "sbom.cdx.json",
+            "content": self._REAL_CDX,
+            "skill_name": "sbom-artifact",
+        }])
+        assert ok, reason
+        assert SBOM_FILE == "sbom_file"
 
 
 _GOOD_SCAN_TASK = (

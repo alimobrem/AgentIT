@@ -3,10 +3,8 @@ name: sbom-artifact
 domain: compliance
 version: 1
 triggers:
-  - sbom
   - bom
-  - software
-  - bill
+  - cyclonedx
 outputs:
   - sbom.cdx.json
 delivery: source
@@ -14,29 +12,27 @@ property: "Application repo carries a CycloneDX Software Bill of Materials artif
 mode: template
 ---
 
-# SBOM Artifact (source patch)
+# SBOM Artifact (source patch) — demoted fallback
+
+> **Not the primary auto_pr path.** Compliance `sbom` clears via
+> **`sbom-ci`** (CI generation). This skill remains only as an optional
+> fallback when no CI can be wired, with honest messaging that Assess
+> still expects CI SBOM generation.
 
 ## Property
-App repo carries a CycloneDX SBOM so Assess can clear compliance `sbom`.
+App repo carries a CycloneDX SBOM file. Prefer CI generation instead.
 
-## Why not sbom-task
-Cluster Tekton `sbom-task` does **not** clear Assess (file scan in app repo).
-Same wrong-layer class as audit-policy vs app-audit-logging.
-
-## How the BOM is built
-1. Prefer **Syft** (`syft <repo> -o cyclonedx-json`) when available on PATH
-2. Else inventory from lockfiles / manifests already in the repo:
-   `requirements.txt`, `pyproject.toml`, `package.json` / `package-lock.json`,
-   `go.mod`, `Pipfile`, `Cargo.toml`, `Gemfile`, `pom.xml`, `composer.json`
-3. Delivery enrichment runs before clear-evidence so Scan/Deliver never open
-   an empty shell
+## Why demoted
+Product truth: Assess / clear-evidence look for CI SBOM steps
+(`anchore/sbom-action`, Syft workflow, Tekton Pipeline wire) — not a
+committed static `sbom.cdx.json`. Scan must not open this as the primary
+remediation for `sbom` (`SOLUTION_CONTRACTS` refuses it as companion).
 
 ## Constraints
 - Real CycloneDX at `sbom.cdx.json` with **non-empty** `components`
-- Clear-evidence `sbom_file` refuses `{}`, Tekton Task YAML, and
-  `components: []` theater
+- Does **not** satisfy clear-evidence `sbom_ci`
 - `delivery: source` only
 
 ## Verification
-- `jq -e '.bomFormat == "CycloneDX" and (.components | length) > 0' sbom.cdx.json`
-- Re-Assess: `sbom` finding resolved
+- Prefer: merge a `sbom-ci` workflow PR, then re-Assess
+- This artifact alone will **not** clear the `sbom` finding on tip

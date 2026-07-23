@@ -40,8 +40,10 @@ GRAFANA_DASHBOARD = "grafana_dashboard"
 SELECTOR_TARGET = "selector_target"
 # Argo CD Application with real source.repoURL + path/chart.
 ARGOCD_APPLICATION = "argocd_application"
-# App-repo CycloneDX/SPDX artifact — clears compliance ``sbom`` finding.
+# App-repo CycloneDX/SPDX artifact — legacy / fallback only (not primary clear).
 SBOM_FILE = "sbom_file"
+# CI generates SBOM (GHA anchore/sbom-action / syft, or Tekton Pipeline wire).
+SBOM_CI = "sbom_ci"
 # Non-skill sentinel (patch_base_image) — same pin check as dockerfile.
 BASE_IMAGE_PIN = "base_image_pin"
 
@@ -599,14 +601,23 @@ def verify_cluster_kind(files: list[dict], kinds: frozenset[str]) -> tuple[bool,
 
 
 
-def verify_sbom_file(files: list[dict]) -> tuple[bool, str]:
-    """True when staged files include a CycloneDX/SPDX SBOM artifact.
+def verify_sbom_ci(files: list[dict]) -> tuple[bool, str]:
+    """True when staged files add CI SBOM generation (not a static BOM file).
 
-    Matches ComplianceAnalyzer / ``sbom-exists`` filename globs (``*sbom*`` /
-    ``*bom*``) but refuses empty ``{}`` theater and CycloneDX shells with
-    ``components: []`` — require bomFormat/SPDX markers *and* at least one
-    component so Scan PRs have supply-chain value (founder bar: merge clears
-    finding with a real BOM).
+    Product path: ``anchore/sbom-action`` / Syft in workflow, or Tekton
+    Pipeline that wires an sbom step. Refuses bare ``sbom-task`` and static
+    ``sbom.cdx.json`` as clear evidence.
+    """
+    from agentit.remediation.sbom_ci import staged_has_ci_sbom
+
+    return staged_has_ci_sbom(files)
+
+
+def verify_sbom_file(files: list[dict]) -> tuple[bool, str]:
+    """Legacy: CycloneDX/SPDX artifact clear (demoted; primary path is ``sbom_ci``).
+
+    Kept for fallback / older tests. Refuses empty ``{}`` theater and
+    CycloneDX shells with ``components: []``.
     """
     import json
 
@@ -987,6 +998,8 @@ def verify_evidence(
         )
     if evidence_kind == ARGOCD_APPLICATION:
         return verify_argocd_application(files, tree_paths=tree_paths)
+    if evidence_kind == SBOM_CI:
+        return verify_sbom_ci(files)
     if evidence_kind == SBOM_FILE:
         return verify_sbom_file(files)
     return False, f"unknown evidence_kind {evidence_kind!r}"

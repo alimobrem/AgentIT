@@ -156,20 +156,33 @@ class TestLicenseFileExistsParity:
 
 
 class TestSbomExistsParity:
-    """Ported from `checks/compliance/sbom.yaml` (deleted in this commit)
-    to `skills/compliance/sbom-exists.md`."""
+    """CI-generation detect (product correction): clears on anchore/sbom-action
+    or Pipeline ``sbom-generate``, not a static ``*sbom*`` filename."""
 
     SKILL_PATH = SKILLS_DIR / "compliance" / "sbom-exists.md"
 
-    def test_fires_when_no_sbom_file(self, create_mock_repo) -> None:
-        finding = _fires(self.SKILL_PATH, create_mock_repo, {"main.py": "print('hi')\n"})
+    def test_fires_when_no_ci_sbom(self, create_mock_repo) -> None:
+        finding = _fires(self.SKILL_PATH, create_mock_repo, {
+            "main.py": "print('hi')\n",
+            "sbom.cdx.json": '{"bomFormat":"CycloneDX","components":[]}\n',
+        })
         assert finding.category == "sbom"
         assert finding.severity == Severity.high
-        assert finding.description == "No SBOM (Software Bill of Materials) found"
-        assert finding.recommendation == "Generate SBOM using Syft, store in ODF"
+        assert finding.description == "No SBOM generation in CI"
+        assert "anchore/sbom-action" in finding.recommendation
 
-    def test_passes_when_sbom_file_present(self, create_mock_repo) -> None:
-        _passes(self.SKILL_PATH, create_mock_repo, {"sbom.json": "{}\n"})
+    def test_passes_when_gha_sbom_action_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {
+            ".github/workflows/sbom.yml": (
+                "jobs:\n  sbom:\n    steps:\n"
+                "      - uses: anchore/sbom-action@v0.24.0\n"
+            ),
+        })
+
+    def test_passes_when_pipeline_sbom_generate_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {
+            "pipeline.yaml": "spec:\n  tasks:\n    - name: sbom-generate\n",
+        })
 
 
 class TestBackupConfigExistsParity:

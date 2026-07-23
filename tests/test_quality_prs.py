@@ -350,6 +350,38 @@ class TestPrBodyPhaseD:
         assert "### Shared-namespace blast radius" in body
         assert "openshift-pipelines" in body
 
+    def test_body_surfaces_llm_review_concerns_when_not_approved(self):
+        body = build_helpful_pr_body(
+            title_line="AgentIT Scan: sbom for pinky",
+            target_findings=[("sbom", "No SBOM generation in CI")],
+            files=[{
+                "path": ".github/workflows/sbom.yml",
+                "target_path": ".github/workflows/sbom.yml",
+                "description": "GHA SBOM", "skill_name": "sbom-ci",
+            }],
+            llm_review={
+                "approved": False,
+                "reason": "workflow may need contents: write for upload",
+                "concerns": ["artifact upload permissions"],
+            },
+        )
+        assert "### LLM review concerns" in body
+        assert "artifact upload permissions" in body
+        assert "contents: write" in body
+
+    def test_body_omits_llm_review_when_approved(self):
+        body = build_helpful_pr_body(
+            title_line="AgentIT Scan: sbom for pinky",
+            target_findings=[("sbom", "No SBOM generation in CI")],
+            files=[{
+                "path": ".github/workflows/sbom.yml",
+                "target_path": ".github/workflows/sbom.yml",
+                "description": "GHA SBOM", "skill_name": "sbom-ci",
+            }],
+            llm_review={"approved": True, "reason": "ok", "concerns": []},
+        )
+        assert "### LLM review concerns" not in body
+
 
 class TestAutoDeliveryQualityGate:
     async def test_refuses_pr_when_no_findings(self):

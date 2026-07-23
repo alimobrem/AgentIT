@@ -3,10 +3,9 @@ name: sbom-task
 domain: compliance
 version: 1
 triggers:
-  - sbom
   - bom
-  - software
-  - bill
+  - cyclonedx
+  - syft
 outputs:
   - Task
 property: "Software Bill of Materials is generated for every build"
@@ -15,7 +14,9 @@ mode: template
 
 # SBOM Generation Task
 
-> **Does not clear compliance `sbom`.** Use `sbom-artifact` for source PRs.
+> **Does not clear compliance `sbom` alone.** Bare cluster Task is
+> wrong-layer. Wire into a Tekton **Pipeline** that runs on the app
+> (or use `sbom-ci` / GitHub Action `anchore/sbom-action`).
 
 ## Property
 Every container image build produces a CycloneDX Software Bill of
@@ -27,6 +28,8 @@ correlation against known CVE databases.
 - Output format: CycloneDX JSON
 - Runs against the built container image (not source tree)
 - SBOM artifact is stored as a Tekton result for downstream consumption
+- Must be referenced from an app Pipeline (`sbom-generate` taskRef) to
+  count as CI generation for Assess
 
 ## Template
 
@@ -70,6 +73,6 @@ spec:
 ```
 
 ## Verification
-- Task run completes successfully and SBOM_PATH result is set
-- `cat sbom.json | jq '.bomFormat'` returns `"CycloneDX"`
-- SBOM contains component entries for application dependencies
+- Task is referenced from the app Pipeline (`sbom-generate`)
+- Or prefer GHA: `anchore/sbom-action` via skill `sbom-ci`
+- Re-Assess: `sbom` finding resolved only when CI wiring is present
