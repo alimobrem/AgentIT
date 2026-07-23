@@ -36,9 +36,11 @@ class TestRegistryLookup:
         assert lookup("banana") is None
 
     def test_all_registered_categories(self):
-        for cat in ("network", "scanning", "sbom", "pipeline", "metrics", "tracing", "base_image"):
+        for cat in ("network", "scanning", "sbom", "pipeline", "metrics", "base_image"):
             result = lookup(cat)
             assert result is not None, f"No fix registered for '{cat}'"
+        # tracing is detect-only (app SDK) — collector does not clear
+        assert lookup("tracing") is None
 
     def test_rbac_autoscaling_monitoring_resolve(self):
         """Added for auto_delivery.py's validate/fix loop, which dispatches

@@ -56,20 +56,23 @@ def _passes(skill_path: Path, create_mock_repo, files: dict[str, str]) -> None:
 
 
 class TestCiPipelineExistsParity:
-    """Ported from `checks/cicd/ci-pipeline.yaml` (deleted in this commit)
-    to `skills/cicd/ci-pipeline-exists.md`."""
+    """Detect skill aligned with CICDAnalyzer (GHA / GitLab / Jenkins / Tekton)."""
 
     SKILL_PATH = SKILLS_DIR / "cicd" / "ci-pipeline-exists.md"
 
-    def test_fires_when_no_gitlab_ci_file(self, create_mock_repo) -> None:
+    def test_fires_when_no_ci_config(self, create_mock_repo) -> None:
         finding = _fires(self.SKILL_PATH, create_mock_repo, {"main.py": "print('hi')\n"})
         assert finding.category == "pipeline"
         assert finding.severity == Severity.high
-        assert finding.description == "No GitLab CI pipeline configuration found"
-        assert finding.recommendation == "Create .gitlab-ci.yml or Tekton Pipeline for build/test/scan/deploy"
+        assert "CI" in finding.description or "pipeline" in finding.description.lower()
 
     def test_passes_when_gitlab_ci_file_present(self, create_mock_repo) -> None:
         _passes(self.SKILL_PATH, create_mock_repo, {".gitlab-ci.yml": "stages: [build]\n"})
+
+    def test_passes_when_github_actions_workflow_present(self, create_mock_repo) -> None:
+        _passes(self.SKILL_PATH, create_mock_repo, {
+            ".github/workflows/ci.yml": "on: [push]\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps: []\n",
+        })
 
 
 class TestDockerfileExistsParity:
@@ -266,8 +269,7 @@ class TestPdbExistsParity:
 
 
 class TestMultiReplicaDeploymentParity:
-    """Ported from `checks/ha_dr/replicas.yaml` (deleted in this commit)
-    to `skills/ha_dr/multi-replica-deployment.md`."""
+    """Detect skill for multi-replica — category ``replicas`` (PDB is availability)."""
 
     SKILL_PATH = SKILLS_DIR / "ha_dr" / "multi-replica-deployment.md"
 
@@ -275,7 +277,7 @@ class TestMultiReplicaDeploymentParity:
         finding = _fires(self.SKILL_PATH, create_mock_repo, {
             "deploy/deployment.yaml": "apiVersion: apps/v1\nkind: Deployment\nspec:\n  replicas: 1\n",
         })
-        assert finding.category == "availability"
+        assert finding.category == "replicas"
         assert finding.severity == Severity.high
         assert finding.description == "No multi-replica deployment found -- no redundancy"
         assert finding.recommendation == "Set replicas >= 2 for high availability"
@@ -421,11 +423,9 @@ class TestNetworkPolicyExistsParity:
 
 
 class TestSecretsScanningInCiParity:
-    """Ported from `checks/security/secrets-scanning.yaml` (deleted in
-    this commit, the last remaining `checks/*.yaml` file) to
-    `skills/security/secrets-scanning-in-ci.md`."""
+    """Vulnerability scanning detect skill (renamed from secrets-scanning-in-ci)."""
 
-    SKILL_PATH = SKILLS_DIR / "security" / "secrets-scanning-in-ci.md"
+    SKILL_PATH = SKILLS_DIR / "security" / "vulnerability-scanning-in-ci.md"
 
     def test_fires_when_no_trivy_reference(self, create_mock_repo) -> None:
         finding = _fires(self.SKILL_PATH, create_mock_repo, {".gitlab-ci.yml": "stages: [build]\n"})

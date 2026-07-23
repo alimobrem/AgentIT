@@ -158,10 +158,17 @@ def _iter_repo_files(repo_path: Path):
 
 
 def _run_file_exists(check: CheckDefinition, repo_path: Path) -> Finding | None:
-    """Return ``None`` (pass) if at least one file matches any glob in *pattern*."""
+    """Return ``None`` (pass) if at least one file matches any glob in *pattern*.
+
+    Patterns match basename **or** full relative path so
+    ``.github/workflows/*.yml`` works alongside ``.gitlab-ci.yml``.
+    """
     patterns = _pattern_list(check.pattern)
-    for name, _rel, _content in _iter_repo_files(repo_path):
-        if any(fnmatch.fnmatch(name, p) for p in patterns):
+    for name, rel, _content in _iter_repo_files(repo_path):
+        if any(
+            fnmatch.fnmatch(name, p) or fnmatch.fnmatch(rel, p)
+            for p in patterns
+        ):
             return None
     return _make_finding(check)
 

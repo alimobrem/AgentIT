@@ -735,8 +735,14 @@ async def auto_validate_and_deliver(
                         base_url, hdrs, path, default_branch,
                     )
 
+                _langs = getattr(getattr(report, "stack", None), "languages", None) or []
                 cluster_files = apply_containerfile_pin_only(
-                    cluster_files, read_file=_read,
+                    cluster_files,
+                    read_file=_read,
+                    target_findings=cluster_target_findings,
+                    language=(
+                        (_langs[0].name or "python").lower() if _langs else "python"
+                    ),
                 )
                 before_audit = len(cluster_files)
                 tree_paths = ghp._list_tree_paths(base_url, hdrs, base_sha)
