@@ -1,0 +1,29 @@
+# Red Hat InfoSec / Pattern Distribution Server (PDS) false-positive handling:
+# https://source.redhat.com/departments/strategy_and_operations/it/it_information_security/wiki/pattern_distribution_server#handling-false-positives
+#
+# Finding: GitHub secret scanning "Generic Secret" on synthetic hex fixtures in
+# tests/test_security.py (commit ce58beb8 / PR #180 secret-classify cache tests).
+# Classification: FALSE POSITIVE — never issued credentials; values exist only to
+# exercise AgentIT's SecurityAnalyzer secret_key regex + LLM classify path.
+# Tip rewrite: fixtures are assembled via "".join(...) so contiguous high-entropy
+# hex no longer appears in source. This allowlist covers historical blobs and
+# scanners that still examine commit history.
+
+title = "AgentIT"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic SecurityAnalyzer test fixtures (InfoSec FP — not real secrets)"
+paths = [
+  '''(^|/)tests/test_security\.py$''',
+]
+
+[[allowlists]]
+description = "Historical contiguous hex fixture from secret-classify cache tests (ce58beb8)"
+regexTarget = "match"
+regexes = [
+  '''d4c8f1e2b3a4c5d6e7f80123''',
+  '''abcdef0123456789''',
+]
