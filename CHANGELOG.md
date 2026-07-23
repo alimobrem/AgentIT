@@ -27,6 +27,7 @@ Product contract detail: [`docs/release-notes.md`](docs/release-notes.md).
 - Solution contracts so Scan PRs clear findings (`SOLUTION_CONTRACTS`, clear-evidence simulation; PRs [#154](https://github.com/alimobrem/AgentIT/pull/154), [#158](https://github.com/alimobrem/AgentIT/pull/158)).
 
 ### Fixed
+- **Decisions fix-review flood (dogfood):** post-merge `still_present` / PR-close paths recorded `skill_effectiveness` rejects for every companion skill YAML on the assessment (pdb/limitrange/…) when a source-patch migration/container delivery failed clear-evidence — not LLM fix-review. Attribute approve/reject to the finding’s `SOLUTION_CONTRACT` skill only.
 - **Audit wiring (dogfood):** clear-evidence `audit_wired` ran *before* delivery relocated root `audit.py` into the app package — Fix/Scan refused with “audit module at repo root only” even when enrichment would have cleared (pinky). Pre-enrich audit (+ pin-only Containerfile) before simulation; drop orphan stubs when the default branch is already packaged+wired; compliance requires a **packaged** audit module path (not repo-root theater). Skill/SOLUTION_CONTRACT document the package + import/call-site bar.
 - Pin AgentIT `Containerfile` base to `ubi9/python-312@sha256:89ef0dda…` (immutable digest; closes theater `:latest`→`:1` Scan PR [#173](https://github.com/alimobrem/AgentIT/pull/173)).
 

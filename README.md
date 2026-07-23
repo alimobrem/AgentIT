@@ -56,7 +56,7 @@ flowchart LR
 | **Generate** | SkillEngine matches findings to skills; Scan/onboard produces remediations |
 | **Gate** | Finding-tied PRs only; SSA dry-run + clear-evidence simulation (refuses theater stubs / destructive Containerfile rewrites; root-only `audit.py` without package wire-up; hand-rolled store DDL passes `migration`). App `Containerfile` base is digest-pinned (`ubi9/python-312@sha256:…`), not floating `:latest`/`:1`. |
 | **Operate** | Human merges on GitHub; Argo CD deploys (Scan HITL — no auto-merge) |
-| **Learn** | Watchers surface drift/CVEs/SLOs; learning drafts skills for human activation |
+| **Learn** | Watchers surface drift/CVEs/SLOs; learning drafts skills for human activation. Decisions (`fix-review`) attributes approve/reject to the finding’s contract skill only — not every companion skill on the assessment (avoids mass false rejects after ineffective source-patch merges). |
 
 Fleet apps land under `apps/{app}/` in the gitops repo (ApplicationSet). AgentIT itself deploys from this repo’s Helm `chart/` via Application `agentit`.
 

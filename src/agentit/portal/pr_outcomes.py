@@ -55,19 +55,34 @@ async def _attribution(store: object, record: dict) -> tuple[str, list[str]]:
     PR delivered -- the two dimensions a future learning mechanism needs to
     query by. ``finding_category`` comes from the owning delivery's own
     ``target_findings`` (Phase 3/4's existing per-finding tracking, see
-    delivery.py), when set. ``skill_names`` reuses ``skill_engine.
-    skill_name_from_path()``, the same recovery ``record_skill_outcomes()``
-    already does for a delivered file. Both default to empty/none -- never
-    guessed -- when the underlying data isn't available.
+    delivery.py), when set. ``skill_names`` prefer the SOLUTION_CONTRACT
+    skill for those findings (source-patch PRs never put skill YAML on the
+    assessment). Only when no target findings are recorded do we fall back
+    to path recovery from onboarding ``category=="skills"`` files — and
+    even then only for cluster-shaped deliveries (not source_patch), because
+    assessment-wide companion skill YAML is not "what this PR delivered".
     """
     finding_category = ""
+    # pr_tracking delivery records put target_findings on the record itself;
+    # some callers nest under raw — accept either.
+    target_findings: list = list(record.get("target_findings") or [])
     raw = record.get("raw")
-    if isinstance(raw, dict):
-        target_findings = raw.get("target_findings") or []
-        if target_findings:
-            first = target_findings[0]
-            if isinstance(first, (list, tuple)) and first:
-                finding_category = str(first[0])
+    if not target_findings and isinstance(raw, dict):
+        target_findings = list(raw.get("target_findings") or [])
+    if target_findings:
+        first = target_findings[0]
+        if isinstance(first, (list, tuple)) and first:
+            finding_category = str(first[0])
+
+    if target_findings:
+        from agentit.skill_engine import skill_names_for_findings
+
+        return finding_category, skill_names_for_findings(target_findings)
+
+    # No finding scope — do not blast every companion skill on the assessment
+    # for source-patch PRs (codechange only; skill YAML companions are unrelated).
+    if (record.get("category") or "") == "source_patch":
+        return finding_category, []
 
     skill_names: list[str] = []
     assessment_id = record.get("assessment_id")
@@ -122,36 +137,46 @@ async def _compute_outcome(
     return None
 
 
-async def _record_rejection_side_effects(store: object, record: dict, reject_reason: str) -> None:
+async def _record_rejection_side_effects(
+    store: object,
+    record: dict,
+    reject_reason: str,
+    *,
+    finding_category: str = "",
+    skill_names: list[str] | None = None,
+) -> None:
     """Mirrors what ``routes/gates.py``'s old reject branch used to do on a
     human's in-app "Reject" click, now fired from the real PR-close signal
     instead: writes ``agent_feedback`` (``get_rejection_count()`` --
     webhooks.py's auto-fixable dispatch loop still reads this to back off a
     category rejected 3+ times -- must keep seeing real rejection signal) and
-    per-skill ``skill_effectiveness`` outcomes for every skill-generated file
-    this PR's delivery covered.
+    per-skill ``skill_effectiveness`` outcomes for skills this PR actually
+    covered (never every skill YAML on the assessment).
     """
     app_name = record.get("app_name", "")
     category = record.get("category", "")
+    reason = (reject_reason or "").strip() or "PR closed without merge"
     if hasattr(store, "record_feedback"):
         try:
             await store.record_feedback(
                 app_name=app_name, agent_name="pr-outcome-sync",
-                finding_category=category, action="rejected", human_reason=reject_reason,
+                finding_category=category, action="rejected", human_reason=reason,
             )
         except Exception:
             logger.warning("Failed to record agent_feedback for rejected PR %s", record.get("pr_url"), exc_info=True)
 
-    assessment_id = record.get("assessment_id")
-    if assessment_id and hasattr(store, "get_onboarding"):
-        try:
-            files = await store.get_onboarding(assessment_id)
-        except Exception:
-            files = None
-        if files:
-            from agentit.skill_engine import record_skill_outcomes
+    from agentit.skill_engine import record_skill_outcomes_for_findings
 
-            await record_skill_outcomes(store, app_name, files, None, "rejected", reject_reason)
+    finding_keys: list[tuple[str, str]] = []
+    cat = (finding_category or "").strip()
+    if cat:
+        finding_keys = [(cat, "")]
+    # When finding_category is known, contract mapping wins — skill_names
+    # recovered from assessment-wide onboarding companions must not override.
+    await record_skill_outcomes_for_findings(
+        store, app_name, finding_keys, "rejected", reason,
+        skill_names=None if cat else skill_names,
+    )
 
 
 async def attach_pr_outcomes(store: object, records: list[dict]) -> list[dict]:
@@ -232,7 +257,10 @@ async def sync_pr_outcomes(
             continue
 
         if outcome["outcome"] == OUTCOME_REJECTED:
-            await _record_rejection_side_effects(store, record, outcome.get("reject_reason", ""))
+            await _record_rejection_side_effects(
+                store, record, outcome.get("reject_reason", ""),
+                finding_category=finding_category, skill_names=skill_names,
+            )
 
         newly.append({**outcome, "pr_url": pr_url, "app_name": record.get("app_name", "")})
     return newly
