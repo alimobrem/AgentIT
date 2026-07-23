@@ -163,6 +163,7 @@ class TestDryRunManifestsAgainstCluster:
 
         assert result["errors"] == []
         assert any("Forbidden" in w for w in result["warnings"])
+        assert "role.yaml" in result["skipped_paths"]
 
     def test_field_manager_conflict_is_soft_warning_not_hard_error(self):
         """Re-onboard with prior kubectl CSA ConfigMaps must not block PRs."""

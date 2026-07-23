@@ -464,6 +464,51 @@ class TestPullRequestsSectionPostDelivery:
         assert 'data-action="apply"' not in resp.text
         assert 'data-action="prs"' not in resp.text
         assert "Commit & Open PR" not in resp.text
+        # Honest UX (#192 extended): never promise PRs after converge failure.
+        assert "AgentIT will open" not in resp.text
+        assert "No pull request will open" in resp.text
+
+    async def test_validation_failed_shows_skip_reasons_not_will_open(self, ui_client):
+        """pulse-agent class: missing APIs / Forbidden skips must surface;
+        UI must not say will open N PRs when nothing opened."""
+        client, store = ui_client
+        report = _report_with_remediable_findings("skip-ui-app")
+        report.infra_repo_url = "https://github.com/org/skip-ui-infra"
+        aid = await store.save(report)
+        await store.save_onboarding(
+            aid, [_cluster_config_file(), _source_patch_file()],
+            orchestration={
+                "auto_validation": {
+                    "converged": False,
+                    "capability_skips": [
+                        "policy.yaml: skipped — API(s) not on cluster: Policy (kyverno.io/v1)",
+                        "task.yaml: skipped — API(s) not on cluster: Task (tekton.dev/v1)",
+                    ],
+                },
+            },
+        )
+        job_id = await store.create_remediation_job(aid)
+        await store.update_remediation_job(
+            job_id, "needs_attention", current_step="deliver",
+            error="Automatic validation could not converge after 3 attempt(s)",
+        )
+        await store.save_apply_results(
+            aid,
+            {
+                "applied": [], "errors": [],
+                "skipped": ["quota.yaml: soft-skipped (Forbidden / missing API)"],
+                "warnings": ["quota.yaml: ResourceQuota/rq: Forbidden"],
+                "repo_files": [],
+            },
+            "ns", dry_run=True,
+        )
+
+        resp = await client.get(f"/assessments/{aid}/onboard-results")
+        assert resp.status_code == 200
+        assert "AgentIT will open" not in resp.text
+        assert "No pull request will open" in resp.text
+        assert "skipped (missing APIs / Forbidden)" in resp.text
+        assert "kyverno.io" in resp.text or "Policy" in resp.text
 
     async def test_needs_attention_with_open_pr_hides_retry_scan_delivery(self, ui_client):
         client, store = ui_client

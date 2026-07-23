@@ -205,7 +205,7 @@ class TestClearEvidenceRecordsSkillOutcome:
              patch("agentit.portal.auto_delivery.validate_and_fix_manifests",
                    return_value={"files": files, "clean": True, "iterations": []}), \
              patch("agentit.portal.auto_delivery._dry_run_check",
-                   return_value=([], [], set())), \
+                   return_value=([], [], set(), [])), \
              patch("agentit.portal.auto_delivery._check_properties", return_value=[]), \
              patch("agentit.portal.github_pr.commit_to_infra_repo"), \
              patch("agentit.portal.github_pr.create_source_patch_pr"), \

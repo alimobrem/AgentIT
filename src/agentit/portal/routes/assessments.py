@@ -1088,14 +1088,18 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
     # already runs — only when the latest onboard job needs attention and
     # nothing is open yet (not a competing "Commit" product).
     needs_attention_onboard = False
+    onboard_jobs: list = []
+    onboard_error = ""
     if hasattr(s, "list_remediation_jobs"):
         onboard_jobs = await s.list_remediation_jobs(assessment_id)
         if onboard_jobs and onboard_jobs[0].get("status") == "needs_attention":
             needs_attention_onboard = True
+            onboard_error = (onboard_jobs[0].get("error") or "").lower()
 
-    # Phase A parity: if finding_gate would refuse (no remediable findings /
-    # score delta), do not preview "will open N PRs" or offer Retry — that
-    # contradicts the refuse flash and confuses the Scan HITL path.
+    # Phase A parity + validation-failed honesty (#192 extended): if
+    # finding_gate would refuse OR latest onboard needs_attention with
+    # nothing opened, do not preview "will open N PRs" — that contradicts
+    # refuse / converge-failed flashes (pulse-agent class).
     from agentit.assessment_diff import current_finding_keys
     from agentit.portal.quality_prs import finding_gate_allows_pr, finding_gate_refuse_reason
 
@@ -1104,13 +1108,48 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
     delivery_refuse_reason = (
         finding_gate_refuse_reason(target_findings) if not delivery_gate_allows else ""
     )
-    if not delivery_gate_allows and pr_opened_count == 0:
-        # Drop preview-only cards; keep any real opened PR records (none here).
+    auto_validation = (orchestration or {}).get("auto_validation") or {}
+    skip_reasons = list(auto_validation.get("capability_skips") or [])
+    if apply_results:
+        for skipped_item in apply_results.get("skipped") or []:
+            if skipped_item and skipped_item not in skip_reasons:
+                skip_reasons.append(skipped_item)
+        for warning in apply_results.get("warnings") or []:
+            if warning and (
+                "Forbidden" in warning
+                or "not found" in warning.lower()
+                or "skipped" in warning.lower()
+            ):
+                if warning not in skip_reasons:
+                    skip_reasons.append(warning)
+    validation_failed = bool(
+        needs_attention_onboard
+        and pr_opened_count == 0
+        and (
+            not delivery_gate_allows
+            or auto_validation.get("converged") is False
+            or "could not converge" in onboard_error
+            or "refusing" in onboard_error
+        )
+    )
+    # When nothing opened and Scan already failed/refused, drop preview-only
+    # cards so we never promise PRs (same class as Phase A refuse UX).
+    if pr_opened_count == 0 and (not delivery_gate_allows or needs_attention_onboard):
         pr_cards = [c for c in pr_cards if c.get("record")]
         pr_pending_count = 0
     show_retry_scan_delivery = (
         needs_attention_onboard and pr_opened_count == 0 and delivery_gate_allows
     )
+    delivery_skip_summary = ""
+    if skip_reasons and pr_opened_count == 0 and not pr_cards:
+        delivery_skip_summary = (
+            f"{len(skip_reasons)} file(s) skipped (missing APIs / Forbidden)"
+        )
+    elif skip_reasons and pr_pending_count:
+        delivery_skip_summary = (
+            f"Opening {pr_pending_count} finding-tied PR(s); "
+            f"{len(skip_reasons)} skipped (missing APIs / Forbidden)"
+        )
 
     return get_templates().TemplateResponse(
         request,
@@ -1134,6 +1173,10 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
             "show_retry_scan_delivery": show_retry_scan_delivery,
             "delivery_gate_allows": delivery_gate_allows,
             "delivery_refuse_reason": delivery_refuse_reason,
+            "validation_failed": validation_failed,
+            "skip_reasons": skip_reasons,
+            "delivery_skip_summary": delivery_skip_summary,
+            "needs_attention_onboard": needs_attention_onboard,
         },
     )
 

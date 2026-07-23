@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 # CRDs (Kyverno, Litmus, …) may be absent. Neither means the manifest is
 # invalid for GitOps/Argo after merge. Hard: schema/admission/unreachable.
 _SOFT_FORBIDDEN_RE = re.compile(
-    r"\bForbidden\b|\(403\)|\b403\b.*\bForbidden\b",
+    r"\bForbidden\b|\(403\)|\b403\b.*\bForbidden\b|\bis forbidden\b",
     re.IGNORECASE,
 )
 _SOFT_MISSING_CRD_RE = re.compile(
@@ -22,16 +22,36 @@ _SOFT_MISSING_CRD_RE = re.compile(
     r"not found on cluster|"
     r"could not find the requested resource|"
     r"the server could not find the requested resource|"
-    r"unable to recognize",
+    r"unable to recognize|"
+    r"\bNot Found\b|\(404\)|\b404\b",
     re.IGNORECASE,
 )
+
+# Kinds we always treat as present when discovery is empty/unavailable —
+# never capability-filter the whole pack to zero on a probe failure.
+_CORE_KINDS_ALWAYS = frozenset({
+    "configmap", "configmaps", "secret", "secrets", "service", "services",
+    "serviceaccount", "serviceaccounts", "pod", "pods", "namespace", "namespaces",
+    "deployment", "deployments", "replicaset", "replicasets",
+    "statefulset", "statefulsets", "daemonset", "daemonsets",
+    "job", "jobs", "cronjob", "cronjobs",
+    "role", "roles", "rolebinding", "rolebindings",
+    "clusterrole", "clusterroles", "clusterrolebinding", "clusterrolebindings",
+    "networkpolicy", "networkpolicies",
+    "horizontalpodautoscaler", "horizontalpodautoscalers",
+    "poddisruptionbudget", "poddisruptionbudgets",
+    "resourcequota", "resourcequotas", "limitrange", "limitranges",
+    "persistentvolumeclaim", "persistentvolumeclaims",
+    "ingress", "ingresses",
+})
 
 
 def classify_dry_run_error(message: str | None) -> str:
     """Classify an SSA dry-run failure as ``\"hard\"`` or ``\"soft\"``.
 
-    Soft → warn in PR body / apply_results; do not block Scan when hard
-    errors are empty. Hard → ``needs_attention`` / block PR open.
+    Soft → skip/warn (Forbidden / missing CRD / Not Found); do **not**
+    count as converge failure. Hard → schema/admission/unreachable →
+    ``needs_attention`` for cluster packs (source-layer PRs still proceed).
     """
     text = (message or "").strip()
     if not text:
@@ -41,6 +61,89 @@ def classify_dry_run_error(message: str | None) -> str:
     if _SOFT_MISSING_CRD_RE.search(text):
         return "soft"
     return "hard"
+
+
+def probe_available_kinds() -> set[str]:
+    """Return lowercased GVK kind names available on the live cluster.
+
+    Empty set means probe failed / offline — callers must not treat that
+    as "nothing is supported" (see ``filter_files_for_cluster_capabilities``).
+    """
+    try:
+        kinds = kube.get_api_resources()
+    except Exception as exc:
+        logger.info("Cluster capability probe failed (non-fatal): %s", exc)
+        return set()
+    return {k.lower() for k in kinds if k}
+
+
+def _kind_supported(kind: str, available_kinds: set[str]) -> bool:
+    """Whether ``kind`` is present on the cluster (or a known core kind)."""
+    if not kind:
+        return False
+    kind_l = kind.lower()
+    plural = kind_l if kind_l.endswith("s") else kind_l + "s"
+    if kind_l in _CORE_KINDS_ALWAYS or plural in _CORE_KINDS_ALWAYS:
+        # Core kinds: if probe succeeded and explicitly lacks them, still
+        # allow (discovery glitches must not drop Deployments/ConfigMaps).
+        return True
+    if not available_kinds:
+        # Probe failed — keep optional CRs for SSA soft-skip path rather
+        # than silently dropping everything custom.
+        return True
+    return kind_l in available_kinds or plural in available_kinds
+
+
+def filter_files_for_cluster_capabilities(
+    files: list[dict],
+    available_kinds: set[str] | None = None,
+) -> tuple[list[dict], list[str]]:
+    """Drop cluster YAML whose GVK is absent; keep source / non-YAML.
+
+    Returns ``(kept_files, skip_reasons)``. Prefer not emitting Kyverno /
+    Tekton packs when those APIs are missing — capability-gated GitOps.
+    Source-layer files (Dockerfile, ``.py``, …) are never filtered here.
+    """
+    kinds = available_kinds if available_kinds is not None else probe_available_kinds()
+    kept: list[dict] = []
+    skips: list[str] = []
+
+    for entry in files:
+        fpath = entry.get("path") or ""
+        suffix = Path(fpath).suffix.lower()
+        if suffix not in (".yaml", ".yml"):
+            kept.append(entry)
+            continue
+        docs = _parse_manifest(entry.get("content") or "")
+        if not docs:
+            kept.append(entry)
+            continue
+        unsupported = [
+            f"{doc.get('kind')} ({doc.get('apiVersion')})"
+            for doc in docs
+            if doc.get("kind") and doc.get("apiVersion")
+            and not _kind_supported(str(doc.get("kind")), kinds)
+        ]
+        if unsupported and len(unsupported) == len([
+            d for d in docs if d.get("kind") and d.get("apiVersion")
+        ]):
+            reason = (
+                f"{fpath}: skipped — API(s) not on cluster: "
+                + ", ".join(unsupported)
+            )
+            skips.append(reason)
+            logger.info("Capability filter: %s", reason)
+            continue
+        if unsupported:
+            # Mixed multi-doc file: keep but note partial skip; SSA soft path
+            # will skip remaining unsupported docs per-document.
+            skips.append(
+                f"{fpath}: partial — unsupported kinds will be SSA-skipped: "
+                + ", ".join(unsupported)
+            )
+        kept.append(entry)
+
+    return kept, skips
 
 _SKIP_EXTENSIONS = frozenset({".sh", ".md", ".json", ".txt", ".toml", ".cfg", ".ini"})
 
@@ -245,12 +348,12 @@ def _classify_and_fix(
 
     ``for_dry_run=True`` prepares documents the way GitOps would eventually
     land them (including operator-namespace and cluster-scoped kinds) so
-    ``dry_run_manifests_against_cluster()`` can SSA-validate them. Missing
-    CRDs are *not* pre-skipped on that path -- ``kube.apply_yaml(dry_run=True)``
-    surfaces a clear apiserver/discovery error instead (fail-closed).
-    When ``for_dry_run=False`` (legacy classify used by skill-parity tests /
-    operator-install helpers), operator-namespace and cluster-scoped docs
-    are still skipped: AgentIT never direct-applies those.
+    ``dry_run_manifests_against_cluster()`` can SSA-validate them. When
+    ``available_kinds`` is non-empty, missing CRDs are pre-skipped (do not
+    count as converge failure). When ``for_dry_run=False`` (legacy classify
+    used by skill-parity tests / operator-install helpers), operator-
+    namespace and cluster-scoped docs are still skipped: AgentIT never
+    direct-applies those.
     """
     kind = doc.get("kind", "")
     api_version = doc.get("apiVersion", "")
@@ -264,16 +367,16 @@ def _classify_and_fix(
     meta = doc["metadata"]
     manifest_ns = meta.get("namespace", "")
 
+    # Capability gate: skip absent GVKs on both dry-run and apply paths so
+    # Tekton/Kyverno packs never burn SSA attempts as converge failures.
+    if available_kinds and not _kind_supported(str(kind), available_kinds):
+        return "skip_crd_missing", f"{kind} ({api_version}) CRD not installed", doc
+
     if not for_dry_run:
         if kind in _CLUSTER_SCOPED_KINDS:
             return "skip_cluster_scope", f"{kind} is cluster-scoped (needs cluster-admin)", doc
         if manifest_ns in _OPERATOR_NAMESPACES:
             return "skip_operator_ns", f"targets operator namespace {manifest_ns}", doc
-        if available_kinds:
-            kind_lower = kind.lower()
-            kind_plural_guess = kind_lower + "s"
-            if kind_lower not in available_kinds and kind_plural_guess not in available_kinds:
-                return "skip_crd_missing", f"{kind} ({api_version}) CRD not installed", doc
 
     if kind not in _CLUSTER_SCOPED_KINDS:
         if manifest_ns in _OPERATOR_NAMESPACES:
@@ -294,6 +397,8 @@ def _classify_and_fix(
 def dry_run_manifests_against_cluster(
     files: list[dict],
     namespace: str = "default",
+    *,
+    available_kinds: set[str] | None = None,
 ) -> dict:
     """Validate manifests via Kubernetes server-side-apply ``dryRun=All``.
 
@@ -304,19 +409,24 @@ def dry_run_manifests_against_cluster(
 
     Failures are classified via ``classify_dry_run_error``:
     - **hard** (``errors``): schema/Bad Request, admission, unreachable —
-      block PR / ``needs_attention``
-    - **soft** (``warnings``): Forbidden (SA lacks dry-run RBAC), missing
-      optional CRD / GVK, field-manager conflict on dry-run — warn in PR
-      body; do not block when hard is empty
+      block cluster PR / ``needs_attention`` (source-layer still proceeds)
+    - **soft** (``warnings`` + ``skipped``): Forbidden (SA RBAC), missing
+      optional CRD / GVK / Not Found — skip that file; do **not** count as
+      converge failure. Field-manager conflict is also soft on dry-run.
 
     Field-manager conflicts are soft on dry-run: AgentIT is not seizing
     ownership here (GitOps/Argo applies after merge). Re-onboarding an app
     with prior ``kubectl`` client-side-apply ConfigMaps must not hard-block
     PR open. Structured ``conflicts`` is still populated for UI/PR notes.
     Non-YAML / narrative files are listed under ``repo_files`` and skipped.
+
+    ``skipped_paths`` lists file paths soft-skipped (missing API / Forbidden)
+    so callers can drop them from delivery packs.
     """
+    kinds = available_kinds if available_kinds is not None else probe_available_kinds()
     applied: list[str] = []
     skipped: list[str] = []
+    skipped_paths: list[str] = []
     errors: list[str] = []
     warnings: list[str] = []
     conflicts: list[dict] = []
@@ -345,15 +455,25 @@ def dry_run_manifests_against_cluster(
         skip_reasons: list[str] = []
         for doc in docs:
             action, reason, fixed = _classify_and_fix(
-                doc, namespace, available_kinds=set(), for_dry_run=True,
+                doc, namespace, available_kinds=kinds, for_dry_run=True,
             )
             if action == "apply":
                 apply_docs.append(fixed)
             else:
                 skip_reasons.append(reason)
+                if action == "skip_crd_missing":
+                    kind = doc.get("kind", "")
+                    if kind in _CRD_TO_OPERATOR:
+                        missing_operators[kind] = _CRD_TO_OPERATOR[kind]
 
         if not apply_docs:
-            skipped.append(f"{fpath} ({'; '.join(skip_reasons) or 'nothing to validate'})")
+            tagged = f"{fpath} ({'; '.join(skip_reasons) or 'nothing to validate'})"
+            skipped.append(tagged)
+            skipped_paths.append(fpath)
+            warnings.append(
+                f"{fpath}: skipped — missing API / unsupported on cluster "
+                f"({'; '.join(skip_reasons)})"
+            )
             continue
 
         content = yaml.dump_all(apply_docs, default_flow_style=False)
@@ -363,8 +483,14 @@ def dry_run_manifests_against_cluster(
             # Fail closed: unreachable cluster / AGENTIT_OFFLINE / discovery
             # blow-ups must never look like a clean dry-run.
             err = str(exc)
-            errors.append(f"{fpath}: {err}")
-            logger.error("Dry-run failed for %s: %s", fpath, err)
+            if classify_dry_run_error(err) == "soft":
+                skipped.append(f"{fpath} ({err})")
+                skipped_paths.append(fpath)
+                warnings.append(f"{fpath}: {err}")
+                logger.warning("Dry-run soft skip for %s: %s", fpath, err)
+            else:
+                errors.append(f"{fpath}: {err}")
+                logger.error("Dry-run failed for %s: %s", fpath, err)
             continue
         if result["applied"]:
             applied.append(fpath)
@@ -400,6 +526,8 @@ def dry_run_manifests_against_cluster(
                             or "no matches for kind" in msg.lower()
                             or "could not find the requested resource" in msg.lower()
                             or "unable to recognize" in msg.lower()
+                            or "not found" in msg.lower()
+                            or "404" in msg.lower()
                         ):
                             missing_operators[kind] = _CRD_TO_OPERATOR[kind]
                 else:
@@ -408,9 +536,12 @@ def dry_run_manifests_against_cluster(
                 errors.extend(file_hard)
                 logger.error("Dry-run hard failure for %s: %s", fpath, "; ".join(file_hard))
             if file_soft:
+                # Soft = skip this file (Forbidden / missing CRD), not converge-fail.
+                skipped.append(f"{fpath} ({'; '.join(file_soft)})")
+                skipped_paths.append(fpath)
                 warnings.extend(file_soft)
                 logger.warning(
-                    "Dry-run soft warning for %s (non-blocking): %s",
+                    "Dry-run soft skip for %s (non-blocking): %s",
                     fpath, "; ".join(file_soft),
                 )
             if not file_hard and not file_soft:
@@ -419,6 +550,7 @@ def dry_run_manifests_against_cluster(
     return {
         "applied": applied,
         "skipped": skipped,
+        "skipped_paths": skipped_paths,
         "errors": errors,
         "warnings": warnings,
         "conflicts": conflicts,

@@ -889,6 +889,7 @@ async def deliver_with_verification(
         dry_errors: list[str] = []
         dry_warnings: list[str] = []
         dry_conflicts: list[dict] = []
+        dry_skipped_paths: list[str] = []
         missing_operators: dict = {}
         validated: list[str] = []
         if concrete_yaml and namespace:
@@ -898,6 +899,7 @@ async def deliver_with_verification(
             dry_errors = list(validation.get("errors") or [])
             dry_warnings = list(validation.get("warnings") or [])
             dry_conflicts = list(validation.get("conflicts") or [])
+            dry_skipped_paths = list(validation.get("skipped_paths") or [])
             missing_operators = dict(validation.get("missing_operators") or {})
             validated = list(validation.get("applied") or [])
             # Field-manager conflicts are already soft-warned in
@@ -915,6 +917,7 @@ async def deliver_with_verification(
                 "mechanism": mechanism, "files": len(files),
                 "validated": len(validated), "errors": len(dry_errors),
                 "warnings": len(dry_warnings),
+                "skipped": len(dry_skipped_paths),
             },
         )
         result: dict = {
@@ -925,6 +928,8 @@ async def deliver_with_verification(
             result["missing_operators"] = missing_operators
         if dry_warnings:
             result["dry_run_warnings"] = dry_warnings
+        if dry_skipped_paths:
+            result["dry_run_skipped_paths"] = dry_skipped_paths
         if dry_errors:
             # Fail closed on hard errors only (schema/admission/unreachable).
             # Soft Forbidden / missing-CRD / field-manager conflict stay in
@@ -951,7 +956,8 @@ async def deliver_with_verification(
                 hint = f" (related operator/CRD may be missing: {ops})"
             result["dry_run_note"] = (
                 "Kubernetes API dry-run warnings (non-blocking — Forbidden or "
-                "optional CRD missing, not treated as invalid manifests): "
+                "optional CRD missing; those files are skipped, not treated as "
+                "invalid manifests): "
                 + "; ".join(dry_warnings[:5])
                 + ("…" if len(dry_warnings) > 5 else "")
                 + hint

@@ -125,13 +125,14 @@ def _merge_fix_files(current_files: list[dict], new_files: list[dict]) -> list[d
 async def _dry_run_check(
     files: list[dict], *, app_name: str, namespace: str, report: AssessmentReport | None,
     store: object, assessment_id: str, actor: str,
-) -> tuple[list[str], list[str], set[str]]:
+) -> tuple[list[str], list[str], set[str], list[str]]:
     """Runs ``route_and_deliver(dry_run=True)`` and returns
-    (hard-errors, soft-warnings, placeholder-blocked-paths).
+    (hard-errors, soft-warnings, placeholder-blocked-paths, soft-skipped-paths).
 
-    Hard errors (schema/admission/unreachable) block convergence / PR open.
-    Soft warnings (Forbidden / missing optional CRD) are surfaced in PR
-    body notes but do not block when hard errors are empty.
+    Hard errors (schema/admission/unreachable) block *cluster* convergence.
+    Soft warnings / skipped paths (Forbidden / missing optional CRD) do not
+    count as converge failure — callers drop those files from the pack.
+    Source-layer remediations are never blocked by this check alone.
 
     Never persists a ``deliveries`` row differently than any other dry run
     already does -- this is the exact same call ``deliver()``'s manual
@@ -148,12 +149,29 @@ async def _dry_run_check(
         if isinstance(o, dict) and o.get("error")
     ]
     soft: list[str] = []
+    skipped_paths: list[str] = []
     for cat, o in result["outcomes"].items():
         if not isinstance(o, dict):
             continue
         for warning in o.get("dry_run_warnings") or []:
             soft.append(f"{cat}: {warning}")
-    return hard, soft, set(result.get("placeholder_blocked") or [])
+        for path in o.get("dry_run_skipped_paths") or []:
+            skipped_paths.append(path)
+    return hard, soft, set(result.get("placeholder_blocked") or []), skipped_paths
+
+
+def _is_source_layer_file(entry: dict) -> bool:
+    """Whether ``entry`` is a source-repo remediation (never SSA-blocked)."""
+    from agentit.portal.delivery import CATEGORY_SOURCE_PATCH, classify_file
+
+    return classify_file(entry) == CATEGORY_SOURCE_PATCH
+
+
+def _drop_paths(files: list[dict], paths: set[str] | list[str]) -> list[dict]:
+    drop = set(paths)
+    if not drop:
+        return list(files)
+    return [f for f in files if f.get("path") not in drop]
 
 
 def _check_properties(files: list[dict]) -> list:
@@ -200,6 +218,8 @@ async def validate_and_fix_manifests(
     """
     current_files = list(files)
     iterations: list[dict] = []
+    all_warnings: list[str] = []
+    all_skipped: list[str] = []
 
     from agentit.remediation.dispatcher import RemediationDispatcher
     dispatcher = RemediationDispatcher(store)
@@ -210,10 +230,17 @@ async def validate_and_fix_manifests(
                 job_id, "validating", f"Validating generated manifests (attempt {i} of {max_iterations})...",
             )
 
-        dry_errors, dry_warnings, placeholder_blocked = await _dry_run_check(
+        dry_errors, dry_warnings, placeholder_blocked, soft_skipped = await _dry_run_check(
             current_files, app_name=app_name, namespace=namespace, report=report,
             store=store, assessment_id=assessment_id, actor=actor,
         )
+        # Soft Forbidden / missing-CRD → drop those files; do not burn retries.
+        if soft_skipped:
+            all_skipped.extend(soft_skipped)
+            current_files = _drop_paths(current_files, soft_skipped)
+        if dry_warnings:
+            all_warnings.extend(dry_warnings)
+
         # property_verifier.verify_all_properties() is a blanket check of
         # all four properties regardless of what this assessment actually
         # flagged -- scope every failure down to the ones tied to a REAL
@@ -235,21 +262,26 @@ async def validate_and_fix_manifests(
             "iteration": i,
             "dry_run_errors": dry_errors,
             "dry_run_warnings": dry_warnings,
+            "soft_skipped_paths": list(soft_skipped),
             "failed_properties": [r.property_name for r in relevant_failed],
             "fixed_categories": [],
         }
 
         # Soft-only dry-run (Forbidden / missing optional CRD) is clean for
-        # PR purposes — hard schema/admission failures still block.
+        # PR purposes — hard schema/admission failures still block cluster.
         if not dry_errors and not relevant_failed:
             iterations.append(iteration_record)
             return {
                 "files": current_files,
                 "clean": True,
                 "iterations": iterations,
-                "warnings": dry_warnings,
+                "warnings": all_warnings or dry_warnings,
+                "skipped_paths": all_skipped,
             }
 
+        # Hard dry-run errors on cluster YAML cannot be fixed by regenerating
+        # the same skill output — do not burn MAX_VALIDATION_ITERATIONS.
+        # Source-layer files are peeled off by the caller and still delivered.
         fixed_categories: list[str] = []
 
         for result in relevant_failed:
@@ -274,7 +306,8 @@ async def validate_and_fix_manifests(
             # Nothing this loop knows how to act on changed this round --
             # another identical attempt would just reproduce the same
             # failure, so stop now rather than burning the remaining
-            # iterations for no reason.
+            # iterations for no reason (Forbidden / missing CRD already
+            # soft-skipped above — remaining hard errors stop immediately).
             break
 
     last = iterations[-1] if iterations else {}
@@ -282,7 +315,8 @@ async def validate_and_fix_manifests(
         "files": current_files,
         "clean": False,
         "iterations": iterations,
-        "warnings": list(last.get("dry_run_warnings") or []),
+        "warnings": all_warnings or list(last.get("dry_run_warnings") or []),
+        "skipped_paths": all_skipped,
         "remaining_issues": list(last.get("dry_run_errors") or []) + list(
             last.get("failed_properties") or []
         ),
@@ -372,6 +406,7 @@ async def auto_validate_and_deliver(
     findings; open ≤ one PR per finding cluster after per-cluster
     validation; PR bodies explain finding → change → expected outcome.
     """
+    from agentit.portal.cluster_apply import filter_files_for_cluster_capabilities
     from agentit.portal.delivery import route_and_deliver
     from agentit.portal.helpers import get_llm_client
     from agentit.portal.quality_prs import (
@@ -385,26 +420,61 @@ async def auto_validate_and_deliver(
         strip_wrong_layer_companions,
     )
 
-    validation = await validate_and_fix_manifests(
-        files, app_name=app_name, namespace=namespace, report=report,
-        store=store, assessment_id=assessment_id, actor=actor, job_id=job_id,
-    )
-    final_files = validation["files"]
+    # Capability gate: drop Kyverno/Tekton/etc. when APIs are absent so SSA
+    # never treats missing platform as AgentIT converge failure (pulse-agent
+    # class: Task/Pipeline/Policy Not Found must not burn 3 attempts).
+    capability_files, capability_skips = filter_files_for_cluster_capabilities(files)
+    source_layer = [f for f in capability_files if _is_source_layer_file(f)]
+    cluster_layer = [f for f in capability_files if not _is_source_layer_file(f)]
+
+    if not cluster_layer:
+        # Entire cluster pack capability-filtered (or never generated) —
+        # nothing to SSA-validate; source-layer proceeds alone.
+        validation = {
+            "files": [],
+            "clean": True,
+            "iterations": [],
+            "warnings": list(capability_skips),
+            "skipped_paths": [],
+        }
+    else:
+        validation = await validate_and_fix_manifests(
+            cluster_layer, app_name=app_name, namespace=namespace,
+            report=report, store=store, assessment_id=assessment_id, actor=actor,
+            job_id=job_id,
+        )
+    # Re-attach source-layer files (never SSA-validated / never blocked).
+    validated_cluster = list(validation["files"])
+    by_path = {f["path"]: f for f in validated_cluster}
+    for sf in source_layer:
+        by_path.setdefault(sf["path"], sf)
+    final_files = list(by_path.values())
+    soft_warnings = list(validation.get("warnings") or []) + list(capability_skips)
+    skipped_paths = list(validation.get("skipped_paths") or [])
+    cluster_failed = not validation["clean"]
+
     await store.save_onboarding(
         assessment_id, final_files,
         orchestration={**orchestration, "auto_validation": {
-            "iterations": validation["iterations"], "converged": validation["clean"],
+            "iterations": validation["iterations"],
+            "converged": validation["clean"],
+            "capability_skips": capability_skips,
+            "skipped_paths": skipped_paths,
+            "source_unblocked": bool(source_layer and cluster_failed),
         }},
     )
 
-    soft_warnings = list(validation.get("warnings") or [])
-
-    if validation["clean"]:
+    if validation["clean"] or source_layer:
         try:
             await store.save_apply_results(
                 assessment_id,
                 {
-                    "applied": [], "skipped": [], "errors": [],
+                    "applied": [],
+                    "skipped": list(capability_skips) + [
+                        f"{p}: soft-skipped (Forbidden / missing API)"
+                        for p in skipped_paths
+                    ],
+                    "errors": list(validation.get("remaining_issues") or []) if cluster_failed else [],
                     "warnings": soft_warnings,
                     "repo_files": [
                         {"path": f["path"], "purpose": "validated by automatic validation loop"}
@@ -414,19 +484,30 @@ async def auto_validate_and_deliver(
                 namespace, dry_run=True,
             )
         except Exception:
-            logger.warning("Failed to persist apply_results for %s after validation converged", app_name, exc_info=True)
+            logger.warning("Failed to persist apply_results for %s after validation", app_name, exc_info=True)
 
-    if not validation["clean"]:
-        reason = (
-            "Automatic validation could not converge after "
-            f"{MAX_VALIDATION_ITERATIONS} attempt(s): "
-            + "; ".join(validation.get("remaining_issues") or ["unknown issue"])
-        )
-        if soft_warnings:
-            reason += (
-                " | dry-run notes (non-blocking): "
+    if cluster_failed and not source_layer:
+        remaining = list(validation.get("remaining_issues") or [])
+        # pulse-agent class: prefer skip/register reasons over "could not
+        # converge after 3 attempts" theater when the pack was soft-skipped.
+        if soft_warnings and not remaining:
+            reason = (
+                "Cluster pack skipped (missing APIs / Forbidden) — no "
+                "finding-tied source remediations left to open. "
                 + "; ".join(soft_warnings[:5])
             )
+        else:
+            iters = len(validation.get("iterations") or [])
+            reason = (
+                "Automatic validation could not converge after "
+                f"{iters or MAX_VALIDATION_ITERATIONS} attempt(s): "
+                + "; ".join(remaining or ["unknown issue"])
+            )
+            if soft_warnings:
+                reason += (
+                    " | skipped (missing APIs / Forbidden): "
+                    + "; ".join(soft_warnings[:5])
+                )
         logger.warning("Auto-validation did not converge for %s: %s", app_name, reason)
         try:
             await store.log_event(
@@ -436,7 +517,53 @@ async def auto_validate_and_deliver(
             )
         except Exception:
             logger.warning("Failed to log auto-validation-needs-attention event for %s", app_name, exc_info=True)
-        return {"status": "needs_attention", "reason": reason, "iterations": validation["iterations"]}
+        return {
+            "status": "needs_attention",
+            "reason": reason,
+            "iterations": validation["iterations"],
+            "skip_reasons": soft_warnings,
+        }
+
+    if cluster_failed and source_layer:
+        # Never block finding-tied source PRs because cluster dry-run failed.
+        logger.info(
+            "Cluster validation failed for %s — continuing with %d source-layer file(s); "
+            "cluster issues: %s",
+            app_name, len(source_layer),
+            "; ".join(validation.get("remaining_issues") or ["unknown"])[:300],
+        )
+        final_files = list(source_layer)
+        soft_warnings = soft_warnings + [
+            f"cluster pack skipped (validation): {issue}"
+            for issue in (validation.get("remaining_issues") or [])[:5]
+        ]
+
+    if not final_files:
+        # Soft-skipped entire catalog pack (pulse-agent: Tekton/Kyverno/Quota)
+        # with no source remediations — honest stop, not converge theater.
+        reason = (
+            "No deliverable files remain after capability / Forbidden skips — "
+            "refusing catalog-shaped empty PR. "
+            + (
+                "; ".join(soft_warnings[:5])
+                if soft_warnings
+                else "Register GitOps and re-Scan for finding-tied remediations."
+            )
+        )
+        logger.warning("Auto-delivery emptied by capability skips for %s: %s", app_name, reason)
+        try:
+            await store.log_event(
+                "auto-delivery", "auto-validation-needs-attention", app_name, "warning",
+                reason, correlation_id=assessment_id,
+            )
+        except Exception:
+            logger.warning("Failed to log empty-after-skip event for %s", app_name, exc_info=True)
+        return {
+            "status": "needs_attention",
+            "reason": reason,
+            "iterations": validation["iterations"],
+            "skip_reasons": soft_warnings,
+        }
 
     # Phase A: finding / score-delta gate — no catalog dumps with empty need.
     # Strip detect_only / no_auto_pr / uncontracted so Scan only opens for
@@ -698,10 +825,26 @@ async def auto_validate_and_deliver(
             continue
 
         # Phase C: per-cluster validation before open.
-        dry_errors, dry_warnings, _ = await _dry_run_check(
-            cluster_files, app_name=app_name, namespace=namespace, report=report,
-            store=store, assessment_id=assessment_id, actor=actor,
-        )
+        # Source-only clusters skip SSA hard-fail (nothing to dry-run).
+        if all(_is_source_layer_file(f) for f in cluster_files):
+            dry_errors, dry_warnings, soft_skipped = [], [], []
+        else:
+            dry_errors, dry_warnings, _, soft_skipped = await _dry_run_check(
+                cluster_files, app_name=app_name, namespace=namespace, report=report,
+                store=store, assessment_id=assessment_id, actor=actor,
+            )
+            if soft_skipped:
+                cluster_files = _drop_paths(cluster_files, soft_skipped)
+                drop_reasons = list(drop_reasons or []) + [
+                    f"{p}: skipped (Forbidden / missing API)" for p in soft_skipped
+                ]
+            if not cluster_files:
+                reason = (
+                    "All cluster manifests skipped (missing APIs / Forbidden) — "
+                    + "; ".join((dry_warnings or soft_skipped)[:3])
+                )
+                cluster_refusals.append(f"{cluster.key}: {reason}")
+                continue
         relevant_failed = [
             r for r in _check_properties(cluster_files)
             if not r.passed and _assessment_has_finding_category(
@@ -712,6 +855,9 @@ async def auto_validate_and_deliver(
             dry_run_errors=dry_errors,
             failed_properties=[r.property_name for r in relevant_failed],
         )
+        # Source-layer: never refuse the cluster because SSA failed.
+        if not ok and all(_is_source_layer_file(f) for f in cluster_files):
+            ok, refuse_reason = True, ""
         if not ok:
             cluster_refusals.append(f"{cluster.key}: {refuse_reason}")
             logger.warning(
@@ -806,6 +952,7 @@ async def auto_validate_and_deliver(
             "review": review,
             "clusters": len(clusters),
             "drop_reasons": drop_reasons,
+            "skip_reasons": soft_warnings,
         }
 
     if cluster_refusals and not unchanged_any:

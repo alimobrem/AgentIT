@@ -87,20 +87,33 @@
    pr_tracking.py -- the same primitives Ledger/Assessment Detail's PR
    displays already use) -- one card per real delivery mechanism/target
    repo, with which findings/agent-generated files it covers, in place of
-   raw manifest/category counts. Phase A refuse drops preview cards so we
-   never promise PRs after "refusing to open a PR". #}
+   raw manifest/category counts. Phase A refuse / validation-failed /
+   needs_attention drop preview cards so we never promise PRs after a
+   refuse or converge failure (pulse-agent class / #192). #}
 <h2 class="section-title mt-0">Pull Requests</h2>
-{% if not delivery_gate_allows|default(true) and not pr_cards %}
+{% if (not delivery_gate_allows|default(true) or validation_failed|default(false) or needs_attention_onboard|default(false)) and not pr_cards %}
 <div class="empty-state" role="status">
   <p>
     <strong>No pull request will open.</strong>
     {% if delivery_refuse_reason %}
     {{ delivery_refuse_reason }}
+    {% elif validation_failed|default(false) or needs_attention_onboard|default(false) %}
+    Scan did not open a PR — see refuse / skip reasons below (missing APIs, Forbidden, or validation could not converge on cluster packs). Source-layer remediations are retried via Retry Scan delivery when remediable findings remain.
     {% else %}
     Scan refused delivery — there are no remediable open findings / score delta.
     {% endif %}
   </p>
-  <p class="text-sm text-muted mb-0">Generated files (if any) stay under Diagnostics below for review — retrying delivery would refuse again until remediable findings appear.</p>
+  {% if delivery_skip_summary %}
+  <p class="text-sm mb-1">{{ delivery_skip_summary }}</p>
+  {% endif %}
+  {% if skip_reasons %}
+  <ul class="finding-list mb-1">
+    {% for reason in skip_reasons[:8] %}
+    <li class="finding-item"><span class="badge badge-muted">skip</span> {{ reason }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  <p class="text-sm text-muted mb-0">Generated files (if any) stay under Diagnostics below for review.</p>
 </div>
 {% elif pr_cards %}
 <p class="text-sm text-muted mb-1">
@@ -108,6 +121,8 @@
   {{ pr_opened_count }} pull request{{ 's' if pr_opened_count != 1 }} opened so far — {{ pr_pending_count }} more may open on a later Scan.
   {% elif pr_opened_count %}
   {{ pr_opened_count }} pull request{{ 's' if pr_opened_count != 1 }} opened for this onboarding — review and merge on GitHub.
+  {% elif delivery_skip_summary %}
+  {{ delivery_skip_summary }} — previewed below, nothing opened yet.
   {% else %}
   AgentIT will open {{ pr_cards|length }} pull request{{ 's' if pr_cards|length != 1 }} when Scan finishes delivery — previewed below, nothing opened yet.
   {% endif %}
