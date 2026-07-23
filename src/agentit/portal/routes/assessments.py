@@ -1224,12 +1224,22 @@ async def deliver(request: Request, assessment_id: str):
     """The unified apply flow's single entry point (docs/unified-apply-
     flow.md section (A)): replaces the independent "Apply to Cluster" /
     "Create PR" buttons for cluster/app config with one decision, computed
-    once via ``route_and_deliver()`` -- the mechanism (direct apply vs.
-    GitOps commit+PR) is no longer a human choice, only ``dry_run`` is.
+    once -- the mechanism (direct apply vs. GitOps commit+PR) is no longer
+    a human choice, only ``dry_run`` is.
+
+    ``dry_run=True`` stays a lightweight, side-effect-free preview via
+    ``route_and_deliver(dry_run=True)`` directly. A real delivery
+    (``dry_run=False``) routes through ``auto_validate_and_deliver()`` --
+    the exact same pipeline Scan's automatic chain uses (Phase C SSA +
+    property checks, the fleet HPA scaleTargetRef gate, the capability
+    filter, and the bounded validate/fix converge loop) -- instead of a
+    hand-maintained subset of those gates that had already drifted once
+    (Hello-World gitops#31: this route's own Phase A finding-gate check
+    passed while the automatic path's file filter / clear-evidence / caps
+    would have refused). One pipeline, one place these gates can drift.
     """
     from agentit.assessment_diff import current_finding_keys
     from agentit.portal.delivery import DeliveryInProgressError, repo_kind_for_mechanism, route_and_deliver
-    from agentit.portal.quality_prs import finding_gate_allows_pr, finding_gate_refuse_reason
 
     s = await get_store()
     report = await s.get(assessment_id)
@@ -1250,144 +1260,97 @@ async def deliver(request: Request, assessment_id: str):
     # analysis.md Phase 3).
     target_findings = sorted(current_finding_keys(report))
 
-    # Phase A: same finding gate as auto_validate_and_deliver — refuse
-    # catalog-dump PRs when there are no remediable open findings / score
-    # delta. Dry-run previews still run (validation only; no PR open).
-    if not dry_run and not finding_gate_allows_pr(target_findings):
-        reason = finding_gate_refuse_reason(target_findings)
+    repo_url = (getattr(report, "repo_url", None) or "").lower()
+    if not dry_run and "octocat/hello-world" in repo_url:
+        # Narrow, permanent probe-repo refusal -- not a general delivery
+        # gate, so it stays here rather than inside auto_validate_and_deliver
+        # (which must stay reusable for any real app).
+        reason = (
+            "Refusing Deliver for probe repo octocat/Hello-World — "
+            "not a dogfood app; remove it from Fleet instead of opening GitOps PRs."
+        )
         return RedirectResponse(
             url=f"/assessments/{assessment_id}/onboard-results?error={quote(reason)}",
             status_code=303,
         )
 
-    # Manual Deliver used to call route_and_deliver with the full onboard
-    # catalog whenever *any* remediable finding existed (Hello-World #31/#32,
-    # pinky #12). Mirror auto_validate_and_deliver's remaining quality bar:
-    # filter to open findings, strip wrong-layer companions, refuse oversized
-    # catalog dumps, and require clear-evidence simulation.
     if not dry_run:
-        from agentit.portal.quality_prs import (
-            MAX_FILES_PER_CLUSTER_PR,
-            clear_evidence_simulation_ok,
-            filter_files_to_open_findings,
-            strip_wrong_layer_companions,
-        )
-        from agentit.remediation.registry import remediable_findings
+        from agentit.portal.auto_delivery import auto_validate_and_deliver
 
-        repo_url = (getattr(report, "repo_url", None) or "").lower()
-        if "octocat/hello-world" in repo_url:
-            reason = (
-                "Refusing Deliver for probe repo octocat/Hello-World — "
-                "not a dogfood app; remove it from Fleet instead of opening GitOps PRs."
-            )
-            return RedirectResponse(
-                url=f"/assessments/{assessment_id}/onboard-results?error={quote(reason)}",
-                status_code=303,
-            )
-
+        orchestration = await s.get_orchestration(assessment_id) or {}
         try:
-            remediable = remediable_findings(target_findings)
-        except Exception:
-            remediable = list(target_findings)
-        gate_findings = remediable if remediable else list(target_findings)
-        kept_files, drop_reasons = filter_files_to_open_findings(files, gate_findings)
-        kept_files, layer_drops = strip_wrong_layer_companions(kept_files, gate_findings)
-        if layer_drops:
-            drop_reasons = list(drop_reasons or []) + layer_drops
-        if not kept_files:
-            reason = (
-                "No generated files map to open findings — refusing PR. "
-                + ("; ".join(drop_reasons[:5]) if drop_reasons else "empty after finding filter")
+            result = await auto_validate_and_deliver(
+                store=s, report=report, app_name=report.repo_name, namespace=namespace,
+                assessment_id=assessment_id, actor=get_current_user(request), files=files,
+                orchestration=orchestration, target_findings=target_findings,
             )
+        except DeliveryInProgressError as exc:
+            # A concurrent delivery for this same app (another human, or the
+            # automatic background validate-and-deliver pipeline) is already
+            # mid-commit -- a clear, specific message, not the generic
+            # "delivery failed" text below, since nothing here actually failed.
             return RedirectResponse(
-                url=f"/assessments/{assessment_id}/onboard-results?error={quote(reason)}",
+                url=f"/assessments/{assessment_id}/onboard-results?error={quote(str(exc))}",
                 status_code=303,
             )
-        if len(kept_files) > MAX_FILES_PER_CLUSTER_PR:
-            reason = (
-                f"Manual Deliver refused catalog dump ({len(kept_files)} files > "
-                f"{MAX_FILES_PER_CLUSTER_PR} per-cluster cap). Use Scan auto-delivery "
-                "which partitions by finding cluster, or deliver a smaller edited set."
-            )
+        except Exception as exc:
+            log.exception("Delivery failed for assessment %s", assessment_id)
+            detail = getattr(exc, "detail", None) or str(exc)
             return RedirectResponse(
-                url=f"/assessments/{assessment_id}/onboard-results?error={quote(reason)}",
+                url=(
+                    f"/assessments/{assessment_id}/onboard-results?error="
+                    f"{quote(f'Delivery failed: {str(detail)[:180]}. Nothing was applied — fix the issue above, then retry Deliver.')}"
+                ),
                 status_code=303,
             )
-        # Populate empty SBOM shells before clear-evidence (same bar as Scan
-        # auto_delivery — refuse components: []) and re-target workload
-        # replicas/health-probes stubs at the app's real Deployment/Rollout
-        # (or its chart's values.yaml) instead of a fabricated stand-in —
-        # same enrichment auto_validate_and_deliver already runs, closing
-        # the manual-Deliver parity gap for this specific class of theater.
-        repo_url = getattr(report, "repo_url", None) or ""
-        needs_sbom_enrich = any(
-            (f.get("skill_name") or "").lower().replace("_", "-") == "sbom-artifact"
-            or "sbom" in str(f.get("target_path") or "").lower()
-            for f in kept_files
+
+        status = result.get("status")
+        if status == "delivered":
+            pr_urls = result.get("pr_urls") or []
+            last_delivery = result.get("delivery") or {}
+            params = ["dry_run=false"]
+            if last_delivery.get("delivery_id"):
+                params.append(f"delivery_id={last_delivery['delivery_id']}")
+            if pr_urls:
+                params.append(f"pr_url={quote(pr_urls[0])}")
+                for cat, o in (last_delivery.get("outcomes") or {}).items():
+                    if isinstance(o, dict) and o.get("pr_url") == pr_urls[0]:
+                        repo_kind = repo_kind_for_mechanism(
+                            (last_delivery.get("mechanisms") or {}).get(cat, ""),
+                        )
+                        if repo_kind:
+                            params.append(f"pr_url_repo={repo_kind}")
+                        break
+            if any(
+                isinstance(o, dict) and o.get("mechanism") == "cicd_shared_namespace"
+                for o in (last_delivery.get("outcomes") or {}).values()
+            ):
+                params.append("cicd_gate=true")
+            return RedirectResponse(
+                url=f"/assessments/{assessment_id}/onboard-results?{'&'.join(params)}",
+                status_code=303,
+            )
+        if status == "unchanged":
+            reason = (
+                "Nothing to deliver — generated manifests already match what's "
+                "deployed. No new pull request needed."
+            )
+            return RedirectResponse(
+                url=f"/assessments/{assessment_id}/onboard-results?warning={quote(reason)}",
+                status_code=303,
+            )
+        # "needs_attention" (gate/validation refusal) or "delivery_failed".
+        reason = str(result.get("reason") or "Delivery did not open a pull request.")
+        return RedirectResponse(
+            url=f"/assessments/{assessment_id}/onboard-results?error={quote(reason)}",
+            status_code=303,
         )
-        needs_workload_enrich = any(
-            (f.get("skill_name") or "").lower().replace("_", "-")
-            in ("workload-replicas", "workload-health-probes")
-            for f in kept_files
-        )
-        if repo_url and (needs_sbom_enrich or needs_workload_enrich):
-            try:
-                from agentit.portal import github_pr as ghp
-                from agentit.remediation.source_patches import (
-                    enrich_sbom_from_repo,
-                    enrich_workload_files_from_repo,
-                )
-
-                token = ghp._get_token()
-                hdrs = ghp._headers(token)
-                owner, repo = ghp._parse_owner_repo(repo_url)
-                base_url = f"{ghp._API}/repos/{owner}/{repo}"
-                default_branch, base_sha = ghp._get_default_branch_and_base_sha(
-                    base_url, hdrs,
-                )
-                tree_paths = ghp._list_tree_paths(base_url, hdrs, base_sha)
-
-                def _read(path: str) -> str | None:
-                    return ghp._get_file_content_at_ref(
-                        base_url, hdrs, path, default_branch,
-                    )
-
-                if needs_sbom_enrich:
-                    kept_files = enrich_sbom_from_repo(
-                        kept_files,
-                        read_file=_read,
-                        tree_paths=tree_paths or None,
-                        app_name=getattr(report, "repo_name", None),
-                    )
-                if needs_workload_enrich and tree_paths:
-                    kept_files, workload_drops = enrich_workload_files_from_repo(
-                        kept_files, read_file=_read, tree_paths=tree_paths,
-                    )
-                    if workload_drops:
-                        drop_reasons = list(drop_reasons or []) + workload_drops
-            except Exception:
-                log.info(
-                    "Manual Deliver SBOM/workload enrich skipped for %s",
-                    assessment_id, exc_info=True,
-                )
-        sim_ok, sim_reason = clear_evidence_simulation_ok(kept_files, gate_findings)
-        if not sim_ok:
-            reason = (
-                "Clear-evidence simulation failed — refusing PR "
-                f"(MERGE would not clear the finding): {sim_reason}"
-            )
-            return RedirectResponse(
-                url=f"/assessments/{assessment_id}/onboard-results?error={quote(reason)}",
-                status_code=303,
-            )
-        files = kept_files
-        target_findings = gate_findings
 
     try:
         delivery = await route_and_deliver(
             files, app_name=report.repo_name, namespace=namespace,
             report=report, store=s, assessment_id=assessment_id,
-            actor=get_current_user(request), dry_run=dry_run,
+            actor=get_current_user(request), dry_run=True,
             target_findings=target_findings,
         )
     except DeliveryInProgressError as exc:

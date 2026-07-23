@@ -63,7 +63,11 @@ def _skill_file(path: str = "netpol.yaml") -> dict:
     return {
         "category": "skills",
         "path": path,
-        "content": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: test\n",
+        "content": (
+            "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\n"
+            "metadata:\n  name: test\n"
+            "spec:\n  podSelector: {}\n  policyTypes:\n    - Ingress\n"
+        ),
         "description": "network policy",
         "skill_name": "network-policy",
         "finding_addressed": "network",
