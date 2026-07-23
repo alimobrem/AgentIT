@@ -47,8 +47,11 @@ Normative detail: [`architecture-agentit-vs-fleet-gitops.md`](./architecture-age
 | `SOLUTION_CONTRACTS` | Every analyzer category contracted; `auto_pr=False` for detect-only (`license`, `secrets`, …) |
 | `evidence_kind` | Machine check before open (`dockerfile_pin`, `audit_wired`, `hpa_target`, …) |
 | Pre-open simulation | `remediation/clear_evidence.py` + `auto_delivery` refuse if MERGE would not clear |
+| Resource collisions | `quality_prs.find_resource_collisions()` refuses a batch that would create two resources with the same (apiVersion, kind, namespace, name) — the Argo-sync-blocking class of bug SSA dry-run validates each file independently and never caught |
 | Skill ↔ contract CI | `tests/test_skill_registry_agreement.py` fails on FIX_REGISTRY / skill / delivery drift |
 | Fleet vs self-managed | Cluster → gitops `apps/{app}/`; self-managed → app `chart/`; source → app repo |
+| Chart-aware source patches | `workload-replicas`/`workload-health-probes` (like HPA before them) find the real Deployment/Rollout via GitHub-REST `read_file`/`tree_paths` and patch a Helm chart's `values.yaml` when `replicas:` is templated — never a fabricated, disconnected stand-in |
+| Manual Deliver = auto pipeline | `POST /assessments/{id}/deliver`'s real (non-dry-run) path calls `auto_validate_and_deliver()` directly — one quality bar every delivery entry point shares, not a hand-maintained subset that can drift |
 | PR / portal honesty | Body: `Clears X by Y (evidence: …)`; Assessment Detail PR cards show contract lines |
 
 ### Checks vs resolutions
