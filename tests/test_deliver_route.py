@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import re
 from unittest.mock import patch
+from urllib.parse import unquote
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from agentit.models import DimensionScore, Finding, Severity
 from agentit.portal.app import app
 from conftest import make_report, make_store, prime_csrf
 
@@ -24,11 +26,26 @@ def _skill_file(path: str = "test-app-network-policy.yaml") -> dict:
     }
 
 
+def _report_with_remediable_findings(repo_name: str = "test-app"):
+    """Default make_report uses uncontracted category=test; Phase A gate
+    refuses those. Deliver success paths need a remediable finding."""
+    return make_report(
+        repo_name=repo_name,
+        scores=[DimensionScore(
+            dimension="security", score=40, max_score=100,
+            findings=[Finding(
+                category="network", severity=Severity.high,
+                description="missing network", recommendation="add NetworkPolicy",
+            )],
+        )],
+    )
+
+
 @pytest.fixture
 async def deliver_client():
     store = await make_store()
     async_store = store
-    report = make_report(repo_name="test-app")
+    report = _report_with_remediable_findings(repo_name="test-app")
     assessment_id = await store.save(report)
     await store.save_onboarding(assessment_id, [_skill_file()])
 
@@ -73,6 +90,108 @@ class TestDeliverWithNoInfraRepoRefusesWithNoDirectApplyFallback:
         assert resp.status_code == 303
         assert "error=" in resp.headers["location"]
         _mock_kube.apply_yaml.assert_not_called()
+
+
+class TestManualDeliverFindingGatePhaseA:
+    """Manual /deliver must use the same Phase A finding_gate as
+    auto_validate_and_deliver — no catalog-dump PRs from Onboard Results."""
+
+    async def test_refuses_when_no_open_findings(self, _mock_kube):
+        store = await make_store()
+        report = make_report(
+            repo_name="catalog-dump-app",
+            scores=[DimensionScore(
+                dimension="security", score=90, max_score=100, findings=[],
+            )],
+        )
+        aid = await store.save(report)
+        await store.save_onboarding(aid, [_skill_file()])
+        await store.set_infra_repo_url(aid, "https://github.com/org/catalog-dump-gitops")
+
+        with patch("agentit.portal.app.get_store", return_value=store), \
+             patch("agentit.portal.routes.assessments.get_store", return_value=store), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://testserver",
+                follow_redirects=True,
+            ) as client:
+                await prime_csrf(client)
+                resp = await client.post(
+                    f"/assessments/{aid}/deliver", data={"dry_run": "false"},
+                    follow_redirects=False,
+                )
+
+        assert resp.status_code == 303
+        location = unquote(resp.headers["location"])
+        assert "error=" in location
+        assert "No open findings" in location
+        mock_commit.assert_not_called()
+        assert await store.list_deliveries(aid) == []
+
+    async def test_refuses_when_only_detect_only_findings(self, _mock_kube):
+        store = await make_store()
+        report = make_report(
+            repo_name="detect-only-deliver-app",
+            scores=[DimensionScore(
+                dimension="security", score=50, max_score=100,
+                findings=[
+                    Finding(
+                        category="license", severity=Severity.medium,
+                        description="No LICENSE file found",
+                        recommendation="Add a LICENSE",
+                    ),
+                    Finding(
+                        category="secrets", severity=Severity.high,
+                        description="Potential api_key found",
+                        recommendation="Rotate and use a Secret",
+                    ),
+                ],
+            )],
+        )
+        aid = await store.save(report)
+        await store.save_onboarding(aid, [_skill_file()])
+        await store.set_infra_repo_url(aid, "https://github.com/org/detect-only-gitops")
+
+        with patch("agentit.portal.app.get_store", return_value=store), \
+             patch("agentit.portal.routes.assessments.get_store", return_value=store), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://testserver",
+                follow_redirects=True,
+            ) as client:
+                await prime_csrf(client)
+                resp = await client.post(
+                    f"/assessments/{aid}/deliver", data={"dry_run": "false"},
+                    follow_redirects=False,
+                )
+
+        assert resp.status_code == 303
+        location = unquote(resp.headers["location"])
+        assert "error=" in location
+        assert "detect_only" in location or "no_auto_pr" in location
+        mock_commit.assert_not_called()
+
+    async def test_allows_when_remediable_findings_exist(self, deliver_client, _mock_kube):
+        client, store, aid = deliver_client
+        await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
+
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset") as mock_ensure:
+            mock_commit.return_value = {
+                "pr_url": "https://github.com/org/infra-gitops/pull/4",
+                "commit_url": "https://github.com/org/infra-gitops/commit/cafebabe",
+                "files_committed": 1,
+            }
+            resp = await client.post(
+                f"/assessments/{aid}/deliver", data={"dry_run": "false"},
+                follow_redirects=False,
+            )
+
+        assert resp.status_code == 303
+        assert "pull/4" in resp.headers["location"]
+        mock_commit.assert_called_once()
+        mock_ensure.assert_called_once()
 
 
 class TestDeliverRegisteredCommitsToInfraRepo:

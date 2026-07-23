@@ -1166,6 +1166,7 @@ async def deliver(request: Request, assessment_id: str):
     """
     from agentit.assessment_diff import current_finding_keys
     from agentit.portal.delivery import DeliveryInProgressError, repo_kind_for_mechanism, route_and_deliver
+    from agentit.portal.quality_prs import finding_gate_allows_pr, finding_gate_refuse_reason
 
     s = await get_store()
     report = await s.get(assessment_id)
@@ -1184,12 +1185,24 @@ async def deliver(request: Request, assessment_id: str):
     # re-assessment's diff can correlate this whole-app delivery back to
     # the findings it was meant to clear (docs/onboarding-loop-vision-gap-
     # analysis.md Phase 3).
+    target_findings = sorted(current_finding_keys(report))
+
+    # Phase A: same finding gate as auto_validate_and_deliver — refuse
+    # catalog-dump PRs when there are no remediable open findings / score
+    # delta. Dry-run previews still run (validation only; no PR open).
+    if not dry_run and not finding_gate_allows_pr(target_findings):
+        reason = finding_gate_refuse_reason(target_findings)
+        return RedirectResponse(
+            url=f"/assessments/{assessment_id}/onboard-results?error={quote(reason)}",
+            status_code=303,
+        )
+
     try:
         delivery = await route_and_deliver(
             files, app_name=report.repo_name, namespace=namespace,
             report=report, store=s, assessment_id=assessment_id,
             actor=get_current_user(request), dry_run=dry_run,
-            target_findings=sorted(current_finding_keys(report)),
+            target_findings=target_findings,
         )
     except DeliveryInProgressError as exc:
         # A concurrent delivery for this same app (another human, or the
