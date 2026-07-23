@@ -290,8 +290,9 @@ class LLMClient:
         files: list[dict],
         app_summary: str,
     ) -> dict | None:
-        """Final pre-PR quality/safety gate over the WHOLE validated batch of
-        generated manifests -- distinct from ``review_fix()`` above, which
+        """Final pre-PR quality/completeness opinion over the WHOLE validated
+        batch of generated manifests -- advisory only, never a gate (see
+        below) -- distinct from ``review_fix()`` above, which
         reviews one fix against one finding. Answers a different question:
         "looking at everything about to be committed together, does this
         look complete, internally consistent, and safe to open as a PR for

@@ -2164,7 +2164,12 @@ async def test_settings_page_default(client, _override_store):
     resp = await client.get("/settings")
     assert resp.status_code == 200
     assert "Settings" in resp.text
-    assert "LLM Safety Gate" in resp.text
+    # "LLM Safety Gate" was a stale AutoMode-era label -- AutoMode's own LLM
+    # classify_action (an actual blocking gate) was removed entirely; this
+    # stat is a plain "is an LLM client configured" flag with no gating
+    # behavior of its own.
+    assert "LLM Availability" in resp.text
+    assert "LLM Safety Gate" not in resp.text
     assert "Data Retention" in resp.text
 
 
