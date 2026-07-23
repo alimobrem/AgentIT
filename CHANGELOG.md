@@ -29,6 +29,13 @@ Product contract detail: [`docs/release-notes.md`](docs/release-notes.md).
 - **Image signing good-PR path:** detect `image-signing-exists` (`file_contains: cosign`) → remediable `image_signing` contract → `cosign-sign-task` (keyless Sigstore Tekton Task). Clear-evidence `cosign_sign_task` refuses empty Task / SLSA L3 / hermetic / Konflux theater without `cosign sign`/`attest`. Optional: pin Syft on `sbom-task` to `v1.48.0` (stop `:latest`).
 
 ### Fixed
+- **SBOM clears via CI generation (not static file):** Assess / `sbom-exists`
+  clear when the repo's CI generates an SBOM (`anchore/sbom-action`, Syft
+  workflow step, or Tekton Pipeline `sbom-generate` wire) — **not** a
+  committed `sbom.cdx.json`. `SOLUTION_CONTRACTS.sbom` → `sbom-ci` (source)
+  with clear-evidence `sbom_ci`; refuses bare `sbom-task` and demoted
+  `sbom-artifact` companions. pulse-agent#4 static BOM is wrong product
+  shape — next Scan opens a GHA/Tekton CI PR instead.
 - **`dockerfile_pin` path-bound (pulse-agent#2 class):** clear-evidence binds
   each container `:latest` finding to its Dockerfile/Containerfile — pinning
   `Dockerfile` alone no longer clears `:latest` on `Dockerfile.deps` / `.fast`.
@@ -43,15 +50,11 @@ Product contract detail: [`docs/release-notes.md`](docs/release-notes.md).
   missing). `migration_tooling` refuses `SELECT 1`, empty `upgrade()`/`pass`,
   and comment-only `op.execute` (require real DDL). Generators/templates pinned
   accordingly. Same refuse class as SBOM empty shells (#199).
-- **SBOM inventory (not empty shells):** `sbom-artifact` populates CycloneDX
-  `components` via Syft when available, else lockfiles/manifests
-  (`requirements.txt`, `package.json`, `go.mod`, …). Delivery enrichment runs
-  before clear-evidence; `sbom_file` refuses `components: []` theater
-  (pulse-agent#3 class). Tip after merge: next Scan opens a real BOM.
+- **SBOM inventory (legacy / demoted):** `sbom-artifact` still populates
+  CycloneDX `components` via Syft/lockfiles when used manually; primary
+  auto_pr path is CI generation (`sbom-ci`). Static file alone does not
+  clear Assess.
 - **Portal OOM under concurrent GitHub webhooks (dogfood):** clone+assess had no concurrency bound and the Rollout sat at 512Mi; overlapping push reassesses OOMKilled the pod mid-run (pinky → webhook 504, push-driven finding verification never ran). Raise portal memory to 1Gi, serialize in-process assess (default max 1 via `assessConcurrency` / `AGENTIT_ASSESS_MAX_CONCURRENT`), and fail soft with HTTP 503 + claim release so GitHub can redeliver the same `X-GitHub-Delivery`.
-- **SBOM good-PR path:** compliance `sbom` clears via source CycloneDX
-  (`skills/compliance/sbom-artifact.md`, clear-evidence `sbom_file`) — not a
-  cluster Tekton `sbom-task` that never satisfied Assess's app-repo file check.
 - **Schedules page (dogfood):** multi-document onboarding `*-cronjob.yaml` bundles (SA/Role before CronJob) rendered every row as `unresolvable` because `yaml.safe_load` only read the first doc; Containerfile omitted `watchers/` + `agents/` registration Markdown so `WATCHER_AGENTS` was empty in-cluster (“0 Long-Lived Agents”); page did not show per-app `assessment_cadence` or live platform CronJobs, so empty/unresolvable onboarding tables looked like “nothing has a schedule.” Parse all YAML docs, ship registration dirs, surface cadence + `list_cronjobs`, and clarify empty-state copy.
 - **Skill learning (minimal ship):** clear-evidence theater refusals now record `skill_effectiveness` rejects (same path as post-merge still-present; deduped per skill+reason within one delivery). After **2** identical reject reason prefixes for `(app, skill)`, that skill cools down and is skipped in `match()` / Fix dispatch; unchanged failure reasons skip blind `redispatch_finding_fix()` (escalate + log `skill-learner-queued`). `run_all()` rejection skip uses finding **category** (not `skill.domain`). skill-learner fast-path flags at the same **2** identical-reject threshold. Capabilities surfaces cooling-down skills.
 - **capability-scout tests-pass (dogfood):** chart wires a dedicated throwaway Postgres sidecar + `AGENTIT_TEST_PG_DSN` (same pattern as Tekton `run-tests` / GHA services) so the in-cluster gate can execute real pytest instead of 0 passed / thousands skipped. Never the fleet bundled DB (fixtures `TRUNCATE`). All-skip infra failures no longer stick `fix_regression_only=true`. Values: `agents.capabilityScout.testPostgres.*` (optional external `dsn` for dogfood Argo).

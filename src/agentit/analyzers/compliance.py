@@ -5,6 +5,7 @@ from pathlib import Path
 from agentit.analyzers.base import calculate_score, is_ignored, iter_yaml_files
 from agentit.models import DimensionScore, Finding, Severity
 from agentit.remediation.audit_wire import has_audit_usage
+from agentit.remediation.sbom_ci import repo_has_ci_sbom_generation
 
 _AUDIT_MODULE_NAMES = frozenset({
     "audit.py", "audit.go", "audit.js", "audit.ts", "audit_log.py",
@@ -17,7 +18,8 @@ class ComplianceAnalyzer:
     def analyze(self, repo_path: Path) -> DimensionScore:
         findings: list[Finding] = []
         has_license = (repo_path / "LICENSE").exists() or (repo_path / "LICENSE.md").exists() or (repo_path / "LICENCE").exists()
-        has_sbom = False
+        # Product path: CI generates SBOM — not a committed static *sbom* file.
+        has_sbom = repo_has_ci_sbom_generation(repo_path)
         has_audit_module = False
         has_audit_callsite = False
         has_policy = False
@@ -26,8 +28,6 @@ class ComplianceAnalyzer:
             if not fp.is_file() or is_ignored(fp, repo_path):
                 continue
             name = fp.name.lower()
-            if "sbom" in name or "bom" in name:
-                has_sbom = True
             if name in _AUDIT_MODULE_NAMES:
                 # Module alone is insufficient — import/call must appear elsewhere.
                 # Root-only orphans (pinky#8 theater) do not count; require a
@@ -69,8 +69,11 @@ class ComplianceAnalyzer:
             findings.append(Finding(
                 category="sbom",
                 severity=Severity.high,
-                description="No SBOM (Software Bill of Materials) found",
-                recommendation="Generate SBOM using Syft, store in ODF",
+                description="No SBOM generation in CI",
+                recommendation=(
+                    "Add CI SBOM generation (GitHub Action anchore/sbom-action "
+                    "or Syft step, or wire a Tekton Pipeline sbom task)"
+                ),
                 source="analyzer:compliance",
             ))
         if not has_audit_log:

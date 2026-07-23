@@ -104,12 +104,13 @@ class TestSolutionContracts:
             assert clears_via_source(cat), cat
             assert contract_for(cat).delivery == "source"
 
-    def test_sbom_refuses_tekton_task_companion(self) -> None:
+    def test_sbom_refuses_tekton_task_and_static_artifact(self) -> None:
         c = contract_for("sbom")
         assert c is not None
-        assert c.skill_name == "sbom-artifact"
-        assert c.evidence_kind == "sbom_file"
+        assert c.skill_name == "sbom-ci"
+        assert c.evidence_kind == "sbom_ci"
         assert "sbom-task" in c.refuse_companions
+        assert "sbom-artifact" in c.refuse_companions
 
     def test_fleet_vs_self_managed_path_hints(self) -> None:
         assert "gitops" in delivery_path_hint("scaling", self_managed=False)
@@ -283,11 +284,11 @@ class TestCategoriesWithNoRealRemediationYetResolveHonestly:
     def test_sbom_trigger_removal_does_not_break_real_sbom_matching(
         self, engine: SkillEngine,
     ) -> None:
-        """``sbom`` resolves via FIX_REGISTRY to source ``sbom-artifact``
-        (not the cluster Tekton ``sbom-task`` companion)."""
+        """``sbom`` resolves via FIX_REGISTRY to source ``sbom-ci``
+        (not bare ``sbom-task`` / static ``sbom-artifact``)."""
         skill = engine.skill_for_category("sbom")
         assert skill is not None
-        assert skill.name == "sbom-artifact"
+        assert skill.name == "sbom-ci"
 
 
 class TestNewSkillTriggersDoNotCollide:

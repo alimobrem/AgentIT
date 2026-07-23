@@ -907,6 +907,7 @@ async def auto_validate_and_deliver(
                 validation_summary=validation_summary,
                 drop_reasons=drop_reasons,
                 score_dimensions=score_dims,
+                llm_review=review,
             ),
             "branch_suffix": cluster.branch_suffix,
             "cluster_key": cluster.key,

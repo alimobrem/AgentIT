@@ -160,14 +160,15 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
         "image-registry-policy",
         kinds=("Policy", "ClusterPolicy"),
     ),
-    # Analyzer + sbom-exists detect an *app-repo* SBOM file. A cluster
-    # Tekton Task (sbom-task) does not clear that finding — refuse it as
-    # a wrong-layer companion (same class as audit-policy vs app-audit).
+    # Assess clears when CI generates an SBOM (GHA anchore/sbom-action /
+    # syft, or Tekton Pipeline wiring). Static sbom.cdx.json and bare
+    # cluster sbom-task do not clear — refuse both as companions.
     "sbom": _c(
-        "compliance", "sbom-artifact", "source",
-        "adding a CycloneDX SBOM artifact (sbom.cdx.json) in the app repo",
-        _ev.SBOM_FILE,
-        "sbom-task",
+        "compliance", "sbom-ci", "source",
+        "adding CI SBOM generation (GitHub Action anchore/sbom-action or "
+        "Tekton Pipeline sbom step)",
+        _ev.SBOM_CI,
+        "sbom-task", "sbom-artifact",
     ),
     # App-level audit logging (compliance analyzer). Cluster apiserver
     # audit-policy ConfigMap does NOT clear this finding. Root-only
