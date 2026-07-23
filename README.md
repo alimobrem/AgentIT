@@ -199,6 +199,7 @@ AgentIT is a **GitOps assistant**, not an auto-apply bot.
 - **No silent cluster applies** for app remediations — path is PR → merge → Argo
 - **Clear-evidence gate** — refuses theater stubs, root-only `audit.py` without package wire-up, destructive Containerfile rewrites, SLSA/hermetic prose without a real `cosign sign` Task (`image_signing` → `cosign-sign-task`), and Tekton `sbom-task` theater for the app-repo `sbom` finding (`sbom` → `sbom-artifact`)
 - **Awaiting verification** only when a delivery actually produced a `pr_url`
+- **Async GitHub push webhooks** — `/api/webhook/github-push` returns **202** immediately and assesses in the background (GitHub’s ~10s timeout). Webhook claims stay incomplete until success; hard failure / busy exhaustion / TTL (~15m) releases the claim so retries work. Portal assess concurrency + 1Gi memory from #189 unchanged
 - Treat outputs as drafts until you validate against your sources of record (cluster, GitHub, Argo)
 
 Quality rules: [`docs/plan-quality-helpful-prs.md`](docs/plan-quality-helpful-prs.md). Product contract: [`docs/release-notes.md`](docs/release-notes.md).

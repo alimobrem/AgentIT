@@ -353,7 +353,7 @@ class TestWebhookWiring:
                 headers={"X-GitHub-Event": "push"},
             )
 
-        assert resp.status_code == 200
+        assert resp.status_code == 202
         delivery = await store.get_delivery(delivery_id)
         assert delivery["finding_resolution"] == "still_present"
 
@@ -384,7 +384,7 @@ class TestWebhookWiring:
                 headers={"X-GitHub-Event": "push"},
             )
 
-        assert resp.status_code == 200
+        assert resp.status_code == 202
         events = await store.list_events(target_app=old_report.repo_name, limit=50)
         # Escalation would fire a real "finding-escalated" event (the
         # `gates` table/generic gate-resolution machinery has been removed

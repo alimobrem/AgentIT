@@ -171,6 +171,7 @@ async def webhook_assess(request: Request, background_tasks: BackgroundTasks):
     except Exception:
         from agentit.portal.metrics import assessments_total as _at
         _at.labels(criticality=criticality, status="error").inc()
+        await s.release_webhook_claim(delivery_id)
         raise
     from agentit.portal.metrics import assessments_total as _at
     _at.labels(criticality=criticality, status="success").inc()
@@ -193,56 +194,32 @@ async def webhook_assess(request: Request, background_tasks: BackgroundTasks):
     base_url = _get_trusted_base_url(request)
     background_tasks.add_task(_run_onboarding_job, onboard_job_id, assessment_id, base_url)
 
+    await s.complete_webhook_claim(delivery_id)
     return JSONResponse({"assessment_id": assessment_id, "overall_score": report.overall_score})
 
 
-@router.post("/api/webhook/github-push")
-async def webhook_github_push(request: Request, background_tasks: BackgroundTasks):
-    """Handle GitHub push webhooks -- triggers re-assessment for managed repos."""
-    event_type = request.headers.get("X-GitHub-Event", "")
-    if event_type == "ping":
-        return JSONResponse({"status": "pong"})
-    if event_type != "push":
-        return JSONResponse({"status": "ignored", "reason": f"event type '{event_type}' not handled"})
+# Background assess retries when the portal assess slot is busy (202 already
+# returned — GitHub will not redeliver). Keep #189 concurrency + 1Gi; just
+# wait for the slot instead of lying with a sync 504.
+_PUSH_BUSY_RETRIES = 3
+_PUSH_BUSY_SLEEP_SECONDS = 30
 
-    body_bytes = await request.body()
-    if not _verify_github_signature(request, body_bytes):
-        raise HTTPException(403, "Invalid webhook signature")
 
-    body = json.loads(body_bytes)
+async def _process_github_push_delivery(
+    *,
+    delivery_id: str,
+    body: dict,
+    managed: dict,
+    repo_url: str,
+    base_url: str,
+) -> None:
+    """Background work for ``webhook_github_push`` after HTTP 202.
 
-    delivery_id = _get_delivery_id(request, body)
-    s_dedup = await get_store()
-    if not await s_dedup.claim_webhook(delivery_id):
-        return JSONResponse({"status": "duplicate", "delivery_id": delivery_id})
-
-    ref = body.get("ref", "")
-    repo_url = body.get("repository", {}).get("html_url", "")
-    default_branch = body.get("repository", {}).get("default_branch", "main")
-
-    if ref != f"refs/heads/{default_branch}":
-        return JSONResponse({"status": "ignored", "reason": f"push to {ref}, not {default_branch}"})
-
-    if not repo_url:
-        raise HTTPException(400, "No repository URL in push payload")
-
-    s = s_dedup
-    fleet = await s.get_fleet_data()
-    managed = next(
-        (app for app in fleet if app["repo_url"].rstrip("/").lower() == repo_url.rstrip("/").lower()),
-        None,
-    )
-    if managed is None:
-        return JSONResponse({"status": "ignored", "reason": f"{repo_url} not in fleet"})
-
-    commit_sha = body.get("after", "")[:12]
-    pusher = body.get("pusher", {}).get("name", "unknown")
-    log.info("GitHub push on managed repo %s by %s (commit %s) -- triggering re-assessment",
-             managed["repo_name"], pusher, commit_sha)
-
-    await s.log_event("github-webhook", "push-received", managed["repo_name"],
-                       "info", f"Push by {pusher} (commit {commit_sha}) -- re-assessing")
-
+    Completes the webhook claim only on full success; releases on any hard
+    failure (or exhausted busy-retries) so the same delivery_id can retry.
+    """
+    s = await get_store()
+    repo_name = managed["repo_name"]
     criticality = managed.get("criticality", "medium")
     check_results: list[dict] = []
     secret_decisions: list[dict] = []
@@ -253,37 +230,74 @@ async def webhook_github_push(request: Request, background_tasks: BackgroundTask
 
     from agentit.secret_classify_cache import BridgedSecretClassifyCache
     classify_cache = BridgedSecretClassifyCache(s, _bridge)
-    try:
-        report = await with_timeout(
-            asyncio.to_thread(
-                clone_assess_cleanup, repo_url, criticality,
-                check_results_out=check_results,
-                secret_decisions_out=secret_decisions,
-                secret_classify_cache=classify_cache,
+
+    report = None
+    last_busy: Exception | None = None
+    for attempt in range(1, _PUSH_BUSY_RETRIES + 1):
+        try:
+            report = await with_timeout(
+                asyncio.to_thread(
+                    clone_assess_cleanup, repo_url, criticality,
+                    check_results_out=check_results,
+                    secret_decisions_out=secret_decisions,
+                    secret_classify_cache=classify_cache,
+                )
             )
+            last_busy = None
+            break
+        except AssessBusyError as exc:
+            last_busy = exc
+            log.warning(
+                "Push re-assessment busy for %s (attempt %d/%d): %s",
+                repo_name, attempt, _PUSH_BUSY_RETRIES, exc,
+            )
+            if attempt < _PUSH_BUSY_RETRIES:
+                await asyncio.sleep(_PUSH_BUSY_SLEEP_SECONDS)
+        except Exception as exc:
+            log.exception("Re-assessment failed for %s", repo_name)
+            await s.log_event(
+                "github-webhook", "reassessment-failed", repo_name,
+                "warning", f"Re-assessment failed: {str(exc)[:200]}",
+            )
+            await s.release_webhook_claim(delivery_id)
+            return
+
+    if report is None:
+        await s.log_event(
+            "github-webhook", "reassessment-busy", repo_name, "warning",
+            f"Re-assessment deferred after {_PUSH_BUSY_RETRIES} busy attempt(s): "
+            f"{str(last_busy)[:200]}",
         )
+        await s.release_webhook_claim(delivery_id)
+        return
+
+    try:
         assessment_id = await s.save(report)
         await s.save_check_results(assessment_id, check_results)
         from agentit.llm_decisions import build_secret_classify_events
         for ev in build_secret_classify_events(secret_decisions, report.repo_name):
             await s.log_event(**ev, correlation_id=assessment_id)
-        await s.log_event("github-webhook", "reassessment-complete", managed["repo_name"],
-                           "info", f"Re-assessment complete: {report.overall_score:.0f}/100 (was {managed.get('latest_score', '?')})")
+        await s.log_event(
+            "github-webhook", "reassessment-complete", repo_name, "info",
+            f"Re-assessment complete: {report.overall_score:.0f}/100 "
+            f"(was {managed.get('latest_score', '?')})",
+        )
         from agentit.events import TOPIC_ASSESSMENTS as _TOPIC_ASSESSMENTS
-        publish_event("assessment-complete", managed["repo_name"],
-                      f"Re-assessment: {report.overall_score:.0f}/100",
-                      {"assessment_id": assessment_id, "score": report.overall_score},
-                      correlation_id=assessment_id,
-                      extra_topic=_TOPIC_ASSESSMENTS)
+        publish_event(
+            "assessment-complete", repo_name,
+            f"Re-assessment: {report.overall_score:.0f}/100",
+            {"assessment_id": assessment_id, "score": report.overall_score},
+            correlation_id=assessment_id,
+            extra_topic=_TOPIC_ASSESSMENTS,
+        )
 
         # Chain assess → onboard (same as webhook_assess). See docs/adr/0001.
         onboard_job_id = await s.create_remediation_job(assessment_id)
-        from agentit.portal.helpers import _get_trusted_base_url
         from agentit.portal.services.onboard_pipeline import _run_onboarding_job
-        base_url = _get_trusted_base_url(request)
-        background_tasks.add_task(_run_onboarding_job, onboard_job_id, assessment_id, base_url)
+        # Schedule onboard as its own task so claim completion is not held
+        # for the full onboard/auto-delivery window.
+        asyncio.create_task(_run_onboarding_job(onboard_job_id, assessment_id, base_url))
 
-        # --- Change impact analysis and targeted re-hardening ---
         commits = body.get("commits", [])
         changed_files: list[str] = []
         added_files: list[str] = []
@@ -296,111 +310,151 @@ async def webhook_github_push(request: Request, background_tasks: BackgroundTask
         from agentit.change_analyzer import analyze_changes
         impact = analyze_changes(changed_files, added_files)
 
-        # Diff against previous assessment
         prev_history = await s.list_history(repo_url)
         if len(prev_history) >= 2:
             prev_report = await s.get(prev_history[-2]["id"])
             if prev_report:
                 from agentit.assessment_diff import diff_assessments
                 diff = diff_assessments(prev_report, report)
-                await s.log_event("reassessment", "score-diff", managed["repo_name"],
-                                   "warning" if diff.degraded else "info",
-                                   diff.summary())
+                await s.log_event(
+                    "reassessment", "score-diff", repo_name,
+                    "warning" if diff.degraded else "info",
+                    diff.summary(),
+                )
 
-                # Finding-scoped re-verification (docs/onboarding-loop-
-                # vision-gap-analysis.md Phase 3): every push-triggered
-                # re-assessment automatically checks whether any prior
-                # delivery on this app that recorded a target finding
-                # actually cleared it -- pure correlation + a visible
-                # signal, not itself an automated delivery. See
-                # check_pending_delivery_verifications()'s own docstring
-                # for Phase 4's current bounded-retry-then-escalate
-                # reaction to a confirmed still-present finding.
                 from agentit.portal.delivery import check_pending_delivery_verifications
-                await check_pending_delivery_verifications(s, managed["repo_name"], report, assessment_id)
+                await check_pending_delivery_verifications(
+                    s, repo_name, report, assessment_id,
+                )
 
-                # Auto-fix new findings that are auto-fixable. RemediationDispatcher
-                # is now genuinely async -- await it directly, no more
-                # .raw/to_thread bridge needed for this call path.
                 if diff.auto_fixable:
                     from agentit.remediation.dispatcher import RemediationDispatcher
                     dispatcher = RemediationDispatcher(s)
                     for finding in diff.auto_fixable:
-                        if await s.get_rejection_count(managed["repo_name"], finding.category) >= 3:
-                            await s.log_event("learning", "skipped-rejected", managed["repo_name"],
-                                               "info", f"Skipping {finding.category} -- rejected 3+ times")
+                        if await s.get_rejection_count(repo_name, finding.category) >= 3:
+                            await s.log_event(
+                                "learning", "skipped-rejected", repo_name, "info",
+                                f"Skipping {finding.category} -- rejected 3+ times",
+                            )
                             continue
-                        dispatch_result = await dispatcher.dispatch(assessment_id, finding.category, managed["repo_name"])
+                        dispatch_result = await dispatcher.dispatch(
+                            assessment_id, finding.category, repo_name,
+                        )
                         if dispatch_result.get("error") and not dispatch_result["files"]:
-                            await s.log_event("dispatcher", "no-fix-available", managed["repo_name"],
-                                               "warning", dispatch_result["error"])
+                            await s.log_event(
+                                "dispatcher", "no-fix-available", repo_name, "warning",
+                                dispatch_result["error"],
+                            )
                             continue
                         if not dispatch_result["files"]:
                             continue
-                        # The "fix-generated" event below is the durable
-                        # record that a fix was generated, not just an
-                        # in-memory dict this handler used to discard once
-                        # dispatch() returned -- the real fix/PR outcome is
-                        # tracked by the delivery this branch triggers next
-                        # (`deliveries`, see pr_tracking.py), not a
-                        # separate hand-maintained `remediations` row.
                         await s.log_event(
-                            "dispatcher", "fix-generated", managed["repo_name"], "info",
-                            f"Generated {len(dispatch_result['files'])} fix(es) for '{finding.category}' via {dispatch_result['agent']}",
+                            "dispatcher", "fix-generated", repo_name, "info",
+                            f"Generated {len(dispatch_result['files'])} fix(es) for "
+                            f"'{finding.category}' via {dispatch_result['agent']}",
                         )
-                        # Nothing auto-delivers without an explicit human
-                        # action (see docs/unified-apply-flow.md) -- this
-                        # dispatched fix is never itself persisted (see
-                        # RemediationDispatcher.dispatch()'s docstring), so
-                        # the real next step is re-running Onboard for this
-                        # app, which regenerates and saves the same fix,
-                        # deliverable from Onboard Results.
+                        # D (follow-up): wire remediable findings into
+                        # gated auto_validate_and_deliver. Until then, log
+                        # only — Scan/onboard remains the PR path.
                         await s.log_event(
-                            "dispatcher", "fix-not-delivered", managed["repo_name"], "info",
+                            "dispatcher", "fix-not-delivered", repo_name, "info",
                             f"Fix for '{finding.category}' generated but not delivered -- "
-                            "re-run Onboard for this app to review and deliver it from Onboard Results.",
+                            "re-run Onboard for this app to review and deliver it "
+                            "from Onboard Results.",
                         )
 
-        await s.log_event("change-analysis", "impact-analyzed", managed["repo_name"],
-                           "info", impact.summary())
-
-        return JSONResponse({
-            "status": "assessed",
-            "repo": managed["repo_name"],
-            "assessment_id": assessment_id,
-            "score": report.overall_score,
-            "previous_score": managed.get("latest_score"),
-            "change_impact": {
-                "files_changed": len(impact.changed_files),
-                "agents_to_rerun": impact.agents_to_rerun,
-                "new_services": impact.new_services,
-                "dependency_changes": impact.dependency_changes,
-            },
-        })
-    except AssessBusyError as exc:
-        # Fail soft under concurrency: GitHub retries 5xx deliveries, and a
-        # 503 here is far better than stacking a second in-process assess
-        # that OOMKills the pod (pinky dogfood: merge push → 504 + no
-        # check_pending_delivery_verifications). Release the claim so
-        # GitHub's automatic redelivery of the same X-GitHub-Delivery can
-        # proceed once the slot is free.
-        log.warning("Re-assessment deferred for %s: %s", managed["repo_name"], exc)
-        await s.release_webhook_claim(delivery_id)
         await s.log_event(
-            "github-webhook", "reassessment-busy", managed["repo_name"],
-            "warning",
-            f"Re-assessment deferred (portal assess slot busy): {str(exc)[:200]}",
+            "change-analysis", "impact-analyzed", repo_name, "info", impact.summary(),
         )
-        return JSONResponse(
-            {"status": "busy", "reason": str(exc)[:200], "repo": managed["repo_name"]},
-            status_code=503,
-            headers={"Retry-After": "30"},
-        )
+        await s.complete_webhook_claim(delivery_id)
     except Exception as exc:
-        log.exception("Re-assessment failed for %s", managed["repo_name"])
-        await s.log_event("github-webhook", "reassessment-failed", managed["repo_name"],
-                           "warning", f"Re-assessment failed: {str(exc)[:200]}")
-        return JSONResponse({"status": "error", "reason": str(exc)[:200]}, status_code=500)
+        log.exception("Push delivery post-assess failed for %s", repo_name)
+        try:
+            await s.log_event(
+                "github-webhook", "reassessment-failed", repo_name, "warning",
+                f"Re-assessment failed: {str(exc)[:200]}",
+            )
+        except Exception:
+            log.warning("Failed to log reassessment-failed for %s", repo_name, exc_info=True)
+        await s.release_webhook_claim(delivery_id)
+
+
+@router.post("/api/webhook/github-push")
+async def webhook_github_push(request: Request, background_tasks: BackgroundTasks):
+    """Handle GitHub push webhooks — ACK fast (202), assess in background.
+
+    GitHub's delivery timeout (~10s) must not wait on clone+assess. Claim
+    is held incomplete until background work finishes; released on failure
+    or stale TTL so retries are possible. Keeps #189 assess concurrency +
+    1Gi portal memory.
+    """
+    event_type = request.headers.get("X-GitHub-Event", "")
+    if event_type == "ping":
+        return JSONResponse({"status": "pong"})
+    if event_type != "push":
+        return JSONResponse({"status": "ignored", "reason": f"event type '{event_type}' not handled"})
+
+    body_bytes = await request.body()
+    if not _verify_github_signature(request, body_bytes):
+        raise HTTPException(403, "Invalid webhook signature")
+
+    body = json.loads(body_bytes)
+
+    ref = body.get("ref", "")
+    repo_url = body.get("repository", {}).get("html_url", "")
+    default_branch = body.get("repository", {}).get("default_branch", "main")
+
+    if ref != f"refs/heads/{default_branch}":
+        return JSONResponse({"status": "ignored", "reason": f"push to {ref}, not {default_branch}"})
+
+    if not repo_url:
+        raise HTTPException(400, "No repository URL in push payload")
+
+    s = await get_store()
+    fleet = await s.get_fleet_data()
+    managed = next(
+        (app for app in fleet if app["repo_url"].rstrip("/").lower() == repo_url.rstrip("/").lower()),
+        None,
+    )
+    if managed is None:
+        return JSONResponse({"status": "ignored", "reason": f"{repo_url} not in fleet"})
+
+    delivery_id = _get_delivery_id(request, body)
+    if not await s.claim_webhook(delivery_id):
+        return JSONResponse({"status": "duplicate", "delivery_id": delivery_id})
+
+    commit_sha = body.get("after", "")[:12]
+    pusher = body.get("pusher", {}).get("name", "unknown")
+    log.info(
+        "GitHub push on managed repo %s by %s (commit %s) -- accepted (202), "
+        "re-assessing in background",
+        managed["repo_name"], pusher, commit_sha,
+    )
+
+    await s.log_event(
+        "github-webhook", "push-received", managed["repo_name"], "info",
+        f"Push by {pusher} (commit {commit_sha}) -- re-assessing (async)",
+    )
+
+    from agentit.portal.helpers import _get_trusted_base_url
+    base_url = _get_trusted_base_url(request)
+    background_tasks.add_task(
+        _process_github_push_delivery,
+        delivery_id=delivery_id,
+        body=body,
+        managed=managed,
+        repo_url=repo_url,
+        base_url=base_url,
+    )
+    return JSONResponse(
+        {
+            "status": "accepted",
+            "delivery_id": delivery_id,
+            "repo": managed["repo_name"],
+            "detail": "re-assessment started in background",
+        },
+        status_code=202,
+    )
 
 
 @router.post("/api/webhook/onboard", dependencies=[Depends(verify_internal_token)])

@@ -143,7 +143,7 @@ _TIMESTAMP_COLUMNS: dict[str, set[str]] = {
     "settings": {"updated_at"},
     "remediation_jobs": {"created_at", "updated_at"},
     "scheduled_operations": {"created_at", "updated_at"},
-    "processed_webhooks": {"processed_at"},
+    "processed_webhooks": {"processed_at", "completed"},
     "agent_feedback": {"created_at"},
     "skill_effectiveness": {"created_at"},
     "suppressed_checks": {"created_at"},
