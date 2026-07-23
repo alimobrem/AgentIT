@@ -10,7 +10,9 @@ from agentit.portal.auto_delivery import auto_validate_and_deliver
 from agentit.portal.quality_prs import (
     MAX_FILES_PER_CLUSTER_PR,
     build_helpful_pr_body,
+    cluster_validation_ok,
     filter_files_to_open_findings,
+    find_resource_collisions,
     finding_gate_allows_pr,
     partition_by_finding_cluster,
     resolve_target_findings,
@@ -165,6 +167,79 @@ class TestClusterPhaseB:
         assert len(clusters) == 2
         assert len(clusters[0].files) == MAX_FILES_PER_CLUSTER_PR
         assert len(clusters[1].files) == 2
+
+
+class TestResourceCollisions:
+    """A duplicate (apiVersion, kind, namespace, name) across generated
+    files blocked ``managed-pinky``'s real Argo sync after merge -- SSA
+    dry-run validates each file/resource independently and never caught
+    it; nothing else in this pipeline did either, until now."""
+
+    def test_no_collision_for_distinct_resources(self) -> None:
+        files = [
+            {"target_path": "a.yaml", "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n"},
+            {"target_path": "b.yaml", "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: b\n"},
+        ]
+        assert find_resource_collisions(files) == []
+
+    def test_same_name_different_kind_is_not_a_collision(self) -> None:
+        files = [
+            {"target_path": "a.yaml", "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: pinky\n"},
+            {"target_path": "b.yaml", "content": "apiVersion: v1\nkind: Service\nmetadata:\n  name: pinky\n"},
+        ]
+        assert find_resource_collisions(files) == []
+
+    def test_same_name_different_namespace_is_not_a_collision(self) -> None:
+        files = [
+            {"target_path": "a.yaml", "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n  namespace: ns1\n"},
+            {"target_path": "b.yaml", "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n  namespace: ns2\n"},
+        ]
+        assert find_resource_collisions(files) == []
+
+    def test_collision_across_two_files(self) -> None:
+        files = [
+            {"target_path": "a.yaml", "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: pinky\n"},
+            {"target_path": "b.yaml", "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: pinky\n"},
+        ]
+        collisions = find_resource_collisions(files)
+        assert len(collisions) == 1
+        assert "ConfigMap/pinky" in collisions[0]
+        assert "a.yaml" in collisions[0] and "b.yaml" in collisions[0]
+
+    def test_collision_within_multi_doc_yaml_in_one_file(self) -> None:
+        files = [{
+            "target_path": "a.yaml",
+            "content": (
+                "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: dup\n"
+                "---\n"
+                "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: dup\n"
+            ),
+        }]
+        assert len(find_resource_collisions(files)) == 1
+
+    def test_different_api_group_same_kind_name_is_not_a_collision(self) -> None:
+        """Different CRDs can legitimately share a bare kind name (e.g.
+        ``Policy`` in kyverno.io/v1 vs. some other API group) -- only an
+        exact (apiVersion, kind, namespace, name) match is a real collision."""
+        files = [
+            {"target_path": "a.yaml", "content": "apiVersion: kyverno.io/v1\nkind: Policy\nmetadata:\n  name: x\n"},
+            {"target_path": "b.yaml", "content": "apiVersion: some.other/v1\nkind: Policy\nmetadata:\n  name: x\n"},
+        ]
+        assert find_resource_collisions(files) == []
+
+    def test_cluster_validation_ok_refuses_on_collision(self) -> None:
+        ok, reason = cluster_validation_ok(
+            dry_run_errors=[], failed_properties=[],
+            collisions=["duplicate ConfigMap/pinky (a.yaml and b.yaml)"],
+        )
+        assert not ok
+        assert "collision" in reason.lower()
+
+    def test_cluster_validation_ok_passes_with_no_collisions(self) -> None:
+        ok, reason = cluster_validation_ok(dry_run_errors=[], failed_properties=[], collisions=[])
+        assert ok, reason
+        ok2, reason2 = cluster_validation_ok(dry_run_errors=[], failed_properties=[])
+        assert ok2, reason2
 
 
 class TestSolutionContractFilter:

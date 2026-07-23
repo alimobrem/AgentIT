@@ -413,6 +413,7 @@ async def auto_validate_and_deliver(
         build_helpful_pr_body,
         cluster_validation_ok,
         filter_files_to_open_findings,
+        find_resource_collisions,
         finding_gate_allows_pr,
         finding_gate_refuse_reason,
         partition_by_finding_cluster,
@@ -884,6 +885,7 @@ async def auto_validate_and_deliver(
         ok, refuse_reason = cluster_validation_ok(
             dry_run_errors=dry_errors,
             failed_properties=[r.property_name for r in relevant_failed],
+            collisions=find_resource_collisions(cluster_files),
         )
         # Source-layer: never refuse the cluster because SSA failed.
         if not ok and all(_is_source_layer_file(f) for f in cluster_files):
