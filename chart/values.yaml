@@ -182,6 +182,16 @@ agents:
   driftDetector:
     enabled: false
     interval: 600     # 10 minutes
+    # Raised from 128/256: drift-detect loads fleet assessments + kube
+    # lists and OOMed under larger fleets. Keep CPU request low so tip
+    # Tekton pods can still schedule under ExceededNodeResources pressure.
+    resources:
+      requests:
+        cpu: 50m
+        memory: 512Mi
+      limits:
+        cpu: 250m
+        memory: 1Gi
   # reassess-scheduler: automatically re-Assesses apps once their configured
   # per-app cadence (apps.assessment_cadence, set from the Assessment Detail
   # page -- daily/weekly/monthly/manual) has elapsed since their last

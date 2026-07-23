@@ -227,6 +227,8 @@ Ops: [`docs/deployment.md`](docs/deployment.md). **Merge gate + post-merge tip:*
 
 Portal memory defaults to **1Gi** with in-process assess concurrency **1** (`chart/values.yaml` `resources` + `assessConcurrency`) so concurrent GitHub push webhooks cannot stack clone+assess working sets and OOMKill the pod (busy callers get HTTP 503 and can retry).
 
+Tip promote under node pressure: Tekton `run-tests` / `build-image` / `self-assess` CPU **requests** stay modest (100m) so pods schedule instead of Pending `ExceededNodeResources`; burst via limits. Drift-detector memory defaults to **512Mi–1Gi** (`agents.driftDetector.resources`).
+
 ## Architecture
 
 ```mermaid

@@ -71,12 +71,10 @@ spec:
             periodSeconds: 120
             failureThreshold: 3
           resources:
-            requests:
-              cpu: 50m
-              memory: 128Mi
-            limits:
-              cpu: 250m
-              memory: 256Mi
+            # Raised memory (values default 512Mi–1Gi): drift-detect loads
+            # fleet assessments + kube lists; 128/256 OOMed under larger
+            # fleets. CPU request stays modest for tip CI scheduling.
+            {{- toYaml .Values.agents.driftDetector.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
