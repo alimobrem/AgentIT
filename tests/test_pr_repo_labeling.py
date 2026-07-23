@@ -12,9 +12,23 @@ from unittest.mock import patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from agentit.models import DimensionScore, Finding, Severity
 from agentit.portal.app import app
 from agentit.portal.delivery import repo_kind_for_mechanism
 from conftest import make_report, make_store, prime_csrf
+
+
+def _report_with_remediable_findings(repo_name: str):
+    return make_report(
+        repo_name=repo_name,
+        scores=[DimensionScore(
+            dimension="security", score=40, max_score=100,
+            findings=[Finding(
+                category="network", severity=Severity.high,
+                description="missing network", recommendation="add NetworkPolicy",
+            )],
+        )],
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -172,7 +186,7 @@ class TestDeliverFlowFlashRepoLabels:
 
     async def test_gitops_commit_flash_labels_gitops_repo(self):
         store = await make_store()
-        report = make_report(repo_name="deliver-flash-gitops-app")
+        report = _report_with_remediable_findings("deliver-flash-gitops-app")
         aid = await store.save(report)
         await store.save_onboarding(aid, [_skill_file()])
         await store.set_infra_repo_url(aid, "https://github.com/org/deliver-flash-infra-gitops")
@@ -203,7 +217,7 @@ class TestDeliverFlowFlashRepoLabels:
 
     async def test_source_repo_pr_flash_labels_code_repo(self):
         store = await make_store()
-        report = make_report(repo_name="deliver-flash-code-app")
+        report = _report_with_remediable_findings("deliver-flash-code-app")
         aid = await store.save(report)
         await store.save_onboarding(aid, [_source_patch_file()])
 

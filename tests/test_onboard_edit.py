@@ -18,6 +18,7 @@ from unittest.mock import patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from agentit.models import DimensionScore, Finding, Severity
 from agentit.portal.app import app
 from conftest import make_report, make_store, prime_csrf
 
@@ -31,11 +32,24 @@ def _configmap_file(path: str = "app-config.yaml") -> dict:
     }
 
 
+def _report_with_remediable_findings(repo_name: str = "test-app"):
+    return make_report(
+        repo_name=repo_name,
+        scores=[DimensionScore(
+            dimension="security", score=40, max_score=100,
+            findings=[Finding(
+                category="rbac", severity=Severity.high,
+                description="missing rbac", recommendation="add RBAC",
+            )],
+        )],
+    )
+
+
 @pytest.fixture
 async def edit_client():
     store = await make_store()
     async_store = store
-    report = make_report(repo_name="test-app")
+    report = _report_with_remediable_findings(repo_name="test-app")
     assessment_id = await store.save(report)
     await store.save_onboarding(assessment_id, [_configmap_file()])
 

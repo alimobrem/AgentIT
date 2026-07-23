@@ -35,7 +35,7 @@ from httpx import ASGITransport, AsyncClient
 from agentit.models import AssessmentReport, DimensionScore, Finding, Language, Severity, StackInfo, ArchitectureInfo
 from agentit.platform_context import PlatformContext
 from agentit.portal.app import app
-from conftest import make_store, prime_csrf
+from conftest import make_report, make_store, prime_csrf
 
 _NO_CLUSTER = PlatformContext()
 
@@ -460,7 +460,18 @@ async def test_single_manifest_delivery_does_not_celebrate(client, _override_sto
 
 async def test_deliver_failure_states_cause_and_next_step(client, _override_store):
     store = _override_store
-    aid = await store.save(_make_report("deliver-fail-app"))
+    # Remediable finding so Phase A finding_gate lets the request reach
+    # route_and_deliver (detect_only "secrets" would refuse earlier).
+    aid = await store.save(make_report(
+        repo_name="deliver-fail-app",
+        scores=[DimensionScore(
+            dimension="security", score=40, max_score=100,
+            findings=[Finding(
+                category="network", severity=Severity.high,
+                description="missing network", recommendation="add NetworkPolicy",
+            )],
+        )],
+    ))
     await store.save_onboarding(aid, [
         {"category": "skills", "path": "f0.yaml", "content": "kind: ConfigMap", "description": "x"},
     ])
