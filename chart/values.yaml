@@ -14,10 +14,13 @@ route:
 resources:
   requests:
     cpu: 100m
-    memory: 256Mi
+    # Raised with limits below: idle portal ~150Mi, but one clone+assess
+    # (8 analyzer threads + LLM) needs real headroom; 256/512 OOMed under
+    # concurrent GitHub push webhooks (pinky dogfood → webhook 504).
+    memory: 512Mi
   limits:
     cpu: 500m
-    memory: 512Mi
+    memory: 1Gi
 
 env:
   ANTHROPIC_VERTEX_PROJECT_ID: ""
@@ -310,6 +313,15 @@ rateLimit:
   enabled: false
   webhookPerMinute: 30
   defaultPerMinute: 120
+
+# Bound in-process clone+assess concurrency on the portal (webhook + UI).
+# Default 1: two overlapping assesses OOMKilled the dogfood Rollout at the
+# old 512Mi limit (GitHub push → 504, push-driven finding verification never
+# ran). Busy callers get HTTP 503 + Retry-After; the webhook claim is
+# released so GitHub can redeliver the same X-GitHub-Delivery.
+assessConcurrency:
+  maxConcurrent: 1
+  acquireTimeoutSeconds: 5
 
 # OpenShift oauth-proxy sidecar in front of the portal UI. Disabled by default
 # so merging this doesn't change behavior on any existing deployment -- flip

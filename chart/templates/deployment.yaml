@@ -156,6 +156,13 @@ spec:
               value: {{ .Values.rateLimit.webhookPerMinute | default 30 | quote }}
             - name: AGENTIT_RATE_LIMIT_DEFAULT_PER_MIN
               value: {{ .Values.rateLimit.defaultPerMinute | default 120 | quote }}
+            # Serialize in-process clone+assess (default 1) so concurrent
+            # GitHub push webhooks cannot OOMKill the portal. See
+            # helpers.assess_concurrency_slot / values.yaml assessConcurrency.
+            - name: AGENTIT_ASSESS_MAX_CONCURRENT
+              value: {{ .Values.assessConcurrency.maxConcurrent | default 1 | quote }}
+            - name: AGENTIT_ASSESS_ACQUIRE_TIMEOUT
+              value: {{ .Values.assessConcurrency.acquireTimeoutSeconds | default 5 | quote }}
           volumeMounts:
             - name: data
               mountPath: /data

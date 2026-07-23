@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from agentit.portal.helpers import (
     ALLOW_UNVERIFIED_WEBHOOKS_ENV,
     ONBOARD_GENERATION_TIMEOUT,
+    AssessBusyError,
     allow_unverified_webhooks,
     clone_assess_cleanup,
     get_store,
@@ -153,6 +154,19 @@ async def webhook_assess(request: Request, background_tasks: BackgroundTasks):
                 secret_decisions_out=secret_decisions,
                 secret_classify_cache=classify_cache,
             )
+        )
+    except AssessBusyError as exc:
+        # Fail soft: tell the in-cluster caller (Tekton / reassess-scheduler)
+        # to retry instead of stacking a second clone+assess that OOMKills
+        # the portal. Release the claim so a retry of the same delivery_id
+        # is not stuck as "duplicate".
+        from agentit.portal.metrics import assessments_total as _at
+        _at.labels(criticality=criticality, status="error").inc()
+        await s.release_webhook_claim(delivery_id)
+        return JSONResponse(
+            {"status": "busy", "reason": str(exc), "delivery_id": delivery_id},
+            status_code=503,
+            headers={"Retry-After": "30"},
         )
     except Exception:
         from agentit.portal.metrics import assessments_total as _at
@@ -363,6 +377,25 @@ async def webhook_github_push(request: Request, background_tasks: BackgroundTask
                 "dependency_changes": impact.dependency_changes,
             },
         })
+    except AssessBusyError as exc:
+        # Fail soft under concurrency: GitHub retries 5xx deliveries, and a
+        # 503 here is far better than stacking a second in-process assess
+        # that OOMKills the pod (pinky dogfood: merge push → 504 + no
+        # check_pending_delivery_verifications). Release the claim so
+        # GitHub's automatic redelivery of the same X-GitHub-Delivery can
+        # proceed once the slot is free.
+        log.warning("Re-assessment deferred for %s: %s", managed["repo_name"], exc)
+        await s.release_webhook_claim(delivery_id)
+        await s.log_event(
+            "github-webhook", "reassessment-busy", managed["repo_name"],
+            "warning",
+            f"Re-assessment deferred (portal assess slot busy): {str(exc)[:200]}",
+        )
+        return JSONResponse(
+            {"status": "busy", "reason": str(exc)[:200], "repo": managed["repo_name"]},
+            status_code=503,
+            headers={"Retry-After": "30"},
+        )
     except Exception as exc:
         log.exception("Re-assessment failed for %s", managed["repo_name"])
         await s.log_event("github-webhook", "reassessment-failed", managed["repo_name"],

@@ -219,6 +219,8 @@ Helm chart in `chart/` + Argo CD Application in `argocd/application.yaml`. Argo 
 
 Ops: [`docs/deployment.md`](docs/deployment.md). **Merge gate + post-merge tip:** [`docs/ci-deploy.md`](docs/ci-deploy.md) (`scripts/ci-merge-gate.sh` — never merge on queued checks). Topology: [`docs/architecture.md`](docs/architecture.md).
 
+Portal memory defaults to **1Gi** with in-process assess concurrency **1** (`chart/values.yaml` `resources` + `assessConcurrency`) so concurrent GitHub push webhooks cannot stack clone+assess working sets and OOMKill the pod (busy callers get HTTP 503 and can retry).
+
 ## Architecture
 
 ```mermaid
