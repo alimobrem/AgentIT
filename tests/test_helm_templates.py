@@ -23,6 +23,10 @@ HELM_VARS = {
     "{{ .Values.postgres.bundled.credentials.database | quote }}": '"agentit"',
     '{{ .Values.postgres.bundled.backup.schedule | default "23 */6 * * *" | quote }}': '"23 */6 * * *"',
     '{{ .Values.agents.capabilityScout.mode | default "docs" }}': "docs",
+    '{{ .Values.agents.capabilityScout.testPostgres.dsn | default "postgresql://agentit_test:agentit_test@127.0.0.1:5432/agentit_test" | quote }}':
+        '"postgresql://agentit_test:agentit_test@127.0.0.1:5432/agentit_test"',
+    "{{ .Values.agents.capabilityScout.testPostgres.image | default .Values.postgres.bundled.image | quote }}":
+        '"registry.redhat.io/rhel9/postgresql-15@sha256:06aeada2ca417445bc4fb711729e65a02ee78421a09c862cbd136ebdd51d7cfa"',
 }
 
 
@@ -1955,6 +1959,44 @@ class TestCapabilityScoutDeployment:
             f"capability-scout cpu limit {limit} is too low for the "
             "tests-pass gate's pytest subprocess to finish in a reasonable time"
         )
+
+    def _scout_container(self):
+        doc = _load(self.TEMPLATE)
+        containers = doc["spec"]["template"]["spec"]["containers"]
+        by_name = {c["name"]: c for c in containers}
+        assert "capability-scout" in by_name
+        return by_name["capability-scout"], by_name
+
+    def test_wires_dedicated_test_pg_dsn_not_fleet_db(self):
+        """tests-pass must use AGENTIT_TEST_PG_DSN (throwaway), never the
+        fleet AGENTIT_DB_DSN — fixtures TRUNCATE every table."""
+        scout, _ = self._scout_container()
+        env_by_name = {e["name"]: e.get("value") for e in scout["env"] if "name" in e}
+        assert "AGENTIT_TEST_PG_DSN" in env_by_name
+        dsn = env_by_name["AGENTIT_TEST_PG_DSN"]
+        assert "agentit_test" in dsn
+        assert "127.0.0.1" in dsn or "localhost" in dsn
+        assert "postgres-bundled" not in dsn
+
+    def test_test_postgres_sidecar_present(self):
+        """Ephemeral sidecar mirrors Tekton run-tests / GHA services so the
+        in-cluster gate can actually execute pytest (no podman in image)."""
+        _, by_name = self._scout_container()
+        assert "test-postgres" in by_name
+        pg = by_name["test-postgres"]
+        env_names = {e["name"] for e in pg["env"]}
+        assert {"POSTGRESQL_USER", "POSTGRESQL_PASSWORD", "POSTGRESQL_DATABASE"} <= env_names
+        assert pg["env"][0]["value"] == "agentit_test" or any(
+            e.get("value") == "agentit_test" for e in pg["env"] if e.get("name") == "POSTGRESQL_USER"
+        )
+        doc = _load(self.TEMPLATE)
+        volumes = {v["name"]: v for v in (doc["spec"]["template"]["spec"].get("volumes") or [])}
+        assert "scout-test-pg-data" in volumes
+        assert "emptyDir" in volumes["scout-test-pg-data"]
+
+    def test_test_postgres_defaults_enabled_in_values(self):
+        values = yaml.safe_load((CHART_DIR.parent / "values.yaml").read_text())
+        assert values["agents"]["capabilityScout"]["testPostgres"]["enabled"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -232,6 +232,26 @@ agents:
     # when eligible else docs). Chart default stays docs; dogfood sets auto
     # via argocd/application.yaml.
     mode: docs
+    # Dedicated throwaway Postgres for the tests-pass safety gate
+    # (capability_scout.run_test_suite). Fixtures TRUNCATE every table —
+    # never point this at the fleet AGENTIT_DB_DSN / bundled Postgres.
+    # Default: ephemeral sidecar (same RHEL image + credentials pattern as
+    # Tekton run-tests / GHA services). Override `dsn` for a human-
+    # provisioned throwaway DB and set `enabled: false` to skip the sidecar
+    # (dogfood Argo can set both via argocd/application.yaml).
+    testPostgres:
+      enabled: true
+      # Empty = sidecar localhost DSN (agentit_test@127.0.0.1:5432/agentit_test).
+      dsn: ""
+      # Empty = postgres.bundled.image.
+      image: ""
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
 
 rbac:
   # Cross-namespace apply is the core "Apply to Cluster" feature: onboarding a

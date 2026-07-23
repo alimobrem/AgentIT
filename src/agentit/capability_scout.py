@@ -544,8 +544,33 @@ def proposal_blocked_by_outcome(
     return False
 
 
+def _tests_pass_is_infra_skip(gate: dict) -> bool:
+    """True when tests-pass failed because the suite never ran (all-skip).
+
+    Dogfood previously had no ``AGENTIT_TEST_PG_DSN`` on the scout pod, so
+    every fixture skipped and ``run_test_suite`` fail-closed. That stuck
+    ``fix_regression_only=true`` forever (later cycles only emit no-signal
+    declines). Infra/all-skip is not a post-merge regression.
+    """
+    if not isinstance(gate, dict) or gate.get("name") != "tests-pass":
+        return False
+    if gate.get("passed"):
+        return False
+    detail = str(gate.get("detail") or "").lower()
+    return (
+        "0 tests actually passed" in detail
+        or "whole suite skipped" in detail
+        or "no agentit_test_pg_dsn" in detail
+    )
+
+
 def last_merge_broke_ci(outcomes: list[dict] | None, run_events: list[dict] | None) -> bool:
-    """True when a recent merge is followed by a tests-pass gate failure."""
+    """True when a recent merge is followed by a real tests-pass failure.
+
+    All-skip / missing test-Postgres failures are ignored — they are infra
+    gaps, not regressions from the latest merge (see
+    ``_tests_pass_is_infra_skip``).
+    """
     merges = [o for o in (outcomes or []) if o.get("state") == "merged"]
     if not merges:
         return False
@@ -555,7 +580,10 @@ def last_merge_broke_ci(outcomes: list[dict] | None, run_events: list[dict] | No
         details = _event_details(event)
         gates = details.get("gate_results") or []
         failed_tests = any(
-            isinstance(g, dict) and g.get("name") == "tests-pass" and not g.get("passed")
+            isinstance(g, dict)
+            and g.get("name") == "tests-pass"
+            and not g.get("passed")
+            and not _tests_pass_is_infra_skip(g)
             for g in gates
         )
         if not failed_tests:
@@ -1235,35 +1263,15 @@ def run_test_suite(repo_dir: Path) -> tuple[bool, str]:
     only removes the risk of accidentally reaching production, it doesn't
     remove the test suite's ability to run.
 
-    **Known infra gap, code-level half fixed here**: this pod has neither
-    podman/docker (so ``tests/conftest.py``'s auto-start fallback can't
-    help) nor an ``AGENTIT_TEST_PG_DSN`` of its own wired into its
-    Deployment env -- unlike CI (a GitHub Actions ``services:`` block / a
-    Tekton ``Sidecar``, see ``.github/workflows/tests.yml``/
-    ``chart/templates/tekton/pipeline.yaml``). Confirmed against
-    ``chart/templates/agents/capability-scout.yaml``: that Deployment wires
-    only the production ``AGENTIT_DB_DSN`` (the bundled fleet Postgres), no
-    ``AGENTIT_TEST_PG_DSN``, and ``Containerfile`` installs neither
-    ``podman`` nor ``docker``. So every collected test's session-scoped
-    ``postgres_dsn`` fixture calls ``pytest.skip(...)``, and a suite that is
-    100% skipped still exits ``0`` -- **without the check below, that read
-    as a clean "pytest passed" and this fail-closed gate would wave a
-    proposal through having verified precisely nothing.** The check below
-    fixes that half of the bug at the code level: an all-skipped run is now
-    treated as a gate failure, not a pass, so the gate fails *closed*
-    instead of *silently green* when Postgres is unreachable.
-    Deliberately NOT fixed by pointing this at the live bundled instance's
-    own database -- test fixtures `TRUNCATE` every table, which would be a
-    real, severe data-loss bug if aimed at production data. Completing the
-    other half (letting this gate actually execute real tests every cycle,
-    instead of correctly-but-uselessly failing closed every cycle) still
-    needs an infrastructure change outside what's verifiable from this
-    pass: a small, dedicated Postgres instance (or a distinct,
-    human-provisioned database on the bundled one) wired into this
-    watcher's own Deployment via a new, explicit ``AGENTIT_TEST_PG_DSN``
-    Secret/env var in ``chart/templates/agents/capability-scout.yaml`` --
-    flagged here for whoever picks it up next rather than guessed at under
-    this pass's time constraints.
+    An all-skipped suite (exit 0, zero ``passed``) is still treated as a
+    gate failure — fail *closed*, never silently green when Postgres is
+    unreachable. Deliberately NOT aimed at the live bundled fleet DB:
+    fixtures ``TRUNCATE`` every table. The chart wires a dedicated
+    throwaway Postgres sidecar (or optional ``agents.capabilityScout.
+    testPostgres.dsn``) as ``AGENTIT_TEST_PG_DSN`` — same pattern as the
+    Tekton ``run-tests`` sidecar / GHA ``services:`` block — so in-cluster
+    cycles can execute real tests instead of correctly-but-uselessly
+    failing closed every tick.
     """
     import os
 
