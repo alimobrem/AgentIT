@@ -1197,6 +1197,72 @@ async def deliver(request: Request, assessment_id: str):
             status_code=303,
         )
 
+    # Manual Deliver used to call route_and_deliver with the full onboard
+    # catalog whenever *any* remediable finding existed (Hello-World #31/#32,
+    # pinky #12). Mirror auto_validate_and_deliver's remaining quality bar:
+    # filter to open findings, strip wrong-layer companions, refuse oversized
+    # catalog dumps, and require clear-evidence simulation.
+    if not dry_run:
+        from agentit.portal.quality_prs import (
+            MAX_FILES_PER_CLUSTER_PR,
+            clear_evidence_simulation_ok,
+            filter_files_to_open_findings,
+            strip_wrong_layer_companions,
+        )
+        from agentit.remediation.registry import remediable_findings
+
+        repo_url = (getattr(report, "repo_url", None) or "").lower()
+        if "octocat/hello-world" in repo_url:
+            reason = (
+                "Refusing Deliver for probe repo octocat/Hello-World — "
+                "not a dogfood app; remove it from Fleet instead of opening GitOps PRs."
+            )
+            return RedirectResponse(
+                url=f"/assessments/{assessment_id}/onboard-results?error={quote(reason)}",
+                status_code=303,
+            )
+
+        try:
+            remediable = remediable_findings(target_findings)
+        except Exception:
+            remediable = list(target_findings)
+        gate_findings = remediable if remediable else list(target_findings)
+        kept_files, drop_reasons = filter_files_to_open_findings(files, gate_findings)
+        kept_files, layer_drops = strip_wrong_layer_companions(kept_files, gate_findings)
+        if layer_drops:
+            drop_reasons = list(drop_reasons or []) + layer_drops
+        if not kept_files:
+            reason = (
+                "No generated files map to open findings — refusing PR. "
+                + ("; ".join(drop_reasons[:5]) if drop_reasons else "empty after finding filter")
+            )
+            return RedirectResponse(
+                url=f"/assessments/{assessment_id}/onboard-results?error={quote(reason)}",
+                status_code=303,
+            )
+        if len(kept_files) > MAX_FILES_PER_CLUSTER_PR:
+            reason = (
+                f"Manual Deliver refused catalog dump ({len(kept_files)} files > "
+                f"{MAX_FILES_PER_CLUSTER_PR} per-cluster cap). Use Scan auto-delivery "
+                "which partitions by finding cluster, or deliver a smaller edited set."
+            )
+            return RedirectResponse(
+                url=f"/assessments/{assessment_id}/onboard-results?error={quote(reason)}",
+                status_code=303,
+            )
+        sim_ok, sim_reason = clear_evidence_simulation_ok(kept_files, gate_findings)
+        if not sim_ok:
+            reason = (
+                "Clear-evidence simulation failed — refusing PR "
+                f"(MERGE would not clear the finding): {sim_reason}"
+            )
+            return RedirectResponse(
+                url=f"/assessments/{assessment_id}/onboard-results?error={quote(reason)}",
+                status_code=303,
+            )
+        files = kept_files
+        target_findings = gate_findings
+
     try:
         delivery = await route_and_deliver(
             files, app_name=report.repo_name, namespace=namespace,

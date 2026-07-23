@@ -23,6 +23,8 @@ def _skill_file(path: str = "test-app-network-policy.yaml") -> dict:
         "path": path,
         "content": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: test\n",
         "description": "network policy",
+        "skill_name": "network-policy",
+        "finding_addressed": "network",
     }
 
 
@@ -192,6 +194,76 @@ class TestManualDeliverFindingGatePhaseA:
         assert "pull/4" in resp.headers["location"]
         mock_commit.assert_called_once()
         mock_ensure.assert_called_once()
+
+    async def test_refuses_catalog_dump_over_per_cluster_cap(self, _mock_kube):
+        """Hello-World #31 class: many skill YAMLs + remediable findings must not
+        bypass auto's per-cluster file cap via Manual Deliver."""
+        from agentit.portal.quality_prs import MAX_FILES_PER_CLUSTER_PR
+
+        store = await make_store()
+        report = _report_with_remediable_findings(repo_name="catalog-cap-app")
+        aid = await store.save(report)
+        files = [
+            _skill_file(path=f"catalog-cap-app-network-policy-{i}.yaml")
+            for i in range(MAX_FILES_PER_CLUSTER_PR + 1)
+        ]
+        await store.save_onboarding(aid, files)
+        await store.set_infra_repo_url(aid, "https://github.com/org/catalog-cap-gitops")
+
+        with patch("agentit.portal.app.get_store", return_value=store), \
+             patch("agentit.portal.routes.assessments.get_store", return_value=store), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://testserver",
+                follow_redirects=True,
+            ) as client:
+                await prime_csrf(client)
+                resp = await client.post(
+                    f"/assessments/{aid}/deliver", data={"dry_run": "false"},
+                    follow_redirects=False,
+                )
+
+        assert resp.status_code == 303
+        location = unquote(resp.headers["location"])
+        assert "error=" in location
+        assert "catalog dump" in location.lower() or "per-cluster" in location.lower()
+        mock_commit.assert_not_called()
+
+    async def test_refuses_octocat_hello_world_probe(self, _mock_kube):
+        store = await make_store()
+        report = make_report(
+            repo_name="Hello-World",
+            repo_url="https://github.com/octocat/Hello-World",
+            scores=[DimensionScore(
+                dimension="security", score=40, max_score=100,
+                findings=[Finding(
+                    category="network", severity=Severity.high,
+                    description="missing network", recommendation="add NetworkPolicy",
+                )],
+            )],
+        )
+        aid = await store.save(report)
+        await store.save_onboarding(aid, [_skill_file()])
+        await store.set_infra_repo_url(aid, "https://github.com/alimobrem/agentit-gitops")
+
+        with patch("agentit.portal.app.get_store", return_value=store), \
+             patch("agentit.portal.routes.assessments.get_store", return_value=store), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://testserver",
+                follow_redirects=True,
+            ) as client:
+                await prime_csrf(client)
+                resp = await client.post(
+                    f"/assessments/{aid}/deliver", data={"dry_run": "false"},
+                    follow_redirects=False,
+                )
+
+        assert resp.status_code == 303
+        location = unquote(resp.headers["location"])
+        assert "error=" in location
+        assert "octocat/Hello-World" in location or "probe" in location.lower()
+        mock_commit.assert_not_called()
 
 
 class TestDeliverRegisteredCommitsToInfraRepo:

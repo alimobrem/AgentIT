@@ -123,6 +123,45 @@ def verify_dockerfile_pin(files: list[dict]) -> tuple[bool, str]:
     return True, f"pinned base image in {candidates[0][0]} (no :latest)"
 
 
+_AUDIT_THEATER_MARKERS = (
+    "theater stub",
+    "intentionally not wired",
+)
+# Real app-audit-logging patches emit structured records; refuse tiny stubs
+# that only define a logger wrapper (pinky #12 class).
+_AUDIT_STRUCTURE_MARKERS = (
+    '"type": "audit"',
+    '"type":"audit"',
+    'type: "audit"',
+    "json.dumps",
+    "json.Marshal",
+    "JSON.stringify",
+    "AuditEvent",
+)
+
+
+def _audit_module_is_theater(content: str) -> str | None:
+    """Return refuse reason if audit module content is a theater stub."""
+    lowered = (content or "").lower()
+    for marker in _AUDIT_THEATER_MARKERS:
+        if marker in lowered:
+            return f"theater stub marker ({marker!r}) — refuse Scan PR"
+    lines = [ln for ln in (content or "").splitlines() if ln.strip()]
+    has_structure = any(m.lower() in lowered for m in _AUDIT_STRUCTURE_MARKERS)
+    if len(lines) < 12 and not has_structure:
+        return (
+            "audit module too thin / unstructured "
+            f"({len(lines)} non-empty lines, no structured audit record) — "
+            "refuse theater stub"
+        )
+    if not has_structure:
+        return (
+            "audit module lacks structured audit record markers "
+            "(json / type=audit / AuditEvent) — refuse theater stub"
+        )
+    return None
+
+
 def verify_audit_wired(files: list[dict]) -> tuple[bool, str]:
     """True when an audit module exists and a package entry imports/uses it."""
     staged = _staged_map(files)
@@ -139,6 +178,10 @@ def verify_audit_wired(files: list[dict]) -> tuple[bool, str]:
             f"audit module at repo root only ({audit_paths[0]}) — "
             "must live in the app package with an import/call site"
         )
+    for path in (packaged or audit_paths):
+        theater_reason = _audit_module_is_theater(staged.get(path, ""))
+        if theater_reason:
+            return False, f"{path}: {theater_reason}"
     # Usage evidence: any non-audit staged file that imports/calls audit.
     for path, content in staged.items():
         if path in audit_paths:

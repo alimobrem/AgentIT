@@ -385,7 +385,7 @@ def _app_audit_logging_patch(skill: "Skill", report: AssessmentReport) -> list[G
 
             import json
             import logging
-            from datetime import datetime, timezone
+            from datetime import UTC, datetime
             from typing import Any
 
             _log = logging.getLogger("audit")
@@ -401,7 +401,7 @@ def _app_audit_logging_patch(skill: "Skill", report: AssessmentReport) -> list[G
             ) -> None:
                 """Emit a structured audit event (stdout → platform log pipeline)."""
                 record = {
-                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "ts": datetime.now(UTC).isoformat(),
                     "type": "audit",
                     "action": action,
                     "actor": actor,
