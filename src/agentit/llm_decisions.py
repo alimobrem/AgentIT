@@ -76,6 +76,7 @@ def _fix_review_decisions(store, limit: int, loop=None) -> list[dict]:
             "target_app": r["app_name"],
             "outcome": r["outcome"],
             "reason": r.get("reason") or "",
+            "pr_url": r.get("pr_url") or "",
         }
         for r in rows
     ]
@@ -144,6 +145,7 @@ def _secret_classify_decisions(store, limit: int, loop=None) -> list[dict]:
             "target_app": r.get("target_app") or "",
             "outcome": outcome,
             "reason": reason,
+            "pr_url": "",
         })
     return decisions
 
@@ -213,6 +215,7 @@ def _capability_proposal_decisions(store, limit: int, loop=None) -> list[dict]:
             "target_app": "agentit",
             "outcome": outcome,
             "reason": _humanize_capability_evidence(details.get("evidence") or r.get("summary", "")),
+            "pr_url": details.get("pr_url") or "",
         })
     return decisions
 

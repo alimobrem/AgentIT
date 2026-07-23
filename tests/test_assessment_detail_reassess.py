@@ -41,6 +41,8 @@ class TestAssessmentDetailReassessButton:
 
     async def test_onboarded_app_gets_confirm_dialog_scan_button(self, portal_client):
         # `portal_client`'s own seeded app is already onboarded (conftest.py).
+        # Seed findings are uncontracted (category=test) — dialog must not
+        # promise open PR(s) when Phase A would refuse.
         client, store, aid = portal_client
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
@@ -48,4 +50,5 @@ class TestAssessmentDetailReassessButton:
         # Onboarded -> the more consequential re-assess+auto-onboard path
         # gets a confirm dialog first, same "Scan" label either way.
         assert "title: 'Scan'" in resp.text
-        assert "open pull request(s) in one step" in resp.text
+        assert "A pull request opens only if remediable findings" in resp.text
+        assert "open pull request(s) in one step" not in resp.text

@@ -107,7 +107,7 @@
         {% elif r.lifecycle == 'rejected' %}
         Rejected{% if r.reject_reason %} &mdash; {{ r.reject_reason }}{% endif %}
         {% elif r.lifecycle == 'closed' %}
-        Closed without merging
+        Closed without merging{% if r.reject_reason %} &mdash; {{ r.reject_reason }}{% endif %}
         {% elif r.lifecycle == 'unknown' %}
         Not tracked &mdash; see the badge tooltip
         {% else %}

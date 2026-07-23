@@ -1092,7 +1092,25 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
         onboard_jobs = await s.list_remediation_jobs(assessment_id)
         if onboard_jobs and onboard_jobs[0].get("status") == "needs_attention":
             needs_attention_onboard = True
-    show_retry_scan_delivery = needs_attention_onboard and pr_opened_count == 0
+
+    # Phase A parity: if finding_gate would refuse (no remediable findings /
+    # score delta), do not preview "will open N PRs" or offer Retry — that
+    # contradicts the refuse flash and confuses the Scan HITL path.
+    from agentit.assessment_diff import current_finding_keys
+    from agentit.portal.quality_prs import finding_gate_allows_pr, finding_gate_refuse_reason
+
+    target_findings = sorted(current_finding_keys(report))
+    delivery_gate_allows = finding_gate_allows_pr(target_findings)
+    delivery_refuse_reason = (
+        finding_gate_refuse_reason(target_findings) if not delivery_gate_allows else ""
+    )
+    if not delivery_gate_allows and pr_opened_count == 0:
+        # Drop preview-only cards; keep any real opened PR records (none here).
+        pr_cards = [c for c in pr_cards if c.get("record")]
+        pr_pending_count = 0
+    show_retry_scan_delivery = (
+        needs_attention_onboard and pr_opened_count == 0 and delivery_gate_allows
+    )
 
     return get_templates().TemplateResponse(
         request,
@@ -1114,6 +1132,8 @@ async def onboard_results(request: Request, assessment_id: str) -> HTMLResponse:
             "pr_opened_count": pr_opened_count,
             "pr_pending_count": pr_pending_count,
             "show_retry_scan_delivery": show_retry_scan_delivery,
+            "delivery_gate_allows": delivery_gate_allows,
+            "delivery_refuse_reason": delivery_refuse_reason,
         },
     )
 

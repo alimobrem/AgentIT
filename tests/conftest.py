@@ -552,6 +552,7 @@ async def portal_client():
     store = await make_store()
     report = make_report()
     assessment_id = await store.save(report)
+    await store.set_infra_repo_url(assessment_id, "https://github.com/org/test-gitops")
     await store.save_onboarding(assessment_id, [
         {"category": "security", "path": "test.yaml",
          "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test",

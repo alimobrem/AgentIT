@@ -24,9 +24,24 @@ from httpx import ASGITransport, AsyncClient
 
 from agentit.agents.base import GeneratedFile
 from agentit.agents.orchestrator import _FILE_METADATA_MANIFEST, _write_file_metadata_manifest
+from agentit.models import DimensionScore, Finding, Severity
 from agentit.portal.app import app
 from agentit.portal.delivery import preview_delivery_groups
 from conftest import make_async_store, make_report, make_store, prime_csrf
+
+
+def _report_with_remediable_findings(repo_name: str) -> object:
+    """Phase A finding_gate allows PR only for remediable contracts."""
+    return make_report(
+        repo_name=repo_name,
+        scores=[DimensionScore(
+            dimension="security", score=40, max_score=100,
+            findings=[Finding(
+                category="network", severity=Severity.high,
+                description="missing network", recommendation="add NetworkPolicy",
+            )],
+        )],
+    )
 
 
 def _cluster_config_file(
@@ -215,7 +230,7 @@ class TestPullRequestsSectionPreDelivery:
 
     async def test_shows_pull_requests_heading_and_preview_cards(self, ui_client):
         client, store = ui_client
-        report = make_report(repo_name="preview-app")
+        report = _report_with_remediable_findings("preview-app")
         aid = await store.save(report)
         await store.set_infra_repo_url(aid, "https://github.com/org/preview-infra")
         await store.save_onboarding(aid, [_cluster_config_file(), _source_patch_file()])
@@ -237,16 +252,46 @@ class TestPullRequestsSectionPreDelivery:
 
     async def test_singular_pull_request_wording(self, ui_client):
         client, store = ui_client
-        report = make_report(repo_name="singular-app")
+        report = _report_with_remediable_findings("singular-app")
         aid = await store.save(report)
         await store.save_onboarding(aid, [_source_patch_file()])
 
         resp = await client.get(f"/assessments/{aid}/onboard-results")
         assert "AgentIT will open 1 pull request when Scan finishes delivery" in resp.text
 
+    async def test_phase_a_refuse_hides_will_open_preview_and_retry(self, ui_client):
+        """P0: after Phase A refuse (no remediable findings), do not promise
+        PRs or offer Retry Scan delivery — that contradicts the refuse."""
+        client, store = ui_client
+        # Default make_report uses uncontracted category=test → gate refuses.
+        report = make_report(repo_name="phase-a-refuse-app")
+        report.infra_repo_url = "https://github.com/org/phase-a-refuse-infra"
+        aid = await store.save(report)
+        await store.save_onboarding(aid, [_cluster_config_file(), _source_patch_file()])
+        job_id = await store.create_remediation_job(aid)
+        await store.update_remediation_job(
+            job_id, "needs_attention", current_step="deliver",
+            error=(
+                "No open findings / score delta — refusing to open a PR "
+                "(catalog dumps are not helpful; see docs/plan-quality-helpful-prs.md Phase A)."
+            ),
+        )
+
+        resp = await client.get(
+            f"/assessments/{aid}/onboard-results"
+            "?warning=No%20open%20findings%20/%20score%20delta%20%E2%80%94%20refusing%20to%20open%20a%20PR"
+        )
+        assert resp.status_code == 200
+        assert "AgentIT will open" not in resp.text
+        assert "Not opened yet" not in resp.text
+        assert 'data-action="retry-scan-delivery"' not in resp.text
+        assert 'aria-label="Retry Scan delivery"' not in resp.text
+        assert "No pull request will open" in resp.text
+        assert "refusing to open a PR" in resp.text
+
     async def test_nothing_deliverable_shows_honest_empty_state(self, ui_client):
         client, store = ui_client
-        report = make_report(repo_name="nothing-deliverable-app")
+        report = _report_with_remediable_findings("nothing-deliverable-app")
         aid = await store.save(report)
         await store.save_onboarding(aid, [_narrative_report_file(), _secret_blocked_file()])
 
@@ -258,7 +303,7 @@ class TestPullRequestsSectionPreDelivery:
     async def test_manual_deliver_ctas_are_not_offered(self, ui_client):
         """Scan opens PRs; Onboard Results must not offer Commit / Per-Agent."""
         client, store = ui_client
-        report = make_report(repo_name="keep-dry-run-app")
+        report = _report_with_remediable_findings("keep-dry-run-app")
         aid = await store.save(report)
         await store.save_onboarding(aid, [_cluster_config_file()])
 
@@ -399,9 +444,10 @@ class TestPullRequestsSectionPostDelivery:
 
     async def test_needs_attention_without_open_pr_shows_retry_scan_delivery(self, ui_client):
         """Retry Scan delivery is the only PR-creating CTA left — and only
-        when the latest onboard job needs attention and nothing is open yet."""
+        when the latest onboard job needs attention, nothing is open yet,
+        and Phase A would still allow a PR (remediable findings exist)."""
         client, store = ui_client
-        report = make_report(repo_name="needs-attention-retry-app")
+        report = _report_with_remediable_findings("needs-attention-retry-app")
         report.infra_repo_url = "https://github.com/org/needs-attention-infra"
         aid = await store.save(report)
         await store.save_onboarding(aid, [_source_patch_file()])

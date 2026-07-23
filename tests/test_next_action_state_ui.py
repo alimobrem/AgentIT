@@ -210,30 +210,45 @@ class TestAssessmentDetailNextActionIndicator:
         assert pr_url in text
 
     async def test_honest_no_schedule_message_for_a_previously_onboarded_clean_app(self, next_action_client):
-        """A previously-onboarded clean app points at Open PRs / Scan, not a
-        fabricated re-check cadence — single next-step banner."""
+        """A previously-onboarded clean app (no remediable findings) does not
+        promise mergeable PRs or nudge Scan for a PR — single quiet banner."""
         client, store = next_action_client
-        aid = await store.save(make_report(repo_name="ad-clean-onboarded-app"))
+        report = make_report(repo_name="ad-clean-onboarded-app")
+        report.infra_repo_url = "https://github.com/org/ad-clean-infra"
+        aid = await store.save(report)
         await store.save_onboarding(aid, [{"category": "security", "path": "x.yaml", "content": "a: b", "description": "d"}])
 
         text = (await client.get(f"/assessments/{aid}")).text
 
-        assert "review and merge them on GitHub" in text
-        assert "No open PRs — run Scan." in text
-        # No competing "Next action:" escalation/retry banner on a clean app.
+        assert "no remediable findings to open a PR for right now" in text
+        assert "No open PRs — nothing remediable to open one for right now." in text
+        assert "when pull request(s) appear below" not in text
         assert "automated fixes exhausted" not in text
         assert "Awaiting verification" not in text
+        assert "Register for GitOps before Scan can deliver" not in text
 
     async def test_no_next_action_noise_for_a_brand_new_never_onboarded_app(self, next_action_client):
-        """A fresh, never-onboarded app's only real next step is Scan (the
-        existing lifecycle hint, which always chains into onboarding
-        automatically) -- restating "nothing pending" underneath it would
-        just be noise."""
+        """Fresh app with GitOps pending gets Scan lifecycle hint."""
         client, store = next_action_client
-        aid = await store.save(make_report(repo_name="ad-fresh-app"))
+        report = make_report(repo_name="ad-fresh-app")
+        report.infra_repo_url = "https://github.com/org/ad-fresh-infra"
+        aid = await store.save(report)
 
         text = (await client.get(f"/assessments/{aid}")).text
 
         assert "Onboard This App" not in text
-        assert "Next action:" not in text
+        assert "Register for GitOps before Scan can deliver" not in text
         assert "no periodic re-check on a schedule" not in text
+        assert "Next step: click <strong>Scan</strong> below" in text
+
+    async def test_not_gitops_register_only_no_scan_for_pr(self, next_action_client):
+        """Not GitOps-registered → Register (or Delete); never Scan promising PRs."""
+        client, store = next_action_client
+        aid = await store.save(make_report(repo_name="ad-no-gitops-app"))
+
+        text = (await client.get(f"/assessments/{aid}")).text
+
+        assert "Register for GitOps before Scan can deliver" in text
+        assert 'data-action="register-gitops"' in text
+        assert 'btn-label">Scan</span>' not in text
+        assert "open pull request(s) in one step" not in text

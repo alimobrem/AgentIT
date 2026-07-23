@@ -168,12 +168,13 @@ class TestAssessmentDetailPrHistory:
         assert pr_url in resp.text
 
     async def test_open_prs_empty_state_when_none_open(self, portal_client):
-        """Open PRs section is always visible; empty state nudges Scan."""
+        """Open PRs section is always visible; empty state is honest when
+        the seeded app has no remediable findings (no Scan-for-PR nudge)."""
         client, store, aid = portal_client
         resp = await client.get(f"/assessments/{aid}")
         assert resp.status_code == 200
         assert "Open PRs" in resp.text
-        assert "No open PRs — run Scan." in resp.text
+        assert "No open PRs — nothing remediable to open one for right now." in resp.text
         assert "Open PRs (" not in resp.text
 
     async def test_ledger_tab_pr_history_shows_merged_outcome(self, portal_client):
