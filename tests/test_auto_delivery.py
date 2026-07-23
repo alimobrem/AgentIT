@@ -300,7 +300,7 @@ class TestAutoValidateAndDeliver:
              patch("agentit.portal.auto_delivery.validate_and_fix_manifests",
                    return_value={"files": [rbac], "clean": True, "iterations": []}), \
              patch("agentit.portal.auto_delivery._dry_run_check",
-                   return_value=([], [], set())), \
+                   return_value=([], [], set(), [])), \
              patch("agentit.portal.auto_delivery._check_properties", return_value=[]), \
              patch("agentit.portal.github_pr.commit_to_infra_repo",
                    return_value={"pr_url": "https://github.com/org/deliver-app-gitops/pull/1",
@@ -371,7 +371,7 @@ class TestAutoValidateAndDeliver:
              patch("agentit.portal.auto_delivery.validate_and_fix_manifests",
                    return_value={"files": [rbac], "clean": True, "iterations": []}), \
              patch("agentit.portal.auto_delivery._dry_run_check",
-                   return_value=([], [], set())), \
+                   return_value=([], [], set(), [])), \
              patch("agentit.portal.auto_delivery._check_properties", return_value=[]), \
              patch("agentit.portal.github_pr.commit_to_infra_repo",
                    return_value={"error": "GitHub API unavailable"}):
