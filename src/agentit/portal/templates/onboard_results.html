@@ -87,9 +87,22 @@
    pr_tracking.py -- the same primitives Ledger/Assessment Detail's PR
    displays already use) -- one card per real delivery mechanism/target
    repo, with which findings/agent-generated files it covers, in place of
-   raw manifest/category counts. #}
+   raw manifest/category counts. Phase A refuse drops preview cards so we
+   never promise PRs after "refusing to open a PR". #}
 <h2 class="section-title mt-0">Pull Requests</h2>
-{% if pr_cards %}
+{% if not delivery_gate_allows|default(true) and not pr_cards %}
+<div class="empty-state" role="status">
+  <p>
+    <strong>No pull request will open.</strong>
+    {% if delivery_refuse_reason %}
+    {{ delivery_refuse_reason }}
+    {% else %}
+    Scan refused delivery — there are no remediable open findings / score delta.
+    {% endif %}
+  </p>
+  <p class="text-sm text-muted mb-0">Generated files (if any) stay under Diagnostics below for review — retrying delivery would refuse again until remediable findings appear.</p>
+</div>
+{% elif pr_cards %}
 <p class="text-sm text-muted mb-1">
   {% if pr_opened_count and pr_pending_count %}
   {{ pr_opened_count }} pull request{{ 's' if pr_opened_count != 1 }} opened so far — {{ pr_pending_count }} more may open on a later Scan.

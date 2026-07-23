@@ -133,12 +133,15 @@
   <a href="/assessments/{{ assessment_id }}?tab=ledger">see the Ledger tab below</a>.
 </div>
 {% elif lifecycle_stage == "onboarded" %}
-<div class="next-step-hint next-step-hint-attention">
-  <span class="next-step-icon" aria-hidden="true">&#9679;</span>
-  Onboarding complete — when pull request(s) appear below, review and merge them on GitHub.
+<div class="next-step-hint {% if fixable_categories %}next-step-hint-attention{% endif %}">
+  <span class="next-step-icon{% if not fixable_categories %} next-step-icon-done{% endif %}" aria-hidden="true">{% if fixable_categories %}&#9679;{% else %}&#10003;{% endif %}</span>
   {% if show_onboard_results_link %}
-  Automatic validation needs attention —
+  Onboarding complete — automatic validation needs attention —
   <a href="/assessments/{{ assessment_id }}/onboard-results">Onboard Results</a>.
+  {% elif fixable_categories %}
+  Onboarding complete — when pull request(s) appear below, review and merge them on GitHub.
+  {% else %}
+  Onboarding complete — no remediable findings to open a PR for right now.
   {% endif %}
 </div>
 {% elif lifecycle_stage == "applied" %}
@@ -166,10 +169,10 @@
     <input type="hidden" name="criticality" value="{{ report.criticality }}">
     {% if ever_onboarded %}
     <button type="button" class="btn btn-action btn-lg"
-      title="Re-clone and re-score the repo from scratch, then regenerate and open pull request(s) for the new score."
+      title="{% if fixable_categories %}Re-clone and re-score the repo from scratch, then regenerate and open pull request(s) for the new score.{% else %}Re-clone and re-score the repo from scratch. Opens a PR only if remediable findings appear.{% endif %}"
       @click="$dispatch('show-confirm', {
         title: 'Scan',
-        message: 'Scan ' + {{ report.repo_name | tojson | forceescape }} + ' — assess, onboard, and open pull request(s) in one step. Merge any open PRs on GitHub when they appear.',
+        message: {% if fixable_categories %}'Scan ' + {{ report.repo_name | tojson | forceescape }} + ' — assess, onboard, and open pull request(s) in one step. Merge any open PRs on GitHub when they appear.'{% else %}'Scan ' + {{ report.repo_name | tojson | forceescape }} + ' — re-assess and onboard. A pull request opens only if remediable findings (or a material score delta) appear; green scores with nothing to fix will not open a PR.'{% endif %},
         form: $refs.reassessForm,
         opts: { confirmText: 'Scan' }
       })">
@@ -337,7 +340,15 @@
     {% endfor %}
   </ul>
   {% else %}
-  <p class="text-muted text-sm mb-2" role="status">No open PRs — run Scan.</p>
+  <p class="text-muted text-sm mb-2" role="status">
+    {% if not fixable_categories and report.overall_score >= 90 %}
+    No open PRs — score looks healthy; Scan only if you want a fresh re-assess.
+    {% elif not fixable_categories %}
+    No open PRs — nothing remediable to open one for right now.
+    {% else %}
+    No open PRs — run Scan.
+    {% endif %}
+  </p>
   {% endif %}
   {% for s in scores_sorted %}
   <div class="dimension-row">
