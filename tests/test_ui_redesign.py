@@ -536,6 +536,10 @@ class TestGitOpsVisibility:
 
         assert resp.status_code == 200
         assert ">GitOps<" in resp.text
+        # deploy_status must resolve managed-{app}, not bare app name —
+        # otherwise Synced/Healthy ApplicationSet apps show "not deployed".
+        assert ">synced<" in resp.text
+        assert "not deployed" not in resp.text
 
     async def test_fleet_shows_gitops_badge_for_self_managed_app_with_matching_source(self, ui_client, _mock_kube):
         """Apps that register themselves into their own fleet (e.g. AgentIT

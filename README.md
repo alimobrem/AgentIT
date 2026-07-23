@@ -194,6 +194,7 @@ AgentIT is a **GitOps assistant**, not an auto-apply bot.
 - **No catalog dumps** — auto delivery and manual `/deliver` only open finding-tied PRs (`finding_gate`)
 - **Honest refuse UX** — when Phase A refuses (“No open findings / score delta”), Onboard Results does not promise “will open N PRs” or offer Retry Scan delivery; green Assessment Detail Scan CTAs / empty Open PRs copy do not promise PRs either
 - **No half-onboarded Fleet apps** — every app is GitOps-registered (or self-managed) **or** removed. Not-registered rows show Register GitOps / Delete only — never a Scan-for-PR CTA. Demo forks you cannot deliver to (e.g. `octocat/Spoon-Knife`) belong off Fleet, not in “Not GitOps-registered” limbo (dogfood: `octocat/Spoon-Knife` removed — undeliverable; Fleet is pinky + AgentIT only)
+- **Fleet deploy badges for ApplicationSet apps** — enrichment looks up `managed-{app}` first (then literal name), same as `gitops_registered`, so Synced/Healthy apps like pinky / `managed-pinky` show synced — not a false “not deployed”
 - **Human merge required** — AgentIT opens PRs; it does not merge them
 - **No silent cluster applies** for app remediations — path is PR → merge → Argo
 - **Clear-evidence gate** — refuses theater stubs, root-only `audit.py` without package wire-up, destructive Containerfile rewrites, SLSA/hermetic prose without a real `cosign sign` Task (`image_signing` → `cosign-sign-task`), and Tekton `sbom-task` theater for the app-repo `sbom` finding (`sbom` → `sbom-artifact`)

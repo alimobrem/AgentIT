@@ -93,7 +93,13 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
 
     for app_item in fleet:
         app_name = app_item["repo_name"].lower().replace("_", "-").replace(".", "-")
-        argo = argo_status.get(app_name)
+        # ApplicationSet apps are named managed-{app} (see
+        # delivery.gitops_application_name); self-managed apps keep a
+        # literal name. deploy_status must use the same lookup as
+        # gitops_registered -- bare app_name alone misses managed-* and
+        # falsely shows "not deployed" (pinky / managed-pinky).
+        managed_name = gitops_application_name(app_name)
+        argo = argo_status.get(managed_name) or argo_status.get(app_name)
         apply_results = None
         try:
             apply_results = _bridge(_store.get_apply_results(app_item["id"])) if _store else None
@@ -127,7 +133,7 @@ def _enrich_fleet_with_cluster_status(fleet: list[dict], _store=None, _loop=None
         # `delivery.is_self_managed_application()`) when its source repo
         # actually matches this app's own repo.
         app_item["gitops_registered"] = (
-            gitops_application_name(app_name) in argo_status
+            managed_name in argo_status
             or is_self_managed_application(
                 argo.get("repo_url") if argo else None, app_item.get("repo_url"),
             )

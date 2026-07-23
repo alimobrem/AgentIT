@@ -99,6 +99,55 @@ class TestFleetArgoCacheLock:
         assert tracking.max_concurrent == 1
 
 
+class TestFleetManagedDeployStatusLookup:
+    """ApplicationSet apps are named managed-{app}; deploy_status must
+    resolve that key (then fall back to the literal name) or Synced/Healthy
+    apps like pinky / managed-pinky falsely show "not deployed"."""
+
+    def test_enrich_resolves_managed_application_name(self):
+        fleet_routes._argo_cache["data"] = {
+            "managed-pinky": {
+                "sync": "Synced",
+                "health": "Healthy",
+                "cluster": "https://cluster",
+                "namespace": "pinky",
+                "repo_url": "https://github.com/org/pinky.git",
+            },
+        }
+        fleet_routes._argo_cache["ts"] = _time.monotonic()
+        fleet = [{"id": "a1", "repo_name": "pinky", "repo_url": "https://github.com/org/pinky"}]
+
+        with patch("agentit.kube.list_custom_resources", return_value=[]):
+            out = fleet_routes._enrich_fleet_with_cluster_status(fleet)
+
+        assert out[0]["deploy_status"] == "synced"
+        assert out[0]["deploy_health"] == "healthy"
+        assert out[0]["gitops_registered"] is True
+
+    def test_enrich_falls_back_to_literal_application_name(self):
+        fleet_routes._argo_cache["data"] = {
+            "agentit": {
+                "sync": "Synced",
+                "health": "Healthy",
+                "cluster": "https://cluster",
+                "namespace": "agentit",
+                "repo_url": "https://github.com/alimobrem/AgentIT.git",
+            },
+        }
+        fleet_routes._argo_cache["ts"] = _time.monotonic()
+        fleet = [{
+            "id": "a2",
+            "repo_name": "AgentIT",
+            "repo_url": "https://github.com/alimobrem/AgentIT",
+        }]
+
+        with patch("agentit.kube.list_custom_resources", return_value=[]):
+            out = fleet_routes._enrich_fleet_with_cluster_status(fleet)
+
+        assert out[0]["deploy_status"] == "synced"
+        assert out[0]["deploy_health"] == "healthy"
+
+
 class TestHealthDeployStatusCacheLock:
     def test_deploy_status_cache_lock_provides_mutual_exclusion(self, monkeypatch):
         tracking = _TrackingLock()
