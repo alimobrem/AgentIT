@@ -126,7 +126,10 @@ async def test_github_push_busy_releases_claim_for_retry(portal_client, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_release_webhook_claim_allows_reclaim(store):
+async def test_release_webhook_claim_allows_reclaim():
+    from conftest import make_store
+
+    store = await make_store()
     assert await store.claim_webhook("release-me") is True
     assert await store.claim_webhook("release-me") is False
     await store.release_webhook_claim("release-me")
