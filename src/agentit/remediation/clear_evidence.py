@@ -47,6 +47,14 @@ BASE_IMAGE_PIN = "base_image_pin"
 
 _FROM_LATEST = re.compile(r"^\s*FROM\s+\S+:latest\b", re.IGNORECASE | re.MULTILINE)
 _FROM_LINE = re.compile(r"^\s*FROM\s+\S+", re.IGNORECASE | re.MULTILINE)
+# Analyzer descriptions end with `` in {rel_path}`` / `` in {df.name}``.
+_FINDING_FILE_PATH = re.compile(
+    r"\bin\s+((?:[\w./-]+/)?(?:[Dd]ockerfile|[Cc]ontainerfile)[\w./-]*)\s*$",
+)
+_UBI_FROM = re.compile(
+    r"^\s*FROM\s+\S*(?:ubi|redhat|registry\.access\.redhat)\S*",
+    re.IGNORECASE | re.MULTILINE,
+)
 _HPA_KIND = re.compile(r"^\s*kind:\s*HorizontalPodAutoscaler\s*$", re.IGNORECASE | re.MULTILINE)
 _SCALE_REF = re.compile(
     r"scaleTargetRef:\s*\n(?:[ \t]+[^\n]+\n)*?[ \t]+kind:\s*(\w+)\s*\n"
@@ -87,15 +95,118 @@ def _staged_map(files: list[dict]) -> dict[str, str]:
     return out
 
 
-def verify_dockerfile_pin(files: list[dict]) -> tuple[bool, str]:
-    """True when a Dockerfile/Containerfile has FROM lines and no ``:latest``.
+def _is_containerfile_path(path: str) -> bool:
+    p = path.lower()
+    return (
+        "dockerfile" in p
+        or "containerfile" in p
+        or p.endswith("dockerfile")
+        or p.endswith("containerfile")
+    )
+
+
+def _container_finding_subtype(description: str) -> str:
+    """Classify a container finding so dockerfile_pin cannot overclaim.
+
+    Returns one of: ``healthcheck``, ``user``, ``ubi``, ``latest``, ``pin``.
+    """
+    d = (description or "").lower()
+    if "healthcheck" in d:
+        return "healthcheck"
+    if "runs as root" in d or "no user directive" in d:
+        return "user"
+    if "not ubi" in d or "universal base image" in d:
+        return "ubi"
+    if ":latest" in d or "latest tag" in d:
+        return "latest"
+    return "pin"
+
+
+def _finding_containerfile_path(description: str) -> str | None:
+    """Extract Dockerfile/Containerfile path from an analyzer description."""
+    m = _FINDING_FILE_PATH.search(description or "")
+    return m.group(1) if m else None
+
+
+def _resolve_staged_containerfile(
+    staged: dict[str, str],
+    target: str,
+) -> tuple[str, str] | None:
+    """Match ``target`` to a staged path (exact, casefold, or basename)."""
+    if not target:
+        return None
+    if target in staged:
+        return target, staged[target]
+    target_cf = target.casefold()
+    for path, content in staged.items():
+        if path.casefold() == target_cf:
+            return path, content
+    base = target.rsplit("/", 1)[-1].casefold()
+    basename_hits = [
+        (p, c) for p, c in staged.items()
+        if p.rsplit("/", 1)[-1].casefold() == base
+    ]
+    if len(basename_hits) == 1:
+        return basename_hits[0]
+    return None
+
+
+def _check_containerfile_pin_content(
+    path: str,
+    content: str,
+    *,
+    base_content: str | None = None,
+) -> tuple[bool, str]:
+    """Pin / rewrite checks for one staged Dockerfile/Containerfile."""
+    from agentit.remediation.source_patches import is_destructive_dockerfile_rewrite
+
+    if not _FROM_LINE.search(content):
+        return False, f"{path}: missing FROM line"
+    if _FROM_LATEST.search(content):
+        return False, f"{path}: still uses :latest on a FROM line"
+    if base_content:
+        destructive, reason = is_destructive_dockerfile_rewrite(base_content, content)
+        if destructive:
+            return False, f"{path}: destructive rewrite refused — {reason}"
+    if "agentit-pin-only" in content and not base_content:
+        return False, (
+            f"{path}: pin-only marker not enriched with existing file — "
+            "refusing theater stub"
+        )
+    return True, f"pinned base image in {path} (no :latest)"
+
+
+def verify_dockerfile_pin(
+    files: list[dict],
+    *,
+    finding_description: str = "",
+) -> tuple[bool, str]:
+    """True when staged Dockerfiles clear the *targeted* container finding.
+
+    Path-bound: when the finding names a Dockerfile/Containerfile, that file
+    must be staged and pinned — pinning an unrelated Dockerfile must not clear
+    ``:latest`` findings on Dockerfile.deps / .fast (pulse-agent#2 class).
+
+    Category mismatch: HEALTHCHECK / USER(root) findings cannot clear via
+    ``dockerfile_pin`` alone. Non-UBI findings require a UBI/Red Hat FROM on
+    the finding's file (pin-only of a non-UBI base is not enough).
 
     When ``base_content`` is present on a staged file (delivery enrichment
     after fetching the existing Dockerfile), also refuse destructive
     rewrites that gut the file into a short stub (#165 / migration #163
     quality bar).
     """
-    from agentit.remediation.source_patches import is_destructive_dockerfile_rewrite
+    subtype = _container_finding_subtype(finding_description)
+    if subtype == "healthcheck":
+        return False, (
+            "HEALTHCHECK finding cannot clear via dockerfile_pin — "
+            "need HEALTHCHECK directive (finding/patch mismatch)"
+        )
+    if subtype == "user":
+        return False, (
+            "USER/root finding cannot clear via dockerfile_pin — "
+            "need USER directive (finding/patch mismatch)"
+        )
 
     staged = _staged_map(files)
     base_by_path = {
@@ -104,34 +215,52 @@ def verify_dockerfile_pin(files: list[dict]) -> tuple[bool, str]:
         if _file_path(f) and f.get("base_content")
     }
     candidates = [
-        (p, c) for p, c in staged.items()
-        if "dockerfile" in p.lower() or "containerfile" in p.lower()
-        or p.lower().endswith("dockerfile") or p.lower().endswith("containerfile")
+        (p, c) for p, c in staged.items() if _is_containerfile_path(p)
     ]
     if not candidates:
-        # Also accept content that looks like a Dockerfile even under odd paths
         for p, c in staged.items():
             if _FROM_LINE.search(c) and ("USER" in c or "HEALTHCHECK" in c or "WORKDIR" in c):
                 candidates.append((p, c))
     if not candidates:
         return False, "no Dockerfile/Containerfile in staged files"
-    for path, content in candidates:
-        if not _FROM_LINE.search(content):
-            return False, f"{path}: missing FROM line"
-        if _FROM_LATEST.search(content):
-            return False, f"{path}: still uses :latest on a FROM line"
-        base = base_by_path.get(path)
-        if base:
-            destructive, reason = is_destructive_dockerfile_rewrite(base, content)
-            if destructive:
-                return False, f"{path}: destructive rewrite refused — {reason}"
-        # Refuse pin-only markers that never got enriched (would overwrite
-        # a real file with a 2-line stub if committed).
-        if "agentit-pin-only" in content and not base:
+
+    target = _finding_containerfile_path(finding_description)
+    if target:
+        resolved = _resolve_staged_containerfile(staged, target)
+        if resolved is None:
             return False, (
-                f"{path}: pin-only marker not enriched with existing file — "
-                "refusing theater stub"
+                f"{target}: not staged — cannot clear finding for that path "
+                f"(refusing overclaim from unrelated Dockerfile pin)"
             )
+        path, content = resolved
+        base = base_by_path.get(path) or base_by_path.get(target)
+        ok, reason = _check_containerfile_pin_content(
+            path, content, base_content=base if isinstance(base, str) else None,
+        )
+        if not ok:
+            return False, reason
+        if subtype == "ubi" and not _UBI_FROM.search(content):
+            return False, (
+                f"{path}: non-UBI finding cannot clear via pin alone — "
+                "FROM must use UBI/Red Hat base (finding/patch mismatch)"
+            )
+        return True, reason
+
+    # No path in description (legacy / generic): every staged containerfile
+    # must be pinned — still refuse UBI/HEALTHCHECK subtypes above.
+    if subtype == "ubi":
+        return False, (
+            "non-UBI finding cannot clear via dockerfile_pin alone — "
+            "need UBI/Red Hat FROM on the finding's Dockerfile "
+            "(finding/patch mismatch)"
+        )
+    for path, content in candidates:
+        base = base_by_path.get(path)
+        ok, reason = _check_containerfile_pin_content(
+            path, content, base_content=base if isinstance(base, str) else None,
+        )
+        if not ok:
+            return False, reason
     return True, f"pinned base image in {candidates[0][0]} (no :latest)"
 
 
@@ -820,13 +949,16 @@ def verify_evidence(
     live_workloads: list[dict[str, str]] | None = None,
     live_label_sets: list[dict[str, str]] | None = None,
     tree_paths: list[str] | None = None,
+    finding_description: str = "",
 ) -> tuple[bool, str]:
     """Dispatch to the verifier for ``evidence_kind``."""
     params = evidence_params or frozenset()
     if evidence_kind == DETECT_ONLY:
         return False, "detect_only / no_auto_pr — Scan must not open a PR"
     if evidence_kind in (DOCKERFILE_PIN, BASE_IMAGE_PIN):
-        return verify_dockerfile_pin(files)
+        return verify_dockerfile_pin(
+            files, finding_description=finding_description,
+        )
     if evidence_kind == AUDIT_WIRED:
         return verify_audit_wired(files)
     if evidence_kind == RUNTIME_PIN:
@@ -879,7 +1011,7 @@ def simulate_finding_clearance(
     from agentit.remediation.registry import allows_auto_pr, contract_for
 
     results: list[EvidenceResult] = []
-    for cat, _desc in target_findings:
+    for cat, desc in target_findings:
         if not cat:
             continue
         contract = contract_for(cat)
@@ -912,6 +1044,7 @@ def simulate_finding_clearance(
             live_workloads=live_workloads if kind == HPA_TARGET else None,
             live_label_sets=live_label_sets if kind == SELECTOR_TARGET else None,
             tree_paths=tree_paths if kind == ARGOCD_APPLICATION else None,
+            finding_description=str(desc or ""),
         )
         results.append(EvidenceResult(
             category=cat, ok=ok, evidence_kind=contract.evidence_kind, reason=reason,

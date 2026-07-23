@@ -120,6 +120,59 @@ class TestDockerfilePin:
         assert not ok
         assert "pin-only" in reason.lower() or "enrich" in reason.lower()
 
+    def test_multi_dockerfile_overclaim_fails(self) -> None:
+        """pulse-agent#2: pinning Dockerfile must not clear Dockerfile.deps/:latest."""
+        files = [{
+            "target_path": "Dockerfile",
+            "content": "FROM registry.access.redhat.com/ubi9/ubi-minimal:1\nUSER 1001\n",
+            "skill_name": "containerfile",
+        }]
+        ok, reason = verify_dockerfile_pin(
+            files,
+            finding_description="Using :latest tag in base image in Dockerfile.deps",
+        )
+        assert not ok
+        assert "Dockerfile.deps" in reason
+        assert "not staged" in reason or "overclaim" in reason.lower()
+
+    def test_single_file_pin_for_named_finding_passes(self) -> None:
+        ok, reason = verify_dockerfile_pin(
+            [{
+                "target_path": "Dockerfile",
+                "content": "FROM registry.access.redhat.com/ubi9/python-312:1\nUSER 1001\n",
+                "skill_name": "containerfile",
+            }],
+            finding_description="Using :latest tag in base image in Dockerfile",
+        )
+        assert ok, reason
+
+    def test_healthcheck_finding_not_cleared_by_from_pin(self) -> None:
+        ok, reason = verify_dockerfile_pin(
+            [{
+                "target_path": "Dockerfile",
+                "content": "FROM registry.access.redhat.com/ubi9/ubi-minimal:1\nUSER 1001\n",
+                "skill_name": "containerfile",
+            }],
+            finding_description="No HEALTHCHECK defined in Dockerfile",
+        )
+        assert not ok
+        assert "HEALTHCHECK" in reason
+        assert "mismatch" in reason.lower()
+
+    def test_non_ubi_finding_not_cleared_by_non_ubi_pin(self) -> None:
+        ok, reason = verify_dockerfile_pin(
+            [{
+                "target_path": "Dockerfile.fast",
+                "content": "FROM python:3.12\nUSER 1001\n",
+                "skill_name": "containerfile",
+            }],
+            finding_description=(
+                "Base image is not UBI (Red Hat Universal Base Image) in Dockerfile.fast"
+            ),
+        )
+        assert not ok
+        assert "ubi" in reason.lower() or "mismatch" in reason.lower()
+
 
 class TestAuditWired:
     def test_refuses_orphan_root_module(self) -> None:
@@ -400,6 +453,32 @@ class TestSimulationGate:
         assert not ok
         assert "Clear-evidence simulation failed" in reason
         assert "container" in reason
+
+    def test_pulse_agent_style_overclaim_refused(self) -> None:
+        """Pinning only Dockerfile while targeting HEALTHCHECK + other Dockerfiles."""
+        files = [{
+            "target_path": "Dockerfile",
+            "content": "FROM registry.access.redhat.com/ubi9/ubi-minimal:1\nUSER 1001\n",
+            "skill_name": "containerfile",
+        }]
+        findings = [
+            ("container", "Base image is not UBI (Red Hat Universal Base Image) in Dockerfile.fast"),
+            ("container", "No HEALTHCHECK defined in Dockerfile"),
+            ("container", "No HEALTHCHECK defined in Dockerfile.deps"),
+            ("container", "No HEALTHCHECK defined in Dockerfile.fast"),
+            ("container", "Using :latest tag in base image in Dockerfile"),
+            ("container", "Using :latest tag in base image in Dockerfile.deps"),
+            ("container", "Using :latest tag in base image in Dockerfile.fast"),
+        ]
+        ok, reason = clear_evidence_simulation_ok(files, findings)
+        assert not ok
+        assert "Clear-evidence simulation failed" in reason
+        assert (
+            "HEALTHCHECK" in reason
+            or "Dockerfile.deps" in reason
+            or "Dockerfile.fast" in reason
+            or "mismatch" in reason.lower()
+        )
 
     def test_refuses_detect_only_in_simulate_results(self) -> None:
         results = simulate_finding_clearance(

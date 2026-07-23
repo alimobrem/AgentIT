@@ -39,7 +39,9 @@ The application is packaged in a container image using a UBI base (not
 This skill opens a **source-repo PR** against the app's `Dockerfile` (or
 `Containerfile`) — not a gitops BuildConfig. Re-Assess after merge clears
 the `container` finding. Clear-evidence refuses destructive rewrites when
-the existing file is known.
+the existing file is known, binds each `:latest` finding to its file path
+(pinning `Dockerfile` alone cannot clear `Dockerfile.deps` / `.fast`), and
+refuses HEALTHCHECK / USER / non-UBI findings via pin-only (mismatch).
 
 ## Template
 Deterministic **greenfield** baseline (no Dockerfile yet). When a file

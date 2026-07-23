@@ -29,6 +29,11 @@ Product contract detail: [`docs/release-notes.md`](docs/release-notes.md).
 - **Image signing good-PR path:** detect `image-signing-exists` (`file_contains: cosign`) → remediable `image_signing` contract → `cosign-sign-task` (keyless Sigstore Tekton Task). Clear-evidence `cosign_sign_task` refuses empty Task / SLSA L3 / hermetic / Konflux theater without `cosign sign`/`attest`. Optional: pin Syft on `sbom-task` to `v1.48.0` (stop `:latest`).
 
 ### Fixed
+- **`dockerfile_pin` path-bound (pulse-agent#2 class):** clear-evidence binds
+  each container `:latest` finding to its Dockerfile/Containerfile — pinning
+  `Dockerfile` alone no longer clears `:latest` on `Dockerfile.deps` / `.fast`.
+  HEALTHCHECK / USER(root) findings refuse via `dockerfile_pin` (mismatch);
+  non-UBI findings require a UBI/Red Hat `FROM` on the finding's file.
 - **Shallow-PR clear-evidence harden (skills audit):** dedicated evidence kinds
   replace bare `cluster_kind` for the top shallow Scan skills —
   `image_scan_task` (trivy/grype/snyk + refuse empty Task / `:latest` step
