@@ -122,6 +122,14 @@ class TestSolutionContracts:
         assert "image-registry-policy" in c.refuse_companions
         assert "limitrange" in c.refuse_companions
 
+    def test_image_signing_contract(self) -> None:
+        c = contract_for("image_signing")
+        assert c is not None
+        assert c.skill_name == "cosign-sign-task"
+        assert c.delivery == "cluster"
+        assert c.evidence_kind == "cosign_sign_task"
+        assert "image-scan-task" in c.refuse_companions
+
     def test_lookup_agrees_with_contract(self) -> None:
         assert lookup("scaling") == ("infrastructure", "hpa")
         assert contract_for("scaling").skill_name == "hpa"

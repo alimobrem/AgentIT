@@ -26,6 +26,7 @@ Product contract detail: [`docs/release-notes.md`](docs/release-notes.md).
 - Portal crisp IA (PR [#160](https://github.com/alimobrem/AgentIT/pull/160)): fixed masthead + footer; denser Assessment / Capabilities / Health / Insights / Fleet surfaces.
 - Checks & resolutions catalog on Capabilities (`portal/check_catalog.py`, PR [#159](https://github.com/alimobrem/AgentIT/pull/159)).
 - Solution contracts so Scan PRs clear findings (`SOLUTION_CONTRACTS`, clear-evidence simulation; PRs [#154](https://github.com/alimobrem/AgentIT/pull/154), [#158](https://github.com/alimobrem/AgentIT/pull/158)).
+- **Image signing good-PR path:** detect `image-signing-exists` (`file_contains: cosign`) → remediable `image_signing` contract → `cosign-sign-task` (keyless Sigstore Tekton Task). Clear-evidence `cosign_sign_task` refuses empty Task / SLSA L3 / hermetic / Konflux theater without `cosign sign`/`attest`. Optional: pin Syft on `sbom-task` to `v1.48.0` (stop `:latest`).
 
 ### Fixed
 - **Schedules page (dogfood):** multi-document onboarding `*-cronjob.yaml` bundles (SA/Role before CronJob) rendered every row as `unresolvable` because `yaml.safe_load` only read the first doc; Containerfile omitted `watchers/` + `agents/` registration Markdown so `WATCHER_AGENTS` was empty in-cluster (“0 Long-Lived Agents”); page did not show per-app `assessment_cadence` or live platform CronJobs, so empty/unresolvable onboarding tables looked like “nothing has a schedule.” Parse all YAML docs, ship registration dirs, surface cadence + `list_cronjobs`, and clarify empty-state copy.

@@ -30,6 +30,8 @@ QUOTA_MANIFEST = "quota_manifest"
 CLUSTER_KIND = "cluster_kind"
 RESOURCE_LIMITS = "resource_limits"
 DETECT_ONLY = "detect_only"
+# Tekton Task that actually runs cosign sign/attest (not SLSA theater).
+COSIGN_SIGN_TASK = "cosign_sign_task"
 # Non-skill sentinel (patch_base_image) — same pin check as dockerfile.
 BASE_IMAGE_PIN = "base_image_pin"
 
@@ -371,6 +373,38 @@ def verify_cluster_kind(files: list[dict], kinds: frozenset[str]) -> tuple[bool,
     return False, f"none of kinds {sorted(kinds)} found in staged files"
 
 
+
+def verify_cosign_sign_task(files: list[dict]) -> tuple[bool, str]:
+    """True when staged files include a Tekton Task that runs cosign sign/attest.
+
+    Refuses empty Task stubs and SLSA L3 / hermetic / Konflux prose theater
+    that never invokes ``cosign sign`` or ``cosign attest``.
+    """
+    staged = _staged_map(files)
+    tasks: list[tuple[str, str]] = []
+    for path, content in staged.items():
+        if re.search(r"^\s*kind:\s*(Cluster)?Task\s*$", content, re.I | re.M):
+            tasks.append((path, content))
+    if not tasks:
+        return False, "no Tekton Task/ClusterTask in staged files"
+    theater_rx = re.compile(
+        r"\b(?:slsa\s*l(?:evel)?\s*3|hermetic|konflux)\b", re.I,
+    )
+    cosign_cmd = re.compile(r"\bcosign\s+(sign|attest)\b", re.I)
+    for path, content in tasks:
+        if cosign_cmd.search(content):
+            return True, f"cosign sign/attest Task in {path}"
+        if theater_rx.search(content) and "cosign" not in content.lower():
+            return False, (
+                f"{path}: SLSA/hermetic/Konflux theater without cosign "
+                "(refuse — need cosign sign or cosign attest)"
+            )
+    return False, (
+        f"{tasks[0][0]}: Task without cosign sign/attest "
+        "(refuse empty or non-signing Task theater)"
+    )
+
+
 def verify_resource_limits(files: list[dict]) -> tuple[bool, str]:
     staged = _staged_map(files)
     for path, content in staged.items():
@@ -410,6 +444,8 @@ def verify_evidence(
         return verify_cluster_kind(files, params)
     if evidence_kind == RESOURCE_LIMITS:
         return verify_resource_limits(files)
+    if evidence_kind == COSIGN_SIGN_TASK:
+        return verify_cosign_sign_task(files)
     return False, f"unknown evidence_kind {evidence_kind!r}"
 
 

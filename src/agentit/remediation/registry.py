@@ -124,6 +124,16 @@ SOLUTION_CONTRACTS: dict[str, SolutionContract] = {
         _ev.CLUSTER_KIND,
         kinds=("Task", "ClusterTask"),
     ),
+    # Detect: image-signing-exists (file_contains cosign). Clear via a real
+    # cosign sign/attest Tekton Task — refuse scan/sbom/registry companions
+    # and SLSA/hermetic theater (clear-evidence cosign_sign_task).
+    "image_signing": _c(
+        "security", "cosign-sign-task", "cluster",
+        "adding a Tekton Task that runs cosign sign (keyless Sigstore)",
+        _ev.COSIGN_SIGN_TASK,
+        "image-scan-task", "sbom-task", "image-registry-policy",
+        "compliance-evidence",
+    ),
     "resource": _c(
         "security", "resource-limits", "cluster",
         "setting container resource requests/limits",

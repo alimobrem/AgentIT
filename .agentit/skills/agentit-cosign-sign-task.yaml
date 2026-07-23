@@ -1,0 +1,29 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: agentit-cosign-sign
+  labels:
+    app.kubernetes.io/name: agentit
+    app.kubernetes.io/component: image-signing
+    app.kubernetes.io/part-of: agentit
+    app.kubernetes.io/managed-by: openshift-pipelines
+spec:
+  description: >
+    Cosign-sign a built image with Sigstore keyless (Fulcio + Rekor).
+    Requires workload identity / OIDC for the TaskRun service account.
+    Does not embed signing keys.
+  params:
+    - name: IMAGE
+      type: string
+      description: Full image reference to sign (digest preferred)
+  steps:
+    - name: cosign-sign
+      image: gcr.io/projectsigstore/cosign:v2.4.3
+      env:
+        - name: COSIGN_YES
+          value: "true"
+      script: |
+        #!/usr/bin/env sh
+        set -eu
+        cosign sign --yes "$(params.IMAGE)"
+        echo "Signed $(params.IMAGE)"
