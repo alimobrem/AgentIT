@@ -1381,6 +1381,19 @@ class TestContainerfileShipsWhatTestsPassGateNeeds:
             "scan_doc_gaps() always returns [] in the running image"
         )
 
+    def test_copies_watcher_and_agent_registration_dirs_into_the_image(self):
+        """Registration Markdown for watchers/*.md and agents/*.md lives at
+        repo root, not inside the installed site-packages tree. Without
+        COPY, load_watcher_agents() resolves empty and Schedules shows
+        0 Long-Lived Agents while the Deployments are running."""
+        content = self._containerfile_text()
+        assert "COPY watchers/ watchers/" in content, (
+            "Containerfile must COPY watchers/ or WATCHER_AGENTS is empty in-cluster"
+        )
+        assert "COPY agents/ agents/" in content, (
+            "Containerfile must COPY agents/ or AGENT_CLASSES is empty in-cluster"
+        )
+
     def test_makes_git_directories_group_writable(self):
         """Regression test: COPY .git ./.git lands owned by root with mode
         755 (group has read+execute but not write), which blocks git from

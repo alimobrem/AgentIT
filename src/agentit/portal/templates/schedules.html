@@ -17,8 +17,12 @@
 
 <div class="stat-grid">
   <div class="stat-card">
-    <div class="stat-label">Scheduled Jobs</div>
+    <div class="stat-label">Onboarding / Reminder Jobs</div>
     <div class="stat-value">{{ schedules | length }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Platform CronJobs</div>
+    <div class="stat-value">{{ platform_cronjobs | length }}</div>
   </div>
   <div class="stat-card">
     <div class="stat-label">Long-Lived Agents</div>
@@ -30,7 +34,98 @@
   </div>
 </div>
 
-<div x-data="{ showForm: false }">
+<p class="text-muted text-sm mb-1">
+  This page has three layers: <strong>per-app re-assessment cadence</strong>
+  (reassess-scheduler), <strong>live platform CronJobs</strong> in AgentIT's
+  namespace, and <strong>onboarding-generated CronJob manifests</strong> (plus
+  optional DB-only reminders). An empty onboarding table does not mean nothing
+  is scheduled.
+</p>
+
+<h2 class="section-title">Per-app re-assessment cadence</h2>
+{% if reassess_scheduler_active %}
+<p class="text-muted text-sm mb-1">
+  <code>reassess-scheduler</code> is ticking — apps below are re-Assessed on
+  their cadence (plus manual Scan and push-triggered checks). Change cadence on
+  each app's Assessment Detail → Overview.
+</p>
+{% else %}
+<p class="text-muted text-sm mb-1">
+  Cadence is saved per app, but <code>reassess-scheduler</code> is not active
+  here yet — until then, re-check via Scan or a push. Watcher status:
+  <a href="/agents">Agents</a>.
+</p>
+{% endif %}
+{% if app_cadences %}
+<table>
+  <thead>
+    <tr><th>App</th><th>Cadence</th><th>Driver</th></tr>
+  </thead>
+  <tbody>
+    {% for c in app_cadences %}
+    <tr>
+      <td class="text-bold">
+        <a href="/assessments/{{ c.app_id }}">{{ c.app_name }}</a>
+      </td>
+      <td>
+        {% if c.cadence == "manual" %}
+        <span class="badge badge-muted">{{ c.cadence_label }}</span>
+        {% else %}
+        <span class="badge badge-low">{{ c.cadence_label }}</span>
+        {% endif %}
+      </td>
+      <td class="text-muted text-xs">reassess-scheduler</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty-state">
+  <h3>No apps in Fleet yet</h3>
+  <p class="text-muted">Assess an app to configure its re-assessment cadence.</p>
+</div>
+{% endif %}
+
+<h2 class="section-title mt-2">Platform CronJobs</h2>
+<p class="text-muted text-sm mb-1">
+  Live Kubernetes CronJobs in AgentIT's own namespace (maintenance, probes,
+  backups). These are chart-managed — not edited from this page.
+</p>
+{% if platform_cronjobs %}
+<table>
+  <thead>
+    <tr><th>Name</th><th>Schedule</th><th>Status</th><th>Last run</th></tr>
+  </thead>
+  <tbody>
+    {% for cj in platform_cronjobs %}
+    <tr>
+      <td class="text-bold">{{ cj.name }}</td>
+      <td>
+        <span>{{ cj.schedule }}</span>
+        {% if cj.human_schedule %}<span class="text-muted text-xs">{{ cj.human_schedule }}</span>{% endif %}
+      </td>
+      <td>
+        {% if cj.suspended %}
+        <span class="badge badge-medium">suspended</span>
+        {% else %}
+        <span class="badge badge-low">active</span>
+        {% endif %}
+      </td>
+      <td class="text-muted text-xs">{{ cj.last_schedule_time or "—" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="text-muted text-sm mb-1">
+  No platform CronJobs listed (cluster API unavailable from this process, or
+  none in the namespace). On dogfood, chart CronJobs such as
+  <code>agentit-synthetic-probe</code> and <code>tekton-cleanup</code> still
+  run even when this table is empty.
+</p>
+{% endif %}
+
+<div x-data="{ showForm: false }" class="mt-2">
   <button class="btn btn-green mb-1" @click="showForm = !showForm" x-text="showForm ? 'Cancel' : 'Track a Schedule'"></button>
   <div x-show="showForm" x-cloak>
     <p class="text-muted text-sm mb-1">
@@ -68,10 +163,14 @@
   </div>
 </div>
 
-<p class="text-muted text-sm mb-1">Watcher / long-lived agent status: <a href="/agents">Agents</a>{% if watchers %} ({{ watchers | length }} active){% endif %}.</p>
+<p class="text-muted text-sm mb-1">
+  Watcher / long-lived agent status:
+  <a href="/agents">Agents</a>{% if watchers %}
+  ({{ watchers_active_count }} active / {{ watchers | length }} registered){% endif %}.
+</p>
 
 {% if schedules %}
-<h2 class="section-title">Scheduled CronWorkflows</h2>
+<h2 class="section-title">Onboarding CronJob manifests</h2>
 <p class="text-muted text-sm mb-1">
   Onboarding-generated schedules below are shown exactly as authored in the generated manifest --
   this page cannot change a real, already-delivered schedule (it never patches a live CronJob's
@@ -121,7 +220,7 @@
         {% if s.concurrency %}
         <span class="badge badge-info" title="{% if s.concurrency == 'Forbid' %}Skip if previous run still active{% elif s.concurrency == 'Replace' %}Cancel previous run and start new{% else %}Allow concurrent runs{% endif %}">{{ s.concurrency }}</span>
         {% else %}
-        <span class="badge badge-muted" title="Not a real CronJob -- this is a reminder only, so there's no real concurrencyPolicy to show.">n/a</span>
+        <span class="badge badge-muted" title="No concurrencyPolicy to show (reminder row, or CronJob document not found in the manifest).">n/a</span>
         {% endif %}
       </td>
       <td>
@@ -147,8 +246,12 @@
 </table>
 {% else %}
 <div class="empty-state">
-  <h3>No Scheduled Operations</h3>
-  <p class="text-muted">No scheduled operations yet.</p>
+  <h3>No onboarding CronJob manifests yet</h3>
+  <p class="text-muted">
+    Fleet apps above may still have a re-assessment cadence, and platform
+    CronJobs may still be running. Onboard (or re-onboard) an app to generate
+    app-scoped CronJob YAML, or use Track a Schedule for a DB-only reminder.
+  </p>
 </div>
 {% endif %}
 {% endblock %}

@@ -2229,6 +2229,11 @@ async def test_schedules_page_empty(client, _override_store):
     resp = await client.get("/schedules")
     assert resp.status_code == 200
     assert "Scheduled Operations" in resp.text
+    # Empty onboarding table must not claim "nothing is scheduled" — cadence
+    # / platform CronJobs are separate layers on this page.
+    assert "No onboarding CronJob manifests yet" in resp.text
+    assert "Per-app re-assessment cadence" in resp.text
+    assert "Platform CronJobs" in resp.text
 
 
 async def test_schedules_page_links_watchers_to_agents(client, _override_store):
@@ -2239,6 +2244,48 @@ async def test_schedules_page_links_watchers_to_agents(client, _override_store):
     assert 'section-title">Long-Lived Agents' not in resp.text
     assert "Watcher / long-lived agent status" in resp.text
     assert 'href="/agents"' in resp.text
+
+
+async def test_schedules_page_shows_fleet_cadence(client, _override_store):
+    """Per-app assessment_cadence is the real Fleet schedule; Schedules must
+    surface it even when no onboarding *-cronjob.yaml rows exist."""
+    store = _override_store
+    report = _make_report("cadence-app")
+    aid = await store.save(report)
+    assert await store.set_assessment_cadence(report.repo_url, "weekly") is True
+
+    resp = await client.get("/schedules")
+    assert resp.status_code == 200
+    assert "Per-app re-assessment cadence" in resp.text
+    assert f'<a href="/assessments/{aid}">cadence-app</a>' in resp.text
+    assert "Weekly" in resp.text
+    assert "reassess-scheduler" in resp.text
+
+
+async def test_schedules_parses_schedule_from_multidoc_cronjob_yaml(client, _override_store):
+    """Skill templates emit SA/Role before the CronJob. safe_load of the
+    first doc used to mark every such row unresolvable on dogfood."""
+    store = _override_store
+    aid = await store.save(_make_report("multidoc-cron-app"))
+    content = (
+        "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: sa\n"
+        "---\n"
+        "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: job\n"
+        "spec:\n  schedule: '0 2 1 * *'\n  concurrencyPolicy: Forbid\n"
+    )
+    await store.save_onboarding(aid, [{
+        "category": "compliance",
+        "path": "multidoc-cron-app-compliance-cronjob.yaml",
+        "content": content,
+        "description": "compliance cronjob",
+    }])
+
+    resp = await client.get("/schedules")
+    assert resp.status_code == 200
+    assert "unresolvable" not in resp.text
+    assert "0 2 1 * *" in resp.text
+    assert "Monthly (1st, 2am UTC)" in resp.text
+    assert "Forbid" in resp.text
 
 
 async def test_schedules_app_name_links_to_assessment_for_manual_schedule(client, _override_store):
