@@ -8,7 +8,7 @@ Brand spelling: **AgentIT** (not AgentIt / Agentit).
 
 | Doc | Role |
 | --- | --- |
-| [../README.md](../README.md) | Product front door — score path, core loop, quick start |
+| [../README.md](../README.md) | Product front door — score path, core loop, quick start, dogfood screenshots under [`assets/readme/`](./assets/readme/) |
 | [score-methodology.md](./score-methodology.md) | 7 dimensions, penalties, overall average, PR impact |
 | [release-notes.md](./release-notes.md) | Product contract, solution contracts, portal IA |
 | [../CHANGELOG.md](../CHANGELOG.md) | Keep a Changelog history |
