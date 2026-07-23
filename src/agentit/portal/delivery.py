@@ -1805,12 +1805,43 @@ async def handle_confirmed_finding_failure(
     watcher-triggered detection pipeline this phase never touches -- it has
     no relationship to ``deliveries.target_findings``/``finding_resolution``
     today) or any other call site.
+
+    Also skips blind redispatch when the contract skill already has
+    repeated identical reject reasons: escalate and queue skill-learner
+    instead of regenerating the same fix.
     """
     category = finding[0]
     failure_count = await store.get_finding_failure_count(app_name, category)
     if failure_count >= FINDING_ESCALATION_THRESHOLD:
         event_id = await escalate_unresolved_finding(store, assessment_id, app_name, finding, failure_count)
         return {"action": "escalated", "event_id": event_id, "failure_count": failure_count}
+
+    same_reason = await _same_reject_reason_blocks_redispatch(store, app_name, finding)
+    if same_reason:
+        event_id = await escalate_unresolved_finding(
+            store, assessment_id, app_name, finding, max(failure_count, 1),
+        )
+        try:
+            await store.log_event(
+                "delivery-verifier", "skill-learner-queued", app_name, "info",
+                f"Queued skill-learner for '{same_reason['skill_name']}' after "
+                f"{same_reason['count']} identical rejects "
+                f"({same_reason['reason_prefix']}) — skipped blind redispatch",
+                details=same_reason,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to log skill-learner-queued for %s/%s", app_name, category,
+                exc_info=True,
+            )
+        return {
+            "action": "escalated",
+            "event_id": event_id,
+            "failure_count": failure_count,
+            "reason": "identical_reject_reason",
+            "cooldown": same_reason,
+        }
+
     # Nested (not flattened via `**result`) deliberately: redispatch_finding_
     # fix() returns its own "action" key (the underlying delivery outcome,
     # e.g. "delivered"/"routing-error") -- flattening it would silently
@@ -1818,6 +1849,34 @@ async def handle_confirmed_finding_failure(
     # decision, the one thing a caller most needs to tell apart.
     result = await redispatch_finding_fix(store, report, assessment_id, app_name, finding)
     return {"action": "redispatched", "failure_count": failure_count, "redispatch_result": result}
+
+
+
+
+async def _same_reject_reason_blocks_redispatch(
+    store: object, app_name: str, finding: tuple[str, str],
+) -> dict | None:
+    """Return cool-down info when redispatch would repeat a failed recipe."""
+    if not hasattr(store, "get_skill_cooldown"):
+        return None
+    try:
+        from agentit.skill_engine import skill_names_for_findings
+
+        names = skill_names_for_findings([finding])
+    except Exception:
+        return None
+    for skill_name in names:
+        try:
+            info = await store.get_skill_cooldown(app_name, skill_name)
+        except Exception:
+            logger.warning(
+                "get_skill_cooldown failed for %s/%s", app_name, skill_name,
+                exc_info=True,
+            )
+            continue
+        if info:
+            return info
+    return None
 
 
 async def check_pending_delivery_verifications(

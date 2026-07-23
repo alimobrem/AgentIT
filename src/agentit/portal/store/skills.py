@@ -20,11 +20,46 @@ Every method assumes ``self._pool`` (an ``asyncpg.Pool``), set by
 from __future__ import annotations
 
 import json
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
 
 from ._shared import _now, _recency_weight, _rows_to_dicts
+
+# After this many rejects with the same reason prefix for (app, skill),
+# SkillEngine skips that skill for the app (clear-evidence theater /
+# still-present loops). Kept at 2 so the second identical failure cools
+# the skill instead of regenerating the same fix again.
+SKILL_COOLDOWN_SAME_REASON = 2
+
+# skill-learner fast-path: aligned with SKILL_COOLDOWN_SAME_REASON so a
+# single-app cool-down still flags the skill for improvement research
+# (otherwise regenerate stops at 2 and the learner never sees a 3rd row).
+SKILL_LEARNER_IDENTICAL_REJECT_THRESHOLD = SKILL_COOLDOWN_SAME_REASON
+
+_STABLE_REJECT_PREFIXES = (
+    "finding still present after merge",
+    "finding cleared after merge",
+    "clear-evidence",
+    "pr closed without merge",
+)
+
+
+def skill_reject_reason_prefix(reason: str, max_len: int = 64) -> str:
+    """Normalize a skill_effectiveness.reason into a cool-down key."""
+    text = (reason or "").strip().lower()
+    if not text:
+        return ""
+    for stable in _STABLE_REJECT_PREFIXES:
+        if text.startswith(stable) or stable in text:
+            return stable
+    for sep in (" — ", " - ", ": ", " ("):
+        if sep in text:
+            text = text.split(sep, 1)[0].strip()
+            break
+    return text[:max_len]
+
 
 
 class SkillsMixin:
@@ -35,6 +70,159 @@ class SkillsMixin:
             'INSERT INTO skill_effectiveness (skill_name, app_name, outcome, reason, created_at) VALUES ($1, $2, $3, $4, $5)',
             skill_name, app_name, outcome, reason, _now(),
         )
+
+    async def get_recent_skill_reject_reasons(
+        self, app_name: str, skill_name: str, *, limit: int = 3,
+    ) -> list[str]:
+        """Most recent reject reasons for ``(app, skill)``, newest first."""
+        rows = await self._pool.fetch(
+            "SELECT reason FROM skill_effectiveness "
+            "WHERE app_name = $1 AND skill_name = $2 AND outcome = 'rejected' "
+            "ORDER BY created_at DESC LIMIT $3",
+            app_name, skill_name, limit,
+        )
+        return [(r["reason"] or "") for r in rows]
+
+    async def count_skill_rejects_with_prefix(
+        self, app_name: str, skill_name: str, reason_prefix: str,
+    ) -> int:
+        """How many rejects for ``(app, skill)`` share ``reason_prefix``."""
+        prefix = skill_reject_reason_prefix(reason_prefix)
+        if not prefix:
+            return 0
+        rows = await self._pool.fetch(
+            "SELECT reason FROM skill_effectiveness "
+            "WHERE app_name = $1 AND skill_name = $2 AND outcome = 'rejected'",
+            app_name, skill_name,
+        )
+        return sum(
+            1 for r in rows
+            if skill_reject_reason_prefix(r["reason"] or "") == prefix
+        )
+
+    async def is_skill_cooling_down(
+        self,
+        app_name: str,
+        skill_name: str,
+        *,
+        threshold: int = SKILL_COOLDOWN_SAME_REASON,
+    ) -> bool:
+        """True when ``(app, skill)`` has ``threshold``+ rejects with one prefix."""
+        info = await self.get_skill_cooldown(app_name, skill_name, threshold=threshold)
+        return info is not None
+
+    async def get_skill_cooldown(
+        self,
+        app_name: str,
+        skill_name: str,
+        *,
+        threshold: int = SKILL_COOLDOWN_SAME_REASON,
+    ) -> dict | None:
+        """Cool-down info for one skill on one app, or ``None`` if active."""
+        rows = await self._pool.fetch(
+            "SELECT reason FROM skill_effectiveness "
+            "WHERE app_name = $1 AND skill_name = $2 AND outcome = 'rejected'",
+            app_name, skill_name,
+        )
+        counts: Counter[str] = Counter()
+        for r in rows:
+            prefix = skill_reject_reason_prefix(r["reason"] or "")
+            if prefix:
+                counts[prefix] += 1
+        if not counts:
+            return None
+        top_prefix, top_count = counts.most_common(1)[0]
+        if top_count < threshold:
+            return None
+        return {
+            "skill_name": skill_name,
+            "app_name": app_name,
+            "reason_prefix": top_prefix,
+            "count": top_count,
+            "cooling_down": True,
+        }
+
+    async def list_cooled_skills(
+        self,
+        app_name: str = "",
+        *,
+        threshold: int = SKILL_COOLDOWN_SAME_REASON,
+    ) -> list[dict]:
+        """Skills cooling down (optionally scoped to one app)."""
+        if app_name:
+            rows = await self._pool.fetch(
+                "SELECT skill_name, reason FROM skill_effectiveness "
+                "WHERE app_name = $1 AND outcome = 'rejected'",
+                app_name,
+            )
+        else:
+            rows = await self._pool.fetch(
+                "SELECT skill_name, app_name, reason FROM skill_effectiveness "
+                "WHERE outcome = 'rejected'",
+            )
+        grouped: dict[tuple[str, str], Counter[str]] = {}
+        for r in rows:
+            skill = r["skill_name"]
+            app = app_name or r["app_name"]
+            prefix = skill_reject_reason_prefix(r["reason"] or "")
+            if not prefix:
+                continue
+            grouped.setdefault((app, skill), Counter())[prefix] += 1
+        cooled: list[dict] = []
+        for (app, skill), counts in grouped.items():
+            top_prefix, top_count = counts.most_common(1)[0]
+            if top_count >= threshold:
+                cooled.append({
+                    "skill_name": skill,
+                    "app_name": app,
+                    "reason_prefix": top_prefix,
+                    "count": top_count,
+                    "cooling_down": True,
+                })
+        cooled.sort(key=lambda x: (-x["count"], x["skill_name"], x["app_name"]))
+        return cooled
+
+    async def get_skills_with_identical_reject_reasons(
+        self,
+        *,
+        min_identical: int = SKILL_LEARNER_IDENTICAL_REJECT_THRESHOLD,
+    ) -> list[dict]:
+        """Skills with ``min_identical``+ rejects sharing one reason prefix."""
+        rows = await self._pool.fetch(
+            "SELECT skill_name, reason, outcome FROM skill_effectiveness",
+        )
+        by_skill: dict[str, Counter[str]] = {}
+        totals: dict[str, dict[str, int]] = {}
+        for r in rows:
+            name = r["skill_name"]
+            totals.setdefault(name, {"approved": 0, "rejected": 0, "total": 0})
+            outcome = r["outcome"]
+            totals[name][outcome] = totals[name].get(outcome, 0) + 1
+            totals[name]["total"] += 1
+            if outcome != "rejected":
+                continue
+            prefix = skill_reject_reason_prefix(r["reason"] or "")
+            if prefix:
+                by_skill.setdefault(name, Counter())[prefix] += 1
+        flagged: list[dict] = []
+        for name, counts in by_skill.items():
+            top_prefix, top_count = counts.most_common(1)[0]
+            if top_count < min_identical:
+                continue
+            t = totals[name]
+            approved = t.get("approved", 0)
+            total = t.get("total", 0) or 1
+            flagged.append({
+                "skill": name,
+                "approval_rate": round(approved / total, 2),
+                "raw_approval_rate": round(approved / total, 2),
+                "total": total,
+                "identical_reject_prefix": top_prefix,
+                "identical_reject_count": top_count,
+                "fast_path": True,
+            })
+        flagged.sort(key=lambda x: (-x["identical_reject_count"], x["skill"]))
+        return flagged
 
     async def get_skill_effectiveness(
         self, skill_name: str = '', min_count: int = 5, half_life_days: float = 90.0,

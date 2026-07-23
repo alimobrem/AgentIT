@@ -613,6 +613,12 @@ async def capabilities_page(request: Request) -> HTMLResponse:
             flagged_skills = await s.get_low_effectiveness_skills()
         except Exception:
             log.warning("Failed to fetch low-effectiveness skills for learn-button preview", exc_info=True)
+    cooled_skills: list[dict] = []
+    if hasattr(s, "list_cooled_skills"):
+        try:
+            cooled_skills = await s.list_cooled_skills()
+        except Exception:
+            log.warning("Failed to fetch cooled skills for Capabilities", exc_info=True)
     learning_runs = await _get_learning_run_history(s)
     skill_learner_status = await _get_skill_learner_status(s)
     llm_available = get_llm_client() is not None
@@ -668,6 +674,7 @@ async def capabilities_page(request: Request) -> HTMLResponse:
         "check_catalog_summary": check_catalog_summary,
         "retention_days": retention_days,
         "flagged_skills": flagged_skills,
+        "cooled_skills": cooled_skills,
         "learning_runs": learning_runs,
         "skill_learner_status": skill_learner_status,
         "llm_available": llm_available,

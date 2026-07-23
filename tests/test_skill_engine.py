@@ -409,10 +409,41 @@ class TestRunAllStoreWiring:
     def _report_and_skill(self):
         skill = _make_skill("network-policy", outputs=["NetworkPolicy"], triggers=["network", "isolation"])
         report = make_report(repo_name="my-app")
+        # Use finding.category (not skill.domain) — run_all gates on the
+        # same category key webhooks.py's get_rejection_count uses.
+        report.scores[0].findings[0].category = "network"
         report.scores[0].findings[0].description = "Missing network isolation between pods"
         return report, skill
 
-    async def test_skill_skipped_after_3_rejections_for_this_app_domain(self, tmp_path: Path) -> None:
+    async def test_skill_skipped_after_3_rejections_for_this_app_category(self, tmp_path: Path) -> None:
+        from conftest import make_store
+
+        engine = SkillEngine(tmp_path, platform=offline_context())
+        report, skill = self._report_and_skill()
+        engine.skills = [skill]
+
+        raw_store = await make_store()
+        for _ in range(3):
+            await raw_store.record_feedback(
+                app_name="my-app", agent_name="skill-engine",
+                finding_category="network", action="rejected",
+            )
+        store = raw_store
+
+        fake_llm = _FakeLLMClient("apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: x\nspec:\n  podSelector: {}\n")
+        import asyncio
+        files = await asyncio.to_thread(
+            engine.run_all, report, store=store, llm_client=fake_llm, loop=asyncio.get_running_loop(),
+        )
+
+        assert files == []
+        assert len(fake_llm.calls) == 0
+        events = await raw_store.list_events_by_agent("skill-engine")
+        assert any(e["action"] == "skipped-rejected" for e in events)
+        assert any("category 'network'" in (e.get("summary") or "") for e in events)
+
+    async def test_skill_not_skipped_when_only_domain_was_rejected(self, tmp_path: Path) -> None:
+        """Regression: run_all used skill.domain for get_rejection_count."""
         from conftest import make_store
 
         engine = SkillEngine(tmp_path, platform=offline_context())
@@ -432,11 +463,7 @@ class TestRunAllStoreWiring:
         files = await asyncio.to_thread(
             engine.run_all, report, store=store, llm_client=fake_llm, loop=asyncio.get_running_loop(),
         )
-
-        assert files == []
-        assert len(fake_llm.calls) == 0
-        events = await raw_store.list_events_by_agent("skill-engine")
-        assert any(e["action"] == "skipped-rejected" for e in events)
+        assert len(files) == 1
 
     async def test_skill_not_skipped_below_rejection_threshold(self, tmp_path: Path) -> None:
         from conftest import make_store
@@ -449,7 +476,7 @@ class TestRunAllStoreWiring:
         for _ in range(2):  # below the 3+ threshold
             await raw_store.record_feedback(
                 app_name="my-app", agent_name="skill-engine",
-                finding_category=skill.domain, action="rejected",
+                finding_category="network", action="rejected",
             )
         store = raw_store
 
@@ -471,7 +498,7 @@ class TestRunAllStoreWiring:
         raw_store = await make_store()
         await raw_store.record_feedback(
             app_name="my-app", agent_name="skill-engine",
-            finding_category=skill.domain, action="modified",
+            finding_category="network", action="modified",
             original_value="old-policy", human_value="a stricter deny-all default policy",
         )
         store = raw_store

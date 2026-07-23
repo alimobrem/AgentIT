@@ -74,6 +74,29 @@ class RemediationDispatcher:
                 "error": f"Assessment {assessment_id} not found",
             }
 
+        cool_app = app_name or getattr(report, "repo_name", "") or ""
+        if (
+            cool_app
+            and skill_name != "patch_base_image"
+            and hasattr(self._store, "is_skill_cooling_down")
+        ):
+            try:
+                if await self._store.is_skill_cooling_down(cool_app, skill_name):
+                    return {
+                        "files": [],
+                        "agent": domain,
+                        "method": skill_name,
+                        "error": (
+                            f"Skill '{skill_name}' is cooling down for {cool_app} "
+                            "after repeated identical rejects — skipped regenerate"
+                        ),
+                    }
+            except Exception:
+                logger.warning(
+                    "is_skill_cooling_down failed for %s/%s", cool_app, skill_name,
+                    exc_info=True,
+                )
+
         if skill_name == "patch_base_image":
             return await self._dispatch_patch(assessment_id, domain, report, app_name)
 
