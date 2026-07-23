@@ -472,9 +472,18 @@ async def test_deliver_failure_states_cause_and_next_step(client, _override_stor
             )],
         )],
     ))
-    await store.save_onboarding(aid, [
-        {"category": "skills", "path": "f0.yaml", "content": "kind: ConfigMap", "description": "x"},
-    ])
+    await store.save_onboarding(aid, [{
+        "category": "skills",
+        "path": "f0.yaml",
+        "content": (
+            "apiVersion: networking.k8s.io/v1\n"
+            "kind: NetworkPolicy\n"
+            "metadata:\n  name: test\n"
+        ),
+        "description": "network policy",
+        "skill_name": "network-policy",
+        "finding_addressed": "network",
+    }])
     with patch("agentit.portal.delivery.route_and_deliver",
                side_effect=RuntimeError("cluster unreachable: connection refused")):
         resp = await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "false"}, follow_redirects=False)

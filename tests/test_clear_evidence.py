@@ -123,7 +123,24 @@ class TestAuditWired:
         ok, reason = verify_audit_wired([
             {
                 "target_path": "apps/api/src/pkg/audit.py",
-                "content": "def audit_log(*a, **k): pass\n",
+                "content": (
+                    '"""Application audit logging."""\n'
+                    "import json\n"
+                    "import logging\n"
+                    "\n"
+                    '_log = logging.getLogger("audit")\n'
+                    "\n"
+                    "def audit_log(action, *, actor, resource, outcome=\"success\"):\n"
+                    "    record = {\n"
+                    '        "ts": "2026-01-01T00:00:00+00:00",\n'
+                    '        "type": "audit",\n'
+                    '        "action": action,\n'
+                    '        "actor": actor,\n'
+                    '        "resource": resource,\n'
+                    '        "outcome": outcome,\n'
+                    "    }\n"
+                    "    _log.info(\"%s\", json.dumps(record))\n"
+                ),
                 "skill_name": "app-audit-logging",
             },
             {
@@ -138,6 +155,33 @@ class TestAuditWired:
             },
         ])
         assert ok, reason
+
+    def test_refuses_theater_stub_even_when_wired(self) -> None:
+        """pinky #12: middleware wire-up must not launder a theater audit.py."""
+        ok, reason = verify_audit_wired([
+            {
+                "target_path": "apps/api/src/pinky_api/audit.py",
+                "content": (
+                    '"""Theater stub — intentionally not wired into the app package."""\n'
+                    "import logging\n"
+                    'log = logging.getLogger("audit")\n'
+                    "def audit_log(event, **kw):\n"
+                    "    log.info(\"%s %s\", event, kw)\n"
+                ),
+                "skill_name": "audit-logging",
+            },
+            {
+                "target_path": "apps/api/src/pinky_api/app.py",
+                "content": (
+                    "from pinky_api.audit import audit_log\n"
+                    "async def agentit_audit_middleware(request, call_next):\n"
+                    "    return await call_next(request)\n"
+                ),
+                "skill_name": "app-audit-logging",
+            },
+        ])
+        assert not ok
+        assert "theater" in reason.lower()
 
 
 class TestRuntimePin:

@@ -90,7 +90,7 @@ flowchart LR
 | --- | --- |
 | **Assess** | 7 dimensions → findings + scores |
 | **Scan / generate** | Skills match findings; Scan/onboard produces remediations |
-| **Gate** | Finding-tied PRs only on auto delivery **and** manual `/deliver`; SSA dry-run + clear-evidence (refuses theater stubs / destructive Containerfile rewrites) |
+| **Gate** | Finding-tied PRs only on auto delivery **and** manual `/deliver`. Manual also mirrors auto’s file filter, wrong-layer strip, per-cluster file cap, and clear-evidence (blocks Hello-World `#31`/`#32`-class catalog dumps; refuses `octocat/Hello-World` probes; refuses theater audit stubs even when middleware is wired — pinky `#12`). SSA dry-run + clear-evidence also refuse destructive Containerfile rewrites / root-only `audit.py`. |
 | **Operate** | Human merges on GitHub; Argo CD deploys. **Awaiting verification** only when a PR was actually opened |
 | **Learn** | Watchers surface drift/CVEs/SLOs; Decisions audit LLM approve/reject; repeated theater cools down. Security-analyzer fixtures use fragment-joined fake hex + `.gitleaks.toml` allowlist (InfoSec Generic Secret FP; never real credentials). |
 

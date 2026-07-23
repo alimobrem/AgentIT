@@ -23,12 +23,25 @@ from agentit.portal.app import app
 from conftest import make_report, make_store, prime_csrf
 
 
-def _configmap_file(path: str = "app-config.yaml") -> dict:
+_RBAC_YAML = (
+    "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: test\n"
+    "---\napiVersion: rbac.authorization.k8s.io/v1\nkind: Role\n"
+    "metadata:\n  name: test\nrules: []\n"
+    "---\napiVersion: rbac.authorization.k8s.io/v1\nkind: RoleBinding\n"
+    "metadata:\n  name: test\nroleRef:\n  kind: Role\n  name: test\n"
+    "subjects:\n- kind: ServiceAccount\n  name: test\n"
+)
+
+
+def _configmap_file(path: str = "app-rbac.yaml") -> dict:
+    """RBAC skill file (named historically; content must clear ``rbac``)."""
     return {
         "category": "skills",
         "path": path,
-        "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  key: value\n",
-        "description": "config",
+        "content": _RBAC_YAML,
+        "description": "rbac",
+        "skill_name": "rbac",
+        "finding_addressed": "rbac",
     }
 
 
@@ -79,7 +92,7 @@ class TestStoreUpdateOnboardingFile:
         aid = await store.save(report)
         await store.save_onboarding(aid, [_configmap_file()])
 
-        updated = await store.update_onboarding_file(aid, "skills", "app-config.yaml", "edited: true\n")
+        updated = await store.update_onboarding_file(aid, "skills", "app-rbac.yaml", "edited: true\n")
         assert updated is not None
         assert updated["content"] == "edited: true\n"
         assert updated["original_content"] == _configmap_file()["content"]
@@ -87,7 +100,7 @@ class TestStoreUpdateOnboardingFile:
         assert "edited_at" in updated
 
         files = await store.get_onboarding(aid)
-        saved = next(f for f in files if f["path"] == "app-config.yaml")
+        saved = next(f for f in files if f["path"] == "app-rbac.yaml")
         assert saved["content"] == "edited: true\n"
         assert saved["original_content"] == _configmap_file()["content"]
 
@@ -97,8 +110,8 @@ class TestStoreUpdateOnboardingFile:
         aid = await store.save(report)
         await store.save_onboarding(aid, [_configmap_file()])
 
-        await store.update_onboarding_file(aid, "skills", "app-config.yaml", "first edit\n")
-        second = await store.update_onboarding_file(aid, "skills", "app-config.yaml", "second edit\n")
+        await store.update_onboarding_file(aid, "skills", "app-rbac.yaml", "first edit\n")
+        second = await store.update_onboarding_file(aid, "skills", "app-rbac.yaml", "second edit\n")
 
         assert second["content"] == "second edit\n"
         # original_content must still be the FIRST-ever generated content,
@@ -117,7 +130,7 @@ class TestStoreUpdateOnboardingFile:
         store = await make_store()
         report = make_report()
         aid = await store.save(report)
-        assert await store.update_onboarding_file(aid, "skills", "app-config.yaml", "x") is None
+        assert await store.update_onboarding_file(aid, "skills", "app-rbac.yaml", "x") is None
 
 
 # ── Edit route ───────────────────────────────────────────────────────────
@@ -129,14 +142,14 @@ class TestEditOnboardingFileRoute:
         new_content = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  key: newvalue\n"
         resp = await client.post(
             f"/assessments/{aid}/onboard-results/edit-file",
-            data={"category": "skills", "path": "app-config.yaml", "content": new_content},
+            data={"category": "skills", "path": "app-rbac.yaml", "content": new_content},
             follow_redirects=False,
         )
         assert resp.status_code == 303
-        assert "edited=app-config.yaml" in resp.headers["location"]
+        assert "edited=app-rbac.yaml" in resp.headers["location"]
 
         files = await store.get_onboarding(aid)
-        saved = next(f for f in files if f["path"] == "app-config.yaml")
+        saved = next(f for f in files if f["path"] == "app-rbac.yaml")
         assert saved["content"] == new_content
         assert saved["edited"] is True
 
@@ -145,7 +158,7 @@ class TestEditOnboardingFileRoute:
         await client.post(
             f"/assessments/{aid}/onboard-results/edit-file",
             data={
-                "category": "skills", "path": "app-config.yaml",
+                "category": "skills", "path": "app-rbac.yaml",
                 "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\n",
             },
             follow_redirects=False,
@@ -163,14 +176,14 @@ class TestEditOnboardingFileRoute:
         broken_yaml = "apiVersion: v1\nkind: ConfigMap\nmetadata: [unterminated\n"
         resp = await client.post(
             f"/assessments/{aid}/onboard-results/edit-file",
-            data={"category": "skills", "path": "app-config.yaml", "content": broken_yaml},
+            data={"category": "skills", "path": "app-rbac.yaml", "content": broken_yaml},
             follow_redirects=False,
         )
         assert resp.status_code == 303
         assert "error=" in resp.headers["location"]
 
         files = await store.get_onboarding(aid)
-        saved = next(f for f in files if f["path"] == "app-config.yaml")
+        saved = next(f for f in files if f["path"] == "app-rbac.yaml")
         assert saved["content"] == _configmap_file()["content"]
         assert not saved.get("edited")
 
@@ -179,12 +192,12 @@ class TestEditOnboardingFileRoute:
         missing_metadata = "apiVersion: v1\nkind: ConfigMap\n"
         resp = await client.post(
             f"/assessments/{aid}/onboard-results/edit-file",
-            data={"category": "skills", "path": "app-config.yaml", "content": missing_metadata},
+            data={"category": "skills", "path": "app-rbac.yaml", "content": missing_metadata},
             follow_redirects=False,
         )
         assert "error=" in resp.headers["location"]
         files = await store.get_onboarding(aid)
-        saved = next(f for f in files if f["path"] == "app-config.yaml")
+        saved = next(f for f in files if f["path"] == "app-rbac.yaml")
         assert not saved.get("edited")
 
     async def test_unknown_file_path_returns_404(self, edit_client):
@@ -203,7 +216,7 @@ class TestEditOnboardingFileRoute:
         client, _store, _aid = edit_client
         resp = await client.post(
             "/assessments/nonexistent/onboard-results/edit-file",
-            data={"category": "skills", "path": "app-config.yaml", "content": "x"},
+            data={"category": "skills", "path": "app-rbac.yaml", "content": "x"},
             follow_redirects=False,
         )
         assert resp.status_code == 404
@@ -222,7 +235,7 @@ class TestOnboardResultsPageRendersEditAndDiff:
         new_content = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  key: changed\n"
         await client.post(
             f"/assessments/{aid}/onboard-results/edit-file",
-            data={"category": "skills", "path": "app-config.yaml", "content": new_content},
+            data={"category": "skills", "path": "app-rbac.yaml", "content": new_content},
             follow_redirects=False,
         )
         resp = await client.get(f"/assessments/{aid}/onboard-results")
@@ -236,7 +249,7 @@ class TestOnboardResultsPageRendersEditAndDiff:
         await client.post(
             f"/assessments/{aid}/onboard-results/edit-file",
             data={
-                "category": "skills", "path": "app-config.yaml",
+                "category": "skills", "path": "app-rbac.yaml",
                 "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  foo: bar\n",
             },
             follow_redirects=False,
@@ -259,7 +272,7 @@ class TestEditInvalidatesStaleDryRun:
         to deliver."""
         client, store, aid = edit_client
         await store.save_apply_results(
-            aid, {"applied": [], "skipped": [], "errors": [], "repo_files": [{"path": "app-config.yaml", "purpose": "dry-run"}]},
+            aid, {"applied": [], "skipped": [], "errors": [], "repo_files": [{"path": "app-rbac.yaml", "purpose": "dry-run"}]},
             "test-app", dry_run=True,
         )
         assert await store.get_apply_results(aid) is not None
@@ -267,7 +280,7 @@ class TestEditInvalidatesStaleDryRun:
         resp = await client.post(
             f"/assessments/{aid}/onboard-results/edit-file",
             data={
-                "category": "skills", "path": "app-config.yaml",
+                "category": "skills", "path": "app-rbac.yaml",
                 "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  key: newvalue\n",
             },
             follow_redirects=False,
@@ -282,7 +295,7 @@ class TestEditInvalidatesStaleDryRun:
         client, store, aid = edit_client
         await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
         await store.save_apply_results(
-            aid, {"applied": [], "skipped": [], "errors": [], "repo_files": [{"path": "app-config.yaml", "purpose": "dry-run"}]},
+            aid, {"applied": [], "skipped": [], "errors": [], "repo_files": [{"path": "app-rbac.yaml", "purpose": "dry-run"}]},
             "test-app", dry_run=True,
         )
         before = await client.get(f"/assessments/{aid}/onboard-results")
@@ -292,7 +305,7 @@ class TestEditInvalidatesStaleDryRun:
         await client.post(
             f"/assessments/{aid}/onboard-results/edit-file",
             data={
-                "category": "skills", "path": "app-config.yaml",
+                "category": "skills", "path": "app-rbac.yaml",
                 "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  key: newvalue\n",
             },
             follow_redirects=False,
@@ -316,7 +329,7 @@ class TestEditInvalidatesStaleDryRun:
         regardless of how it got there."""
         client, store, aid = edit_client
         await store.save_apply_results(
-            aid, {"applied": ["app-config.yaml"], "skipped": [], "errors": []},
+            aid, {"applied": ["app-rbac.yaml"], "skipped": [], "errors": []},
             "test-app", dry_run=False,
         )
         assert await store.get_apply_results(aid) is not None
@@ -324,7 +337,7 @@ class TestEditInvalidatesStaleDryRun:
         await client.post(
             f"/assessments/{aid}/onboard-results/edit-file",
             data={
-                "category": "skills", "path": "app-config.yaml",
+                "category": "skills", "path": "app-rbac.yaml",
                 "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  key: post-delivery-edit\n",
             },
             follow_redirects=False,
@@ -340,7 +353,7 @@ class TestEditInvalidatesStaleDryRun:
         resp = await client.post(
             f"/assessments/{aid}/onboard-results/edit-file",
             data={
-                "category": "skills", "path": "app-config.yaml",
+                "category": "skills", "path": "app-rbac.yaml",
                 "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  key: x\n",
             },
             follow_redirects=False,
@@ -354,13 +367,13 @@ class TestEditInvalidatesStaleDryRun:
         result either."""
         client, store, aid = edit_client
         await store.save_apply_results(
-            aid, {"applied": [], "skipped": [], "errors": [], "repo_files": [{"path": "app-config.yaml", "purpose": "dry-run"}]},
+            aid, {"applied": [], "skipped": [], "errors": [], "repo_files": [{"path": "app-rbac.yaml", "purpose": "dry-run"}]},
             "test-app", dry_run=True,
         )
         broken_yaml = "apiVersion: v1\nkind: ConfigMap\nmetadata: [unterminated\n"
         resp = await client.post(
             f"/assessments/{aid}/onboard-results/edit-file",
-            data={"category": "skills", "path": "app-config.yaml", "content": broken_yaml},
+            data={"category": "skills", "path": "app-rbac.yaml", "content": broken_yaml},
             follow_redirects=False,
         )
         assert "error=" in resp.headers["location"]
@@ -374,12 +387,10 @@ class TestDeliverUsesEditedContent:
     async def test_deliver_applies_edited_content_not_original(self, edit_client, _mock_kube):
         client, store, aid = edit_client
         await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
-        edited_content = (
-            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  key: EDITED_VALUE\n"
-        )
+        edited_content = _RBAC_YAML.replace("name: test", "name: EDITED_VALUE", 1)
         edit_resp = await client.post(
             f"/assessments/{aid}/onboard-results/edit-file",
-            data={"category": "skills", "path": "app-config.yaml", "content": edited_content},
+            data={"category": "skills", "path": "app-rbac.yaml", "content": edited_content},
             follow_redirects=False,
         )
         assert edit_resp.status_code == 303
@@ -398,29 +409,48 @@ class TestDeliverUsesEditedContent:
         _mock_kube.apply_yaml.assert_not_called()
         mock_commit.assert_called_once()
         committed_files = mock_commit.call_args[0][2]
-        delivered_content = next(f["content"] for f in committed_files if f["path"] == "app-config.yaml")
+        delivered_content = next(f["content"] for f in committed_files if f["path"] == "app-rbac.yaml")
         assert "EDITED_VALUE" in delivered_content
         assert "EDITED_VALUE" not in _configmap_file()["content"]
 
     async def test_delivery_row_records_edited_files(self, edit_client, _mock_kube):
         client, store, aid = edit_client
+        await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
+        edited = _RBAC_YAML.replace("name: test", "name: edited-sa", 1)
         await client.post(
             f"/assessments/{aid}/onboard-results/edit-file",
             data={
-                "category": "skills", "path": "app-config.yaml",
-                "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  key: edited\n",
+                "category": "skills", "path": "app-rbac.yaml",
+                "content": edited,
             },
             follow_redirects=False,
         )
-        await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "false"}, follow_redirects=False)
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"):
+            mock_commit.return_value = {
+                "pr_url": "https://github.com/org/infra-gitops/pull/1",
+                "commit_url": "https://github.com/org/infra-gitops/commit/abc",
+                "files_committed": 1,
+            }
+            await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "false"}, follow_redirects=False)
 
         deliveries = await store.list_deliveries(aid)
         assert len(deliveries) == 1
-        assert deliveries[0]["details"]["edited_files"] == ["app-config.yaml"]
+        assert deliveries[0]["details"]["edited_files"] == ["app-rbac.yaml"]
 
     async def test_delivery_row_has_no_edited_files_when_nothing_was_edited(self, edit_client, _mock_kube):
         client, store, aid = edit_client
-        await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "false"}, follow_redirects=False)
+        await store.set_infra_repo_url(aid, "https://github.com/org/infra-gitops")
+        with patch("agentit.portal.delivery.kube.get_custom_resource", return_value={"metadata": {}}), \
+             patch("agentit.portal.github_pr.commit_to_infra_repo") as mock_commit, \
+             patch("agentit.portal.github_pr.ensure_applicationset"):
+            mock_commit.return_value = {
+                "pr_url": "https://github.com/org/infra-gitops/pull/1",
+                "commit_url": "https://github.com/org/infra-gitops/commit/abc",
+                "files_committed": 1,
+            }
+            await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "false"}, follow_redirects=False)
         deliveries = await store.list_deliveries(aid)
         assert deliveries[0]["details"]["edited_files"] == []
 
@@ -429,36 +459,34 @@ class TestDeliverUsesEditedContent:
 
 
 class TestEditCannotBypassSafetyRouting:
-    async def test_editing_configmap_into_secret_blocks_delivery(self, edit_client, _mock_kube):
-        """The routing/safety logic must react to the ACTUAL edited content,
-        not the original classification -- editing a ConfigMap into a
-        Secret must hit the exact same permanent deny-rule
-        (CATEGORY_SECRET_BLOCKED) any originally-generated Secret would,
-        never routed to any delivery mechanism."""
+    async def test_editing_rbac_into_secret_blocks_delivery(self, edit_client, _mock_kube):
+        """Editing a remediating RBAC manifest into a Secret must not open a PR.
+
+        Manual Deliver's clear-evidence gate refuses before route_and_deliver
+        (Secret content cannot clear ``rbac``); nothing is applied.
+        """
         client, store, aid = edit_client
         secret_content = (
             "apiVersion: v1\nkind: Secret\nmetadata:\n  name: test\ndata:\n  password: c2VjcmV0\n"
         )
         edit_resp = await client.post(
             f"/assessments/{aid}/onboard-results/edit-file",
-            data={"category": "skills", "path": "app-config.yaml", "content": secret_content},
+            data={"category": "skills", "path": "app-rbac.yaml", "content": secret_content},
             follow_redirects=False,
         )
         assert edit_resp.status_code == 303
 
-        await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "false"}, follow_redirects=False)
-
+        resp = await client.post(
+            f"/assessments/{aid}/deliver", data={"dry_run": "false"}, follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert "error=" in resp.headers["location"]
+        assert "Clear-evidence" in resp.headers["location"] or "clear" in resp.headers["location"].lower()
         _mock_kube.apply_yaml.assert_not_called()
-        deliveries = await store.list_deliveries(aid)
-        assert len(deliveries) == 1
-        # Blocked-only delivery: no mechanism was assigned to any category --
-        # the file is recorded as `secret_blocked`, never delivered.
-        assert deliveries[0]["mechanism"] == "none"
-        assert deliveries[0]["categories"] == {"secret_blocked": 1}
-        assert deliveries[0]["details"]["edited_files"] == ["app-config.yaml"]
+        assert await store.list_deliveries(aid) == []
 
     async def test_editing_manifest_still_goes_through_route_and_deliver(self, edit_client, _mock_kube):
-        """A non-adversarial edit (still a ConfigMap) must still be routed
+        """A non-adversarial edit (still valid RBAC) must still be routed
         through the exact same route_and_deliver() path as an unedited file
         -- no separate, edit-only code path."""
         client, store, aid = edit_client
@@ -467,10 +495,10 @@ class TestEditCannotBypassSafetyRouting:
                 "delivery_id": "d1", "registered": False, "infra_repo_url": None,
                 "mechanisms": {}, "outcomes": {}, "blocked": [], "excluded": [],
             }
-            edited_content = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  x: y\n"
+            edited_content = _RBAC_YAML.replace("name: test", "name: test-edited", 1)
             await client.post(
                 f"/assessments/{aid}/onboard-results/edit-file",
-                data={"category": "skills", "path": "app-config.yaml", "content": edited_content},
+                data={"category": "skills", "path": "app-rbac.yaml", "content": edited_content},
                 follow_redirects=False,
             )
             resp = await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "false"}, follow_redirects=False)
