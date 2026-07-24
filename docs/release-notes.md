@@ -53,6 +53,8 @@ Either way, Argo registration reuses `ensure_applicationset()`, fixed to be **ad
 
 A brand-new, genuinely empty custom repo (zero commits) still works with `commit_to_infra_repo()`'s existing tree/commit/PR flow unmodified — `_get_default_branch_and_base_sha()` transparently bootstraps the default branch with one zero-parent, zero-file commit (the well-known empty-tree SHA) the first time it's needed.
 
+`tests/test_browser_critical.py`'s Register-for-GitOps Playwright journey now mocks `github_pr.ensure_custom_gitops_repo()` (same pattern as `test_ui_redesign.py`'s route-level coverage) instead of hitting the real GitHub API — the browser-critical CI job has no `GITHUB_TOKEN`, so the unmocked call was a guaranteed failure there even though the same journey passed locally against a real token.
+
 ### Solution contracts
 
 `SOLUTION_CONTRACTS` lands every analyzer category as remediable or detect-only:
