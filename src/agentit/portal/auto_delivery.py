@@ -100,6 +100,41 @@ def _assessment_has_finding_category(report: AssessmentReport | None, category: 
     return False
 
 
+def _finding_list_has_category(target_findings: list[tuple[str, str]], category: str) -> bool:
+    """Same matching rule as ``_assessment_has_finding_category()``, scoped
+    to an explicit ``target_findings`` list instead of the whole report."""
+    cat = category.lower().replace(" ", "_").replace("-", "_")
+    for c, _ in target_findings:
+        f_cat = str(c).lower().replace(" ", "_").replace("-", "_")
+        if cat in f_cat or f_cat in cat:
+            return True
+    return False
+
+
+def _category_is_in_scope(
+    category: str, *, report: AssessmentReport | None,
+    target_findings: list[tuple[str, str]] | None,
+) -> bool:
+    """Whether a property's mapped ``category`` is genuinely in scope for
+    THIS validate/fix invocation.
+
+    When ``target_findings`` is given (a single, isolated finding
+    cluster's own findings), scope to exactly those -- never the whole
+    report. This is the crux of the 2026-07-24 pulse-agent postmortem:
+    checking against the whole report let an unrelated finding elsewhere
+    in the same assessment (e.g. "autoscaling", with no candidate file at
+    all) veto a completely different, individually-valid cluster's own
+    files (e.g. the "gitops" cluster's argocd-application.yaml) purely
+    because they were validated in the same undifferentiated batch.
+    Falls back to whole-report scope only when no cluster scope is given
+    at all (e.g. tests that call ``validate_and_fix_manifests()`` directly
+    without partitioning first).
+    """
+    if target_findings is not None:
+        return _finding_list_has_category(target_findings, category)
+    return _assessment_has_finding_category(report, category)
+
+
 def _merge_fix_files(current_files: list[dict], new_files: list[dict]) -> list[dict]:
     """Merge a dispatcher's freshly-regenerated fix files into the current
     onboarding batch: a fix for a ``path`` the batch already carries
@@ -198,6 +233,7 @@ async def validate_and_fix_manifests(
     actor: str,
     max_iterations: int = MAX_VALIDATION_ITERATIONS,
     job_id: str | None = None,
+    target_findings: list[tuple[str, str]] | None = None,
 ) -> dict:
     """The iterative validate -> fix -> re-validate loop.
 
@@ -213,6 +249,15 @@ async def validate_and_fix_manifests(
     failure would just repeat it), OR after ``max_iterations`` -- whichever
     comes first. Never silently declares success: the returned ``clean``
     flag is the honest, sole source of truth for whether this converged.
+
+    ``target_findings``, when given, scopes property relevance to exactly
+    those findings (see ``_category_is_in_scope()``) -- callers validating
+    one isolated finding cluster's own files MUST pass their own
+    ``target_findings`` here, not the whole report, so an unrelated,
+    unfixable finding elsewhere in the same assessment can never veto
+    this cluster's own, otherwise-valid files. Callers validating a whole
+    undifferentiated batch (no cluster scope yet) may omit it, falling
+    back to whole-report scope.
 
     Returns {"files": list[dict], "clean": bool, "iterations": list[dict]}.
     """
@@ -253,8 +298,9 @@ async def validate_and_fix_manifests(
         # never attempts (see _assessment_has_finding_category()).
         relevant_failed = [
             r for r in _check_properties(current_files)
-            if not r.passed and _assessment_has_finding_category(
-                report, _PROPERTY_TO_FIX_CATEGORY.get(r.property_name, ""),
+            if not r.passed and _category_is_in_scope(
+                _PROPERTY_TO_FIX_CATEGORY.get(r.property_name, ""),
+                report=report, target_findings=target_findings,
             )
         ]
 
@@ -411,7 +457,6 @@ async def auto_validate_and_deliver(
     from agentit.portal.helpers import get_llm_client
     from agentit.portal.quality_prs import (
         build_helpful_pr_body,
-        cluster_validation_ok,
         filter_files_to_open_findings,
         find_resource_collisions,
         finding_gate_allows_pr,
@@ -426,122 +471,22 @@ async def auto_validate_and_deliver(
     # class: Task/Pipeline/Policy Not Found must not burn 3 attempts).
     capability_files, capability_skips = filter_files_for_cluster_capabilities(files)
     source_layer = [f for f in capability_files if _is_source_layer_file(f)]
-    cluster_layer = [f for f in capability_files if not _is_source_layer_file(f)]
+    soft_warnings = list(capability_skips)
 
-    if not cluster_layer:
-        # Entire cluster pack capability-filtered (or never generated) —
-        # nothing to SSA-validate; source-layer proceeds alone.
-        validation = {
-            "files": [],
-            "clean": True,
-            "iterations": [],
-            "warnings": list(capability_skips),
-            "skipped_paths": [],
-        }
-    else:
-        validation = await validate_and_fix_manifests(
-            cluster_layer, app_name=app_name, namespace=namespace,
-            report=report, store=store, assessment_id=assessment_id, actor=actor,
-            job_id=job_id,
-        )
-    # Re-attach source-layer files (never SSA-validated / never blocked).
-    validated_cluster = list(validation["files"])
-    by_path = {f["path"]: f for f in validated_cluster}
-    for sf in source_layer:
-        by_path.setdefault(sf["path"], sf)
-    final_files = list(by_path.values())
-    soft_warnings = list(validation.get("warnings") or []) + list(capability_skips)
-    skipped_paths = list(validation.get("skipped_paths") or [])
-    cluster_failed = not validation["clean"]
-
+    # Best-effort snapshot, saved BEFORE any validate/fix work happens, so a
+    # human can see what was generated even if something below crashes or
+    # every finding cluster is refused. Superseded by the final save after
+    # per-cluster validation below (get_onboarding() always reads the
+    # latest row) -- this one is purely a safety net, never the source of
+    # truth for what actually got delivered.
     await store.save_onboarding(
-        assessment_id, final_files,
-        orchestration={**orchestration, "auto_validation": {
-            "iterations": validation["iterations"],
-            "converged": validation["clean"],
-            "capability_skips": capability_skips,
-            "skipped_paths": skipped_paths,
-            "source_unblocked": bool(source_layer and cluster_failed),
-        }},
+        assessment_id, capability_files,
+        orchestration={**orchestration, "auto_validation": {"stage": "pre-validation", "capability_skips": capability_skips}},
     )
 
-    if validation["clean"] or source_layer:
-        try:
-            await store.save_apply_results(
-                assessment_id,
-                {
-                    "applied": [],
-                    "skipped": list(capability_skips) + [
-                        f"{p}: soft-skipped (Forbidden / missing API)"
-                        for p in skipped_paths
-                    ],
-                    "errors": list(validation.get("remaining_issues") or []) if cluster_failed else [],
-                    "warnings": soft_warnings,
-                    "repo_files": [
-                        {"path": f["path"], "purpose": "validated by automatic validation loop"}
-                        for f in final_files
-                    ],
-                },
-                namespace, dry_run=True,
-            )
-        except Exception:
-            logger.warning("Failed to persist apply_results for %s after validation", app_name, exc_info=True)
-
-    if cluster_failed and not source_layer:
-        remaining = list(validation.get("remaining_issues") or [])
-        # pulse-agent class: prefer skip/register reasons over "could not
-        # converge after 3 attempts" theater when the pack was soft-skipped.
-        if soft_warnings and not remaining:
-            reason = (
-                "Cluster pack skipped (missing APIs / Forbidden) — no "
-                "finding-tied source remediations left to open. "
-                + "; ".join(soft_warnings[:5])
-            )
-        else:
-            iters = len(validation.get("iterations") or [])
-            reason = (
-                "Automatic validation could not converge after "
-                f"{iters or MAX_VALIDATION_ITERATIONS} attempt(s): "
-                + "; ".join(remaining or ["unknown issue"])
-            )
-            if soft_warnings:
-                reason += (
-                    " | skipped (missing APIs / Forbidden): "
-                    + "; ".join(soft_warnings[:5])
-                )
-        logger.warning("Auto-validation did not converge for %s: %s", app_name, reason)
-        try:
-            await store.log_event(
-                "auto-delivery", "auto-validation-needs-attention", app_name, "warning",
-                f"{reason} -- manifests were saved; review on Ledger / Scan Results.",
-                correlation_id=assessment_id,
-            )
-        except Exception:
-            logger.warning("Failed to log auto-validation-needs-attention event for %s", app_name, exc_info=True)
-        return {
-            "status": "needs_attention",
-            "reason": reason,
-            "iterations": validation["iterations"],
-            "skip_reasons": soft_warnings,
-        }
-
-    if cluster_failed and source_layer:
-        # Never block finding-tied source PRs because cluster dry-run failed.
-        logger.info(
-            "Cluster validation failed for %s — continuing with %d source-layer file(s); "
-            "cluster issues: %s",
-            app_name, len(source_layer),
-            "; ".join(validation.get("remaining_issues") or ["unknown"])[:300],
-        )
-        final_files = list(source_layer)
-        soft_warnings = soft_warnings + [
-            f"cluster pack skipped (validation): {issue}"
-            for issue in (validation.get("remaining_issues") or [])[:5]
-        ]
-
-    if not final_files:
-        # Soft-skipped entire catalog pack (pulse-agent: Tekton/Kyverno/Quota)
-        # with no source remediations — honest stop, not converge theater.
+    if not capability_files:
+        # Soft-skipped entire pack (pulse-agent: Tekton/Kyverno/Quota) with
+        # no source remediations either — honest stop, not converge theater.
         reason = (
             "No deliverable files remain after capability / Forbidden skips — "
             "refusing catalog-shaped empty PR. "
@@ -562,13 +507,15 @@ async def auto_validate_and_deliver(
         return {
             "status": "needs_attention",
             "reason": reason,
-            "iterations": validation["iterations"],
+            "iterations": [],
             "skip_reasons": soft_warnings,
         }
 
     # Phase A: finding / score-delta gate — no catalog dumps with empty need.
     # Strip detect_only / no_auto_pr / uncontracted so Scan only opens for
-    # remediable SOLUTION_CONTRACTS (fail-closed coverage).
+    # remediable SOLUTION_CONTRACTS (fail-closed coverage). Whole-batch is
+    # correct here -- this asks "should ANY PR happen at all for this
+    # assessment", not a per-cluster isolation question.
     resolved_findings = resolve_target_findings(report, target_findings)
     try:
         from agentit.remediation.registry import remediable_findings
@@ -591,7 +538,7 @@ async def auto_validate_and_deliver(
     # Downstream filter/cluster/PR body only see remediable findings.
     resolved_findings = remediable if remediable else resolved_findings
 
-    kept_files, drop_reasons = filter_files_to_open_findings(final_files, resolved_findings)
+    kept_files, drop_reasons = filter_files_to_open_findings(capability_files, resolved_findings)
     # Solution-complete: drop wrong-layer companions (gitops Kyverno for a
     # Dockerfile :latest finding, apiserver audit-policy for app audit, …).
     kept_files, layer_drops = strip_wrong_layer_companions(kept_files, resolved_findings)
@@ -632,6 +579,13 @@ async def auto_validate_and_deliver(
     cluster_refusals: list[str] = []
     last_delivery: dict | None = None
     unchanged_any = False
+    # Every finding cluster that reached at least "validated" (whether or
+    # not its PR itself ultimately opened) accumulates here -- the true,
+    # per-cluster-isolated final batch, replacing the old single
+    # batch-wide `final_files` a global pre-pass used to compute. Always
+    # includes source_layer (never SSA-validated / never blocked, exactly
+    # as before).
+    delivered_files_by_path: dict[str, dict] = {f["path"]: f for f in source_layer}
     # One skill_effectiveness row per (skill, reason prefix) per delivery
     # attempt — multi-cluster theater refusals must not double-count into
     # cool-down within a single auto_validate_and_deliver call.
@@ -644,6 +598,29 @@ async def auto_validate_and_deliver(
         from agentit.portal.delivery import is_self_managed_delivery_target
         from agentit.portal.quality_prs import clear_evidence_simulation_ok
 
+        async def _refuse_cluster(reason: str, event_action: str = "auto-delivery-cluster-refused") -> None:
+            """Refuse exactly THIS cluster -- never touches any other
+            cluster's files or outcome. Always both logged (Python logger,
+            for operators) AND recorded as a real, visible store event
+            (for the UI) -- confirmed live (2026-07-24) that several of
+            these branches previously only did the former, making a
+            dropped file's fate invisible anywhere a human could see it.
+            """
+            cluster_refusals.append(f"{cluster.key}: {reason}")
+            logger.warning(
+                "Auto-delivery cluster %s for %s refused: %s", cluster.key, app_name, reason,
+            )
+            try:
+                await store.log_event(
+                    "auto-delivery", event_action, app_name, "warning",
+                    f"Cluster {cluster.key}: {reason}", correlation_id=assessment_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to log %s event for cluster %s (%s)",
+                    event_action, cluster.key, app_name, exc_info=True,
+                )
+
         cluster_files = list(cluster.files)
         # Per-cluster wrong-layer strip (source-only findings → no gitops YAML).
         cluster_files, cluster_layer_drops = strip_wrong_layer_companions(
@@ -652,14 +629,10 @@ async def auto_validate_and_deliver(
         if cluster_layer_drops:
             drop_reasons = list(drop_reasons or []) + cluster_layer_drops
         if not cluster_files:
-            reason = (
+            await _refuse_cluster(
                 "Solution contract emptied cluster (wrong-layer companions stripped) — "
-                + "; ".join(cluster_layer_drops[:3])
-            )
-            cluster_refusals.append(f"{cluster.key}: {reason}")
-            logger.warning(
-                "Auto-delivery cluster %s for %s refused by solution contract: %s",
-                cluster.key, app_name, reason,
+                + "; ".join(cluster_layer_drops[:3]),
+                "auto-delivery-solution-contract-empty",
             )
             continue
 
@@ -691,14 +664,9 @@ async def auto_validate_and_deliver(
             if hpa_drops:
                 drop_reasons = list(drop_reasons or []) + hpa_drops
             if not cluster_files:
-                reason = (
-                    "Fleet HPA scaleTargetRef gate emptied cluster — "
-                    + "; ".join(hpa_drops[:3])
-                )
-                cluster_refusals.append(f"{cluster.key}: {reason}")
-                logger.warning(
-                    "Auto-delivery cluster %s for %s refused by fleet HPA gate: %s",
-                    cluster.key, app_name, reason,
+                await _refuse_cluster(
+                    "Fleet HPA scaleTargetRef gate emptied cluster — " + "; ".join(hpa_drops[:3]),
+                    "auto-delivery-fleet-hpa-gate",
                 )
                 continue
 
@@ -789,11 +757,10 @@ async def auto_validate_and_deliver(
                             cluster.key, app_name,
                         )
                         continue
-                    reason = (
-                        "Pre-enrich emptied cluster (audit already wired or "
-                        "no mergeable patch)"
+                    await _refuse_cluster(
+                        "Pre-enrich emptied cluster (audit already wired or no mergeable patch)",
+                        "auto-delivery-pre-enrich-empty",
                     )
-                    cluster_refusals.append(f"{cluster.key}: {reason}")
                     continue
             except Exception:
                 logger.info(
@@ -810,21 +777,7 @@ async def auto_validate_and_deliver(
             self_managed=self_managed,
         )
         if not sim_ok:
-            cluster_refusals.append(f"{cluster.key}: {sim_reason}")
-            logger.warning(
-                "Auto-delivery cluster %s for %s refused by clear-evidence simulation: %s",
-                cluster.key, app_name, sim_reason,
-            )
-            try:
-                await store.log_event(
-                    "auto-delivery", "auto-delivery-clear-evidence", app_name, "warning",
-                    f"Cluster {cluster.key}: {sim_reason}",
-                    correlation_id=assessment_id,
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to log clear-evidence refusal for %s", app_name, exc_info=True,
-                )
+            await _refuse_cluster(sim_reason, "auto-delivery-clear-evidence")
             # Theater / clear-evidence failures must count toward skill
             # cool-down (same path as post-merge still-present rejects).
             try:
@@ -855,50 +808,65 @@ async def auto_validate_and_deliver(
                 )
             continue
 
-        # Phase C: per-cluster validation before open.
-        # Source-only clusters skip SSA hard-fail (nothing to dry-run).
+        # Phase C: per-cluster validate -> fix -> re-validate, scoped to
+        # exactly THIS cluster's own files and own target findings. This
+        # (not a separate, batch-wide pre-pass over the whole undifferentiated
+        # cluster_layer) is the one and only place fix-retry happens now --
+        # see module docstring / 2026-07-24 pulse-agent postmortem for why a
+        # shared, batch-wide verdict was the actual root cause of files
+        # being silently discarded over an unrelated, unfixable finding
+        # elsewhere in the same onboarding.
+        cluster_warnings: list[str] = []
         if all(_is_source_layer_file(f) for f in cluster_files):
-            dry_errors, dry_warnings, soft_skipped = [], [], []
+            # Source-only clusters skip SSA/property validation entirely
+            # (nothing to dry-run; never SSA-blocked).
+            pass
         else:
-            dry_errors, dry_warnings, _, soft_skipped = await _dry_run_check(
+            cluster_validation = await validate_and_fix_manifests(
                 cluster_files, app_name=app_name, namespace=namespace, report=report,
                 store=store, assessment_id=assessment_id, actor=actor,
+                target_findings=cluster_target_findings,
             )
-            if soft_skipped:
-                cluster_files = _drop_paths(cluster_files, soft_skipped)
+            cluster_files = cluster_validation["files"]
+            cluster_warnings = list(cluster_validation.get("warnings") or [])
+            if cluster_validation.get("skipped_paths"):
                 drop_reasons = list(drop_reasons or []) + [
-                    f"{p}: skipped (Forbidden / missing API)" for p in soft_skipped
+                    f"{p}: skipped (Forbidden / missing API)"
+                    for p in cluster_validation["skipped_paths"]
                 ]
             if not cluster_files:
-                reason = (
+                await _refuse_cluster(
                     "All cluster manifests skipped (missing APIs / Forbidden) — "
-                    + "; ".join((dry_warnings or soft_skipped)[:3])
+                    + "; ".join((cluster_validation.get("remaining_issues") or [])[:3]),
+                    "auto-delivery-cluster-empty-after-skip",
                 )
-                cluster_refusals.append(f"{cluster.key}: {reason}")
                 continue
-        relevant_failed = [
-            r for r in _check_properties(cluster_files)
-            if not r.passed and _assessment_has_finding_category(
-                report, _PROPERTY_TO_FIX_CATEGORY.get(r.property_name, ""),
-            )
-        ]
-        ok, refuse_reason = cluster_validation_ok(
-            dry_run_errors=dry_errors,
-            failed_properties=[r.property_name for r in relevant_failed],
-            collisions=find_resource_collisions(cluster_files),
-        )
-        # Source-layer: never refuse the cluster because SSA failed.
-        if not ok and all(_is_source_layer_file(f) for f in cluster_files):
-            ok, refuse_reason = True, ""
-        if not ok:
-            cluster_refusals.append(f"{cluster.key}: {refuse_reason}")
-            logger.warning(
-                "Auto-delivery cluster %s for %s failed validation: %s",
-                cluster.key, app_name, refuse_reason,
-            )
-            continue
+            collisions = find_resource_collisions(cluster_files)
+            if collisions:
+                await _refuse_cluster(
+                    "Resource collision: " + "; ".join(collisions[:5]),
+                    "auto-delivery-cluster-collision",
+                )
+                continue
+            if not cluster_validation["clean"]:
+                iters = len(cluster_validation.get("iterations") or [])
+                remaining = list(cluster_validation.get("remaining_issues") or [])
+                await _refuse_cluster(
+                    f"Could not converge after {iters or MAX_VALIDATION_ITERATIONS} "
+                    f"attempt(s): {'; '.join(remaining or ['unknown issue'])} -- "
+                    "this finding's own remediation could not be validated; "
+                    "unrelated clusters are unaffected.",
+                    "auto-delivery-cluster-validation-failed",
+                )
+                continue
+        # This cluster's own files survived isolated validation -- record
+        # them for the final onboarding snapshot regardless of whether the
+        # delivery call below itself succeeds (matches the pre-refactor
+        # contract: manifests that validated are visible to a human even
+        # if the mechanical PR-open step fails for an unrelated reason).
+        for f in cluster_files:
+            delivered_files_by_path[f["path"]] = f
 
-        cluster_warnings = dry_warnings or soft_warnings
         validation_summary = (
             "SSA dry-run (concrete YAML), clear-evidence simulation "
             "(contract evidence_kind), property checks for targeted "
@@ -971,6 +939,25 @@ async def auto_validate_and_deliver(
                         logger.warning("Failed to log gate-refused for %s", app_name, exc_info=True)
             else:
                 unchanged_any = True
+
+    # Final, accurate snapshot: the union of every cluster's own validated
+    # files (isolated per-cluster -- one cluster's refusal can never keep
+    # another cluster's already-valid files out of this), replacing the
+    # pre-validation best-effort save above as "the latest" onboarding row.
+    final_files = list(delivered_files_by_path.values())
+    if final_files:
+        try:
+            await store.save_onboarding(
+                assessment_id, final_files,
+                orchestration={**orchestration, "auto_validation": {
+                    "stage": "post-validation",
+                    "capability_skips": capability_skips,
+                    "clusters_total": len(clusters),
+                    "clusters_refused": len(cluster_refusals),
+                }},
+            )
+        except Exception:
+            logger.warning("Failed to persist final onboarding snapshot for %s", app_name, exc_info=True)
 
     if all_pr_urls and last_delivery is not None:
         notify_delivery = {
