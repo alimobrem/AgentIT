@@ -38,6 +38,21 @@ Decisions: [ADR 0001 — GitOps Scan HITL](./adr/0001-gitops-scan-hitl.md), [ADR
 
 Normative detail: [`architecture-agentit-vs-fleet-gitops.md`](./architecture-agentit-vs-fleet-gitops.md).
 
+### Bring-your-own GitOps repo
+
+An app's GitOps infra repo (where its Argo `Application`/manifests live — distinct from its own source-code repo) is now optional, not fixed to one shared default:
+
+| Human supplies… | AgentIT does |
+| --- | --- |
+| Nothing | Unchanged existing behavior: the shared default repo (`{token-account}/agentit-gitops`, auto-created/reused via `ensure_infra_repo()`) |
+| A repo that exists + AgentIT's token has push access | Used as-is, no creation (`github_pr.ensure_custom_gitops_repo()`) |
+| A repo that doesn't exist yet | Created **empty** (no README/starter scaffold — just `apps/{app}/` once the normal onboarding delivery populates it) in the **exact org/owner the URL specifies** — org-aware (`/orgs/{owner}/repos` for an org, `/user/repos` only when that owner *is* the authenticated token's own account; creating under a *different* user's personal account has no GitHub API and is refused, never silently redirected elsewhere) |
+| A repo that exists but the token lacks push access | Hard refusal (mirrors `InfraRepoRequiredError`) — never a silently created/substituted repo the human didn't ask for |
+
+Either way, Argo registration reuses `ensure_applicationset()`, fixed to be **additive**: the fleet-wide `agentit-managed-apps` ApplicationSet's `spec.generators` gets one `git` directory-generator entry per distinct infra repo currently in use (a normal, documented Argo CD pattern — top-level generators are unioned, not merged/matrixed), appended without ever removing another app's already-registered entry. The shared `spec.template.spec.source.repoURL` is a `{{values.repoURL}}` generator-values reference, not a hardcoded literal, so every generated `Application` still syncs from the repo that actually produced it regardless of how many repos are registered. `watchers/drift_detector.py`'s self-heal checks for the default repo's entry anywhere in that list (not just index 0) and heals it the same additive way.
+
+A brand-new, genuinely empty custom repo (zero commits) still works with `commit_to_infra_repo()`'s existing tree/commit/PR flow unmodified — `_get_default_branch_and_base_sha()` transparently bootstraps the default branch with one zero-parent, zero-file commit (the well-known empty-tree SHA) the first time it's needed.
+
 ### Solution contracts
 
 `SOLUTION_CONTRACTS` lands every analyzer category as remediable or detect-only:
