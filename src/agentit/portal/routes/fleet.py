@@ -339,6 +339,14 @@ async def fleet_page(request: Request) -> HTMLResponse:
     _fs.set(total_apps)
     _fas.set(avg_score)
 
+    # Real (cached, gracefully-degrading) default GitOps infra repo URL for
+    # the Assess modal's optional field hint -- never a fabricated example
+    # URL (see github_pr.default_infra_repo_url()'s docstring). None (e.g.
+    # no GITHUB_TOKEN configured yet) falls back to the template's own
+    # generic placeholder.
+    from agentit.portal.github_pr import default_infra_repo_url
+    default_infra_repo = await asyncio.to_thread(default_infra_repo_url)
+
     return get_templates().TemplateResponse(
         request,
         "fleet.html",
@@ -348,6 +356,7 @@ async def fleet_page(request: Request) -> HTMLResponse:
             "avg_score": avg_score,
             "critical_total": critical_total,
             "pending_need_you": pending_need_you,
+            "default_infra_repo_url": default_infra_repo,
         },
     )
 

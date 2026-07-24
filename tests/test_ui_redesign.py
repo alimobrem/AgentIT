@@ -618,7 +618,15 @@ class TestGitOpsVisibility:
         client, store = ui_client
         aid = await store.save(make_report(repo_name="to-register-app"))
 
-        with patch("agentit.portal.github_pr.ensure_applicationset", return_value=True) as mock_ensure:
+        # A human-supplied infra_repo_url now goes through the same
+        # existence/access check the Assess-time gate applies
+        # (ensure_custom_gitops_repo()) -- mocked here as "already exists,
+        # already accessible" so this test still exercises this route's
+        # own behavior in isolation from that check's real GitHub calls.
+        with patch(
+            "agentit.portal.github_pr.ensure_custom_gitops_repo",
+            return_value={"repo_url": "https://github.com/org/gitops-infra", "created": False},
+        ), patch("agentit.portal.github_pr.ensure_applicationset", return_value=True) as mock_ensure:
             resp = await client.post(
                 f"/assessments/{aid}/register-gitops",
                 data={"infra_repo_url": "https://github.com/org/gitops-infra"},
@@ -661,7 +669,10 @@ class TestGitOpsVisibility:
         assert 'data-action="register-gitops"' in resp.text
         assert "Register for GitOps" in resp.text
 
-        with patch("agentit.portal.github_pr.ensure_applicationset", return_value=True):
+        with patch(
+            "agentit.portal.github_pr.ensure_custom_gitops_repo",
+            return_value={"repo_url": "https://github.com/org/gitops-infra", "created": False},
+        ), patch("agentit.portal.github_pr.ensure_applicationset", return_value=True):
             reg_resp = await client.post(
                 f"/assessments/{aid}/register-gitops",
                 data={"infra_repo_url": "https://github.com/org/gitops-infra"},
@@ -738,6 +749,131 @@ class TestGitOpsVisibility:
         assert "Could not auto-create" in err_resp.text
         assert 'data-action="register-gitops"' in err_resp.text
 
+    async def test_register_gitops_human_supplied_existing_repo_used_as_is(self, ui_client):
+        """Bring-your-own-GitOps-repo: a human-supplied repo on this route
+        must go through the same existence/access check the Assess-time
+        gate applies -- previously this route used a human-supplied URL
+        completely unchecked."""
+        client, store = ui_client
+        aid = await store.save(make_report(repo_name="byo-existing-app"))
+
+        with patch(
+            "agentit.portal.github_pr.ensure_custom_gitops_repo",
+            return_value={"repo_url": "https://github.com/customorg/custom-gitops", "created": False},
+        ) as mock_ensure_repo, patch(
+            "agentit.portal.github_pr.ensure_applicationset", return_value=True,
+        ) as mock_ensure_appset:
+            resp = await client.post(
+                f"/assessments/{aid}/register-gitops",
+                data={"infra_repo_url": "https://github.com/customorg/custom-gitops"},
+                follow_redirects=False,
+            )
+
+        mock_ensure_repo.assert_called_once_with("https://github.com/customorg/custom-gitops")
+        mock_ensure_appset.assert_called_once_with("https://github.com/customorg/custom-gitops")
+        assert resp.status_code == 303
+        assert "success=" in resp.headers["location"]
+
+        report = await store.get(aid)
+        assert report.infra_repo_url == "https://github.com/customorg/custom-gitops"
+
+    async def test_register_gitops_human_supplied_missing_repo_gets_created(self, ui_client):
+        client, store = ui_client
+        aid = await store.save(make_report(repo_name="byo-missing-app"))
+
+        with patch(
+            "agentit.portal.github_pr.ensure_custom_gitops_repo",
+            return_value={"repo_url": "https://github.com/customorg/brand-new-gitops", "created": True},
+        ), patch("agentit.portal.github_pr.ensure_applicationset", return_value=True):
+            resp = await client.post(
+                f"/assessments/{aid}/register-gitops",
+                data={"infra_repo_url": "https://github.com/customorg/brand-new-gitops"},
+                follow_redirects=False,
+            )
+
+        assert resp.status_code == 303
+        assert "success=" in resp.headers["location"]
+        report = await store.get(aid)
+        assert report.infra_repo_url == "https://github.com/customorg/brand-new-gitops"
+
+    async def test_register_gitops_human_supplied_repo_error_surfaces_and_never_registers(self, ui_client):
+        """A refused custom repo (exists, no push access) must redirect with
+        a visible error and never proceed to Argo setup or persist the
+        unusable URL -- never a fabricated success."""
+        client, store = ui_client
+        aid = await store.save(make_report(repo_name="byo-refused-app"))
+
+        with patch(
+            "agentit.portal.github_pr.ensure_custom_gitops_repo",
+            return_value={"error": "AgentIT's GitHub token does not have write (push) access"},
+        ), patch("agentit.portal.github_pr.ensure_applicationset") as mock_ensure_appset:
+            resp = await client.post(
+                f"/assessments/{aid}/register-gitops",
+                data={"infra_repo_url": "https://github.com/customorg/no-access-gitops"},
+                follow_redirects=False,
+            )
+
+        mock_ensure_appset.assert_not_called()
+        assert resp.status_code == 303
+        from urllib.parse import unquote
+        location = unquote(resp.headers["location"])
+        assert "error=" in location
+        assert "push" in location.lower() or "access" in location.lower()
+
+        report = await store.get(aid)
+        assert report.infra_repo_url is None
+
+    async def test_register_gitops_human_supplied_untrusted_host_rejected(self, ui_client):
+        client, store = ui_client
+        aid = await store.save(make_report(repo_name="byo-untrusted-app"))
+
+        with patch("agentit.portal.github_pr.ensure_custom_gitops_repo") as mock_ensure_repo:
+            resp = await client.post(
+                f"/assessments/{aid}/register-gitops",
+                data={"infra_repo_url": "https://evil.example.com/customorg/custom-gitops"},
+                follow_redirects=False,
+            )
+
+        mock_ensure_repo.assert_not_called()
+        assert resp.status_code == 303
+        assert "error=" in resp.headers["location"]
+
+
+class TestDefaultGitopsRepoPlaceholder:
+    """The Assess modal's optional GitOps Infra Repo field must hint at the
+    REAL current default repo (github_pr.default_infra_repo_url()), never
+    a fabricated example URL -- per this repo's no-mock-data rule."""
+
+    async def test_fleet_shows_real_default_repo_url_as_placeholder(self, ui_client):
+        client, _store = ui_client
+
+        # fleet_page() does a local `from agentit.portal.github_pr import
+        # default_infra_repo_url` at call time -- the patch target is the
+        # `github_pr` module itself, not `routes.fleet`'s (nonexistent)
+        # module-level attribute of the same name.
+        with patch(
+            "agentit.portal.github_pr.default_infra_repo_url",
+            return_value="https://github.com/alimobrem/agentit-gitops",
+        ):
+            resp = await client.get("/fleet")
+
+        assert resp.status_code == 200
+        assert 'placeholder="https://github.com/alimobrem/agentit-gitops"' in resp.text
+        # The field itself must stay optional/blank-by-default -- only the
+        # hint text shows the real value, never pre-filled as a value.
+        assert 'name="infra_repo_url" value=' not in resp.text
+
+    async def test_fleet_falls_back_to_generic_placeholder_when_default_unresolvable(self, ui_client):
+        """No GITHUB_TOKEN configured yet (or any other resolution failure)
+        must never break the page -- graceful fallback to the old generic
+        example placeholder."""
+        client, _store = ui_client
+
+        with patch("agentit.portal.github_pr.default_infra_repo_url", return_value=None):
+            resp = await client.get("/fleet")
+
+        assert resp.status_code == 200
+        assert 'placeholder="https://github.com/org/gitops-infra"' in resp.text
 
 
 # ── 6. Nav update ────────────────────────────────────────────────────────
