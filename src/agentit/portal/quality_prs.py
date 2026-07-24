@@ -317,17 +317,79 @@ def partition_by_finding_cluster(
     return clusters
 
 
+def _iter_resource_docs(files: list[dict]):
+    """Yield ``(file_path, parsed_doc)`` for every real K8s resource
+    document across a batch of generated files (handles multi-doc
+    ``---`` YAML). Non-YAML / unparsable content is skipped, not an error
+    here — other gates (SSA dry-run, property checks) already own that."""
+    import yaml
+
+    for f in files:
+        path = f.get("target_path") or f.get("path") or "?"
+        content = f.get("content") or ""
+        try:
+            docs = list(yaml.safe_load_all(content))
+        except yaml.YAMLError:
+            continue
+        for doc in docs:
+            if isinstance(doc, dict) and doc.get("kind") and isinstance(doc.get("metadata"), dict):
+                yield path, doc
+
+
+def find_resource_collisions(files: list[dict]) -> list[str]:
+    """Refuse a batch that would create two resources with the same
+    (apiVersion, kind, namespace, name) -- the exact class of bug that
+    blocked ``managed-pinky``'s real Argo sync after merge (duplicate
+    GVK/name across generated files, only ever discovered live). Nothing
+    else in this pipeline checks this: SSA dry-run validates each
+    file/resource independently, and Argo's own "who owns this" conflict
+    only ever surfaces after merge, not before a PR opens.
+
+    Deliberately batch-scoped only (not checked against what's already
+    committed under ``apps/{app}/**`` on the target repo) -- that would
+    need the same GitHub-REST tree_paths/read_file access the other
+    pre-open enrichments already use; a follow-up, not required to close
+    the within-batch class of this bug.
+    """
+    seen: dict[tuple[str, str, str, str], str] = {}
+    collisions: list[str] = []
+    for path, doc in _iter_resource_docs(files):
+        kind = str(doc.get("kind") or "")
+        meta = doc.get("metadata") or {}
+        name = str(meta.get("name") or "")
+        if not kind or not name:
+            continue
+        namespace = str(meta.get("namespace") or "")
+        api_version = str(doc.get("apiVersion") or "")
+        key = (api_version, kind, namespace, name)
+        if key in seen:
+            where = seen[key] if seen[key] == path else f"{seen[key]} and {path}"
+            collisions.append(
+                f"duplicate {kind}/{name}"
+                + (f" in namespace {namespace}" if namespace else "")
+                + f" ({where}) — would collide on Argo sync, not caught by "
+                "per-file SSA dry-run alone"
+            )
+        else:
+            seen[key] = path
+    return collisions
+
+
 def cluster_validation_ok(
     *,
     dry_run_errors: list[str],
     failed_properties: list[str],
+    collisions: list[str] | None = None,
 ) -> tuple[bool, str]:
-    """Phase C: per-cluster bar — hard SSA/dry-run errors or targeted property fails block the PR.
+    """Phase C: per-cluster bar — hard SSA/dry-run errors, targeted property
+    fails, or a same-(kind,name,namespace) resource collision block the PR.
 
     Soft dry-run warnings (Forbidden / missing optional CRD) are *not* passed
     in ``dry_run_errors`` — callers keep those in a separate warnings list
     for PR body notes without blocking open.
     """
+    if collisions:
+        return False, "Resource collision: " + "; ".join(collisions[:5])
     if dry_run_errors:
         return False, "SSA/dry-run failed: " + "; ".join(dry_run_errors[:5])
     if failed_properties:

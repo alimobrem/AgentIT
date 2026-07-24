@@ -413,6 +413,7 @@ async def auto_validate_and_deliver(
         build_helpful_pr_body,
         cluster_validation_ok,
         filter_files_to_open_findings,
+        find_resource_collisions,
         finding_gate_allows_pr,
         finding_gate_refuse_reason,
         partition_by_finding_cluster,
@@ -720,6 +721,7 @@ async def auto_validate_and_deliver(
                 from agentit.remediation.source_patches import (
                     apply_containerfile_pin_only,
                     enrich_sbom_from_repo,
+                    enrich_workload_files_from_repo,
                 )
 
                 token = ghp._get_token()
@@ -756,6 +758,11 @@ async def auto_validate_and_deliver(
                     cluster_files = enrich_audit_files_from_paths(
                         cluster_files, tree_paths=tree_paths, read_file=_read,
                     )
+                    cluster_files, workload_drops = enrich_workload_files_from_repo(
+                        cluster_files, read_file=_read, tree_paths=tree_paths,
+                    )
+                    if workload_drops:
+                        drop_reasons = list(drop_reasons or []) + workload_drops
                 # Already-wired repos drop orphan audit stubs — strip the
                 # audit finding so we do not refuse / open theater.
                 if before_audit and not any(
@@ -878,6 +885,7 @@ async def auto_validate_and_deliver(
         ok, refuse_reason = cluster_validation_ok(
             dry_run_errors=dry_errors,
             failed_properties=[r.property_name for r in relevant_failed],
+            collisions=find_resource_collisions(cluster_files),
         )
         # Source-layer: never refuse the cluster because SSA failed.
         if not ok and all(_is_source_layer_file(f) for f in cluster_files):

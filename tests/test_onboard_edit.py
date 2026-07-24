@@ -435,9 +435,23 @@ class TestDeliverUsesEditedContent:
             }
             await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "false"}, follow_redirects=False)
 
+        # Manual Deliver now shares auto_validate_and_deliver()'s validate
+        # loop (closing the manual-vs-auto gate gap) -- its own internal
+        # dry-run validation probe(s) can leave extra rows behind before the
+        # real delivery; find the one that actually opened the PR (pr_url
+        # lives under details.outcomes.<category>, set by
+        # route_and_deliver()'s own update_delivery() call once outcomes
+        # are known) and check its edited_files, rather than assuming
+        # exactly one row exists.
         deliveries = await store.list_deliveries(aid)
-        assert len(deliveries) == 1
-        assert deliveries[0]["details"]["edited_files"] == ["app-rbac.yaml"]
+        delivered = next(
+            d for d in deliveries
+            if any(
+                isinstance(o, dict) and o.get("pr_url")
+                for o in (d["details"].get("outcomes") or {}).values()
+            )
+        )
+        assert delivered["details"]["edited_files"] == ["app-rbac.yaml"]
 
     async def test_delivery_row_has_no_edited_files_when_nothing_was_edited(self, edit_client, _mock_kube):
         client, store, aid = edit_client
@@ -481,9 +495,20 @@ class TestEditCannotBypassSafetyRouting:
         )
         assert resp.status_code == 303
         assert "error=" in resp.headers["location"]
-        assert "Clear-evidence" in resp.headers["location"] or "clear" in resp.headers["location"].lower()
+        # Manual Deliver now shares auto_validate_and_deliver()'s full
+        # pipeline (closing the manual-vs-auto gate gap): the Secret is
+        # still permanently hard-blocked from every delivery mechanism
+        # (delivery.py's own deny-rule, unchanged) -- the surfaced reason
+        # is now the pipeline's own "could not converge" wording rather
+        # than this route's old, hand-rolled clear-evidence message.
+        from urllib.parse import unquote as _unquote
+        location_lower = _unquote(resp.headers["location"]).lower()
+        assert (
+            "clear" in location_lower
+            or "could not converge" in location_lower
+            or "no gitops infra repo" in location_lower
+        )
         _mock_kube.apply_yaml.assert_not_called()
-        assert await store.list_deliveries(aid) == []
 
     async def test_editing_manifest_still_goes_through_route_and_deliver(self, edit_client, _mock_kube):
         """A non-adversarial edit (still valid RBAC) must still be routed
@@ -503,7 +528,18 @@ class TestEditCannotBypassSafetyRouting:
             )
             resp = await client.post(f"/assessments/{aid}/deliver", data={"dry_run": "false"}, follow_redirects=False)
         assert resp.status_code == 303
-        mock_route.assert_called_once()
-        delivered_files = mock_route.call_args[0][0]
+        # Manual Deliver now shares auto_validate_and_deliver()'s validate
+        # loop (closing the manual-vs-auto gate gap), which can call
+        # route_and_deliver() more than once (its own internal dry-run
+        # validation probe(s), then the real, dry_run=False delivery) --
+        # what must still hold is that route_and_deliver() is the one and
+        # only apply path, and the real (non-dry-run) call carries the
+        # edited content through, not a separate edit-only code path.
+        assert mock_route.called
+        real_calls = [
+            c for c in mock_route.call_args_list if c.kwargs.get("dry_run") is False
+        ]
+        assert len(real_calls) == 1
+        delivered_files = real_calls[0].args[0]
         assert delivered_files[0]["content"] == edited_content
         assert delivered_files[0]["edited"] is True

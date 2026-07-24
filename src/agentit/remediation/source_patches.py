@@ -545,6 +545,180 @@ def _health_probes_patch(skill: "Skill", report: AssessmentReport) -> list[Gener
     return out
 
 
+def enrich_workload_files_from_repo(
+    files: list[dict],
+    *,
+    read_file=None,
+    tree_paths: list[str] | None = None,
+) -> tuple[list[dict], list[str]]:
+    """Rewrite ``workload-replicas``/``workload-health-probes`` stubs to
+    target the app's *real* Deployment/Rollout — never a fabricated
+    ``deploy/deployment.yaml`` stand-in.
+
+    ``_workload_replicas_patch``/``_health_probes_patch`` generate before any
+    real repo access exists (``_workload_yaml_paths()``'s snapshot is only
+    ever populated during ``run_assessment()``'s own analyzer pass — gone by
+    the time a separate onboarding job calls this generator later), so they
+    fall back to a disconnected greenfield stub every time, even for an app
+    with a perfectly real chart. This mirrors the fix
+    ``self_managed_hpa.py``/``fleet_hpa.py`` already shipped for HPA
+    ``scaleTargetRef`` ("prove the file you're patching actually attaches to
+    the live workload") — using the same GitHub-REST ``tree_paths`` +
+    ``read_file`` mechanism ``apply_containerfile_pin_only`` /
+    ``enrich_sbom_from_repo`` already rely on, called from the same
+    pre-clear-evidence enrichment step.
+
+    For a Helm chart whose workload templates ``replicas:`` via
+    ``{{ .Values.<key> }}``, patches the chart's own ``values.yaml`` numeric
+    key instead of rewriting the templated line — inserting a second literal
+    ``replicas:`` key next to the templated one would corrupt the chart, not
+    fix it (``pulse-agent`` gitops incident class).
+
+    Returns ``(files, drop_reasons)``. A workload/health file with no safely
+    identifiable real target is **dropped**, not left as an unattached
+    stub — fail closed into ``needs_attention`` same as the HPA gates,
+    rather than open a mergeable-looking PR that changes nothing real.
+
+    Known limitation, flagged rather than silently overreached: takes the
+    first real Deployment/Rollout manifest found in ``tree_paths`` — a
+    multi-workload repo with more than one scaleable resource only gets the
+    first one patched.
+    """
+    from agentit.remediation.workload_patches import (
+        chart_root_for_template_path,
+        has_health_probes,
+        helm_templated_replicas_key,
+        is_workload_manifest,
+        patch_health_probes,
+        patch_replicas,
+        patch_values_numeric_key,
+        replicas_at_least,
+        values_yaml_path_for_chart,
+    )
+
+    def _skill(f: dict) -> str:
+        return (f.get("skill_name") or "").lower().replace("_", "-")
+
+    stub_files = [f for f in files if _skill(f) in ("workload-replicas", "workload-health-probes")]
+    if not stub_files:
+        return files, []
+    if read_file is None or not tree_paths:
+        # No repo access this call — leave stubs as-is; clear-evidence /
+        # downstream gates still decide whether they're good enough.
+        return files, []
+
+    real_path: str | None = None
+    real_content: str | None = None
+    for p in sorted(pp for pp in tree_paths if pp.endswith((".yaml", ".yml"))):
+        try:
+            text = read_file(p)
+        except Exception:
+            logger.info("workload enrich: read_file failed for %s", p, exc_info=True)
+            continue
+        if text and is_workload_manifest(text):
+            real_path, real_content = p, text
+            break
+
+    kept: list[dict] = []
+    drop_reasons: list[str] = []
+    for f in files:
+        skill = _skill(f)
+        if skill not in ("workload-replicas", "workload-health-probes"):
+            kept.append(f)
+            continue
+
+        stub_target = f.get("target_path") or f.get("path") or "?"
+        if real_path is None or real_content is None:
+            drop_reasons.append(
+                f"{stub_target}: no real Deployment/Rollout manifest found in "
+                "the repo tree — refusing fabricated workload stub"
+            )
+            continue
+
+        if skill == "workload-replicas":
+            helm_key = helm_templated_replicas_key(real_content)
+            if helm_key is not None:
+                chart_root = chart_root_for_template_path(real_path)
+                if chart_root is None:
+                    drop_reasons.append(
+                        f"{real_path}: templates .Values.{helm_key} outside a "
+                        "templates/ tree — refusing ambiguous chart edit"
+                    )
+                    continue
+                values_path = values_yaml_path_for_chart(chart_root)
+                try:
+                    values_content = read_file(values_path)
+                except Exception:
+                    values_content = None
+                if not values_content:
+                    drop_reasons.append(
+                        f"{real_path}: replicas templated via .Values.{helm_key} "
+                        f"but {values_path} is unreadable — refusing"
+                    )
+                    continue
+                patched_values = patch_values_numeric_key(values_content, helm_key)
+                if patched_values is None:
+                    drop_reasons.append(
+                        f"{values_path}: {helm_key} is not a plain top-level "
+                        "numeric key — refusing ambiguous chart edit"
+                    )
+                    continue
+                if patched_values == values_content:
+                    # Chart already declares >= 2 — nothing to patch; the
+                    # open finding will clear on its own via live_evidence /
+                    # the analyzer fix, not via a delivered file.
+                    continue
+                new_f = dict(f)
+                new_f["target_path"] = values_path
+                new_f["path"] = f"patch-replicas-{values_path.replace('/', '-')}"
+                new_f["content"] = patched_values
+                new_f["base_content"] = values_content
+                new_f["description"] = (
+                    f"Generated by skill {f.get('skill_name')} — bump {helm_key} "
+                    f"to >=2 in {values_path} ({real_path} templates replicas via "
+                    f"{{{{ .Values.{helm_key} }}}})"
+                )
+                kept.append(new_f)
+                continue
+
+            if replicas_at_least(real_content, minimum=2):
+                continue  # already satisfied live; drop the stale stub
+            patched = patch_replicas(real_content, replicas=2)
+            new_f = dict(f)
+            new_f["target_path"] = real_path
+            new_f["path"] = f"patch-replicas-{real_path.replace('/', '-')}"
+            new_f["content"] = patched
+            new_f["base_content"] = real_content
+            new_f["description"] = (
+                f"Generated by skill {f.get('skill_name')} — set replicas>=2 "
+                f"on {real_path}"
+            )
+            kept.append(new_f)
+            continue
+
+        # workload-health-probes
+        if has_health_probes(real_content):
+            continue  # already satisfied; drop the stale stub
+        patched = patch_health_probes(real_content)
+        if patched == real_content:
+            drop_reasons.append(
+                f"{real_path}: could not locate a containers: block to inject "
+                "probes into — refusing"
+            )
+            continue
+        new_f = dict(f)
+        new_f["target_path"] = real_path
+        new_f["path"] = f"patch-probes-{real_path.replace('/', '-')}"
+        new_f["content"] = patched
+        new_f["base_content"] = real_content
+        new_f["description"] = (
+            f"Generated by skill {f.get('skill_name')} — inject probes on {real_path}"
+        )
+        kept.append(new_f)
+
+    return kept, drop_reasons
+
+
 def _eol_upgrade_patch(skill: "Skill", report: AssessmentReport) -> list[GeneratedFile]:
     findings = _open_findings(report, "eol")
     files: list[GeneratedFile] = []

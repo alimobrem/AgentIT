@@ -1119,6 +1119,46 @@ class TestRouteAndDeliverClusterConfig:
         committed = mock_commit.call_args[0][2]
         assert [f["path"] for f in committed] == ["app-network-policy.yaml"]
 
+    async def test_placeholder_repo_url_and_image_org_are_caught(self) -> None:
+        """gitops#32: an Argo Application repoURL of "your-org/hello-world.git"
+        reached a merged file before this was caught live -- confirm the
+        general placeholder gate (not just the one hardcoded bootstrap
+        image token) now catches it, and the analogous "your-org" image
+        registry stand-in."""
+        assert has_unresolved_placeholders(
+            "apiVersion: argoproj.io/v1alpha1\nkind: Application\nspec:\n"
+            "  source:\n    repoURL: https://github.com/your-org/hello-world.git\n"
+            "    path: chart/\n"
+        )
+        assert has_unresolved_placeholders(
+            "apiVersion: apps/v1\nkind: Deployment\nspec:\n  template:\n"
+            "    spec:\n      containers:\n        - image: quay.io/org/pinky:latest\n"
+        )
+        assert has_unresolved_placeholders(
+            "spec:\n  source:\n    repoURL: https://example.com/org/app.git\n"
+        )
+
+    async def test_real_looking_repo_urls_are_not_flagged(self) -> None:
+        """The field-scoped placeholder gate must not false-positive on a
+        perfectly real-shaped repoURL/image -- only the specific
+        fabricated-org/host patterns confirmed by real incidents."""
+        assert not has_unresolved_placeholders(
+            "spec:\n  source:\n    repoURL: https://github.com/alimobrem/pinky.git\n"
+            "    path: chart/\n"
+        )
+        assert not has_unresolved_placeholders(
+            "spec:\n  template:\n    spec:\n      containers:\n"
+            "        - image: quay.io/alimobrem/pinky:v1\n"
+        )
+        # A deliberately placeholder-shaped value in an unrelated field
+        # (e.g. a sample alerting email address) must not be mistaken for
+        # a fabricated deploy target -- the gate is field-scoped, not a
+        # blanket content scan.
+        assert not has_unresolved_placeholders(
+            "receivers:\n  - name: team\n    email_configs:\n"
+            "      - to: team@example.com\n"
+        )
+
     async def test_dry_run_skips_infra_commit_call(self):
         store, raw = await make_async_store()
         report = make_report()

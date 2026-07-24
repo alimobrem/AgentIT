@@ -933,10 +933,19 @@ def verify_argocd_application(
         if not repo or not repo.group(1).strip() or repo.group(1).strip() in ("''", '""'):
             return False, f"{path}: Application missing spec.source.repoURL — refuse empty shell"
         repo_url = repo.group(1).strip().strip("\"'")
-        if "example.com" in repo_url or repo_url in ("https://github.com/org/agentit.git",):
-            # Template placeholder still ok if path/chart present — only refuse
-            # when combined with missing tree path below.
-            pass
+        if "example.com" in repo_url or "your-org" in repo_url.lower() or "your_org" in repo_url.lower():
+            # A fabricated org/host placeholder is never a real deploy
+            # target regardless of whether path/chart also looks plausible
+            # -- refuse outright (gitops#32: "your-org/hello-world.git"
+            # reached a merged Application before this was caught live).
+            # Deliberately narrow (not a generic "github.com/org/" match --
+            # this codebase's own test fixtures use that exact shape for a
+            # perfectly fine, real-looking repo URL).
+            return False, (
+                f"{path}: Application repoURL {repo_url!r} looks like an "
+                "unresolved placeholder org/host — refuse rather than merge "
+                "a fabricated deploy target"
+            )
         path_m = re.search(r"^\s*path:\s*[\"']?([^\s\"']+)[\"']?\s*$", content, re.M)
         chart_m = re.search(r"^\s*chart:\s*[\"']?([^\s\"']+)[\"']?\s*$", content, re.M)
         if not path_m and not chart_m:

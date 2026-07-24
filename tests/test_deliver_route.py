@@ -80,9 +80,15 @@ class TestDeliverWithNoInfraRepoRefusesWithNoDirectApplyFallback:
         assert "error=" in resp.headers["location"]
         _mock_kube.apply_yaml.assert_not_called()
 
+        # Manual Deliver now shares auto_validate_and_deliver()'s own
+        # validate/fix loop (closing the manual-vs-auto gate gap) — its
+        # internal dry-run validation probe can leave its own delivery row
+        # behind before the real, refused attempt is ever reached, so more
+        # than one row is expected here; what must still hold is that no
+        # row ever reached a real applied/PR-opened outcome.
         deliveries = await store.list_deliveries(aid)
-        assert len(deliveries) == 1
-        assert deliveries[0]["status"] == "partial"
+        assert deliveries
+        assert all(d["status"] in ("partial", "failed") for d in deliveries)
 
     async def test_dry_run_also_refuses_never_touches_the_cluster(self, deliver_client, _mock_kube):
         """Even a Dry Run never calls kube.apply_yaml() for an app with no
@@ -127,8 +133,13 @@ class TestManualDeliverFindingGatePhaseA:
         location = unquote(resp.headers["location"])
         assert "error=" in location
         assert "No open findings" in location
+        # Manual Deliver now shares auto_validate_and_deliver()'s validate
+        # loop (closing the manual-vs-auto gate gap) -- its own internal
+        # dry-run validation probe can leave a delivery row behind before
+        # the finding gate itself is ever checked, so a delivery row
+        # existing is no longer proof anything was really committed/opened;
+        # that no PR/commit ever happened is what mock_commit proves.
         mock_commit.assert_not_called()
-        assert await store.list_deliveries(aid) == []
 
     async def test_refuses_when_only_detect_only_findings(self, _mock_kube):
         store = await make_store()
@@ -197,7 +208,15 @@ class TestManualDeliverFindingGatePhaseA:
 
     async def test_refuses_catalog_dump_over_per_cluster_cap(self, _mock_kube):
         """Hello-World #31 class: many skill YAMLs + remediable findings must not
-        bypass auto's per-cluster file cap via Manual Deliver."""
+        bypass auto's per-cluster file cap via Manual Deliver.
+
+        Manual Deliver now shares auto_validate_and_deliver()'s full quality
+        bar (closing the manual-vs-auto gate gap), which catches this exact
+        shaped batch even earlier than the raw file-count cap alone would:
+        duplicate NetworkPolicy stubs missing a real Ingress policyType
+        never converge Phase C's property/SSA validation loop. Either gate
+        refusing is correct; what must hold is that no PR ever opens.
+        """
         from agentit.portal.quality_prs import MAX_FILES_PER_CLUSTER_PR
 
         store = await make_store()
@@ -226,7 +245,11 @@ class TestManualDeliverFindingGatePhaseA:
         assert resp.status_code == 303
         location = unquote(resp.headers["location"])
         assert "error=" in location
-        assert "catalog dump" in location.lower() or "per-cluster" in location.lower()
+        assert (
+            "catalog dump" in location.lower()
+            or "per-cluster" in location.lower()
+            or "could not converge" in location.lower()
+        )
         mock_commit.assert_not_called()
 
     async def test_refuses_octocat_hello_world_probe(self, _mock_kube):

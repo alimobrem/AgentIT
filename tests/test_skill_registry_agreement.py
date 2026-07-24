@@ -31,6 +31,7 @@ from agentit.remediation.registry import (
     clears_via_source,
     contract_for,
     delivery_path_hint,
+    expected_clear_lines,
     lookup,
     remediable_findings,
 )
@@ -51,6 +52,42 @@ _ANALYZER_CATEGORIES = frozenset({
     "eol",
     "instrumentation", "metrics", "logging", "tracing", "dashboards", "alerting",
 })
+
+
+class TestExpectedClearLinesDeduped:
+    """pulse-agent#2: seven "container" findings (different descriptions,
+    same category) printed the identical contract-derived sentence seven
+    times in a real PR body -- the line's content depends only on the
+    category, never the finding's own description."""
+
+    def test_one_line_per_distinct_category_not_per_finding(self) -> None:
+        lines = expected_clear_lines([
+            ("container", "using :latest tag in dockerfile"),
+            ("container", "using :latest tag in dockerfile.deps"),
+            ("container", "no healthcheck defined in dockerfile"),
+        ])
+        assert len(lines) == 1
+        assert "container" in lines[0]
+
+    def test_distinct_categories_each_still_get_a_line(self) -> None:
+        lines = expected_clear_lines([
+            ("container", "using :latest tag"),
+            ("rbac", "missing rbac"),
+            ("container", "no healthcheck defined"),
+        ])
+        assert len(lines) == 2
+
+    def test_preserves_order_of_first_appearance(self) -> None:
+        lines = expected_clear_lines([
+            ("rbac", "missing rbac"),
+            ("container", "using :latest tag"),
+            ("rbac", "another rbac finding"),
+        ])
+        assert "rbac" in lines[0]
+        assert "container" in lines[1]
+
+    def test_empty_input_returns_empty(self) -> None:
+        assert expected_clear_lines([]) == []
 
 
 class TestSolutionContracts:

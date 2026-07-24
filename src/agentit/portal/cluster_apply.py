@@ -63,6 +63,51 @@ def classify_dry_run_error(message: str | None) -> str:
     return "hard"
 
 
+def classify_soft_dry_run_reason(message: str | None) -> str:
+    """Further classify an already-``"soft"`` dry-run message.
+
+    Both buckets stay non-blocking (unchanged product contract), but they
+    are not the same kind of "soft" and were being folded into one
+    generic warning string — a human reading a PR's dry-run notes could
+    not tell "grant AgentIT's SA more rights and this would apply" from
+    "this cluster does not run that operator at all, this will never
+    apply no matter what RBAC changes" (the exact ambiguity behind
+    missing-CRD manifests reaching a merged, permanently-unsyncable
+    GitOps PR — pinky's real incident).
+
+    ``"capability_limited"``: AgentIT's own ServiceAccount lacks RBAC —
+    fixable by granting rights; not evidence the resource is wrong for
+    this cluster.
+    ``"cluster_incompatible"``: the CRD/kind genuinely is not installed
+    on this cluster (optional operator absent) — merging it will simply
+    never sync, regardless of RBAC.
+    ``"other"``: soft for a different reason (e.g. field-manager conflict).
+    """
+    text = (message or "").strip()
+    if not text:
+        return "other"
+    if _SOFT_FORBIDDEN_RE.search(text):
+        return "capability_limited"
+    if _SOFT_MISSING_CRD_RE.search(text):
+        return "cluster_incompatible"
+    return "other"
+
+
+_SOFT_REASON_LABEL = {
+    "capability_limited": "AgentIT SA lacks rights — grantable",
+    "cluster_incompatible": "operator/CRD not installed on this cluster — will never sync",
+    "other": "non-blocking",
+}
+
+
+def label_soft_dry_run_warning(fpath: str, message: str) -> str:
+    """A dry-run warning string tagged with *which kind* of soft skip this
+    is, so it reads as a distinct, actionable fact rather than generic
+    dry-run noise a human has to parse the raw K8s error to understand."""
+    reason = classify_soft_dry_run_reason(message)
+    return f"{fpath} [{_SOFT_REASON_LABEL[reason]}]: {message}"
+
+
 def probe_available_kinds() -> set[str]:
     """Return lowercased GVK kind names available on the live cluster.
 
@@ -486,7 +531,7 @@ def dry_run_manifests_against_cluster(
             if classify_dry_run_error(err) == "soft":
                 skipped.append(f"{fpath} ({err})")
                 skipped_paths.append(fpath)
-                warnings.append(f"{fpath}: {err}")
+                warnings.append(label_soft_dry_run_warning(fpath, err))
                 logger.warning("Dry-run soft skip for %s: %s", fpath, err)
             else:
                 errors.append(f"{fpath}: {err}")
@@ -518,7 +563,7 @@ def dry_run_manifests_against_cluster(
             for msg in per_doc:
                 tagged = f"{fpath}: {msg}"
                 if classify_dry_run_error(msg) == "soft":
-                    file_soft.append(tagged)
+                    file_soft.append(label_soft_dry_run_warning(fpath, msg))
                     for doc in apply_docs:
                         kind = doc.get("kind", "")
                         if kind in _CRD_TO_OPERATOR and (

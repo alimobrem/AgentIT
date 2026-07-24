@@ -10,12 +10,18 @@
 
 <div class="stat-grid">
   <div class="stat-card">
-    <div class="stat-label">LLM Safety Gate</div>
+    {# Stale AutoMode-era label -- AutoMode's LLM classify_action (an actual
+       blocking safety gate) was removed entirely (2026-07-18); llm_available
+       is a plain "is an LLM client configured" flag used by several
+       unrelated, mostly-advisory features (secret classification, skill
+       generation, the final quality review before delivery, capability-
+       scout's evidence gate) -- none of which is "the" safety gate. #}
+    <div class="stat-label">LLM Availability</div>
     <div class="stat-value">
       {% if llm_available %}
-        <span class="text-success">Active</span>
+        <span class="text-success">Configured</span>
       {% else %}
-        <span class="text-warning">Unavailable</span>
+        <span class="text-warning">Not configured</span>
       {% endif %}
     </div>
   </div>
