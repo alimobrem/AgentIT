@@ -52,6 +52,7 @@ Normative detail: [`architecture-agentit-vs-fleet-gitops.md`](./architecture-age
 | Fleet vs self-managed | Cluster → gitops `apps/{app}/`; self-managed → app `chart/`; source → app repo |
 | Chart-aware source patches | `workload-replicas`/`workload-health-probes` (like HPA before them) find the real Deployment/Rollout via GitHub-REST `read_file`/`tree_paths` and patch a Helm chart's `values.yaml` when `replicas:` is templated — never a fabricated, disconnected stand-in |
 | Manual Deliver = auto pipeline | `POST /assessments/{id}/deliver`'s real (non-dry-run) path calls `auto_validate_and_deliver()` directly — one quality bar every delivery entry point shares, not a hand-maintained subset that can drift |
+| Deterministic fields never LLM-invented | `SkillEngine.generate()` tries the LLM before the template fallback even for `mode: template` skills — for `argocd-application`, that let the LLM fabricate `repoURL` (e.g. `github.com/org/pulse-ui.git`) instead of the real repo. `_force_real_repo_url_for_application_output()` now overwrites `repoURL` on any generated `kind: Application` with the real `report.repo_url` after generation, regardless of which path produced it |
 | PR / portal honesty | Body: `Clears X by Y (evidence: …)`; Assessment Detail PR cards show contract lines |
 
 ### Checks vs resolutions
