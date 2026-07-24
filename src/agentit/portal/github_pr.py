@@ -561,12 +561,30 @@ def get_commits_behind(repo_url: str, base_sha: str, head_ref: str = "main") -> 
 # auto_delivery remains the sole GitOps/chart PR creator.
 
 
+# The well-known, universal empty-tree SHA -- exists implicitly in every
+# git repo, no API call needed to create it. Used by
+# `_get_default_branch_and_base_sha()`'s empty-repo bootstrap below.
+_EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
 def _get_default_branch_and_base_sha(base_url: str, hdrs: dict) -> tuple[str, str]:
     """Fetch a repo's default branch and its current head SHA -- the first
     two GitHub API calls every PR-opening function below makes before
     building a tree. Raises (``requests.HTTPError`` or otherwise) exactly
     like the inlined calls this replaces did; each caller's own
-    try/except handles it identically to before."""
+    try/except handles it identically to before.
+
+    A brand-new, genuinely empty repo (zero commits -- e.g. one just
+    created by ``ensure_custom_gitops_repo()`` with ``auto_init=False``,
+    per the product decision to hand back an empty repo rather than
+    scaffold a README) has no ``refs/heads/{default_branch}`` ref yet, so
+    that second call 404s. Rather than let every caller's commit flow fail
+    on a repo that's empty *by design*, this bootstraps it transparently:
+    one zero-parent commit pointing at the well-known empty tree, with no
+    files of its own, just to give the default branch a real ref to build
+    on -- the exact same commit/ref/PR machinery every caller already uses
+    then proceeds completely normally on top of it.
+    """
     resp = requests.get(base_url, headers=hdrs, timeout=10)
     resp.raise_for_status()
     default_branch = resp.json()["default_branch"]
@@ -575,6 +593,25 @@ def _get_default_branch_and_base_sha(base_url: str, hdrs: dict) -> tuple[str, st
         f"{base_url}/git/ref/heads/{default_branch}",
         headers=hdrs, timeout=10,
     )
+    if resp.status_code == 404:
+        resp = requests.post(
+            f"{base_url}/git/commits",
+            headers=hdrs, timeout=10,
+            json={
+                "message": "chore: initialize empty GitOps repo",
+                "tree": _EMPTY_TREE_SHA,
+                "parents": [],
+            },
+        )
+        resp.raise_for_status()
+        base_sha = resp.json()["sha"]
+        requests.post(
+            f"{base_url}/git/refs",
+            headers=hdrs, timeout=10,
+            json={"ref": f"refs/heads/{default_branch}", "sha": base_sha},
+        ).raise_for_status()
+        return default_branch, base_sha
+
     resp.raise_for_status()
     base_sha = resp.json()["object"]["sha"]
     return default_branch, base_sha
@@ -1183,6 +1220,17 @@ def is_trusted_git_host(repo_url: str) -> bool:
 MANAGED_APPS_APPLICATIONSET_NAME = "agentit-managed-apps"
 MANAGED_APPS_APPLICATIONSET_NAMESPACE = "openshift-gitops"
 
+# The shared ApplicationSet's `spec.template.spec.source.repoURL` -- a
+# literal Git-generator `values` reference (see `ensure_applicationset()`),
+# NOT an actual repo URL. Every generator entry sets its own
+# `git.values.repoURL` to its own real repo, so this one shared template
+# resolves to the *correct* repo per generated item regardless of which of
+# (potentially several) generators produced it. Exposed as a constant so
+# `watchers/drift_detector.py` can verify it wasn't overwritten with a
+# literal (bogus or otherwise) URL, the same way it verifies the
+# generators list, without a second hardcoded copy of this string.
+MANAGED_APPS_SOURCE_REPO_URL_TEMPLATE = "{{values.repoURL}}"
+
 # AgentIT's own repo -- the same default `cli.py`'s `self-assess`/`self-fix`
 # commands and `routes/assessments.py`'s `/self-assess` route already use.
 # Reused here purely as the owner-resolution seed for
@@ -1194,16 +1242,24 @@ _AGENTIT_SELF_REPO_URL = "https://github.com/alimobrem/AgentIT"
 
 def expected_managed_apps_repo_url() -> str:
     """The git source repoURL the fleet-wide ``agentit-managed-apps``
-    ApplicationSet (built by ``ensure_applicationset()`` below) should
-    always have.
+    ApplicationSet's *default-repo* generator entry (built by
+    ``ensure_applicationset()`` below) should always contain -- one entry
+    among potentially several now that bring-your-own-GitOps-repo apps get
+    their own additional generator entries alongside this one (see
+    ``ensure_applicationset()``'s docstring).
 
     Derived the exact same way ``_auto_create_infra_repo()``
     (``routes/assessments.py``) computes it when it calls
     ``ensure_infra_repo()``: resolve the owner via ``_parse_owner_repo()``
     (this module's one owner-resolution routine, used by every other call
-    site here) and apply ``ensure_infra_repo()``'s own "one shared
-    ``agentit-gitops`` repo per GitHub owner" naming convention -- never a
-    second, independently hardcoded guess of the final URL.
+    site here) and apply ``ensure_infra_repo()``'s own naming convention --
+    never a second, independently hardcoded guess of the final URL. NOTE:
+    despite the name, that convention is really "one shared
+    ``agentit-gitops`` repo per *token account*", not per GitHub owner --
+    see ``ensure_infra_repo()``'s docstring for the confirmed-live detail.
+    This still resolves to the right value in practice only because
+    ``_AGENTIT_SELF_REPO_URL``'s owner below is itself the token account's
+    own owner in this single-tenant fleet.
 
     Used by ``DriftDetector`` (``watchers/drift_detector.py``) to detect and
     self-heal the 2026-07-18 incident: something entirely outside this
@@ -1216,8 +1272,64 @@ def expected_managed_apps_repo_url() -> str:
     return f"https://github.com/{owner}/agentit-gitops"
 
 
+def _managed_apps_git_generator(infra_repo_url: str) -> dict:
+    """One ``git`` directory-generator entry for ``spec.generators`` --
+    shared by every distinct GitOps repo (default or bring-your-own) the
+    fleet-wide ApplicationSet watches. ``values.repoURL`` is what makes
+    multiple entries safe to coexist: the shared ``spec.template`` reads
+    ``{{values.repoURL}}`` (``MANAGED_APPS_SOURCE_REPO_URL_TEMPLATE``)
+    rather than a hardcoded literal, so each generated Application still
+    syncs from the *correct* repo regardless of how many generators (repos)
+    are in the list -- see ``ensure_applicationset()``'s docstring.
+    """
+    return {
+        "git": {
+            "repoURL": infra_repo_url,
+            "revision": "HEAD",
+            "directories": [
+                {"path": "apps/*"},
+                {"path": "apps/agentit", "exclude": True},
+            ],
+            "values": {"repoURL": infra_repo_url},
+        },
+    }
+
+
 def ensure_applicationset(infra_repo_url: str) -> bool:
-    """Ensure an Argo CD ApplicationSet exists for the infra repo."""
+    """Ensure the fleet-wide ``agentit-managed-apps`` ApplicationSet exists
+    and watches ``infra_repo_url`` -- additively.
+
+    **Bring-your-own-GitOps-repo landmine this closes:** every delivery
+    calls this with *that app's own* ``infra_repo_url`` (``delivery.py``),
+    which may be the shared default repo or a distinct custom repo a human
+    supplied. The object is a single, fixed-name/fixed-namespace CR
+    (``MANAGED_APPS_APPLICATIONSET_NAME``/``_NAMESPACE``) shared by every
+    app regardless of which repo it uses -- previously this function
+    unconditionally REPLACED ``spec.generators`` with one entry for
+    whichever ``infra_repo_url`` was passed most recently, so onboarding
+    (or drift-healing) app A into a different repo than app B silently
+    orphaned Argo sync for B, with no visible error.
+
+    Now read-merge-write: fetch the existing object (if any), and if no
+    generator entry already targets this exact ``infra_repo_url``, APPEND
+    one (``_managed_apps_git_generator()``) rather than replacing the list
+    -- every other repo's entry, and any Applications already syncing from
+    it, are left completely untouched. Argo CD's ApplicationSet controller
+    treats multiple top-level (non-``matrix``/``merge``) generators as a
+    plain union of their generated items -- a normal, documented pattern,
+    not a special case -- so this is a supported way to watch N distinct
+    repos from one ApplicationSet. Idempotent: calling this again with a
+    ``infra_repo_url`` already present is a no-op patch (identical body).
+
+    Known limitation, not solved here: this read-then-write has no
+    optimistic-concurrency (resourceVersion) check, so two onboardings
+    racing within milliseconds onto two brand-new distinct repos could
+    theoretically lose one's entry to a last-write-wins race -- the same
+    class of unguarded read-modify-write risk already present everywhere
+    else this codebase mutates Kubernetes objects (no locking pattern
+    exists anywhere in this codebase today), not a new risk introduced
+    here.
+    """
     if not is_trusted_git_host(infra_repo_url):
         logger.warning(
             "Skipping ApplicationSet: infra_repo_url host not in trusted domains %s: %s",
@@ -1227,6 +1339,27 @@ def ensure_applicationset(infra_repo_url: str) -> bool:
 
     name = MANAGED_APPS_APPLICATIONSET_NAME
     namespace = MANAGED_APPS_APPLICATIONSET_NAMESPACE
+
+    try:
+        existing = kube.get_custom_resource(
+            "argoproj.io", "v1alpha1", "applicationsets", name, namespace=namespace,
+        )
+    except Exception as exc:
+        logger.warning("ApplicationSet lookup error: %s", exc)
+        return False
+
+    if existing is None:
+        generators = [_managed_apps_git_generator(infra_repo_url)]
+    else:
+        generators = list((existing.get("spec") or {}).get("generators") or [])
+        already_present = any(
+            (g.get("git") or {}).get("repoURL") == infra_repo_url for g in generators
+        )
+        if not already_present:
+            generators.append(_managed_apps_git_generator(infra_repo_url))
+        if not generators:
+            generators = [_managed_apps_git_generator(infra_repo_url)]
+
     appset = {
         "apiVersion": "argoproj.io/v1alpha1",
         "kind": "ApplicationSet",
@@ -1235,16 +1368,7 @@ def ensure_applicationset(infra_repo_url: str) -> bool:
             "namespace": namespace,
         },
         "spec": {
-            "generators": [{
-                "git": {
-                    "repoURL": infra_repo_url,
-                    "revision": "HEAD",
-                    "directories": [
-                    {"path": "apps/*"},
-                    {"path": "apps/agentit", "exclude": True},
-                ],
-                },
-            }],
+            "generators": generators,
             "template": {
                 "metadata": {
                     "name": "managed-{{path.basename}}",
@@ -1259,7 +1383,7 @@ def ensure_applicationset(infra_repo_url: str) -> bool:
                     # update). include excludes grafana *.json / *.md / *.sh
                     # that otherwise fail manifest unmarshal.
                     "source": {
-                        "repoURL": infra_repo_url,
+                        "repoURL": MANAGED_APPS_SOURCE_REPO_URL_TEMPLATE,
                         "targetRevision": "HEAD",
                         "path": "{{path}}",
                         "directory": {
@@ -1281,9 +1405,6 @@ def ensure_applicationset(infra_repo_url: str) -> bool:
     }
 
     try:
-        existing = kube.get_custom_resource(
-            "argoproj.io", "v1alpha1", "applicationsets", name, namespace=namespace,
-        )
         if existing is None:
             kube.create_custom_resource("argoproj.io", "v1alpha1", "applicationsets", namespace, appset)
         else:
@@ -1299,12 +1420,30 @@ def ensure_infra_repo(owner: str, repo_name: str = "agentit-gitops") -> dict:
     """Create a GitOps infra repo if it doesn't exist. Returns {"repo_url"} or {"error"}.
 
     Checks if the repo exists first under ``owner``. If not, creates a private
-    repo via ``/user/repos`` (authenticated token owner). When that 422s
-    because the name already exists under the token user, reuses that repo
-    instead of failing — this is the Register-for-GitOps path for third-party
-    app owners (e.g. ``octocat/Hello-World``) where ``/orgs/{owner}/repos``
-    is not permitted. ``apps/.gitkeep`` is written to the repo that was
-    actually created/reused, not blindly to ``owner/repo_name``.
+    repo via ``/user/repos``. **Despite the ``owner`` parameter, this first
+    creation attempt always lands under the *authenticated token's own*
+    GitHub account, not under ``owner``** -- ``POST /user/repos`` ignores any
+    notion of a target owner entirely; only the *fallback* path (a 422 name
+    conflict, handled below) ever calls ``/orgs/{owner}/repos``. Confirmed
+    live: every fleet app onboarded so far (regardless of its own source
+    repo's real owner, e.g. apps under a ``PulseSRE`` org) resolved to the
+    exact same ``https://github.com/{token-login}/agentit-gitops`` -- i.e.
+    today's real behavior is "one shared infra repo per *token account*",
+    not "one shared infra repo per app-owning org" as this function's name
+    and the ``owner`` parameter might suggest. That is a deliberate,
+    confirmed-acceptable product decision for the "no repo supplied"
+    default path in this single-tenant fleet (see
+    ``_resolve_mandatory_infra_repo_url()``) -- left unchanged here; only
+    documented accurately. ``ensure_custom_gitops_repo()`` below is the
+    separate, org-aware function for a human-supplied GitOps repo, which
+    *does* need to respect the exact owner/org the URL specifies.
+
+    When ``/user/repos`` 422s because the name already exists under the
+    token user, reuses that repo instead of failing — this is the
+    Register-for-GitOps path for third-party app owners (e.g.
+    ``octocat/Hello-World``) where ``/orgs/{owner}/repos`` is not permitted.
+    ``apps/.gitkeep`` is written to the repo that was actually
+    created/reused, not blindly to ``owner/repo_name``.
     """
     try:
         token = _get_token()
@@ -1374,6 +1513,185 @@ def ensure_infra_repo(owner: str, repo_name: str = "agentit-gitops") -> dict:
     except Exception as exc:
         logger.exception("Failed to create infra repo")
         return {"error": str(exc)}
+
+
+def _github_owner_type(owner: str, hdrs: dict) -> str | None:
+    """``"Organization"`` or ``"User"`` for a GitHub login, via ``GET
+    /users/{owner}`` -- used by ``ensure_custom_gitops_repo()`` to pick the
+    correct repo-creation endpoint (``/orgs/{owner}/repos`` vs
+    ``/user/repos``); GitHub has no single endpoint that accepts either
+    kind of owner. Returns ``None`` if the lookup itself fails (network
+    error, unexpected status) rather than raising -- the caller treats an
+    unknown type as its own refusal case."""
+    try:
+        resp = requests.get(f"{_API}/users/{owner}", headers=hdrs, timeout=10)
+        if resp.status_code == 200:
+            return resp.json().get("type")
+    except Exception:
+        logger.warning("Failed to look up GitHub owner type for %s", owner, exc_info=True)
+    return None
+
+
+def ensure_custom_gitops_repo(repo_url: str) -> dict:
+    """Bring-your-own-GitOps-repo support: ensure a human-supplied
+    ``repo_url`` is a real, write-accessible GitHub repo -- creating it,
+    empty, if it doesn't exist yet.
+
+    Returns ``{"repo_url", "created"}`` on success, or ``{"error"}`` on any
+    refusal -- callers (``_resolve_mandatory_infra_repo_url()``,
+    ``routes/assessments.py::register_gitops()``) surface ``error`` as a
+    hard stop (mirroring ``InfraRepoRequiredError``), never a fabricated
+    success. Three cases:
+
+    1. **Exists and AgentIT's token has push access** (GitHub's own
+       ``permissions.push`` on the ``GET /repos/{owner}/{repo}`` response --
+       the confirmed access bar): reused as-is, ``created=False``.
+    2. **Exists but the token lacks push access**: refused outright. We do
+       NOT silently create a same-named repo elsewhere (e.g. under a
+       different owner) -- the user explicitly typed this URL, and
+       substituting a different repo they didn't ask for is exactly the
+       silent-failure pattern this feature is supposed to eliminate.
+    3. **Doesn't exist (404)**: created empty (``auto_init=False`` -- no
+       scaffolded README/starter template, just ``apps/{app}/`` once the
+       normal onboarding delivery populates it; see
+       ``_get_default_branch_and_base_sha()``'s empty-repo bootstrap for
+       why an empty repo still works with the rest of this module's
+       commit/PR machinery) -- **in the exact owner/org the URL itself
+       specifies**, not silently redirected to the token's own account the
+       way ``ensure_infra_repo()``'s default-path fallback does. GitHub
+       has two different, mutually exclusive creation endpoints depending
+       on whether that owner is an org or a user account
+       (``_github_owner_type()`` picks the right one); creating under
+       another *user's* personal account has no API at all and is refused
+       with an explicit message rather than attempted.
+
+    Unrecognized GitHub API states (a non-200/404 existence check, an
+    owner-type lookup failure, a creation call that itself fails) all
+    return ``{"error": ...}`` with an actionable message -- never raise,
+    matching every other GitHub-API function in this module.
+    """
+    try:
+        token = _get_token()
+        hdrs = _headers(token)
+        owner, repo_name = _parse_owner_repo(repo_url)
+
+        resp = requests.get(f"{_API}/repos/{owner}/{repo_name}", headers=hdrs, timeout=10)
+        if resp.status_code == 200:
+            body = resp.json()
+            if bool((body.get("permissions") or {}).get("push")):
+                return {"repo_url": body.get("html_url", repo_url), "created": False}
+            return {
+                "error": (
+                    f"GitOps repo '{owner}/{repo_name}' already exists, but AgentIT's "
+                    "GitHub token does not have write (push) access to it -- refusing to "
+                    "silently create or use a substitute repo you didn't specify. Grant "
+                    f"the token push access to {owner}/{repo_name}, or supply a different "
+                    "GitOps repo URL."
+                ),
+            }
+        if resp.status_code != 404:
+            return {
+                "error": (
+                    f"GitHub API error checking '{owner}/{repo_name}': "
+                    f"{resp.status_code} {resp.text[:200]}"
+                ),
+            }
+
+        owner_type = _github_owner_type(owner, hdrs)
+        create_payload = {
+            "name": repo_name,
+            "description": "AgentIT GitOps infrastructure — managed by AgentIT agents",
+            "private": True,
+            "auto_init": False,
+        }
+        if owner_type == "Organization":
+            resp = requests.post(
+                f"{_API}/orgs/{owner}/repos", headers=hdrs, timeout=10, json=create_payload,
+            )
+        elif owner_type == "User":
+            me = requests.get(f"{_API}/user", headers=hdrs, timeout=10)
+            login = me.json().get("login") if me.ok else None
+            if not (login and login.lower() == owner.lower()):
+                return {
+                    "error": (
+                        f"Cannot create '{owner}/{repo_name}' -- AgentIT's GitHub token is "
+                        f"authenticated as a different account ({login or 'unknown'}), and "
+                        "GitHub has no API to create a repo directly under another user's "
+                        "personal account. Create it manually, or supply a GitOps repo URL "
+                        "under an org/account AgentIT's token can create repos in."
+                    ),
+                }
+            resp = requests.post(
+                f"{_API}/user/repos", headers=hdrs, timeout=10, json=create_payload,
+            )
+        else:
+            return {
+                "error": (
+                    f"Could not determine whether '{owner}' is a GitHub user or "
+                    "organization -- cannot create the GitOps repo."
+                ),
+            }
+
+        if resp.status_code not in (200, 201):
+            return {
+                "error": (
+                    f"GitHub API error creating '{owner}/{repo_name}': "
+                    f"{resp.status_code} {resp.text[:200]}"
+                ),
+            }
+
+        created = resp.json()
+        created_url = created.get("html_url", repo_url)
+        logger.info("Created custom GitOps repo: %s", created_url)
+        return {"repo_url": created_url, "created": True}
+
+    except Exception as exc:
+        logger.exception("Failed to ensure custom GitOps repo %s", repo_url)
+        return {"error": str(exc)}
+
+
+_DEFAULT_INFRA_REPO_URL_CACHE_SECONDS = 300
+_default_infra_repo_url_cache: dict[str, object] = {"value": None, "ts": 0.0}
+
+
+def default_infra_repo_url() -> str | None:
+    """The real GitOps infra repo URL that "no repo supplied" resolves to
+    today -- ``https://github.com/{token-login}/agentit-gitops``, i.e.
+    exactly what ``ensure_infra_repo()``'s ``/user/repos``-first behavior
+    actually creates/reuses (see that function's docstring). Used purely
+    to show a truthful placeholder in the Assess form's optional GitOps
+    Infra Repo field -- never a fabricated example URL.
+
+    Cached in-process for ``_DEFAULT_INFRA_REPO_URL_CACHE_SECONDS`` (the
+    token's own login essentially never changes mid-process) so rendering
+    the Fleet page doesn't cost a live GitHub API call on every request.
+    Returns ``None`` (never raises) when ``GITHUB_TOKEN`` is unset or the
+    lookup fails -- callers fall back to a generic placeholder in that case.
+    """
+    import time
+
+    now = time.time()
+    if (
+        _default_infra_repo_url_cache["value"] is not None
+        and now - _default_infra_repo_url_cache["ts"] < _DEFAULT_INFRA_REPO_URL_CACHE_SECONDS
+    ):
+        return _default_infra_repo_url_cache["value"]
+
+    try:
+        token = _get_token()
+        resp = requests.get(f"{_API}/user", headers=_headers(token), timeout=5)
+        if resp.status_code != 200:
+            return None
+        login = resp.json().get("login")
+        if not login:
+            return None
+        url = f"https://github.com/{login}/agentit-gitops"
+        _default_infra_repo_url_cache["value"] = url
+        _default_infra_repo_url_cache["ts"] = now
+        return url
+    except Exception:
+        logger.warning("Failed to resolve default GitOps infra repo URL", exc_info=True)
+        return None
 
 
 def _webhook_insecure_ssl_flag() -> str:
