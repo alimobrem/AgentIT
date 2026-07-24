@@ -655,6 +655,47 @@ def test_ensure_applicationset_reregistering_same_repo_is_idempotent_noop(mock_k
 
 
 @patch("agentit.portal.github_pr.kube")
+def test_ensure_applicationset_heals_pre_fix_entry_missing_values_field(mock_kube):
+    """Live-cluster-caught regression: a generator entry created by the
+    OLD (pre-additive-fix) code has no `git.values.repoURL` at all. Once
+    the shared template reads `{{values.repoURL}}` instead of a hardcoded
+    literal, an entry left as-is (rather than normalized) would resolve
+    an empty/unset repoURL on its next Argo reconcile -- confirmed live:
+    `managed-pinky`'s Application briefly dropped to sync status
+    "Unknown" with a literal, unresolved `{{values.repoURL}}` in
+    `spec.source.repoURL` before this normalization was added. Every call
+    must re-sync an already-present entry to the current shape, not just
+    skip it as "already there"."""
+    pre_fix_appset = {
+        "metadata": {"name": "agentit-managed-apps"},
+        "spec": {
+            "generators": [
+                {"git": {
+                    "repoURL": "https://github.com/alimobrem/agentit-gitops",
+                    "revision": "HEAD",
+                    "directories": [
+                        {"path": "apps/*"},
+                        {"path": "apps/agentit", "exclude": True},
+                    ],
+                    # No `values` key -- the exact pre-fix shape.
+                }},
+            ],
+        },
+    }
+    mock_kube.get_custom_resource.return_value = pre_fix_appset
+
+    result = ensure_applicationset("https://github.com/alimobrem/agentit-gitops")
+
+    assert result is True
+    args, _ = mock_kube.patch_custom_resource.call_args
+    generators = args[5]["spec"]["generators"]
+    assert len(generators) == 1
+    assert generators[0]["git"]["values"] == {
+        "repoURL": "https://github.com/alimobrem/agentit-gitops",
+    }
+
+
+@patch("agentit.portal.github_pr.kube")
 def test_ensure_applicationset_new_generator_carries_own_values_repo_url(mock_kube):
     """Each generator entry must set its own `git.values.repoURL` -- the
     mechanism the shared `{{values.repoURL}}` template resolves through."""

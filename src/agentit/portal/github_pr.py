@@ -1352,10 +1352,25 @@ def ensure_applicationset(infra_repo_url: str) -> bool:
         generators = [_managed_apps_git_generator(infra_repo_url)]
     else:
         generators = list((existing.get("spec") or {}).get("generators") or [])
-        already_present = any(
-            (g.get("git") or {}).get("repoURL") == infra_repo_url for g in generators
-        )
-        if not already_present:
+        updated_existing = False
+        for g in generators:
+            if (g.get("git") or {}).get("repoURL") == infra_repo_url:
+                # Normalize in place -- not just "leave alone if present".
+                # Caught live: an entry created by the OLD (pre-fix) code
+                # has no `git.values.repoURL` at all, so once the shared
+                # template below switches to reading
+                # `{{values.repoURL}}`, that pre-existing entry's own
+                # Application would resolve an unset/empty repoURL --
+                # confirmed against the real cluster (`managed-pinky`
+                # dropped to sync status "Unknown", `spec.source.repoURL`
+                # became the literal, unresolved string
+                # "{{values.repoURL}}") before this normalization step
+                # was added. Every call now re-syncs the existing entry to
+                # the current, correct shape, healing any repo registered
+                # before this fix shipped -- not just adding new ones.
+                g["git"] = _managed_apps_git_generator(infra_repo_url)["git"]
+                updated_existing = True
+        if not updated_existing:
             generators.append(_managed_apps_git_generator(infra_repo_url))
         if not generators:
             generators = [_managed_apps_git_generator(infra_repo_url)]
