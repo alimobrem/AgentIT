@@ -245,19 +245,51 @@ def file_matches_finding_categories(file: dict, finding_categories: set[str]) ->
 _COMPANION_INELIGIBLE_CATEGORIES = frozenset({"narrative_report", "secret_blocked"})
 
 
-def _companion_layer(file: dict) -> str | None:
+def _is_explicitly_refused_companion(file: dict, finding_cats: set[str]) -> bool:
+    """True when this file's skill is on ANY of ``finding_cats``'
+    SOLUTION_CONTRACT ``refuse_companions`` denylist.
+
+    ``refuse_companions`` is a deliberate, per-contract safety rule (e.g.
+    ``image_signing``'s contract explicitly refuses ``image-scan-task`` --
+    a real scanning skill, not a wrong-layer stub, but a DIFFERENT
+    security concern that must never be bundled into a signing-only PR
+    as if it were incidental). ``file_matches_finding_categories()``
+    already enforces this for Tier 1 matching, but collapses "explicitly
+    refused" and "just doesn't match anything" into the same ``None`` --
+    Tier 2 rescue must NOT treat an explicit refusal as "safe, just
+    unrelated," or it would quietly reopen exactly the wrong-companion
+    class of bug the denylist exists to close.
+    """
+    skill = normalize_category(str(file.get("skill_name") or ""))
+    if not skill:
+        return False
+    try:
+        from agentit.remediation.registry import contract_for
+    except Exception:
+        return False
+    for cat in finding_cats:
+        c = contract_for(cat)
+        if c and skill in {normalize_category(s) for s in c.refuse_companions}:
+            return True
+    return False
+
+
+def _companion_layer(file: dict, finding_cats: set[str]) -> str | None:
     """The delivery-layer category (``classify_file()``) a Tier 2
     "Also included" companion would need to share with an existing Tier 1
     cluster to ride along safely -- or ``None`` if this file is never
-    companion-eligible (see ``_COMPANION_INELIGIBLE_CATEGORIES``).
+    companion-eligible (see ``_COMPANION_INELIGIBLE_CATEGORIES`` and
+    ``_is_explicitly_refused_companion()``).
 
-    Deliberately does NOT re-run any content-safety check here (secrets,
-    destructive rewrites, placeholders) -- those already ran upstream
-    before a file reaches this filter, and every downstream per-cluster
-    gate (SSA dry-run, resource collisions, placeholder detection) still
-    applies uniformly to a companion once it's merged into a cluster's
-    file list, exactly as it does for a Tier 1 fix file.
+    Deliberately does NOT re-run any other content-safety check here
+    (secrets, destructive rewrites, placeholders) -- those already ran
+    upstream before a file reaches this filter, and every downstream
+    per-cluster gate (SSA dry-run, resource collisions, placeholder
+    detection) still applies uniformly to a companion once it's merged
+    into a cluster's file list, exactly as it does for a Tier 1 fix file.
     """
+    if _is_explicitly_refused_companion(file, finding_cats):
+        return None
     from agentit.portal.delivery import classify_file
 
     category = classify_file(file)
@@ -310,7 +342,7 @@ def filter_files_to_open_findings(
             kept.append(enriched)
             continue
 
-        layer = _companion_layer(f)
+        layer = _companion_layer(f, finding_cats)
         path = f.get("path") or f.get("target_path") or "?"
         if layer is None:
             drop_reasons.append(

@@ -675,6 +675,7 @@ class TestPerClusterIsolation:
         saved = await store.get_onboarding(aid)
         saved_paths = {f["path"] for f in saved}
         assert clean_gitops_file["path"] in saved_paths
+        assert source_file["path"] in saved_paths
 
 
 class TestFetchExistingInfraTreeFiles:
@@ -743,4 +744,3 @@ class TestFetchExistingInfraTreeFiles:
             "apps/pinky/cluster_config/pinky-quota.yaml",
         }
         assert all(f["content"] for f in result)
-        assert source_file["path"] in saved_paths

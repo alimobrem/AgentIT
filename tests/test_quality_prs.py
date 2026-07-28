@@ -219,6 +219,37 @@ class TestTier2CompanionCoverage:
         assert kept[0]["path"] == "rbac.yaml"
         assert any("leaked-secret.yaml" in d for d in drops)
 
+    def test_explicitly_refused_companion_is_never_rescued(self):
+        """Regression, caught by the full suite (test_image_signing.py):
+        "image_signing"'s contract explicitly denylists "image-scan-task"
+        in refuse_companions -- a real, deliberate safety rule (scanning
+        and signing are different security concerns, never bundle one
+        into the other's PR), not an incidental "doesn't match" case.
+        Both files here are the SAME delivery layer (cluster_config), so
+        only the explicit refuse_companions check -- not a wrong-layer
+        check -- can be what keeps this file from being rescued."""
+        findings = [("image_signing", "No cosign/Sigstore image signing detected")]
+        files = [
+            {
+                "category": "skills", "path": "pinky-cosign-sign-task.yaml",
+                "content": (
+                    "apiVersion: tekton.dev/v1\nkind: Task\n"
+                    "spec:\n  steps:\n  - script: cosign sign --yes img\n"
+                ),
+                "skill_name": "cosign-sign-task",
+            },
+            {
+                "category": "skills", "path": "pinky-image-scan-task.yaml",
+                "content": "apiVersion: tekton.dev/v1\nkind: Task\n",
+                "skill_name": "image-scan-task",
+            },
+        ]
+        kept, drops = filter_files_to_open_findings(files, findings)
+        assert len(kept) == 1
+        assert kept[0]["skill_name"] == "cosign-sign-task"
+        assert len(drops) == 1
+        assert not any(f.get("_tier") == "companion" for f in kept)
+
     def test_companion_attaches_to_same_layer_tier1_cluster(self):
         findings = [("rbac", "missing rbac")]
         companion = {
@@ -413,14 +444,11 @@ class TestSolutionContractFilter:
     """Pinky gitops #22/#23: wrong-layer companions must not clear-attach."""
 
     def test_container_refuses_kyverno_and_limitrange_companions(self):
-        """filter_files_to_open_findings() alone now rescues these two
-        cluster-layer files as Tier 2 companions rather than dropping them
-        outright -- it has no opinion on source-vs-cluster layering, only
-        on "does this map to an open finding". The actual wrong-layer
-        guarantee (pinky #22/#23: a source-only finding's PR must never
-        carry cluster YAML) is enforced by strip_wrong_layer_companions(),
-        the very next stage every real caller runs -- see
-        test_container_end_to_end_still_drops_wrong_layer_companions below."""
+        """"container"'s SOLUTION_CONTRACT explicitly denylists these two
+        skills in refuse_companions (registry.py) -- coverage's new Tier 2
+        rescue must respect that denylist, not quietly reopen the pinky
+        #22/#23 wrong-companion hole by rescuing an explicitly-refused
+        skill as "safe, just unrelated"."""
         findings = [("container", "using :latest tag in base image in dockerfile")]
         files = [
             {
@@ -447,43 +475,13 @@ class TestSolutionContractFilter:
             },
         ]
         kept, drops = filter_files_to_open_findings(files, findings)
-        assert drops == []
-        tier1 = [f for f in kept if f.get("_tier") != "companion"]
-        companions = [f for f in kept if f.get("_tier") == "companion"]
-        assert len(tier1) == 1
-        assert tier1[0]["skill_name"] == "containerfile"
-        assert len(companions) == 2
-
-    def test_container_end_to_end_still_drops_wrong_layer_companions(self):
-        """Pinky gitops #22/#23, confirmed still closed end-to-end: chaining
-        filter_files_to_open_findings() -> strip_wrong_layer_companions()
-        (exactly what auto_delivery.py's real call site does) drops the
-        rescued Tier 2 companions above once the source-only-finding rule
-        applies -- coverage never reopens this wrong-layer hole."""
-        findings = [("container", "using :latest tag in base image in dockerfile")]
-        files = [
-            {
-                "category": "codechange", "path": "patch-Dockerfile", "target_path": "Dockerfile",
-                "content": "FROM registry.access.redhat.com/ubi9/ubi-minimal:1\n",
-                "description": "pin Dockerfile", "skill_name": "containerfile",
-            },
-            {
-                "category": "skills", "path": "pinky-image-registry-policy.yaml",
-                "content": "apiVersion: kyverno.io/v1\nkind: Policy\n",
-                "description": "Kyverno image registry", "skill_name": "image-registry-policy",
-            },
-        ]
-        kept, drops = filter_files_to_open_findings(files, findings)
-        kept, layer_drops = strip_wrong_layer_companions(kept, findings)
         assert len(kept) == 1
         assert kept[0]["skill_name"] == "containerfile"
-        assert len(layer_drops) == 1
-        assert "wrong layer" in layer_drops[0]
+        assert len(drops) == 2
 
     def test_audit_refuses_apiserver_audit_policy_companion(self):
         """See test_container_refuses_kyverno_and_limitrange_companions --
-        same reasoning: rescued as a Tier 2 companion here, dropped by
-        strip_wrong_layer_companions() end-to-end (next test)."""
+        "audit"'s contract explicitly denylists "audit-policy" too."""
         findings = [("audit", "no audit logging implementation detected")]
         files = [
             {
@@ -503,32 +501,9 @@ class TestSolutionContractFilter:
             },
         ]
         kept, drops = filter_files_to_open_findings(files, findings)
-        assert drops == []
-        tier1 = [f for f in kept if f.get("_tier") != "companion"]
-        companions = [f for f in kept if f.get("_tier") == "companion"]
-        assert len(tier1) == 1
-        assert tier1[0]["skill_name"] == "app-audit-logging"
-        assert len(companions) == 1 and companions[0]["path"] == "pinky-audit-policy.yaml"
-
-    def test_audit_end_to_end_still_drops_wrong_layer_companion(self):
-        findings = [("audit", "no audit logging implementation detected")]
-        files = [
-            {
-                "category": "codechange", "path": "patch-audit.py", "target_path": "audit.py",
-                "content": "def audit_event(*a, **k): ...\n",
-                "description": "app audit module", "skill_name": "app-audit-logging",
-            },
-            {
-                "category": "skills", "path": "pinky-audit-policy.yaml",
-                "content": "apiVersion: v1\nkind: ConfigMap\n",
-                "description": "apiserver audit policy", "skill_name": "audit-policy",
-            },
-        ]
-        kept, drops = filter_files_to_open_findings(files, findings)
-        kept, layer_drops = strip_wrong_layer_companions(kept, findings)
         assert len(kept) == 1
         assert kept[0]["skill_name"] == "app-audit-logging"
-        assert any("audit-policy" in d or "pinky-audit-policy" in d for d in layer_drops)
+        assert any("audit-policy" in d or "pinky-audit-policy" in d for d in drops)
 
     def test_strip_wrong_layer_drops_gitops_yaml_for_source_findings(self):
         findings = [("container", "using :latest")]

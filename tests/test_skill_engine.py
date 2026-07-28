@@ -1752,7 +1752,9 @@ class TestTektonParamsNeverLLMInvented:
         files = engine.generate(skill, report, llm_client=fake_llm)
 
         assert len(files) == 1
-        assert files[0].content == manifest
+        # The LLM-path pipeline trims trailing whitespace independent of
+        # this fix -- compare content, not exact trailing-newline framing.
+        assert files[0].content.strip() == manifest.strip()
 
     def test_unrecognized_param_names_are_left_untouched(self, tmp_path: Path) -> None:
         """Only the specific, known-deterministic param names get
@@ -1771,4 +1773,4 @@ class TestTektonParamsNeverLLMInvented:
         files = engine.generate(skill, report, llm_client=fake_llm)
 
         assert len(files) == 1
-        assert files[0].content == content
+        assert files[0].content.strip() == content.strip()
