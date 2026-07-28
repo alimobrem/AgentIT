@@ -28,6 +28,7 @@ import pytest
 from agentit.models import DimensionScore, Finding, Severity
 from agentit.portal.auto_delivery import (
     MAX_VALIDATION_ITERATIONS,
+    _fetch_existing_infra_tree_files,
     auto_validate_and_deliver,
     notify_pr_ready,
     review_final_manifests,
@@ -596,4 +597,72 @@ class TestPerClusterIsolation:
         saved = await store.get_onboarding(aid)
         saved_paths = {f["path"] for f in saved}
         assert clean_gitops_file["path"] in saved_paths
+
+
+class TestFetchExistingInfraTreeFiles:
+    """quality_prs.find_resource_collisions()'s previously-documented
+    follow-up: catch a new file colliding with something already merged
+    on the target repo, not just within the current batch."""
+
+    async def test_self_managed_never_calls_github(self):
+        report = make_report(repo_name="agentit")
+        report.infra_repo_url = "https://github.com/alimobrem/agentit-gitops"
+        with patch("agentit.portal.github_pr._get_token") as mock_token:
+            result = await _fetch_existing_infra_tree_files(
+                report, "agentit", self_managed=True,
+            )
+        assert result == []
+        mock_token.assert_not_called()
+
+    async def test_no_infra_repo_url_returns_empty_without_calling_github(self):
+        report = make_report(repo_name="no-infra-app")
+        report.infra_repo_url = None
+        with patch("agentit.portal.github_pr._get_token") as mock_token:
+            result = await _fetch_existing_infra_tree_files(
+                report, "no-infra-app", self_managed=False,
+            )
+        assert result == []
+        mock_token.assert_not_called()
+
+    async def test_github_failure_degrades_to_empty_not_an_exception(self):
+        """A GitHub API failure here must never block a delivery that
+        would otherwise be fine -- falls back to within-batch-only
+        collision checking, exactly like before this existed."""
+        report = make_report(repo_name="flaky-app")
+        report.infra_repo_url = "https://github.com/org/flaky-app-gitops"
+        with patch("agentit.portal.github_pr._get_token", side_effect=RuntimeError("boom")):
+            result = await _fetch_existing_infra_tree_files(
+                report, "flaky-app", self_managed=False,
+            )
+        assert result == []
+
+    async def test_fetches_only_this_apps_own_subtree(self):
+        report = make_report(repo_name="pinky")
+        report.infra_repo_url = "https://github.com/org/pinky-gitops"
+        tree = [
+            "apps/pinky/skills/pinky-config.yaml",
+            "apps/pinky/cluster_config/pinky-quota.yaml",
+            "apps/other-app/skills/other-config.yaml",
+            "README.md",
+        ]
+
+        def _fake_content(base_url, hdrs, path, ref):
+            return f"# content of {path}\n"
+
+        with patch("agentit.portal.github_pr._get_token", return_value="t"), \
+             patch("agentit.portal.github_pr._get_default_branch_and_base_sha",
+                   return_value=("main", "sha")), \
+             patch("agentit.portal.github_pr._list_tree_paths", return_value=tree), \
+             patch("agentit.portal.github_pr._get_file_content_at_ref",
+                   side_effect=_fake_content):
+            result = await _fetch_existing_infra_tree_files(
+                report, "pinky", self_managed=False,
+            )
+
+        paths = {f["path"] for f in result}
+        assert paths == {
+            "apps/pinky/skills/pinky-config.yaml",
+            "apps/pinky/cluster_config/pinky-quota.yaml",
+        }
+        assert all(f["content"] for f in result)
         assert source_file["path"] in saved_paths

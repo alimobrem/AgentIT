@@ -24,6 +24,9 @@ enrichment) is a natural next fixture to add here, not yet built out.
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 from agentit.analyzers.ha_dr import HADRAnalyzer
 from agentit.analyzers.security import SecurityAnalyzer
@@ -37,6 +40,15 @@ from agentit.skill_engine import load_all_skills
 from conftest import make_report
 
 _SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
+
+
+@pytest.fixture(autouse=True)
+def _no_live_registry_calls():
+    """Keep this suite's "hermetic and fast" property intact now that
+    harden_dockerfile_content() attempts a real registry digest lookup --
+    falls back to the floating :1 tag, same as before this existed."""
+    with patch("agentit.remediation.registry_client.resolve_image_digest", return_value=None):
+        yield
 
 
 def _load_skill(name: str):

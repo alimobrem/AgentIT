@@ -236,13 +236,64 @@ def file_matches_finding_categories(file: dict, finding_categories: set[str]) ->
     return None
 
 
+# Categories a companion file is never eligible to ride along as, even when
+# it's otherwise safe -- these are files this pipeline has already decided,
+# by explicit design, are never a real deliverable (see delivery.py's
+# ``preview_delivery_groups()``, which drops both from every mechanism):
+# CATEGORY_NARRATIVE_REPORT is documentation-about-changes, not a change;
+# CATEGORY_SECRET_BLOCKED is a permanent deny-rule, not a routing gap.
+_COMPANION_INELIGIBLE_CATEGORIES = frozenset({"narrative_report", "secret_blocked"})
+
+
+def _companion_layer(file: dict) -> str | None:
+    """The delivery-layer category (``classify_file()``) a Tier 2
+    "Also included" companion would need to share with an existing Tier 1
+    cluster to ride along safely -- or ``None`` if this file is never
+    companion-eligible (see ``_COMPANION_INELIGIBLE_CATEGORIES``).
+
+    Deliberately does NOT re-run any content-safety check here (secrets,
+    destructive rewrites, placeholders) -- those already ran upstream
+    before a file reaches this filter, and every downstream per-cluster
+    gate (SSA dry-run, resource collisions, placeholder detection) still
+    applies uniformly to a companion once it's merged into a cluster's
+    file list, exactly as it does for a Tier 1 fix file.
+    """
+    from agentit.portal.delivery import classify_file
+
+    category = classify_file(file)
+    if category in _COMPANION_INELIGIBLE_CATEGORIES:
+        return None
+    return category
+
+
 def filter_files_to_open_findings(
     files: list[dict],
     target_findings: list[tuple[str, str]],
 ) -> tuple[list[dict], list[str]]:
-    """Phase A: drop generated files whose category/skill is not in the open finding set.
+    """Phase A + coverage: split generated files into two tiers instead of a
+    binary keep/drop.
 
-    Returns ``(kept, drop_reasons)``.
+    - **Tier 1 "fix"** (unchanged from the original Phase A behavior):
+      files whose category/skill exactly matches an open finding. These
+      are what makes a PR's "clears finding X" claim trustworthy, and
+      still go through the full existing gate stack.
+    - **Tier 2 "companion"** (new): files that don't map to any open
+      finding, but are otherwise safe to ship alongside a Tier 1 fix --
+      marked ``_tier="companion"`` and ``_companion_layer=<category>`` so
+      ``partition_by_finding_cluster()`` can attach them to a same-layer
+      cluster, and ``build_helpful_pr_body()`` can render them under a
+      distinct "Also included" section rather than claiming they clear
+      anything. A companion with no eligible layer, or one that can't be
+      attached to any Tier 1 cluster later, is dropped exactly like today
+      -- this never weakens the "no catalog-dump PRs" guarantee, it only
+      stops throwing away real, safe content that happened to ride along
+      with a real fix.
+
+    Returns ``(kept, drop_reasons)`` -- ``kept`` may contain both tiers;
+    check ``f.get("_tier")`` to distinguish. Confirmed live (2026-07-24)
+    that a meaningful fraction of real skill/CodeChangeAgent output
+    (extra Dockerfiles, otel_setup.py, …) was silently dropped here on
+    every fleet app even though it was perfectly safe to ship.
     """
     finding_cats = {normalize_category(c) for c, _ in target_findings if c}
     display_cats: dict[str, str] = {}
@@ -254,15 +305,20 @@ def filter_files_to_open_findings(
     drop_reasons: list[str] = []
     for f in files:
         matched = file_matches_finding_categories(f, finding_cats)
-        if matched is None:
-            path = f.get("path") or f.get("target_path") or "?"
+        if matched is not None:
+            enriched = {**f, "_finding_cluster": display_cats.get(matched, matched)}
+            kept.append(enriched)
+            continue
+
+        layer = _companion_layer(f)
+        path = f.get("path") or f.get("target_path") or "?"
+        if layer is None:
             drop_reasons.append(
                 f"{path}: not tied to an open finding "
                 f"({', '.join(sorted(display_cats.values())) or 'none'})"
             )
             continue
-        enriched = {**f, "_finding_cluster": display_cats.get(matched, matched)}
-        kept.append(enriched)
+        kept.append({**f, "_tier": "companion", "_companion_layer": layer})
     return kept, drop_reasons
 
 
@@ -282,9 +338,22 @@ def partition_by_finding_cluster(
     *,
     max_files: int = MAX_FILES_PER_CLUSTER_PR,
 ) -> list[FindingCluster]:
-    """Phase B: one PR per finding cluster (prefer separate PRs over grab-bags)."""
+    """Phase B: one PR per finding cluster (prefer separate PRs over grab-bags).
+
+    Tier 1 "fix" files (see ``filter_files_to_open_findings()``) are
+    grouped/chunked exactly as before. Tier 2 "companion" files
+    (``_tier == "companion"``) have no ``_finding_cluster`` of their own
+    -- each gets attached to an existing same-layer Tier 1 cluster
+    instead (see ``_attach_companions_to_clusters()``). A companion whose
+    layer matches no Tier 1 cluster anywhere in this batch is dropped --
+    this never opens a companion-only PR, which would violate Phase A's
+    "must clear a finding or claim a real score delta" gate.
+    """
+    tier1_files = [f for f in files if f.get("_tier") != "companion"]
+    companions = [f for f in files if f.get("_tier") == "companion"]
+
     by_key: dict[str, list[dict]] = {}
-    for f in files:
+    for f in tier1_files:
         key = str(f.get("_finding_cluster") or f.get("category") or "misc")
         by_key.setdefault(key, []).append(f)
 
@@ -314,7 +383,62 @@ def partition_by_finding_cluster(
                     branch_suffix=suffix,
                 )
             )
+
+    if companions and clusters:
+        _attach_companions_to_clusters(clusters, companions, max_files=max_files)
+
     return clusters
+
+
+def _attach_companions_to_clusters(
+    clusters: list[FindingCluster],
+    companions: list[dict],
+    *,
+    max_files: int,
+) -> None:
+    """Mutates ``clusters`` in place: appends each Tier 2 companion to a
+    same-layer Tier 1 cluster with room (below ``max_files``), spilling
+    into a new same-family chunk if every existing same-layer chunk is
+    already full. Never invents a new finding cluster from scratch --
+    only ever extends one that already exists, reusing its
+    ``target_findings`` (a companion never gets its own).
+    """
+    from agentit.portal.delivery import classify_file
+
+    # Each cluster is homogeneous by construction (grouped by
+    # _finding_cluster, and strip_wrong_layer_companions already keeps a
+    # cluster single-layer) -- one classify_file() call per cluster is enough.
+    cluster_layer = {
+        id(c): classify_file(c.files[0]) for c in clusters if c.files
+    }
+
+    by_layer: dict[str, list[dict]] = {}
+    for comp in companions:
+        by_layer.setdefault(comp.get("_companion_layer") or "", []).append(comp)
+
+    for layer, comps in by_layer.items():
+        if not layer:
+            continue
+        same_layer = [c for c in clusters if cluster_layer.get(id(c)) == layer]
+        if not same_layer:
+            continue
+        overflow_idx = 0
+        for comp in comps:
+            target = next((c for c in same_layer if len(c.files) < max_files), None)
+            if target is not None:
+                target.files.append(comp)
+                continue
+            overflow_idx += 1
+            base = same_layer[0]
+            overflow = FindingCluster(
+                key=f"{base.key}-also-included-{overflow_idx}",
+                files=[comp],
+                target_findings=base.target_findings,
+                branch_suffix=f"{base.branch_suffix}-more-{overflow_idx}",
+            )
+            clusters.append(overflow)
+            same_layer.append(overflow)
+            cluster_layer[id(overflow)] = layer
 
 
 def _iter_resource_docs(files: list[dict]):
@@ -336,7 +460,11 @@ def _iter_resource_docs(files: list[dict]):
                 yield path, doc
 
 
-def find_resource_collisions(files: list[dict]) -> list[str]:
+def find_resource_collisions(
+    files: list[dict],
+    *,
+    existing_files: list[dict] | None = None,
+) -> list[str]:
     """Refuse a batch that would create two resources with the same
     (apiVersion, kind, namespace, name) -- the exact class of bug that
     blocked ``managed-pinky``'s real Argo sync after merge (duplicate
@@ -345,13 +473,29 @@ def find_resource_collisions(files: list[dict]) -> list[str]:
     file/resource independently, and Argo's own "who owns this" conflict
     only ever surfaces after merge, not before a PR opens.
 
-    Deliberately batch-scoped only (not checked against what's already
-    committed under ``apps/{app}/**`` on the target repo) -- that would
-    need the same GitHub-REST tree_paths/read_file access the other
-    pre-open enrichments already use; a follow-up, not required to close
-    the within-batch class of this bug.
+    ``existing_files`` (optional, same ``{"path"/"target_path", "content"}``
+    shape as ``files``): manifests already committed on the target repo's
+    default branch -- the caller fetches these (GitHub REST tree_paths +
+    read_file, exactly the pattern the source-patch pre-enrich step
+    already uses) and passes them in so a *new* file colliding with
+    something already merged under ``apps/{app}/**`` (or ``chart/**`` for
+    self-managed) is caught too, closing this function's own previously-
+    documented follow-up. Omit it (default) to keep the original,
+    within-batch-only behavior -- every existing caller/test is
+    unaffected. Read-only: never validated or re-checked itself, only
+    used as a collision baseline.
     """
     seen: dict[tuple[str, str, str, str], str] = {}
+    for path, doc in _iter_resource_docs(existing_files or []):
+        kind = str(doc.get("kind") or "")
+        meta = doc.get("metadata") or {}
+        name = str(meta.get("name") or "")
+        if not kind or not name:
+            continue
+        namespace = str(meta.get("namespace") or "")
+        api_version = str(doc.get("apiVersion") or "")
+        seen[(api_version, kind, namespace, name)] = f"already committed at {path}"
+
     collisions: list[str] = []
     for path, doc in _iter_resource_docs(files):
         kind = str(doc.get("kind") or "")
@@ -444,7 +588,15 @@ def strip_wrong_layer_companions(
                 f"({', '.join(cats)}) — clears via app-repo patch, not gitops"
             )
             continue
-        if skill and allowed_skills and skill not in allowed_skills:
+        # Tier 2 companions (quality_prs.filter_files_to_open_findings) were
+        # already vetted for being safe to ride along without clearing any
+        # specific finding -- the "must be the exact clearing skill" bar
+        # below is a Tier 1 correctness property (this file's presence
+        # implies it clears cat), which a companion never claims. Skipping
+        # it here would otherwise re-drop every rescued companion the
+        # moment every target finding happens to clear via source.
+        is_companion = f.get("_tier") == "companion"
+        if not is_companion and skill and allowed_skills and skill not in allowed_skills:
             path = f.get("path") or f.get("target_path") or "?"
             drops.append(
                 f"{path}: skill '{skill}' is not the clearing skill "
@@ -467,7 +619,17 @@ def build_helpful_pr_body(
     shared_ns_note: str = "",
     llm_review: dict | None = None,
 ) -> str:
-    """Phase D: finding → change → expected outcome (reviewable from GitHub alone)."""
+    """Phase D: finding → change → expected outcome (reviewable from GitHub alone).
+
+    ``files`` may include Tier 2 "companion" entries (``_tier ==
+    "companion"``, see ``filter_files_to_open_findings()``) alongside the
+    Tier 1 files that actually clear ``target_findings`` -- rendered
+    under a separate "Also included" section so the PR never overstates
+    what a companion is claimed to do.
+    """
+    tier1_files = [f for f in files if f.get("_tier") != "companion"]
+    companion_files = [f for f in files if f.get("_tier") == "companion"]
+
     finding_lines = []
     for cat, desc in target_findings:
         finding_lines.append(f"- `{cat}` — {desc}")
@@ -493,7 +655,7 @@ def build_helpful_pr_body(
             )
 
     file_lines = []
-    for f in files:
+    for f in tier1_files:
         path = f.get("target_path") or f.get("path") or "?"
         why = f.get("description") or f.get("finding_addressed") or "addresses open finding"
         file_lines.append(f"- `{path}` — {why}")
@@ -520,6 +682,20 @@ def build_helpful_pr_body(
         *(file_lines or ["- _(none)_"]),
         "",
     ]
+    if companion_files:
+        companion_lines = []
+        for f in companion_files:
+            path = f.get("target_path") or f.get("path") or "?"
+            why = f.get("description") or f.get("finding_addressed") or "generated alongside this fix"
+            companion_lines.append(f"- `{path}` — {why}")
+        parts.extend([
+            "### Also included",
+            "Generated alongside the fix above but not required to clear any "
+            "of the targeted findings -- included for completeness, not "
+            "claimed to resolve anything on its own.",
+            *companion_lines,
+            "",
+        ])
     if shared_ns_note:
         parts.extend([
             "### Shared-namespace blast radius",
