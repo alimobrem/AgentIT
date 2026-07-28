@@ -489,6 +489,12 @@ async def register_gitops(request: Request, assessment_id: str):
     is supplied, mirroring `_auto_create_infra_repo`) rather than requiring
     a full re-assessment with the GitOps Infra Repo field filled in from
     scratch.
+
+    A human-supplied repo here goes through the exact same bring-your-own-
+    repo existence/access/create check `_resolve_mandatory_infra_repo_url()`
+    applies at Assess time (`github_pr.ensure_custom_gitops_repo()`) --
+    previously this route used a human-supplied URL completely unchecked,
+    the same gap that existed at Assess time before this feature.
     """
     s = await get_store()
     report = await s.get(assessment_id)
@@ -508,6 +514,26 @@ async def register_gitops(request: Request, assessment_id: str):
                 ),
                 status_code=303,
             )
+    else:
+        from agentit.portal.github_pr import ensure_custom_gitops_repo, is_trusted_git_host
+        if not is_trusted_git_host(infra_repo_url):
+            return RedirectResponse(
+                url=(
+                    f"/assessments/{assessment_id}?error="
+                    f"{quote(f'GitOps infra repo {infra_repo_url!r} is not on a trusted Git host.')}"
+                ),
+                status_code=303,
+            )
+        result = await asyncio.to_thread(ensure_custom_gitops_repo, infra_repo_url)
+        if "error" in result:
+            return RedirectResponse(
+                url=(
+                    f"/assessments/{assessment_id}?error="
+                    f"{quote('GitOps infra repo could not be used: ' + result['error'])}"
+                ),
+                status_code=303,
+            )
+        infra_repo_url = result["repo_url"]
 
     await s.set_infra_repo_url(assessment_id, infra_repo_url)
 

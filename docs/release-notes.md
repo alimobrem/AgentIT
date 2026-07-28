@@ -38,6 +38,23 @@ Decisions: [ADR 0001 — GitOps Scan HITL](./adr/0001-gitops-scan-hitl.md), [ADR
 
 Normative detail: [`architecture-agentit-vs-fleet-gitops.md`](./architecture-agentit-vs-fleet-gitops.md).
 
+### Bring-your-own GitOps repo
+
+An app's GitOps infra repo (where its Argo `Application`/manifests live — distinct from its own source-code repo) is now optional, not fixed to one shared default:
+
+| Human supplies… | AgentIT does |
+| --- | --- |
+| Nothing | Unchanged existing behavior: the shared default repo (`{token-account}/agentit-gitops`, auto-created/reused via `ensure_infra_repo()`) |
+| A repo that exists + AgentIT's token has push access | Used as-is, no creation (`github_pr.ensure_custom_gitops_repo()`) |
+| A repo that doesn't exist yet | Created **empty** (no README/starter scaffold — just `apps/{app}/` once the normal onboarding delivery populates it) in the **exact org/owner the URL specifies** — org-aware (`/orgs/{owner}/repos` for an org, `/user/repos` only when that owner *is* the authenticated token's own account; creating under a *different* user's personal account has no GitHub API and is refused, never silently redirected elsewhere) |
+| A repo that exists but the token lacks push access | Hard refusal (mirrors `InfraRepoRequiredError`) — never a silently created/substituted repo the human didn't ask for |
+
+Either way, Argo registration reuses `ensure_applicationset()`, fixed to be **additive**: the fleet-wide `agentit-managed-apps` ApplicationSet's `spec.generators` gets one `git` directory-generator entry per distinct infra repo currently in use (a normal, documented Argo CD pattern — top-level generators are unioned, not merged/matrixed), appended without ever removing another app's already-registered entry. The shared `spec.template.spec.source.repoURL` is a `{{values.repoURL}}` generator-values reference, not a hardcoded literal, so every generated `Application` still syncs from the repo that actually produced it regardless of how many repos are registered. `watchers/drift_detector.py`'s self-heal checks for the default repo's entry anywhere in that list (not just index 0) and heals it the same additive way.
+
+A brand-new, genuinely empty custom repo (zero commits) still works with `commit_to_infra_repo()`'s existing tree/commit/PR flow unmodified — `_get_default_branch_and_base_sha()` transparently bootstraps the default branch with one zero-parent, zero-file commit (the well-known empty-tree SHA) the first time it's needed.
+
+`tests/test_browser_critical.py`'s Register-for-GitOps Playwright journey now mocks `github_pr.ensure_custom_gitops_repo()` (same pattern as `test_ui_redesign.py`'s route-level coverage) instead of hitting the real GitHub API — the browser-critical CI job has no `GITHUB_TOKEN`, so the unmocked call was a guaranteed failure there even though the same journey passed locally against a real token.
+
 ### Solution contracts
 
 `SOLUTION_CONTRACTS` lands every analyzer category as remediable or detect-only:
@@ -53,6 +70,7 @@ Normative detail: [`architecture-agentit-vs-fleet-gitops.md`](./architecture-age
 | Chart-aware source patches | `workload-replicas`/`workload-health-probes` (like HPA before them) find the real Deployment/Rollout via GitHub-REST `read_file`/`tree_paths` and patch a Helm chart's `values.yaml` when `replicas:` is templated — never a fabricated, disconnected stand-in |
 | Manual Deliver = auto pipeline | `POST /assessments/{id}/deliver`'s real (non-dry-run) path calls `auto_validate_and_deliver()` directly — one quality bar every delivery entry point shares, not a hand-maintained subset that can drift |
 | Per-cluster validate/fix isolation | `auto_validate_and_deliver()` used to run one batch-wide validate→fix→retry pass (`validate_and_fix_manifests()`) over the whole undifferentiated cluster-config file set *before* partitioning into per-finding clusters — an unfixable, unrelated finding (e.g. "Autoscaling" with no candidate file at all) could silently discard an entirely unrelated, individually-valid file sharing the same batch (confirmed live on pulse-agent: an unrelated Autoscaling gap discarded `pulse-agent-argocd-application.yaml`, with no error or event anywhere). Partitioning now happens *before* any validate/fix work; the fix-retry loop runs per finding-cluster, scoped to that cluster's own findings via `target_findings=` — one cluster's failure can never affect a sibling's outcome. Every per-cluster refusal (wrong-layer-companion strip, fleet HPA gate, pre-enrich-empty, clear-evidence, validation) is now a real `store.log_event()`, not just a Python logger line |
+| Deterministic fields never LLM-invented | `SkillEngine.generate()` tries the LLM before the template fallback even for `mode: template` skills — for `argocd-application`, that let the LLM fabricate `repoURL` (e.g. `github.com/org/pulse-ui.git`) instead of the real repo. `_force_real_repo_url_for_application_output()` now overwrites `repoURL` on any generated `kind: Application` with the real `report.repo_url` after generation, regardless of which path produced it |
 | PR / portal honesty | Body: `Clears X by Y (evidence: …)`; Assessment Detail PR cards show contract lines |
 
 ### Checks vs resolutions

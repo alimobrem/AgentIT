@@ -576,6 +576,168 @@ def test_ensure_applicationset_returns_false_on_api_error(mock_kube):
     assert result is False
 
 
+# ── ensure_applicationset: bring-your-own-GitOps-repo additive fix ──────
+#
+# Previously this REPLACED spec.generators with one entry for whatever
+# infra_repo_url was passed most recently -- onboarding app A into a
+# different repo than app B silently orphaned Argo sync for B. Now it's
+# read-merge-write: a distinct infra_repo_url gets its own generator
+# entry APPENDED, never replacing what's already there. The shared
+# template's source.repoURL is also now a `{{values.repoURL}}` generator-
+# values reference rather than a hardcoded literal, so each generated
+# Application still resolves to the correct repo regardless of how many
+# generators are present.
+
+
+@patch("agentit.portal.github_pr.kube")
+def test_ensure_applicationset_second_distinct_repo_is_appended_not_replacing_first(mock_kube):
+    """The core landmine fix: onboarding a second app against a different
+    custom GitOps repo must not remove the first repo's generator entry."""
+    existing_appset = {
+        "metadata": {"name": "agentit-managed-apps"},
+        "spec": {
+            "generators": [
+                {"git": {
+                    "repoURL": "https://github.com/org/agentit-gitops",
+                    "revision": "HEAD",
+                    "directories": [{"path": "apps/*"}],
+                    "values": {"repoURL": "https://github.com/org/agentit-gitops"},
+                }},
+            ],
+            "template": {"spec": {"source": {"repoURL": "{{values.repoURL}}"}}},
+        },
+    }
+    mock_kube.get_custom_resource.return_value = existing_appset
+
+    result = ensure_applicationset("https://github.com/customorg/custom-gitops")
+
+    assert result is True
+    mock_kube.create_custom_resource.assert_not_called()
+    mock_kube.patch_custom_resource.assert_called_once()
+    args, _ = mock_kube.patch_custom_resource.call_args
+    generators = args[5]["spec"]["generators"]
+    repo_urls = {g["git"]["repoURL"] for g in generators}
+    assert repo_urls == {
+        "https://github.com/org/agentit-gitops",
+        "https://github.com/customorg/custom-gitops",
+    }
+    # The shared template must reference the generator's own values, never
+    # a hardcoded literal -- otherwise every generated Application would
+    # sync from whichever repo was passed most recently, regardless of
+    # which generator actually produced it.
+    assert args[5]["spec"]["template"]["spec"]["source"]["repoURL"] == "{{values.repoURL}}"
+
+
+@patch("agentit.portal.github_pr.kube")
+def test_ensure_applicationset_reregistering_same_repo_is_idempotent_noop(mock_kube):
+    """Calling this again for a repo already present must not duplicate
+    its generator entry."""
+    existing_appset = {
+        "metadata": {"name": "agentit-managed-apps"},
+        "spec": {
+            "generators": [
+                {"git": {
+                    "repoURL": "https://github.com/org/agentit-gitops",
+                    "values": {"repoURL": "https://github.com/org/agentit-gitops"},
+                }},
+            ],
+        },
+    }
+    mock_kube.get_custom_resource.return_value = existing_appset
+
+    result = ensure_applicationset("https://github.com/org/agentit-gitops")
+
+    assert result is True
+    args, _ = mock_kube.patch_custom_resource.call_args
+    generators = args[5]["spec"]["generators"]
+    assert len(generators) == 1
+    assert generators[0]["git"]["repoURL"] == "https://github.com/org/agentit-gitops"
+
+
+@patch("agentit.portal.github_pr.kube")
+def test_ensure_applicationset_heals_pre_fix_entry_missing_values_field(mock_kube):
+    """Live-cluster-caught regression: a generator entry created by the
+    OLD (pre-additive-fix) code has no `git.values.repoURL` at all. Once
+    the shared template reads `{{values.repoURL}}` instead of a hardcoded
+    literal, an entry left as-is (rather than normalized) would resolve
+    an empty/unset repoURL on its next Argo reconcile -- confirmed live:
+    `managed-pinky`'s Application briefly dropped to sync status
+    "Unknown" with a literal, unresolved `{{values.repoURL}}` in
+    `spec.source.repoURL` before this normalization was added. Every call
+    must re-sync an already-present entry to the current shape, not just
+    skip it as "already there"."""
+    pre_fix_appset = {
+        "metadata": {"name": "agentit-managed-apps"},
+        "spec": {
+            "generators": [
+                {"git": {
+                    "repoURL": "https://github.com/alimobrem/agentit-gitops",
+                    "revision": "HEAD",
+                    "directories": [
+                        {"path": "apps/*"},
+                        {"path": "apps/agentit", "exclude": True},
+                    ],
+                    # No `values` key -- the exact pre-fix shape.
+                }},
+            ],
+        },
+    }
+    mock_kube.get_custom_resource.return_value = pre_fix_appset
+
+    result = ensure_applicationset("https://github.com/alimobrem/agentit-gitops")
+
+    assert result is True
+    args, _ = mock_kube.patch_custom_resource.call_args
+    generators = args[5]["spec"]["generators"]
+    assert len(generators) == 1
+    assert generators[0]["git"]["values"] == {
+        "repoURL": "https://github.com/alimobrem/agentit-gitops",
+    }
+
+
+@patch("agentit.portal.github_pr.kube")
+def test_ensure_applicationset_new_generator_carries_own_values_repo_url(mock_kube):
+    """Each generator entry must set its own `git.values.repoURL` -- the
+    mechanism the shared `{{values.repoURL}}` template resolves through."""
+    mock_kube.get_custom_resource.return_value = None
+
+    ensure_applicationset("https://github.com/customorg/custom-gitops")
+
+    args, _ = mock_kube.create_custom_resource.call_args
+    generator = args[4]["spec"]["generators"][0]
+    assert generator["git"]["values"] == {"repoURL": "https://github.com/customorg/custom-gitops"}
+    assert args[4]["spec"]["template"]["spec"]["source"]["repoURL"] == "{{values.repoURL}}"
+
+
+@patch("agentit.portal.github_pr.kube")
+def test_ensure_applicationset_preserves_third_repo_when_adding_a_fourth(mock_kube):
+    """Three-repo scenario -- makes sure the merge logic scales past two
+    entries, not just a special-cased pair."""
+    existing_appset = {
+        "metadata": {"name": "agentit-managed-apps"},
+        "spec": {
+            "generators": [
+                {"git": {"repoURL": "https://github.com/org/agentit-gitops",
+                          "values": {"repoURL": "https://github.com/org/agentit-gitops"}}},
+                {"git": {"repoURL": "https://github.com/customorg1/custom-gitops",
+                          "values": {"repoURL": "https://github.com/customorg1/custom-gitops"}}},
+            ],
+        },
+    }
+    mock_kube.get_custom_resource.return_value = existing_appset
+
+    result = ensure_applicationset("https://github.com/customorg2/another-gitops")
+
+    assert result is True
+    args, _ = mock_kube.patch_custom_resource.call_args
+    repo_urls = {g["git"]["repoURL"] for g in args[5]["spec"]["generators"]}
+    assert repo_urls == {
+        "https://github.com/org/agentit-gitops",
+        "https://github.com/customorg1/custom-gitops",
+        "https://github.com/customorg2/another-gitops",
+    }
+
+
 # ── expected_managed_apps_repo_url ───────────────────────────────────────
 #
 # DriftDetector's ApplicationSet self-heal (2026-07-18) needs a real,

@@ -10,7 +10,7 @@ import pytest
 
 from agentit.check_engine import run_checks
 from agentit.models import Severity
-from agentit.platform_context import offline_context
+from agentit.platform_context import PlatformContext, offline_context
 from agentit.skill_engine import (
     Skill,
     SkillEngine,
@@ -1543,3 +1543,114 @@ class TestRunAssessmentPicksUpDetectModeSkills:
         assert synthetic is not None, "checks-only dimension vanished when its only check passed"
         assert synthetic.score == 100
         assert synthetic.findings == []
+
+
+_FABRICATED_ARGOCD_APPLICATION = """apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: pulse-ui
+  namespace: openshift-gitops
+spec:
+  project: default
+  source:
+    repoURL: "https://github.com/org/pulse-ui.git"
+    targetRevision: HEAD
+    path: chart/
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: pulse-ui
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+"""
+
+
+class TestArgoCDApplicationRepoURLNeverLLMInvented:
+    """Regression: confirmed live on pulse-ui -- the argocd-application skill
+    is `mode: template`, but generate() tries the LLM first whenever one is
+    configured (see its own docstring), and the LLM has no ground truth for
+    the real repo URL, so it fabricated `https://github.com/org/pulse-ui.git`
+    instead of the real `https://github.com/PulseSRE/pulse-ui`. That shape is
+    generic enough that verify_argocd_application()'s placeholder denylist
+    can't safely catch it (this codebase's own fixtures use the same
+    `github.com/org/...` shape for a legitimate repo URL), so the file was
+    silently never delivered.
+
+    repoURL is 100% deterministic (`report.repo_url`) -- generate() must
+    force it to the real value after generation, regardless of whether the
+    content came from the LLM or the template fallback.
+    """
+
+    @staticmethod
+    def _platform() -> PlatformContext:
+        """offline_context()'s common_kinds deliberately omits CRDs like Argo
+        CD's Application -- a live cluster with ArgoCD installed reports
+        "applications" via real API discovery instead. Mirror that here so
+        the platform-kind gate doesn't skip the skill before generation."""
+        ctx = offline_context()
+        ctx.available_kinds.add("applications")
+        return ctx
+
+    def _skill(self) -> Skill:
+        return Skill(
+            name="argocd-application",
+            domain="cicd",
+            version=1,
+            triggers=["gitops"],
+            outputs=["Application"],
+            property_description="Application is deployed via GitOps with auto-sync",
+            body="# no template block needed for this LLM-path test",
+            file_path="skills/cicd/argocd-application.md",
+            mode="template",
+        )
+
+    def test_llm_fabricated_repo_url_is_overridden_with_the_real_one(self, tmp_path: Path) -> None:
+        engine = SkillEngine(tmp_path, platform=self._platform())
+        skill = self._skill()
+        report = make_report(repo_name="pulse-ui", repo_url="https://github.com/PulseSRE/pulse-ui")
+        fake_llm = _FakeLLMClient(_FABRICATED_ARGOCD_APPLICATION)
+
+        files = engine.generate(skill, report, llm_client=fake_llm)
+
+        assert len(files) == 1
+        content = files[0].content
+        assert "https://github.com/PulseSRE/pulse-ui" in content
+        assert "github.com/org/pulse-ui" not in content
+
+    def test_template_fallback_path_is_unaffected_still_real(self, tmp_path: Path) -> None:
+        """No LLM available -- the deterministic template path already gets
+        this right; the override must be a no-op here (same real URL either
+        way), not break the existing correct behavior."""
+        skill = self._skill()
+        skill.body = (
+            "```yaml\napiVersion: argoproj.io/v1alpha1\nkind: Application\n"
+            "metadata:\n  name: {{app_name}}\nspec:\n  source:\n"
+            '    repoURL: "{{git_url}}"\n    path: chart/\n```\n'
+        )
+        engine = SkillEngine(tmp_path, platform=self._platform())
+        report = make_report(repo_name="pulse-ui", repo_url="https://github.com/PulseSRE/pulse-ui")
+
+        files = engine.generate(skill, report, llm_client=None)
+
+        assert len(files) == 1
+        assert "https://github.com/PulseSRE/pulse-ui" in files[0].content
+
+    def test_non_application_output_is_left_untouched(self, tmp_path: Path) -> None:
+        """The override must be scoped to `kind: Application` documents only
+        -- it must never touch unrelated LLM output for other skills."""
+        engine = SkillEngine(tmp_path, platform=offline_context())
+        skill = _make_skill("network-policy", outputs=["NetworkPolicy"])
+        report = make_report(repo_name="pulse-ui", repo_url="https://github.com/PulseSRE/pulse-ui")
+        manifest = (
+            "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\n"
+            "metadata:\n  name: pulse-ui-netpol\nspec:\n  podSelector: {}\n"
+            "  policyTypes:\n    - Ingress\n"
+        )
+        fake_llm = _FakeLLMClient(manifest)
+
+        files = engine.generate(skill, report, llm_client=fake_llm)
+
+        assert len(files) == 1
+        assert "NetworkPolicy" in files[0].content
+        assert "podSelector" in files[0].content

@@ -83,7 +83,8 @@ class InfraRepoRequiredError(Exception):
 def _resolve_mandatory_infra_repo_url(repo_url: str, human_supplied: str | None) -> str:
     """Resolve a real, usable GitOps infra repo URL for a brand-new
     assessment -- auto-created via ``_auto_create_infra_repo()`` when the
-    human didn't supply one, otherwise the human-supplied URL itself.
+    human didn't supply one, otherwise a human-supplied bring-your-own
+    GitOps repo, verified/created via ``github_pr.ensure_custom_gitops_repo()``.
     Either way the result is validated against the same trusted-git-host
     allowlist ``ensure_applicationset()`` enforces at first-delivery time
     (``github_pr.is_trusted_git_host()``), so an untrusted or unusable infra
@@ -93,7 +94,7 @@ def _resolve_mandatory_infra_repo_url(repo_url: str, human_supplied: str | None)
     Raises ``InfraRepoRequiredError`` (never returns ``None``/falls back to
     Direct Apply) on any failure -- all apps must be GitOps-registered now.
     """
-    from agentit.portal.github_pr import is_trusted_git_host
+    from agentit.portal.github_pr import ensure_custom_gitops_repo, is_trusted_git_host
 
     if human_supplied:
         if not is_trusted_git_host(human_supplied):
@@ -102,7 +103,16 @@ def _resolve_mandatory_infra_repo_url(repo_url: str, human_supplied: str | None)
                 "(set AGENTIT_TRUSTED_GIT_DOMAINS if it should be) -- Assess cannot "
                 "proceed without a usable GitOps infra repo."
             )
-        return human_supplied
+        # Bring-your-own-repo: real existence + write-access check, creating
+        # it (empty, in the exact org the URL specifies) only if missing or
+        # inaccessible -- never a silent no-op on an unusable custom repo.
+        # See `ensure_custom_gitops_repo()`'s docstring for the three cases.
+        result = ensure_custom_gitops_repo(human_supplied)
+        if "error" in result:
+            raise InfraRepoRequiredError(
+                f"GitOps infra repo '{human_supplied}' could not be used: {result['error']}"
+            )
+        return result["repo_url"]
 
     infra = _auto_create_infra_repo(repo_url)
     if infra is None:
@@ -153,7 +163,18 @@ def _assess_sync(
 
 
 def _auto_create_infra_repo(repo_url: str) -> str | None:
-    """Auto-create a GitOps infra repo based on the app repo owner."""
+    """Auto-create (or reuse) the shared default GitOps infra repo for the
+    "no repo supplied" path.
+
+    Passes ``repo_url``'s owner through to ``ensure_infra_repo()``, but
+    that owner is NOT actually where the repo ends up living in the common
+    case -- see ``ensure_infra_repo()``'s docstring: its first creation
+    attempt (``/user/repos``) always lands under the authenticated token's
+    own account, confirmed live to be the real, deliberate "one shared
+    infra repo per token account" behavior every app in this single-tenant
+    fleet already relies on today. Left unchanged; this docstring merely
+    stops implying "per owner" when it's really "per token account".
+    """
     try:
         from agentit.portal.github_pr import _parse_owner_repo, ensure_infra_repo
         owner, _ = _parse_owner_repo(repo_url)

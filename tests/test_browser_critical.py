@@ -234,7 +234,21 @@ class TestRegisterForGitOpsFeedback:
     async def test_register_gitops_shows_success_after_boost(self, page, critical_portal):
         url, aid, _store, _kube = critical_portal
 
+        # A human-supplied repo now goes through the bring-your-own-repo
+        # existence/access/create check (`github_pr.ensure_custom_gitops_repo()`,
+        # see `routes/assessments.py::register_gitops()`), which calls the real
+        # GitHub API and needs GITHUB_TOKEN -- neither of which this UI-feedback
+        # journey should depend on. Mocked the same way `test_ui_redesign.py`'s
+        # `test_register_gitops_route_sets_infra_repo_url_and_ensures_applicationset`
+        # already does for the non-browser route test.
         with patch("agentit.portal.github_pr.ensure_applicationset", return_value=True), \
+             patch(
+                 "agentit.portal.github_pr.ensure_custom_gitops_repo",
+                 return_value={
+                     "repo_url": "https://github.com/org/agentit-gitops",
+                     "created": False,
+                 },
+             ), \
              patch(
                  "agentit.portal.delivery.kube.get_custom_resource",
                  return_value=None,

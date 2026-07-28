@@ -213,7 +213,8 @@ class DriftDetector:
 
     async def _check_applicationset_drift(self) -> None:
         """Self-heal the fleet-wide `agentit-managed-apps` ApplicationSet's
-        git source repoURL if it's ever manually overwritten outside AgentIT.
+        DEFAULT-repo generator entry / template if it's ever manually
+        overwritten outside AgentIT.
 
         2026-07-18 incident (twice in one day): something entirely outside
         this repo's code ran `oc create`/`oc patch` directly against the
@@ -224,12 +225,25 @@ class DriftDetector:
         That broke GitOps rollout for the entire fleet both times until a
         human noticed and manually restored it.
 
-        Only ever CORRECTS a drifted value back to the known-good one
-        (`github_pr.expected_managed_apps_repo_url()`), applied via
-        `github_pr.ensure_applicationset()` -- the exact same function
-        onboarding already uses to write this spec, so there is one source
-        of truth for "what correct looks like", not a second copy of the
-        spec here. Never creates or deletes the object: that stays owned by
+        Bring-your-own-GitOps-repo update: `spec.generators` may now hold
+        MULTIPLE entries -- one per distinct custom repo a human supplied,
+        alongside the default's -- so this no longer assumes `generators[0]`
+        is "the" entry. Instead it checks whether ANY entry still targets
+        the known-good default repo URL
+        (`github_pr.expected_managed_apps_repo_url()`), and whether the
+        shared template's `source.repoURL` is still the
+        `github_pr.MANAGED_APPS_SOURCE_REPO_URL_TEMPLATE` placeholder every
+        generator's own `values.repoURL` resolves through (rather than a
+        literal, possibly-bogus URL). Either drifting triggers a heal.
+
+        Only ever CORRECTS the default entry/template back to known-good,
+        applied via `github_pr.ensure_applicationset()` -- the exact same,
+        now-additive function onboarding already uses to write this spec,
+        so there is one source of truth for "what correct looks like", not
+        a second copy of the spec here. Additive: healing the default entry
+        can never remove or replace any OTHER (custom-repo) generator entry
+        already present, by construction of `ensure_applicationset()`
+        itself. Never creates or deletes the object: that stays owned by
         onboarding's own `ensure_applicationset()` call
         (`routes/assessments.py`, `portal/delivery.py`) -- if the
         ApplicationSet doesn't exist yet, this is a no-op.
@@ -255,26 +269,34 @@ class DriftDetector:
             return
 
         spec = appset.get("spec", {}) or {}
-        generators = spec.get("generators") or [{}]
-        generator_url = (generators[0] or {}).get("git", {}).get("repoURL", "")
+        generators = spec.get("generators") or []
         source_url = spec.get("template", {}).get("spec", {}).get("source", {}).get("repoURL", "")
 
         expected_url = github_pr.expected_managed_apps_repo_url()
-        if generator_url == expected_url and source_url == expected_url:
+        default_generator_present = any(
+            (g.get("git") or {}).get("repoURL") == expected_url for g in generators
+        )
+        template_intact = source_url == github_pr.MANAGED_APPS_SOURCE_REPO_URL_TEMPLATE
+
+        if default_generator_present and template_intact:
             return
 
-        drifted_url = generator_url or source_url
         click.echo(
-            f"[drift-detect] DRIFT: {name} ApplicationSet repoURL is '{drifted_url}', "
-            f"expected '{expected_url}' -- healing",
+            f"[drift-detect] DRIFT: {name} ApplicationSet's default-repo generator "
+            f"(expected git.repoURL={expected_url!r}) is "
+            f"{'present' if default_generator_present else 'MISSING'}; template "
+            f"source.repoURL is {'intact' if template_intact else f'drifted (got {source_url!r})'} "
+            "-- healing",
             err=True,
         )
         healed = await asyncio.to_thread(github_pr.ensure_applicationset, expected_url)
         action = "applicationset-repo-drift-healed" if healed else "applicationset-repo-drift-heal-failed"
+        restored_note = "automatically restored (additive -- other repos' generator entries left untouched)"
+        failed_note = "heal attempt FAILED, needs manual fix"
         summary = (
-            f"{name} ApplicationSet's git source repoURL had drifted to '{drifted_url}' "
-            f"(expected '{expected_url}') -- "
-            f"{'automatically restored' if healed else 'heal attempt FAILED, needs manual fix'}."
+            f"{name} ApplicationSet's default-repo generator/template had drifted "
+            f"(generator_present={default_generator_present}, template_intact={template_intact}) -- "
+            f"{restored_note if healed else failed_note}."
         )
         self._publisher.publish(
             "agentit-events",
@@ -284,9 +306,9 @@ class DriftDetector:
             severity="critical",
             summary=summary,
             details={
-                "generator_repo_url": generator_url,
-                "source_repo_url": source_url,
                 "expected_repo_url": expected_url,
+                "generator_present": default_generator_present,
+                "template_intact": template_intact,
                 "healed": healed,
             },
         )

@@ -226,7 +226,7 @@
       </div>
       <div class="form-group">
         <label class="form-label" for="infra_repo_url">GitOps Infra Repo <span class="text-muted text-xs">(optional -- auto-created if blank)</span></label>
-        <input type="url" id="infra_repo_url" name="infra_repo_url" placeholder="https://github.com/org/gitops-infra">
+        <input type="url" id="infra_repo_url" name="infra_repo_url" placeholder="{{ default_infra_repo_url or 'https://github.com/org/gitops-infra' }}">
         <span class="text-muted text-xs">GitOps registration is required -- every change to this app goes through PR review and Argo CD sync; there is no direct-apply fallback. Leave blank and AgentIT will scaffold one for you; Assess fails with a clear error if neither works.</span>
       </div>
       <div class="form-group">

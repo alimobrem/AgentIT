@@ -382,13 +382,45 @@ _DRIFTED_APPLICATIONSET = {
     },
 }
 
+_TEMPLATE_PLACEHOLDER = "{{values.repoURL}}"
+
 _HEALTHY_APPLICATIONSET = {
     "metadata": {"name": "agentit-managed-apps", "namespace": "openshift-gitops"},
     "spec": {
-        "generators": [{"git": {"repoURL": _EXPECTED_MANAGED_APPS_REPO_URL, "revision": "HEAD"}}],
+        "generators": [{"git": {
+            "repoURL": _EXPECTED_MANAGED_APPS_REPO_URL, "revision": "HEAD",
+            "values": {"repoURL": _EXPECTED_MANAGED_APPS_REPO_URL},
+        }}],
         "template": {
-            "spec": {"source": {"repoURL": _EXPECTED_MANAGED_APPS_REPO_URL, "targetRevision": "HEAD"}},
+            "spec": {"source": {"repoURL": _TEMPLATE_PLACEHOLDER, "targetRevision": "HEAD"}},
         },
+    },
+}
+
+# Bring-your-own-GitOps-repo scenario: the default repo's generator entry
+# sits alongside a distinct custom repo's entry -- both must be inspected,
+# and healing must never touch the custom entry.
+_MULTI_REPO_HEALTHY_APPLICATIONSET = {
+    "metadata": {"name": "agentit-managed-apps", "namespace": "openshift-gitops"},
+    "spec": {
+        "generators": [
+            {"git": {"repoURL": "https://github.com/customorg/custom-gitops",
+                      "values": {"repoURL": "https://github.com/customorg/custom-gitops"}}},
+            {"git": {"repoURL": _EXPECTED_MANAGED_APPS_REPO_URL,
+                      "values": {"repoURL": _EXPECTED_MANAGED_APPS_REPO_URL}}},
+        ],
+        "template": {"spec": {"source": {"repoURL": _TEMPLATE_PLACEHOLDER}}},
+    },
+}
+
+_MULTI_REPO_DEFAULT_MISSING_APPLICATIONSET = {
+    "metadata": {"name": "agentit-managed-apps", "namespace": "openshift-gitops"},
+    "spec": {
+        "generators": [
+            {"git": {"repoURL": "https://github.com/customorg/custom-gitops",
+                      "values": {"repoURL": "https://github.com/customorg/custom-gitops"}}},
+        ],
+        "template": {"spec": {"source": {"repoURL": _TEMPLATE_PLACEHOLDER}}},
     },
 }
 
@@ -425,7 +457,7 @@ class TestApplicationSetDriftHeal:
         assert call.kwargs["severity"] == "critical"
         assert call.kwargs["target_app"] == "agentit-managed-apps"
         assert call.kwargs["details"]["expected_repo_url"] == _EXPECTED_MANAGED_APPS_REPO_URL
-        assert call.kwargs["details"]["generator_repo_url"] == "https://github.com/org/infra-gitops"
+        assert call.kwargs["details"]["generator_present"] is False
         assert call.kwargs["details"]["healed"] is True
 
     @patch("agentit.watchers.drift_detector.kube.list_custom_resources", return_value=None)
@@ -515,6 +547,53 @@ class TestApplicationSetDriftHeal:
         await detector.detect_once()
 
         mock_ensure.assert_called_once_with(_EXPECTED_MANAGED_APPS_REPO_URL)
+
+    @patch("agentit.watchers.drift_detector.kube.list_custom_resources", return_value=None)
+    @patch("agentit.portal.github_pr.ensure_applicationset")
+    @patch("agentit.watchers.drift_detector.kube.get_custom_resource")
+    async def test_multi_repo_default_present_alongside_custom_entry_no_heal(
+        self, mock_get, mock_ensure, mock_list,
+    ):
+        """Bring-your-own-GitOps-repo: a custom repo's generator entry
+        sitting alongside the default's, both healthy, must never trigger
+        a heal -- the multi-generator list itself is not drift."""
+        mock_get.return_value = _MULTI_REPO_HEALTHY_APPLICATIONSET
+        detector = _detector()
+
+        await detector.detect_once()
+
+        mock_ensure.assert_not_called()
+        publish_calls = [
+            c for c in detector._publisher.publish.call_args_list
+            if str(c.kwargs.get("action", "")).startswith("applicationset-repo-drift")
+        ]
+        assert publish_calls == []
+
+    @patch("agentit.watchers.drift_detector.kube.list_custom_resources", return_value=None)
+    @patch("agentit.portal.github_pr.ensure_applicationset", return_value=True)
+    @patch("agentit.watchers.drift_detector.kube.get_custom_resource")
+    async def test_multi_repo_default_missing_heals_additively_without_touching_custom_entry(
+        self, mock_get, mock_ensure, mock_list,
+    ):
+        """The default repo's own generator entry vanished (e.g. some
+        external actor replaced spec.generators outright) while a custom
+        repo's entry is still present. Must still heal -- and the heal
+        itself (`ensure_applicationset()`, tested directly in
+        test_portal_pr.py) is additive, so this never has to -- and must
+        never -- reconstruct or touch the custom entry itself here."""
+        mock_get.return_value = _MULTI_REPO_DEFAULT_MISSING_APPLICATIONSET
+        detector = _detector()
+
+        await detector.detect_once()
+
+        mock_ensure.assert_called_once_with(_EXPECTED_MANAGED_APPS_REPO_URL)
+        heal_calls = [
+            c for c in detector._publisher.publish.call_args_list
+            if c.kwargs.get("action") == "applicationset-repo-drift-healed"
+        ]
+        assert len(heal_calls) == 1
+        assert heal_calls[0].kwargs["details"]["generator_present"] is False
+        assert heal_calls[0].kwargs["details"]["template_intact"] is True
 
     @patch("agentit.watchers.drift_detector.kube.get_custom_resource", return_value=_DRIFTED_APPLICATIONSET)
     async def test_runs_independently_of_argo_applications_access(self, mock_get):
