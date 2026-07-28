@@ -1654,3 +1654,121 @@ class TestArgoCDApplicationRepoURLNeverLLMInvented:
         assert len(files) == 1
         assert "NetworkPolicy" in files[0].content
         assert "podSelector" in files[0].content
+
+
+_FABRICATED_TEKTON_PIPELINE_RUN = """apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: pulse-agent-pipeline-run-
+spec:
+  pipelineRef:
+    name: pulse-agent-pipeline
+  params:
+    - name: repo-url
+      value: "https://github.com/your-org/pulse-agent.git"
+    - name: image-ref
+      value: "quay.io/example/pulse-agent:latest"
+  workspaces:
+    - name: shared-workspace
+"""
+
+
+class TestTektonParamsNeverLLMInvented:
+    """Same class of bug as the Argo CD Application repoURL fix, same fix
+    pattern generalized: a Tekton Pipeline/PipelineRun's repo-url and
+    image-ref params are exactly as deterministic (report.repo_url,
+    get_image_ref(app_name)) as Application repoURL -- the LLM has no
+    ground truth for either and can only guess a plausible-looking value."""
+
+    @staticmethod
+    def _platform() -> PlatformContext:
+        """offline_context()'s common_kinds omits Tekton's Pipeline/
+        PipelineRun CRDs (not core K8s) -- a live cluster with OpenShift
+        Pipelines installed reports "pipelines"/"pipelineruns" via real
+        API discovery instead. Mirror that here so the platform-kind gate
+        doesn't skip the skill before generation."""
+        ctx = offline_context()
+        ctx.available_kinds.add("pipelines")
+        ctx.available_kinds.add("pipelineruns")
+        return ctx
+
+    def _skill(self) -> Skill:
+        return Skill(
+            name="tekton-pipeline",
+            domain="cicd",
+            version=1,
+            triggers=["pipeline"],
+            outputs=["Pipeline", "PipelineRun"],
+            property_description="Application has automated CI/CD pipeline",
+            body="# no template block needed for this LLM-path test",
+            file_path="skills/cicd/tekton-pipeline.md",
+            mode="llm",
+        )
+
+    def test_llm_fabricated_params_are_overridden_with_real_values(self, tmp_path: Path) -> None:
+        engine = SkillEngine(tmp_path, platform=self._platform())
+        skill = self._skill()
+        report = make_report(repo_name="pulse-agent", repo_url="https://github.com/PulseSRE/pulse-agent")
+        fake_llm = _FakeLLMClient(_FABRICATED_TEKTON_PIPELINE_RUN)
+
+        files = engine.generate(skill, report, llm_client=fake_llm)
+
+        assert len(files) == 1
+        content = files[0].content
+        assert 'value: "https://github.com/PulseSRE/pulse-agent"' in content
+        assert "your-org/pulse-agent" not in content
+        assert "quay.io/example/pulse-agent" not in content
+        # Real image_ref value actually got substituted, not just removed.
+        assert "image-registry.openshift-image-registry.svc" in content
+
+    def test_correct_llm_output_is_left_unchanged(self, tmp_path: Path) -> None:
+        """No warning-worthy rewrite should happen when the LLM already
+        got it right -- the override is idempotent, not just corrective."""
+        engine = SkillEngine(tmp_path, platform=self._platform())
+        skill = self._skill()
+        report = make_report(repo_name="pulse-agent", repo_url="https://github.com/PulseSRE/pulse-agent")
+        already_correct = _FABRICATED_TEKTON_PIPELINE_RUN.replace(
+            "https://github.com/your-org/pulse-agent.git",
+            "https://github.com/PulseSRE/pulse-agent",
+        )
+        fake_llm = _FakeLLMClient(already_correct)
+
+        files = engine.generate(skill, report, llm_client=fake_llm)
+
+        assert len(files) == 1
+        assert 'value: "https://github.com/PulseSRE/pulse-agent"' in files[0].content
+
+    def test_non_pipeline_output_is_left_untouched(self, tmp_path: Path) -> None:
+        """Must never touch an unrelated skill's params-shaped output."""
+        engine = SkillEngine(tmp_path, platform=offline_context())
+        skill = _make_skill("network-policy", outputs=["NetworkPolicy"])
+        report = make_report(repo_name="pulse-agent", repo_url="https://github.com/PulseSRE/pulse-agent")
+        manifest = (
+            "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\n"
+            "metadata:\n  name: x\nspec:\n  podSelector: {}\n  policyTypes:\n    - Ingress\n"
+        )
+        fake_llm = _FakeLLMClient(manifest)
+
+        files = engine.generate(skill, report, llm_client=fake_llm)
+
+        assert len(files) == 1
+        assert files[0].content == manifest
+
+    def test_unrecognized_param_names_are_left_untouched(self, tmp_path: Path) -> None:
+        """Only the specific, known-deterministic param names get
+        rewritten -- an unrelated param (e.g. a custom build arg) must
+        never be guessed at or clobbered."""
+        engine = SkillEngine(tmp_path, platform=self._platform())
+        skill = self._skill()
+        report = make_report(repo_name="pulse-agent", repo_url="https://github.com/PulseSRE/pulse-agent")
+        content = (
+            "apiVersion: tekton.dev/v1\nkind: PipelineRun\nmetadata:\n"
+            "  generateName: pulse-agent-pipeline-run-\nspec:\n  params:\n"
+            "    - name: build-flavor\n      value: \"release\"\n"
+        )
+        fake_llm = _FakeLLMClient(content)
+
+        files = engine.generate(skill, report, llm_client=fake_llm)
+
+        assert len(files) == 1
+        assert files[0].content == content

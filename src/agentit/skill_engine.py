@@ -172,6 +172,84 @@ def _force_real_repo_url_for_application_output(
     return fixed_files
 
 
+# Matches a Tekton `- name: <X>\n  value: <Y>` param entry -- the same
+# adjacent two-line shape tekton-pipeline.md's own template always uses,
+# and the shape its own "Key decisions" section instructs the LLM to
+# follow. Group 1 preserves the exact "<indent>- name: " prefix; group 2
+# is the param name (used to decide WHICH real value belongs here, never
+# rewritten itself); group 3 preserves the exact "\n<indent>value: "
+# transition; group 4 is the current value, replaced only when it
+# disagrees with the real one.
+_TEKTON_PARAM_RE = re.compile(
+    r'^([ \t]*-\s*name:\s*)["\']?([\w.-]+)["\']?(\s*\n[ \t]*value:\s*)["\']?([^"\'\n]*)["\']?',
+    re.MULTILINE,
+)
+# Normalized (hyphens/underscores stripped, lowercased) param-name ->
+# which _template_variables() key is the real, deterministic value for
+# it. Deliberately narrow: only names this codebase's own tekton-pipeline
+# skill declares (`repo-url`, `image-ref`) plus the handful of spellings
+# an LLM might plausibly reach for -- anything else is left untouched
+# rather than guessed at.
+_TEKTON_PARAM_REAL_VALUE_KEY = {
+    "repourl": "repo_url",
+    "giturl": "repo_url",
+    "gitrepourl": "repo_url",
+    "sourceurl": "repo_url",
+    "imageref": "image_ref",
+    "image": "image_ref",
+    "imagename": "image_ref",
+}
+
+
+def _force_real_tekton_params_for_pipeline_output(
+    files: list[GeneratedFile], report: AssessmentReport, app_name: str,
+) -> list[GeneratedFile]:
+    """A Tekton ``Pipeline``/``PipelineRun``'s ``repo-url``/``image-ref``
+    params are exactly as deterministic as an Argo ``Application``'s
+    ``repoURL`` (the same ``report.repo_url``/``get_image_ref(app_name)``
+    values ``_template_variables()`` already computes for the template
+    path) -- never a value an LLM should be trusted to invent. The LLM
+    path has no ground truth for either (confirmed by
+    ``_template_variables()``'s own docstring: neither is injected into
+    the LLM's prompt), so it can only guess a plausible-looking git URL
+    or image reference.
+
+    Same pattern as ``_force_real_repo_url_for_application_output()``,
+    generalized: rewrite any param whose *name* is a known real-value
+    key to the real value, regardless of what the LLM (or a stale
+    template render) produced, on any generated ``Pipeline``/
+    ``PipelineRun`` document.
+    """
+    from agentit.image_builder import get_image_ref
+
+    real_values = {"repo_url": (report.repo_url or "").strip(), "image_ref": get_image_ref(app_name)}
+    fixed_files: list[GeneratedFile] = []
+    for gen_file in files:
+        content = gen_file.content or ""
+        if not re.search(r"(?m)^\s*kind:\s*(Pipeline|PipelineRun)\s*$", content):
+            fixed_files.append(gen_file)
+            continue
+
+        def _replace(match: re.Match) -> str:
+            prefix, name, mid, current_value = match.group(1), match.group(2), match.group(3), match.group(4)
+            value_key = _TEKTON_PARAM_REAL_VALUE_KEY.get(re.sub(r"[-_]", "", name.strip().lower()))
+            real_value = real_values.get(value_key or "") if value_key else None
+            if not real_value or current_value == real_value:
+                return match.group(0)
+            logger.warning(
+                "Skill %s emitted Tekton param %s=%r for %s -- overriding with the "
+                "real value %r before delivery",
+                gen_file.skill_name, name, current_value, gen_file.path, real_value,
+            )
+            return f'{prefix}{name}{mid}"{real_value}"'
+
+        new_content = _TEKTON_PARAM_RE.sub(_replace, content)
+        if new_content != content:
+            gen_file = gen_file.model_copy(update={"content": new_content})
+        fixed_files.append(gen_file)
+    return fixed_files
+
+
 @dataclass
 class Skill:
     """A single skill definition loaded from a Markdown file with YAML frontmatter.
@@ -657,7 +735,8 @@ class SkillEngine:
                 prior_reject_reasons=prior_reject_reasons,
             )
             if llm_result:
-                return _force_real_repo_url_for_application_output(llm_result, report)
+                llm_result = _force_real_repo_url_for_application_output(llm_result, report)
+                return _force_real_tekton_params_for_pipeline_output(llm_result, report, app_name)
             logger.debug("LLM generation failed for %s — falling back to template", skill.name)
 
         # Fall back to template rendering
@@ -684,13 +763,14 @@ class SkillEngine:
                         skill.name,
                     )
                     return []
-                return _force_real_repo_url_for_application_output([GeneratedFile(
+                rendered_files = _force_real_repo_url_for_application_output([GeneratedFile(
                     path=f"{app_name}-{skill.name}.yaml",
                     content=rendered,
                     description=f"Generated by skill {skill.name}",
                     finding_addressed=skill.property_description,
                     skill_name=skill.name,
                 )], report)
+                return _force_real_tekton_params_for_pipeline_output(rendered_files, report, app_name)
 
         return []
 

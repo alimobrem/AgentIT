@@ -29,6 +29,7 @@ from agentit.models import DimensionScore, Finding, Severity
 from agentit.portal.auto_delivery import (
     MAX_VALIDATION_ITERATIONS,
     _fetch_existing_infra_tree_files,
+    _record_llm_review_concerns_for_skills,
     auto_validate_and_deliver,
     notify_pr_ready,
     review_final_manifests,
@@ -242,6 +243,83 @@ class TestReviewFinalManifests:
 
         result = await review_final_manifests(_FakeLLM(), [_configmap_file()], report)
         assert result == {"approved": False, "confidence": 0.4, "reason": "looks incomplete", "concerns": ["x"]}
+
+
+class TestRecordLLMReviewConcernsForSkills:
+    """Closes the loop review_final_manifests() itself used to be a dead
+    end for: a flagged concern must feed back into the same
+    skill_effectiveness cooldown accounting a clear-evidence rejection
+    already uses, not just sit as inert PR-body text."""
+
+    async def test_flagged_review_records_rejected_outcome_for_each_skill(self):
+        store = await make_store()
+        files = [
+            {"path": "a.yaml", "skill_name": "image-scan-task"},
+            {"path": "b.yaml", "skill_name": "cosign-sign-task"},
+        ]
+        review = {
+            "approved": False,
+            "reason": "Two Tekton Task manifests are visibly truncated mid-content",
+            "concerns": ["image-scan-task 'report' step truncated"],
+        }
+
+        await _record_llm_review_concerns_for_skills(store, "pulse-agent", files, review)
+
+        for skill in ("image-scan-task", "cosign-sign-task"):
+            stats = await store.get_skill_effectiveness(skill_name=skill, min_count=1)
+            assert stats[skill]["total"] == 1
+            assert stats[skill]["rejected"] == 1
+            assert stats[skill].get("approved", 0) == 0
+
+    async def test_reason_is_prefixed_so_it_reads_distinctly_from_clear_evidence(self):
+        store = await make_store()
+        files = [{"path": "a.yaml", "skill_name": "dockerfile-pin-only-test"}]
+        review = {"approved": False, "reason": "mutable tag used instead of a digest"}
+
+        await _record_llm_review_concerns_for_skills(store, "pulse-agent", files, review)
+
+        count = await store.count_skill_rejects_with_prefix(
+            "pulse-agent", "dockerfile-pin-only-test", "llm-review",
+        )
+        assert count == 1
+
+    async def test_participates_in_the_same_cooldown_accounting_as_clear_evidence(self):
+        """The whole point: repeated LLM-flagged concerns for the same
+        skill must count toward the exact cooldown mechanism a repeated
+        clear-evidence rejection already uses -- confirmed by using
+        count_skill_rejects_with_prefix() directly, the same query
+        skill_engine.py's cooldown gate itself calls."""
+        store = await make_store()
+        files = [{"path": "a.yaml", "skill_name": "flaky-skill-test"}]
+        review = {"approved": False, "reason": "same real problem every time"}
+
+        for _ in range(3):
+            await _record_llm_review_concerns_for_skills(store, "pulse-agent", files, review)
+
+        count = await store.count_skill_rejects_with_prefix(
+            "pulse-agent", "flaky-skill-test", "llm-review",
+        )
+        assert count == 3
+
+    async def test_no_files_with_a_skill_name_is_a_no_op(self):
+        store = await make_store()
+        files = [{"path": "code-changes-summary.md"}]
+        review = {"approved": False, "reason": "x"}
+
+        # Must not raise even though no skill_name is present anywhere.
+        await _record_llm_review_concerns_for_skills(store, "pulse-agent", files, review)
+
+    async def test_store_failure_degrades_gracefully_never_raises(self):
+        from unittest.mock import AsyncMock
+
+        bad_store = AsyncMock()
+        bad_store.record_skill_outcome.side_effect = RuntimeError("db down")
+        files = [{"path": "a.yaml", "skill_name": "some-skill"}]
+        review = {"approved": False, "reason": "x"}
+
+        # Must not propagate -- an LLM-review bookkeeping failure can
+        # never be allowed to break the actual delivery pipeline.
+        await _record_llm_review_concerns_for_skills(bad_store, "pulse-agent", files, review)
 
 
 class TestNotifyPrReady:
