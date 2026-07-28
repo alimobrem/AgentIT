@@ -1,4 +1,4 @@
-FROM registry.access.redhat.com/ubi9/python-312@sha256:89ef0dda6192195677f9da2d4a26b454607fb2d6788cef679c31ce9419f119ac
+FROM registry.access.redhat.com/ubi9/python-312@sha256:ebd0347a0422ad0d24db801972b4c1efa6f3352e5c2553b034e6b70e91235854
 
 USER 0
 # Optional oc/kubectl binaries for break-glass / live e2e from a pod shell.
