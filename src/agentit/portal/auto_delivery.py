@@ -157,6 +157,52 @@ def _merge_fix_files(current_files: list[dict], new_files: list[dict]) -> list[d
     return merged
 
 
+async def _fetch_existing_infra_tree_files(
+    report: AssessmentReport | None, app_name: str, *, self_managed: bool,
+) -> list[dict]:
+    """Real content of every manifest already committed under this app's
+    own subtree on the infra/GitOps repo's default branch -- fleet apps
+    land at ``apps/{app_name}/**`` (``github_pr.commit_to_infra_repo()``'s
+    own convention); self-managed AgentIT has no infra repo at all (its
+    cluster-config PRs land on ``AgentIT.git`` itself, not a separate
+    infra repo), so this always returns ``[]`` for that case.
+
+    Exists so ``find_resource_collisions()`` can catch a new file
+    colliding with something already merged, not just collisions within
+    the current batch -- closing that function's own previously-
+    documented follow-up. Best-effort: any GitHub API failure here must
+    never block a delivery that would otherwise be fine, so this returns
+    ``[]`` (falls back to the original within-batch-only check) rather
+    than raising.
+    """
+    if self_managed or report is None or not getattr(report, "infra_repo_url", None):
+        return []
+    try:
+        from agentit.portal import github_pr as ghp
+        from agentit.portal.delivery import _sanitize_app_name
+
+        token = ghp._get_token()
+        hdrs = ghp._headers(token)
+        owner, repo = ghp._parse_owner_repo(report.infra_repo_url)
+        base_url = f"{ghp._API}/repos/{owner}/{repo}"
+        default_branch, base_sha = ghp._get_default_branch_and_base_sha(base_url, hdrs)
+        tree_paths = ghp._list_tree_paths(base_url, hdrs, base_sha)
+        prefix = f"apps/{_sanitize_app_name(app_name)}/"
+        app_paths = [p for p in (tree_paths or []) if p.startswith(prefix)]
+        existing: list[dict] = []
+        for path in app_paths:
+            content = ghp._get_file_content_at_ref(base_url, hdrs, path, default_branch)
+            if content:
+                existing.append({"path": path, "content": content})
+        return existing
+    except Exception:
+        logger.info(
+            "Existing-infra-tree fetch skipped for %s (collision check stays within-batch)",
+            app_name, exc_info=True,
+        )
+        return []
+
+
 async def _dry_run_check(
     files: list[dict], *, app_name: str, namespace: str, report: AssessmentReport | None,
     store: object, assessment_id: str, actor: str,
@@ -382,6 +428,52 @@ async def review_final_manifests(llm_client: object | None, files: list[dict], r
     return llm_client.review_final_manifests(files, app_summary)
 
 
+async def _record_llm_review_concerns_for_skills(
+    store: object, app_name: str, files: list[dict], review: dict,
+) -> None:
+    """Closes the loop ``review_final_manifests()``'s own docstring
+    calls out as still missing: a flagged concern used to only ever
+    become inert PR-body text (``build_helpful_pr_body()``'s "LLM review
+    concerns" section) -- nothing about it ever fed back into whether
+    AgentIT should keep trusting the skill(s) that produced the flagged
+    content. Records a real ``skill_effectiveness`` row (``outcome=
+    "rejected"``, ``reason`` prefixed ``"llm-review: "`` so it reads
+    distinctly from a clear-evidence rejection in Decisions/cooldown
+    while still participating in the exact same
+    ``count_skill_rejects_with_prefix()`` cooldown accounting) for every
+    skill that contributed a file to this batch -- so a skill repeatedly
+    flagged for the same real problem (truncation, a mutable/placeholder
+    tag, ...) eventually cools down like any other repeat offender,
+    instead of the signal going nowhere every single cycle.
+
+    Deliberately batch-level attribution (every skill in ``files``, not
+    a per-concern-per-file mapping) -- ``review``'s ``concerns`` are free
+    text with no structured file/skill linkage to attribute more
+    precisely, and the existing clear-evidence rejection path this
+    mirrors (see ``auto_validate_and_deliver()``'s per-cluster loop) has
+    the exact same batch-level granularity today, not a regression this
+    introduces.
+    """
+    skill_names = sorted({
+        str(f.get("skill_name") or "").strip()
+        for f in files
+        if str(f.get("skill_name") or "").strip()
+    })
+    if not skill_names:
+        return
+    reason = f"llm-review: {(review.get('reason') or 'concerns flagged').strip()}"
+    try:
+        from agentit.skill_engine import record_skill_outcomes_for_findings
+
+        await record_skill_outcomes_for_findings(
+            store, app_name, [], "rejected", reason, skill_names=skill_names,
+        )
+    except Exception:
+        logger.warning(
+            "Failed to record LLM-review-concern skill outcomes for %s", app_name, exc_info=True,
+        )
+
+
 async def notify_pr_ready(
     store: object, app_name: str, assessment_id: str, delivery: dict, review: dict | None,
 ) -> list[str]:
@@ -544,7 +636,12 @@ async def auto_validate_and_deliver(
     kept_files, layer_drops = strip_wrong_layer_companions(kept_files, resolved_findings)
     if layer_drops:
         drop_reasons = list(drop_reasons or []) + layer_drops
-    if not kept_files:
+    # kept_files may now be Tier 2 "companion" only (see
+    # filter_files_to_open_findings()) -- a companion never justifies a PR
+    # on its own (nothing here claims to clear a finding), so this must be
+    # treated the same as an empty batch, not silently produce zero
+    # clusters with no recorded reason further down.
+    if not any(f.get("_tier") != "companion" for f in kept_files):
         reason = (
             "No generated files map to open findings — refusing PR. "
             + ("; ".join(drop_reasons[:5]) if drop_reasons else "empty after finding filter")
@@ -565,6 +662,7 @@ async def auto_validate_and_deliver(
     review = await review_final_manifests(llm_client, kept_files, report)
     if review is not None and not review.get("approved", True):
         logger.info("Final LLM review flagged concerns for %s: %s", app_name, review.get("reason"))
+        await _record_llm_review_concerns_for_skills(store, app_name, kept_files, review)
 
     # Phase B: one PR per finding cluster (fleet + self-managed parity — Phase F).
     clusters = partition_by_finding_cluster(kept_files, resolved_findings)
@@ -841,7 +939,12 @@ async def auto_validate_and_deliver(
                     "auto-delivery-cluster-empty-after-skip",
                 )
                 continue
-            collisions = find_resource_collisions(cluster_files)
+            existing_infra_files = await _fetch_existing_infra_tree_files(
+                report, app_name, self_managed=self_managed,
+            )
+            collisions = find_resource_collisions(
+                cluster_files, existing_files=existing_infra_files,
+            )
             if collisions:
                 await _refuse_cluster(
                     "Resource collision: " + "; ".join(collisions[:5]),

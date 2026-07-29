@@ -21,6 +21,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _LATEST_TAG_RE = re.compile(r"(FROM\s+\S+):latest(\b)", re.IGNORECASE | re.MULTILINE)
+# Same match as _LATEST_TAG_RE, but with "FROM " and the image name in
+# separate groups -- pin_dockerfile_with_real_digests() needs the bare
+# image name on its own to resolve each distinct image's own digest.
+_FROM_LATEST_SPLIT_RE = re.compile(r"(FROM\s+)(\S+):latest(\b)", re.IGNORECASE | re.MULTILINE)
 _FROM_LINE_RE = re.compile(r"^\s*FROM\s+\S+", re.IGNORECASE | re.MULTILINE)
 _USER_LINE_RE = re.compile(r"^\s*USER\s+", re.IGNORECASE | re.MULTILINE)
 _HEALTHCHECK_LINE_RE = re.compile(r"^\s*HEALTHCHECK\s+", re.IGNORECASE | re.MULTILINE)
@@ -64,6 +68,12 @@ def pin_dockerfile_from_lines(content: str, *, floating_tag: str = "1") -> str:
     more reproducible than ``:latest`` without a live registry digest
     lookup. When ``floating_tag`` is a ``sha256:…`` digest, rewrite
     ``:latest`` FROM lines to ``image@sha256:…``.
+
+    Deliberately network-free -- ``is_destructive_dockerfile_rewrite()``
+    calls this directly as a fast, deterministic baseline it must never
+    block on a live registry for. ``pin_dockerfile_with_real_digests()``
+    below is the network-attempting version real delivery paths should
+    prefer.
     """
     tag = (floating_tag or "1").lstrip(":")
     if tag.startswith("sha256:"):
@@ -74,6 +84,36 @@ def pin_dockerfile_from_lines(content: str, *, floating_tag: str = "1") -> str:
             flags=re.IGNORECASE | re.MULTILINE,
         )
     return _LATEST_TAG_RE.sub(rf"\1:{tag}\2", content)
+
+
+def pin_dockerfile_with_real_digests(content: str) -> str:
+    """Pin every ``:latest`` FROM line to ITS OWN real, current digest --
+    resolved independently per distinct base image, unlike a single
+    shared tag/digest applied uniformly (a multi-stage build's
+    ``FROM node:latest AS build`` / ``FROM nginx:latest`` need two
+    different real digests, never the same one).
+
+    Falls back to the existing floating ``:1`` tag, per line, whenever a
+    real digest can't be resolved for that specific image (unreachable
+    registry, private/rate-limited repo, ...) -- never blocks delivery
+    or fabricates a digest. This is the real-hardening upgrade to the
+    ``:1``-only default confirmed live (2026-07-28, pulse-agent /
+    pulse-ui) to satisfy AgentIT's own "no literal :latest" check without
+    providing real image immutability.
+    """
+    from agentit.remediation.registry_client import resolve_image_digest
+
+    digest_cache: dict[str, str | None] = {}
+
+    def _pin_one(match: re.Match) -> str:
+        prefix, image, boundary = match.group(1), match.group(2), match.group(3)
+        if image not in digest_cache:
+            digest_cache[image] = resolve_image_digest(f"{image}:latest")
+        digest = digest_cache[image]
+        pin = f"@{digest}" if digest else ":1"
+        return f"{prefix}{image}{pin}{boundary}"
+
+    return _FROM_LATEST_SPLIT_RE.sub(_pin_one, content)
 
 
 def _pin_latest_in_dockerfile(content: str) -> str:
@@ -117,7 +157,7 @@ def harden_dockerfile_content(
                     if not lines[idx].endswith("\n"):
                         lines[idx] += "\n"
                     body = "".join(lines)
-    body = pin_dockerfile_from_lines(body)
+    body = pin_dockerfile_with_real_digests(body)
     if add_user and not _USER_LINE_RE.search(body):
         body = body.rstrip("\n") + "\nUSER 1001\n"
     if add_healthcheck and not _HEALTHCHECK_LINE_RE.search(body):

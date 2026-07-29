@@ -112,7 +112,12 @@ class TestFindingGatePhaseA:
         assert ("network", "missing network") in keys
 
     def test_filter_drops_unrelated_templates_124_class(self):
-        """#124-class: many unrelated files + few findings → keep only linked ones."""
+        """#124-class: many unrelated files + few findings -> the ONE file
+        tied to the finding is Tier 1; the other two -- generated same-layer
+        content that doesn't clear anything itself -- ride along as Tier 2
+        "companions" instead of being thrown away outright (coverage fix,
+        2026-07-28: real fleet output like this was being silently dropped
+        on every app). Nothing here is ever claimed to clear `rbac`."""
         findings = [("rbac", "missing rbac")]
         files = [
             _rbac_file(),
@@ -126,9 +131,13 @@ class TestFindingGatePhaseA:
             },
         ]
         kept, drops = filter_files_to_open_findings(files, findings)
-        assert len(kept) == 1
-        assert kept[0]["path"] == "rbac.yaml"
-        assert len(drops) == 2
+        assert drops == []
+        tier1 = [f for f in kept if f.get("_tier") != "companion"]
+        companions = [f for f in kept if f.get("_tier") == "companion"]
+        assert len(tier1) == 1
+        assert tier1[0]["path"] == "rbac.yaml"
+        assert {f["path"] for f in companions} == {"otel.yaml", "kyverno.yaml"}
+        assert all(c["_companion_layer"] == "cluster_config" for c in companions)
 
     def test_filter_keeps_via_skill_registry_bridge(self):
         findings = [("network", "missing network policy")]
@@ -167,6 +176,157 @@ class TestClusterPhaseB:
         assert len(clusters) == 2
         assert len(clusters[0].files) == MAX_FILES_PER_CLUSTER_PR
         assert len(clusters[1].files) == 2
+
+
+class TestTier2CompanionCoverage:
+    """Coverage fix (2026-07-28): real generated content that doesn't map
+    to a tracked finding rides along as a labeled Tier 2 "companion"
+    instead of being silently thrown away -- confirmed live that a
+    meaningful fraction of real fleet output (extra Dockerfiles,
+    otel_setup.py, …) was dropped this way on every app."""
+
+    def test_narrative_report_never_becomes_a_companion(self):
+        """code-changes-summary.md is documentation about changes, not a
+        change -- never eligible as a companion, exactly like it's never
+        eligible for any real delivery mechanism (delivery.py's
+        preview_delivery_groups() excludes it the same way)."""
+        findings = [("rbac", "missing rbac")]
+        files = [
+            _rbac_file(),
+            {
+                "category": "codechange", "path": "code-changes-summary.md",
+                "content": "# Summary\nChanged things.\n",
+                "description": "narrative summary", "skill_name": "",
+            },
+        ]
+        kept, drops = filter_files_to_open_findings(files, findings)
+        assert len(kept) == 1
+        assert kept[0]["path"] == "rbac.yaml"
+        assert any("code-changes-summary.md" in d for d in drops)
+
+    def test_secret_content_never_becomes_a_companion(self):
+        findings = [("rbac", "missing rbac")]
+        files = [
+            _rbac_file(),
+            {
+                "category": "skills", "path": "leaked-secret.yaml",
+                "content": "apiVersion: v1\nkind: Secret\nmetadata:\n  name: x\ndata:\n  key: dmFsdWU=\n",
+                "description": "oops", "skill_name": "some-skill",
+            },
+        ]
+        kept, drops = filter_files_to_open_findings(files, findings)
+        assert len(kept) == 1
+        assert kept[0]["path"] == "rbac.yaml"
+        assert any("leaked-secret.yaml" in d for d in drops)
+
+    def test_explicitly_refused_companion_is_never_rescued(self):
+        """Regression, caught by the full suite (test_image_signing.py):
+        "image_signing"'s contract explicitly denylists "image-scan-task"
+        in refuse_companions -- a real, deliberate safety rule (scanning
+        and signing are different security concerns, never bundle one
+        into the other's PR), not an incidental "doesn't match" case.
+        Both files here are the SAME delivery layer (cluster_config), so
+        only the explicit refuse_companions check -- not a wrong-layer
+        check -- can be what keeps this file from being rescued."""
+        findings = [("image_signing", "No cosign/Sigstore image signing detected")]
+        files = [
+            {
+                "category": "skills", "path": "pinky-cosign-sign-task.yaml",
+                "content": (
+                    "apiVersion: tekton.dev/v1\nkind: Task\n"
+                    "spec:\n  steps:\n  - script: cosign sign --yes img\n"
+                ),
+                "skill_name": "cosign-sign-task",
+            },
+            {
+                "category": "skills", "path": "pinky-image-scan-task.yaml",
+                "content": "apiVersion: tekton.dev/v1\nkind: Task\n",
+                "skill_name": "image-scan-task",
+            },
+        ]
+        kept, drops = filter_files_to_open_findings(files, findings)
+        assert len(kept) == 1
+        assert kept[0]["skill_name"] == "cosign-sign-task"
+        assert len(drops) == 1
+        assert not any(f.get("_tier") == "companion" for f in kept)
+
+    def test_companion_attaches_to_same_layer_tier1_cluster(self):
+        findings = [("rbac", "missing rbac")]
+        companion = {
+            "category": "skills", "path": "otel.yaml",
+            "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: otel\n",
+            "description": "otel", "skill_name": "otel-collector",
+        }
+        kept, _drops = filter_files_to_open_findings([_rbac_file(), companion], findings)
+        clusters = partition_by_finding_cluster(kept, findings)
+        assert len(clusters) == 1
+        paths = {f["path"] for f in clusters[0].files}
+        assert paths == {"rbac.yaml", "otel.yaml"}
+
+    def test_companion_with_no_same_layer_cluster_is_dropped_not_orphaned(self):
+        """A source-layer companion when every Tier 1 cluster in the batch
+        is cluster-layer has nowhere safe to ride -- it must not become its
+        own standalone PR (that would violate Phase A's finding gate)."""
+        findings = [("rbac", "missing rbac")]
+        source_companion = {
+            "category": "codechange", "path": "helper.py", "target_path": "helper.py",
+            "content": "def helper(): ...\n", "description": "unrelated helper",
+            "skill_name": "some-other-skill",
+        }
+        kept, _drops = filter_files_to_open_findings([_rbac_file(), source_companion], findings)
+        clusters = partition_by_finding_cluster(kept, findings)
+        assert len(clusters) == 1
+        assert [f["path"] for f in clusters[0].files] == ["rbac.yaml"]
+
+    def test_companion_overflow_spills_into_a_new_chunk(self):
+        """A Tier 1 cluster already at MAX_FILES_PER_CLUSTER_PR must not
+        silently grow past the reviewable cap -- extra companions spill
+        into a new, same-family chunk instead."""
+        findings = [("rbac", "missing rbac")]
+        tier1 = [
+            {**_rbac_file(path=f"rbac-{i}.yaml"), "_finding_cluster": "rbac"}
+            for i in range(MAX_FILES_PER_CLUSTER_PR)
+        ]
+        companions = [
+            {
+                "path": f"companion-{i}.yaml", "content": "kind: ConfigMap\n",
+                "_tier": "companion", "_companion_layer": "cluster_config",
+            }
+            for i in range(2)
+        ]
+        clusters = partition_by_finding_cluster(tier1 + companions, findings)
+        assert len(clusters) == 2
+        assert len(clusters[0].files) == MAX_FILES_PER_CLUSTER_PR
+        assert len(clusters[1].files) == 2
+        assert clusters[1].target_findings == clusters[0].target_findings
+
+    def test_pr_body_renders_also_included_section_for_companions(self):
+        body = build_helpful_pr_body(
+            title_line="AgentIT Scan: rbac for pinky",
+            target_findings=[("rbac", "missing rbac")],
+            files=[
+                _rbac_file(),
+                {
+                    "path": "otel.yaml", "description": "generated alongside",
+                    "_tier": "companion",
+                },
+            ],
+        )
+        assert "### Also included" in body
+        assert "`otel.yaml`" in body
+        assert "not claimed to resolve anything on its own" in body
+        # The Tier 1 "Files" section must list only the real fix, never the companion.
+        files_section = body.split("### Files")[1].split("### Also included")[0]
+        assert "rbac.yaml" in files_section
+        assert "otel.yaml" not in files_section
+
+    def test_pr_body_omits_also_included_section_when_no_companions(self):
+        body = build_helpful_pr_body(
+            title_line="AgentIT Scan: rbac for pinky",
+            target_findings=[("rbac", "missing rbac")],
+            files=[_rbac_file()],
+        )
+        assert "### Also included" not in body
 
 
 class TestResourceCollisions:
@@ -227,6 +387,44 @@ class TestResourceCollisions:
         ]
         assert find_resource_collisions(files) == []
 
+    def test_collision_against_already_committed_resource(self) -> None:
+        """Closes this function's own previously-documented follow-up: a
+        NEW file must be caught colliding with something already merged
+        on the target repo, not just with another file in this same
+        batch."""
+        new_files = [
+            {"target_path": "a.yaml", "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: pinky\n"},
+        ]
+        existing_files = [
+            {"path": "apps/pinky/skills/pinky-config.yaml",
+             "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: pinky\n"},
+        ]
+        collisions = find_resource_collisions(new_files, existing_files=existing_files)
+        assert len(collisions) == 1
+        assert "ConfigMap/pinky" in collisions[0]
+        assert "already committed" in collisions[0]
+
+    def test_no_collision_against_distinct_already_committed_resources(self) -> None:
+        new_files = [
+            {"target_path": "a.yaml", "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: pinky\n"},
+        ]
+        existing_files = [
+            {"path": "apps/pinky/skills/other.yaml",
+             "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: pinky-other\n"},
+        ]
+        assert find_resource_collisions(new_files, existing_files=existing_files) == []
+
+    def test_existing_files_omitted_keeps_original_within_batch_only_behavior(self) -> None:
+        """Every existing caller/test that never passes existing_files
+        must see identical behavior to before this parameter existed."""
+        files = [
+            {"target_path": "a.yaml", "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n"},
+            {"target_path": "b.yaml", "content": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: b\n"},
+        ]
+        assert find_resource_collisions(files) == []
+        assert find_resource_collisions(files, existing_files=None) == []
+        assert find_resource_collisions(files, existing_files=[]) == []
+
     def test_cluster_validation_ok_refuses_on_collision(self) -> None:
         ok, reason = cluster_validation_ok(
             dry_run_errors=[], failed_properties=[],
@@ -246,6 +444,11 @@ class TestSolutionContractFilter:
     """Pinky gitops #22/#23: wrong-layer companions must not clear-attach."""
 
     def test_container_refuses_kyverno_and_limitrange_companions(self):
+        """"container"'s SOLUTION_CONTRACT explicitly denylists these two
+        skills in refuse_companions (registry.py) -- coverage's new Tier 2
+        rescue must respect that denylist, not quietly reopen the pinky
+        #22/#23 wrong-companion hole by rescuing an explicitly-refused
+        skill as "safe, just unrelated"."""
         findings = [("container", "using :latest tag in base image in dockerfile")]
         files = [
             {
@@ -277,6 +480,8 @@ class TestSolutionContractFilter:
         assert len(drops) == 2
 
     def test_audit_refuses_apiserver_audit_policy_companion(self):
+        """See test_container_refuses_kyverno_and_limitrange_companions --
+        "audit"'s contract explicitly denylists "audit-policy" too."""
         findings = [("audit", "no audit logging implementation detected")]
         files = [
             {

@@ -1,6 +1,10 @@
 """Workload replicas / health-probe source patches + clear-evidence."""
 from __future__ import annotations
 
+from unittest.mock import patch
+
+import pytest
+
 from agentit.remediation.clear_evidence import (
     WORKLOAD_PROBES,
     WORKLOAD_REPLICAS,
@@ -23,6 +27,15 @@ from agentit.remediation.workload_patches import (
     verify_workload_probes,
     verify_workload_replicas,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_live_registry_calls():
+    """harden_dockerfile_content() now attempts a real registry digest
+    lookup -- keep this suite hermetic/offline (falls back to the
+    floating :1 tag, same as before this existed)."""
+    with patch("agentit.remediation.registry_client.resolve_image_digest", return_value=None):
+        yield
 
 
 class TestWorkloadReplicas:

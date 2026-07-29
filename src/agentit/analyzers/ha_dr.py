@@ -1,10 +1,55 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
+
+import yaml
 
 from agentit.analyzers.base import calculate_score, iter_yaml_files
 from agentit.models import DimensionScore, Finding, Severity
+
+# The same workload-kind set property_verifier.py's own workload-container
+# probe already treats as "a real workload" -- reused here so both analyzers
+# agree on what counts as a live-shaped resource, not two independently
+# drifting lists.
+_WORKLOAD_KINDS = ("Deployment", "StatefulSet", "Rollout", "DaemonSet")
+
+
+def _workload_replica_counts(content: str) -> list[int]:
+    """Yield ``spec.replicas`` from every real Deployment/StatefulSet/
+    Rollout/DaemonSet document in ``content`` -- never a bare regex match
+    against raw file text.
+
+    Confirmed live (documented, previously unfixed): a plain
+    ``re.search(r"replicas:\\s*...")`` over the whole file matched
+    ``replicas:`` anywhere at all -- inside a comment, an unrelated
+    resource, or a completely disconnected stub manifest the app doesn't
+    actually use -- and silently cleared the finding. Scoping to an actual
+    workload-kind document's own ``spec.replicas`` field closes that class
+    of false-clear (a comment or unrelated field can never masquerade as a
+    workload's real replica count). This is still repo-only static
+    analysis with no live-cluster correlation, so a *fully-formed but
+    genuinely orphaned* Deployment YAML sitting unused in the repo can
+    still false-clear -- that would need the same live workload-discovery
+    access ``fleet_hpa.discover_namespace_workloads()`` already has, which
+    this analyzer (no cluster context, repo path only) does not.
+    """
+    try:
+        docs = yaml.safe_load_all(content)
+        parsed = list(docs)
+    except yaml.YAMLError:
+        return []
+    counts: list[int] = []
+    for doc in parsed:
+        if not isinstance(doc, dict) or doc.get("kind") not in _WORKLOAD_KINDS:
+            continue
+        spec = doc.get("spec")
+        if not isinstance(spec, dict):
+            continue
+        try:
+            counts.append(int(spec.get("replicas")))
+        except (TypeError, ValueError):
+            continue
+    return counts
 
 
 class HADRAnalyzer:
@@ -31,7 +76,7 @@ class HADRAnalyzer:
         values_yaml_texts: list[str] = []
 
         for path, content in iter_yaml_files(repo_path):
-            if re.search(r"replicas:\s*([2-9]|\d{2,})", content):
+            if any(count >= 2 for count in _workload_replica_counts(content)):
                 has_replicas = True
             helm_key = helm_templated_replicas_key(content)
             if helm_key is not None:
