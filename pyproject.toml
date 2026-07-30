@@ -10,7 +10,7 @@ license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "click>=8.1",
-    "gitpython>=3.1.52",  # 3.1.51/3.1.52 fix 4 HIGH command-injection/exfil CVEs (GHSA-2f96-g7mh-g2hx, GHSA-956x-8gvw-wg5v, GHSA-rwj8-pgh3-r573, GHSA-v396-v7q4-x2qj)
+    "gitpython>=3.1.57",  # 3.1.52 wasn't enough: 4 more HIGH CVEs disclosed since (GHSA-6p8h-3wgx-97gf, GHSA-r9mr-m37c-5fr3, GHSA-fjr4-x663-mwxc fixed 3.1.54; GHSA-94p4-4cq8-9g67 fixed 3.1.55). Floor set to latest stable (3.1.57) instead of the minimum fixed version, to absorb 3.1.56's follow-on hardening too.
     "pydantic>=2.7",
     "rich>=13.0",
     "anthropic[vertex]>=0.42",
