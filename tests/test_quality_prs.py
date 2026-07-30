@@ -278,10 +278,19 @@ class TestTier2CompanionCoverage:
         assert len(clusters) == 1
         assert [f["path"] for f in clusters[0].files] == ["rbac.yaml"]
 
-    def test_companion_overflow_spills_into_a_new_chunk(self):
+    def test_companion_overflow_is_dropped_not_spilled_into_a_doomed_cluster(self):
         """A Tier 1 cluster already at MAX_FILES_PER_CLUSTER_PR must not
-        silently grow past the reviewable cap -- extra companions spill
-        into a new, same-family chunk instead."""
+        silently grow past the reviewable cap -- but overflow companions
+        must NOT spill into a brand-new "also-included" cluster either.
+        Such a cluster would inherit the base cluster's target_findings
+        (rbac) while containing zero files that clear it, so
+        clear_evidence_simulation_ok() would refuse it unconditionally on
+        every single Scan run (confirmed live against pulse-agent
+        2026-07-29: every `<key>-also-included-N` overflow cluster was
+        refused every time). Dropping the overflow is a no-op for the
+        merged PR either way -- Phase A already forbids a companion-only
+        PR -- but it skips a full, guaranteed-to-fail validation pass and
+        a misleading "refused" warning per Scan run."""
         findings = [("rbac", "missing rbac")]
         tier1 = [
             {**_rbac_file(path=f"rbac-{i}.yaml"), "_finding_cluster": "rbac"}
@@ -295,10 +304,80 @@ class TestTier2CompanionCoverage:
             for i in range(2)
         ]
         clusters = partition_by_finding_cluster(tier1 + companions, findings)
-        assert len(clusters) == 2
+        assert len(clusters) == 1
         assert len(clusters[0].files) == MAX_FILES_PER_CLUSTER_PR
-        assert len(clusters[1].files) == 2
-        assert clusters[1].target_findings == clusters[0].target_findings
+        assert {f["path"] for f in clusters[0].files} == {
+            f"rbac-{i}.yaml" for i in range(MAX_FILES_PER_CLUSTER_PR)
+        }
+
+    def test_companion_overflow_cluster_would_have_failed_clear_evidence(self):
+        """Locks in *why* dropping is correct: a companion-only cluster
+        that inherits a Tier 1 cluster's target_findings can never pass
+        the clear-evidence gate, because none of its files touch what
+        that finding requires. This is the exact failure mode observed
+        live for pulse-agent's `container-also-included-1`/`-2` clusters
+        before the fix -- guaranteed, unconditional refusal, every run."""
+        from agentit.portal.quality_prs import clear_evidence_simulation_ok
+
+        overflow_files = [
+            {"path": "companion-0.yaml", "content": "kind: ConfigMap\n"},
+        ]
+        ok, reason = clear_evidence_simulation_ok(
+            overflow_files, [("rbac", "missing rbac")],
+        )
+        assert ok is False
+        assert "refusing PR" in reason
+
+    def test_pulse_agent_container_incident_reproduction(self):
+        """Exact reproduction of the live pulse-agent regression (Scan run
+        2026-07-29T20:22Z, correlation_id 8bb0306dcc184cceb15dbbff139ddbc4):
+        a full "container" Tier 1 cluster (patch-Dockerfile/.deps/.fast plus
+        two of the `skills`-generated patch-0N Dockerfile variants, filling
+        MAX_FILES_PER_CLUSTER_PR) plus a real `patch-08-otel_setup.py`-style
+        companion that has nowhere to go. Before the fix, this produced a
+        `container-also-included-1` cluster that was refused every run
+        (clear-evidence: "no Dockerfile/Containerfile in staged files");
+        after the fix, the companion is dropped and the real container fix
+        still ships untouched.
+        """
+        from agentit.portal.quality_prs import clear_evidence_simulation_ok
+
+        findings = [("container", "using :latest tag in base image in dockerfile")]
+        container_fix = {
+            "category": "codechange", "path": "patch-Dockerfile", "target_path": "Dockerfile",
+            "content": "FROM registry.access.redhat.com/ubi9/ubi-minimal@sha256:deadbeef\n",
+            "description": "pin Dockerfile", "skill_name": "containerfile",
+        }
+        skills_variants = [
+            {
+                "category": "skills", "path": f"patch-0{i}-Dockerfile",
+                "content": "FROM registry.access.redhat.com/ubi9/ubi-minimal@sha256:deadbeef\n",
+                "description": "UBI9 Dockerfile with non-root user and health check",
+                "skill_name": "containerfile",
+            }
+            for i in range(1, 3)
+        ]
+        tier1_files = [container_fix, *skills_variants]
+        kept, _drops = filter_files_to_open_findings(
+            [
+                *tier1_files,
+                {
+                    "category": "codechange", "path": "patch-08-otel_setup.py",
+                    "target_path": "otel_setup.py",
+                    "content": "# opentelemetry setup\n",
+                    "description": "OTel instrumentation helper", "skill_name": "otel-setup",
+                },
+            ],
+            findings,
+        )
+        clusters = partition_by_finding_cluster(kept, findings, max_files=len(tier1_files))
+        assert len(clusters) == 1, (
+            "the otel_setup.py companion has nowhere to go once the container "
+            "cluster is full -- it must be dropped, not spun into its own "
+            "always-refused 'container-also-included' cluster"
+        )
+        ok, _reason = clear_evidence_simulation_ok(clusters[0].files, clusters[0].target_findings)
+        assert ok, "the real container fix must still clear-evidence-pass untouched"
 
     def test_pr_body_renders_also_included_section_for_companions(self):
         body = build_helpful_pr_body(

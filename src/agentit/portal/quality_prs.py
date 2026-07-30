@@ -375,11 +375,13 @@ def partition_by_finding_cluster(
     Tier 1 "fix" files (see ``filter_files_to_open_findings()``) are
     grouped/chunked exactly as before. Tier 2 "companion" files
     (``_tier == "companion"``) have no ``_finding_cluster`` of their own
-    -- each gets attached to an existing same-layer Tier 1 cluster
-    instead (see ``_attach_companions_to_clusters()``). A companion whose
-    layer matches no Tier 1 cluster anywhere in this batch is dropped --
-    this never opens a companion-only PR, which would violate Phase A's
-    "must clear a finding or claim a real score delta" gate.
+    -- each gets attached to an existing same-layer Tier 1 cluster with
+    room instead (see ``_attach_companions_to_clusters()``). A companion
+    whose layer matches no Tier 1 cluster anywhere in this batch, or
+    whose same-layer cluster(s) are already full, is dropped -- this
+    never opens (or spills into) a companion-only PR, which would
+    violate Phase A's "must clear a finding or claim a real score delta"
+    gate.
     """
     tier1_files = [f for f in files if f.get("_tier") != "companion"]
     companions = [f for f in files if f.get("_tier") == "companion"]
@@ -429,11 +431,27 @@ def _attach_companions_to_clusters(
     max_files: int,
 ) -> None:
     """Mutates ``clusters`` in place: appends each Tier 2 companion to a
-    same-layer Tier 1 cluster with room (below ``max_files``), spilling
-    into a new same-family chunk if every existing same-layer chunk is
-    already full. Never invents a new finding cluster from scratch --
-    only ever extends one that already exists, reusing its
-    ``target_findings`` (a companion never gets its own).
+    same-layer Tier 1 cluster with room (below ``max_files``). A companion
+    that doesn't fit in any same-layer cluster -- because every one of
+    them is already at ``max_files`` -- is dropped, exactly like a
+    companion whose layer matches no Tier 1 cluster at all. Never invents
+    a new finding cluster from scratch -- only ever extends one that
+    already exists, reusing its ``target_findings`` (a companion never
+    gets its own).
+
+    This deliberately does NOT spill overflow companions into a new
+    "also-included" cluster of their own: such a cluster would inherit
+    the base cluster's ``target_findings`` but contain zero files that
+    actually clear that finding, so ``clear_evidence_simulation_ok()``
+    downstream would refuse it unconditionally on every single Scan run
+    -- confirmed against pulse-agent's live Scan output (2026-07-29),
+    where every ``<key>-also-included-N`` overflow cluster was refused,
+    unconditionally, every time, wasting a full validation pass and
+    emitting a misleading "refused" warning for content that could never
+    have shipped in the first place. Dropping it here costs nothing (the
+    companion was never going to ship as its own PR either way -- Phase
+    A's finding gate forbids a companion-only PR) but skips that wasted
+    work and noise.
     """
     from agentit.portal.delivery import classify_file
 
@@ -454,23 +472,10 @@ def _attach_companions_to_clusters(
         same_layer = [c for c in clusters if cluster_layer.get(id(c)) == layer]
         if not same_layer:
             continue
-        overflow_idx = 0
         for comp in comps:
             target = next((c for c in same_layer if len(c.files) < max_files), None)
             if target is not None:
                 target.files.append(comp)
-                continue
-            overflow_idx += 1
-            base = same_layer[0]
-            overflow = FindingCluster(
-                key=f"{base.key}-also-included-{overflow_idx}",
-                files=[comp],
-                target_findings=base.target_findings,
-                branch_suffix=f"{base.branch_suffix}-more-{overflow_idx}",
-            )
-            clusters.append(overflow)
-            same_layer.append(overflow)
-            cluster_layer[id(overflow)] = layer
 
 
 def _iter_resource_docs(files: list[dict]):
