@@ -24,6 +24,7 @@ import yaml
 from agentit.models import (
     ArchitectureInfo,
     AssessmentReport,
+    Database,
     DimensionScore,
     Finding,
     Language,
@@ -212,7 +213,11 @@ def _make_full_coverage_report(repo_name: str = "parity-app") -> AssessmentRepor
         stack=StackInfo(
             languages=[_lang()],
             frameworks=[],
-            databases=[],
+            # Non-empty: this fixture exercises every skill domain including
+            # "migration", which now requires a real database dependency
+            # (has_database_dependency precondition) before it fires --
+            # see PulseSRE/pulse-ui#40.
+            databases=[Database(name="postgresql")],
             runtimes=[],
             package_managers=["pip"],
         ),

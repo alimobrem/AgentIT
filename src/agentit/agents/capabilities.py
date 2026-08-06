@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # patches the application's own source repo (not K8s manifests) — optional
 # source-patch path, not a peer "domain agent" to skills.
 AGENT_CAPABILITIES: dict[str, str] = {
-    "codechange": "Optional source patches: .gitignore, OTel, structured logging, Dockerfile/health",
+    "codechange": "Optional source patches: .gitignore, OTel, structured logging, health endpoint",
     # Long-lived watcher agents
     "vuln-watcher": "Monitors fleet for CVEs, raises an alert for every critical/high finding",
     "slo-tracker": "Checks SLO status, publishes breach alerts, recommends rollbacks",

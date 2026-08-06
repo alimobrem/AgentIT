@@ -2,14 +2,30 @@
 
 This is the agent that modifies application code (not just infrastructure manifests).
 It handles config-level and simple source-level changes:
-- Dockerfile fixes (USER, HEALTHCHECK, base image)
 - Health endpoint addition
 - OpenTelemetry auto-instrumentation config
 - .gitignore additions
-- Secrets externalization patterns
 
 All changes go through LLM classification before being proposed as a PR
 to the application repo.
+
+``dockerfile``/``container`` and ``secrets`` findings are deliberately NOT
+handled here (removed 2026-08-06): both this agent's deterministic and LLM
+paths did a blind ``action: "create"`` full-file overwrite with no
+knowledge of the existing file, bypassing every guardrail the skill-engine
+path has (``remediation.source_patches.apply_containerfile_pin_only()``,
+``harden_dockerfile_content()``, ``is_destructive_dockerfile_rewrite()``).
+Confirmed live on ``PulseSRE/pulse-agent#2`` (deleted ``RUN pip install`` +
+``CMD``) and ``PulseSRE/pulse-ui#39`` (swapped nginx→nodejs base image
+family, left ``:latest`` unpinned, deleted ``ENTRYPOINT``, and overwrote a
+real ``.env.example`` with fabricated ``DATABASE_URL``/``API_KEY`` content)
+-- see ``skills/security/containerfile.md``'s own "never gut the body"
+contract, which this agent's output silently violated because it carries
+no ``skill_name`` the enrichment pipeline recognizes. The skill engine's
+``containerfile`` skill (source-repo pin/harden) already owns
+``dockerfile``/``container`` safely; ``secrets`` is contractually
+detect-only (``SOLUTION_CONTRACTS`` — human rotates, never auto-PR'd) and
+this agent's ``.env.example`` generator broke that contract too.
 """
 
 from __future__ import annotations
@@ -37,7 +53,6 @@ Rules:
 - Prefer config changes over source changes
 - Never remove existing functionality
 - Never add dependencies without explaining why
-- For Dockerfiles: use UBI base images, add USER, add HEALTHCHECK
 - For health endpoints: use the framework already in use
 - Keep changes surgical — one finding, one file
 """
@@ -57,10 +72,14 @@ Generate the minimal fix.
 # with the branches in _generate_change_deterministic(), otherwise findings
 # either pass the filter with no handler (silently produce nothing) or have
 # a handler that's unreachable because the category is filtered out first.
+#
+# "dockerfile"/"container" and "secrets" are intentionally excluded — see
+# the module docstring for why (unguarded full-file overwrite, confirmed
+# live-broken; secrets is contractually detect-only).
 _SUPPORTED_CATEGORIES = {
-    "secrets", "gitignore", "instrumentation", "otel",
+    "gitignore", "instrumentation", "otel",
     "opentelemetry", "tracing", "logging", "structured",
-    "dockerfile", "container", "health",
+    "health",
 }
 
 
@@ -224,57 +243,16 @@ class CodeChangeAgent:
         cat = finding.category.lower()
         lang = self._primary_language()
 
-        if "dockerfile" in cat or "container" in cat:
-            return self._fix_dockerfile(finding)
         if "health" in cat:
             return self._add_health_endpoint(finding, lang)
         if "gitignore" in cat:
             return self._fix_gitignore(finding)
         if any(kw in cat for kw in ("otel", "opentelemetry", "tracing", "instrumentation")):
             return self._add_otel_config(finding, lang)
-        if "secrets" in cat:
-            return self._add_secrets_pattern(finding)
         if any(kw in cat for kw in ("logging", "structured")):
             return self._add_logging_config(finding, lang)
 
         return None
-
-    def _fix_dockerfile(self, finding: Finding) -> CodeChange:
-        name = self._name
-        lang = self._primary_language()
-
-        base_image = {
-            "python": "registry.access.redhat.com/ubi9/python-312:latest",
-            "go": "registry.access.redhat.com/ubi9/go-toolset:latest",
-            "java": "registry.access.redhat.com/ubi9/openjdk-21:latest",
-            "node": "registry.access.redhat.com/ubi9/nodejs-20:latest",
-            "javascript": "registry.access.redhat.com/ubi9/nodejs-20:latest",
-            "typescript": "registry.access.redhat.com/ubi9/nodejs-20:latest",
-        }.get(lang, "registry.access.redhat.com/ubi9/ubi-minimal:latest")
-
-        port = 3000 if lang in ("node", "javascript", "typescript") else 8080
-
-        content = textwrap.dedent(f"""\
-            FROM {base_image}
-
-            WORKDIR /app
-            COPY . .
-
-            USER 1001
-
-            EXPOSE {port}
-
-            HEALTHCHECK --interval=30s --timeout=5s --retries=3 \\
-              CMD curl -f http://localhost:{port}/ || exit 1
-        """)
-
-        return CodeChange(
-            file_path="Dockerfile",
-            action="create",
-            content=content,
-            explanation=f"UBI9 Dockerfile with non-root user and health check ({finding.description})",
-            finding=finding.description,
-        )
 
     def _add_health_endpoint(self, finding: Finding, lang: str) -> CodeChange | None:
         framework = self._primary_framework().lower()
@@ -366,24 +344,6 @@ class CodeChangeAgent:
             action="append",
             content=content,
             explanation="Add standard ignores for secrets, IDE files, and build artifacts",
-            finding=finding.description,
-        )
-
-    def _add_secrets_pattern(self, finding: Finding) -> CodeChange:
-        """Deterministic fix for hardcoded-secrets findings: externalize to env vars."""
-        content = textwrap.dedent("""\
-            # Example environment configuration for externalized secrets.
-            # Copy to .env (already gitignored), fill in real values, and load
-            # via your framework's env/config loader instead of hardcoding.
-            DATABASE_URL=
-            API_KEY=
-            SECRET_KEY=
-        """)
-        return CodeChange(
-            file_path=".env.example",
-            action="create",
-            content=content,
-            explanation="Externalize hardcoded secrets into environment variables",
             finding=finding.description,
         )
 

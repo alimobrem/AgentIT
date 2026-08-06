@@ -34,7 +34,36 @@ _UBI_FROM_RE = re.compile(
 )
 
 # Instructions that indicate a real app image (not our greenfield stub).
-_SUBSTANTIVE_DF_TOKENS = ("RUN ", "COPY ", "ADD ", "ARG ", "ENV ", "WORKDIR ")
+# CMD/ENTRYPOINT/EXPOSE included so a rewrite that silently drops the
+# app's actual startup command (confirmed live: PulseSRE/pulse-agent#2
+# dropped `CMD ["pulse-agent-api"]`; PulseSRE/pulse-ui#39 dropped
+# `ENTRYPOINT [...]`) is caught the same way a dropped RUN/COPY already is.
+_SUBSTANTIVE_DF_TOKENS = (
+    "RUN ", "COPY ", "ADD ", "ARG ", "ENV ", "WORKDIR ",
+    "CMD ", "ENTRYPOINT ", "EXPOSE ",
+)
+_FROM_IMAGE_SPEC_RE = re.compile(
+    r"^\s*FROM\s+(?:--\S+\s+)*(\S+)", re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _from_image_repos(text: str) -> list[str]:
+    """Base image repo (registry+path, no tag/digest) for each FROM line,
+    in order -- used to catch a rewrite silently swapping the base image
+    *family* (e.g. ``ubi9/nginx-122`` -> ``ubi9/nodejs-20``), not just its
+    tag. ``--platform=...`` flags are skipped; ``AS <stage>`` aliases are
+    not part of the image spec token so need no special handling."""
+    repos = []
+    for image_spec in _FROM_IMAGE_SPEC_RE.findall(text or ""):
+        repo = image_spec.split("@", 1)[0]
+        # Split off a `:tag` -- but not a registry `host:port` prefix, so
+        # only strip after the last `/` when one is present.
+        head, _, rest = repo.rpartition("/")
+        if ":" in rest:
+            rest = rest.split(":", 1)[0]
+            repo = f"{head}/{rest}" if head else rest
+        repos.append(repo)
+    return repos
 
 _UBI_RUNTIME: dict[str, str] = {
     "python": "registry.access.redhat.com/ubi9/python-312:1",
@@ -220,6 +249,13 @@ def is_destructive_dockerfile_rewrite(
         return True, (
             f"proposed Dockerfile guts existing "
             f"({len(exist_body)} → {len(prop_body)} non-comment lines)"
+        )
+    exist_repos = _from_image_repos(exist)
+    prop_repos = _from_image_repos(prop)
+    if exist_repos and prop_repos and exist_repos != prop_repos:
+        return True, (
+            f"proposed swaps base image family "
+            f"({' / '.join(exist_repos)} → {' / '.join(prop_repos)})"
         )
     for token in _SUBSTANTIVE_DF_TOKENS:
         if exist.count(token) > prop.count(token):
@@ -1086,7 +1122,7 @@ def _helm_chart_template_fallback(
     unresolved-placeholder or mismatched-values-vs-template bug. Every
     value baked in here is one this skill already has real data for
     (``app_name``, the real ``image_ref``, and the same language-based port
-    convention ``agents/codechange.py::_fix_dockerfile`` already uses) --
+    convention ``_port_for_language()`` in this module already uses) --
     nothing fabricated, matching the "no mock data" rule.
     """
     lang = _primary_language(report)
@@ -1220,7 +1256,25 @@ def _db_migration_tooling_patch(skill: "Skill", report: AssessmentReport) -> lis
     Greenfield apps get Alembic (Python) or versioned SQL (Go/Node) with a
     non-empty first revision and URL read from the environment (no invented
     credentials). Clear-evidence refuses config-only stubs (#157).
+
+    Refuses when the report shows no database dependency at all -- an app
+    with none has nothing to migrate. ``analyzers/data_governance.py``'s
+    ``has_database_dependency()`` gate is the primary defense (the
+    ``migration`` finding should never exist for a database-less app in
+    the first place); this is a second, independent check against
+    ``report.stack.databases`` in case a stale/manual finding reaches
+    generation anyway. Confirmed live-broken before this gate existed:
+    ``PulseSRE/pulse-ui#40`` invented a ``schema_migrations_baseline``
+    table for a database-less React UI repo.
     """
+    if not (report.stack.databases or []):
+        logger.info(
+            "db-migration-tooling: refusing for %s — no database dependency "
+            "detected (report.stack.databases empty)",
+            report.repo_name,
+        )
+        return []
+
     lang = _primary_language(report)
     files: list[GeneratedFile] = []
     findings = _open_findings(report, "migration")

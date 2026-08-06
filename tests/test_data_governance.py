@@ -2,7 +2,14 @@ from agentit.analyzers.data_governance import DataGovernanceAnalyzer
 
 
 def test_no_data_governance_scores_low(create_mock_repo):
-    repo = create_mock_repo({"app.py": "print('hi')\n"})
+    # Needs a real database dependency, or the "migration" finding is
+    # correctly suppressed (has_database_dependency precondition) --
+    # this fixture is meant to test "has data, no governance," not
+    # "no data at all."
+    repo = create_mock_repo({
+        "app.py": "print('hi')\n",
+        "requirements.txt": "psycopg2-binary\n",
+    })
     analyzer = DataGovernanceAnalyzer()
     score = analyzer.analyze(repo)
     assert score.dimension == "data_governance"

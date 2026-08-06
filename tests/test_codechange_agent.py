@@ -83,29 +83,6 @@ class TestDeterministicChanges:
         result = agent.run()
         assert "opentelemetry" in result.changes[0].content.lower()
 
-    def test_generates_dockerfile_fix(self, tmp_path: Path) -> None:
-        """'dockerfile'/'container' findings must reach _fix_dockerfile() —
-        previously filtered out by _SUPPORTED_CATEGORIES before ever
-        reaching the (already-written) handler."""
-        report = _make_report(findings=[
-            Finding(category="dockerfile", severity=Severity.high,
-                    description="No Dockerfile found", recommendation="Add one"),
-        ])
-        agent = CodeChangeAgent(report, tmp_path / "out")
-        result = agent.run()
-        assert len(result.changes) == 1
-        assert result.changes[0].file_path == "Dockerfile"
-
-    def test_generates_container_fix(self, tmp_path: Path) -> None:
-        report = _make_report(findings=[
-            Finding(category="container", severity=Severity.high,
-                    description="Running as root", recommendation="Add USER"),
-        ])
-        agent = CodeChangeAgent(report, tmp_path / "out")
-        result = agent.run()
-        assert len(result.changes) == 1
-        assert result.changes[0].file_path == "Dockerfile"
-
     def test_generates_health_endpoint_fix(self, tmp_path: Path) -> None:
         """'health' findings must reach _add_health_endpoint() — previously
         filtered out by _SUPPORTED_CATEGORIES before ever reaching the
@@ -118,18 +95,6 @@ class TestDeterministicChanges:
         result = agent.run()
         assert len(result.changes) == 1
         assert result.changes[0].file_path == "healthz.py"
-
-    def test_generates_secrets_fix(self, tmp_path: Path) -> None:
-        """'secrets' findings pass the _SUPPORTED_CATEGORIES filter and must
-        now have a real handler instead of silently producing nothing."""
-        report = _make_report(findings=[
-            Finding(category="secrets", severity=Severity.critical,
-                    description="Hardcoded password", recommendation="Externalize it"),
-        ])
-        agent = CodeChangeAgent(report, tmp_path / "out")
-        result = agent.run()
-        assert len(result.changes) == 1
-        assert result.changes[0].file_path == ".env.example"
 
     def test_generates_logging_fix(self, tmp_path: Path) -> None:
         """'logging'/'structured' findings pass the _SUPPORTED_CATEGORIES
@@ -174,8 +139,8 @@ class TestLLMChanges:
         llm._chat.return_value = "not valid json"
 
         report = _make_report(findings=[
-            Finding(category="secrets", severity=Severity.high,
-                    description="Hardcoded secret", recommendation="Fix"),
+            Finding(category="gitignore", severity=Severity.high,
+                    description="Missing .gitignore", recommendation="Fix"),
         ])
         agent = CodeChangeAgent(report, tmp_path / "out", llm_client=llm)
         result = agent.run()
@@ -186,8 +151,8 @@ class TestLLMChanges:
         llm._chat.return_value = None
 
         report = _make_report(findings=[
-            Finding(category="secrets", severity=Severity.high,
-                    description="Hardcoded secret", recommendation="Fix"),
+            Finding(category="gitignore", severity=Severity.high,
+                    description="Missing .gitignore", recommendation="Fix"),
         ])
         agent = CodeChangeAgent(report, tmp_path / "out", llm_client=llm)
         result = agent.run()
@@ -209,6 +174,54 @@ class TestSupportedCategoriesConsistency:
             agent = CodeChangeAgent(report, tmp_path / f"out-{category}")
             result = agent.run()
             assert len(result.changes) == 1, f"category '{category}' passed the filter but produced no change"
+
+
+class TestExcludedCategoriesNeverReachCodeChange:
+    """dockerfile/container/secrets must never be handled by this agent --
+    both its deterministic and LLM paths do a blind full-file overwrite
+    with no knowledge of the existing file, bypassing every guardrail the
+    skill-engine path has. Confirmed live-broken (PulseSRE/pulse-agent#2,
+    PulseSRE/pulse-ui#39) -- see the module docstring. Regression coverage
+    so a future change can't silently re-add these to _SUPPORTED_CATEGORIES
+    without a human reconsidering the tradeoff explicitly."""
+
+    @pytest.mark.parametrize("category", ["dockerfile", "container", "secrets"])
+    def test_excluded_category_produces_no_change_deterministic(
+        self, tmp_path: Path, category: str,
+    ) -> None:
+        report = _make_report(findings=[
+            Finding(category=category, severity=Severity.high,
+                    description=f"{category} finding", recommendation="fix it"),
+        ])
+        agent = CodeChangeAgent(report, tmp_path / f"out-{category}")
+        result = agent.run()
+        assert len(result.changes) == 0
+
+    @pytest.mark.parametrize("category", ["dockerfile", "container", "secrets"])
+    def test_excluded_category_never_calls_llm(
+        self, tmp_path: Path, category: str,
+    ) -> None:
+        """Even with an LLM client configured, excluded categories must be
+        filtered out before _generate_change_with_llm() is ever called --
+        never trust the LLM to correctly refuse on its own."""
+        llm = MagicMock()
+        llm._chat.return_value = '{"file_path": "Dockerfile", "action": "create", "content": "FROM x", "explanation": "x"}'
+
+        report = _make_report(findings=[
+            Finding(category=category, severity=Severity.high,
+                    description=f"{category} finding", recommendation="fix it"),
+        ])
+        agent = CodeChangeAgent(report, tmp_path / f"out-llm-{category}", llm_client=llm)
+        result = agent.run()
+        assert len(result.changes) == 0
+        llm._chat.assert_not_called()
+
+    def test_excluded_categories_not_in_supported_categories(self) -> None:
+        from agentit.agents.codechange import _SUPPORTED_CATEGORIES
+
+        assert "dockerfile" not in _SUPPORTED_CATEGORIES
+        assert "container" not in _SUPPORTED_CATEGORIES
+        assert "secrets" not in _SUPPORTED_CATEGORIES
 
 
 class TestNoActionableFindings:

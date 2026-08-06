@@ -15,6 +15,7 @@ import pytest
 from agentit.models import (
     ArchitectureInfo,
     AssessmentReport,
+    Database,
     DimensionScore,
     Finding,
     Language,
@@ -462,6 +463,7 @@ def make_report(
     repo_name: str = "test-app",
     repo_url: str | None = None,
     languages: list[Language] | None = None,
+    databases: list[Database] | None = None,
     scores: list[DimensionScore] | None = None,
     criticality: str = "medium",
     summary: str = "test summary",
@@ -481,7 +483,7 @@ def make_report(
         assessed_at=datetime.now(timezone.utc),
         stack=StackInfo(
             languages=languages,
-            frameworks=[], databases=[], runtimes=[], package_managers=[],
+            frameworks=[], databases=databases or [], runtimes=[], package_managers=[],
         ),
         architecture=ArchitectureInfo(
             service_count=1, architecture_style="monolith", has_api=True,

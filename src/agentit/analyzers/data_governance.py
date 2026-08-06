@@ -78,6 +78,32 @@ def has_migration_approach(repo_path: Path) -> bool:
     )
 
 
+def has_database_dependency(repo_path: Path) -> bool:
+    """True when a dependency manifest names a real database driver/ORM.
+
+    Reuses ``stack_detector.DB_PATTERNS``/``DEP_FILES`` (the same signal
+    ``StackInfo.databases`` is built from) rather than a second heuristic —
+    an app with no database dependency at all has nothing to migrate, so
+    ``migration`` must not fire for it (confirmed live:
+    ``PulseSRE/pulse-ui#40`` scaffolded a fake ``schema_migrations_baseline``
+    table for a database-less React UI repo).
+    """
+    from agentit.analyzers.stack_detector import DEP_FILES, DB_PATTERNS
+
+    patterns = [p.lower() for pats in DB_PATTERNS.values() for p in pats]
+    for candidate in DEP_FILES:
+        fp = repo_path / candidate
+        if not fp.exists():
+            continue
+        try:
+            content = fp.read_text(errors="ignore").lower()
+        except OSError:
+            continue
+        if any(pattern in content for pattern in patterns):
+            return True
+    return False
+
+
 class DataGovernanceAnalyzer:
     dimension = "data_governance"
 
@@ -113,7 +139,7 @@ class DataGovernanceAnalyzer:
                 recommendation="Configure Crunchy PostgreSQL backup schedule or add backup CronJob",
                 source="analyzer:data_governance",
             ))
-        if not has_migration:
+        if not has_migration and has_database_dependency(repo_path):
             findings.append(Finding(
                 category="migration",
                 severity=Severity.medium,
