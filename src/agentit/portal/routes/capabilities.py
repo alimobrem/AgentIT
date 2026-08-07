@@ -229,9 +229,11 @@ async def agent_detail(request: Request, agent_name: str) -> HTMLResponse:
                 "last_heartbeat": "—",
             }
         elif agent_name in AGENT_CAPABILITIES:
-            # Optional source-patch agent (codechange) that's never run in
-            # this deployment yet -- Catalog links here for registered
-            # onboarding agents, so render an honest "never run" page.
+            # A registered agent (currently only long-lived watchers --
+            # no Python onboarding agents remain, see
+            # docs/agent-removal-readiness.md) that hasn't run yet in this
+            # deployment -- Catalog links here for registered agents, so
+            # render an honest "never run" page.
             agent = {
                 "agent_name": agent_name,
                 "category": agent_name,

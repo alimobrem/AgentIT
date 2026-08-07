@@ -20,6 +20,26 @@ RESULT_BEGIN = "--- AGENTIT_RESULT_BEGIN ---"
 RESULT_END = "--- AGENTIT_RESULT_END ---"
 
 
+class _FakeAgentResult:
+    """Minimal stand-in for the informal Agent.run() -> result.files
+    protocol every real Python onboarding agent used to implement --
+    only ``_FakeAgent`` below (test-only) still uses it."""
+
+    files: list = []
+
+
+class _FakeAgent:
+    """Minimal Agent stand-in, used only to keep the local/K8s Job
+    execution paths exercised now that no production Python onboarding
+    agent remains (see docs/agent-removal-readiness.md)."""
+
+    def __init__(self, report, output_dir) -> None:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    def run(self) -> _FakeAgentResult:
+        return _FakeAgentResult()
+
+
 def _extract_result(output: str) -> str:
     """Extract JSON payload from between result markers."""
     b = output.find(RESULT_BEGIN)
@@ -38,18 +58,18 @@ class TestRunAgentCLI:
         Path(path).write_text(report.model_dump_json(), encoding="utf-8")
         return path
 
-    def test_run_codechange_agent(self, tmp_path: Path):
-        """Optional source-patch agent remains CLI-runnable."""
+    def test_codechange_agent_no_longer_runnable(self, tmp_path: Path):
+        """`codechange` (the last Python onboarding agent) was removed
+        2026-08-07 -- its remaining categories either violated their own
+        detect-only contract or duplicated an already-guarded skill (see
+        docs/agent-removal-readiness.md). The CLI must now report it as
+        unknown, same as any other never-registered name."""
         report = make_report()
         path = self._write_report(report)
         try:
             runner = CliRunner()
             result = runner.invoke(main, ["run-agent", "codechange", "--report", path])
-            assert result.exit_code == 0, f"exit {result.exit_code}: {result.output}"
-            payload = _extract_result(result.output)
-            files = json.loads(payload)
-            assert isinstance(files, list)
-            assert all("path" in f and "content" in f for f in files)
+            assert result.exit_code != 0
         finally:
             Path(path).unlink(missing_ok=True)
 
@@ -94,15 +114,17 @@ class TestOrchestratorK8sMode:
     """Orchestrator local vs kubernetes agent execution modes."""
 
     async def test_local_mode_default(self):
-        """Default mode is local (in-process) — no K8s Jobs created."""
+        """Default mode is local (in-process) — no K8s Jobs created.
+
+        No Python onboarding agent remains at all now (skills own every
+        domain -- see docs/agent-removal-readiness.md); an empty,
+        all-succeeded `agent_results` is the honest outcome here."""
         from agentit.agents.orchestrator import FleetOrchestrator
 
-        # criticality=high plans optional codechange; skills run first.
         report = make_report(criticality="high")
         with tempfile.TemporaryDirectory() as tmpdir:
             orch = FleetOrchestrator(report=report, output_dir=Path(tmpdir))
             result = await orch.run()
-            assert len(result.agent_results) > 0
             assert all(ar.success for ar in result.agent_results)
 
     @patch.dict("os.environ", {"AGENTIT_AGENT_MODE": "kubernetes"})
@@ -118,13 +140,27 @@ class TestOrchestratorK8sMode:
     async def test_kubernetes_mode_creates_jobs(
         self, mock_del_cm, mock_del_job, mock_log, mock_status, mock_job, mock_cm
     ):
-        """Kubernetes mode creates Jobs and reads results."""
+        """Kubernetes mode creates Jobs and reads results.
+
+        No production Python onboarding agent remains (skills own every
+        domain -- see docs/agent-removal-readiness.md); this injects a
+        fake one via agent_filter/AGENT_CLASSES so there is something for
+        _run_agents_as_jobs() to actually submit a Job for -- the class
+        itself is never instantiated in K8s mode (results come from the
+        mocked pod log), so it doesn't need to be real.
+        """
         from agentit.agents.orchestrator import FleetOrchestrator
 
         report = make_report(criticality="high")
         with tempfile.TemporaryDirectory() as tmpdir:
-            orch = FleetOrchestrator(report=report, output_dir=Path(tmpdir))
-            result = await orch.run()
+            orch = FleetOrchestrator(
+                report=report, output_dir=Path(tmpdir), agent_filter=["fake-agent"],
+            )
+            with patch(
+                "agentit.agents.capabilities.AGENT_CLASSES",
+                {"fake-agent": ("fake", "tests.test_agent_containerization", "_FakeAgent", "small")},
+            ), patch("agentit.agents.capabilities.get_agent_class", return_value=_FakeAgent):
+                result = await orch.run()
             assert mock_cm.called, "create_config_map not called"
             assert mock_job.called, "create_job not called"
             assert mock_del_job.called, "delete_job not called (cleanup)"
@@ -134,15 +170,28 @@ class TestOrchestratorK8sMode:
     @patch("agentit.agents.orchestrator.AGENT_MODE", "kubernetes")
     @patch("agentit.kube.create_config_map", return_value=False)
     async def test_kubernetes_mode_fallback_on_configmap_failure(self, mock_cm):
-        """Falls back to local mode if ConfigMap creation fails."""
+        """Falls back to local mode if ConfigMap creation fails.
+
+        No production Python onboarding agent remains (skills own every
+        domain -- see docs/agent-removal-readiness.md); this injects a
+        fake local-runnable one so the local-mode fallback path itself
+        (the thing this test actually guards) stays exercised.
+        """
         from agentit.agents.orchestrator import FleetOrchestrator
 
         report = make_report(criticality="high")
         with tempfile.TemporaryDirectory() as tmpdir:
-            orch = FleetOrchestrator(report=report, output_dir=Path(tmpdir))
-            result = await orch.run()
+            orch = FleetOrchestrator(
+                report=report, output_dir=Path(tmpdir), agent_filter=["fake-agent"],
+            )
+            with patch(
+                "agentit.agents.capabilities.AGENT_CLASSES",
+                {"fake-agent": ("fake", "tests.test_agent_containerization", "_FakeAgent", "small")},
+            ), patch("agentit.agents.capabilities.get_agent_class", return_value=_FakeAgent):
+                result = await orch.run()
             # Should still produce results (fell back to local)
             assert len(result.agent_results) > 0
+            assert all(ar.success for ar in result.agent_results)
 
 
 class TestKubeJobHelpers:

@@ -18,17 +18,18 @@ class GeneratedFile(BaseModel):
     # this file -- lets callers (e.g. cli.py's self-fix) record skill
     # effectiveness precisely instead of re-deriving a skill name from the
     # file path (which is ambiguous once app_name/skill.name both contain
-    # hyphens). Left "" for files a Python agent generated -- they carry no
-    # skill attribution.
+    # hyphens). Left "" when no skill attribution applies.
     skill_name: str = ""
-    # Set by CodeChangeAgent to the real destination path in the *app's own*
-    # repo (e.g. "Dockerfile", ".gitignore") -- distinct from `path`, which is
-    # this file's name in AgentIT's own output/storage (e.g.
-    # "patch-01-Dockerfile"). Lets the unified delivery router build a real
-    # PR patch against the actual target file instead of a same-named copy
-    # under a new directory (see docs/unified-apply-flow.md's "GitHub/
-    # source-repo changes -- real source patches" taxonomy row). Left "" for
-    # every other file, which fall back to `path` unchanged.
+    # Set by SkillEngine._generate_source_patch() (``delivery: source``
+    # skills, e.g. containerfile/db-migration-tooling/app-audit-logging) to
+    # the real destination path in the *app's own* repo (e.g. "Dockerfile",
+    # ".gitignore") -- distinct from `path`, which is this file's name in
+    # AgentIT's own output/storage (e.g. "patch-01-Dockerfile"). Lets the
+    # unified delivery router build a real PR patch against the actual
+    # target file instead of a same-named copy under a new directory (see
+    # docs/unified-apply-flow.md's "GitHub/source-repo changes -- real
+    # source patches" taxonomy row). Left "" for every other file, which
+    # fall back to `path` unchanged.
     target_path: str = ""
 
 

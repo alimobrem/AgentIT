@@ -25,9 +25,19 @@ class TestAssessOnboardFlow:
         assert len(report.scores) == 7
 
     async def test_onboard_generates_manifests(self, tmp_path):
+        """No Python onboarding agent remains at all (skills own every
+        domain -- see docs/agent-removal-readiness.md), so this report
+        uses a finding that actually matches a real skill trigger
+        (network-policy) rather than the generic default, or nothing
+        would generate files at all."""
         from agentit.agents.orchestrator import FleetOrchestrator
 
-        report = make_report(criticality="high")
+        report = make_report(criticality="high", scores=[DimensionScore(
+            dimension="security", score=25, max_score=100,
+            findings=[Finding(category="network", severity=Severity.high,
+                               description="Missing network isolation between pods",
+                               recommendation="Add NetworkPolicy")],
+        )])
         store, raw = await make_async_store()
         aid = await raw.save(report)
 
@@ -39,8 +49,10 @@ class TestAssessOnboardFlow:
         assert any(r.files_generated for r in result.agent_results)
         assert len(await raw.list_slos(aid)) > 0
 
-    async def test_orchestrator_registers_agents(self, tmp_path):
-        """Only optional codechange remains as a Python onboarding agent."""
+    async def test_orchestrator_registers_no_python_onboarding_agents(self, tmp_path):
+        """No Python onboarding agent remains at all now -- codechange
+        (the last one) was removed 2026-08-07; skills own every domain
+        (see docs/agent-removal-readiness.md)."""
         from agentit.agents.orchestrator import FleetOrchestrator
 
         store, raw = await make_async_store()
@@ -53,8 +65,7 @@ class TestAssessOnboardFlow:
 
         agents = await raw.list_agents()
         names = {a["agent_name"] for a in agents}
-        assert "codechange" in names
-        assert names.isdisjoint({"cost", "dependency"})
+        assert names == set()
 
 
 class TestInfraRepoFlow:
@@ -99,32 +110,3 @@ class TestDeleteCascade:
         assert await store.list_slos(aid) == []
 
 
-class TestCodeChangeAgentFlow:
-    """Code change agent: generates patches for actionable findings."""
-
-    def test_generates_gitignore_for_finding(self, tmp_path):
-        from agentit.agents.codechange import CodeChangeAgent
-        report = make_report(
-            scores=[DimensionScore(
-                dimension="security", score=30, max_score=100,
-                findings=[Finding(category="gitignore", severity=Severity.low,
-                                  description="Missing .gitignore", recommendation="Add it")],
-            )],
-        )
-        agent = CodeChangeAgent(report, tmp_path / "out")
-        result = agent.run()
-        assert len(result.changes) == 1
-        assert ".env" in result.changes[0].content
-
-    def test_skips_non_actionable_findings(self, tmp_path):
-        from agentit.agents.codechange import CodeChangeAgent
-        report = make_report(
-            scores=[DimensionScore(
-                dimension="security", score=30, max_score=100,
-                findings=[Finding(category="network", severity=Severity.high,
-                                  description="No NetworkPolicy", recommendation="Add it")],
-            )],
-        )
-        agent = CodeChangeAgent(report, tmp_path / "out")
-        result = agent.run()
-        assert len(result.changes) == 0

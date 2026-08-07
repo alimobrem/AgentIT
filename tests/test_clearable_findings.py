@@ -13,7 +13,7 @@ from agentit.analyzers.live_evidence import (
     apply_live_cluster_finding_clear,
     live_hpa_present,
 )
-from agentit.models import DimensionScore, Finding, Language, Severity
+from agentit.models import Database, DimensionScore, Finding, Language, Severity
 from agentit.remediation.source_patches import generate_source_patch_for_skill
 from agentit.skill_engine import SkillEngine, load_skill
 from conftest import make_report
@@ -271,6 +271,11 @@ class TestNestedMigrationDetection:
         assert "migration" not in cats
 
     def test_tests_dir_create_table_does_not_count_as_migration(self, tmp_path: Path):
+        # A real DB dependency must be present, or the "no database at all"
+        # precondition (has_database_dependency) suppresses the finding
+        # before this test's actual scenario (test-dir DDL doesn't count)
+        # is even reached.
+        (tmp_path / "requirements.txt").write_text("psycopg2-binary\n", encoding="utf-8")
         tests = tmp_path / "tests"
         tests.mkdir()
         (tests / "test_schema.py").write_text(
@@ -281,6 +286,60 @@ class TestNestedMigrationDetection:
         score = DataGovernanceAnalyzer().analyze(tmp_path)
         cats = {f.category for f in score.findings}
         assert "migration" in cats
+
+
+class TestMigrationRequiresADatabase:
+    """The migration finding/skill must never fire for a database-less app.
+
+    Confirmed live-broken: PulseSRE/pulse-ui#40 (a React UI repo with no
+    database at all) got a fabricated `schema_migrations_baseline` table
+    from db-migration-tooling because the analyzer flagged "no migration
+    tooling" without first checking whether there was anything to migrate.
+    """
+
+    def test_no_dependency_manifest_at_all_does_not_flag_migration(self, tmp_path: Path):
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "app.tsx").write_text("export default function App() {}\n", encoding="utf-8")
+        score = DataGovernanceAnalyzer().analyze(tmp_path)
+        cats = {f.category for f in score.findings}
+        assert "migration" not in cats
+
+    def test_frontend_only_package_json_does_not_flag_migration(self, tmp_path: Path):
+        (tmp_path / "package.json").write_text(
+            '{"name": "pulse-ui", "dependencies": {"react": "^18.0.0", "react-dom": "^18.0.0"}}\n',
+            encoding="utf-8",
+        )
+        score = DataGovernanceAnalyzer().analyze(tmp_path)
+        cats = {f.category for f in score.findings}
+        assert "migration" not in cats
+
+    def test_real_db_dependency_without_tooling_still_flags_migration(self, tmp_path: Path):
+        (tmp_path / "requirements.txt").write_text("psycopg2-binary\n", encoding="utf-8")
+        score = DataGovernanceAnalyzer().analyze(tmp_path)
+        cats = {f.category for f in score.findings}
+        assert "migration" in cats
+
+    def test_generator_refuses_when_report_has_no_database(self):
+        skill = load_skill(Path("skills/data_governance/db-migration-tooling.md"))
+        assert skill is not None
+        report = make_report(
+            repo_name="pulse-ui",
+            languages=[Language(name="typescript", file_count=10, percentage=100.0)],
+            scores=[
+                DimensionScore(
+                    dimension="data_governance", score=50, max_score=100,
+                    findings=[
+                        Finding(
+                            category="migration", severity=Severity.medium,
+                            description="No database migration tooling detected",
+                            recommendation="Add Alembic",
+                        ),
+                    ],
+                ),
+            ],
+        )
+        files = generate_source_patch_for_skill(skill, report, "pulse-ui")
+        assert files == []
 
 
 class TestNodeVersionPinClearsEol:
@@ -410,6 +469,7 @@ class TestSourcePatchSkills:
         report = make_report(
             repo_name="pinky",
             languages=[Language(name="python", file_count=10, percentage=100.0)],
+            databases=[Database(name="postgresql")],
             scores=[
                 DimensionScore(
                     dimension="data_governance", score=50, max_score=100,

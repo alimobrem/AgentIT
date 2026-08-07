@@ -56,8 +56,8 @@ LLM's output fails validation) is deliberately conservative: it never
 invents a value that isn't already real and available (`app_name`, the real
 internal registry `image_ref` `image_builder.get_image_ref()` already
 provides, and a language-based port convention this codebase already uses
-in `agents/codechange.py::_fix_dockerfile` — 3000 for Node/JS/TS, 8080
-otherwise).
+in `remediation/source_patches.py::_port_for_language()` — 3000 for
+Node/JS/TS, 8080 otherwise).
 
 ## Constraints (both LLM and fallback paths)
 - `Chart.yaml` must exist with `apiVersion: v2`, a real `name`, and a

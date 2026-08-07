@@ -181,14 +181,24 @@ class TestRunOnboardingCarriesRealDescriptions:
         from agentit.portal.helpers import run_onboarding
 
         async_store, store = await make_async_store()
-        report = make_report(criticality="critical")
+        # No Python onboarding agent remains at all (skills own every
+        # domain -- see docs/agent-removal-readiness.md); use a finding
+        # that actually matches a real skill trigger (network-policy)
+        # rather than the generic default, or nothing would generate
+        # files at all.
+        report = make_report(criticality="critical", scores=[DimensionScore(
+            dimension="security", score=25, max_score=100,
+            findings=[Finding(category="network", severity=Severity.high,
+                               description="Missing network isolation between pods",
+                               recommendation="Add NetworkPolicy")],
+        )])
         aid = await store.save(report)
 
         with patch("agentit.portal.helpers.get_store", return_value=async_store), \
              patch("agentit.portal.helpers._store", async_store):
             files, _ = await run_onboarding(report, assessment_id=aid)
 
-        assert files, "expected skills (or codechange) to generate files"
+        assert files, "expected skills to generate files"
         skill_files = [f for f in files if f.get("category") == "skills"]
         assert skill_files, "skills should own remediations"
         for f in skill_files:
@@ -609,8 +619,11 @@ class TestDeEmphasizedRawPlumbing:
         assert "<details" in resp.text
 
     async def test_failed_agent_error_shown_under_fail_badge(self, ui_client):
-        """orchestration.agents[].error must surface under FAIL for skills /
-        optional codechange without digging in JSON."""
+        """orchestration.agents[].error must surface under FAIL for skills
+        or any other agent name in the orchestration summary, without
+        digging in JSON. "codechange" here is arbitrary test data for the
+        generic "_other" row -- not tied to the (removed) Python agent of
+        the same name."""
         client, store = ui_client
         report = make_report(repo_name="agent-fail-error-app")
         aid = await store.save(report)
@@ -633,7 +646,7 @@ class TestDeEmphasizedRawPlumbing:
         assert "LLM timeout while resolving BOM" in resp.text
         assert 'badge-low">OK' in resp.text
         assert "Primary remediations" in resp.text
-        assert "Optional source patches" in resp.text
+        assert "codechange" in resp.text
 
     async def test_no_inline_styles_in_pull_requests_section(self, ui_client):
         client, store = ui_client

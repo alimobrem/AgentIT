@@ -147,6 +147,93 @@ class TestDestructiveRewrite:
         assert not bad, reason
 
 
+class TestDestructiveRewriteCatchesLiveBugs:
+    """Regression coverage for two live-confirmed, fresh-post-fix bugs
+    (2026-08-05/06): CodeChangeAgent's since-removed _fix_dockerfile()
+    generator shipped these exact rewrites, unguarded, into real fleet
+    PRs. These tests pin the *detection* (is_destructive_dockerfile_rewrite)
+    so any future generator that produces the same shape is caught by
+    clear-evidence (remediation/clear_evidence.py's
+    _check_containerfile_pin_content), regardless of which code path
+    produced it."""
+
+    def test_dropping_run_pip_install_and_cmd_is_destructive(self) -> None:
+        """PulseSRE/pulse-agent#2: dropped `RUN pip install --no-cache-dir .`
+        and `CMD ["pulse-agent-api"]`, changed COPY/WORKDIR, and left
+        `:latest` unpinned on the very FROM line the finding was about."""
+        existing = (
+            "FROM registry.access.redhat.com/ubi9/python-312:latest\n"
+            "WORKDIR /opt/app-root/src\n\n"
+            "COPY pyproject.toml .\n"
+            "COPY sre_agent/ sre_agent/\n"
+            "RUN pip install --no-cache-dir .\n\n"
+            "USER 1001\n"
+            "EXPOSE 8080\n"
+            'CMD ["pulse-agent-api"]\n'
+        )
+        shipped_broken = (
+            "FROM registry.access.redhat.com/ubi9/python-312:latest\n\n"
+            "WORKDIR /app\n"
+            "COPY . .\n\n"
+            "USER 1001\n\n"
+            "EXPOSE 8080\n\n"
+            "HEALTHCHECK --interval=30s --timeout=5s --retries=3 \\\n"
+            "  CMD curl -f http://localhost:8080/ || exit 1\n"
+        )
+        bad, reason = is_destructive_dockerfile_rewrite(existing, shipped_broken)
+        assert bad, reason
+        assert "RUN" in reason or "CMD" in reason
+
+    def test_swapping_base_image_family_is_destructive(self) -> None:
+        """PulseSRE/pulse-ui#39: swapped the base image family from nginx
+        (serving a pre-built static SPA) to nodejs, dropped ENTRYPOINT, and
+        the new FROM line still ended in `:latest` -- failing the skill's
+        one job (eliminate :latest) on its own output."""
+        existing = (
+            "FROM registry.access.redhat.com/ubi9/nginx-122:latest\n\n"
+            "COPY dist/ /opt/app-root/src/\n"
+            "COPY entrypoint.sh /opt/app-root/entrypoint.sh\n\n"
+            "EXPOSE 8080\n\n"
+            'ENTRYPOINT ["/opt/app-root/entrypoint.sh"]\n'
+        )
+        shipped_broken = (
+            "FROM registry.access.redhat.com/ubi9/nodejs-20:latest\n\n"
+            "WORKDIR /app\n"
+            "COPY . .\n\n"
+            "USER 1001\n\n"
+            "EXPOSE 3000\n\n"
+            "HEALTHCHECK --interval=30s --timeout=5s --retries=3 \\\n"
+            "  CMD curl -f http://localhost:3000/ || exit 1\n"
+        )
+        bad, reason = is_destructive_dockerfile_rewrite(existing, shipped_broken)
+        assert bad, reason
+        assert "base image family" in reason
+
+    def test_dropping_entrypoint_alone_is_destructive(self) -> None:
+        existing = (
+            "FROM registry.access.redhat.com/ubi9/nginx-122:1\n"
+            "COPY dist/ /opt/app-root/src/\n"
+            'ENTRYPOINT ["/opt/app-root/entrypoint.sh"]\n'
+        )
+        proposed = "FROM registry.access.redhat.com/ubi9/nginx-122:1\nCOPY dist/ /opt/app-root/src/\n"
+        bad, reason = is_destructive_dockerfile_rewrite(existing, proposed)
+        assert bad, reason
+        assert "ENTRYPOINT" in reason
+
+    def test_legitimate_ubi_force_harden_is_still_allowed(self) -> None:
+        """force_ubi harden legitimately changes the base image family
+        (e.g. a non-UBI image -> UBI) -- must not be caught by the new
+        base-image-family-swap guard."""
+        from agentit.remediation.source_patches import harden_dockerfile_content
+
+        existing = "FROM node:20\nCOPY . .\nCMD [\"node\", \"index.js\"]\n"
+        hardened = harden_dockerfile_content(
+            existing, force_ubi=True, language="node",
+        )
+        bad, reason = is_destructive_dockerfile_rewrite(existing, hardened)
+        assert not bad, reason
+
+
 class TestApplyContainerfilePinOnly:
     def test_replaces_stub_with_pin_of_existing(self) -> None:
         stub = (

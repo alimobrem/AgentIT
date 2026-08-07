@@ -142,17 +142,34 @@ async def client():
 # ------------------------------------------------------------------
 
 
+class _CrashingAgent:
+    """Minimal Agent stand-in that always raises -- used only to keep
+    the partial-results-on-crash resilience path exercised now that no
+    production Python onboarding agent remains at all (codechange, the
+    last one, was removed 2026-08-07 -- see
+    docs/agent-removal-readiness.md)."""
+
+    def __init__(self, report, output_dir) -> None:
+        pass
+
+    def run(self):
+        raise RuntimeError("simulated crash")
+
+
 async def test_onboard_agent_crash_returns_partial(client, _override_store):
-    """When codechange raises, skills still produce remediation files."""
+    """When a Python agent raises, skills still produce remediation files."""
     store = _override_store
     report = _make_report_with_findings()
-    # Force codechange into the plan (high criticality).
-    report.criticality = "critical"
     aid = await store.save(report)
 
     with patch(
-        "agentit.agents.codechange.CodeChangeAgent.run",
-        side_effect=RuntimeError("simulated crash"),
+        "agentit.agents.orchestrator.FleetOrchestrator._select_agents",
+        return_value=["fake-crashing-agent"],
+    ), patch(
+        "agentit.agents.capabilities.AGENT_CLASSES",
+        {"fake-crashing-agent": ("fake", "tests.test_error_recovery", "_CrashingAgent", "small")},
+    ), patch(
+        "agentit.agents.capabilities.get_agent_class", return_value=_CrashingAgent,
     ):
         resp = await client.post(f"/assessments/{aid}/onboard", follow_redirects=False)
 
@@ -161,26 +178,28 @@ async def test_onboard_agent_crash_returns_partial(client, _override_store):
 
     files = await store.get_onboarding(aid)
     assert files is not None
-    assert len(files) > 0, "Skills should still produce files despite codechange crash"
+    assert len(files) > 0, "Skills should still produce files despite the crashed agent"
 
     categories = {f["category"] for f in files}
     # Source-delivery skills (containerfile → Dockerfile, etc.) are
-    # reclassified to category=codechange for CATEGORY_SOURCE_PATCH routing
-    # even though CodeChangeAgent crashed. That is intentional product
-    # behavior — assert the agent failed, and any codechange files come
-    # from skills (skill_name set), not the crashed agent.
+    # reclassified to category=codechange for CATEGORY_SOURCE_PATCH
+    # routing -- a stable internal label, unrelated to the (removed)
+    # CodeChangeAgent Python class -- even though the injected fake
+    # agent crashed. That is intentional product behavior — assert the
+    # agent failed, and any codechange-categorized files come from
+    # skills (skill_name set), not the crashed agent.
     orch = await store.get_orchestration(aid)
     assert orch is not None
-    codechange_agent = next(
-        (a for a in orch.get("agents", []) if a.get("name") == "codechange"),
+    crashing_agent = next(
+        (a for a in orch.get("agents", []) if a.get("name") == "fake-crashing-agent"),
         None,
     )
-    assert codechange_agent is not None
-    assert codechange_agent.get("success") is False
+    assert crashing_agent is not None
+    assert crashing_agent.get("success") is False
     for f in files:
         if f["category"] == "codechange":
             assert f.get("skill_name"), (
-                "codechange-categorized file after CodeChangeAgent crash "
+                "codechange-categorized file after the injected agent crash "
                 "must be a skill source patch"
             )
     assert "skills" in categories or any(f.get("skill_name") for f in files)

@@ -18,13 +18,15 @@ class TestGeneratedFile:
         gf = GeneratedFile(path="x.yaml", content="y", description="z", finding_addressed="fix it")
         assert gf.finding_addressed == "fix it"
 
-    def test_all_agents_use_shared_generated_file(self) -> None:
-        # Only optional codechange remains as a Python onboarding agent.
-        from agentit.agents.codechange import CodeChangeAgent
+    def test_skill_engine_uses_shared_generated_file(self) -> None:
+        # No Python onboarding agent remains at all (skills own every
+        # domain -- see docs/agent-removal-readiness.md); skill_engine.py
+        # and remediation/source_patches.py are the real producers of
+        # GeneratedFile now.
+        from agentit import skill_engine
         from agentit.agents.base import GeneratedFile as GF
 
-        assert CodeChangeAgent is not None
-        assert GF is GeneratedFile
+        assert skill_engine.GeneratedFile is GF
 
 
 class TestSanitizeName:

@@ -323,9 +323,9 @@ def filter_files_to_open_findings(
 
     Returns ``(kept, drop_reasons)`` -- ``kept`` may contain both tiers;
     check ``f.get("_tier")`` to distinguish. Confirmed live (2026-07-24)
-    that a meaningful fraction of real skill/CodeChangeAgent output
-    (extra Dockerfiles, otel_setup.py, …) was silently dropped here on
-    every fleet app even though it was perfectly safe to ship.
+    that a meaningful fraction of real skill output (extra Dockerfiles,
+    otel_setup.py, …) was silently dropped here on every fleet app even
+    though it was perfectly safe to ship.
     """
     finding_cats = {normalize_category(c) for c, _ in target_findings if c}
     display_cats: dict[str, str] = {}

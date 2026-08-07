@@ -46,6 +46,20 @@ browser = [
 [project.scripts]
 agentit = "agentit.cli:main"
 
+[tool.uv]
+# Transitive-dependency CVE floors -- neither package is a direct
+# dependency (aiohttp comes in via kubernetes; cryptography via
+# google-auth, pulled in by anthropic[vertex]), so there's no
+# `dependencies` entry to bump directly; `constraint-dependencies` forces
+# the resolver to pick a version at/above the floor if -- and only if --
+# something else already requires the package (same mechanism as a pip
+# constraints file; see docs/history/changelog-dogfood-notes.md's
+# `gitpython` entries for the equivalent direct-dependency pattern).
+constraint-dependencies = [
+    "aiohttp>=3.14.3",  # CVE-2026-69244 (HIGH): OOB heap read in the C HTTP response parser's error-message path (malformed chunked response) can DoS a client. Fixed 3.14.3 (also latest stable).
+    "cryptography>=50.0.0",  # CVE-2026-69247 (HIGH): PKCS#7 EnvelopedData decryption (pkcs7_decrypt_der/_pem/_smime) exposed a Bleichenbacher oracle via distinguishable errors/timing. Fixed 50.0.0 (also latest stable).
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentit"]
 

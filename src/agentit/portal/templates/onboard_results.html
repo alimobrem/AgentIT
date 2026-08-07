@@ -360,8 +360,7 @@
 
 {% if _has_orchestration %}
 {% set _skills = orchestration.agents | selectattr('name', 'equalto', 'skills') | list %}
-{% set _codechange = orchestration.agents | selectattr('name', 'equalto', 'codechange') | list %}
-{% set _other = orchestration.agents | rejectattr('name', 'in', ['skills', 'codechange']) | list %}
+{% set _other = orchestration.agents | rejectattr('name', 'equalto', 'skills') | list %}
 <div x-data="{ open: false }">
   <h2 class="section-title collapse-toggle" @click="open = !open" :aria-expanded="open">
     Generation Summary
@@ -377,14 +376,6 @@
         <tr class="{% if a.success %}row-border-green{% else %}row-border-red{% endif %}">
           <td>skills</td>
           <td class="text-sm text-muted">Primary remediations</td>
-          <td>{% if a.success %}<span class="badge badge-low">OK</span>{% else %}<span class="badge badge-critical">FAIL</span>{% endif %}{% if a.error %}<div class="text-danger text-sm mt-1">{{ a.error }}</div>{% endif %}</td>
-          <td>{{ a.files_count }}</td>
-        </tr>
-        {% endfor %}
-        {% for a in _codechange %}
-        <tr class="{% if a.success %}row-border-green{% else %}row-border-red{% endif %}">
-          <td>codechange</td>
-          <td class="text-sm text-muted">Optional source patches</td>
           <td>{% if a.success %}<span class="badge badge-low">OK</span>{% else %}<span class="badge badge-critical">FAIL</span>{% endif %}{% if a.error %}<div class="text-danger text-sm mt-1">{{ a.error }}</div>{% endif %}</td>
           <td>{{ a.files_count }}</td>
         </tr>

@@ -606,9 +606,12 @@ def classify_file(entry: dict) -> str:
     path = entry.get("path", "")
     suffix = Path(path).suffix.lower()
 
-    # CodeChangeAgent output -- explicitly tagged by category rather than
-    # guessed from file extension, per the design doc. Its own summary file
-    # is documentation about the changes, not a change itself.
+    # "codechange" is a routing label ``helpers._codechange_category_override()``
+    # applies to skill-generated app-repo patches -- explicitly tagged
+    # rather than guessed from file extension, per the design doc. (Not
+    # tied to the now-removed CodeChangeAgent Python agent; kept as a
+    # stable internal category key. "code-changes-summary.md" is dead --
+    # only that agent ever produced it.)
     if category == "codechange":
         if path == "code-changes-summary.md":
             return CATEGORY_NARRATIVE_REPORT

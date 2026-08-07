@@ -970,18 +970,22 @@ def create_source_patch_pr(
 ) -> dict:
     """Open a PR with a real patch against each file's actual location in
     the app's own repo -- fixes the pre-existing correctness gap where
-    ``CodeChangeAgent``'s source-level fixes (Dockerfile, .gitignore, health
-    endpoints, OTel/logging snippets) landed as loose copies under
-    ``.agentit/codechange/*`` instead of a diff against the real target file
-    (see docs/unified-apply-flow.md's "GitHub/source-repo changes -- real
-    source patches" taxonomy row).
+    source-level fixes (Dockerfile, migration scaffolding, audit.py, a
+    whole Helm chart, …) landed as loose copies under ``.agentit/codechange/*``
+    instead of a diff against the real target file (see
+    docs/unified-apply-flow.md's "GitHub/source-repo changes -- real source
+    patches" taxonomy row). ``"codechange"`` here is a stable internal
+    branch-naming/category convention, not the (removed) Python agent of
+    the same name -- every ``delivery: source`` skill (containerfile,
+    db-migration-tooling, app-audit-logging, helm-chart, …) routes through
+    this same path today.
 
     Each ``files`` entry should carry a ``target_path`` (the real destination
-    in the app's repo, set by ``CodeChangeAgent`` on each ``GeneratedFile``
-    and threaded through by ``agents/orchestrator.py``'s target-path
-    manifest) -- entries missing one fall back to their own ``path``
-    unchanged, matching ``create_onboarding_pr``'s behavior for non-codechange
-    callers.
+    in the app's repo, set by ``SkillEngine._generate_source_patch()`` on
+    each ``GeneratedFile`` and threaded through by ``agents/orchestrator.py``'s
+    target-path manifest) -- entries missing one fall back to their own
+    ``path`` unchanged, matching ``create_onboarding_pr``'s behavior for
+    non-source-patch callers.
 
     Belt-and-suspenders: any ``chart/``-targeted file must pass
     ``delivery.validate_self_managed_chart_delivery`` (Helm-shaped, no
@@ -1047,8 +1051,9 @@ def create_source_patch_pr(
 
         if pr_context and pr_context.get("body"):
             pr_body = str(pr_context["body"])
-            # Distinguish Scan chart/cluster source PRs from true codechange
-            # patches by mechanism label in the title (quality-review P2).
+            # Distinguish Scan chart/cluster source PRs from direct
+            # source-patch skill deliveries by mechanism label in the
+            # title (quality-review P2).
             cluster = pr_context.get("cluster_key")
             if cluster:
                 pr_title = f"[AgentIT] Scan {cluster}: source-repo patch for {repo_name}"

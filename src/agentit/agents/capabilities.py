@@ -13,15 +13,20 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-# Cluster remediations (security, observability, cicd, compliance,
-# infrastructure, cost, dependency, incident, release, retirement, chaos)
-# are skill-only — their Python agents were removed once skills had full
-# template-fallback parity. See docs/agent-removal-readiness.md.
-# `codechange` is the sole remaining one-shot Python onboarding agent: it
-# patches the application's own source repo (not K8s manifests) — optional
-# source-patch path, not a peer "domain agent" to skills.
+# Every onboarding domain (security, observability, cicd, compliance,
+# infrastructure, cost, dependency, incident, release, retirement, chaos,
+# and the app-source-repo patches `codechange` used to propose) is now
+# skill-only. Python onboarding agents were removed once skills had full
+# template-fallback parity (see docs/agent-removal-readiness.md);
+# `codechange` was the last one, removed 2026-08-07 once its remaining
+# categories were found to either violate their own detect-only contract
+# (logging/tracing/instrumentation — SOLUTION_CONTRACTS `auto_pr=False`,
+# "human wires/instruments") or duplicate an already-guarded skill
+# (health -- `workload-health-probes` already clears the finding via K8s
+# probes without an unwired app-code stub). ``AGENT_CLASSES`` below is
+# now always empty; only long-lived watcher agents remain registered
+# here.
 AGENT_CAPABILITIES: dict[str, str] = {
-    "codechange": "Optional source patches: .gitignore, OTel, structured logging, Dockerfile/health",
     # Long-lived watcher agents
     "vuln-watcher": "Monitors fleet for CVEs, raises an alert for every critical/high finding",
     "slo-tracker": "Checks SLO status, publishes breach alerts, recommends rollbacks",
@@ -135,9 +140,7 @@ def load_agent_classes(agents_dir: Path | None = None) -> dict[str, tuple[str, s
 AGENT_CLASSES: dict[str, tuple[str, str, str, str]] = load_agent_classes()
 
 
-AGENT_DISPLAY_NAMES: dict[str, str] = {
-    "codechange": "Code Change (source patches)",
-}
+AGENT_DISPLAY_NAMES: dict[str, str] = {}
 
 def _watchers_dir() -> Path:
     """Repo-root ``watchers/`` directory holding registration Markdown

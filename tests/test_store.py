@@ -1222,12 +1222,17 @@ class TestBackgroundMaintenanceAsyncHelpers:
 
         await store.register_agent("chaos", "chaos")
         await store.register_agent("codechange", "codechange")
+        await store.agent_heartbeat("vuln-watcher")
 
         pruned = await prune_stale_agents_and_log(store)
 
-        assert pruned == ["chaos"]
+        # No Python onboarding agent remains at all now (codechange was
+        # the last, removed 2026-08-07 -- see docs/agent-removal-readiness.md),
+        # so both "chaos" and "codechange" are equally stale; only the
+        # long-lived watcher survives.
+        assert sorted(pruned) == ["chaos", "codechange"]
         remaining = {a["agent_name"] for a in await store.list_agents()}
-        assert remaining == {"codechange"}
+        assert remaining == {"vuln-watcher"}
 
     async def test_diff_and_log_inventory_changes(self, store, tmp_path):
         from agentit.skill_inventory import diff_and_log_inventory_changes
