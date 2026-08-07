@@ -56,16 +56,26 @@ RUN mkdir -p src/agentit && touch src/agentit/__init__.py && \
 COPY src/ src/
 RUN pip install --no-cache-dir --no-deps --force-reinstall .
 COPY skills/ skills/
-# Extension-model unification registers long-lived watchers and the
-# remaining one-shot agent from Markdown at repo-root watchers/*.md and
-# agents/*.md (see agents/capabilities.py). Those dirs are NOT inside the
-# installed site-packages tree -- without shipping them next to skills/
-# under WORKDIR, load_watcher_agents()/load_agent_classes() resolve to an
-# empty list and Schedules reports "0 Long-Lived Agents" while the
-# watcher Deployments are actually running.
+# Extension-model unification registers long-lived watchers from Markdown
+# at repo-root watchers/*.md (see agents/capabilities.py). That dir is NOT
+# inside the installed site-packages tree -- without shipping it next to
+# skills/ under WORKDIR, load_watcher_agents() resolves to an empty list
+# and Schedules reports "0 Long-Lived Agents" while the watcher
+# Deployments are actually running.
 COPY watchers/ watchers/
-COPY agents/ agents/
-# checks/ is intentionally NOT copied here -- Phase 4 of
+# agents/ (one-shot `mode: agent` registrations) is intentionally NOT
+# copied here -- `codechange`, the last Python onboarding agent, was
+# removed 2026-08-07 (see docs/agent-removal-readiness.md); skills now own
+# every domain it used to cover. That leaves agents/ with zero tracked
+# files, and git doesn't track empty directories, so agents/ doesn't exist
+# at all in a checkout of this commit -- `COPY agents/ agents/` fails the
+# build outright ("/agents": not found) rather than copying nothing.
+# capabilities.py's load_agent_classes() already handles a missing
+# agents_dir gracefully (`if not resolved.is_dir(): ... return {}`), so
+# nothing at runtime expects this directory to exist. Re-add this COPY
+# line if agents/ ever gains a real file again (e.g. a new one-shot Python
+# agent registered the same way).
+# checks/ is intentionally NOT copied here either -- Phase 4 of
 # docs/extension-model-unification-plan-2026-07-18.md ported every
 # checks/*.yaml file to a mode: detect skill under skills/, so checks/ now
 # has zero files in it. Git doesn't track empty directories, so checks/
