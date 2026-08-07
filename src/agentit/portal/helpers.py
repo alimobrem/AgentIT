@@ -667,10 +667,10 @@ async def run_onboarding(report, assessment_id: str | None = None, store: object
                 continue
             category_dir = base / ar.category
             # See agents/orchestrator.py::_write_target_path_manifest -- the
-            # only way CodeChangeAgent's real target file (e.g. "Dockerfile")
-            # survives from the agent's in-memory GeneratedFile.target_path
-            # to this dict, which is all the delivery router downstream ever
-            # sees.
+            # only way a `delivery: source` skill's real target file (e.g.
+            # "Dockerfile") survives from its in-memory
+            # GeneratedFile.target_path to this dict, which is all the
+            # delivery router downstream ever sees.
             target_paths: dict[str, str] = {}
             manifest_path = category_dir / "_target_paths.json"
             if manifest_path.is_file():

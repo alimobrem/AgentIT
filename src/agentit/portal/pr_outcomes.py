@@ -80,7 +80,8 @@ async def _attribution(store: object, record: dict) -> tuple[str, list[str]]:
         return finding_category, skill_names_for_findings(target_findings)
 
     # No finding scope — do not blast every companion skill on the assessment
-    # for source-patch PRs (codechange only; skill YAML companions are unrelated).
+    # for source-patch PRs (delivery: source skills only; skill YAML companions
+    # are unrelated).
     if (record.get("category") or "") == "source_patch":
         return finding_category, []
 

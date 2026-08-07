@@ -16,11 +16,13 @@ from conftest import make_store
 
 
 class TestGetKnownAgentNames:
-    def test_includes_surviving_python_agents(self) -> None:
+    def test_includes_no_python_onboarding_agents(self) -> None:
+        """Every Python onboarding agent, including the last one
+        (`codechange`, removed 2026-08-07), is gone -- skills own every
+        domain now (see docs/agent-removal-readiness.md). AGENT_CLASSES is
+        always empty, so the known-names set is exactly the watcher set."""
         known = get_known_agent_names()
-        assert "codechange" in known
-        assert "cost" not in known
-        assert "dependency" not in known
+        assert known == frozenset(w["name"] for w in WATCHER_AGENTS)
 
     def test_includes_long_lived_watchers(self) -> None:
         known = get_known_agent_names()
@@ -30,14 +32,14 @@ class TestGetKnownAgentNames:
         assert "skill-learner" in known
 
     def test_excludes_removed_python_agents(self) -> None:
-        """The 9 Python agents removed in favor of skills-only generation
+        """Every Python agent removed in favor of skills-only generation
         must never appear in the known-names set, or their stale
         agent_registry rows would never get pruned."""
         known = get_known_agent_names()
         removed = {
             "chaos", "cicd", "compliance", "hardening", "incident",
             "infrastructure", "observability", "release", "retirement",
-            "cost", "dependency",
+            "cost", "dependency", "codechange",
         }
         assert known.isdisjoint(removed)
 
@@ -53,13 +55,13 @@ class TestPruneStaleAgentsAndLog:
         store = await make_store()
         for name in ("chaos", "cicd", "security"):
             await store.register_agent(name, name)
-        await store.register_agent("codechange", "codechange")
+        await store.agent_heartbeat("vuln-watcher")
 
         pruned = await prune_stale_agents_and_log(store)
 
         assert sorted(pruned) == ["chaos", "cicd", "security"]
         remaining = {a["agent_name"] for a in await store.list_agents()}
-        assert remaining == {"codechange"}
+        assert remaining == {"vuln-watcher"}
 
         events = await store.list_events_by_agent("agent-registry")
         assert len(events) == 1
@@ -67,10 +69,9 @@ class TestPruneStaleAgentsAndLog:
         assert events[0]["severity"] == "warning"
         assert "chaos" in events[0]["summary"]
 
-    async def test_preserves_legitimate_agents_and_watchers(self) -> None:
-        """Optional codechange plus watchers must never be pruned."""
+    async def test_preserves_legitimate_watchers(self) -> None:
+        """Long-lived watchers must never be pruned."""
         store = await make_store()
-        await store.register_agent("codechange", "codechange")
         await store.agent_heartbeat("vuln-watcher")
         await store.agent_heartbeat("slo-tracker")
         await store.agent_heartbeat("drift-detector")
@@ -82,13 +83,12 @@ class TestPruneStaleAgentsAndLog:
         assert await store.list_events_by_agent("agent-registry") == []
         remaining = {a["agent_name"] for a in await store.list_agents()}
         assert remaining == {
-            "codechange",
             "vuln-watcher", "slo-tracker", "drift-detector", "skill-learner",
         }
 
     async def test_no_stale_rows_logs_no_event(self) -> None:
         store = await make_store()
-        await store.register_agent("codechange", "codechange")
+        await store.agent_heartbeat("vuln-watcher")
 
         pruned = await prune_stale_agents_and_log(store)
 
@@ -96,15 +96,15 @@ class TestPruneStaleAgentsAndLog:
         assert await store.list_events_by_agent("agent-registry") == []
 
     async def test_mixed_stale_and_legitimate_prunes_only_stale(self) -> None:
-        """Removed Python agents (incl. former cost/dependency) prune away;
-        only codechange + watchers remain."""
+        """Removed Python agents (incl. former cost/dependency, and
+        codechange -- the last Python onboarding agent, removed
+        2026-08-07) prune away; only watchers remain."""
         store = await make_store()
         removed = ["chaos", "cicd", "compliance", "hardening", "incident",
                    "infrastructure", "observability", "release", "retirement",
-                   "cost", "dependency"]
+                   "cost", "dependency", "codechange"]
         for name in removed:
             await store.register_agent(name, name)
-        await store.register_agent("codechange", "codechange")
         await store.agent_heartbeat("vuln-watcher")
         await store.agent_heartbeat("slo-tracker")
         await store.agent_heartbeat("drift-detector")
@@ -115,7 +115,6 @@ class TestPruneStaleAgentsAndLog:
         assert sorted(pruned) == sorted(removed)
         remaining = {a["agent_name"] for a in await store.list_agents()}
         assert remaining == {
-            "codechange",
             "vuln-watcher", "slo-tracker", "drift-detector", "skill-learner",
         }
 

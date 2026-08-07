@@ -29,10 +29,12 @@ REQUIRED_FIELDS = {"name", "category", "code_ref", "resource_tier", "description
 # section. `load_agent_classes()` must reproduce this exactly from
 # `agents/*.md` -- a pure format migration, zero behavior change, the same
 # discipline Phase 1 proved for `checks/observability/health-check.yaml`.
-# Post skills-primary simplification: only optional codechange remains.
-_PRE_PHASE2_AGENT_CLASSES: dict[str, tuple[str, str, str, str]] = {
-    "codechange": ("codechange", "agentit.agents.codechange", "CodeChangeAgent", "large"),
-}
+# Post skills-primary simplification, `codechange` was the sole remaining
+# entry; it was itself removed 2026-08-07 (its remaining categories either
+# violated their own detect-only contract or duplicated an already-guarded
+# skill -- see docs/agent-removal-readiness.md), so no Python onboarding
+# agent remains at all now.
+_PRE_PHASE2_AGENT_CLASSES: dict[str, tuple[str, str, str, str]] = {}
 
 
 def _all_agent_files() -> list[Path]:
@@ -113,9 +115,12 @@ class TestLoadAgentClasses:
         assert load_agent_classes(tmp_path / "does-not-exist") == {}
 
     def test_skips_malformed_file_without_crashing(self, tmp_path: Path) -> None:
+        # load_agent_classes() only *records* code_ref strings -- it never
+        # imports them (get_agent_class() does the real lazy import) -- so
+        # this doesn't need a genuinely importable module:class here.
         (tmp_path / "good.md").write_text(
             "---\nmode: agent\nname: good\ncategory: good\n"
-            "code_ref: agentit.agents.codechange:CodeChangeAgent\n"
+            "code_ref: some.module:SomeClass\n"
             "resource_tier: small\ndescription: ok\n---\n\nbody\n",
         )
         (tmp_path / "bad.md").write_text("no frontmatter here at all\n")
@@ -126,7 +131,7 @@ class TestLoadAgentClasses:
         )
         result = load_agent_classes(tmp_path)
         assert result == {
-            "good": ("good", "agentit.agents.codechange", "CodeChangeAgent", "small"),
+            "good": ("good", "some.module", "SomeClass", "small"),
         }
 
     def test_get_agent_class_resolves_every_loaded_agent(self) -> None:

@@ -35,8 +35,7 @@ graph TB
         Analyzers["7 Analyzers"]
         Detect["mode: detect skills\nvia check_engine runners"]
         SkillEngine["SkillEngine\n~70 skills"]
-        Orchestrator["FleetOrchestrator\nskills-first"]
-        Codechange["Optional CodeChangeAgent\nsource patches"]
+        Orchestrator["FleetOrchestrator\nskills-only"]
         Quality["quality_prs.py\nfinding clusters"]
         AutoDel["auto_delivery.py\nSSA dry-run → PR"]
         Delivery["delivery.py\nroute_and_deliver()"]
@@ -62,8 +61,7 @@ graph TB
     CLI & Portal --> Runner
     Runner -->|"AssessmentReport"| Orchestrator
     Orchestrator --> SkillEngine --> LLM
-    Orchestrator --> Codechange
-    SkillEngine & Codechange --> Store
+    SkillEngine --> Store
     Portal -->|"Scan / onboard job"| AutoDel
     AutoDel --> Quality --> Delivery
     Delivery -->|"fleet PR"| Gitops
@@ -98,8 +96,7 @@ flowchart TD
     C & D & E --> F["AssessmentReport"]
     F --> G["FleetOrchestrator"]
     G --> H["SkillEngine.match + generate"]
-    G --> I["Optional CodeChangeAgent"]
-    H & I --> J["validate_manifest"]
+    H --> J["validate_manifest"]
     J --> K["auto_validate_and_deliver"]
     K --> L{"Quality gate\nopen findings / score delta?"}
     L -->|no| M["needs_attention / no PR"]
@@ -183,10 +180,17 @@ Image promote: push `main` → Tekton `run-tests` → `build-image` → `smoke-t
 
 ## Agents & watchers
 
+No Python onboarding agent remains at all now — `codechange` (source
+patches: Dockerfile/health/gitignore/OTel/logging) was the last one,
+removed 2026-08-07 once its remaining categories were found to either
+violate their own detect-only contract (`logging`/`tracing`/
+`instrumentation` — `SOLUTION_CONTRACTS` `auto_pr=False`) or duplicate an
+already-guarded skill (`health` — `workload-health-probes` already clears
+it via K8s probes). See `docs/agent-removal-readiness.md`.
+
 | Component | Role |
 | --- | --- |
-| **Skills** | Primary remediation for all domains (incl. cost/dependency) |
-| **CodeChangeAgent** | Optional source patches when criticality/score warrants |
+| **Skills** | Sole remediation path for every domain (incl. cost/dependency/source patches) |
 | **vuln-watcher** | CVE alerts (no auto-fix pipeline) |
 | **slo-tracker** | SLO breach alerts / rollback recommendations |
 | **drift-detector** | Argo + API drift |

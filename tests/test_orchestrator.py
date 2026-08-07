@@ -19,6 +19,26 @@ from agentit.models import (
 from conftest import make_async_store, make_report, make_store
 
 
+class _FakeAgentResult:
+    """Minimal stand-in for the informal Agent.run() -> result.files
+    protocol every real Python onboarding agent used to implement --
+    only ``_FakeAgent`` below (test-only) still uses it."""
+
+    files: list = []
+
+
+class _FakeAgent:
+    """Minimal Agent stand-in, used only to keep _run_agents_local()'s
+    real success path exercised now that no production Python
+    onboarding agent remains (see docs/agent-removal-readiness.md)."""
+
+    def __init__(self, report, output_dir) -> None:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    def run(self) -> _FakeAgentResult:
+        return _FakeAgentResult()
+
+
 class TestPlanSelectsAgents:
     def test_plan_has_no_skill_only_domains(self, tmp_path: Path) -> None:
         """security/observability/cicd/compliance/infrastructure/release/
@@ -42,28 +62,20 @@ class TestPlanSelectsAgents:
         for agent in ("dependency", "cost"):
             assert agent not in plan.agents_to_run
 
-    def test_plan_adds_codechange_for_high_criticality(self, tmp_path: Path) -> None:
-        """High criticality -> codechange agent included."""
-        report = make_report(criticality="high")
-        orch = FleetOrchestrator(report, tmp_path / "out")
-        plan = orch.plan()
-        assert "codechange" in plan.agents_to_run
-
-    def test_plan_adds_codechange_for_low_score(self, tmp_path: Path) -> None:
-        """Score < 50 -> codechange agent included."""
-        report = make_report()
-        report.overall_score = 40.0
-        orch = FleetOrchestrator(report, tmp_path / "out")
-        plan = orch.plan()
-        assert "codechange" in plan.agents_to_run
-
-    def test_plan_skips_codechange_for_high_score_low_crit(self, tmp_path: Path) -> None:
-        """Low criticality, score >= 50 -> no codechange."""
-        report = make_report(criticality="low")
-        report.overall_score = 80.0
-        orch = FleetOrchestrator(report, tmp_path / "out")
-        plan = orch.plan()
-        assert "codechange" not in plan.agents_to_run
+    def test_plan_never_adds_codechange_regardless_of_criticality_or_score(self, tmp_path: Path) -> None:
+        """`codechange` (the last Python onboarding agent) was removed
+        2026-08-07: its remaining categories either violated their own
+        detect-only contract (logging/tracing/instrumentation) or
+        duplicated an already-guarded skill (health). No agent name is
+        ever planned now, regardless of criticality/score -- skills own
+        every domain (see docs/agent-removal-readiness.md)."""
+        for criticality, score in (("high", 90.0), ("critical", 90.0), ("low", 10.0), ("medium", 40.0)):
+            report = make_report(criticality=criticality)
+            report.overall_score = score
+            orch = FleetOrchestrator(report, tmp_path / f"out-{criticality}-{score}")
+            plan = orch.plan()
+            assert plan.agents_to_run == []
+            assert "codechange" not in plan.agents_to_run
 
 
 class TestRun:
@@ -100,25 +112,37 @@ class TestRun:
     async def test_run_records_structured_agent_runs(self, tmp_path: Path) -> None:
         """Every local agent execution must write a real agent_runs row so
         get_agent_stats()/list_agent_runs() reflect actual history, not a
-        LIKE-matched heuristic over unrelated events."""
-        # codechange is the sole remaining Python onboarding agent.
+        LIKE-matched heuristic over unrelated events.
+
+        No production Python onboarding agent remains (skills own every
+        domain -- see docs/agent-removal-readiness.md); this injects a
+        minimal fake one via AGENT_CLASSES so _run_agents_local()'s real
+        success path (the thing this test actually guards) stays
+        exercised rather than becoming untestable.
+        """
         store, raw = await make_async_store()
         report = make_report(criticality="medium")
         aid = await raw.save(report)
         orch = FleetOrchestrator(
             report, tmp_path / "out", store=store, assessment_id=aid,
-            agent_filter=["codechange"],
+            agent_filter=["fake-agent"],
         )
-        await orch.run()
+        with patch(
+            "agentit.agents.capabilities.AGENT_CLASSES",
+            {"fake-agent": ("fake", "tests.test_orchestrator", "_FakeAgent", "small")},
+        ), patch(
+            "agentit.agents.capabilities.get_agent_class", return_value=_FakeAgent,
+        ):
+            await orch.run()
 
-        runs = await raw.list_agent_runs("codechange")
+        runs = await raw.list_agent_runs("fake-agent")
         assert len(runs) == 1
         assert runs[0]["status"] == "success"
         assert runs[0]["mode"] == "local"
         assert runs[0]["assessment_id"] == aid
         assert runs[0]["duration_ms"] is not None
 
-        stats = await raw.get_agent_stats("codechange")
+        stats = await raw.get_agent_stats("fake-agent")
         assert stats[0]["successes"] == 1
 
 
@@ -257,14 +281,15 @@ class TestConflicts:
 
     async def test_full_run_with_standard_profile_has_no_false_conflicts(self, tmp_path: Path) -> None:
         """Realistic skills-primary run must not produce false priority
-        conflicts. criticality=high plans optional codechange; skills run
-        unconditionally."""
+        conflicts. No Python agent is ever planned anymore (see
+        docs/agent-removal-readiness.md) -- a clean run with zero results
+        and zero conflicts is the expected, honest outcome here, not a
+        gap."""
         report = make_report(criticality="high")
         orch = FleetOrchestrator(report, tmp_path / "out")
         result = await orch.run()
 
-        successful = [r for r in result.agent_results if r.success]
-        assert len(successful) >= 1
+        assert all(r.success for r in result.agent_results)
 
         priority = [c for c in result.conflicts if c["type"] == "priority"]
         assert priority == [], f"Unexpected false-positive conflicts: {priority}"
@@ -305,32 +330,12 @@ class TestRecommendation:
             AgentResult(agent_name="skills", category="skills",
                         files_generated=["x.yaml"], success=True, findings_count=1),
         ]
-        conflicts = [{"type": "priority", "agents": ["codechange", "skills"],
-                      "resolution": "skills wins", "winner": "skills"}]
+        conflicts = [{"type": "priority", "agents": ["some-skill", "another-skill"],
+                      "resolution": "some-skill wins", "winner": "some-skill"}]
 
         rec = orch._generate_recommendation(results, conflicts)
         assert rec.startswith("READY FOR REVIEW")
         assert "1 conflict(s)" in rec
-
-
-class TestCodechangeAgentRegistration:
-    """codechange remains the optional source-patch Python agent."""
-
-    async def test_codechange_runs_for_high_criticality(self, tmp_path: Path) -> None:
-        report = make_report(criticality="high")
-        orch = FleetOrchestrator(report, tmp_path / "out")
-        result = await orch.run()
-
-        agent_names = {r.agent_name for r in result.agent_results}
-        assert "codechange" in agent_names
-
-        cc = [r for r in result.agent_results if r.agent_name == "codechange"][0]
-        assert cc.success is True
-
-    def test_codechange_agent_importable(self) -> None:
-        from agentit.agents.codechange import CodeChangeAgent
-        assert CodeChangeAgent is not None
-        assert hasattr(CodeChangeAgent, "run")
 
 
 class TestNoSilentSwallowing:
@@ -452,11 +457,10 @@ class TestSkillsFirstLLMPassthrough:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """LLM construction failures must never break skills-first generation
-        or the orchestration run as a whole. criticality="high" so
-        dependency/cost/codechange actually run -- with "medium" (and this
-        report's generic finding), there would be no Python agents left to
-        plan at all (see docs/agent-removal-readiness.md), which would make
-        this assertion vacuous rather than a real regression guard."""
+        or the orchestration run as a whole. No Python onboarding agent
+        remains at all now (see docs/agent-removal-readiness.md), so this
+        only guards that run() completes and returns cleanly -- an empty
+        `agent_results` is an honest outcome here, not a gap."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
 
         report = make_report(criticality="high")
@@ -465,4 +469,4 @@ class TestSkillsFirstLLMPassthrough:
             orch = FleetOrchestrator(report, tmp_path / "out")
             result = await orch.run()  # must not raise
 
-        assert result.agent_results  # run still completed
+        assert result.agent_results is not None  # run still completed

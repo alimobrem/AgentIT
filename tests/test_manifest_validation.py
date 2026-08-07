@@ -72,12 +72,10 @@ def _validate_agent_yaml(agent_cls: type, report: AssessmentReport, tmp_path: Pa
 
 
 class TestAgentYamlValidity:
-    # Cost/dependency Python agents removed (skills own remediations).
-    # Skill YAML validity: tests/test_skill_agent_parity.py.
-    # Optional codechange may emit non-YAML source patches — covered by
-    # tests/test_codechange_agent.py (if present) / orchestrator runs.
-
-    def test_codechange_agent_yaml_outputs_valid_when_present(self, tmp_path: Path) -> None:
-        from agentit.agents.codechange import CodeChangeAgent
-        errors = _validate_agent_yaml(CodeChangeAgent, _make_full_report(), tmp_path)
-        assert errors == [], f"CodeChange agent produced invalid YAML: {errors}"
+    # No Python onboarding agent remains at all now -- codechange (the
+    # last one) was removed 2026-08-07; skills own every domain (see
+    # docs/agent-removal-readiness.md). Skill YAML validity is covered by
+    # tests/test_skill_agent_parity.py. _validate_agent_yaml()/
+    # _make_full_report() above are kept as reusable helpers should a
+    # future Python agent ever be registered again.
+    pass

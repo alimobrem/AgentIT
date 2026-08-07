@@ -554,9 +554,12 @@ class TestOrchestratorStoreWiring:
         agent_results/agent_runs the orchestrator already produces are the
         real, non-fabricated record now.
 
-        criticality="high" so dependency/cost/codechange are actually
-        planned -- security/observability/cicd/compliance are now
-        skill-only domains (see docs/agent-removal-readiness.md).
+        No Python onboarding agent remains at all now (skills own every
+        domain -- see docs/agent-removal-readiness.md), so this report
+        uses a finding that actually matches a real skill trigger
+        (network-policy) rather than the generic default, or "skills"
+        would never appear with files_generated either -- making the
+        assertion vacuous rather than a real regression guard.
         """
         from agentit.agents.orchestrator import FleetOrchestrator
         import tempfile
@@ -564,7 +567,12 @@ class TestOrchestratorStoreWiring:
 
         store = await make_store()
         async_store = store
-        report = make_report(criticality="high")
+        report = make_report(criticality="high", scores=[DimensionScore(
+            dimension="security", score=25, max_score=100,
+            findings=[Finding(category="network", severity=Severity.high,
+                               description="Missing network isolation between pods",
+                               recommendation="Add NetworkPolicy")],
+        )])
         aid = await store.save(report)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -575,13 +583,13 @@ class TestOrchestratorStoreWiring:
             result = await orch.run()
 
         agent_names_with_files = {r.agent_name for r in result.agent_results if r.files_generated}
-        assert agent_names_with_files & {"skills", "codechange"}
+        assert agent_names_with_files & {"skills"}
 
-    async def test_agents_registered_on_run(self):
-        """Orchestrator registers available Python agents in the store.
-
-        Only codechange remains as a registered Python onboarding agent.
-        """
+    async def test_no_python_onboarding_agents_registered_on_run(self):
+        """No Python onboarding agent remains at all now (skills own
+        every domain, including the source patches `codechange` used to
+        propose -- see docs/agent-removal-readiness.md), so run() must
+        register none in the store."""
         from agentit.agents.orchestrator import FleetOrchestrator
         import tempfile
         from pathlib import Path
@@ -600,20 +608,25 @@ class TestOrchestratorStoreWiring:
 
         agents = await store.list_agents()
         agent_names = {a["agent_name"] for a in agents}
-        assert "codechange" in agent_names, "codechange not registered"
+        assert agent_names == set()
 
     async def test_run_succeeds_without_assessment_id(self):
         """Orchestrator still runs (and generates files) when assessment_id
         is None -- e.g. a dry-run/preview invocation with nothing persisted
-        yet. criticality="high" so dependency/cost/codechange are actually
-        planned -- see the sibling test above for why."""
+        yet. Uses a network-policy-matching finding so "skills" actually
+        produces output -- see the sibling test above for why."""
         from agentit.agents.orchestrator import FleetOrchestrator
         import tempfile
         from pathlib import Path
 
         store = await make_store()
         async_store = store
-        report = make_report(criticality="high")
+        report = make_report(criticality="high", scores=[DimensionScore(
+            dimension="security", score=25, max_score=100,
+            findings=[Finding(category="network", severity=Severity.high,
+                               description="Missing network isolation between pods",
+                               recommendation="Add NetworkPolicy")],
+        )])
         await store.save(report)
 
         with tempfile.TemporaryDirectory() as tmpdir:

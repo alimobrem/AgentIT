@@ -26,8 +26,11 @@ _TARGET_PATHS_MANIFEST = "_target_paths.json"
 
 def _write_target_path_manifest(sub_dir: Path, files: list) -> None:
     """Persist ``{path: target_path}`` for any generated file that carries a
-    non-empty ``GeneratedFile.target_path`` (currently only ``CodeChangeAgent``
-    output). ``AgentResult`` only threads plain relative paths through to
+    non-empty ``GeneratedFile.target_path`` (set by
+    ``SkillEngine._generate_source_patch()`` for ``delivery: source``
+    skills -- no Python onboarding agent remains at all now, see
+    docs/agent-removal-readiness.md). ``AgentResult`` only threads plain
+    relative paths through to
     ``portal/helpers.py::run_onboarding`` -- this sidecar file is how that
     per-file metadata survives the local-agent/K8s-Job -> portal boundary, so
     the unified delivery router (``portal/delivery.py``) can build a real PR
@@ -48,9 +51,9 @@ def _write_file_metadata_manifest(sub_dir: Path, files: list) -> None:
     """Persist ``{path: {"description", "finding_addressed", "skill_name"}}``
     for every generated file -- the real, human-authored "why this file
     exists" ``GeneratedFile`` already carries (see ``agents/base.py``:
-    every agent/skill sets a real ``description``, e.g. "VPA for {name}
-    (updateMode: ...)" or a codechange's own ``finding.description``; skill
-    output additionally sets ``finding_addressed``/``skill_name``).
+    every skill sets a real ``description``, e.g. "VPA for {name}
+    (updateMode: ...)"; source-patch skill output additionally sets
+    ``finding_addressed``/``skill_name``).
 
     Sibling to ``_write_target_path_manifest()`` above: same problem
     (``AgentResult.files_generated`` only threads plain relative paths
@@ -90,12 +93,12 @@ AGENT_MODE = _read_agent_mode()
 # resolved -- it is not itself a conflict trigger. Two agents both
 # succeeding is normal and expected, not a conflict.
 #
-# Cost/dependency Python agents are gone — skills own those remediations
-# (VPA/HPA/Renovate/etc.). The only remaining Python onboarding agent is
-# `codechange` (optional source-repo patches), plus the aggregate
-# `skills` AgentResult from Step 1. No cross-agent kind collision remains
-# that needs a priority matrix entry today (HPA and VPA both come from
-# skills under one AgentResult).
+# All Python onboarding agents are gone — skills own every remediation
+# domain now (VPA/HPA/Renovate/Dockerfile/etc., including the source
+# patches `codechange` used to propose; see docs/agent-removal-readiness.md).
+# Only the aggregate `skills` AgentResult from Step 1 remains. No
+# cross-agent kind collision remains that needs a priority matrix entry
+# today (HPA and VPA both come from skills under one AgentResult).
 PRIORITY_MATRIX: dict[tuple[str, str], str] = {}
 
 # Reserved for future kind-pair collisions across distinct AgentResults.
@@ -311,8 +314,11 @@ class FleetOrchestrator:
             logger.debug("Skill engine failed (non-fatal): %s", exc)
 
         # --- Step 2: Skip Python agents whose domain skills already covered ---
-        # Only `codechange` remains as a Python onboarding agent (source
-        # patches, not K8s manifests). Skills own cost/dependency/etc.
+        # No Python onboarding agents remain (skills own every domain,
+        # including the source patches `codechange` used to propose --
+        # see docs/agent-removal-readiness.md) -- this loop is now a no-op
+        # in practice, kept only so a future Python agent registered via
+        # agents/*.md is still correctly skipped if its domain is covered.
         skip_agents: set[str] = set()
         if skill_covered_domains:
             for agent_name in plan.agents_to_run:
@@ -646,12 +652,6 @@ class FleetOrchestrator:
         else:
             agents = []
 
-        # Skills own cluster remediations. Optionally run codechange for
-        # source-repo patches when the app is high-criticality or low-score.
-        if self._profile in ("standard", "full") or profile_agents is None:
-            if self.report.criticality in ("high", "critical") or self.report.overall_score < 50:
-                agents.append("codechange")
-
         return agents
 
     def _manifest_kinds(self, result: AgentResult) -> dict[str, dict]:
@@ -689,8 +689,11 @@ class FleetOrchestrator:
         structurally possible since the security/observability/cicd/
         compliance/infrastructure/incident/release/retirement/chaos Python
         agents were removed once skills covered their domains (see
-        ``AGENT_CLASSES`` in ``agents/capabilities.py`` -- only
-        ``codechange`` remains, plus a synthetic ``"skills"`` result).
+        ``AGENT_CLASSES`` in ``agents/capabilities.py`` -- now empty; the
+        last Python agent, ``codechange``, was itself removed 2026-08-07
+        once its remaining categories were found to either violate their
+        own detect-only contract or duplicate an already-guarded skill --
+        only a synthetic ``"skills"`` result remains).
         Removed 2026-07-20 as dead code, along with the now-equally-dead
         ``"BLOCKED: ..."`` branch of ``_generate_recommendation()`` below,
         since this was the only producer of a ``"type": "blocker"``
@@ -794,7 +797,6 @@ class FleetOrchestrator:
         warnings = conflicts
 
         skill_ok = any(r.agent_name == "skills" and r.success for r in results)
-        codechange = next((r for r in results if r.agent_name == "codechange"), None)
 
         if fail_count > 0:
             failed = ", ".join(r.agent_name for r in results if not r.success)
@@ -803,14 +805,12 @@ class FleetOrchestrator:
                 f"failed: {failed}. Review before Scan delivery."
             )
 
-        # Skills-primary summary — codechange is an optional source-patch
-        # path, not a peer "domain agent" in a 3-agent fleet.
+        # Skills-primary summary — skills is now the only generation path
+        # (see docs/agent-removal-readiness.md).
         parts = [f"{total_files} remediation file(s)"]
         if skill_ok:
             skill_n = next(len(r.files_generated) for r in results if r.agent_name == "skills")
             parts.append(f"skills generated {skill_n}")
-        if codechange and codechange.success and codechange.files_generated:
-            parts.append(f"codechange proposed {len(codechange.files_generated)} source patch(es)")
         warn_suffix = f" ({len(warnings)} conflict(s) — review before proceeding)" if warnings else ""
         return f"READY FOR REVIEW: {'; '.join(parts)}. Scan opens PRs; merge on GitHub.{warn_suffix}"
 

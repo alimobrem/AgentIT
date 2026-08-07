@@ -30,11 +30,11 @@ Previously preferred over a Deployment patch for these reasons:
 1. **Source-repo patch to an existing manifest** — `ha_dr.py`'s `Finding`
    for `health` carries no `file_path`, and this codebase's skill
    generation pipeline (`skill_engine.py::generate()`) has no access to the
-   app's real, current repo content at generation time (verified: the only
-   agent that ever read real file content for context,
-   `agents/codechange.py::CodeChangeAgent`, is not instantiated anywhere in
-   the live onboarding pipeline — `agents/orchestrator.py` never
-   constructs one). Regenerating a whole Deployment from scratch to "patch"
+   app's real, current repo content at generation time (the only Python
+   agent that ever read real file content for context, `CodeChangeAgent`,
+   was removed 2026-08-07 -- see docs/agent-removal-readiness.md -- and
+   even before that was never instantiated in the live onboarding
+   pipeline). Regenerating a whole Deployment from scratch to "patch"
    it (the one precedent that *does* exist, `containerfile.md`'s Dockerfile
    patch) is safe for a Dockerfile's fairly generic build steps; for a
    Deployment it would blindly discard real, unknown fields (image, env,

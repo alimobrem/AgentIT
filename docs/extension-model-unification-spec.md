@@ -1,5 +1,22 @@
 # Unifying checks/analyzers/skills into one extension model — design spec
 
+**Status update (2026-08-07): `codechange` removed, not "kept Python."**
+This doc's Scope note and §1's Python-agents table (both below) state that
+`codechange` "must stay Python" / is "fundamentally not skill-shaped,"
+following `docs/history/agent-removal-readiness.md`'s conclusion. That
+conclusion is now superseded: `codechange`'s remaining categories were
+found to either violate their own detect-only contract
+(`logging`/`tracing`/`instrumentation` — `SOLUTION_CONTRACTS`
+`auto_pr=False`, "human wires/instruments") or duplicate an
+already-guarded skill (`health` — `workload-health-probes` already clears
+it via K8s probes without an unwired app-code stub); its `dockerfile`/
+`container` handling was a live, unguarded correctness bug (confirmed on
+`pulse-agent#2`/`pulse-ui#39`). Rather than keeping it Python, it was
+deleted outright — no Python onboarding agent remains at all now. The
+rest of this doc's analysis (checks vs. analyzers, §0-§6) is unaffected
+and left as-is below, per this repo's docs convention of appending status
+rather than rewriting history.
+
 **Status update (2026-07-18): superseded in part, see
 `docs/history/extension-model-unification-plan-2026-07-18.md`.** This doc's own
 scope (per its "Scope note" below) never re-examined the agents-vs-skills

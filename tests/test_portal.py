@@ -3996,12 +3996,12 @@ async def test_skill_detail_page_surfaces_detect_rule_content(client):
     assert "No CI/CD pipeline configuration found" in resp.text
 
 
-async def test_agent_detail_renders_for_never_run_onboarding_agent(client, _override_store):
-    """Optional codechange agent that's never run must render honestly."""
+async def test_agent_detail_404s_for_removed_codechange_agent(client, _override_store):
+    """codechange (the last Python onboarding agent) was removed
+    2026-08-07 -- it must now 404 like any other unknown agent name, not
+    render a stale "never run" page (see docs/agent-removal-readiness.md)."""
     resp = await client.get("/agents/codechange")
-    assert resp.status_code == 200
-    assert "codechange" in resp.text
-    assert "never ticked" in resp.text.lower()
+    assert resp.status_code == 404
 
 
 # ── Capabilities: per-skill lifecycle view ──────────────────────────────
@@ -4334,19 +4334,21 @@ async def test_background_agent_registry_prune_surfaces_on_events_page(client, _
 
     store = _override_store
     # Rows left behind by Python agents removed in favor of skills-only
-    # generation, plus the legitimate agents/watchers that must survive.
+    # generation (including codechange, the last one, removed
+    # 2026-08-07 -- see docs/agent-removal-readiness.md), plus the
+    # legitimate long-lived watcher that must survive.
     await store.register_agent("security", "security")
     await store.register_agent("observability", "observability")
     await store.register_agent("codechange", "codechange")
     await store.agent_heartbeat("vuln-watcher")
 
     pruned = await prune_stale_agents_and_log(store)
-    assert sorted(pruned) == ["observability", "security"]
+    assert sorted(pruned) == ["codechange", "observability", "security"]
 
     api_resp = await client.get("/api/agents")
     assert api_resp.status_code == 200
     names = {a["agent_name"] for a in api_resp.json()}
-    assert names == {"codechange", "vuln-watcher"}
+    assert names == {"vuln-watcher"}
 
     events_resp = await client.get("/events")
     assert events_resp.status_code == 200
@@ -4365,14 +4367,14 @@ async def test_background_agent_registry_prune_is_noop_when_nothing_stale(client
     from agentit.agent_registry_cleanup import prune_stale_agents_and_log
 
     store = _override_store
-    await store.register_agent("codechange", "codechange")
+    await store.agent_heartbeat("vuln-watcher")
 
     pruned = await prune_stale_agents_and_log(store)
 
     assert pruned == []
     assert await store.list_events_by_agent("agent-registry") == []
     names = {a["agent_name"] for a in await store.list_agents()}
-    assert names == {"codechange"}
+    assert names == {"vuln-watcher"}
 
 
 # ── Loop health meta-metric ──────────────────────────────────────────────
