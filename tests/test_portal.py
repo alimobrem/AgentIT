@@ -3878,6 +3878,86 @@ async def test_deprecate_skill_git_failure_keeps_deprecation_but_warns(client, t
     assert details["reason"] == "no longer relevant"
 
 
+# ── Capabilities: clear a skill's reject-cooldown (Option B) ───────────
+
+
+async def test_clear_skill_cooldown_unblocks_and_logs_event(client, _override_store):
+    store = _override_store
+    for _ in range(2):
+        await store.record_skill_outcome(
+            "containerfile", "pulse-agent", "rejected", "clear-evidence: :latest",
+        )
+    assert await store.is_skill_cooling_down("pulse-agent", "containerfile")
+
+    resp = await client.post(
+        "/capabilities/skills/clear-cooldown",
+        data={
+            "app_name": "pulse-agent",
+            "skill_name": "containerfile",
+            "reason": "rejects caused by now-deleted CodeChangeAgent, not this skill",
+        },
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    location = resp.headers["location"]
+    assert "success=" in location
+    from urllib.parse import unquote
+    assert "Cleared cooldown" in unquote(location)
+
+    assert not await store.is_skill_cooling_down("pulse-agent", "containerfile")
+
+    import json
+    events = await store.list_events_by_action("skill-cooldown-cleared")
+    assert len(events) == 1
+    assert events[0]["target_app"] == "pulse-agent"
+    details = json.loads(events[0]["details_json"] or "{}")
+    assert details["skill"] == "containerfile"
+    assert details["was_cooling_down"] is True
+
+
+async def test_clear_skill_cooldown_requires_a_reason(client, _override_store):
+    store = _override_store
+    for _ in range(2):
+        await store.record_skill_outcome(
+            "containerfile", "pulse-agent", "rejected", "clear-evidence: :latest",
+        )
+
+    resp = await client.post(
+        "/capabilities/skills/clear-cooldown",
+        data={"app_name": "pulse-agent", "skill_name": "containerfile", "reason": "   "},
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    assert "error=" in resp.headers["location"]
+    assert await store.is_skill_cooling_down("pulse-agent", "containerfile")
+
+
+async def test_clear_skill_cooldown_requires_app_and_skill_name(client, _override_store):
+    resp = await client.post(
+        "/capabilities/skills/clear-cooldown",
+        data={"app_name": "", "skill_name": "containerfile", "reason": "test"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "error=" in resp.headers["location"]
+
+
+async def test_capabilities_page_shows_clear_cooldown_form_for_cooled_skill(client, _override_store):
+    store = _override_store
+    for _ in range(2):
+        await store.record_skill_outcome(
+            "containerfile", "pulse-ui", "rejected", "clear-evidence: :latest",
+        )
+
+    resp = await client.get("/capabilities")
+    assert resp.status_code == 200
+    assert "Cooling down" in resp.text
+    assert 'action="/capabilities/skills/clear-cooldown"' in resp.text
+    assert "pulse-ui" in resp.text
+
+
 # ── Capabilities: "Needs Review" (draft skills surfaced above the fold) ──
 
 

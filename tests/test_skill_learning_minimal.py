@@ -7,6 +7,8 @@ import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from agentit.assessment_diff import finding_key
 from agentit.models import DimensionScore, Finding, Severity
 from agentit.platform_context import offline_context
@@ -82,6 +84,135 @@ class TestSkillCooldownStore:
         entry = next(f for f in flagged if f["skill"] == "db-migration-tooling")
         assert entry["identical_reject_count"] >= SKILL_COOLDOWN_SAME_REASON
         assert entry.get("fast_path") is True
+
+
+class TestClearSkillCooldown:
+    """Option B of the skill-effectiveness reject-cooldown investigation:
+    a human-initiated, audited way to clear a stuck ``(app, skill)``
+    cool-down -- see ``AssessmentStore.clear_skill_cooldown()``'s
+    docstring. Must unblock the exact pair cleared, leave every other
+    pair untouched, and still let a genuinely-still-bad skill cool down
+    again afterward (never a permanent bypass).
+    """
+
+    async def _cool_down(self, store, skill_name: str, app_name: str, reason: str = "clear-evidence: :latest") -> None:
+        for _ in range(SKILL_COOLDOWN_SAME_REASON):
+            await store.record_skill_outcome(skill_name, app_name, "rejected", reason)
+
+    async def test_clear_unblocks_the_cooled_skill(self):
+        store = await make_store()
+        await self._cool_down(store, "containerfile", "pulse-agent")
+        assert await store.is_skill_cooling_down("pulse-agent", "containerfile")
+
+        result = await store.clear_skill_cooldown(
+            "pulse-agent", "containerfile",
+            reason="rejects were caused by now-deleted CodeChangeAgent, not this skill",
+            actor="test-operator",
+        )
+
+        assert result["was_cooling_down"] is True
+        assert result["previous_count"] >= SKILL_COOLDOWN_SAME_REASON
+        assert result["previous_reason_prefix"] == "clear-evidence"
+        assert await store.get_skill_cooldown("pulse-agent", "containerfile") is None
+        assert not await store.is_skill_cooling_down("pulse-agent", "containerfile")
+
+    async def test_clear_removes_skill_from_list_cooled_skills(self):
+        """The exact query skill_engine.py's match()/run_all() use to build
+        their skip-set (list_cooled_skills) must also stop flagging the
+        cleared pair -- otherwise a fresh Scan would keep skipping it
+        despite get_skill_cooldown() itself returning None."""
+        store = await make_store()
+        await self._cool_down(store, "containerfile", "pulse-agent")
+        cooled_before = {c["skill_name"] for c in await store.list_cooled_skills("pulse-agent")}
+        assert "containerfile" in cooled_before
+
+        await store.clear_skill_cooldown(
+            "pulse-agent", "containerfile", reason="false positive", actor="test-operator",
+        )
+
+        cooled_after = {c["skill_name"] for c in await store.list_cooled_skills("pulse-agent")}
+        assert "containerfile" not in cooled_after
+        cooled_after_unscoped = {(c["app_name"], c["skill_name"]) for c in await store.list_cooled_skills()}
+        assert ("pulse-agent", "containerfile") not in cooled_after_unscoped
+
+    async def test_clear_does_not_affect_other_apps_or_skills(self):
+        store = await make_store()
+        await self._cool_down(store, "containerfile", "pulse-agent")
+        await self._cool_down(store, "containerfile", "pulse-ui")
+        await self._cool_down(store, "network-policy", "pulse-agent")
+
+        await store.clear_skill_cooldown(
+            "pulse-agent", "containerfile", reason="scoped clear test", actor="test-operator",
+        )
+
+        assert await store.get_skill_cooldown("pulse-agent", "containerfile") is None
+        # Same skill, different app -- still cooling down.
+        assert await store.get_skill_cooldown("pulse-ui", "containerfile") is not None
+        # Same app, different skill -- still cooling down.
+        assert await store.get_skill_cooldown("pulse-agent", "network-policy") is not None
+
+    async def test_skill_can_cool_down_again_after_being_cleared(self):
+        """Not a permanent bypass: enough new matching rejects after the
+        clear must trip the cool-down again."""
+        store = await make_store()
+        await self._cool_down(store, "containerfile", "pulse-agent")
+        await store.clear_skill_cooldown(
+            "pulse-agent", "containerfile", reason="false positive", actor="test-operator",
+        )
+        assert await store.get_skill_cooldown("pulse-agent", "containerfile") is None
+
+        # A genuinely new, real problem -- same number of rejects it took
+        # the first time.
+        await self._cool_down(store, "containerfile", "pulse-agent", reason="clear-evidence: new real bug")
+
+        info = await store.get_skill_cooldown("pulse-agent", "containerfile")
+        assert info is not None
+        assert info["count"] == SKILL_COOLDOWN_SAME_REASON
+
+    async def test_clear_does_not_delete_prior_reject_history(self):
+        store = await make_store()
+        await self._cool_down(store, "containerfile", "pulse-agent")
+        await store.clear_skill_cooldown(
+            "pulse-agent", "containerfile", reason="false positive", actor="test-operator",
+        )
+        reasons = await store.get_recent_skill_reject_reasons("pulse-agent", "containerfile", limit=10)
+        assert len(reasons) == SKILL_COOLDOWN_SAME_REASON
+
+    async def test_clear_requires_a_reason(self):
+        store = await make_store()
+        await self._cool_down(store, "containerfile", "pulse-agent")
+        for bad_reason in ("", "   "):
+            with pytest.raises(ValueError):
+                await store.clear_skill_cooldown("pulse-agent", "containerfile", reason=bad_reason)
+        # Still cooling down -- the invalid calls above must not have inserted anything.
+        assert await store.get_skill_cooldown("pulse-agent", "containerfile") is not None
+
+    async def test_clear_reports_when_skill_was_not_actually_cooling_down(self):
+        store = await make_store()
+        result = await store.clear_skill_cooldown(
+            "quiet-app", "quiet-skill", reason="preemptive clear", actor="test-operator",
+        )
+        assert result["was_cooling_down"] is False
+        assert result["previous_count"] == 0
+        assert result["previous_reason_prefix"] is None
+
+    async def test_clear_marker_does_not_dilute_approval_rate(self):
+        """The override row itself must not be counted as a skill outcome
+        by the effectiveness math it's not part of -- clearing a cooldown
+        must not make a skill's approval rate look worse."""
+        store = await make_store()
+        for _ in range(5):
+            await store.record_skill_outcome("dilution-test", "pulse-agent", "approved", "")
+        stats_before = await store.get_skill_effectiveness(skill_name="dilution-test", min_count=1)
+        assert stats_before["dilution-test"]["total"] == 5
+
+        await store.clear_skill_cooldown(
+            "pulse-agent", "dilution-test", reason="not actually cooling down", actor="test-operator",
+        )
+
+        stats_after = await store.get_skill_effectiveness(skill_name="dilution-test", min_count=1)
+        assert stats_after["dilution-test"]["total"] == 5
+        assert stats_after["dilution-test"]["weighted_rate"] == stats_before["dilution-test"]["weighted_rate"]
 
 
 class TestMatchAndRunAllCooldown:

@@ -5,6 +5,11 @@ of it, plus the ``skill_inventory_snapshots`` table (point-in-time
 snapshots of the skills/checks catalog, for "did anything change?"
 tracking independent of ``git log``).
 
+Also owns the one human-initiated escape hatch from the automatic
+reject-cooldown this table drives (``clear_skill_cooldown()``, backed by
+the ``SKILL_COOLDOWN_CLEAR_OUTCOME`` marker row) -- see that method's
+docstring.
+
 Grouped together since ``get_loop_health()``/``get_skill_history()`` (loop
 health, per-skill lifecycle) are themselves built directly on
 ``get_skill_effectiveness()``/``get_low_effectiveness_skills()`` in this
@@ -37,6 +42,20 @@ SKILL_COOLDOWN_SAME_REASON = 2
 # single-app cool-down still flags the skill for improvement research
 # (otherwise regenerate stops at 2 and the learner never sees a 3rd row).
 SKILL_LEARNER_IDENTICAL_REJECT_THRESHOLD = SKILL_COOLDOWN_SAME_REASON
+
+# Sentinel `skill_effectiveness.outcome` value for a human-initiated
+# cool-down override (`clear_skill_cooldown()` below) -- never written by
+# any automatic code path, only by that one method. `get_skill_cooldown()`
+# / `list_cooled_skills()` treat the most recent row with this outcome for
+# a given (app, skill) pair as a "waterline": only *rejected* rows strictly
+# after it count toward the cool-down threshold going forward. This is
+# purely additive -- the automatic trigger's own condition (2+ rejects
+# sharing a reason prefix) never changes, so a skill that keeps failing
+# for a real reason after being cleared cools down again once enough new
+# matching rejects land. See `clear_skill_cooldown()`'s docstring for the
+# full rationale (investigated as part of the pulse-agent/pulse-ui
+# containerfile false-positive cool-down, docs/release-notes.md).
+SKILL_COOLDOWN_CLEAR_OUTCOME = "cooldown_cleared"
 
 _STABLE_REJECT_PREFIXES = (
     "finding still present after merge",
@@ -118,11 +137,23 @@ class SkillsMixin:
         *,
         threshold: int = SKILL_COOLDOWN_SAME_REASON,
     ) -> dict | None:
-        """Cool-down info for one skill on one app, or ``None`` if active."""
+        """Cool-down info for one skill on one app, or ``None`` if active.
+
+        Only counts rejects strictly after the most recent
+        ``clear_skill_cooldown()`` override for this exact ``(app_name,
+        skill_name)`` pair, if any -- see that method's docstring and
+        ``SKILL_COOLDOWN_CLEAR_OUTCOME`` above. Without an override, this
+        is every reject ever recorded (unchanged, no time window), exactly
+        as before.
+        """
         rows = await self._pool.fetch(
             "SELECT reason FROM skill_effectiveness "
-            "WHERE app_name = $1 AND skill_name = $2 AND outcome = 'rejected'",
-            app_name, skill_name,
+            "WHERE app_name = $1 AND skill_name = $2 AND outcome = 'rejected' "
+            "AND created_at > COALESCE("
+            "  (SELECT MAX(created_at) FROM skill_effectiveness "
+            "   WHERE app_name = $1 AND skill_name = $2 AND outcome = $3),"
+            "  '-infinity'::timestamptz)",
+            app_name, skill_name, SKILL_COOLDOWN_CLEAR_OUTCOME,
         )
         counts: Counter[str] = Counter()
         for r in rows:
@@ -148,26 +179,57 @@ class SkillsMixin:
         *,
         threshold: int = SKILL_COOLDOWN_SAME_REASON,
     ) -> list[dict]:
-        """Skills cooling down (optionally scoped to one app)."""
+        """Skills cooling down (optionally scoped to one app).
+
+        Respects `clear_skill_cooldown()` overrides the same way
+        `get_skill_cooldown()` does -- a reject recorded before the most
+        recent override for its exact ``(app, skill)`` pair doesn't count.
+        This is the query `skill_engine.py`'s `match()`/`run_all()` use to
+        build their skip-set, so a cleared skill must stop showing up here
+        too, not just in `get_skill_cooldown()`, or Scan would keep
+        skipping it despite the clear.
+        """
         if app_name:
             rows = await self._pool.fetch(
-                "SELECT skill_name, reason FROM skill_effectiveness "
+                "SELECT skill_name, reason, created_at FROM skill_effectiveness "
                 "WHERE app_name = $1 AND outcome = 'rejected'",
                 app_name,
             )
+            clears = await self._pool.fetch(
+                "SELECT skill_name, created_at FROM skill_effectiveness "
+                "WHERE app_name = $1 AND outcome = $2",
+                app_name, SKILL_COOLDOWN_CLEAR_OUTCOME,
+            )
         else:
             rows = await self._pool.fetch(
-                "SELECT skill_name, app_name, reason FROM skill_effectiveness "
+                "SELECT skill_name, app_name, reason, created_at FROM skill_effectiveness "
                 "WHERE outcome = 'rejected'",
             )
+            clears = await self._pool.fetch(
+                "SELECT skill_name, app_name, created_at FROM skill_effectiveness "
+                "WHERE outcome = $1",
+                SKILL_COOLDOWN_CLEAR_OUTCOME,
+            )
+
+        last_cleared: dict[tuple[str, str], datetime] = {}
+        for c in clears:
+            key = (app_name or c["app_name"], c["skill_name"])
+            ts = c["created_at"]
+            if key not in last_cleared or ts > last_cleared[key]:
+                last_cleared[key] = ts
+
         grouped: dict[tuple[str, str], Counter[str]] = {}
         for r in rows:
             skill = r["skill_name"]
             app = app_name or r["app_name"]
+            key = (app, skill)
+            cleared_at = last_cleared.get(key)
+            if cleared_at is not None and r["created_at"] <= cleared_at:
+                continue
             prefix = skill_reject_reason_prefix(r["reason"] or "")
             if not prefix:
                 continue
-            grouped.setdefault((app, skill), Counter())[prefix] += 1
+            grouped.setdefault(key, Counter())[prefix] += 1
         cooled: list[dict] = []
         for (app, skill), counts in grouped.items():
             top_prefix, top_count = counts.most_common(1)[0]
@@ -182,6 +244,70 @@ class SkillsMixin:
         cooled.sort(key=lambda x: (-x["count"], x["skill_name"], x["app_name"]))
         return cooled
 
+    async def clear_skill_cooldown(
+        self, app_name: str, skill_name: str, *, reason: str, actor: str = "",
+    ) -> dict:
+        """Human-initiated, audited escape hatch for one ``(app_name,
+        skill_name)`` cool-down (Option B of the skill-effectiveness
+        reject-cooldown investigation -- see docs/release-notes.md).
+
+        ``get_skill_cooldown()`` has no expiry and no time window: once 2+
+        rejects for a pair share a reason prefix, that skill is skipped
+        for that app forever, with no existing way to un-stick it even
+        when the rejects turn out to have been earned by a *different*,
+        since-fixed-or-removed component (confirmed case: `containerfile`
+        on pulse-agent/pulse-ui cooling down from rejects the now-deleted
+        CodeChangeAgent caused, not this skill's own logic).
+
+        This does not delete or edit any prior row -- the full reject
+        history stays exactly as recorded, still visible on
+        `/capabilities/skills/{skill}/history` and via
+        `get_recent_skill_reject_reasons()`. It inserts one new
+        ``skill_effectiveness`` row with a dedicated
+        ``SKILL_COOLDOWN_CLEAR_OUTCOME`` marker instead, which
+        `get_skill_cooldown()`/`list_cooled_skills()` treat as a
+        waterline: only rejects strictly *after* the most recent such
+        marker for this exact pair count toward the threshold going
+        forward. Concretely:
+
+        - Immediately after this call, `get_skill_cooldown(app_name,
+          skill_name)` returns ``None`` (verified by this module's tests).
+        - Every *other* ``(app, skill)`` pair is untouched -- the marker
+          is scoped to this exact pair only.
+        - If the skill keeps failing for a real reason afterward, it cools
+          down again once ``SKILL_COOLDOWN_SAME_REASON`` more rejects
+          sharing one prefix land -- this is an explicit, one-time reset
+          of the count, never a permanent bypass of the automatic trigger.
+
+        Raises ``ValueError`` if ``reason`` is blank -- every caller
+        (portal route, CLI command) must supply a real, human-written
+        reason; this is a deliberate, audited override, not a silent
+        mutation.
+        """
+        reason = (reason or "").strip()
+        if not reason:
+            raise ValueError("A reason is required to clear a skill cooldown")
+
+        info_before = await self.get_skill_cooldown(app_name, skill_name)
+        cleared_at = _now()
+        actor_label = (actor or "").strip() or "unknown"
+        await self._pool.execute(
+            "INSERT INTO skill_effectiveness (skill_name, app_name, outcome, reason, created_at) "
+            "VALUES ($1, $2, $3, $4, $5)",
+            skill_name, app_name, SKILL_COOLDOWN_CLEAR_OUTCOME,
+            f"cooldown cleared by {actor_label}: {reason}", cleared_at,
+        )
+        return {
+            "skill_name": skill_name,
+            "app_name": app_name,
+            "actor": actor_label,
+            "reason": reason,
+            "cleared_at": cleared_at.isoformat(),
+            "was_cooling_down": info_before is not None,
+            "previous_reason_prefix": info_before["reason_prefix"] if info_before else None,
+            "previous_count": info_before["count"] if info_before else 0,
+        }
+
     async def get_skills_with_identical_reject_reasons(
         self,
         *,
@@ -189,7 +315,9 @@ class SkillsMixin:
     ) -> list[dict]:
         """Skills with ``min_identical``+ rejects sharing one reason prefix."""
         rows = await self._pool.fetch(
-            "SELECT skill_name, reason, outcome FROM skill_effectiveness",
+            "SELECT skill_name, reason, outcome FROM skill_effectiveness "
+            "WHERE outcome != $1",
+            SKILL_COOLDOWN_CLEAR_OUTCOME,
         )
         by_skill: dict[str, Counter[str]] = {}
         totals: dict[str, dict[str, int]] = {}
@@ -231,16 +359,22 @@ class SkillsMixin:
 
         Fetches raw ``created_at`` per row and weights in Python (rather
         than aggregated in SQL) so the weighting logic stays simple and
-        auditable.
+        auditable. Excludes ``clear_skill_cooldown()`` override markers
+        (``SKILL_COOLDOWN_CLEAR_OUTCOME``) -- those are audit rows, not a
+        real approve/reject outcome, and must not dilute the approval
+        rate this feeds into ``get_low_effectiveness_skills()``.
         """
         if skill_name:
             rows = await self._pool.fetch(
-                'SELECT skill_name, outcome, created_at FROM skill_effectiveness WHERE skill_name = $1',
-                skill_name,
+                'SELECT skill_name, outcome, created_at FROM skill_effectiveness '
+                'WHERE skill_name = $1 AND outcome != $2',
+                skill_name, SKILL_COOLDOWN_CLEAR_OUTCOME,
             )
         else:
             rows = await self._pool.fetch(
-                'SELECT skill_name, outcome, created_at FROM skill_effectiveness',
+                'SELECT skill_name, outcome, created_at FROM skill_effectiveness '
+                'WHERE outcome != $1',
+                SKILL_COOLDOWN_CLEAR_OUTCOME,
             )
 
         now = datetime.now(timezone.utc)

@@ -144,14 +144,20 @@
   </thead>
   <tbody>
     {% for o in outcomes %}
-    <tr class="{% if o.outcome == 'approved' %}row-border-green{% else %}row-border-red{% endif %}">
+    <tr class="{% if o.outcome == 'approved' %}row-border-green{% elif o.outcome == 'rejected' %}row-border-red{% endif %}">
       <td class="text-sm"><span data-timestamp="{{ o.created_at }}">{{ o.created_at[:19] }}</span></td>
       <td>{{ o.app_name }}</td>
       <td>
         {% if o.outcome == "approved" %}
           <span class="badge badge-low">approved</span>
+        {% elif o.outcome == "rejected" %}
+          <span class="badge badge-critical">rejected</span>
         {% else %}
-          <span class="badge badge-critical">{{ o.outcome }}</span>
+          {# e.g. "cooldown_cleared" -- a human override marker, not a real
+             approve/reject outcome (see store/skills.py's
+             SKILL_COOLDOWN_CLEAR_OUTCOME) -- shown distinctly so it never
+             reads as an extra failure. #}
+          <span class="badge badge-warning">{{ o.outcome.replace('_', ' ') }}</span>
         {% endif %}
       </td>
       <td class="text-sm text-muted">{{ o.reason or "—" }}</td>
