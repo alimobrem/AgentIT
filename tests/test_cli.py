@@ -175,3 +175,73 @@ def test_activate_skill_promotes_valid_draft(tmp_path: Path):
     assert result.exit_code == 0, result.output
     assert "Activated" in result.output
     assert "status: active" in skill_file.read_text()
+
+
+# ── clear-skill-cooldown: CLI parity with the portal's clear-cooldown
+# action. Store-level behavior (does the clear actually unblock the
+# skill, leave other pairs alone, allow re-cooling) is covered against a
+# real Postgres store in tests/test_skill_learning_minimal.py -- these
+# hermetically mock the store to prove the CLI wires args through to
+# ``AssessmentStore.clear_skill_cooldown`` correctly and prints the right
+# outcome, the same "mock the collaborator" pattern used above for
+# ``self-fix``'s LLM dependency.
+
+
+def test_clear_skill_cooldown_cli_reports_cleared_cooldown():
+    from unittest.mock import AsyncMock, patch
+
+    fake_store = AsyncMock()
+    fake_store.clear_skill_cooldown.return_value = {
+        "skill_name": "containerfile", "app_name": "pulse-agent",
+        "was_cooling_down": True, "previous_count": 4,
+        "previous_reason_prefix": "clear-evidence",
+    }
+
+    runner = CliRunner()
+    with patch("agentit.cli.create_store", new=AsyncMock(return_value=fake_store)):
+        result = runner.invoke(
+            main,
+            [
+                "clear-skill-cooldown", "pulse-agent", "containerfile",
+                "--reason", "rejects caused by now-deleted CodeChangeAgent, not this skill",
+                "--actor", "cli-test-operator",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Cleared cooldown" in result.output
+    fake_store.clear_skill_cooldown.assert_called_once_with(
+        "pulse-agent", "containerfile",
+        reason="rejects caused by now-deleted CodeChangeAgent, not this skill",
+        actor="cli-test-operator",
+    )
+
+
+def test_clear_skill_cooldown_cli_defaults_actor_to_os_user():
+    import getpass
+    from unittest.mock import AsyncMock, patch
+
+    fake_store = AsyncMock()
+    fake_store.clear_skill_cooldown.return_value = {
+        "skill_name": "some-skill", "app_name": "some-app",
+        "was_cooling_down": False, "previous_count": 0, "previous_reason_prefix": None,
+    }
+
+    runner = CliRunner()
+    with patch("agentit.cli.create_store", new=AsyncMock(return_value=fake_store)):
+        result = runner.invoke(
+            main, ["clear-skill-cooldown", "some-app", "some-skill", "--reason", "preemptive"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "was not cooling down" in result.output
+    _, kwargs = fake_store.clear_skill_cooldown.call_args
+    assert kwargs["actor"] == getpass.getuser()
+
+
+def test_clear_skill_cooldown_cli_requires_reason_option():
+    runner = CliRunner()
+    result = runner.invoke(main, ["clear-skill-cooldown", "some-app", "some-skill"])
+
+    assert result.exit_code != 0
+    assert "--reason" in result.output

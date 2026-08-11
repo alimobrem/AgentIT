@@ -37,15 +37,34 @@
 </div>
 
 {% if cooled_skills %}
-<div class="mb-2 text-sm text-muted" role="status">
-  <strong class="text-warning">Cooling down</strong>
-  (skipped for regenerate after 2+ identical rejects):
+<div class="mb-2 text-sm" role="status">
+  <p class="text-muted mb-1">
+    <strong class="text-warning">Cooling down</strong>
+    (skipped for regenerate after 2+ identical rejects). Clearing requires a reason and is logged to
+    <a href="/events">Events</a> — a skill that keeps failing for a real reason cools down again.
+  </p>
   {% for c in cooled_skills[:5] %}
+  <div class="mb-1" x-data="{ clearing: false }">
     <code>{{ c.skill_name }}</code> on {{ c.app_name }}
-    ({{ c.count }}× {{ c.reason_prefix }}){% if not loop.last %}; {% endif %}
+    ({{ c.count }}× {{ c.reason_prefix }})
+    <button type="button" class="btn btn-sm btn-outline" x-show="!clearing" @click="clearing = true">
+      Clear cooldown&hellip;
+    </button>
+    <div class="gate-reject-row" x-show="clearing" x-transition x-cloak>
+      <form method="post" action="/capabilities/skills/clear-cooldown" class="inline-form">
+        <input type="hidden" name="app_name" value="{{ c.app_name }}">
+        <input type="hidden" name="skill_name" value="{{ c.skill_name }}">
+        <input type="text" name="reason" placeholder="Why clear this cooldown? (required)" class="gate-reject-input">
+        <button type="submit" class="btn btn-sm btn-action">
+          <span class="btn-label">Confirm</span>
+          <span class="htmx-indicator spinner-wrap"><span class="spinner"></span></span>
+        </button>
+      </form>
+    </div>
+  </div>
   {% endfor %}
   {% if cooled_skills|length > 5 %}
-    (+{{ cooled_skills|length - 5 }} more)
+    <p class="text-muted text-sm">(+{{ cooled_skills|length - 5 }} more — see each skill's own history page.)</p>
   {% endif %}
 </div>
 {% endif %}

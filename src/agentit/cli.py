@@ -1189,6 +1189,40 @@ def activate_skill(skill_path: str) -> None:
     click.echo(success_msg, err=True)
 
 
+@main.command("clear-skill-cooldown")
+@click.argument("app_name")
+@click.argument("skill_name")
+@click.option("--reason", required=True, help="Why this cooldown is being cleared (required, audited).")
+@click.option("--actor", default="", help="Who is clearing this cooldown (defaults to the current OS user).")
+@_run_async
+async def clear_skill_cooldown_cmd(app_name: str, skill_name: str, reason: str, actor: str) -> None:
+    """Manually clear a skill_effectiveness reject-cooldown for one (app, skill) pair.
+
+    CLI parity with the portal's Capabilities page action
+    (``routes/capabilities.py::clear_skill_cooldown_route``) -- both call
+    the same ``AssessmentStore.clear_skill_cooldown()`` store method, so
+    they always agree on what "cleared" means. Requires ``AGENTIT_DB_DSN``
+    to point at the real store (there is no local/offline mode for this --
+    the cooldown lives in Postgres, not in any skill file on disk).
+    """
+    import getpass
+
+    resolved_actor = actor.strip() or getpass.getuser()
+    store = await create_store()
+    result = await store.clear_skill_cooldown(app_name, skill_name, reason=reason, actor=resolved_actor)
+
+    if result["was_cooling_down"]:
+        click.echo(
+            f"Cleared cooldown for {skill_name} on {app_name} "
+            f"(was cooling down after {result['previous_count']}x \"{result['previous_reason_prefix']}\").",
+            err=True,
+        )
+    else:
+        click.echo(
+            f"{skill_name} on {app_name} was not cooling down -- recorded the override anyway.", err=True,
+        )
+
+
 @main.command("migrate-sqlite-to-postgres")
 @click.option(
     "--sqlite-path", default="agentit.db", type=click.Path(exists=True),

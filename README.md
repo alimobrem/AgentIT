@@ -167,7 +167,7 @@ uv run agentit portal --port 8080
 # open http://localhost:8080
 ```
 
-Useful commands: `self-assess`, `watch`, `learn`, `test-skill`, `activate-skill`. Full list: `uv run agentit --help`.
+Useful commands: `self-assess`, `watch`, `learn`, `test-skill`, `activate-skill`, `clear-skill-cooldown`. Full list: `uv run agentit --help`.
 
 Scoring details: [`docs/score-methodology.md`](docs/score-methodology.md). Shareable badge: `GET /badge/{app}.svg`.
 

@@ -20,7 +20,14 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from agentit.agents.capabilities import AGENT_CAPABILITIES, WATCHER_AGENTS as _WATCHER_AGENTS
-from agentit.portal.helpers import get_llm_client, get_retention_days, get_store, get_templates, with_timeout
+from agentit.portal.helpers import (
+    get_current_user,
+    get_llm_client,
+    get_retention_days,
+    get_store,
+    get_templates,
+    with_timeout,
+)
 
 log = logging.getLogger(__name__)
 
@@ -1113,3 +1120,79 @@ async def deprecate_skill_route(request: Request):
         )
         url += f"&warning={quote(warning_msg)}"
     return RedirectResponse(url=url, status_code=303)
+
+
+@router.post("/capabilities/skills/clear-cooldown", response_model=None)
+async def clear_skill_cooldown_route(request: Request):
+    """Manually clear an active reject-cooldown for one ``(app, skill)``
+    pair -- the Option B escape hatch from the skill-effectiveness
+    reject-cooldown investigation (see docs/release-notes.md).
+
+    ``AssessmentStore.get_skill_cooldown()`` has no expiry and no time
+    window: once 2+ rejects for a pair share a reason prefix, that skill
+    is skipped for that app forever (`skill_engine.py`, `remediation/
+    dispatcher.py`, `delivery.py`), with no existing way to un-stick a
+    skill wrongly blamed for a bug in a different, since-fixed-or-removed
+    component (confirmed case: `containerfile` cooling down on
+    pulse-agent/pulse-ui from rejects the now-deleted CodeChangeAgent
+    caused, not this skill's own logic).
+
+    This is a purely data-side fix (one new `skill_effectiveness` row via
+    `store.clear_skill_cooldown()`) -- unlike `activate_skill_route`/
+    `deprecate_skill_route` above, there is no skill file on disk to edit
+    and no git commit/PR needed; the clear takes effect immediately for
+    every reader of `get_skill_cooldown()`/`list_cooled_skills()`.
+    Human-in-the-loop by design: requires a real reason (rejected
+    otherwise) and always logs a `skill-cooldown-cleared` event via
+    `store.log_event()` so it shows up on the Events feed, exactly like
+    every other skill lifecycle action on this page -- never a silent
+    mutation.
+    """
+    form = await request.form()
+    app_name = str(form.get("app_name", "")).strip()
+    skill_name = str(form.get("skill_name", "")).strip()
+    reason = str(form.get("reason", "")).strip()
+
+    if not app_name or not skill_name:
+        return RedirectResponse(
+            url=f"/capabilities?error={quote('App name and skill name are required')}", status_code=303,
+        )
+    if not reason:
+        return RedirectResponse(
+            url=f"/capabilities?error={quote('A reason is required to clear a skill cooldown')}", status_code=303,
+        )
+
+    s = await get_store()
+    if not hasattr(s, "clear_skill_cooldown"):
+        return RedirectResponse(
+            url=f"/capabilities?error={quote('This store does not support clearing cooldowns')}", status_code=303,
+        )
+
+    actor = get_current_user(request)
+    try:
+        result = await s.clear_skill_cooldown(app_name, skill_name, reason=reason, actor=actor)
+    except ValueError as exc:
+        return RedirectResponse(url=f"/capabilities?error={quote(str(exc))}", status_code=303)
+
+    if result["was_cooling_down"]:
+        success_msg = (
+            f"Cleared cooldown for {skill_name} on {app_name} "
+            f"(was cooling down after {result['previous_count']}\u00d7 "
+            f"\"{result['previous_reason_prefix']}\"): {reason}"
+        )
+    else:
+        success_msg = (
+            f"{skill_name} on {app_name} was not cooling down — recorded the override anyway: {reason}"
+        )
+
+    await s.log_event(
+        "portal", "skill-cooldown-cleared", app_name, "info", success_msg,
+        details={
+            "skill": skill_name, "app_name": app_name, "reason": reason, "actor": actor,
+            "was_cooling_down": result["was_cooling_down"],
+            "previous_reason_prefix": result["previous_reason_prefix"],
+            "previous_count": result["previous_count"],
+        },
+    )
+
+    return RedirectResponse(url=f"/capabilities?success={quote(success_msg)}", status_code=303)
